@@ -1,0 +1,281 @@
+Perfect: BTCUSDT futures + 15m is a clean setup (tons of liquidity, strong microstructure signals, and futures-only features like funding/OI/liquidations).
+
+Below is a concrete, buildable spec you can follow.
+
+Target definition
+What you predict
+
+Every new 15m candle, predict next H = 8 candles (2 hours):
+
+P(up), P(down), P(chop)
+
+E[r] expected return (or expected move)
+
+Decision: LONG / SHORT / HOLD
+
+Sizing (optional): position size from volatility + confidence
+
+Why H=8
+
+15m is noisy; 2h gives enough signal while still “trading-speed”.
+
+Data you must ingest (futures-specific)
+1) Price + candles
+
+1m OHLCV (resample to 15m)
+(store 1m so you can rebuild features cleanly)
+
+2) Futures-only streams (huge edge)
+
+Pick what your exchange offers (Binance/Bybit etc.):
+
+Funding rate + next funding time
+
+Open interest (OI) time series
+
+Long/short ratio (if available)
+
+Liquidations (notional liquidation volume)
+
+Mark price and index price (for basis/premium)
+
+Order book top-of-book / spread (even 1–2 levels helps)
+
+Trades (tape): buyer-initiated vs seller-initiated volume (aggression)
+
+3) Execution costs model
+
+maker/taker fees
+
+realistic slippage model (volatility-based)
+
+funding cost (if holding across funding time)
+
+Labeling (the most important part)
+
+Use a volatility-adjusted label so “up/down” means meaningful move, not noise.
+
+Step A: compute forward return
+
+For each 15m timestamp t:
+
+r_fwd = (close[t+8] - close[t]) / close[t]
+
+Step B: compute volatility scale at time t
+
+vol = ATR_15m[t] / close[t] (or rolling std of returns)
+
+Step C: define dynamic threshold
+
+thr = max(0.0015, 0.9 * vol)
+
+0.0015 = 0.15% floor so you don’t label tiny wiggles
+
+0.9*vol adapts to regimes
+
+Label
+
+Up: r_fwd > +thr
+
+Down: r_fwd < -thr
+
+Chop: otherwise
+
+This gives a much more stable training target.
+
+Feature set (strong, futures-native)
+
+Compute features using only info available up to time t.
+
+A) Trend / momentum
+
+returns: 1, 2, 4, 8 bars
+
+EMA slopes: EMA20 slope, EMA50 slope
+
+distance from EMA20/EMA50
+
+breakout distance: (close - rolling_high_20) / close, (close - rolling_low_20) / close
+
+ADX-like trend strength proxy (optional)
+
+B) Volatility / regime
+
+ATR, rolling std
+
+Bollinger bandwidth
+
+volatility regime flag (low/med/high)
+
+C) Tape / orderflow (edge for futures)
+
+aggressive buy volume / aggressive sell volume ratio (last 15m, last 1h)
+
+cumulative delta proxy (rolling)
+
+spread and spread z-score
+
+top-of-book imbalance (bid depth vs ask depth)
+
+D) Futures structure (big edge)
+
+OI change: dOI_15m, dOI_1h
+
+Price vs OI interaction:
+
+price up + OI up = trend continuation bias
+
+price up + OI down = short covering risk (reversal probability)
+
+Funding:
+
+current funding rate, rolling funding trend
+
+“funding extreme” flag (contrarian risk)
+
+Basis / premium:
+
+(mark - index)/index or (perp - spot)/spot
+
+Liquidations:
+
+liquidation notional last 15m/1h
+
+liquidation spike z-score
+
+E) Time context
+
+hour-of-day (UTC) — helps capture liquidity rhythms
+
+day-of-week
+
+Modeling (how to get “precision” without overfitting)
+Use 2-stage gating (this is key)
+Model 1: Regime classifier
+
+Predict: trend_up / trend_down / chop
+
+LightGBM or XGBoost
+
+Model 2: Edge / magnitude model
+
+Predict expected move size or probability of move exceeding costs:
+
+P(|move| > cost_threshold) or directly E[abs(r_fwd)]
+
+Decision logic
+
+If P(chop) > 0.55 → HOLD
+
+Else compute edge = E[abs(move)] - (fees + slippage + expected_funding_cost)
+
+If edge <= 0 → HOLD
+
+Else:
+
+If P(up) > 0.60 → LONG
+
+If P(down) > 0.60 → SHORT
+
+else HOLD
+
+Why this works: you’re not forcing a trade; you trade only when the market is trending and expected move beats costs.
+
+Futures risk engine (mandatory)
+Position sizing (simple + strong)
+
+risk per trade = 0.25%–0.75% of equity (start small)
+
+stop distance = k * ATR_15m (k ~ 1.2 to 2.0 depending on regime)
+
+size = risk_amount / stop_distance
+
+Hard kill-switches
+
+max daily loss
+
+max drawdown
+
+max consecutive losses
+
+disable trading around funding extremes or liquidation storms (optional mode)
+
+Stops/exits (practical)
+
+initial stop: ATR-based
+
+take-profit: partial at 1R then trail
+
+time stop: exit if no movement after N bars (reduces chop bleed)
+
+Backtesting + validation (don’t skip)
+Must-haves
+
+Walk-forward: train on past → test on future, rolling window
+
+Purged split / embargo because 2h horizon overlaps
+
+Real costs:
+
+taker fees (assume worst case initially)
+
+slippage tied to volatility/spread
+
+funding cost if holding across funding timestamp (include probability)
+
+Metrics that matter
+
+max drawdown
+
+profit factor
+
+average trade return after costs
+
+% time in market (exposure)
+
+performance by regime (trend vs chop)
+
+Live system (minimal web app, for you)
+Services (keep it clean)
+
+Collector: futures data streams → DB
+
+Feature builder: every 15m compute features
+
+Trainer: daily/weekly retrain + sanity checks
+
+Signal engine: every 15m output LONG/SHORT/HOLD + confidence
+
+Execution: place orders + manage stops (only after paper)
+
+Dashboard: chart + latest signal + reasons + live stats
+
+Dashboard should show
+
+current regime probabilities
+
+why signal fired (top features / reason codes)
+
+expected move vs costs
+
+risk mode (normal/high vol/no trade)
+
+last N trades + drawdown
+
+What you should build first (exact order)
+
+Ingest + store: 1m candles + OI + funding + liquidations
+
+Resample to 15m + generate labels (H=8)
+
+Build feature table (as-of join with news later if you add it)
+
+Train regime model + edge model
+
+Walk-forward evaluation with realistic costs
+
+Live signal service + dashboard (no trading yet)
+
+Paper trading
+
+Live trading small size + kill-switch
