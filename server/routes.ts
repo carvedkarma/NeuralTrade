@@ -6,7 +6,6 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  // Dashboard data endpoint
   app.get("/api/dashboard", async (req, res) => {
     try {
       const data = await storage.getDashboardData();
@@ -17,7 +16,6 @@ export async function registerRoutes(
     }
   });
 
-  // Refresh data endpoint (force refresh)
   app.post("/api/refresh", async (req, res) => {
     try {
       storage.refreshData();
@@ -26,6 +24,39 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error refreshing data:", error);
       res.status(500).json({ error: "Failed to refresh data" });
+    }
+  });
+
+  app.post("/api/strategy/start", async (req, res) => {
+    try {
+      storage.startStrategy();
+      const data = await storage.getDashboardData();
+      res.json(data);
+    } catch (error) {
+      console.error("Error starting strategy:", error);
+      res.status(500).json({ error: "Failed to start strategy" });
+    }
+  });
+
+  app.post("/api/strategy/stop", async (req, res) => {
+    try {
+      storage.stopStrategy();
+      const data = await storage.getDashboardData();
+      res.json(data);
+    } catch (error) {
+      console.error("Error stopping strategy:", error);
+      res.status(500).json({ error: "Failed to stop strategy" });
+    }
+  });
+
+  app.patch("/api/strategy/settings", async (req, res) => {
+    try {
+      storage.updateStrategySettings(req.body);
+      const data = await storage.getDashboardData();
+      res.json(data);
+    } catch (error) {
+      console.error("Error updating strategy settings:", error);
+      res.status(500).json({ error: "Failed to update settings" });
     }
   });
 

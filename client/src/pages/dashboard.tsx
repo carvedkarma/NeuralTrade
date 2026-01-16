@@ -7,6 +7,7 @@ import { RiskModeCard } from "@/components/risk-mode-card";
 import { StatsCard } from "@/components/stats-card";
 import { TradeHistory } from "@/components/trade-history";
 import { PriceChart } from "@/components/price-chart";
+import { StrategyControl } from "@/components/strategy-control";
 import { ThemeToggle } from "@/components/theme-toggle";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock } from "lucide-react";
@@ -59,7 +60,7 @@ export default function Dashboard() {
                 </div>
                 <div>
                   <h1 className="text-lg font-semibold" data-testid="text-app-title">BTC Futures Signal</h1>
-                  <p className="text-xs text-muted-foreground" data-testid="text-app-subtitle">BTCUSDT Perpetual</p>
+                  <p className="text-xs text-muted-foreground" data-testid="text-app-subtitle">Kalman Trend Strategy</p>
                 </div>
               </div>
             </div>
@@ -87,7 +88,12 @@ export default function Dashboard() {
       <main className="container mx-auto px-4 py-6" data-testid="main-content">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
           <div className="lg:col-span-8 space-y-4">
-            <PriceChart candles={data.candles} signal={data.currentSignal} />
+            <PriceChart 
+              candles={data.candles} 
+              kalmanFast={data.kalmanFast}
+              kalmanSlow={data.kalmanSlow}
+              strategySignal={data.strategySignal}
+            />
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <FuturesMetricsCard data={data.futuresData} />
@@ -96,6 +102,11 @@ export default function Dashboard() {
           </div>
 
           <div className="lg:col-span-4 space-y-4">
+            <StrategyControl 
+              strategyState={data.strategyState}
+              strategySignal={data.strategySignal}
+              activeTrade={data.activeTrade}
+            />
             <SignalCard signal={data.currentSignal} />
             <RegimeCard signal={data.currentSignal} />
             <StatsCard
@@ -127,7 +138,7 @@ export default function Dashboard() {
               <Badge variant="secondary" className="text-xs" data-testid="badge-paper-trading">
                 Paper Trading Mode
               </Badge>
-              <span data-testid="text-footer-info">H=8 (2hr horizon) | 15m timeframe</span>
+              <span data-testid="text-footer-info">Kalman (70/250) | 15m timeframe</span>
             </div>
           </div>
         </div>

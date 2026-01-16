@@ -1,10 +1,11 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import type { Candle, Signal } from "@shared/schema";
+import type { Candle, StrategySignal } from "@shared/schema";
 import {
   ResponsiveContainer,
-  AreaChart,
+  ComposedChart,
   Area,
+  Line,
   XAxis,
   YAxis,
   Tooltip,
@@ -15,12 +16,15 @@ import { useMemo } from "react";
 
 interface PriceChartProps {
   candles: Candle[];
-  signal: Signal;
+  kalmanFast: number[];
+  kalmanSlow: number[];
+  strategySignal: StrategySignal;
 }
 
-export function PriceChart({ candles, signal }: PriceChartProps) {
+export function PriceChart({ candles, kalmanFast, kalmanSlow, strategySignal }: PriceChartProps) {
   const chartData = useMemo(() => {
-    return candles.map((candle) => {
+    if (!candles || candles.length === 0) return [];
+    return candles.map((candle, i) => {
       return {
         time: candle.timestamp,
         open: candle.open,
@@ -28,25 +32,31 @@ export function PriceChart({ candles, signal }: PriceChartProps) {
         low: candle.low,
         close: candle.close,
         volume: candle.volume,
-        priceRange: [candle.low, candle.high],
+        kalmanFast: kalmanFast?.[i] ?? null,
+        kalmanSlow: kalmanSlow?.[i] ?? null,
       };
     });
-  }, [candles]);
+  }, [candles, kalmanFast, kalmanSlow]);
 
-  const currentPrice = candles.length > 0 ? candles[candles.length - 1].close : 0;
-  const firstPrice = candles.length > 0 ? candles[0].open : currentPrice;
+  const currentPrice = candles && candles.length > 0 ? candles[candles.length - 1].close : 0;
+  const firstPrice = candles && candles.length > 0 ? candles[0].open : currentPrice;
   const priceChange = firstPrice !== 0 ? ((currentPrice - firstPrice) / firstPrice) * 100 : 0;
   const isPositive = priceChange >= 0;
 
   const priceRange = useMemo(() => {
-    if (candles.length === 0) return { min: 0, max: 0 };
-    const highs = candles.map(c => c.high);
-    const lows = candles.map(c => c.low);
-    const min = Math.min(...lows);
-    const max = Math.max(...highs);
+    if (!candles || candles.length === 0) return { min: 0, max: 0 };
+    const allPrices = [
+      ...candles.map(c => c.high),
+      ...candles.map(c => c.low),
+      ...(kalmanFast?.filter(v => v !== null && v !== undefined) ?? []),
+      ...(kalmanSlow?.filter(v => v !== null && v !== undefined) ?? []),
+    ];
+    if (allPrices.length === 0) return { min: 0, max: 0 };
+    const min = Math.min(...allPrices);
+    const max = Math.max(...allPrices);
     const padding = (max - min) * 0.05;
     return { min: min - padding, max: max + padding };
-  }, [candles]);
+  }, [candles, kalmanFast, kalmanSlow]);
 
   const CustomTooltip = ({ active, payload }: any) => {
     if (active && payload && payload.length) {
@@ -68,6 +78,18 @@ export function PriceChart({ candles, signal }: PriceChartProps) {
             <span className={candleIsUp ? "text-emerald-400" : "text-red-400"}>
               ${data.close.toLocaleString()}
             </span>
+            {data.kalmanFast && (
+              <>
+                <span className="text-cyan-400">Fast:</span>
+                <span className="text-cyan-400">${data.kalmanFast.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+              </>
+            )}
+            {data.kalmanSlow && (
+              <>
+                <span className="text-orange-400">Slow:</span>
+                <span className="text-orange-400">${data.kalmanSlow.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+              </>
+            )}
           </div>
         </div>
       );
@@ -82,6 +104,13 @@ export function PriceChart({ candles, signal }: PriceChartProps) {
           <div className="flex items-center gap-3">
             <CardTitle className="text-lg font-semibold" data-testid="text-chart-title">BTCUSDT</CardTitle>
             <Badge variant="secondary" className="font-mono" data-testid="badge-timeframe">15m</Badge>
+            <Badge 
+              variant="secondary"
+              className={strategySignal.regime === "bull" ? "text-emerald-400" : "text-red-400"}
+              data-testid="badge-regime"
+            >
+              {strategySignal.regime === "bull" ? "BULL" : "BEAR"}
+            </Badge>
           </div>
           <div className="flex items-baseline gap-2">
             <span className="text-2xl font-mono font-bold" data-testid="text-current-price">
@@ -96,15 +125,25 @@ export function PriceChart({ candles, signal }: PriceChartProps) {
             </Badge>
           </div>
         </div>
+        <div className="flex items-center gap-4 mt-2 text-xs">
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-0.5 bg-cyan-400 rounded" />
+            <span className="text-muted-foreground">Fast (70)</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-0.5 bg-orange-400 rounded" />
+            <span className="text-muted-foreground">Slow (250)</span>
+          </div>
+        </div>
       </CardHeader>
       <CardContent className="p-0 pr-2">
         <div className="h-[320px] w-full" data-testid="chart-container">
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={chartData} margin={{ top: 10, right: 10, bottom: 10, left: 60 }}>
+            <ComposedChart data={chartData} margin={{ top: 10, right: 10, bottom: 10, left: 60 }}>
               <defs>
                 <linearGradient id="priceGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={isPositive ? "#10b981" : "#ef4444"} stopOpacity={0.3} />
-                  <stop offset="100%" stopColor={isPositive ? "#10b981" : "#ef4444"} stopOpacity={0.05} />
+                  <stop offset="0%" stopColor={isPositive ? "#10b981" : "#ef4444"} stopOpacity={0.2} />
+                  <stop offset="100%" stopColor={isPositive ? "#10b981" : "#ef4444"} stopOpacity={0.02} />
                 </linearGradient>
               </defs>
               <XAxis
@@ -126,22 +165,50 @@ export function PriceChart({ candles, signal }: PriceChartProps) {
               />
               <Tooltip content={<CustomTooltip />} />
               
-              <ReferenceLine
-                y={currentPrice}
-                stroke="hsl(var(--primary))"
-                strokeDasharray="3 3"
-                strokeOpacity={0.7}
-              />
+              {strategySignal.stopLoss && (
+                <ReferenceLine
+                  y={strategySignal.stopLoss}
+                  stroke="#ef4444"
+                  strokeDasharray="3 3"
+                  strokeOpacity={0.7}
+                />
+              )}
+              {strategySignal.takeProfit1 && (
+                <ReferenceLine
+                  y={strategySignal.takeProfit1}
+                  stroke="#10b981"
+                  strokeDasharray="3 3"
+                  strokeOpacity={0.7}
+                />
+              )}
 
               <Area
                 type="monotone"
                 dataKey="close"
                 stroke={isPositive ? "#10b981" : "#ef4444"}
-                strokeWidth={2}
+                strokeWidth={1.5}
                 fill="url(#priceGradient)"
                 isAnimationActive={false}
               />
-            </AreaChart>
+
+              <Line
+                type="monotone"
+                dataKey="kalmanFast"
+                stroke="#22d3ee"
+                strokeWidth={2}
+                dot={false}
+                isAnimationActive={false}
+              />
+
+              <Line
+                type="monotone"
+                dataKey="kalmanSlow"
+                stroke="#fb923c"
+                strokeWidth={2}
+                dot={false}
+                isAnimationActive={false}
+              />
+            </ComposedChart>
           </ResponsiveContainer>
         </div>
       </CardContent>

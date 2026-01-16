@@ -70,8 +70,39 @@ export const tradeSchema = z.object({
   status: z.enum(["open", "closed"]),
   stopLoss: z.number(),
   takeProfit: z.number(),
+  entryCandle: z.number().optional(),
+  signalType: z.enum(["crossover", "retest"]).optional(),
 });
 export type Trade = z.infer<typeof tradeSchema>;
+
+export const kalmanStateSchema = z.object({
+  x: z.number(),
+  P: z.number(),
+});
+export type KalmanState = z.infer<typeof kalmanStateSchema>;
+
+export const strategySignalSchema = z.object({
+  type: z.enum(["crossover", "retest", "none"]),
+  direction: signalTypeSchema,
+  entryZone: z.number().nullable(),
+  stopLoss: z.number().nullable(),
+  takeProfit1: z.number().nullable(),
+  takeProfit2: z.number().nullable(),
+  atr: z.number(),
+  regime: z.enum(["bull", "bear"]),
+  kalmanFast: z.number(),
+  kalmanSlow: z.number(),
+});
+export type StrategySignal = z.infer<typeof strategySignalSchema>;
+
+export const strategyStateSchema = z.object({
+  isRunning: z.boolean(),
+  useRetestSignals: z.boolean(),
+  riskPercent: z.number(),
+  atrMultiplier: z.number(),
+  timeStopCandles: z.number(),
+});
+export type StrategyState = z.infer<typeof strategyStateSchema>;
 
 export const dashboardDataSchema = z.object({
   candles: z.array(candleSchema),
@@ -86,5 +117,10 @@ export const dashboardDataSchema = z.object({
   profitFactor: z.number(),
   totalTrades: z.number(),
   exposure: z.number(),
+  kalmanFast: z.array(z.number()),
+  kalmanSlow: z.array(z.number()),
+  strategySignal: strategySignalSchema,
+  strategyState: strategyStateSchema,
+  activeTrade: tradeSchema.nullable(),
 });
 export type DashboardData = z.infer<typeof dashboardDataSchema>;
