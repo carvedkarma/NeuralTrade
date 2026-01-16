@@ -8,6 +8,7 @@ import { StatsCard } from "@/components/stats-card";
 import { TradeHistory } from "@/components/trade-history";
 import { PriceChart } from "@/components/price-chart";
 import { StrategyControl } from "@/components/strategy-control";
+import { ActiveTradePanel } from "@/components/active-trade-panel";
 import { ThemeToggle } from "@/components/theme-toggle";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock } from "lucide-react";
@@ -93,6 +94,8 @@ export default function Dashboard() {
               kalmanFast={data.kalmanFast}
               kalmanSlow={data.kalmanSlow}
               strategySignal={data.strategySignal}
+              activeTrade={data.activeTrade}
+              recentTrades={data.recentTrades}
             />
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -107,6 +110,12 @@ export default function Dashboard() {
               strategySignal={data.strategySignal}
               activeTrade={data.activeTrade}
             />
+            {data.activeTrade && (
+              <ActiveTradePanel 
+                trade={data.activeTrade}
+                currentPrice={data.candles[data.candles.length - 1]?.close ?? 0}
+              />
+            )}
             <SignalCard signal={data.currentSignal} />
             <RegimeCard signal={data.currentSignal} />
             <StatsCard

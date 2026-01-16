@@ -1,6 +1,6 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import type { Candle, StrategySignal } from "@shared/schema";
+import type { Candle, StrategySignal, Trade } from "@shared/schema";
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -10,6 +10,8 @@ import {
   YAxis,
   Tooltip,
   ReferenceLine,
+  Scatter,
+  Cell,
 } from "recharts";
 import { format } from "date-fns";
 import { useMemo } from "react";
@@ -19,9 +21,11 @@ interface PriceChartProps {
   kalmanFast: number[];
   kalmanSlow: number[];
   strategySignal: StrategySignal;
+  activeTrade: Trade | null;
+  recentTrades: Trade[];
 }
 
-export function PriceChart({ candles, kalmanFast, kalmanSlow, strategySignal }: PriceChartProps) {
+export function PriceChart({ candles, kalmanFast, kalmanSlow, strategySignal, activeTrade, recentTrades }: PriceChartProps) {
   const chartData = useMemo(() => {
     if (!candles || candles.length === 0) return [];
     return candles.map((candle, i) => {
@@ -38,6 +42,62 @@ export function PriceChart({ candles, kalmanFast, kalmanSlow, strategySignal }: 
     });
   }, [candles, kalmanFast, kalmanSlow]);
 
+  const tradeMarkers = useMemo(() => {
+    if (!candles || candles.length === 0) return [];
+    const markers: Array<{ time: number; price: number; type: 'entry' | 'exit'; side: 'LONG' | 'SHORT'; pnl?: number }> = [];
+    
+    const minTime = candles[0].timestamp;
+    const maxTime = candles[candles.length - 1].timestamp;
+    
+    (recentTrades ?? []).forEach(trade => {
+      if (trade.timestamp >= minTime && trade.timestamp <= maxTime) {
+        markers.push({
+          time: trade.timestamp,
+          price: trade.entryPrice,
+          type: 'entry',
+          side: trade.side,
+        });
+      }
+      if (trade.status === 'closed' && trade.exitPrice) {
+        const exitTime = trade.timestamp + 15 * 60 * 1000 * 2;
+        if (exitTime >= minTime && exitTime <= maxTime) {
+          markers.push({
+            time: exitTime,
+            price: trade.exitPrice,
+            type: 'exit',
+            side: trade.side,
+            pnl: trade.pnlPercent ?? 0,
+          });
+        }
+      }
+    });
+    
+    if (activeTrade) {
+      markers.push({
+        time: activeTrade.timestamp,
+        price: activeTrade.entryPrice,
+        type: 'entry',
+        side: activeTrade.side,
+      });
+    }
+    
+    return markers;
+  }, [candles, recentTrades, activeTrade]);
+
+  const chartDataWithMarkers = useMemo(() => {
+    return chartData.map(point => {
+      const entryMarker = tradeMarkers.find(m => Math.abs(m.time - point.time) < 15 * 60 * 1000 && m.type === 'entry');
+      const exitMarker = tradeMarkers.find(m => Math.abs(m.time - point.time) < 15 * 60 * 1000 && m.type === 'exit');
+      return {
+        ...point,
+        entryPrice: entryMarker ? entryMarker.price : null,
+        entrySide: entryMarker ? entryMarker.side : null,
+        exitPrice: exitMarker ? exitMarker.price : null,
+        exitPnl: exitMarker ? exitMarker.pnl : null,
+      };
+    });
+  }, [chartData, tradeMarkers]);
+
   const currentPrice = candles && candles.length > 0 ? candles[candles.length - 1].close : 0;
   const firstPrice = candles && candles.length > 0 ? candles[0].open : currentPrice;
   const priceChange = firstPrice !== 0 ? ((currentPrice - firstPrice) / firstPrice) * 100 : 0;
@@ -51,12 +111,15 @@ export function PriceChart({ candles, kalmanFast, kalmanSlow, strategySignal }: 
       ...(kalmanFast?.filter(v => v !== null && v !== undefined) ?? []),
       ...(kalmanSlow?.filter(v => v !== null && v !== undefined) ?? []),
     ];
+    if (activeTrade) {
+      allPrices.push(activeTrade.stopLoss, activeTrade.takeProfit, activeTrade.entryPrice);
+    }
     if (allPrices.length === 0) return { min: 0, max: 0 };
     const min = Math.min(...allPrices);
     const max = Math.max(...allPrices);
-    const padding = (max - min) * 0.05;
+    const padding = (max - min) * 0.08;
     return { min: min - padding, max: max + padding };
-  }, [candles, kalmanFast, kalmanSlow]);
+  }, [candles, kalmanFast, kalmanSlow, activeTrade]);
 
   const CustomTooltip = ({ active, payload }: any) => {
     if (active && payload && payload.length) {
@@ -90,11 +153,64 @@ export function PriceChart({ candles, kalmanFast, kalmanSlow, strategySignal }: 
                 <span className="text-orange-400">${data.kalmanSlow.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
               </>
             )}
+            {data.entryPrice && (
+              <>
+                <span className="text-yellow-400">Entry:</span>
+                <span className="text-yellow-400">${data.entryPrice.toLocaleString()} ({data.entrySide})</span>
+              </>
+            )}
+            {data.exitPrice && (
+              <>
+                <span className={data.exitPnl >= 0 ? "text-emerald-400" : "text-red-400"}>Exit:</span>
+                <span className={data.exitPnl >= 0 ? "text-emerald-400" : "text-red-400"}>
+                  ${data.exitPrice.toLocaleString()} ({data.exitPnl >= 0 ? '+' : ''}{data.exitPnl?.toFixed(2)}%)
+                </span>
+              </>
+            )}
           </div>
         </div>
       );
     }
     return null;
+  };
+
+  const EntryMarkerShape = (props: any) => {
+    const { cx, cy, payload } = props;
+    if (!payload.entryPrice) return null;
+    const isLong = payload.entrySide === 'LONG';
+    return (
+      <g>
+        <polygon
+          points={isLong 
+            ? `${cx},${cy - 8} ${cx - 6},${cy + 4} ${cx + 6},${cy + 4}` 
+            : `${cx},${cy + 8} ${cx - 6},${cy - 4} ${cx + 6},${cy - 4}`
+          }
+          fill={isLong ? "#10b981" : "#ef4444"}
+          stroke="#fff"
+          strokeWidth={1}
+        />
+        <text x={cx} y={cy - 14} textAnchor="middle" fill="#fff" fontSize={9} fontWeight="bold">
+          {isLong ? 'BUY' : 'SELL'}
+        </text>
+      </g>
+    );
+  };
+
+  const ExitMarkerShape = (props: any) => {
+    const { cx, cy, payload } = props;
+    if (!payload.exitPrice) return null;
+    const isProfit = (payload.exitPnl ?? 0) >= 0;
+    return (
+      <g>
+        <circle cx={cx} cy={cy} r={6} fill={isProfit ? "#10b981" : "#ef4444"} stroke="#fff" strokeWidth={1} />
+        <text x={cx} y={cy + 3} textAnchor="middle" fill="#fff" fontSize={8} fontWeight="bold">
+          X
+        </text>
+        <text x={cx} y={cy - 12} textAnchor="middle" fill={isProfit ? "#10b981" : "#ef4444"} fontSize={9} fontWeight="bold">
+          {isProfit ? '+' : ''}{payload.exitPnl?.toFixed(1)}%
+        </text>
+      </g>
+    );
   };
 
   return (
@@ -111,6 +227,14 @@ export function PriceChart({ candles, kalmanFast, kalmanSlow, strategySignal }: 
             >
               {strategySignal.regime === "bull" ? "BULL" : "BEAR"}
             </Badge>
+            {activeTrade && (
+              <Badge 
+                className={`animate-pulse ${activeTrade.side === "LONG" ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30" : "bg-red-500/20 text-red-400 border-red-500/30"}`}
+                data-testid="badge-active-trade"
+              >
+                {activeTrade.side} OPEN @ ${activeTrade.entryPrice.toLocaleString()}
+              </Badge>
+            )}
           </div>
           <div className="flex items-baseline gap-2">
             <span className="text-2xl font-mono font-bold" data-testid="text-current-price">
@@ -125,7 +249,7 @@ export function PriceChart({ candles, kalmanFast, kalmanSlow, strategySignal }: 
             </Badge>
           </div>
         </div>
-        <div className="flex items-center gap-4 mt-2 text-xs">
+        <div className="flex items-center gap-4 mt-2 text-xs flex-wrap">
           <div className="flex items-center gap-1">
             <div className="w-3 h-0.5 bg-cyan-400 rounded" />
             <span className="text-muted-foreground">Fast (70)</span>
@@ -134,12 +258,24 @@ export function PriceChart({ candles, kalmanFast, kalmanSlow, strategySignal }: 
             <div className="w-3 h-0.5 bg-orange-400 rounded" />
             <span className="text-muted-foreground">Slow (250)</span>
           </div>
+          <div className="flex items-center gap-1">
+            <div className="w-0 h-0 border-l-4 border-r-4 border-b-8 border-l-transparent border-r-transparent border-b-emerald-400" />
+            <span className="text-muted-foreground">Buy Entry</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-0 h-0 border-l-4 border-r-4 border-t-8 border-l-transparent border-r-transparent border-t-red-400" />
+            <span className="text-muted-foreground">Sell Entry</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 rounded-full bg-emerald-400 flex items-center justify-center text-[6px] text-white font-bold">X</div>
+            <span className="text-muted-foreground">Exit</span>
+          </div>
         </div>
       </CardHeader>
       <CardContent className="p-0 pr-2">
-        <div className="h-[320px] w-full" data-testid="chart-container">
+        <div className="h-[360px] w-full" data-testid="chart-container">
           <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={chartData} margin={{ top: 10, right: 10, bottom: 10, left: 60 }}>
+            <ComposedChart data={chartDataWithMarkers} margin={{ top: 20, right: 10, bottom: 10, left: 60 }}>
               <defs>
                 <linearGradient id="priceGradient" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor={isPositive ? "#10b981" : "#ef4444"} stopOpacity={0.2} />
@@ -165,21 +301,30 @@ export function PriceChart({ candles, kalmanFast, kalmanSlow, strategySignal }: 
               />
               <Tooltip content={<CustomTooltip />} />
               
-              {strategySignal.stopLoss && (
-                <ReferenceLine
-                  y={strategySignal.stopLoss}
-                  stroke="#ef4444"
-                  strokeDasharray="3 3"
-                  strokeOpacity={0.7}
-                />
-              )}
-              {strategySignal.takeProfit1 && (
-                <ReferenceLine
-                  y={strategySignal.takeProfit1}
-                  stroke="#10b981"
-                  strokeDasharray="3 3"
-                  strokeOpacity={0.7}
-                />
+              {activeTrade && (
+                <>
+                  <ReferenceLine
+                    y={activeTrade.entryPrice}
+                    stroke="#fbbf24"
+                    strokeWidth={2}
+                    strokeDasharray="5 5"
+                    label={{ value: `Entry $${activeTrade.entryPrice.toLocaleString()}`, position: 'right', fill: '#fbbf24', fontSize: 10 }}
+                  />
+                  <ReferenceLine
+                    y={activeTrade.stopLoss}
+                    stroke="#ef4444"
+                    strokeWidth={2}
+                    strokeDasharray="3 3"
+                    label={{ value: `SL $${activeTrade.stopLoss.toLocaleString()}`, position: 'right', fill: '#ef4444', fontSize: 10 }}
+                  />
+                  <ReferenceLine
+                    y={activeTrade.takeProfit}
+                    stroke="#10b981"
+                    strokeWidth={2}
+                    strokeDasharray="3 3"
+                    label={{ value: `TP $${activeTrade.takeProfit.toLocaleString()}`, position: 'right', fill: '#10b981', fontSize: 10 }}
+                  />
+                </>
               )}
 
               <Area
@@ -206,6 +351,18 @@ export function PriceChart({ candles, kalmanFast, kalmanSlow, strategySignal }: 
                 stroke="#fb923c"
                 strokeWidth={2}
                 dot={false}
+                isAnimationActive={false}
+              />
+
+              <Scatter
+                dataKey="entryPrice"
+                shape={<EntryMarkerShape />}
+                isAnimationActive={false}
+              />
+
+              <Scatter
+                dataKey="exitPrice"
+                shape={<ExitMarkerShape />}
                 isAnimationActive={false}
               />
             </ComposedChart>
