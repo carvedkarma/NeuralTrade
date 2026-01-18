@@ -1,4 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import { SignalCard } from "@/components/signal-card";
 import { RegimeCard } from "@/components/regime-card";
 import { FeaturesCard } from "@/components/features-card";
@@ -15,18 +16,36 @@ import { IndicatorsCard } from "@/components/indicators-card";
 import { MTFScoreCard } from "@/components/mtf-score-card";
 import { WhaleActivityCard } from "@/components/whale-activity-card";
 import { PerformanceStatsCard } from "@/components/performance-stats-card";
+import { StrategySelectorCard } from "@/components/strategy-selector-card";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { format } from "date-fns";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 
 export default function Dashboard() {
   const { data, isLoading, error, refetch, isFetching } = useQuery<DashboardData>({
     queryKey: ["/api/dashboard"],
     refetchInterval: 15000,
   });
+
+  const hasTriggeredAnalysis = useRef(false);
+  
+  const analyzeMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/ai/analyze"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
+    },
+  });
+
+  useEffect(() => {
+    if (data && !data.aiAnalysis && !hasTriggeredAnalysis.current && !analyzeMutation.isPending) {
+      hasTriggeredAnalysis.current = true;
+      analyzeMutation.mutate();
+    }
+  }, [data, analyzeMutation]);
 
   if (isLoading) {
     return (
@@ -165,21 +184,16 @@ export default function Dashboard() {
           <TabsContent value="analysis" className="mt-0">
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
               <div className="lg:col-span-8 space-y-4">
-                <PriceChart 
-                  candles={data.candles} 
-                  kalmanFast={data.kalmanFast}
-                  kalmanSlow={data.kalmanSlow}
+                <AIAnalysisCard analysis={data.aiAnalysis} />
+                <StrategySelectorCard 
+                  indicators={data.indicators}
+                  mtfScore={data.mtfScore}
                   strategySignal={data.strategySignal}
-                  activeTrade={data.activeTrade}
-                  recentTrades={data.recentTrades}
                 />
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <MTFScoreCard mtfScore={data.mtfScore} />
-                  <WhaleActivityCard whaleActivity={data.whaleActivity} />
-                </div>
               </div>
               <div className="lg:col-span-4 space-y-4">
-                <AIAnalysisCard analysis={data.aiAnalysis} />
+                <MTFScoreCard mtfScore={data.mtfScore} />
+                <WhaleActivityCard whaleActivity={data.whaleActivity} />
                 <SignalCard signal={data.currentSignal} />
               </div>
             </div>
