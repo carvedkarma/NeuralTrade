@@ -474,19 +474,21 @@ export class MemStorage implements IStorage {
   private generateFallbackCandles(): void {
     const now = Date.now();
     const interval = 15 * 60 * 1000;
-    let basePrice = 95000 + Math.random() * 10000;
+    const targetPrice = 95000;
+    let currentPrice = targetPrice;
     
     this.candles = [];
     for (let i = 299; i >= 0; i--) {
       const timestamp = now - i * interval;
-      const volatility = 0.002 + Math.random() * 0.003;
-      const trend = Math.random() > 0.5 ? 1 : -1;
-      const movement = basePrice * volatility * trend;
+      const volatility = 0.001 + Math.random() * 0.002;
+      const meanReversion = (targetPrice - currentPrice) * 0.01;
+      const randomWalk = currentPrice * volatility * (Math.random() > 0.5 ? 1 : -1);
+      const movement = meanReversion + randomWalk;
       
-      const open = basePrice;
-      const close = basePrice + movement;
-      const high = Math.max(open, close) + basePrice * volatility * Math.random() * 0.5;
-      const low = Math.min(open, close) - basePrice * volatility * Math.random() * 0.5;
+      const open = currentPrice;
+      const close = currentPrice + movement;
+      const high = Math.max(open, close) + currentPrice * volatility * Math.random() * 0.3;
+      const low = Math.min(open, close) - currentPrice * volatility * Math.random() * 0.3;
       
       this.candles.push({
         timestamp,
@@ -497,7 +499,7 @@ export class MemStorage implements IStorage {
         volume: Math.round(100000000 + Math.random() * 500000000),
       });
       
-      basePrice = close;
+      currentPrice = close;
     }
     
     this.isLiveData = false;
