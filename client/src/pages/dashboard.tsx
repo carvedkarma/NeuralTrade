@@ -94,11 +94,11 @@ export default function Dashboard() {
             <div className="flex items-center gap-3">
               <Badge 
                 variant="secondary" 
-                className={`text-xs flex items-center gap-1 ${data.isLiveData ? "bg-emerald-500/20 text-emerald-400" : "bg-yellow-500/20 text-yellow-400"}`}
+                className={`text-xs flex items-center gap-1 ${data.isLiveData ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}`}
                 data-testid="badge-data-source"
               >
                 {data.isLiveData ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
-                {data.isLiveData ? "Live" : "Simulated"}
+                {data.dataSource === "coingecko" ? "CoinGecko" : data.dataSource === "cryptocompare" ? "CryptoCompare" : data.dataSource === "binance" ? "Binance" : "No Data"}
               </Badge>
               <div className="flex items-center gap-2 text-xs text-muted-foreground" data-testid="last-update-container">
                 <Clock className="h-3.5 w-3.5" />
@@ -120,6 +120,16 @@ export default function Dashboard() {
       </header>
 
       <main className="container mx-auto px-4 py-6" data-testid="main-content">
+        {data.dataError && (
+          <div className="mb-4 p-4 rounded-lg border border-red-500/30 bg-red-500/10 text-red-400" data-testid="alert-data-error">
+            <div className="flex items-center gap-2">
+              <WifiOff className="h-5 w-5" />
+              <span className="font-medium">No Market Data Available</span>
+            </div>
+            <p className="mt-1 text-sm text-red-400/80">{data.dataError}</p>
+          </div>
+        )}
+        
         <Tabs defaultValue="overview" className="w-full">
           <TabsList className="mb-4" data-testid="tabs-list">
             <TabsTrigger value="overview" data-testid="tab-overview">Overview</TabsTrigger>

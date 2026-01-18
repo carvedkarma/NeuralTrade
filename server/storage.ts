@@ -21,6 +21,8 @@ import { randomUUID } from "crypto";
 import { getKlines, getMultiTimeframeKlines, getFuturesData, detectLargeOrders } from "./binance";
 import { getAllIndicators, calculateMultiTimeframeScore, type TechnicalIndicators } from "./indicators";
 import { analyzeMarket, generateAISignal } from "./ai-analysis";
+import { getFullBTCData, getBTCPrice } from "./coingecko";
+import { getFullBTCDataCryptoCompare } from "./cryptocompare";
 
 export interface IStorage {
   getDashboardData(): Promise<DashboardData>;
@@ -104,6 +106,8 @@ export class MemStorage implements IStorage {
   private mtfScore: MultiTimeframeScore | null = null;
   private whaleActivity: WhaleActivity | null = null;
   private isLiveData = false;
+  private dataError: string | null = null;
+  private dataSource: "coingecko" | "cryptocompare" | "binance" | "none" = "none";
   
   private strategyState: StrategyState = {
     isRunning: false,
@@ -430,38 +434,89 @@ export class MemStorage implements IStorage {
   async refreshData(): Promise<void> {
     const now = Date.now();
     
-    if (now - this.lastBinanceUpdate < 5000 && this.candles.length > 0) {
+    if (now - this.lastBinanceUpdate < 60000 && this.candles.length > 0) {
       return;
     }
     
+    let dataFetched = false;
+    
     try {
-      const liveCandles = await getKlines("BTCUSDT", "15m", 300);
+      console.log("Attempting to fetch data from CoinGecko...");
+      const coinGeckoData = await getFullBTCData();
       
-      if (liveCandles.length > 0) {
-        this.candles = liveCandles;
+      if (coinGeckoData && coinGeckoData.candles.length > 0) {
+        this.candles = coinGeckoData.candles;
         this.isLiveData = true;
+        this.dataSource = "coingecko";
+        this.dataError = null;
         this.initializeKalmanFilters();
         this.indicators = getAllIndicators(this.candles);
-        
-        const [mtfCandles, whaleData] = await Promise.all([
-          getMultiTimeframeKlines(),
-          detectLargeOrders(),
-        ]);
-        
-        if (mtfCandles.m15.length > 0) {
-          this.mtfScore = calculateMultiTimeframeScore(mtfCandles);
-        }
-        this.whaleActivity = whaleData;
-        
         this.lastBinanceUpdate = now;
-      } else {
-        this.generateFallbackCandles();
+        dataFetched = true;
+        console.log(`CoinGecko data fetched: ${coinGeckoData.candles.length} candles, price: $${coinGeckoData.currentPrice}`);
       }
     } catch (error) {
-      console.error("Error fetching Binance data:", error);
-      if (this.candles.length === 0) {
-        this.generateFallbackCandles();
+      console.error("Error fetching CoinGecko data:", error);
+    }
+    
+    if (!dataFetched) {
+      try {
+        console.log("Attempting to fetch data from CryptoCompare...");
+        const cryptoCompareData = await getFullBTCDataCryptoCompare();
+        
+        if (cryptoCompareData && cryptoCompareData.candles.length > 0) {
+          this.candles = cryptoCompareData.candles;
+          this.isLiveData = true;
+          this.dataSource = "cryptocompare";
+          this.dataError = null;
+          this.initializeKalmanFilters();
+          this.indicators = getAllIndicators(this.candles);
+          this.lastBinanceUpdate = now;
+          dataFetched = true;
+          console.log(`CryptoCompare data fetched: ${cryptoCompareData.candles.length} candles, price: $${cryptoCompareData.currentPrice}`);
+        }
+      } catch (error) {
+        console.error("Error fetching CryptoCompare data:", error);
       }
+    }
+    
+    if (!dataFetched) {
+      try {
+        console.log("Attempting to fetch data from Binance...");
+        const liveCandles = await getKlines("BTCUSDT", "15m", 300);
+        
+        if (liveCandles.length > 0) {
+          this.candles = liveCandles;
+          this.isLiveData = true;
+          this.dataSource = "binance";
+          this.dataError = null;
+          this.initializeKalmanFilters();
+          this.indicators = getAllIndicators(this.candles);
+          
+          const [mtfCandles, whaleData] = await Promise.all([
+            getMultiTimeframeKlines(),
+            detectLargeOrders(),
+          ]);
+          
+          if (mtfCandles.m15.length > 0) {
+            this.mtfScore = calculateMultiTimeframeScore(mtfCandles);
+          }
+          this.whaleActivity = whaleData;
+          
+          this.lastBinanceUpdate = now;
+          dataFetched = true;
+          console.log(`Binance data fetched: ${liveCandles.length} candles`);
+        }
+      } catch (error) {
+        console.error("Error fetching Binance data:", error);
+      }
+    }
+    
+    if (!dataFetched && this.candles.length === 0) {
+      this.isLiveData = false;
+      this.dataSource = "none";
+      this.dataError = "Unable to fetch live market data. Both CoinGecko and Binance APIs are unavailable.";
+      console.error(this.dataError);
     }
     
     this.lastRefresh = now;
@@ -829,8 +884,71 @@ export class MemStorage implements IStorage {
   async getDashboardData(): Promise<DashboardData> {
     await this.refreshData();
     
-    if (this.candles.length === 0) {
-      this.generateFallbackCandles();
+    if (this.candles.length === 0 && this.dataError) {
+      const emptySignal: Signal = {
+        timestamp: Date.now(),
+        signal: "HOLD",
+        confidence: 0,
+        probUp: 0.33,
+        probDown: 0.33,
+        probChop: 0.34,
+        expectedMove: 0,
+        costs: 0,
+        edge: 0,
+        regime: "chop",
+        riskMode: "no_trade",
+        topFeatures: [],
+      };
+      
+      const emptyFuturesData: FuturesData = {
+        fundingRate: 0,
+        nextFundingTime: Date.now() + 8 * 3600000,
+        openInterest: 0,
+        oiChange15m: 0,
+        oiChange1h: 0,
+        longShortRatio: 1,
+        liquidations15m: 0,
+        liquidations1h: 0,
+        markPrice: 0,
+        indexPrice: 0,
+        basis: 0,
+      };
+      
+      const emptyStrategySignal: StrategySignal = {
+        type: "none",
+        direction: "HOLD",
+        entryZone: null,
+        stopLoss: null,
+        takeProfit1: null,
+        takeProfit2: null,
+        atr: 0,
+        regime: "bear",
+        kalmanFast: 0,
+        kalmanSlow: 0,
+      };
+      
+      return {
+        candles: [],
+        currentSignal: emptySignal,
+        futuresData: emptyFuturesData,
+        recentTrades: [],
+        equity: this.equity,
+        drawdown: 0,
+        maxDrawdown: 0,
+        dailyPnl: 0,
+        winRate: 0,
+        profitFactor: 0,
+        totalTrades: 0,
+        exposure: 0,
+        kalmanFast: [],
+        kalmanSlow: [],
+        strategySignal: emptyStrategySignal,
+        strategyState: this.strategyState,
+        activeTrade: null,
+        isLiveData: false,
+        dataSource: "none",
+        dataError: this.dataError,
+      };
     }
     
     const kalmanFast = this.kalmanFastValues[this.kalmanFastValues.length - 1] ?? 0;
@@ -903,6 +1021,8 @@ export class MemStorage implements IStorage {
       whaleActivity: this.whaleActivity ?? undefined,
       performanceStats,
       isLiveData: this.isLiveData,
+      dataSource: this.dataSource,
+      dataError: this.dataError,
     };
   }
 }

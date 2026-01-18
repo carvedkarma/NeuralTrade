@@ -212,5 +212,7 @@ export const dashboardDataSchema = z.object({
   whaleActivity: whaleActivitySchema.optional(),
   performanceStats: performanceStatsSchema.optional(),
   isLiveData: z.boolean().optional(),
+  dataSource: z.enum(["coingecko", "cryptocompare", "binance", "none"]).optional(),
+  dataError: z.string().nullable().optional(),
 });
 export type DashboardData = z.infer<typeof dashboardDataSchema>;
