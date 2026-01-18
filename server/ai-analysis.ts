@@ -42,6 +42,14 @@ export interface AISignal {
   timeframe: string;
 }
 
+function safeNum(val: unknown, fallback = 0): number {
+  return typeof val === 'number' && !isNaN(val) ? val : fallback;
+}
+
+function safeStr(val: unknown, fallback = "N/A"): string {
+  return typeof val === 'string' ? val : fallback;
+}
+
 export async function analyzeMarket(
   candles: Candle[],
   indicators: TechnicalIndicators,
@@ -49,13 +57,30 @@ export async function analyzeMarket(
   whaleActivity: WhaleActivity,
   mtfScore: Partial<MultiTimeframeScore>
 ): Promise<AIAnalysis> {
-  if (!openai) {
+  if (!openai || !candles || candles.length === 0) {
     return getDefaultAnalysis(indicators, futuresData, mtfScore);
   }
+  
   const lastCandle = candles[candles.length - 1];
+  if (!lastCandle) {
+    return getDefaultAnalysis(indicators, futuresData, mtfScore);
+  }
+  
   const priceChange24h = candles.length >= 96 
     ? ((lastCandle.close - candles[candles.length - 96].close) / candles[candles.length - 96].close) * 100 
     : 0;
+
+  const rsiVal = safeNum(indicators?.rsi?.value, 50);
+  const rsiDesc = safeStr(indicators?.rsi?.description, "N/A");
+  const macdHist = safeNum(indicators?.macd?.histogram, 0);
+  const bbPercentB = safeNum(indicators?.bollingerBands?.percentB, 0.5);
+  const adxVal = safeNum(indicators?.adx?.value, 20);
+  const adxDesc = safeStr(indicators?.adx?.description, "N/A");
+  const stochK = safeNum(indicators?.stochastic?.k, 50);
+  const stochD = safeNum(indicators?.stochastic?.d, 50);
+  const vwapVal = safeNum(indicators?.vwap?.value, lastCandle.close);
+  const supports = indicators?.supportResistance?.supports ?? [];
+  const resistances = indicators?.supportResistance?.resistances ?? [];
 
   const prompt = `You are an expert crypto futures trader analyzing BTCUSDT. Provide a concise market analysis.
 
@@ -65,32 +90,32 @@ CURRENT MARKET DATA:
 - Volume: $${(lastCandle.volume / 1e9).toFixed(2)}B
 
 TECHNICAL INDICATORS:
-- RSI(14): ${indicators.rsi.value.toFixed(1)} - ${indicators.rsi.description}
-- MACD: ${indicators.macd.histogram > 0 ? "Bullish" : "Bearish"} histogram at ${indicators.macd.histogram.toFixed(2)}
-- Bollinger %B: ${(indicators.bollingerBands.percentB * 100).toFixed(1)}%
-- ADX: ${indicators.adx.value.toFixed(1)} - ${indicators.adx.description}
-- Stochastic: K=${indicators.stochastic.k.toFixed(1)}, D=${indicators.stochastic.d.toFixed(1)}
+- RSI(14): ${rsiVal.toFixed(1)} - ${rsiDesc}
+- MACD: ${macdHist > 0 ? "Bullish" : "Bearish"} histogram at ${macdHist.toFixed(2)}
+- Bollinger %B: ${(bbPercentB * 100).toFixed(1)}%
+- ADX: ${adxVal.toFixed(1)} - ${adxDesc}
+- Stochastic: K=${stochK.toFixed(1)}, D=${stochD.toFixed(1)}
 
 FUTURES DATA:
-- Funding Rate: ${(futuresData.fundingRate * 100).toFixed(4)}%
-- Open Interest: $${(futuresData.openInterest / 1e9).toFixed(2)}B
-- Long/Short Ratio: ${futuresData.longShortRatio.toFixed(2)}
-- Basis: ${(futuresData.basis * 100).toFixed(4)}%
+- Funding Rate: ${(safeNum(futuresData?.fundingRate) * 100).toFixed(4)}%
+- Open Interest: $${(safeNum(futuresData?.openInterest) / 1e9).toFixed(2)}B
+- Long/Short Ratio: ${safeNum(futuresData?.longShortRatio, 1).toFixed(2)}
+- Basis: ${(safeNum(futuresData?.basis) * 100).toFixed(4)}%
 
 WHALE ACTIVITY:
-- Large Buys: $${(whaleActivity.largeBuys / 1e6).toFixed(2)}M
-- Large Sells: $${(whaleActivity.largeSells / 1e6).toFixed(2)}M
-- Net Flow: $${(whaleActivity.netFlow / 1e6).toFixed(2)}M
-- Whale Sentiment: ${whaleActivity.whaleActivity}
+- Large Buys: $${(safeNum(whaleActivity?.largeBuys) / 1e6).toFixed(2)}M
+- Large Sells: $${(safeNum(whaleActivity?.largeSells) / 1e6).toFixed(2)}M
+- Net Flow: $${(safeNum(whaleActivity?.netFlow) / 1e6).toFixed(2)}M
+- Whale Sentiment: ${safeStr(whaleActivity?.whaleActivity, "neutral")}
 
 MULTI-TIMEFRAME:
-- Score: ${(mtfScore.score ?? 0).toFixed(2)} (${mtfScore.direction ?? "neutral"})
-- Alignment: ${((mtfScore.alignment ?? 0) * 100).toFixed(0)}%
+- Score: ${safeNum(mtfScore?.score).toFixed(2)} (${safeStr(mtfScore?.direction, "neutral")})
+- Alignment: ${(safeNum(mtfScore?.alignment) * 100).toFixed(0)}%
 
 SUPPORT/RESISTANCE:
-- Nearest Support: $${indicators.supportResistance.supports[0]?.toLocaleString() ?? "N/A"}
-- Nearest Resistance: $${indicators.supportResistance.resistances[0]?.toLocaleString() ?? "N/A"}
-- VWAP: $${indicators.vwap.value.toLocaleString()}
+- Nearest Support: $${supports[0]?.toLocaleString() ?? "N/A"}
+- Nearest Resistance: $${resistances[0]?.toLocaleString() ?? "N/A"}
+- VWAP: $${vwapVal.toLocaleString()}
 
 Respond in this exact JSON format:
 {
@@ -134,8 +159,30 @@ export async function generateAISignal(
   whaleActivity: WhaleActivity,
   mtfScore: Partial<MultiTimeframeScore>
 ): Promise<AISignal> {
+  if (!candles || candles.length === 0) {
+    return getDefaultSignal(0, indicators, mtfScore);
+  }
+  
   const lastCandle = candles[candles.length - 1];
-  const atr = indicators.atr.value;
+  if (!lastCandle) {
+    return getDefaultSignal(0, indicators, mtfScore);
+  }
+  
+  const atr = safeNum(indicators?.atr?.value, 500);
+  const rsiVal = safeNum(indicators?.rsi?.value, 50);
+  const rsiSig = safeStr(indicators?.rsi?.signal, "neutral");
+  const macdSig = safeStr(indicators?.macd?.signal, "neutral");
+  const macdHist = safeNum(indicators?.macd?.histogram, 0);
+  const bbPercentB = safeNum(indicators?.bollingerBands?.percentB, 0.5);
+  const adxVal = safeNum(indicators?.adx?.value, 20);
+  const plusDI = safeNum(indicators?.adx?.plusDI, 20);
+  const minusDI = safeNum(indicators?.adx?.minusDI, 20);
+  const stochK = safeNum(indicators?.stochastic?.k, 50);
+  const stochD = safeNum(indicators?.stochastic?.d, 50);
+  const obvSig = safeStr(indicators?.obv?.signal, "neutral");
+  const vwapVal = safeNum(indicators?.vwap?.value, lastCandle.close);
+  const supports = indicators?.supportResistance?.supports ?? [];
+  const resistances = indicators?.supportResistance?.resistances ?? [];
 
   if (!openai) {
     return getDefaultSignal(lastCandle.close, indicators, mtfScore);
@@ -147,25 +194,25 @@ PRICE: $${lastCandle.close.toLocaleString()}
 ATR(14): $${atr.toFixed(2)}
 
 INDICATORS:
-- RSI: ${indicators.rsi.value.toFixed(1)} (${indicators.rsi.signal})
-- MACD: ${indicators.macd.signal} (histogram: ${indicators.macd.histogram.toFixed(2)})
-- Bollinger %B: ${(indicators.bollingerBands.percentB * 100).toFixed(1)}%
-- ADX: ${indicators.adx.value.toFixed(1)} (+DI: ${indicators.adx.plusDI.toFixed(1)}, -DI: ${indicators.adx.minusDI.toFixed(1)})
-- Stochastic: ${indicators.stochastic.k.toFixed(1)}/${indicators.stochastic.d.toFixed(1)}
-- OBV: ${indicators.obv.signal}
-- VWAP: Price ${lastCandle.close > indicators.vwap.value ? "above" : "below"} at $${indicators.vwap.value.toFixed(2)}
+- RSI: ${rsiVal.toFixed(1)} (${rsiSig})
+- MACD: ${macdSig} (histogram: ${macdHist.toFixed(2)})
+- Bollinger %B: ${(bbPercentB * 100).toFixed(1)}%
+- ADX: ${adxVal.toFixed(1)} (+DI: ${plusDI.toFixed(1)}, -DI: ${minusDI.toFixed(1)})
+- Stochastic: ${stochK.toFixed(1)}/${stochD.toFixed(1)}
+- OBV: ${obvSig}
+- VWAP: Price ${lastCandle.close > vwapVal ? "above" : "below"} at $${vwapVal.toFixed(2)}
 
 FUTURES:
-- Funding: ${(futuresData.fundingRate * 100).toFixed(4)}%
-- L/S Ratio: ${futuresData.longShortRatio.toFixed(2)}
+- Funding: ${(safeNum(futuresData?.fundingRate) * 100).toFixed(4)}%
+- L/S Ratio: ${safeNum(futuresData?.longShortRatio, 1).toFixed(2)}
 
-WHALE: ${whaleActivity.whaleActivity} ($${(whaleActivity.netFlow / 1e6).toFixed(2)}M net)
+WHALE: ${safeStr(whaleActivity?.whaleActivity, "neutral")} ($${(safeNum(whaleActivity?.netFlow) / 1e6).toFixed(2)}M net)
 
-MTF SCORE: ${(mtfScore.score ?? 0).toFixed(2)} (${mtfScore.direction ?? "neutral"}, ${((mtfScore.alignment ?? 0) * 100).toFixed(0)}% aligned)
+MTF SCORE: ${safeNum(mtfScore?.score).toFixed(2)} (${safeStr(mtfScore?.direction, "neutral")}, ${(safeNum(mtfScore?.alignment) * 100).toFixed(0)}% aligned)
 
 S/R LEVELS:
-- Support: $${indicators.supportResistance.supports[0]?.toFixed(0) ?? "N/A"}
-- Resistance: $${indicators.supportResistance.resistances[0]?.toFixed(0) ?? "N/A"}
+- Support: $${supports[0]?.toFixed(0) ?? "N/A"}
+- Resistance: $${resistances[0]?.toFixed(0) ?? "N/A"}
 
 Generate a signal. Use ATR for stop calculation. Target 2R minimum. Only signal if confidence > 60%.
 
@@ -210,22 +257,32 @@ export async function explainTrade(
   currentPrice: number,
   indicators: TechnicalIndicators
 ): Promise<string> {
+  const entry = safeNum(trade?.entryPrice, 0);
+  const current = safeNum(currentPrice, entry);
+  const side = safeStr(trade?.side, "LONG");
+  const sigType = safeStr(trade?.signalType, "retest");
+  
   if (!openai) {
-    const pnl = trade.side === "LONG" 
-      ? ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100
-      : ((trade.entryPrice - currentPrice) / trade.entryPrice) * 100;
-    return `${trade.side} position from $${trade.entryPrice.toLocaleString()}, currently ${pnl > 0 ? "+" : ""}${pnl.toFixed(2)}%. ${trade.signalType} signal.`;
+    const pnl = side === "LONG" 
+      ? ((current - entry) / (entry || 1)) * 100
+      : ((entry - current) / (entry || 1)) * 100;
+    return `${side} position from $${entry.toLocaleString()}, currently ${pnl > 0 ? "+" : ""}${pnl.toFixed(2)}%. ${sigType} signal.`;
   }
 
-  const prompt = `Explain this BTC futures trade briefly:
-- Side: ${trade.side}
-- Entry: $${trade.entryPrice.toLocaleString()}
-- Current: $${currentPrice.toLocaleString()}
-- Stop: $${trade.stopLoss.toLocaleString()}
-- Target: $${trade.takeProfit.toLocaleString()}
-- Signal: ${trade.signalType}
+  const rsiVal = safeNum(indicators?.rsi?.value, 50);
+  const macdSig = safeStr(indicators?.macd?.signal, "neutral");
+  const stopLoss = safeNum(trade?.stopLoss, entry);
+  const takeProfit = safeNum(trade?.takeProfit, entry);
 
-Current RSI: ${indicators.rsi.value.toFixed(1)}, MACD: ${indicators.macd.signal}
+  const prompt = `Explain this BTC futures trade briefly:
+- Side: ${side}
+- Entry: $${entry.toLocaleString()}
+- Current: $${current.toLocaleString()}
+- Stop: $${stopLoss.toLocaleString()}
+- Target: $${takeProfit.toLocaleString()}
+- Signal: ${sigType}
+
+Current RSI: ${rsiVal.toFixed(1)}, MACD: ${macdSig}
 
 In 1-2 sentences, explain the trade logic and current status.`;
 
@@ -254,42 +311,51 @@ function getDefaultAnalysis(
   futuresData: FuturesData,
   mtfScore: Partial<MultiTimeframeScore>
 ): AIAnalysis {
-  const rsi = indicators.rsi;
-  const macd = indicators.macd;
-  const direction = mtfScore.direction ?? "neutral";
+  const rsiVal = safeNum(indicators?.rsi?.value, 50);
+  const rsiDesc = safeStr(indicators?.rsi?.description, "RSI neutral");
+  const macdHist = safeNum(indicators?.macd?.histogram, 0);
+  const macdDesc = safeStr(indicators?.macd?.description, "MACD neutral");
+  const macdSig = safeStr(indicators?.macd?.signal, "neutral");
+  const adxDesc = safeStr(indicators?.adx?.description, "ADX neutral");
+  const atrVal = safeNum(indicators?.atr?.value, 500);
+  const vwapVal = safeNum(indicators?.vwap?.value, 1);
+  const supports = indicators?.supportResistance?.supports ?? [];
+  const direction = safeStr(mtfScore?.direction, "neutral");
+  const fundingRate = safeNum(futuresData?.fundingRate, 0);
+  const lsRatio = safeNum(futuresData?.longShortRatio, 1);
   
   let recommendation: AIAnalysis["recommendation"] = "HOLD";
   let confidence = 0.5;
   
-  if (rsi.value < 30 && macd.histogram > 0 && direction === "bullish") {
+  if (rsiVal < 30 && macdHist > 0 && direction === "bullish") {
     recommendation = "STRONG_BUY";
     confidence = 0.75;
-  } else if (rsi.value < 40 && direction === "bullish") {
+  } else if (rsiVal < 40 && direction === "bullish") {
     recommendation = "BUY";
     confidence = 0.65;
-  } else if (rsi.value > 70 && macd.histogram < 0 && direction === "bearish") {
+  } else if (rsiVal > 70 && macdHist < 0 && direction === "bearish") {
     recommendation = "STRONG_SELL";
     confidence = 0.75;
-  } else if (rsi.value > 60 && direction === "bearish") {
+  } else if (rsiVal > 60 && direction === "bearish") {
     recommendation = "SELL";
     confidence = 0.65;
   }
 
   return {
-    marketSummary: `BTC showing ${direction} momentum with RSI at ${rsi.value.toFixed(1)}. Funding rate at ${(futuresData.fundingRate * 100).toFixed(4)}% indicates ${futuresData.fundingRate > 0 ? "bullish" : "bearish"} sentiment.`,
-    trendExplanation: `${macd.description}. ${indicators.adx.description}.`,
-    signalReasoning: `Technical indicators suggest ${recommendation.toLowerCase().replace("_", " ")} based on ${rsi.description} and ${macd.signal} MACD.`,
-    riskAssessment: `ATR suggests volatility of ${((indicators.atr.value / indicators.vwap.value) * 100).toFixed(2)}%. Watch ${indicators.supportResistance.supports[0] ? `support at $${indicators.supportResistance.supports[0].toLocaleString()}` : "key levels"}.`,
+    marketSummary: `BTC showing ${direction} momentum with RSI at ${rsiVal.toFixed(1)}. Funding rate at ${(fundingRate * 100).toFixed(4)}% indicates ${fundingRate > 0 ? "bullish" : "bearish"} sentiment.`,
+    trendExplanation: `${macdDesc}. ${adxDesc}.`,
+    signalReasoning: `Technical indicators suggest ${recommendation.toLowerCase().replace("_", " ")} based on ${rsiDesc} and ${macdSig} MACD.`,
+    riskAssessment: `ATR suggests volatility of ${((atrVal / vwapVal) * 100).toFixed(2)}%. Watch ${supports[0] ? `support at $${supports[0].toLocaleString()}` : "key levels"}.`,
     recommendation,
     confidence,
     keyInsights: [
-      rsi.description,
-      macd.description,
-      `L/S ratio at ${futuresData.longShortRatio.toFixed(2)}`
+      rsiDesc,
+      macdDesc,
+      `L/S ratio at ${lsRatio.toFixed(2)}`
     ],
-    warnings: futuresData.fundingRate > 0.001 
+    warnings: fundingRate > 0.001 
       ? ["High funding rate may indicate overleveraged longs"]
-      : futuresData.fundingRate < -0.001
+      : fundingRate < -0.001
       ? ["Negative funding suggests bearish sentiment"]
       : []
   };
@@ -300,37 +366,39 @@ function getDefaultSignal(
   indicators: TechnicalIndicators,
   mtfScore: Partial<MultiTimeframeScore>
 ): AISignal {
-  const atr = indicators.atr.value;
-  const rsi = indicators.rsi;
-  const mtfDirection = mtfScore.direction ?? "neutral";
-  const mtfAlignment = mtfScore.alignment ?? 0;
+  const price = safeNum(currentPrice, 100000);
+  const atr = safeNum(indicators?.atr?.value, 500);
+  const rsiVal = safeNum(indicators?.rsi?.value, 50);
+  const rsiDesc = safeStr(indicators?.rsi?.description, "RSI neutral");
+  const mtfDirection = safeStr(mtfScore?.direction, "neutral");
+  const mtfAlignment = safeNum(mtfScore?.alignment, 0);
   
   let direction: AISignal["direction"] = "HOLD";
   let confidence = 0.5;
   
-  if (rsi.value < 35 && mtfDirection === "bullish" && mtfAlignment > 0.5) {
+  if (rsiVal < 35 && mtfDirection === "bullish" && mtfAlignment > 0.5) {
     direction = "LONG";
     confidence = 0.65;
-  } else if (rsi.value > 65 && mtfDirection === "bearish" && mtfAlignment > 0.5) {
+  } else if (rsiVal > 65 && mtfDirection === "bearish" && mtfAlignment > 0.5) {
     direction = "SHORT";
     confidence = 0.65;
   }
 
-  const entry = direction !== "HOLD" ? currentPrice : null;
+  const entry = direction !== "HOLD" ? price : null;
   const stop = direction === "LONG" 
-    ? currentPrice - atr * 1.5 
+    ? price - atr * 1.5 
     : direction === "SHORT" 
-    ? currentPrice + atr * 1.5 
+    ? price + atr * 1.5 
     : null;
   const tp1 = direction === "LONG"
-    ? currentPrice + atr * 3
+    ? price + atr * 3
     : direction === "SHORT"
-    ? currentPrice - atr * 3
+    ? price - atr * 3
     : null;
   const tp2 = direction === "LONG"
-    ? currentPrice + atr * 5
+    ? price + atr * 5
     : direction === "SHORT"
-    ? currentPrice - atr * 5
+    ? price - atr * 5
     : null;
 
   return {
@@ -341,7 +409,7 @@ function getDefaultSignal(
     takeProfit1: tp1,
     takeProfit2: tp2,
     reasoning: direction !== "HOLD" 
-      ? `${direction} signal based on ${rsi.description} with ${mtfDirection} MTF confirmation.`
+      ? `${direction} signal based on ${rsiDesc} with ${mtfDirection} MTF confirmation.`
       : "No clear setup. Waiting for better conditions.",
     riskReward: 2,
     timeframe: "15m"
