@@ -27,6 +27,17 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/ai/analyze", async (req, res) => {
+    try {
+      await storage.requestAIAnalysis();
+      const data = await storage.getDashboardData();
+      res.json(data);
+    } catch (error) {
+      console.error("Error requesting AI analysis:", error);
+      res.status(500).json({ error: "Failed to get AI analysis" });
+    }
+  });
+
   app.post("/api/strategy/start", async (req, res) => {
     try {
       storage.startStrategy();

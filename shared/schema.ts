@@ -104,6 +104,80 @@ export const strategyStateSchema = z.object({
 });
 export type StrategyState = z.infer<typeof strategyStateSchema>;
 
+export const aiAnalysisSchema = z.object({
+  marketSummary: z.string(),
+  trendExplanation: z.string(),
+  signalReasoning: z.string(),
+  riskAssessment: z.string(),
+  recommendation: z.enum(["STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"]),
+  confidence: z.number(),
+  keyInsights: z.array(z.string()),
+  warnings: z.array(z.string()),
+});
+export type AIAnalysis = z.infer<typeof aiAnalysisSchema>;
+
+export const aiSignalSchema = z.object({
+  direction: signalTypeSchema,
+  confidence: z.number(),
+  entryPrice: z.number().nullable(),
+  stopLoss: z.number().nullable(),
+  takeProfit1: z.number().nullable(),
+  takeProfit2: z.number().nullable(),
+  reasoning: z.string(),
+  riskReward: z.number(),
+  timeframe: z.string(),
+});
+export type AISignal = z.infer<typeof aiSignalSchema>;
+
+export const technicalIndicatorSchema = z.object({
+  name: z.string(),
+  value: z.number(),
+  signal: z.enum(["bullish", "bearish", "neutral"]),
+  strength: z.number(),
+  description: z.string(),
+});
+export type TechnicalIndicator = z.infer<typeof technicalIndicatorSchema>;
+
+export const multiTimeframeScoreSchema = z.object({
+  score: z.number(),
+  direction: z.enum(["bullish", "bearish", "neutral"]),
+  alignment: z.number(),
+  details: z.array(z.object({
+    timeframe: z.string(),
+    trend: z.enum(["up", "down", "neutral"]),
+    weight: z.number(),
+  })),
+});
+export type MultiTimeframeScore = z.infer<typeof multiTimeframeScoreSchema>;
+
+export const whaleActivitySchema = z.object({
+  largeBuys: z.number(),
+  largeSells: z.number(),
+  netFlow: z.number(),
+  whaleActivity: z.enum(["bullish", "bearish", "neutral"]),
+});
+export type WhaleActivity = z.infer<typeof whaleActivitySchema>;
+
+export const performanceStatsSchema = z.object({
+  totalTrades: z.number(),
+  winningTrades: z.number(),
+  losingTrades: z.number(),
+  winRate: z.number(),
+  avgWin: z.number(),
+  avgLoss: z.number(),
+  profitFactor: z.number(),
+  sharpeRatio: z.number(),
+  maxDrawdown: z.number(),
+  currentDrawdown: z.number(),
+  expectancy: z.number(),
+  avgRMultiple: z.number(),
+  bestTrade: z.number(),
+  worstTrade: z.number(),
+  consecutiveWins: z.number(),
+  consecutiveLosses: z.number(),
+});
+export type PerformanceStats = z.infer<typeof performanceStatsSchema>;
+
 export const dashboardDataSchema = z.object({
   candles: z.array(candleSchema),
   currentSignal: signalSchema,
@@ -122,5 +196,21 @@ export const dashboardDataSchema = z.object({
   strategySignal: strategySignalSchema,
   strategyState: strategyStateSchema,
   activeTrade: tradeSchema.nullable(),
+  aiAnalysis: aiAnalysisSchema.optional(),
+  aiSignal: aiSignalSchema.optional(),
+  indicators: z.object({
+    rsi: technicalIndicatorSchema,
+    macd: technicalIndicatorSchema,
+    bollingerBands: technicalIndicatorSchema,
+    obv: technicalIndicatorSchema,
+    vwap: technicalIndicatorSchema,
+    atr: technicalIndicatorSchema,
+    adx: technicalIndicatorSchema,
+    stochastic: technicalIndicatorSchema,
+  }).optional(),
+  mtfScore: multiTimeframeScoreSchema.optional(),
+  whaleActivity: whaleActivitySchema.optional(),
+  performanceStats: performanceStatsSchema.optional(),
+  isLiveData: z.boolean().optional(),
 });
 export type DashboardData = z.infer<typeof dashboardDataSchema>;

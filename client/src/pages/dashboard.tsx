@@ -10,10 +10,16 @@ import { PriceChart } from "@/components/price-chart";
 import { StrategyControl } from "@/components/strategy-control";
 import { ActiveTradePanel } from "@/components/active-trade-panel";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { AIAnalysisCard } from "@/components/ai-analysis-card";
+import { IndicatorsCard } from "@/components/indicators-card";
+import { MTFScoreCard } from "@/components/mtf-score-card";
+import { WhaleActivityCard } from "@/components/whale-activity-card";
+import { PerformanceStatsCard } from "@/components/performance-stats-card";
 import type { DashboardData } from "@shared/schema";
-import { Loader2, RefreshCw, Bitcoin, Clock } from "lucide-react";
+import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { format } from "date-fns";
 
 export default function Dashboard() {
@@ -67,6 +73,14 @@ export default function Dashboard() {
             </div>
 
             <div className="flex items-center gap-3">
+              <Badge 
+                variant="secondary" 
+                className={`text-xs flex items-center gap-1 ${data.isLiveData ? "bg-emerald-500/20 text-emerald-400" : "bg-yellow-500/20 text-yellow-400"}`}
+                data-testid="badge-data-source"
+              >
+                {data.isLiveData ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
+                {data.isLiveData ? "Live" : "Simulated"}
+              </Badge>
               <div className="flex items-center gap-2 text-xs text-muted-foreground" data-testid="last-update-container">
                 <Clock className="h-3.5 w-3.5" />
                 <span data-testid="text-last-update">Updated {format(new Date(data.currentSignal.timestamp), "HH:mm:ss")}</span>
@@ -87,56 +101,135 @@ export default function Dashboard() {
       </header>
 
       <main className="container mx-auto px-4 py-6" data-testid="main-content">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-          <div className="lg:col-span-8 space-y-4">
-            <PriceChart 
-              candles={data.candles} 
-              kalmanFast={data.kalmanFast}
-              kalmanSlow={data.kalmanSlow}
-              strategySignal={data.strategySignal}
-              activeTrade={data.activeTrade}
-              recentTrades={data.recentTrades}
-            />
+        <Tabs defaultValue="overview" className="w-full">
+          <TabsList className="mb-4" data-testid="tabs-list">
+            <TabsTrigger value="overview" data-testid="tab-overview">Overview</TabsTrigger>
+            <TabsTrigger value="analysis" data-testid="tab-analysis">AI Analysis</TabsTrigger>
+            <TabsTrigger value="indicators" data-testid="tab-indicators">Indicators</TabsTrigger>
+            <TabsTrigger value="performance" data-testid="tab-performance">Performance</TabsTrigger>
+          </TabsList>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <FuturesMetricsCard data={data.futuresData} />
-              <FeaturesCard features={data.currentSignal.topFeatures} />
+          <TabsContent value="overview" className="mt-0">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+              <div className="lg:col-span-8 space-y-4">
+                <PriceChart 
+                  candles={data.candles} 
+                  kalmanFast={data.kalmanFast}
+                  kalmanSlow={data.kalmanSlow}
+                  strategySignal={data.strategySignal}
+                  activeTrade={data.activeTrade}
+                  recentTrades={data.recentTrades}
+                />
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <FuturesMetricsCard data={data.futuresData} />
+                  <FeaturesCard features={data.currentSignal.topFeatures} />
+                </div>
+              </div>
+
+              <div className="lg:col-span-4 space-y-4">
+                <StrategyControl 
+                  strategyState={data.strategyState}
+                  strategySignal={data.strategySignal}
+                  activeTrade={data.activeTrade}
+                />
+                {data.activeTrade && (
+                  <ActiveTradePanel 
+                    trade={data.activeTrade}
+                    currentPrice={data.candles[data.candles.length - 1]?.close ?? 0}
+                  />
+                )}
+                <SignalCard signal={data.currentSignal} />
+                <RegimeCard signal={data.currentSignal} />
+                <StatsCard
+                  equity={data.equity}
+                  dailyPnl={data.dailyPnl}
+                  winRate={data.winRate}
+                  profitFactor={data.profitFactor}
+                  totalTrades={data.totalTrades}
+                />
+                <RiskModeCard
+                  riskMode={data.currentSignal.riskMode}
+                  drawdown={data.drawdown}
+                  maxDrawdown={data.maxDrawdown}
+                  exposure={data.exposure}
+                />
+              </div>
+
+              <div className="lg:col-span-12">
+                <TradeHistory trades={data.recentTrades} />
+              </div>
             </div>
-          </div>
+          </TabsContent>
 
-          <div className="lg:col-span-4 space-y-4">
-            <StrategyControl 
-              strategyState={data.strategyState}
-              strategySignal={data.strategySignal}
-              activeTrade={data.activeTrade}
-            />
-            {data.activeTrade && (
-              <ActiveTradePanel 
-                trade={data.activeTrade}
-                currentPrice={data.candles[data.candles.length - 1]?.close ?? 0}
-              />
-            )}
-            <SignalCard signal={data.currentSignal} />
-            <RegimeCard signal={data.currentSignal} />
-            <StatsCard
-              equity={data.equity}
-              dailyPnl={data.dailyPnl}
-              winRate={data.winRate}
-              profitFactor={data.profitFactor}
-              totalTrades={data.totalTrades}
-            />
-            <RiskModeCard
-              riskMode={data.currentSignal.riskMode}
-              drawdown={data.drawdown}
-              maxDrawdown={data.maxDrawdown}
-              exposure={data.exposure}
-            />
-          </div>
+          <TabsContent value="analysis" className="mt-0">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+              <div className="lg:col-span-8 space-y-4">
+                <PriceChart 
+                  candles={data.candles} 
+                  kalmanFast={data.kalmanFast}
+                  kalmanSlow={data.kalmanSlow}
+                  strategySignal={data.strategySignal}
+                  activeTrade={data.activeTrade}
+                  recentTrades={data.recentTrades}
+                />
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <MTFScoreCard mtfScore={data.mtfScore} />
+                  <WhaleActivityCard whaleActivity={data.whaleActivity} />
+                </div>
+              </div>
+              <div className="lg:col-span-4 space-y-4">
+                <AIAnalysisCard analysis={data.aiAnalysis} />
+                <SignalCard signal={data.currentSignal} />
+              </div>
+            </div>
+          </TabsContent>
 
-          <div className="lg:col-span-12">
-            <TradeHistory trades={data.recentTrades} />
-          </div>
-        </div>
+          <TabsContent value="indicators" className="mt-0">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+              <div className="lg:col-span-8 space-y-4">
+                <PriceChart 
+                  candles={data.candles} 
+                  kalmanFast={data.kalmanFast}
+                  kalmanSlow={data.kalmanSlow}
+                  strategySignal={data.strategySignal}
+                  activeTrade={data.activeTrade}
+                  recentTrades={data.recentTrades}
+                />
+                <IndicatorsCard indicators={data.indicators} />
+              </div>
+              <div className="lg:col-span-4 space-y-4">
+                <MTFScoreCard mtfScore={data.mtfScore} />
+                <WhaleActivityCard whaleActivity={data.whaleActivity} />
+                <FuturesMetricsCard data={data.futuresData} />
+              </div>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="performance" className="mt-0">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+              <div className="lg:col-span-8 space-y-4">
+                <TradeHistory trades={data.recentTrades} />
+              </div>
+              <div className="lg:col-span-4 space-y-4">
+                <PerformanceStatsCard stats={data.performanceStats} equity={data.equity} />
+                <StatsCard
+                  equity={data.equity}
+                  dailyPnl={data.dailyPnl}
+                  winRate={data.winRate}
+                  profitFactor={data.profitFactor}
+                  totalTrades={data.totalTrades}
+                />
+                <RiskModeCard
+                  riskMode={data.currentSignal.riskMode}
+                  drawdown={data.drawdown}
+                  maxDrawdown={data.maxDrawdown}
+                  exposure={data.exposure}
+                />
+              </div>
+            </div>
+          </TabsContent>
+        </Tabs>
       </main>
 
       <footer className="border-t border-border py-4 mt-8" data-testid="footer">
