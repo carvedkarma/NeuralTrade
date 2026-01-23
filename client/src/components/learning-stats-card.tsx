@@ -4,8 +4,10 @@ import { Progress } from "@/components/ui/progress";
 import type { LearningStats } from "@shared/schema";
 import { 
   Database, Cpu, Brain, Activity, Layers, Clock, 
-  CheckCircle2, AlertCircle, Zap, TrendingUp, BarChart3
+  CheckCircle2, AlertCircle, Zap, TrendingUp, BarChart3,
+  Globe, MessageCircle, Newspaper, Gauge, History, BookOpen, Target
 } from "lucide-react";
+import { SiReddit, SiX } from "react-icons/si";
 
 interface LearningStatsCardProps {
   learningStats?: LearningStats;
@@ -400,6 +402,247 @@ export function LearningOverviewCard({ learningStats }: LearningStatsCardProps) 
             <div className="text-xl font-bold text-amber-400" data-testid="text-predictions-count">
               {learningStats.ensembleStats.totalPredictions}
             </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function SocialAwarenessCard({ learningStats }: LearningStatsCardProps) {
+  if (!learningStats?.socialAwareness) {
+    return (
+      <Card data-testid="card-social-awareness-empty">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-medium flex items-center gap-2">
+            <Globe className="h-4 w-4 text-muted-foreground" />
+            Social & Global Awareness
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">Loading social awareness stats...</p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const { socialAwareness } = learningStats;
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case "active": return "text-emerald-400 bg-emerald-500/20";
+      case "idle": return "text-muted-foreground bg-muted";
+      case "error": return "text-red-400 bg-red-500/20";
+      default: return "text-muted-foreground bg-muted";
+    }
+  };
+
+  const formatTime = (ts: number | null) => {
+    if (!ts) return "Never";
+    const seconds = Math.floor((Date.now() - ts) / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+    return `${Math.floor(seconds / 3600)}h ago`;
+  };
+
+  const getPlatformIcon = (icon: string) => {
+    switch (icon) {
+      case "gauge": return <Gauge className="h-4 w-4" />;
+      case "newspaper": return <Newspaper className="h-4 w-4" />;
+      case "twitter": return <SiX className="h-4 w-4" />;
+      case "reddit": return <SiReddit className="h-4 w-4" />;
+      default: return <MessageCircle className="h-4 w-4" />;
+    }
+  };
+
+  const getSentimentColor = (sentiment: number) => {
+    if (sentiment >= 0.6) return "text-emerald-400";
+    if (sentiment <= 0.4) return "text-red-400";
+    return "text-amber-400";
+  };
+
+  const getSentimentLabel = (sentiment: number) => {
+    if (sentiment >= 0.7) return "Bullish";
+    if (sentiment >= 0.55) return "Slightly Bullish";
+    if (sentiment >= 0.45) return "Neutral";
+    if (sentiment >= 0.3) return "Slightly Bearish";
+    return "Bearish";
+  };
+
+  return (
+    <Card data-testid="card-social-awareness">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm font-medium flex items-center gap-2">
+          <Globe className="h-4 w-4 text-cyan-400" />
+          Social & Global Awareness
+          <Badge variant="outline" className="ml-auto text-xs">
+            {socialAwareness.totalItemsRead} items read
+          </Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {/* Global Sentiment Summary */}
+        <div className="bg-gradient-to-br from-cyan-500/10 to-blue-500/10 rounded-lg p-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium">Global Market Sentiment</span>
+            <span className={`text-lg font-bold ${getSentimentColor(socialAwareness.globalSentiment)}`}>
+              {(socialAwareness.globalSentiment * 100).toFixed(0)}%
+            </span>
+          </div>
+          <Progress 
+            value={socialAwareness.globalSentiment * 100} 
+            className="h-2"
+          />
+          <div className="flex justify-between text-xs text-muted-foreground mt-1">
+            <span>Bearish</span>
+            <span className={getSentimentColor(socialAwareness.globalSentiment)}>
+              {getSentimentLabel(socialAwareness.globalSentiment)}
+            </span>
+            <span>Bullish</span>
+          </div>
+        </div>
+
+        {/* Platform List */}
+        <div className="space-y-2">
+          <div className="text-xs text-muted-foreground font-medium">Data Sources by Platform</div>
+          {socialAwareness.platforms.map((platform, i) => (
+            <div 
+              key={i} 
+              className="flex items-center justify-between p-2 bg-muted/30 rounded"
+              data-testid={`platform-${platform.platform.toLowerCase().replace(/[\s\/]/g, '-')}`}
+            >
+              <div className="flex items-center gap-2">
+                <div className="text-muted-foreground">
+                  {getPlatformIcon(platform.icon)}
+                </div>
+                <span className="text-sm font-medium">{platform.platform}</span>
+                <Badge className={getStatusColor(platform.status)} variant="outline">
+                  {platform.status}
+                </Badge>
+              </div>
+              <div className="flex items-center gap-3 text-xs">
+                <span className="text-muted-foreground">
+                  <span className="font-medium text-foreground">{platform.itemsRead}</span> reads
+                </span>
+                <span className={getSentimentColor(platform.sentiment)}>
+                  {(platform.sentiment * 100).toFixed(0)}%
+                </span>
+                <span className="text-muted-foreground">{formatTime(platform.lastFetch)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Last Update */}
+        <div className="pt-2 border-t text-xs text-muted-foreground flex items-center gap-1">
+          <Clock className="h-3 w-3" />
+          Last social update: {formatTime(socialAwareness.lastGlobalUpdate)}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function HistoricalLearningCard({ learningStats }: LearningStatsCardProps) {
+  if (!learningStats?.historicalLearning) {
+    return (
+      <Card data-testid="card-historical-learning-empty">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-medium flex items-center gap-2">
+            <History className="h-4 w-4 text-muted-foreground" />
+            Historical Data Learning
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">Loading historical learning stats...</p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const { historicalLearning } = learningStats;
+
+  const formatTime = (ts: number | null) => {
+    if (!ts) return "Never";
+    const seconds = Math.floor((Date.now() - ts) / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+    return `${Math.floor(seconds / 86400)}d ago`;
+  };
+
+  return (
+    <Card data-testid="card-historical-learning">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm font-medium flex items-center gap-2">
+          <History className="h-4 w-4 text-indigo-400" />
+          Historical Data Learning
+          <Badge variant="outline" className="ml-auto text-xs">
+            {historicalLearning.yearsOfData} year{historicalLearning.yearsOfData !== 1 ? 's' : ''} of data
+          </Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {/* Learning Progress */}
+        <div className="bg-gradient-to-br from-indigo-500/10 to-purple-500/10 rounded-lg p-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium">Learning Progress</span>
+            <span className="text-lg font-bold text-indigo-400">
+              {historicalLearning.learningProgress.toFixed(0)}%
+            </span>
+          </div>
+          <Progress 
+            value={historicalLearning.learningProgress} 
+            className="h-2"
+          />
+          <div className="text-xs text-muted-foreground mt-1">
+            {historicalLearning.epochsCompleted} training epochs completed
+          </div>
+        </div>
+
+        {/* Stats Grid */}
+        <div className="grid grid-cols-2 gap-3">
+          <div className="bg-muted/30 rounded-lg p-3 text-center">
+            <Database className="h-4 w-4 mx-auto mb-1 text-blue-400" />
+            <div className="text-xs text-muted-foreground">Historical Candles</div>
+            <div className="text-lg font-bold" data-testid="text-historical-candles">
+              {historicalLearning.totalHistoricalCandles.toLocaleString()}
+            </div>
+          </div>
+          <div className="bg-muted/30 rounded-lg p-3 text-center">
+            <BookOpen className="h-4 w-4 mx-auto mb-1 text-purple-400" />
+            <div className="text-xs text-muted-foreground">Patterns Learned</div>
+            <div className="text-lg font-bold" data-testid="text-patterns-learned">
+              {historicalLearning.patternsLearnedFromHistory}
+            </div>
+          </div>
+          <div className="bg-muted/30 rounded-lg p-3 text-center">
+            <Target className="h-4 w-4 mx-auto mb-1 text-amber-400" />
+            <div className="text-xs text-muted-foreground">Backtest Trades</div>
+            <div className="text-lg font-bold" data-testid="text-backtest-trades">
+              {historicalLearning.backtestTrades}
+            </div>
+          </div>
+          <div className="bg-muted/30 rounded-lg p-3 text-center">
+            <TrendingUp className="h-4 w-4 mx-auto mb-1 text-emerald-400" />
+            <div className="text-xs text-muted-foreground">Historical Win Rate</div>
+            <div className="text-lg font-bold text-emerald-400" data-testid="text-historical-winrate">
+              {historicalLearning.historicalWinRate.toFixed(1)}%
+            </div>
+          </div>
+        </div>
+
+        {/* Data Range */}
+        <div className="pt-2 border-t">
+          <div className="text-xs text-muted-foreground mb-2">Training Data Range</div>
+          <div className="flex items-center justify-between text-sm">
+            <span className="font-medium">{historicalLearning.dataRangeStart}</span>
+            <span className="text-muted-foreground">→</span>
+            <span className="font-medium">{historicalLearning.dataRangeEnd}</span>
+          </div>
+          <div className="text-xs text-muted-foreground mt-2 flex items-center gap-1">
+            <Clock className="h-3 w-3" />
+            Last training: {formatTime(historicalLearning.lastTrainingTime)}
           </div>
         </div>
       </CardContent>

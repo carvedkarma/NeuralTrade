@@ -24,7 +24,9 @@ import {
   PatternLearningCard, 
   FeatureComputationCard, 
   ModelPerformanceCard, 
-  LearningOverviewCard 
+  LearningOverviewCard,
+  SocialAwarenessCard,
+  HistoricalLearningCard
 } from "@/components/learning-stats-card";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff } from "lucide-react";
@@ -227,6 +229,14 @@ export default function Dashboard() {
           <TabsContent value="learning" className="mt-0">
             <div className="space-y-4">
               <LearningOverviewCard learningStats={data.learningStats} />
+              
+              {/* Social Awareness & Historical Learning - Key new sections */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <SocialAwarenessCard learningStats={data.learningStats} />
+                <HistoricalLearningCard learningStats={data.learningStats} />
+              </div>
+              
+              {/* Data Sources & Pattern Memory */}
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
                 <div className="lg:col-span-6 space-y-4">
                   <DataSourcesCard learningStats={data.learningStats} />

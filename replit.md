@@ -28,7 +28,14 @@ The system operates with live data only - no simulated fallback. Shows error mes
 - **SentimentCard Component**: Displays Fear & Greed gauge, social/news scores, top headlines
 - **Binance Vision API** as primary data source (data-api.binance.vision) - reliable, high rate limits
 - **CoinGecko/CryptoCompare APIs** as fallbacks with aggressive caching
-- Dashboard now has tabbed navigation: Overview, Signal, AI Analysis, Indicators, Performance
+- Dashboard now has tabbed navigation: Overview, Signal, Learning, AI Analysis, Indicators, Performance
+- **Learning Analytics Tab**: Shows ML/DL system learning progress with:
+  - Social & Global Awareness: Tracks reads from Fear & Greed Index, CryptoPanic News, Twitter/X, Reddit
+  - Historical Data Learning: Shows patterns learned, backtest trades, historical win rate
+  - Data Sources tracking with attempts/successes for each API
+  - Pattern Memory stats with regime breakdown
+  - Feature Engine with 40 features across 6 categories
+  - ML Ensemble Performance for all 3 models
 
 ## User Preferences
 

@@ -276,6 +276,31 @@ export const modelPerformanceStatsSchema = z.object({
 });
 export type ModelPerformanceStats = z.infer<typeof modelPerformanceStatsSchema>;
 
+export const socialPlatformStatsSchema = z.object({
+  platform: z.string(),
+  icon: z.string(),
+  status: z.enum(["active", "idle", "error"]),
+  itemsRead: z.number(),
+  lastFetch: z.number().nullable(),
+  sentiment: z.number(),
+  influence: z.number(),
+});
+export type SocialPlatformStats = z.infer<typeof socialPlatformStatsSchema>;
+
+export const historicalLearningStatsSchema = z.object({
+  totalHistoricalCandles: z.number(),
+  yearsOfData: z.number(),
+  patternsLearnedFromHistory: z.number(),
+  backtestTrades: z.number(),
+  historicalWinRate: z.number(),
+  dataRangeStart: z.string(),
+  dataRangeEnd: z.string(),
+  learningProgress: z.number(),
+  epochsCompleted: z.number(),
+  lastTrainingTime: z.number().nullable(),
+});
+export type HistoricalLearningStats = z.infer<typeof historicalLearningStatsSchema>;
+
 export const learningStatsSchema = z.object({
   dataSources: z.array(dataSourceStatsSchema),
   patternLearning: patternLearningStatsSchema,
@@ -294,6 +319,13 @@ export const learningStatsSchema = z.object({
     newestCandle: z.number().nullable(),
     dataGaps: z.number(),
   }),
+  socialAwareness: z.object({
+    platforms: z.array(socialPlatformStatsSchema),
+    totalItemsRead: z.number(),
+    globalSentiment: z.number(),
+    lastGlobalUpdate: z.number().nullable(),
+  }),
+  historicalLearning: historicalLearningStatsSchema,
 });
 export type LearningStats = z.infer<typeof learningStatsSchema>;
 
