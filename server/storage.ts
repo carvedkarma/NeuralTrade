@@ -29,9 +29,9 @@ import { analyzeMarket, generateAISignal } from "./ai-analysis";
 import { getFullBTCData, getBTCPrice } from "./coingecko";
 import { getFullBTCDataCryptoCompare } from "./cryptocompare";
 import { getFullBTCDataBinanceVision } from "./binance-vision";
-import { computeFeatures, getLatestFeatures, type FeatureVector } from "./feature-engine";
+import { computeFeatures, getLatestFeatures, detectCandlestickPatterns, analyzeVolumeProfile, type FeatureVector, type CandlestickPattern, type VolumeProfile } from "./feature-engine";
 import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-engine";
-import { getSentimentData, interpretFearGreed } from "./sentiment-api";
+import { getSentimentData, interpretFearGreed, getNewsStats } from "./sentiment-api";
 import { storePattern, findSimilarPatterns } from "./pattern-memory";
 
 export interface IStorage {
@@ -166,6 +166,18 @@ export class MemStorage implements IStorage {
     historicalWinRate: 0,
     learningEpochs: 0,
     lastTrainingTime: 0,
+    // Deep analysis tracking
+    candlestickPatternsDetected: 0,
+    bullishPatterns: 0,
+    bearishPatterns: 0,
+    volumeAnomalies: 0,
+    trendReversals: 0,
+    supportBounces: 0,
+    resistanceRejections: 0,
+    // Pattern types learned
+    patternTypesLearned: {} as Record<string, number>,
+    lastCandlestickPattern: "",
+    lastVolumeProfile: { buyVol: 0, sellVol: 0, ratio: 1 },
   };
   
   private strategyState: StrategyState = {
@@ -247,22 +259,44 @@ export class MemStorage implements IStorage {
       return;
     }
     
-    console.log(`Starting training run... (${this.candles.length} candles, epoch ${this.learningStats.learningEpochs + 1})`);
+    console.log(`Starting DEEP training run... (${this.candles.length} candles, epoch ${this.learningStats.learningEpochs + 1})`);
     this.lastTrainingRun = now;
     
     try {
       const lookback = 8;
       const forwardLook = 16;
       let patternsAdded = 0;
+      let candlestickPatternsFound = 0;
+      let bullishFound = 0;
+      let bearishFound = 0;
       
-      console.log(`Training will process candles from index 50 to ${this.candles.length - forwardLook}...`);
+      console.log(`Deep analysis: processing candles from index 50 to ${this.candles.length - forwardLook}...`);
       
-      for (let i = 50; i < this.candles.length - forwardLook; i += 4) {
+      for (let i = 50; i < this.candles.length - forwardLook; i += 2) {
         const historicalSlice = this.candles.slice(0, i + 1);
         const feature = getLatestFeatures(historicalSlice);
-        if (!feature) {
-          console.log(`No feature computed for index ${i} (slice length: ${historicalSlice.length})`);
-          continue;
+        if (!feature) continue;
+        
+        const candlestickPatterns = detectCandlestickPatterns(historicalSlice);
+        const volumeProfile = analyzeVolumeProfile(historicalSlice);
+        
+        for (const pattern of candlestickPatterns) {
+          candlestickPatternsFound++;
+          if (pattern.type === "bullish") bullishFound++;
+          if (pattern.type === "bearish") bearishFound++;
+          
+          this.learningStats.patternTypesLearned[pattern.name] = 
+            (this.learningStats.patternTypesLearned[pattern.name] || 0) + 1;
+          
+          if (pattern.name === "Support Bounce") this.learningStats.supportBounces++;
+          if (pattern.name === "Resistance Rejection") this.learningStats.resistanceRejections++;
+          if (pattern.name.includes("Engulfing") || pattern.name.includes("Star")) {
+            this.learningStats.trendReversals++;
+          }
+        }
+        
+        if (volumeProfile.volumeAnomaly) {
+          this.learningStats.volumeAnomalies++;
         }
         
         const entryPrice = this.candles[i].close;
@@ -270,24 +304,42 @@ export class MemStorage implements IStorage {
         const return16 = ((this.candles[i + forwardLook]?.close || entryPrice) - entryPrice) / entryPrice;
         
         let maxDrawdown = 0;
+        let maxRunup = 0;
         for (let j = i + 1; j <= i + forwardLook && j < this.candles.length; j++) {
           const low = this.candles[j].low;
+          const high = this.candles[j].high;
           const dd = (low - entryPrice) / entryPrice;
+          const ru = (high - entryPrice) / entryPrice;
           if (dd < maxDrawdown) maxDrawdown = dd;
+          if (ru > maxRunup) maxRunup = ru;
         }
         
         const label: "up" | "down" | "chop" = 
-          return8 > 0.005 ? "up" : 
-          return8 < -0.005 ? "down" : "chop";
+          return8 > 0.004 ? "up" : 
+          return8 < -0.004 ? "down" : "chop";
         
         try {
           await storePattern(feature, return8, return16, maxDrawdown, label);
           patternsAdded++;
         } catch (storeErr) {
-          console.error("Error storing pattern:", storeErr);
+          if (!String(storeErr).includes("duplicate")) {
+            console.error("Error storing pattern:", storeErr);
+          }
         }
         
-        if (patternsAdded >= 20) break;
+        if (patternsAdded >= 40) break;
+      }
+      
+      const latestVolProfile = analyzeVolumeProfile(this.candles);
+      this.learningStats.lastVolumeProfile = {
+        buyVol: latestVolProfile.buyVolume,
+        sellVol: latestVolProfile.sellVolume,
+        ratio: latestVolProfile.volumeRatio,
+      };
+      
+      const latestPatterns = detectCandlestickPatterns(this.candles);
+      if (latestPatterns.length > 0) {
+        this.learningStats.lastCandlestickPattern = latestPatterns[0].name;
       }
       
       if (patternsAdded > 0) {
@@ -298,10 +350,14 @@ export class MemStorage implements IStorage {
         this.learningStats.historicalCandlesProcessed += this.candles.length;
         this.learningStats.backtestTradesSimulated += Math.floor(patternsAdded * 0.6);
         this.learningStats.historicalWinRate = 0.52 + Math.random() * 0.08;
-        console.log(`Training completed: ${patternsAdded} patterns stored, epoch ${this.learningStats.learningEpochs}`);
+        this.learningStats.candlestickPatternsDetected += candlestickPatternsFound;
+        this.learningStats.bullishPatterns += bullishFound;
+        this.learningStats.bearishPatterns += bearishFound;
+        
+        console.log(`Deep training completed: ${patternsAdded} patterns, ${candlestickPatternsFound} candlestick patterns (${bullishFound} bullish, ${bearishFound} bearish), epoch ${this.learningStats.learningEpochs}`);
       }
     } catch (error) {
-      console.error("Error during training:", error);
+      console.error("Error during deep training:", error);
     }
   }
 
@@ -1143,9 +1199,9 @@ export class MemStorage implements IStorage {
           {
             platform: "CryptoPanic News",
             icon: "newspaper",
-            status: this.learningStats.cryptoPanicReads > 0 ? "active" : "idle",
-            itemsRead: this.learningStats.cryptoPanicReads,
-            lastFetch: this.learningStats.lastCryptoPanicFetch || null,
+            status: (() => { const stats = getNewsStats(); return stats.totalReads > 0 ? "active" : "idle"; })(),
+            itemsRead: (() => { const stats = getNewsStats(); return stats.totalReads; })(),
+            lastFetch: (() => { const stats = getNewsStats(); return stats.lastUpdate || null; })(),
             sentiment: this.cachedSentiment?.newsScore ? (this.cachedSentiment.newsScore + 1) / 2 : 0.5,
             influence: 0.25,
           },
@@ -1168,7 +1224,7 @@ export class MemStorage implements IStorage {
             influence: 0.2,
           },
         ],
-        totalItemsRead: this.learningStats.fearGreedReads + this.learningStats.cryptoPanicReads + 
+        totalItemsRead: this.learningStats.fearGreedReads + getNewsStats().totalReads + 
                         this.learningStats.twitterReads + this.learningStats.redditReads,
         globalSentiment: this.learningStats.globalSentiment,
         lastGlobalUpdate: this.learningStats.lastSocialUpdate || null,

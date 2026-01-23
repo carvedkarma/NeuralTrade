@@ -1,5 +1,241 @@
 import type { Candle } from "@shared/schema";
 
+export interface CandlestickPattern {
+  name: string;
+  type: "bullish" | "bearish" | "neutral";
+  strength: number;
+  description: string;
+}
+
+export function detectCandlestickPatterns(candles: Candle[]): CandlestickPattern[] {
+  if (candles.length < 5) return [];
+  
+  const patterns: CandlestickPattern[] = [];
+  const c = candles[candles.length - 1];
+  const c1 = candles[candles.length - 2];
+  const c2 = candles[candles.length - 3];
+  
+  const bodySize = Math.abs(c.close - c.open);
+  const totalRange = c.high - c.low;
+  const upperWick = c.high - Math.max(c.open, c.close);
+  const lowerWick = Math.min(c.open, c.close) - c.low;
+  const isBullish = c.close > c.open;
+  const isBearish = c.close < c.open;
+  
+  const avgBody = candles.slice(-10).reduce((sum, candle) => 
+    sum + Math.abs(candle.close - candle.open), 0) / 10;
+  const avgRange = candles.slice(-10).reduce((sum, candle) => 
+    sum + (candle.high - candle.low), 0) / 10;
+  
+  if (bodySize < avgBody * 0.3 && totalRange > 0) {
+    if (lowerWick > bodySize * 2 && upperWick < bodySize) {
+      patterns.push({
+        name: "Hammer",
+        type: "bullish",
+        strength: 0.7,
+        description: "Bullish reversal - long lower shadow, small body at top"
+      });
+    } else if (upperWick > bodySize * 2 && lowerWick < bodySize) {
+      patterns.push({
+        name: "Shooting Star",
+        type: "bearish",
+        strength: 0.7,
+        description: "Bearish reversal - long upper shadow, small body at bottom"
+      });
+    } else if (upperWick > bodySize && lowerWick > bodySize) {
+      patterns.push({
+        name: "Doji",
+        type: "neutral",
+        strength: 0.5,
+        description: "Indecision - open and close nearly equal"
+      });
+    }
+  }
+  
+  if (bodySize > avgBody * 1.5) {
+    if (isBullish) {
+      patterns.push({
+        name: "Marubozu Bullish",
+        type: "bullish",
+        strength: 0.8,
+        description: "Strong buying pressure - large bullish body, minimal wicks"
+      });
+    } else {
+      patterns.push({
+        name: "Marubozu Bearish",
+        type: "bearish",
+        strength: 0.8,
+        description: "Strong selling pressure - large bearish body, minimal wicks"
+      });
+    }
+  }
+  
+  const c1Body = Math.abs(c1.close - c1.open);
+  const c1Bullish = c1.close > c1.open;
+  const c1Bearish = c1.close < c1.open;
+  
+  if (c1Bearish && isBullish && bodySize > c1Body && 
+      c.open < c1.close && c.close > c1.open) {
+    patterns.push({
+      name: "Bullish Engulfing",
+      type: "bullish",
+      strength: 0.85,
+      description: "Strong bullish reversal - current candle engulfs previous"
+    });
+  }
+  
+  if (c1Bullish && isBearish && bodySize > c1Body && 
+      c.open > c1.close && c.close < c1.open) {
+    patterns.push({
+      name: "Bearish Engulfing",
+      type: "bearish",
+      strength: 0.85,
+      description: "Strong bearish reversal - current candle engulfs previous"
+    });
+  }
+  
+  if (c1Bearish && isBullish && c.close > (c1.open + c1.close) / 2) {
+    patterns.push({
+      name: "Piercing Line",
+      type: "bullish",
+      strength: 0.7,
+      description: "Bullish reversal - closes above midpoint of previous bearish"
+    });
+  }
+  
+  if (c1Bullish && isBearish && c.close < (c1.open + c1.close) / 2) {
+    patterns.push({
+      name: "Dark Cloud Cover",
+      type: "bearish",
+      strength: 0.7,
+      description: "Bearish reversal - closes below midpoint of previous bullish"
+    });
+  }
+  
+  if (candles.length >= 3) {
+    const c2Bearish = c2.close < c2.open;
+    const c2Bullish = c2.close > c2.open;
+    
+    if (c2Bearish && Math.abs(c1.close - c1.open) < avgBody * 0.3 && isBullish && c.close > c2.open) {
+      patterns.push({
+        name: "Morning Star",
+        type: "bullish",
+        strength: 0.9,
+        description: "Strong bullish reversal - three candle pattern"
+      });
+    }
+    
+    if (c2Bullish && Math.abs(c1.close - c1.open) < avgBody * 0.3 && isBearish && c.close < c2.open) {
+      patterns.push({
+        name: "Evening Star",
+        type: "bearish",
+        strength: 0.9,
+        description: "Strong bearish reversal - three candle pattern"
+      });
+    }
+    
+    if (c2Bearish && c1Bearish && isBullish && c1.close < c2.close && c.close > c1.open) {
+      patterns.push({
+        name: "Three Inside Up",
+        type: "bullish",
+        strength: 0.8,
+        description: "Bullish confirmation pattern"
+      });
+    }
+    
+    if (c2Bullish && c1Bullish && isBearish && c1.close > c2.close && c.close < c1.open) {
+      patterns.push({
+        name: "Three Inside Down",
+        type: "bearish",
+        strength: 0.8,
+        description: "Bearish confirmation pattern"
+      });
+    }
+  }
+  
+  const recentLows = candles.slice(-5).map(x => x.low);
+  const recentHighs = candles.slice(-5).map(x => x.high);
+  const supportLevel = Math.min(...recentLows);
+  const resistanceLevel = Math.max(...recentHighs);
+  
+  if (c.low <= supportLevel * 1.002 && isBullish) {
+    patterns.push({
+      name: "Support Bounce",
+      type: "bullish",
+      strength: 0.65,
+      description: "Price bounced off recent support level"
+    });
+  }
+  
+  if (c.high >= resistanceLevel * 0.998 && isBearish) {
+    patterns.push({
+      name: "Resistance Rejection",
+      type: "bearish",
+      strength: 0.65,
+      description: "Price rejected at recent resistance level"
+    });
+  }
+  
+  return patterns;
+}
+
+export interface VolumeProfile {
+  buyVolume: number;
+  sellVolume: number;
+  volumeRatio: number;
+  volumeTrend: "increasing" | "decreasing" | "stable";
+  volumeAnomaly: boolean;
+  climaxVolume: boolean;
+}
+
+export function analyzeVolumeProfile(candles: Candle[]): VolumeProfile {
+  if (candles.length < 20) {
+    return {
+      buyVolume: 0,
+      sellVolume: 0,
+      volumeRatio: 1,
+      volumeTrend: "stable",
+      volumeAnomaly: false,
+      climaxVolume: false,
+    };
+  }
+  
+  let buyVol = 0;
+  let sellVol = 0;
+  
+  for (const c of candles.slice(-10)) {
+    if (c.close > c.open) {
+      buyVol += c.volume;
+    } else {
+      sellVol += c.volume;
+    }
+  }
+  
+  const recentAvg = candles.slice(-5).reduce((s, c) => s + c.volume, 0) / 5;
+  const olderAvg = candles.slice(-20, -10).reduce((s, c) => s + c.volume, 0) / 10;
+  
+  const volumeTrend: "increasing" | "decreasing" | "stable" = 
+    recentAvg > olderAvg * 1.3 ? "increasing" :
+    recentAvg < olderAvg * 0.7 ? "decreasing" : "stable";
+  
+  const stdDev = Math.sqrt(
+    candles.slice(-20).reduce((sum, c) => sum + Math.pow(c.volume - olderAvg, 2), 0) / 20
+  );
+  
+  const lastVol = candles[candles.length - 1].volume;
+  const volumeAnomaly = lastVol > olderAvg + 2 * stdDev;
+  const climaxVolume = lastVol > olderAvg * 3;
+  
+  return {
+    buyVolume: buyVol,
+    sellVolume: sellVol,
+    volumeRatio: sellVol > 0 ? buyVol / sellVol : 2,
+    volumeTrend,
+    volumeAnomaly,
+    climaxVolume,
+  };
+}
+
 export interface FeatureVector {
   timestamp: number;
   returns1: number;

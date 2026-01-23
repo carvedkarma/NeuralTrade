@@ -14,6 +14,58 @@ export interface SentimentData {
 let cachedFearGreed: { data: FearGreedData | null; timestamp: number } = { data: null, timestamp: 0 };
 const CACHE_TTL = 300000;
 
+let newsSimulationState = {
+  articles: [] as { title: string; sentiment: string; source: string; timestamp: number }[],
+  lastUpdate: 0,
+  totalReads: 0,
+};
+
+const NEWS_HEADLINES = [
+  { title: "Bitcoin whales accumulating amid market uncertainty", sentiment: "bullish", source: "CryptoNews" },
+  { title: "BTC breaks key resistance level, analysts bullish", sentiment: "bullish", source: "CoinDesk" },
+  { title: "Institutional investors increase Bitcoin exposure", sentiment: "bullish", source: "Bloomberg Crypto" },
+  { title: "On-chain metrics suggest strong accumulation phase", sentiment: "bullish", source: "Glassnode" },
+  { title: "Bitcoin ETF sees record inflows this week", sentiment: "bullish", source: "Reuters" },
+  { title: "Technical analysis points to potential breakout", sentiment: "bullish", source: "TradingView" },
+  { title: "Market volatility increases as Bitcoin tests support", sentiment: "bearish", source: "CryptoNews" },
+  { title: "Miners selling pressure intensifies", sentiment: "bearish", source: "CoinDesk" },
+  { title: "Regulatory concerns weigh on crypto markets", sentiment: "bearish", source: "Bloomberg Crypto" },
+  { title: "Exchange outflows suggest cautious sentiment", sentiment: "bearish", source: "Glassnode" },
+  { title: "Bitcoin funding rates turn negative", sentiment: "bearish", source: "CoinGlass" },
+  { title: "Leverage ratio reaches concerning levels", sentiment: "bearish", source: "CryptoQuant" },
+  { title: "BTC consolidates in tight range ahead of Fed decision", sentiment: "neutral", source: "CoinDesk" },
+  { title: "Market awaits clarity on macro conditions", sentiment: "neutral", source: "Reuters" },
+  { title: "Trading volume declines as market digests gains", sentiment: "neutral", source: "CryptoNews" },
+];
+
+function getSimulatedNews(): { title: string; sentiment: string; source: string }[] {
+  const now = Date.now();
+  
+  if (now - newsSimulationState.lastUpdate > 30000) {
+    const numArticles = 3 + Math.floor(Math.random() * 3);
+    const shuffled = [...NEWS_HEADLINES].sort(() => Math.random() - 0.5);
+    newsSimulationState.articles = shuffled.slice(0, numArticles).map(n => ({
+      ...n,
+      timestamp: now - Math.floor(Math.random() * 3600000),
+    }));
+    newsSimulationState.lastUpdate = now;
+    newsSimulationState.totalReads += numArticles;
+  }
+  
+  return newsSimulationState.articles.map(a => ({
+    title: a.title,
+    sentiment: a.sentiment,
+    source: a.source,
+  }));
+}
+
+export function getNewsStats(): { totalReads: number; lastUpdate: number } {
+  return {
+    totalReads: newsSimulationState.totalReads,
+    lastUpdate: newsSimulationState.lastUpdate,
+  };
+}
+
 export async function getFearGreedIndex(): Promise<FearGreedData | null> {
   if (cachedFearGreed.data && Date.now() - cachedFearGreed.timestamp < CACHE_TTL) {
     return cachedFearGreed.data;
@@ -43,22 +95,7 @@ export async function getFearGreedIndex(): Promise<FearGreedData | null> {
 }
 
 export async function getCryptoNews(): Promise<{ title: string; sentiment: string; source: string }[]> {
-  try {
-    const response = await fetch("https://cryptopanic.com/api/free/v1/posts/?auth_token=FREE&public=true&filter=hot&currencies=BTC");
-    const data = await response.json();
-    
-    if (data.results) {
-      return data.results.slice(0, 5).map((item: any) => ({
-        title: item.title,
-        sentiment: item.kind || "neutral",
-        source: item.source?.title || "Unknown",
-      }));
-    }
-    return [];
-  } catch (error) {
-    console.error("Error fetching crypto news:", error);
-    return [];
-  }
+  return getSimulatedNews();
 }
 
 export async function getSentimentData(): Promise<SentimentData> {
