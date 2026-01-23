@@ -4,7 +4,7 @@
 
 A powerful AI-driven BTCUSDT futures trading signal dashboard featuring:
 - Kalman filter trend detection (70/250 periods)
-- Real-time Binance market data integration (with simulated fallback)
+- Real-time market data from Binance Vision API (primary), CoinGecko and CryptoCompare fallbacks
 - OpenAI-powered market analysis and signal generation
 - 10+ technical indicators (RSI, MACD, Bollinger Bands, ADX, Stochastic, OBV, VWAP, ATR)
 - Multi-timeframe confluence scoring (5m/15m/1h/4h)
@@ -12,17 +12,21 @@ A powerful AI-driven BTCUSDT futures trading signal dashboard featuring:
 - Automated paper trading with ATR-based risk management
 - Comprehensive performance analytics
 
-The system operates with live Binance data when available and gracefully falls back to simulated data.
+The system operates with live data only - no simulated fallback. Shows error message when all APIs unavailable.
 
 ## Recent Changes (January 2026)
 
+- **Binance Vision API** as primary data source (data-api.binance.vision) - reliable, high rate limits
+- **CoinGecko API** as first fallback with aggressive caching
+- **CryptoCompare API** as second fallback
+- Removed simulated data - shows error when all APIs fail
 - Added OpenAI integration for AI market analysis (uses Replit AI Integrations)
 - Implemented 8 technical indicators with bull/bear signals
 - Added multi-timeframe analysis scoring system
 - Created whale activity detection for large orders
 - Added performance statistics tracking
 - Dashboard now has tabbed navigation: Overview, AI Analysis, Indicators, Performance
-- Added Live/Simulated data source indicator badge
+- Added Live data source indicator badge (Binance/CoinGecko/CryptoCompare)
 
 ## User Preferences
 
@@ -45,15 +49,18 @@ Preferred communication style: Simple, everyday language.
 - **Language**: TypeScript with ESM modules
 - **API Pattern**: RESTful endpoints serving JSON data
 - **AI Integration**: OpenAI via Replit AI Integrations for market analysis
-- **Market Data**: Binance API for real-time futures data (with fallback to simulated)
+- **Market Data**: Binance Vision API (primary), CoinGecko, CryptoCompare (fallbacks)
 - **Development**: Vite dev server with HMR integration for development mode
 - **Production**: Static file serving from built assets
 
 ### Data Layer
 - **ORM**: Drizzle ORM configured for PostgreSQL
 - **Schema**: Zod schemas in shared directory for type-safe validation across client and server
-- **Market Data**: Binance public API for candles, funding rates, open interest, liquidations
-- **Fallback**: Simulated data when Binance API is blocked (HTTP 451)
+- **Market Data**: 
+  - Primary: Binance Vision API (data-api.binance.vision) - 15m candles, price ticker, 24h stats
+  - Fallback 1: CoinGecko API with 5-min cache TTL
+  - Fallback 2: CryptoCompare API
+- **Error Handling**: Shows "No Market Data Available" when all APIs fail (no simulated data)
 
 ### Key Data Models
 - **Candle**: OHLCV data for price charts
