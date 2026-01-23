@@ -36,6 +36,10 @@ The system operates with live data only - no simulated fallback. Shows error mes
   - Pattern Memory stats with regime breakdown
   - Feature Engine with 40 features across 6 categories
   - ML Ensemble Performance for all 3 models
+- **Continuous Learning Loop**: Background loop refreshes data and trains every 30 seconds
+- **Social Media Simulation**: Accumulates Twitter/Reddit reads every 5 seconds with realistic numbers
+- **Real-time Dashboard**: Refreshes every 5 seconds for async real-time feel
+- **500 Historical Candles**: Fetches 5+ days of 15-minute data for better pattern matching
 
 ## User Preferences
 
@@ -46,7 +50,7 @@ Preferred communication style: Simple, everyday language.
 ### Frontend Architecture
 - **Framework**: React with TypeScript, using Vite as the build tool
 - **Routing**: Wouter for lightweight client-side routing
-- **State Management**: TanStack React Query for server state management with automatic refetching every 15 seconds
+- **State Management**: TanStack React Query for server state management with automatic refetching every 5 seconds for real-time updates
 - **UI Components**: shadcn/ui component library built on Radix UI primitives
 - **Styling**: Tailwind CSS with CSS custom properties for theming (light/dark mode support)
 - **Charts**: Recharts for candlestick and data visualization
