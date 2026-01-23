@@ -75,9 +75,13 @@ export const patterns = pgTable("patterns", {
   forwardReturn8: real("forward_return_8"),
   forwardReturn16: real("forward_return_16"),
   forwardMaxDrawdown: real("forward_max_drawdown"),
+  forwardMaxRunup: real("forward_max_runup"),
+  timeToMfe: integer("time_to_mfe"),
   forwardWin: boolean("forward_win"),
   regime: varchar("regime", { length: 20 }),
   label: varchar("label", { length: 20 }),
+  atrAtEntry: real("atr_at_entry"),
+  dynamicThreshold: real("dynamic_threshold"),
 }, (table) => ({
   timestampIdx: index("patterns_timestamp_idx").on(table.timestamp),
 }));

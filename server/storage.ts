@@ -32,7 +32,7 @@ import { getFullBTCDataBinanceVision } from "./binance-vision";
 import { computeFeatures, getLatestFeatures, detectCandlestickPatterns, analyzeVolumeProfile, analyzeMultiTimeframePatterns, type FeatureVector, type CandlestickPattern, type VolumeProfile, type MultiTimeframeCorrelation } from "./feature-engine";
 import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-engine";
 import { getSentimentData, interpretFearGreed, getNewsStats } from "./sentiment-api";
-import { storePattern, findSimilarPatterns } from "./pattern-memory";
+import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime } from "./pattern-memory";
 
 export interface IStorage {
   getDashboardData(): Promise<DashboardData>;
@@ -308,23 +308,39 @@ export class MemStorage implements IStorage {
         const return8 = ((this.candles[i + lookback]?.close || entryPrice) - entryPrice) / entryPrice;
         const return16 = ((this.candles[i + forwardLook]?.close || entryPrice) - entryPrice) / entryPrice;
         
+        let atrSum = 0;
+        for (let j = Math.max(0, i - 13); j <= i; j++) {
+          atrSum += this.candles[j].high - this.candles[j].low;
+        }
+        const atrAtEntry = atrSum / Math.min(14, i + 1);
+        const dynamicThreshold = Math.max(0.0015, 0.9 * atrAtEntry / entryPrice);
+        
         let maxDrawdown = 0;
         let maxRunup = 0;
+        let timeToMfe = 0;
         for (let j = i + 1; j <= i + forwardLook && j < this.candles.length; j++) {
           const low = this.candles[j].low;
           const high = this.candles[j].high;
           const dd = (low - entryPrice) / entryPrice;
           const ru = (high - entryPrice) / entryPrice;
           if (dd < maxDrawdown) maxDrawdown = dd;
-          if (ru > maxRunup) maxRunup = ru;
+          if (ru > maxRunup) {
+            maxRunup = ru;
+            timeToMfe = j - i;
+          }
         }
         
-        const label: "up" | "down" | "chop" = 
-          return8 > 0.004 ? "up" : 
-          return8 < -0.004 ? "down" : "chop";
-        
         try {
-          await storePattern(feature, return8, return16, maxDrawdown, label);
+          await storePattern({
+            feature,
+            forwardReturn8: return8,
+            forwardReturn16: return16,
+            maxDrawdown,
+            maxRunup,
+            timeToMfe,
+            atrAtEntry,
+            dynamicThreshold,
+          });
           patternsAdded++;
         } catch (storeErr) {
           if (!String(storeErr).includes("duplicate")) {
@@ -360,12 +376,15 @@ export class MemStorage implements IStorage {
         this.learningStats.lastTrainingTime = now;
         this.learningStats.historicalCandlesProcessed += this.candles.length;
         this.learningStats.backtestTradesSimulated += Math.floor(patternsAdded * 0.6);
-        this.learningStats.historicalWinRate = 0.52 + Math.random() * 0.08;
         this.learningStats.candlestickPatternsDetected += candlestickPatternsFound;
         this.learningStats.bullishPatterns += bullishFound;
         this.learningStats.bearishPatterns += bearishFound;
         
-        console.log(`Deep training completed: ${patternsAdded} patterns, ${candlestickPatternsFound} candlestick patterns (${bullishFound} bullish, ${bearishFound} bearish), MTF: ${mtfAnalysis.overallSignal} (${(mtfAnalysis.confluence * 100).toFixed(0)}% confluence), epoch ${this.learningStats.learningEpochs}`);
+        const storedStats = await getStoredPatternStats();
+        this.learningStats.historicalWinRate = storedStats.winRate;
+        this.learningStats.patternsByRegime = storedStats.regimeBreakdown;
+        
+        console.log(`Deep training completed: ${patternsAdded} patterns (win rate: ${(storedStats.winRate * 100).toFixed(1)}%), regimes: up=${storedStats.regimeBreakdown.trend_up} down=${storedStats.regimeBreakdown.trend_down} chop=${storedStats.regimeBreakdown.chop}, MTF: ${mtfAnalysis.overallSignal} (${(mtfAnalysis.confluence * 100).toFixed(0)}% confluence), epoch ${this.learningStats.learningEpochs}`);
       }
     } catch (error) {
       console.error("Error during deep training:", error);

@@ -9,9 +9,47 @@ export interface PatternMatch {
   forwardReturn8: number;
   forwardReturn16: number;
   maxDrawdown: number;
+  maxRunup: number;
+  timeToMfe: number;
   won: boolean;
   regime: string;
   label: string;
+  atrAtEntry: number;
+  dynamicThreshold: number;
+}
+
+export function mapKalmanToRegime(kalmanRegime: string): string {
+  switch (kalmanRegime) {
+    case "bull": return "trend_up";
+    case "bear": return "trend_down";
+    case "chop": return "chop";
+    case "shock": return "shock";
+    default: return "chop";
+  }
+}
+
+export function computeDynamicThreshold(atr: number, price: number): number {
+  const volatility = atr / price;
+  return Math.max(0.0015, 0.9 * volatility);
+}
+
+export function determineLabel(
+  forwardReturn8: number,
+  threshold: number
+): "up" | "down" | "chop" {
+  if (forwardReturn8 > threshold) return "up";
+  if (forwardReturn8 < -threshold) return "down";
+  return "chop";
+}
+
+export function determineWin(
+  label: "up" | "down" | "chop",
+  forwardReturn8: number,
+  threshold: number
+): boolean {
+  if (label === "up") return forwardReturn8 > 0;
+  if (label === "down") return forwardReturn8 < 0;
+  return Math.abs(forwardReturn8) <= threshold;
 }
 
 export interface PatternStats {
@@ -20,9 +58,14 @@ export interface PatternStats {
   avgReturn16: number;
   winRate: number;
   avgDrawdown: number;
+  avgRunup: number;
+  avgTimeToMfe: number;
+  mae70thPercentile: number;
+  mfe70thPercentile: number;
   bestCase: number;
   worstCase: number;
   consistency: number;
+  regimeBreakdown: Record<string, number>;
 }
 
 function cosineSimilarity(a: number[], b: number[]): number {
@@ -52,14 +95,23 @@ function euclideanDistance(a: number[], b: number[]): number {
   return Math.sqrt(sum);
 }
 
-export async function storePattern(
-  feature: FeatureVector,
-  forwardReturn8: number,
-  forwardReturn16: number,
-  maxDrawdown: number,
-  label: "up" | "down" | "chop"
-): Promise<void> {
-  const won = label === "up" ? forwardReturn8 > 0 : label === "down" ? forwardReturn8 < 0 : false;
+export interface StorePatternParams {
+  feature: FeatureVector;
+  forwardReturn8: number;
+  forwardReturn16: number;
+  maxDrawdown: number;
+  maxRunup: number;
+  timeToMfe: number;
+  atrAtEntry: number;
+  dynamicThreshold: number;
+}
+
+export async function storePattern(params: StorePatternParams): Promise<void> {
+  const { feature, forwardReturn8, forwardReturn16, maxDrawdown, maxRunup, timeToMfe, atrAtEntry, dynamicThreshold } = params;
+  
+  const label = determineLabel(forwardReturn8, dynamicThreshold);
+  const won = determineWin(label, forwardReturn8, dynamicThreshold);
+  const regime = mapKalmanToRegime(feature.kalmanRegime);
   
   await db.insert(patterns).values({
     timestamp: feature.timestamp,
@@ -68,22 +120,30 @@ export async function storePattern(
     forwardReturn8: forwardReturn8,
     forwardReturn16: forwardReturn16,
     forwardMaxDrawdown: maxDrawdown,
+    forwardMaxRunup: maxRunup,
+    timeToMfe: timeToMfe,
     forwardWin: won,
-    regime: feature.kalmanRegime,
-    label,
+    regime: regime,
+    label: label,
+    atrAtEntry: atrAtEntry,
+    dynamicThreshold: dynamicThreshold,
   });
 }
 
 export async function findSimilarPatterns(
   currentEmbedding: number[],
   topK: number = 50,
-  minSimilarity: number = 0.7
+  minSimilarity: number = 0.7,
+  embargoTimestamp?: number
 ): Promise<PatternMatch[]> {
   const allPatterns = await db.select().from(patterns).orderBy(desc(patterns.timestamp)).limit(10000);
   
   const matches: PatternMatch[] = [];
+  const embargoMs = embargoTimestamp || (Date.now() - 8 * 15 * 60 * 1000);
   
   for (const pattern of allPatterns) {
+    if (pattern.timestamp > embargoMs) continue;
+    
     const embedding = pattern.embedding as number[];
     if (!Array.isArray(embedding)) continue;
     
@@ -96,9 +156,13 @@ export async function findSimilarPatterns(
         forwardReturn8: pattern.forwardReturn8 || 0,
         forwardReturn16: pattern.forwardReturn16 || 0,
         maxDrawdown: pattern.forwardMaxDrawdown || 0,
+        maxRunup: pattern.forwardMaxRunup || 0,
+        timeToMfe: pattern.timeToMfe || 0,
         won: pattern.forwardWin || false,
         regime: pattern.regime || "unknown",
         label: pattern.label || "unknown",
+        atrAtEntry: pattern.atrAtEntry || 0,
+        dynamicThreshold: pattern.dynamicThreshold || 0.004,
       });
     }
   }
@@ -116,16 +180,28 @@ export function computePatternStats(matches: PatternMatch[]): PatternStats {
       avgReturn16: 0,
       winRate: 0,
       avgDrawdown: 0,
+      avgRunup: 0,
+      avgTimeToMfe: 0,
+      mae70thPercentile: 0,
+      mfe70thPercentile: 0,
       bestCase: 0,
       worstCase: 0,
       consistency: 0,
+      regimeBreakdown: {},
     };
   }
   
   const returns8 = matches.map(m => m.forwardReturn8);
   const returns16 = matches.map(m => m.forwardReturn16);
-  const drawdowns = matches.map(m => m.maxDrawdown);
+  const drawdowns = matches.map(m => m.maxDrawdown).sort((a, b) => a - b);
+  const runups = matches.map(m => m.maxRunup).sort((a, b) => b - a);
+  const timesToMfe = matches.map(m => m.timeToMfe);
   const wins = matches.filter(m => m.won).length;
+  
+  const regimeBreakdown: Record<string, number> = {};
+  for (const m of matches) {
+    regimeBreakdown[m.regime] = (regimeBreakdown[m.regime] || 0) + 1;
+  }
   
   const avgReturn8 = returns8.reduce((a, b) => a + b, 0) / matches.length;
   const avgReturn16 = returns16.reduce((a, b) => a + b, 0) / matches.length;
@@ -133,15 +209,22 @@ export function computePatternStats(matches: PatternMatch[]): PatternStats {
   const variance = returns8.reduce((sum, r) => sum + Math.pow(r - avgReturn8, 2), 0) / matches.length;
   const stdDev = Math.sqrt(variance);
   
+  const p70Index = Math.floor(matches.length * 0.7);
+  
   return {
     matchCount: matches.length,
     avgReturn8,
     avgReturn16,
     winRate: wins / matches.length,
     avgDrawdown: drawdowns.reduce((a, b) => a + b, 0) / matches.length,
+    avgRunup: runups.reduce((a, b) => a + b, 0) / matches.length,
+    avgTimeToMfe: timesToMfe.reduce((a, b) => a + b, 0) / matches.length,
+    mae70thPercentile: drawdowns[p70Index] || 0,
+    mfe70thPercentile: runups[Math.floor(matches.length * 0.3)] || 0,
     bestCase: Math.max(...returns8),
     worstCase: Math.min(...returns8),
     consistency: avgReturn8 === 0 ? 0 : 1 - (stdDev / Math.abs(avgReturn8)),
+    regimeBreakdown,
   };
 }
 
@@ -177,4 +260,69 @@ export function getPatternConfidence(stats: PatternStats): {
     confidence,
     reasoning: `${stats.matchCount} similar patterns found. Win rate: ${(winRate * 100).toFixed(1)}%, Avg return: ${expectedReturn.toFixed(2)}%, Best: ${(stats.bestCase * 100).toFixed(2)}%, Worst: ${(stats.worstCase * 100).toFixed(2)}%`,
   };
+}
+
+export interface StoredPatternStats {
+  totalPatterns: number;
+  winRate: number;
+  regimeBreakdown: Record<string, number>;
+  avgThreshold: number;
+  recentWinRate: number;
+}
+
+export async function getStoredPatternStats(): Promise<StoredPatternStats> {
+  try {
+    const allPatterns = await db.select().from(patterns).orderBy(desc(patterns.timestamp)).limit(5000);
+    
+    if (allPatterns.length === 0) {
+      return {
+        totalPatterns: 0,
+        winRate: 0,
+        regimeBreakdown: { trend_up: 0, trend_down: 0, chop: 0, shock: 0 },
+        avgThreshold: 0.004,
+        recentWinRate: 0,
+      };
+    }
+    
+    const totalWins = allPatterns.filter(p => p.forwardWin).length;
+    const winRate = totalWins / allPatterns.length;
+    
+    const regimeBreakdown: Record<string, number> = { trend_up: 0, trend_down: 0, chop: 0, shock: 0 };
+    let thresholdSum = 0;
+    let thresholdCount = 0;
+    
+    for (const p of allPatterns) {
+      const regime = p.regime || "chop";
+      if (regime in regimeBreakdown) {
+        regimeBreakdown[regime]++;
+      } else {
+        regimeBreakdown["chop"]++;
+      }
+      if (p.dynamicThreshold) {
+        thresholdSum += p.dynamicThreshold;
+        thresholdCount++;
+      }
+    }
+    
+    const recentPatterns = allPatterns.slice(0, Math.min(100, allPatterns.length));
+    const recentWins = recentPatterns.filter(p => p.forwardWin).length;
+    const recentWinRate = recentPatterns.length > 0 ? recentWins / recentPatterns.length : 0;
+    
+    return {
+      totalPatterns: allPatterns.length,
+      winRate,
+      regimeBreakdown,
+      avgThreshold: thresholdCount > 0 ? thresholdSum / thresholdCount : 0.004,
+      recentWinRate,
+    };
+  } catch (error) {
+    console.error("Error getting stored pattern stats:", error);
+    return {
+      totalPatterns: 0,
+      winRate: 0,
+      regimeBreakdown: { trend_up: 0, trend_down: 0, chop: 0, shock: 0 },
+      avgThreshold: 0.004,
+      recentWinRate: 0,
+    };
+  }
 }
