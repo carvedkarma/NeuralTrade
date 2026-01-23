@@ -164,7 +164,7 @@ export async function generateShotPlan(
                        ensemble.confidence >= 0.65 && 
                        ensemble.consensus >= 0.5 &&
                        patternMatches.length >= 10 &&
-                       reasons.length >= 2;
+                       reasons.length >= 1;
   
   let entryZone: { low: number; high: number } | null = null;
   let stopLoss: number | null = null;
