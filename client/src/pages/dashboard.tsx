@@ -19,6 +19,13 @@ import { PerformanceStatsCard } from "@/components/performance-stats-card";
 import { StrategySelectorCard } from "@/components/strategy-selector-card";
 import { ShotPlanCard } from "@/components/shot-plan-card";
 import { SentimentCard } from "@/components/sentiment-card";
+import { 
+  DataSourcesCard, 
+  PatternLearningCard, 
+  FeatureComputationCard, 
+  ModelPerformanceCard, 
+  LearningOverviewCard 
+} from "@/components/learning-stats-card";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -136,6 +143,7 @@ export default function Dashboard() {
           <TabsList className="mb-4" data-testid="tabs-list">
             <TabsTrigger value="overview" data-testid="tab-overview">Overview</TabsTrigger>
             <TabsTrigger value="signal" data-testid="tab-signal">Signal</TabsTrigger>
+            <TabsTrigger value="learning" data-testid="tab-learning">Learning</TabsTrigger>
             <TabsTrigger value="analysis" data-testid="tab-analysis">AI Analysis</TabsTrigger>
             <TabsTrigger value="indicators" data-testid="tab-indicators">Indicators</TabsTrigger>
             <TabsTrigger value="performance" data-testid="tab-performance">Performance</TabsTrigger>
@@ -212,6 +220,22 @@ export default function Dashboard() {
                 <SentimentCard sentiment={data.sentiment} />
                 <SignalCard signal={data.currentSignal} />
                 <RegimeCard signal={data.currentSignal} />
+              </div>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="learning" className="mt-0">
+            <div className="space-y-4">
+              <LearningOverviewCard learningStats={data.learningStats} />
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                <div className="lg:col-span-6 space-y-4">
+                  <DataSourcesCard learningStats={data.learningStats} />
+                  <PatternLearningCard learningStats={data.learningStats} />
+                </div>
+                <div className="lg:col-span-6 space-y-4">
+                  <FeatureComputationCard learningStats={data.learningStats} />
+                  <ModelPerformanceCard learningStats={data.learningStats} />
+                </div>
               </div>
             </div>
           </TabsContent>

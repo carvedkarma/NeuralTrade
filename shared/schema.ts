@@ -223,6 +223,80 @@ export const sentimentSchema = z.object({
 });
 export type Sentiment = z.infer<typeof sentimentSchema>;
 
+export const dataSourceStatsSchema = z.object({
+  name: z.string(),
+  status: z.enum(["active", "fallback", "error", "idle"]),
+  lastFetch: z.number().nullable(),
+  candlesCollected: z.number(),
+  successRate: z.number(),
+  avgLatency: z.number(),
+});
+export type DataSourceStats = z.infer<typeof dataSourceStatsSchema>;
+
+export const patternLearningStatsSchema = z.object({
+  totalPatterns: z.number(),
+  uniquePatterns: z.number(),
+  avgSimilarity: z.number(),
+  matchRate: z.number(),
+  lastPatternAdded: z.number().nullable(),
+  patternsByRegime: z.record(z.string(), z.number()),
+  topPatternOutcomes: z.array(z.object({
+    pattern: z.string(),
+    winRate: z.number(),
+    count: z.number(),
+  })),
+});
+export type PatternLearningStats = z.infer<typeof patternLearningStatsSchema>;
+
+export const featureComputationStatsSchema = z.object({
+  totalFeatures: z.number(),
+  featuresComputed: z.number(),
+  computationTime: z.number(),
+  topFeatures: z.array(z.object({
+    name: z.string(),
+    importance: z.number(),
+    currentValue: z.number(),
+  })),
+  featureCategories: z.record(z.string(), z.number()),
+});
+export type FeatureComputationStats = z.infer<typeof featureComputationStatsSchema>;
+
+export const modelPerformanceStatsSchema = z.object({
+  modelName: z.string(),
+  weight: z.number(),
+  predictionsToday: z.number(),
+  accuracy: z.number(),
+  avgConfidence: z.number(),
+  lastPrediction: z.number().nullable(),
+  signalDistribution: z.object({
+    long: z.number(),
+    short: z.number(),
+    hold: z.number(),
+  }),
+});
+export type ModelPerformanceStats = z.infer<typeof modelPerformanceStatsSchema>;
+
+export const learningStatsSchema = z.object({
+  dataSources: z.array(dataSourceStatsSchema),
+  patternLearning: patternLearningStatsSchema,
+  featureComputation: featureComputationStatsSchema,
+  modelPerformance: z.array(modelPerformanceStatsSchema),
+  ensembleStats: z.object({
+    totalPredictions: z.number(),
+    consensusRate: z.number(),
+    avgConfidence: z.number(),
+    lastUpdate: z.number(),
+  }),
+  dataIngestion: z.object({
+    candlesTotal: z.number(),
+    timeRangeDays: z.number(),
+    oldestCandle: z.number().nullable(),
+    newestCandle: z.number().nullable(),
+    dataGaps: z.number(),
+  }),
+});
+export type LearningStats = z.infer<typeof learningStatsSchema>;
+
 export const dashboardDataSchema = z.object({
   candles: z.array(candleSchema),
   currentSignal: signalSchema,
@@ -258,6 +332,7 @@ export const dashboardDataSchema = z.object({
   mtfScore: multiTimeframeScoreSchema.optional(),
   whaleActivity: whaleActivitySchema.optional(),
   performanceStats: performanceStatsSchema.optional(),
+  learningStats: learningStatsSchema.optional(),
   isLiveData: z.boolean().optional(),
   dataSource: z.enum(["coingecko", "cryptocompare", "binance", "none"]).optional(),
   dataError: z.string().nullable().optional(),
