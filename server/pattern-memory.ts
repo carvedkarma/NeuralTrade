@@ -33,7 +33,7 @@ export function computeDynamicThreshold(atr: number, price: number): number {
   return Math.max(0.0015, 0.9 * volatility);
 }
 
-export function determineLabel(
+export function determineActualOutcome(
   forwardReturn8: number,
   threshold: number
 ): "up" | "down" | "chop" {
@@ -42,14 +42,19 @@ export function determineLabel(
   return "chop";
 }
 
+export function determinePrediction(
+  regime: "trend_up" | "trend_down" | "chop" | "shock"
+): "up" | "down" | "chop" {
+  if (regime === "trend_up") return "up";
+  if (regime === "trend_down") return "down";
+  return "chop";
+}
+
 export function determineWin(
-  label: "up" | "down" | "chop",
-  forwardReturn8: number,
-  threshold: number
+  prediction: "up" | "down" | "chop",
+  actualOutcome: "up" | "down" | "chop"
 ): boolean {
-  if (label === "up") return forwardReturn8 > 0;
-  if (label === "down") return forwardReturn8 < 0;
-  return Math.abs(forwardReturn8) <= threshold;
+  return prediction === actualOutcome;
 }
 
 export interface PatternStats {
@@ -109,9 +114,10 @@ export interface StorePatternParams {
 export async function storePattern(params: StorePatternParams): Promise<void> {
   const { feature, forwardReturn8, forwardReturn16, maxDrawdown, maxRunup, timeToMfe, atrAtEntry, dynamicThreshold } = params;
   
-  const label = determineLabel(forwardReturn8, dynamicThreshold);
-  const won = determineWin(label, forwardReturn8, dynamicThreshold);
   const regime = mapKalmanToRegime(feature.kalmanRegime);
+  const prediction = determinePrediction(regime);
+  const actualOutcome = determineActualOutcome(forwardReturn8, dynamicThreshold);
+  const won = determineWin(prediction, actualOutcome);
   
   await db.insert(patterns).values({
     timestamp: feature.timestamp,
@@ -124,7 +130,7 @@ export async function storePattern(params: StorePatternParams): Promise<void> {
     timeToMfe: timeToMfe,
     forwardWin: won,
     regime: regime,
-    label: label,
+    label: actualOutcome,
     atrAtEntry: atrAtEntry,
     dynamicThreshold: dynamicThreshold,
   });
