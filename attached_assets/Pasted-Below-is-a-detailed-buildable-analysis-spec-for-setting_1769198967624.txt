@@ -1,0 +1,410 @@
+Below is a detailed, buildable analysis/spec for setting up a learning system that uses patterns + news (plus price/futures data) to produce BTCUSDT futures 15m signals. It’s written so you can paste it to your Replit agent.
+
+MASTER SPEC: Pattern + News Learning System (BTCUSDT Futures 15m, Signal-Only)
+Goal
+
+Build a learning system that produces HIGH-PRECISION signals (LONG/SHORT/HOLD) by combining:
+
+Pattern memory (find similar historical setups and learn outcomes)
+
+News intelligence (convert headlines + macro events into structured features)
+
+Futures microstructure (OI, funding, liquidations, mark/index)
+
+Regime gating (trade only when conditions are favorable)
+
+The system must prioritize precision and risk control, not “always predicting”.
+
+1) DATA FOUNDATION (REQUIRED)
+1.1 Price & Futures Data
+
+Must store 1m candles, then resample to 15m.
+
+Minimum required fields:
+
+candles_1m(ts, o,h,l,c,v)
+
+candles_15m(ts, o,h,l,c,v)
+
+Futures-specific time series:
+
+open_interest(ts, oi)
+
+funding(ts, rate, next_funding_ts)
+
+mark_index(ts, mark, index, basis)
+
+liquidations(ts, side, notional)
+
+trades_agg(ts, buy_vol, sell_vol, delta)
+
+orderbook_top(ts, bid, ask, spread, imbalance)
+
+1.2 News / Events Data
+
+Store raw + processed news items:
+
+news_raw(id, source, published_ts, first_seen_ts, title, body, url)
+
+news_processed(id, event_type, sentiment, impact, confidence, assets, decay_half_life)
+
+Economic calendar events (macro):
+
+macro_events(id, event_name, scheduled_ts, forecast, previous, actual, surprise, importance)
+
+Important rule: store first_seen_ts (when your system saw it) to avoid lookahead.
+
+2) PATTERN LEARNING SYSTEM (CORE)
+
+Pattern learning should be similarity search, not random “pattern counts”.
+
+2.1 Define a “Pattern Window”
+
+For each 15m candle time t, build a window of the last N candles:
+
+N = 64 or 128 (16–32 hours)
+
+Each window becomes:
+
+features matrix: X[t-N+1 : t]
+
+future outcome: what happened next (labels)
+
+2.2 Outcome Labels (for learning what patterns lead to)
+
+Use horizon H = 8 candles (2 hours) as default.
+
+Compute forward return:
+
+r_fwd = close[t+H] / close[t] - 1
+
+Compute volatility scale:
+
+vol = ATR_15m[t] / close[t]
+
+Dynamic threshold:
+
+thr = max(0.0015, 0.9*vol)
+
+Labels:
+
+Up: r_fwd > +thr
+
+Down: r_fwd < -thr
+
+Chop: else
+
+Also compute path risk labels (important for stops/hold time):
+
+MAE = max adverse excursion in next H candles
+
+MFE = max favorable excursion in next H candles
+
+time_to_mfe = candle index when MFE occurred
+
+These enable:
+
+stop placement suggestions
+
+expected hold time prediction
+
+2.3 Pattern Embedding
+
+Convert each window into a fixed vector embedding:
+
+Option A (fast MVP):
+
+Flatten key features (returns, vol, OI change, funding, delta) across last N candles
+
+Reduce with PCA (e.g., 64 dims)
+
+Option B (better):
+
+Train an autoencoder or small TCN encoder to produce 64–128 dim embedding
+
+Store embeddings:
+
+pattern_embeddings(ts, embedding_vector, label, mae, mfe, time_to_mfe, regime)
+
+2.4 Similarity Search (the “pattern memory”)
+
+At inference time (current time t_now):
+
+compute embedding for last N candles
+
+find top-k nearest neighbors in history (k=50–200)
+
+compute outcome stats from those neighbors:
+
+P(up), P(down), P(chop)
+
+expected return, expected MAE/MFE
+
+expected hold time distribution
+
+performance split by regime
+
+This becomes a Pattern Signal:
+
+pattern_confidence
+
+pattern_expected_move
+
+pattern_expected_hold
+
+Important: Similarity search must be time-safe:
+
+never use future data beyond t_now
+
+apply an “embargo window” (exclude the most recent H candles) to prevent leakage
+
+3) NEWS INTELLIGENCE SYSTEM (CORE)
+
+News should be converted into structured numeric features, not just “sentiment”.
+
+3.1 News Ingestion Sources (practical)
+
+Crypto news feed (CryptoPanic / RSS)
+
+Exchange announcements (Binance)
+
+Macro calendar (CPI, FOMC, NFP, rates)
+
+Optional: X/Twitter (only from curated accounts)
+
+3.2 Event Classification
+
+Each news item must be mapped to:
+
+event_type (taxonomy below)
+
+sentiment for BTC (bullish/bearish/neutral)
+
+impact_score 0–100
+
+confidence 0–1
+
+decay_half_life (minutes/hours)
+
+asset_target (BTC, crypto broad, USD macro, etc.)
+
+Event taxonomy (BTC-focused)
+
+macro_rate (FOMC, rate decisions)
+
+macro_inflation (CPI, PCE)
+
+macro_jobs (NFP)
+
+etf_regulation (ETF, SEC, regulation)
+
+exchange_risk (outage, hacks, legal)
+
+protocol_security (major crypto hacks)
+
+whale_flow (large onchain moves, optional)
+
+market_risk (geopolitics, risk-off headlines)
+
+3.3 Credibility & Confirmation
+
+News must be weighted:
+
+source reliability weight
+
+if multiple sources confirm same event → confidence up
+
+rumor language → confidence down
+
+3.4 Time Decay Aggregation (turn news into candle features)
+
+For each 15m candle t, aggregate all news in last windows:
+
+Create a decay-weighted score:
+
+weight = confidence * exp(-Δt / half_life) * impact
+
+Compute:
+
+news_score_15m, news_score_1h, news_score_6h
+
+news_max_impact_1h
+
+news_event_counts_by_type
+
+macro_event_soon flag (within next 60 minutes)
+
+macro_event_blackout flag (±30 minutes around high importance)
+
+Use news primarily as:
+
+a filter (no-trade windows)
+
+a risk modifier
+
+only secondarily as direction predictor
+
+4) REGIME GATING (MOST IMPORTANT FOR PRECISION)
+
+Before any signal is allowed, classify regime.
+
+Regime classes:
+
+Trend Up
+
+Trend Down
+
+Chop
+
+Shock
+
+Regime features:
+
+efficiency ratio
+
+kalman fast vs slow distance & slope
+
+ATR regime
+
+liquidation spike
+
+spread widening
+
+OI acceleration
+
+Rules:
+
+If Chop probability > 0.55 → HOLD
+
+If Shock active → only shock logic, reduce confidence thresholds
+
+5) ENSEMBLE LEARNING (HOW EVERYTHING COMBINES)
+
+Final signal must be an ensemble of:
+
+Pattern Signal (similarity outcomes)
+
+Price/Feature ML Model (LightGBM/XGBoost)
+
+Deep Model (TCN/Transformer) (optional but desired)
+
+News Signal (structured aggregates)
+
+Rule-based Kalman Trend Engine (trend gating and exits)
+
+Final decision logic (simple + robust)
+
+Start from regime gate:
+
+if chop/high uncertainty → HOLD
+
+Combine probabilities:
+
+P_final = w1*P_pattern + w2*P_ml + w3*P_dl
+
+Apply news modifiers:
+
+if macro blackout → HOLD
+
+if high negative news score → raise threshold for LONG
+
+Only output LONG/SHORT if:
+
+P_final(direction) > 0.65
+
+expected_move > (fees + slippage + funding_risk) * 3
+
+6) SHOT PLAN GENERATOR (ENTRY/STOP/TP/HOLD)
+
+Given a direction is approved:
+
+Entry zone
+
+Use ATR-based zone:
+
+entry_low/high = price ± 0.25*ATR
+
+Or retest trigger (Kalman retest):
+
+SHORT: price retests fast Kalman and rejects
+
+Stop loss
+
+Use predicted MAE from pattern neighbors:
+
+stop_distance = max(1.2*ATR, expected_MAE_70th_percentile)
+
+Place stop beyond last swing OR beyond Kalman fast with buffer
+
+Take profits
+
+Use predicted MFE from neighbors:
+
+TP1 at 1R
+
+TP2 at 2R
+
+trail using Kalman fast
+
+Hold time
+
+Use neighbor time_to_mfe distribution:
+
+expected hold = median of neighbor time_to_mfe
+
+if no follow-through by 3 candles → time stop exit suggestion
+
+7) TRAINING & VALIDATION (TO MAKE IT REAL)
+
+Must implement:
+
+walk-forward training
+
+purged/embargo split (because horizon overlaps)
+
+include fees, slippage, funding in evaluation
+
+probability calibration (isotonic)
+
+Minimum data requirement:
+
+at least 1–2 years of 15m candles
+
+thousands of labeled windows
+
+8) UI REQUIREMENTS (single user)
+
+Show:
+
+current signal (LONG/SHORT/HOLD)
+
+regime probabilities
+
+pattern similarity stats (top-k outcomes summary)
+
+news panel (top events + scores)
+
+shot plan (entry/stop/TP/hold)
+
+reasons list (top drivers + veto reasons)
+
+9) IMPLEMENTATION ORDER (VERY IMPORTANT)
+
+Build price/futures ingestion + DB
+
+Build feature engine + Kalman
+
+Build labeling + walk-forward backtest
+
+Implement similarity search pattern memory
+
+Implement news ingestion + structured scoring
+
+Build ML baseline and ensemble decision
+
+Add deep model only after baseline is stable
+
+Key rule
+
+Most of the time the system should output HOLD.
+Trading only high-quality setups is what makes it “powerful”.
