@@ -39,7 +39,7 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 export default function Dashboard() {
   const { data, isLoading, error, refetch, isFetching } = useQuery<DashboardData>({
     queryKey: ["/api/dashboard"],
-    refetchInterval: 15000,
+    refetchInterval: 5000,
   });
 
   const hasTriggeredAnalysis = useRef(false);

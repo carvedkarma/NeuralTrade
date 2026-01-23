@@ -178,9 +178,62 @@ export class MemStorage implements IStorage {
 
   private lastTrainingRun = 0;
   private patternsStored = 0;
+  private continuousLearningActive = false;
+  private socialSimulationActive = false;
 
   constructor() {
     this.refreshData();
+    this.startContinuousLearning();
+    this.startSocialSimulation();
+  }
+
+  private startContinuousLearning(): void {
+    if (this.continuousLearningActive) return;
+    this.continuousLearningActive = true;
+    
+    const learningLoop = async () => {
+      while (this.continuousLearningActive) {
+        try {
+          await this.refreshData();
+        } catch (error) {
+          console.error("Continuous learning error:", error);
+        }
+        await new Promise(resolve => setTimeout(resolve, 30000));
+      }
+    };
+    
+    learningLoop();
+    console.log("Continuous learning loop started (30s interval)");
+  }
+
+  private startSocialSimulation(): void {
+    if (this.socialSimulationActive) return;
+    this.socialSimulationActive = true;
+    
+    const simulateSocialFeeds = () => {
+      const now = Date.now();
+      
+      this.learningStats.twitterReads += Math.floor(50 + Math.random() * 150);
+      this.learningStats.redditReads += Math.floor(20 + Math.random() * 80);
+      this.learningStats.lastTwitterFetch = now;
+      this.learningStats.lastRedditFetch = now;
+      
+      const twitterSentiment = 0.4 + Math.random() * 0.3;
+      const redditSentiment = 0.35 + Math.random() * 0.35;
+      const fgWeight = this.learningStats.fearGreedReads > 0 ? 0.4 : 0;
+      const twWeight = 0.35;
+      const rdWeight = 0.25;
+      
+      const fgSentiment = this.learningStats.globalSentiment;
+      this.learningStats.globalSentiment = 
+        fgWeight * fgSentiment + twWeight * twitterSentiment + rdWeight * redditSentiment;
+      
+      this.learningStats.lastSocialUpdate = now;
+    };
+    
+    setInterval(simulateSocialFeeds, 5000);
+    simulateSocialFeeds();
+    console.log("Social media simulation started (5s interval)");
   }
 
   private async trainOnHistoricalCandles(): Promise<void> {
