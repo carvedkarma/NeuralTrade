@@ -2,6 +2,23 @@ import type { Candle, FuturesData, Signal } from "@shared/schema";
 import type { FeatureVector } from "./feature-engine";
 import { getEnsemblePrediction, type EnsemblePrediction } from "./ml-predictor";
 import { findSimilarPatterns, computePatternStats, type PatternMatch } from "./pattern-memory";
+import { getSentimentData, interpretFearGreed } from "./sentiment-api";
+
+function checkNewsFilter(newsScore: number, fearGreedValue: number): { shouldVeto: boolean; reason: string | null } {
+  if (fearGreedValue >= 85 || fearGreedValue <= 10) {
+    return { 
+      shouldVeto: true, 
+      reason: `Extreme sentiment (F&G: ${fearGreedValue}) - macro blackout period` 
+    };
+  }
+  if (Math.abs(newsScore) >= 0.8) {
+    return { 
+      shouldVeto: true, 
+      reason: `Extreme news bias (${(newsScore * 100).toFixed(0)}%) - wait for stabilization` 
+    };
+  }
+  return { shouldVeto: false, reason: null };
+}
 
 export interface ShotPlan {
   signal: "LONG" | "SHORT" | "HOLD";
@@ -90,7 +107,10 @@ export async function generateShotPlan(
   const strategy = selectStrategy(regime, feature);
   const holdTimeStr = getEstimatedHoldTime(regime, feature);
   
-  const ensemble = await getEnsemblePrediction(candles, feature, futuresData, includeAI);
+  const [ensemble, sentiment] = await Promise.all([
+    getEnsemblePrediction(candles, feature, futuresData, includeAI),
+    getSentimentData()
+  ]);
   
   const patternMatches = await findSimilarPatterns(feature.embedding, 20, 0.65);
   const patternStats = computePatternStats(patternMatches);
@@ -100,6 +120,12 @@ export async function generateShotPlan(
   
   const holdCandles = regime === "shock" ? 2 : regime === "chop" ? 3 : 6;
   const costs = estimateCosts(holdCandles);
+  
+  const fearGreedValue = sentiment.fearGreed?.value ?? 50;
+  const newsFilter = checkNewsFilter(sentiment.newsScore, fearGreedValue);
+  if (newsFilter.shouldVeto && newsFilter.reason) {
+    vetoReasons.push(newsFilter.reason);
+  }
   
   if (ensemble.probChop > 0.55) {
     vetoReasons.push(`High chop probability: ${(ensemble.probChop * 100).toFixed(1)}%`);
@@ -112,6 +138,12 @@ export async function generateShotPlan(
   }
   if (ensemble.consensus < 0.5) {
     vetoReasons.push(`Low model consensus: ${(ensemble.consensus * 100).toFixed(0)}%`);
+  }
+  if (ensemble.confidence < 0.65) {
+    vetoReasons.push(`Low confidence: ${(ensemble.confidence * 100).toFixed(0)}% (need 65%+)`);
+  }
+  if (patternMatches.length < 10) {
+    vetoReasons.push(`Insufficient pattern matches: ${patternMatches.length} (need 10+)`);
   }
   
   if (ensemble.direction === "LONG") {
@@ -129,8 +161,9 @@ export async function generateShotPlan(
   }
   
   const shouldTrade = vetoReasons.length === 0 && 
-                       ensemble.confidence > 0.5 && 
+                       ensemble.confidence >= 0.65 && 
                        ensemble.consensus >= 0.5 &&
+                       patternMatches.length >= 10 &&
                        reasons.length >= 2;
   
   let entryZone: { low: number; high: number } | null = null;
