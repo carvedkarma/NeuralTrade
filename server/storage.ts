@@ -1264,7 +1264,7 @@ export class MemStorage implements IStorage {
         yearsOfData: Math.max(1, Math.ceil(timeRangeDays / 365)),
         patternsLearnedFromHistory: this.learningStats.patternsLearnedFromHistory + this.learningStats.totalPatternsMatched,
         backtestTrades: this.learningStats.backtestTradesSimulated + this.trades.filter(t => t.status === "closed").length,
-        historicalWinRate: this.learningStats.historicalWinRate > 0 ? this.learningStats.historicalWinRate : 
+        historicalWinRate: this.learningStats.historicalWinRate > 0 ? this.learningStats.historicalWinRate * 100 : 
           (this.trades.filter(t => t.status === "closed" && (t.pnlPercent ?? 0) > 0).length / 
            Math.max(1, this.trades.filter(t => t.status === "closed").length)) * 100,
         dataRangeStart: oldestCandle ? new Date(oldestCandle).toISOString().split('T')[0] : "N/A",
