@@ -51,7 +51,7 @@ export async function getBTCPriceBinanceVision(): Promise<number | null> {
   }
 }
 
-export async function getBTCCandlesBinanceVision(interval: string = "15m", limit: number = 168): Promise<Candle[]> {
+export async function getBTCCandlesBinanceVision(interval: string = "15m", limit: number = 500): Promise<Candle[]> {
   try {
     const data = await fetchBinanceVision(`/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`);
     
@@ -102,7 +102,7 @@ export async function getFullBTCDataBinanceVision(): Promise<{
     
     const [price, candles, stats] = await Promise.all([
       getBTCPriceBinanceVision(),
-      getBTCCandlesBinanceVision("15m", 168),
+      getBTCCandlesBinanceVision("15m", 500),
       getBTC24hStatsBinanceVision(),
     ]);
 
