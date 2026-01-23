@@ -2,31 +2,33 @@
 
 ## Overview
 
-A powerful AI-driven BTCUSDT futures trading signal dashboard featuring:
-- Kalman filter trend detection (70/250 periods)
-- Real-time market data from Binance Vision API (primary), CoinGecko and CryptoCompare fallbacks
-- OpenAI-powered market analysis and signal generation
-- 10+ technical indicators (RSI, MACD, Bollinger Bands, ADX, Stochastic, OBV, VWAP, ATR)
-- Multi-timeframe confluence scoring (5m/15m/1h/4h)
-- Whale activity detection for large order flow ($50K+ orders)
-- Automated paper trading with ATR-based risk management
-- Comprehensive performance analytics
+An institutional-grade AI-driven BTCUSDT futures trading signal dashboard featuring:
+- **ML Ensemble Predictor**: Combines rule-based (35%), pattern-based (35%), and OpenAI (30%) models with weighted voting
+- **Pattern Memory System**: Stores historical setups with cosine similarity search (minimum 10 matches, 0.6+ similarity)
+- **Comprehensive Feature Engine**: Computes 40+ features (price, volatility, momentum, regime, Kalman filters)
+- **Shot Plan Generation**: Entry zones, stop loss, TP1/TP2, R:R ratio, expected hold time, estimated costs, calculated edge
+- **Gatekeeper Logic**: HOLD unless confidence > 0.5, consensus >= 0.5, edge positive, at least 2 supporting reasons
+- **Sentiment Integration**: Fear & Greed Index, social score, news sentiment with caching
+- **Real-time Market Data**: Binance Vision API (primary), CoinGecko and CryptoCompare fallbacks
+- **10+ Technical Indicators**: RSI, MACD, Bollinger Bands, ADX, Stochastic, OBV, VWAP, ATR
+- **Multi-timeframe Confluence**: Scoring across 5m/15m/1h/4h timeframes
+- **Automated Paper Trading**: ATR-based risk management with performance analytics
 
 The system operates with live data only - no simulated fallback. Shows error message when all APIs unavailable.
 
 ## Recent Changes (January 2026)
 
+- **ML Ensemble Predictor**: Combines 3 models (rule-based, pattern, OpenAI) with weighted voting
+- **Pattern Memory System**: Stores historical setups in PostgreSQL with embeddings for similarity search
+- **Feature Engine**: 40+ features including efficiency ratios, Kalman filters, regime detection
+- **Shot Plan Generation**: Comprehensive trade plans with entry/stop/TP zones and reasoning
+- **Sentiment APIs**: Fear & Greed Index and news sentiment with 5-minute caching
+- **New Signal Tab**: Dedicated tab displaying shot plan, sentiment, and AI analysis
+- **ShotPlanCard Component**: Shows probabilities, trade levels, reasons/vetos, pattern matches
+- **SentimentCard Component**: Displays Fear & Greed gauge, social/news scores, top headlines
 - **Binance Vision API** as primary data source (data-api.binance.vision) - reliable, high rate limits
-- **CoinGecko API** as first fallback with aggressive caching
-- **CryptoCompare API** as second fallback
-- Removed simulated data - shows error when all APIs fail
-- Added OpenAI integration for AI market analysis (uses Replit AI Integrations)
-- Implemented 8 technical indicators with bull/bear signals
-- Added multi-timeframe analysis scoring system
-- Created whale activity detection for large orders
-- Added performance statistics tracking
-- Dashboard now has tabbed navigation: Overview, AI Analysis, Indicators, Performance
-- Added Live data source indicator badge (Binance/CoinGecko/CryptoCompare)
+- **CoinGecko/CryptoCompare APIs** as fallbacks with aggressive caching
+- Dashboard now has tabbed navigation: Overview, Signal, AI Analysis, Indicators, Performance
 
 ## User Preferences
 
@@ -42,7 +44,7 @@ Preferred communication style: Simple, everyday language.
 - **Styling**: Tailwind CSS with CSS custom properties for theming (light/dark mode support)
 - **Charts**: Recharts for candlestick and data visualization
 - **Animations**: Framer Motion for smooth UI transitions
-- **Tab Navigation**: Overview, AI Analysis, Indicators, Performance views
+- **Tab Navigation**: Overview, Signal, AI Analysis, Indicators, Performance views
 
 ### Backend Architecture
 - **Runtime**: Node.js with Express.js
