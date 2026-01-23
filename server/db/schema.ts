@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, real, timestamp, jsonb, boolean, index, varchar } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, bigint, real, timestamp, jsonb, boolean, index, varchar } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -69,7 +69,7 @@ export const features = pgTable("features", {
 
 export const patterns = pgTable("patterns", {
   id: serial("id").primaryKey(),
-  timestamp: integer("timestamp").notNull(),
+  timestamp: bigint("timestamp", { mode: "number" }).notNull(),
   embedding: jsonb("embedding").notNull(),
   featureHash: varchar("feature_hash", { length: 64 }),
   forwardReturn8: real("forward_return_8"),

@@ -279,8 +279,8 @@ function calculateEfficiencyRatio(candles: Candle[], period: number = 10): numbe
 }
 
 export function computeFeatures(candles: Candle[]): FeatureVector[] {
-  if (candles.length < 250) {
-    console.warn("Need at least 250 candles for full feature computation");
+  if (candles.length < 50) {
+    console.warn("Need at least 50 candles for feature computation");
     return [];
   }
   
@@ -304,8 +304,9 @@ export function computeFeatures(candles: Candle[]): FeatureVector[] {
   const kalmanSlowArr = kalmanFilter(closes, 0.005);
   
   const features: FeatureVector[] = [];
+  const startIdx = Math.max(50, candles.length > 250 ? 250 : 50);
   
-  for (let i = 250; i < candles.length; i++) {
+  for (let i = startIdx; i < candles.length; i++) {
     const price = closes[i];
     const avgVol = volumes.slice(i - 20, i).reduce((a, b) => a + b, 0) / 20;
     
