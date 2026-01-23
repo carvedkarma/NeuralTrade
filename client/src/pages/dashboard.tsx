@@ -17,6 +17,8 @@ import { MTFScoreCard } from "@/components/mtf-score-card";
 import { WhaleActivityCard } from "@/components/whale-activity-card";
 import { PerformanceStatsCard } from "@/components/performance-stats-card";
 import { StrategySelectorCard } from "@/components/strategy-selector-card";
+import { ShotPlanCard } from "@/components/shot-plan-card";
+import { SentimentCard } from "@/components/sentiment-card";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -133,6 +135,7 @@ export default function Dashboard() {
         <Tabs defaultValue="overview" className="w-full">
           <TabsList className="mb-4" data-testid="tabs-list">
             <TabsTrigger value="overview" data-testid="tab-overview">Overview</TabsTrigger>
+            <TabsTrigger value="signal" data-testid="tab-signal">Signal</TabsTrigger>
             <TabsTrigger value="analysis" data-testid="tab-analysis">AI Analysis</TabsTrigger>
             <TabsTrigger value="indicators" data-testid="tab-indicators">Indicators</TabsTrigger>
             <TabsTrigger value="performance" data-testid="tab-performance">Performance</TabsTrigger>
@@ -187,6 +190,28 @@ export default function Dashboard() {
 
               <div className="lg:col-span-12">
                 <TradeHistory trades={data.recentTrades} />
+              </div>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="signal" className="mt-0">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+              <div className="lg:col-span-8 space-y-4">
+                <PriceChart 
+                  candles={data.candles} 
+                  kalmanFast={data.kalmanFast}
+                  kalmanSlow={data.kalmanSlow}
+                  strategySignal={data.strategySignal}
+                  activeTrade={data.activeTrade}
+                  recentTrades={data.recentTrades}
+                />
+                <AIAnalysisCard analysis={data.aiAnalysis} />
+              </div>
+              <div className="lg:col-span-4 space-y-4">
+                <ShotPlanCard shotPlan={data.shotPlan} />
+                <SentimentCard sentiment={data.sentiment} />
+                <SignalCard signal={data.currentSignal} />
+                <RegimeCard signal={data.currentSignal} />
               </div>
             </div>
           </TabsContent>

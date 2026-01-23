@@ -16,6 +16,8 @@ import type {
   MultiTimeframeScore,
   WhaleActivity,
   PerformanceStats,
+  ShotPlan,
+  Sentiment,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { getKlines, getMultiTimeframeKlines, getFuturesData, detectLargeOrders } from "./binance";
@@ -24,6 +26,9 @@ import { analyzeMarket, generateAISignal } from "./ai-analysis";
 import { getFullBTCData, getBTCPrice } from "./coingecko";
 import { getFullBTCDataCryptoCompare } from "./cryptocompare";
 import { getFullBTCDataBinanceVision } from "./binance-vision";
+import { computeFeatures, getLatestFeatures } from "./feature-engine";
+import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-engine";
+import { getSentimentData, interpretFearGreed } from "./sentiment-api";
 
 export interface IStorage {
   getDashboardData(): Promise<DashboardData>;
@@ -109,6 +114,10 @@ export class MemStorage implements IStorage {
   private isLiveData = false;
   private dataError: string | null = null;
   private dataSource: "coingecko" | "cryptocompare" | "binance" | "none" = "none";
+  private cachedShotPlan: ShotPlan | null = null;
+  private cachedSentiment: Sentiment | null = null;
+  private lastShotPlanUpdate = 0;
+  private lastSentimentUpdate = 0;
   
   private strategyState: StrategyState = {
     isRunning: false,
@@ -1018,6 +1027,67 @@ export class MemStorage implements IStorage {
       stochastic: { name: "Stoch", value: this.indicators.stochastic.value, signal: this.indicators.stochastic.signal, strength: this.indicators.stochastic.strength, description: this.indicators.stochastic.description },
     } : undefined;
 
+    const now = Date.now();
+    
+    if (now - this.lastShotPlanUpdate > 60000 && this.candles.length >= 250) {
+      try {
+        const feature = getLatestFeatures(this.candles);
+        if (feature) {
+          const shotPlanResult = await generateShotPlan(this.candles, feature, futuresData, false);
+          this.cachedShotPlan = {
+            signal: shotPlanResult.signal,
+            confidence: shotPlanResult.confidence,
+            regime: shotPlanResult.regime,
+            strategy: shotPlanResult.strategy,
+            entryZone: shotPlanResult.entryZone,
+            stopLoss: shotPlanResult.stopLoss,
+            takeProfit1: shotPlanResult.takeProfit1,
+            takeProfit2: shotPlanResult.takeProfit2,
+            trailingStop: shotPlanResult.trailingStop,
+            riskReward: shotPlanResult.riskReward,
+            expectedHoldTime: shotPlanResult.expectedHoldTime,
+            estimatedCosts: shotPlanResult.estimatedCosts,
+            edge: shotPlanResult.edge,
+            probUp: shotPlanResult.probUp,
+            probDown: shotPlanResult.probDown,
+            probChop: shotPlanResult.probChop,
+            expectedMove: shotPlanResult.expectedMove,
+            reasons: shotPlanResult.reasons,
+            vetoReasons: shotPlanResult.vetoReasons,
+            patternMatchCount: shotPlanResult.patternMatches.length,
+            modelConsensus: shotPlanResult.mlPredictions.consensus,
+          };
+          this.lastShotPlanUpdate = now;
+        }
+      } catch (error) {
+        console.error("Error generating shot plan:", error);
+      }
+    }
+    
+    if (now - this.lastSentimentUpdate > 300000) {
+      try {
+        const sentimentData = await getSentimentData();
+        const fearGreedInterpret = sentimentData.fearGreed 
+          ? interpretFearGreed(sentimentData.fearGreed.value)
+          : null;
+        
+        this.cachedSentiment = {
+          fearGreed: sentimentData.fearGreed ? {
+            value: sentimentData.fearGreed.value,
+            classification: sentimentData.fearGreed.valueClassification,
+            signal: fearGreedInterpret?.signal || "neutral",
+            description: fearGreedInterpret?.description || "",
+          } : null,
+          socialScore: sentimentData.socialSentiment,
+          newsScore: sentimentData.newsScore,
+          topNews: sentimentData.topNews,
+        };
+        this.lastSentimentUpdate = now;
+      } catch (error) {
+        console.error("Error fetching sentiment:", error);
+      }
+    }
+
     return {
       candles: displayCandles,
       currentSignal: signal,
@@ -1038,6 +1108,8 @@ export class MemStorage implements IStorage {
       activeTrade: this.activeTrade,
       aiAnalysis: this.aiAnalysis ?? undefined,
       aiSignal: this.aiSignal ?? undefined,
+      shotPlan: this.cachedShotPlan ?? undefined,
+      sentiment: this.cachedSentiment ?? undefined,
       indicators: indicatorsSummary,
       mtfScore: this.mtfScore ?? undefined,
       whaleActivity: this.whaleActivity ?? undefined,
