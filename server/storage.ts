@@ -29,7 +29,7 @@ import { analyzeMarket, generateAISignal } from "./ai-analysis";
 import { getFullBTCData, getBTCPrice } from "./coingecko";
 import { getFullBTCDataCryptoCompare } from "./cryptocompare";
 import { getFullBTCDataBinanceVision } from "./binance-vision";
-import { computeFeatures, getLatestFeatures, detectCandlestickPatterns, analyzeVolumeProfile, type FeatureVector, type CandlestickPattern, type VolumeProfile } from "./feature-engine";
+import { computeFeatures, getLatestFeatures, detectCandlestickPatterns, analyzeVolumeProfile, analyzeMultiTimeframePatterns, type FeatureVector, type CandlestickPattern, type VolumeProfile, type MultiTimeframeCorrelation } from "./feature-engine";
 import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-engine";
 import { getSentimentData, interpretFearGreed, getNewsStats } from "./sentiment-api";
 import { storePattern, findSimilarPatterns } from "./pattern-memory";
@@ -178,6 +178,11 @@ export class MemStorage implements IStorage {
     patternTypesLearned: {} as Record<string, number>,
     lastCandlestickPattern: "",
     lastVolumeProfile: { buyVol: 0, sellVol: 0, ratio: 1 },
+    // Multi-timeframe analysis
+    multiTimeframeConfluence: 0,
+    multiTimeframeSignal: "neutral" as "bullish" | "bearish" | "neutral",
+    timeframeAlignments: 0,
+    divergenceDetected: false,
   };
   
   private strategyState: StrategyState = {
@@ -342,6 +347,12 @@ export class MemStorage implements IStorage {
         this.learningStats.lastCandlestickPattern = latestPatterns[0].name;
       }
       
+      const mtfAnalysis = analyzeMultiTimeframePatterns(this.candles);
+      this.learningStats.multiTimeframeConfluence = mtfAnalysis.confluence;
+      this.learningStats.multiTimeframeSignal = mtfAnalysis.overallSignal;
+      this.learningStats.timeframeAlignments = mtfAnalysis.alignedTimeframes;
+      this.learningStats.divergenceDetected = mtfAnalysis.divergence;
+      
       if (patternsAdded > 0) {
         this.patternsStored += patternsAdded;
         this.learningStats.patternsLearnedFromHistory += patternsAdded;
@@ -354,7 +365,7 @@ export class MemStorage implements IStorage {
         this.learningStats.bullishPatterns += bullishFound;
         this.learningStats.bearishPatterns += bearishFound;
         
-        console.log(`Deep training completed: ${patternsAdded} patterns, ${candlestickPatternsFound} candlestick patterns (${bullishFound} bullish, ${bearishFound} bearish), epoch ${this.learningStats.learningEpochs}`);
+        console.log(`Deep training completed: ${patternsAdded} patterns, ${candlestickPatternsFound} candlestick patterns (${bullishFound} bullish, ${bearishFound} bearish), MTF: ${mtfAnalysis.overallSignal} (${(mtfAnalysis.confluence * 100).toFixed(0)}% confluence), epoch ${this.learningStats.learningEpochs}`);
       }
     } catch (error) {
       console.error("Error during deep training:", error);

@@ -620,3 +620,156 @@ export function getLatestFeatures(candles: Candle[]): FeatureVector | null {
   const features = computeFeatures(candles);
   return features.length > 0 ? features[features.length - 1] : null;
 }
+
+export interface TimeframeAggregation {
+  timeframe: string;
+  multiplier: number;
+  candles: Candle[];
+}
+
+export function aggregateToTimeframe(candles: Candle[], multiplier: number): Candle[] {
+  if (candles.length < multiplier) return [];
+  
+  const aggregated: Candle[] = [];
+  const remainder = candles.length % multiplier;
+  const startIndex = remainder;
+  const count = Math.floor(candles.length / multiplier);
+  
+  for (let i = 0; i < count; i++) {
+    const sliceStart = startIndex + i * multiplier;
+    const sliceEnd = sliceStart + multiplier;
+    const slice = candles.slice(sliceStart, sliceEnd);
+    if (slice.length === 0) continue;
+    
+    aggregated.push({
+      timestamp: slice[0].timestamp,
+      open: slice[0].open,
+      high: Math.max(...slice.map(c => c.high)),
+      low: Math.min(...slice.map(c => c.low)),
+      close: slice[slice.length - 1].close,
+      volume: slice.reduce((sum, c) => sum + c.volume, 0),
+    });
+  }
+  
+  return aggregated;
+}
+
+export interface MultiTimeframePattern {
+  timeframe: string;
+  patterns: CandlestickPattern[];
+  trend: "bullish" | "bearish" | "neutral";
+  strength: number;
+}
+
+export interface MultiTimeframeCorrelation {
+  timeframes: MultiTimeframePattern[];
+  overallSignal: "bullish" | "bearish" | "neutral";
+  confluence: number;
+  alignedTimeframes: number;
+  divergence: boolean;
+  description: string;
+}
+
+export function analyzeMultiTimeframePatterns(candles: Candle[]): MultiTimeframeCorrelation {
+  const timeframeMultipliers = [
+    { name: "5m", mult: 1 },
+    { name: "15m", mult: 3 },
+    { name: "1h", mult: 12 },
+    { name: "4h", mult: 48 },
+  ];
+  
+  const timeframes: MultiTimeframePattern[] = [];
+  let bullishCount = 0;
+  let bearishCount = 0;
+  let totalStrength = 0;
+  
+  for (const tf of timeframeMultipliers) {
+    const aggregated = tf.mult === 1 ? candles : aggregateToTimeframe(candles, tf.mult);
+    
+    if (aggregated.length < 10) continue;
+    
+    const patterns = detectCandlestickPatterns(aggregated);
+    const volumeProfile = analyzeVolumeProfile(aggregated);
+    
+    const bullishPatterns = patterns.filter(p => p.type === "bullish");
+    const bearishPatterns = patterns.filter(p => p.type === "bearish");
+    
+    let trend: "bullish" | "bearish" | "neutral" = "neutral";
+    let strength = 0;
+    
+    if (bullishPatterns.length > bearishPatterns.length) {
+      trend = "bullish";
+      strength = bullishPatterns.reduce((s, p) => s + p.strength, 0) / bullishPatterns.length;
+      bullishCount++;
+    } else if (bearishPatterns.length > bullishPatterns.length) {
+      trend = "bearish";
+      strength = bearishPatterns.reduce((s, p) => s + p.strength, 0) / bearishPatterns.length;
+      bearishCount++;
+    } else if (volumeProfile.volumeRatio > 1.2) {
+      trend = "bullish";
+      strength = 0.6;
+      bullishCount++;
+    } else if (volumeProfile.volumeRatio < 0.8) {
+      trend = "bearish";
+      strength = 0.6;
+      bearishCount++;
+    }
+    
+    const recentCandles = aggregated.slice(-5);
+    if (recentCandles.length >= 2) {
+      const priceChange = (recentCandles[recentCandles.length - 1].close - recentCandles[0].close) / recentCandles[0].close;
+      if (priceChange > 0.005 && trend === "neutral") {
+        trend = "bullish";
+        strength = 0.5;
+        bullishCount++;
+      } else if (priceChange < -0.005 && trend === "neutral") {
+        trend = "bearish";
+        strength = 0.5;
+        bearishCount++;
+      }
+    }
+    
+    totalStrength += strength;
+    
+    timeframes.push({
+      timeframe: tf.name,
+      patterns,
+      trend,
+      strength,
+    });
+  }
+  
+  const alignedTimeframes = Math.max(bullishCount, bearishCount);
+  const totalTimeframes = timeframes.length;
+  const confluence = totalTimeframes > 0 ? alignedTimeframes / totalTimeframes : 0;
+  const divergence = bullishCount > 0 && bearishCount > 0 && Math.abs(bullishCount - bearishCount) <= 1;
+  
+  let overallSignal: "bullish" | "bearish" | "neutral" = "neutral";
+  if (bullishCount > bearishCount && confluence >= 0.5) {
+    overallSignal = "bullish";
+  } else if (bearishCount > bullishCount && confluence >= 0.5) {
+    overallSignal = "bearish";
+  }
+  
+  const avgStrength = totalTimeframes > 0 ? totalStrength / totalTimeframes : 0;
+  
+  let description = "";
+  if (confluence >= 0.75) {
+    description = `Strong ${overallSignal} confluence across ${alignedTimeframes}/${totalTimeframes} timeframes`;
+  } else if (divergence) {
+    description = `Timeframe divergence detected - mixed signals across timeframes`;
+  } else if (confluence >= 0.5) {
+    description = `Moderate ${overallSignal} bias with ${(confluence * 100).toFixed(0)}% confluence`;
+  } else {
+    description = `No clear multi-timeframe alignment`;
+  }
+  
+  return {
+    timeframes,
+    overallSignal,
+    confluence,
+    alignedTimeframes,
+    divergence,
+    description,
+  };
+}
