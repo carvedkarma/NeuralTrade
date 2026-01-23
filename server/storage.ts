@@ -23,6 +23,7 @@ import { getAllIndicators, calculateMultiTimeframeScore, type TechnicalIndicator
 import { analyzeMarket, generateAISignal } from "./ai-analysis";
 import { getFullBTCData, getBTCPrice } from "./coingecko";
 import { getFullBTCDataCryptoCompare } from "./cryptocompare";
+import { getFullBTCDataBinanceVision } from "./binance-vision";
 
 export interface IStorage {
   getDashboardData(): Promise<DashboardData>;
@@ -441,27 +442,48 @@ export class MemStorage implements IStorage {
     let dataFetched = false;
     
     try {
-      console.log("Attempting to fetch data from CoinGecko...");
-      const coinGeckoData = await getFullBTCData();
+      console.log("Attempting to fetch data from Binance Vision...");
+      const binanceVisionData = await getFullBTCDataBinanceVision();
       
-      if (coinGeckoData && coinGeckoData.candles.length > 0) {
-        this.candles = coinGeckoData.candles;
+      if (binanceVisionData && binanceVisionData.candles.length > 0) {
+        this.candles = binanceVisionData.candles;
         this.isLiveData = true;
-        this.dataSource = "coingecko";
+        this.dataSource = "binance";
         this.dataError = null;
         this.initializeKalmanFilters();
         this.indicators = getAllIndicators(this.candles);
         this.lastBinanceUpdate = now;
         dataFetched = true;
-        console.log(`CoinGecko data fetched: ${coinGeckoData.candles.length} candles, price: $${coinGeckoData.currentPrice}`);
+        console.log(`Binance Vision data fetched: ${binanceVisionData.candles.length} candles, price: $${binanceVisionData.currentPrice}`);
       }
     } catch (error) {
-      console.error("Error fetching CoinGecko data:", error);
+      console.error("Error fetching Binance Vision data:", error);
     }
     
     if (!dataFetched) {
       try {
-        console.log("Attempting to fetch data from CryptoCompare...");
+        console.log("Fallback: Attempting to fetch data from CoinGecko...");
+        const coinGeckoData = await getFullBTCData();
+        
+        if (coinGeckoData && coinGeckoData.candles.length > 0) {
+          this.candles = coinGeckoData.candles;
+          this.isLiveData = true;
+          this.dataSource = "coingecko";
+          this.dataError = null;
+          this.initializeKalmanFilters();
+          this.indicators = getAllIndicators(this.candles);
+          this.lastBinanceUpdate = now;
+          dataFetched = true;
+          console.log(`CoinGecko data fetched: ${coinGeckoData.candles.length} candles, price: $${coinGeckoData.currentPrice}`);
+        }
+      } catch (error) {
+        console.error("Error fetching CoinGecko data:", error);
+      }
+    }
+    
+    if (!dataFetched) {
+      try {
+        console.log("Fallback: Attempting to fetch data from CryptoCompare...");
         const cryptoCompareData = await getFullBTCDataCryptoCompare();
         
         if (cryptoCompareData && cryptoCompareData.candles.length > 0) {
@@ -482,7 +504,7 @@ export class MemStorage implements IStorage {
     
     if (!dataFetched) {
       try {
-        console.log("Attempting to fetch data from Binance...");
+        console.log("Fallback: Attempting to fetch data from Binance main API...");
         const liveCandles = await getKlines("BTCUSDT", "15m", 300);
         
         if (liveCandles.length > 0) {
