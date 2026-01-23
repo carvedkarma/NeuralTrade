@@ -178,6 +178,51 @@ export const performanceStatsSchema = z.object({
 });
 export type PerformanceStats = z.infer<typeof performanceStatsSchema>;
 
+export const shotPlanSchema = z.object({
+  signal: signalTypeSchema,
+  confidence: z.number(),
+  regime: z.enum(["trend_up", "trend_down", "chop", "shock"]),
+  strategy: z.string(),
+  entryZone: z.object({ low: z.number(), high: z.number() }).nullable(),
+  stopLoss: z.number().nullable(),
+  takeProfit1: z.number().nullable(),
+  takeProfit2: z.number().nullable(),
+  trailingStop: z.number().nullable(),
+  riskReward: z.number(),
+  expectedHoldTime: z.string(),
+  estimatedCosts: z.number(),
+  edge: z.number(),
+  probUp: z.number(),
+  probDown: z.number(),
+  probChop: z.number(),
+  expectedMove: z.number(),
+  reasons: z.array(z.string()),
+  vetoReasons: z.array(z.string()),
+  patternMatchCount: z.number().optional(),
+  modelConsensus: z.number().optional(),
+});
+export type ShotPlan = z.infer<typeof shotPlanSchema>;
+
+export const fearGreedSchema = z.object({
+  value: z.number(),
+  classification: z.string(),
+  signal: z.enum(["bullish", "bearish", "neutral"]),
+  description: z.string(),
+});
+export type FearGreed = z.infer<typeof fearGreedSchema>;
+
+export const sentimentSchema = z.object({
+  fearGreed: fearGreedSchema.nullable(),
+  socialScore: z.number(),
+  newsScore: z.number(),
+  topNews: z.array(z.object({
+    title: z.string(),
+    sentiment: z.string(),
+    source: z.string(),
+  })),
+});
+export type Sentiment = z.infer<typeof sentimentSchema>;
+
 export const dashboardDataSchema = z.object({
   candles: z.array(candleSchema),
   currentSignal: signalSchema,
@@ -198,6 +243,8 @@ export const dashboardDataSchema = z.object({
   activeTrade: tradeSchema.nullable(),
   aiAnalysis: aiAnalysisSchema.optional(),
   aiSignal: aiSignalSchema.optional(),
+  shotPlan: shotPlanSchema.optional(),
+  sentiment: sentimentSchema.optional(),
   indicators: z.object({
     rsi: technicalIndicatorSchema,
     macd: technicalIndicatorSchema,
