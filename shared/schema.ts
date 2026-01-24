@@ -334,6 +334,8 @@ export const historicalLearningStatsSchema = z.object({
   candlesUsedForTraining: z.number(),
   candlesAvailable: z.number(),
   trainingCoverage: z.number(),
+  deepLearningPass: z.number().optional(),
+  deepLearningComplete: z.boolean().optional(),
 });
 export type HistoricalLearningStats = z.infer<typeof historicalLearningStatsSchema>;
 

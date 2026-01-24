@@ -195,6 +195,10 @@ export class MemStorage implements IStorage {
     multiTimeframeSignal: "neutral" as "bullish" | "bearish" | "neutral",
     timeframeAlignments: 0,
     divergenceDetected: false,
+    // Deep learning progress tracking
+    deepLearningIndex: 50,
+    deepLearningComplete: false,
+    deepLearningPassCount: 0,
   };
   
   private strategyState: StrategyState = {
@@ -247,7 +251,28 @@ export class MemStorage implements IStorage {
         this.learningStats.patternsLearnedFromHistory = state.totalPredictions || 0;
         this.lastTrainingRun = Number(state.lastTrainTs) || 0;
         
+        // Restore deep learning progress from patternsVersion (format: p1.X.idxY)
+        const pv = state.patternsVersion || "";
+        const idxMatch = pv.match(/idx(\d+)/);
+        if (idxMatch) {
+          this.learningStats.deepLearningIndex = parseInt(idxMatch[1], 10);
+        }
+        // Restore pass count from modelVersion (format: v1.X.passY)
+        const mv = state.modelVersion || "";
+        const passMatch = mv.match(/pass(\d+)/);
+        if (passMatch) {
+          this.learningStats.deepLearningPassCount = parseInt(passMatch[1], 10);
+        }
+        // Restore training progress
+        const tp = state.trainingProgress ?? 0;
+        if (tp < 1) {
+          this.learningStats.deepLearningComplete = false;
+        } else {
+          this.learningStats.deepLearningComplete = true;
+        }
+        
         console.log(`[Persistence] Restored: ${this.learningStats.learningEpochs} epochs, ${this.learningStats.backtestTradesSimulated} backtest trades, ${(this.learningStats.historicalWinRate * 100).toFixed(1)}% win rate`);
+        console.log(`[Deep Learning] Restored progress: index=${this.learningStats.deepLearningIndex}, pass=${this.learningStats.deepLearningPassCount}, complete=${this.learningStats.deepLearningComplete}`);
       } else {
         console.log("[Persistence] No saved learning state found, starting fresh");
       }
@@ -287,14 +312,16 @@ export class MemStorage implements IStorage {
   private async saveLearningStateToDb(): Promise<void> {
     try {
       const now = Date.now();
+      const maxIndex = this.learningStats.historicalCandlesProcessed - 16;
+      const trainingProgress = maxIndex > 50 ? (this.learningStats.deepLearningIndex - 50) / (maxIndex - 50) : 0;
       const stateData = {
         key: "main",
         lastTrainTs: this.learningStats.lastTrainingTime,
         lastFeatureTs: this.learningStats.lastFeatureCompute,
         lastIngestedTs: this.lastRefresh,
-        modelVersion: `v1.${this.learningStats.learningEpochs}`,
-        patternsVersion: `p1.${this.patternsStored}`,
-        trainingProgress: 1.0,
+        modelVersion: `v1.${this.learningStats.learningEpochs}.pass${this.learningStats.deepLearningPassCount}`,
+        patternsVersion: `p1.${this.patternsStored}.idx${this.learningStats.deepLearningIndex}`,
+        trainingProgress: trainingProgress,
         epochsCompleted: this.learningStats.learningEpochs,
         isFrozen: false,
         totalPredictions: this.learningStats.totalPredictions,
@@ -458,7 +485,7 @@ export class MemStorage implements IStorage {
   private async trainOnHistoricalCandles(): Promise<void> {
     const now = Date.now();
     const isFirstRun = this.lastTrainingRun === 0;
-    const cooldown = isFirstRun ? 0 : 60000;
+    const cooldown = isFirstRun ? 0 : 30000;
     
     if (now - this.lastTrainingRun < cooldown) return;
     
@@ -477,7 +504,23 @@ export class MemStorage implements IStorage {
     // Update stats to reflect actual training data
     this.learningStats.historicalCandlesProcessed = candlesToUse.length;
     
-    console.log(`Starting DEEP training run... (${candlesToUse.length} candles from ${trainingCandles.length > this.candles.length ? 'DB' : 'memory'}, epoch ${this.learningStats.learningEpochs + 1})`);
+    const lookback = 8;
+    const forwardLook = 16;
+    const maxIndex = candlesToUse.length - forwardLook;
+    
+    // Resume from where we left off, or start fresh if complete
+    let startIdx = this.learningStats.deepLearningIndex;
+    if (startIdx >= maxIndex || this.learningStats.deepLearningComplete) {
+      // Start a new pass through the data
+      startIdx = 50;
+      this.learningStats.deepLearningPassCount++;
+      this.learningStats.deepLearningComplete = false;
+      console.log(`[Deep Learning] Starting pass #${this.learningStats.deepLearningPassCount + 1} over ${candlesToUse.length} candles`);
+    }
+    
+    const passNumber = this.learningStats.deepLearningPassCount + 1;
+    const progressPct = ((startIdx - 50) / (maxIndex - 50) * 100).toFixed(1);
+    console.log(`[Deep Learning] Pass ${passNumber}: Processing from index ${startIdx} (${progressPct}% complete), epoch ${this.learningStats.learningEpochs + 1}`);
     this.lastTrainingRun = now;
     
     updateDataCounts(candlesToUse.length, this.learningStats.backtestTradesSimulated);
@@ -491,17 +534,17 @@ export class MemStorage implements IStorage {
     }
     
     try {
-      const lookback = 8;
-      const forwardLook = 16;
       let patternsAdded = 0;
       let candlestickPatternsFound = 0;
       let bullishFound = 0;
       let bearishFound = 0;
       
-      console.log(`Deep analysis: processing candles from index 50 to ${candlesToUse.length - forwardLook}...`);
+      // Process 500 candles per epoch for thorough deep learning
+      const batchSize = 500;
+      const endIdx = Math.min(startIdx + batchSize, maxIndex);
       
-      for (let i = 50; i < candlesToUse.length - forwardLook; i += 2) {
-        const historicalSlice = candlesToUse.slice(0, i + 1);
+      for (let i = startIdx; i < endIdx; i++) {
+        const historicalSlice = candlesToUse.slice(Math.max(0, i - 200), i + 1);
         const feature = getLatestFeatures(historicalSlice);
         if (!feature) continue;
         
@@ -567,11 +610,16 @@ export class MemStorage implements IStorage {
           patternsAdded++;
         } catch (storeErr) {
           if (!String(storeErr).includes("duplicate")) {
-            console.error("Error storing pattern:", storeErr);
+            // Skip duplicates silently
           }
         }
-        
-        if (patternsAdded >= 40) break;
+      }
+      
+      // Update progress tracker
+      this.learningStats.deepLearningIndex = endIdx;
+      if (endIdx >= maxIndex) {
+        this.learningStats.deepLearningComplete = true;
+        console.log(`[Deep Learning] Pass ${passNumber} COMPLETE! Processed all ${candlesToUse.length} historical candles.`);
       }
       
       const latestVolProfile = analyzeVolumeProfile(candlesToUse);
@@ -1572,12 +1620,24 @@ export class MemStorage implements IStorage {
            Math.max(1, this.trades.filter(t => t.status === "closed").length)) * 100,
         dataRangeStart: oldestCandle ? new Date(oldestCandle).toISOString().split('T')[0] : "N/A",
         dataRangeEnd: newestCandle ? new Date(newestCandle).toISOString().split('T')[0] : "N/A",
-        learningProgress: Math.min(100, (this.learningStats.totalPredictions / 100) * 100),
+        // Calculate actual deep learning progress through historical data
+        learningProgress: (() => {
+          const maxIdx = (this.learningStats.historicalCandlesProcessed || this.candles.length) - 16;
+          if (maxIdx <= 50) return 0;
+          const progress = ((this.learningStats.deepLearningIndex - 50) / (maxIdx - 50)) * 100;
+          return Math.min(100, Math.max(0, progress));
+        })(),
         epochsCompleted: this.learningStats.learningEpochs,
         lastTrainingTime: this.learningStats.lastTrainingTime || null,
-        candlesUsedForTraining: this.learningStats.historicalCandlesProcessed || this.candles.length,
+        candlesUsedForTraining: this.learningStats.deepLearningIndex,
         candlesAvailable: this.learningStats.historicalCandlesProcessed || this.candles.length,
-        trainingCoverage: 100,
+        trainingCoverage: (() => {
+          const maxIdx = (this.learningStats.historicalCandlesProcessed || this.candles.length) - 16;
+          if (maxIdx <= 50) return 0;
+          return Math.min(100, ((this.learningStats.deepLearningIndex - 50) / (maxIdx - 50)) * 100);
+        })(),
+        deepLearningPass: this.learningStats.deepLearningPassCount + 1,
+        deepLearningComplete: this.learningStats.deepLearningComplete,
       },
     };
   }
