@@ -19,6 +19,11 @@ The system operates with live data only - no simulated fallback. Shows error mes
 ## Recent Changes (January 2026)
 
 - **ML Ensemble Predictor**: Combines 3 models (rule-based, pattern, OpenAI) with weighted voting
+- **Directional Accuracy Metrics**: Evaluates model performance excluding HOLD predictions:
+  - Directional accuracy only counted when prediction was LONG/SHORT AND market moved
+  - Flat market outcomes (no meaningful price movement) are excluded from accuracy calculation
+  - Each model shows: Dir. Accuracy (ex-HOLD), HOLD Rate, Signal Frequency breakdown (% LONG/SHORT/HOLD)
+  - 0.1% price change threshold determines if market actually moved
 - **Pattern Memory System**: Stores historical setups in PostgreSQL with embeddings for similarity search
 - **Feature Engine**: 40+ features including efficiency ratios, Kalman filters, regime detection
 - **Shot Plan Generation**: Comprehensive trade plans with entry/stop/TP zones and reasoning
