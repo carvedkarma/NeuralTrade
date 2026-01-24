@@ -40,7 +40,7 @@ export interface PatternSample {
   won: boolean;
 }
 
-let patternClusters: Map<string, PatternCluster> = new Map();
+export let patternClusters: Map<string, PatternCluster> = new Map();
 
 export interface PatternMatch {
   timestamp: number;

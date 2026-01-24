@@ -32,7 +32,7 @@ import { getFullBTCDataBinanceVision } from "./binance-vision";
 import { computeFeatures, getLatestFeatures, detectCandlestickPatterns, analyzeVolumeProfile, analyzeMultiTimeframePatterns, type FeatureVector, type CandlestickPattern, type VolumeProfile, type MultiTimeframeCorrelation } from "./feature-engine";
 import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-engine";
 import { getSentimentData, interpretFearGreed, getNewsStats } from "./sentiment-api";
-import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime, getLastSimilarityDistribution, initializePatternClusters, getPatternClusterStats, updateDataCounts, canCreateNewPatterns } from "./pattern-memory";
+import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime, getLastSimilarityDistribution, initializePatternClusters, getPatternClusterStats, updateDataCounts, canCreateNewPatterns, patternClusters } from "./pattern-memory";
 
 export interface IStorage {
   getDashboardData(): Promise<DashboardData>;
@@ -1291,7 +1291,7 @@ export class MemStorage implements IStorage {
       historicalLearning: {
         totalHistoricalCandles: this.learningStats.historicalCandlesProcessed + this.candles.length,
         yearsOfData: Math.max(1, Math.ceil(timeRangeDays / 365)),
-        patternsLearnedFromHistory: this.learningStats.patternsLearnedFromHistory + this.learningStats.totalPatternsMatched,
+        patternsLearnedFromHistory: patternClusters.length,
         backtestTrades: this.learningStats.backtestTradesSimulated + this.trades.filter(t => t.status === "closed").length,
         historicalWinRate: this.learningStats.historicalWinRate > 0 ? this.learningStats.historicalWinRate * 100 : 
           (this.trades.filter(t => t.status === "closed" && (t.pnlPercent ?? 0) > 0).length / 
