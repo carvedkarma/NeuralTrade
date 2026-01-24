@@ -28,6 +28,13 @@ import {
   SocialAwarenessCard,
   HistoricalLearningCard
 } from "@/components/learning-stats-card";
+import {
+  PortfolioCard,
+  OpenPositionCard,
+  EquityCurveCard,
+  RecentTradesCard,
+  PaperTradingStatsCard
+} from "@/components/paper-trading-card";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -145,6 +152,7 @@ export default function Dashboard() {
           <TabsList className="mb-4" data-testid="tabs-list">
             <TabsTrigger value="overview" data-testid="tab-overview">Overview</TabsTrigger>
             <TabsTrigger value="signal" data-testid="tab-signal">Signal</TabsTrigger>
+            <TabsTrigger value="paper" data-testid="tab-paper">Paper Trading</TabsTrigger>
             <TabsTrigger value="learning" data-testid="tab-learning">Learning</TabsTrigger>
             <TabsTrigger value="analysis" data-testid="tab-analysis">AI Analysis</TabsTrigger>
             <TabsTrigger value="indicators" data-testid="tab-indicators">Indicators</TabsTrigger>
@@ -222,6 +230,20 @@ export default function Dashboard() {
                 <SentimentCard sentiment={data.sentiment} />
                 <SignalCard signal={data.currentSignal} />
                 <RegimeCard signal={data.currentSignal} />
+              </div>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="paper" className="mt-0">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+              <div className="lg:col-span-8 space-y-4">
+                <EquityCurveCard />
+                <RecentTradesCard />
+              </div>
+              <div className="lg:col-span-4 space-y-4">
+                <PortfolioCard />
+                <OpenPositionCard />
+                <PaperTradingStatsCard />
               </div>
             </div>
           </TabsContent>

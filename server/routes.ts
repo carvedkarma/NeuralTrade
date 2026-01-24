@@ -1,11 +1,13 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import paperRoutes from "./paper/routes";
 
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  app.use("/api/paper", paperRoutes);
   app.get("/api/dashboard", async (req, res) => {
     try {
       const data = await storage.getDashboardData();

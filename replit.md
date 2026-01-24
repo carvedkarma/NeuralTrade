@@ -40,6 +40,14 @@ The system operates with live data only - no simulated fallback. Shows error mes
 - **Social Media Simulation**: Accumulates Twitter/Reddit reads every 5 seconds with realistic numbers
 - **Real-time Dashboard**: Refreshes every 5 seconds for async real-time feel
 - **500 Historical Candles**: Fetches 5+ days of 15-minute data for better pattern matching
+- **Paper Trading System**: Comprehensive simulated trading with:
+  - Portfolio management with $10,000 starting equity
+  - Position sizing based on 0.5% risk per trade
+  - Realistic fees (0.04% taker, 0.02% maker) and slippage (2bps)
+  - Stop loss, dual take profits (TP1 50%, TP2 50%), trailing stops
+  - Time stops (3 bars), position flip logic for strong signals
+  - Equity curve tracking and performance analytics
+  - API endpoints: /api/paper/portfolio, /api/paper/positions, /api/paper/trades, /api/paper/equity
 
 ## User Preferences
 
@@ -55,7 +63,7 @@ Preferred communication style: Simple, everyday language.
 - **Styling**: Tailwind CSS with CSS custom properties for theming (light/dark mode support)
 - **Charts**: Recharts for candlestick and data visualization
 - **Animations**: Framer Motion for smooth UI transitions
-- **Tab Navigation**: Overview, Signal, AI Analysis, Indicators, Performance views
+- **Tab Navigation**: Overview, Signal, Paper Trading, Learning, AI Analysis, Indicators, Performance views
 
 ### Backend Architecture
 - **Runtime**: Node.js with Express.js
@@ -85,6 +93,10 @@ Preferred communication style: Simple, everyday language.
 - **PerformanceStats**: Win rate, Sharpe ratio, profit factor, max drawdown, expectancy
 - **AIAnalysis**: Market summary, recommendation, key insights, warnings
 - **Trade**: Trade history with entry/exit prices and P&L
+- **PaperPortfolio**: Portfolio equity, available balance, realized/unrealized PnL, max drawdown
+- **PaperPosition**: Open/closed positions with entry/exit prices, stop loss, TP levels, trailing stops
+- **PaperTrade**: Individual trade executions with fees, slippage, PnL
+- **PaperEquityCurve**: Time series of equity values for performance visualization
 
 ### API Endpoints
 - `GET /api/dashboard` - Returns complete dashboard data
@@ -93,6 +105,13 @@ Preferred communication style: Simple, everyday language.
 - `POST /api/strategy/start` - Start automated paper trading
 - `POST /api/strategy/stop` - Stop automated trading
 - `PATCH /api/strategy/settings` - Update strategy parameters
+- `GET /api/paper/portfolio` - Returns paper trading portfolio summary
+- `GET /api/paper/positions` - Returns open/closed positions
+- `GET /api/paper/trades` - Returns recent paper trades
+- `GET /api/paper/equity` - Returns equity curve data
+- `GET /api/paper/config` - Returns paper trading config
+- `POST /api/paper/config` - Update paper trading config
+- `POST /api/paper/reset` - Reset paper trading to starting state
 
 ### Build System
 - **Client Build**: Vite bundles React app to `dist/public`

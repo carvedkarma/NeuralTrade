@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { pgTable, text, serial, integer, bigint, real, timestamp, jsonb, boolean, index, varchar } from "drizzle-orm/pg-core";
+import { createInsertSchema } from "drizzle-zod";
 
 export const signalTypeSchema = z.enum(["LONG", "SHORT", "HOLD"]);
 export type SignalType = z.infer<typeof signalTypeSchema>;
@@ -380,3 +382,234 @@ export const dashboardDataSchema = z.object({
   dataError: z.string().nullable().optional(),
 });
 export type DashboardData = z.infer<typeof dashboardDataSchema>;
+
+export const candles = pgTable("candles", {
+  id: serial("id").primaryKey(),
+  timestamp: integer("timestamp").notNull(),
+  timeframe: varchar("timeframe", { length: 10 }).notNull().default("15m"),
+  open: real("open").notNull(),
+  high: real("high").notNull(),
+  low: real("low").notNull(),
+  close: real("close").notNull(),
+  volume: real("volume").notNull(),
+}, (table) => ({
+  timestampIdx: index("candles_timestamp_idx").on(table.timestamp),
+  timeframeIdx: index("candles_timeframe_idx").on(table.timeframe),
+}));
+
+export const features = pgTable("features", {
+  id: serial("id").primaryKey(),
+  timestamp: integer("timestamp").notNull(),
+  returns1: real("returns_1"),
+  returns2: real("returns_2"),
+  returns4: real("returns_4"),
+  returns8: real("returns_8"),
+  ema20Slope: real("ema20_slope"),
+  ema50Slope: real("ema50_slope"),
+  emaDistance: real("ema_distance"),
+  vwapDistance: real("vwap_distance"),
+  breakoutDistanceHigh: real("breakout_distance_high"),
+  breakoutDistanceLow: real("breakout_distance_low"),
+  efficiencyRatio: real("efficiency_ratio"),
+  atr14: real("atr14"),
+  volatility: real("volatility"),
+  bollingerWidth: real("bollinger_width"),
+  volatilityRegime: varchar("volatility_regime", { length: 20 }),
+  rsi14: real("rsi14"),
+  macd: real("macd"),
+  macdSignal: real("macd_signal"),
+  macdHist: real("macd_hist"),
+  adx: real("adx"),
+  plusDi: real("plus_di"),
+  minusDi: real("minus_di"),
+  stochK: real("stoch_k"),
+  stochD: real("stoch_d"),
+  obv: real("obv"),
+  kalmanFast: real("kalman_fast"),
+  kalmanSlow: real("kalman_slow"),
+  kalmanSpread: real("kalman_spread"),
+  kalmanRegime: varchar("kalman_regime", { length: 20 }),
+  oiChange15m: real("oi_change_15m"),
+  oiChange1h: real("oi_change_1h"),
+  fundingRate: real("funding_rate"),
+  fundingZscore: real("funding_zscore"),
+  liquidations15m: real("liquidations_15m"),
+  liquidations1h: real("liquidations_1h"),
+  markIndexSpread: real("mark_index_spread"),
+  orderbookSpread: real("orderbook_spread"),
+  orderbookImbalance: real("orderbook_imbalance"),
+  tradeDelta: real("trade_delta"),
+  deltaDevergence: real("delta_divergence"),
+  fearGreedIndex: real("fear_greed_index"),
+  socialSentiment: real("social_sentiment"),
+  newsScore: real("news_score"),
+  embedding: jsonb("embedding"),
+}, (table) => ({
+  timestampIdx: index("features_timestamp_idx").on(table.timestamp),
+}));
+
+export const patterns = pgTable("patterns", {
+  id: serial("id").primaryKey(),
+  timestamp: bigint("timestamp", { mode: "number" }).notNull(),
+  embedding: jsonb("embedding").notNull(),
+  featureHash: varchar("feature_hash", { length: 64 }),
+  forwardReturn8: real("forward_return_8"),
+  forwardReturn16: real("forward_return_16"),
+  forwardMaxDrawdown: real("forward_max_drawdown"),
+  forwardMaxRunup: real("forward_max_runup"),
+  timeToMfe: integer("time_to_mfe"),
+  forwardWin: boolean("forward_win"),
+  regime: varchar("regime", { length: 20 }),
+  label: varchar("label", { length: 20 }),
+  atrAtEntry: real("atr_at_entry"),
+  dynamicThreshold: real("dynamic_threshold"),
+}, (table) => ({
+  timestampIdx: index("patterns_timestamp_idx").on(table.timestamp),
+}));
+
+export const signals = pgTable("signals", {
+  id: serial("id").primaryKey(),
+  timestamp: integer("timestamp").notNull(),
+  signal: varchar("signal", { length: 10 }).notNull(),
+  confidence: real("confidence").notNull(),
+  probUp: real("prob_up"),
+  probDown: real("prob_down"),
+  probChop: real("prob_chop"),
+  expectedMove: real("expected_move"),
+  costs: real("costs"),
+  edge: real("edge"),
+  regime: varchar("regime", { length: 20 }),
+  riskMode: varchar("risk_mode", { length: 20 }),
+  vetoReasons: jsonb("veto_reasons"),
+  supportReasons: jsonb("support_reasons"),
+}, (table) => ({
+  timestampIdx: index("signals_timestamp_idx").on(table.timestamp),
+}));
+
+export const sentimentData = pgTable("sentiment_data", {
+  id: serial("id").primaryKey(),
+  timestamp: integer("timestamp").notNull(),
+  source: varchar("source", { length: 50 }).notNull(),
+  value: real("value"),
+  metadata: jsonb("metadata"),
+}, (table) => ({
+  timestampIdx: index("sentiment_timestamp_idx").on(table.timestamp),
+  sourceIdx: index("sentiment_source_idx").on(table.source),
+}));
+
+export const backtestRuns = pgTable("backtest_runs", {
+  id: serial("id").primaryKey(),
+  startTs: bigint("start_ts", { mode: "number" }).notNull(),
+  endTs: bigint("end_ts", { mode: "number" }).notNull(),
+  trades: integer("trades").notNull(),
+  winRate: real("win_rate"),
+  totalPnlPct: real("total_pnl_pct"),
+  sharpeRatio: real("sharpe_ratio"),
+  maxDrawdownPct: real("max_drawdown_pct"),
+  profitFactor: real("profit_factor"),
+  modelVersion: varchar("model_version", { length: 50 }),
+  parameters: jsonb("parameters"),
+});
+
+export const paperPortfolio = pgTable("paper_portfolio", {
+  id: serial("id").primaryKey(),
+  startingEquityUsdt: real("starting_equity_usdt").notNull(),
+  currentEquityUsdt: real("current_equity_usdt").notNull(),
+  availableBalanceUsdt: real("available_balance_usdt").notNull(),
+  unrealizedPnlUsdt: real("unrealized_pnl_usdt").default(0),
+  realizedPnlUsdt: real("realized_pnl_usdt").default(0),
+  maxDrawdownPct: real("max_drawdown_pct").default(0),
+  peakEquityUsdt: real("peak_equity_usdt").notNull(),
+  totalTrades: integer("total_trades").default(0),
+  winningTrades: integer("winning_trades").default(0),
+  losingTrades: integer("losing_trades").default(0),
+  updatedTs: bigint("updated_ts", { mode: "number" }).notNull(),
+});
+
+export const paperPositions = pgTable("paper_positions", {
+  id: serial("id").primaryKey(),
+  symbol: varchar("symbol", { length: 20 }).notNull(),
+  side: varchar("side", { length: 10 }).notNull(),
+  status: varchar("status", { length: 10 }).notNull(),
+  entryTs: bigint("entry_ts", { mode: "number" }).notNull(),
+  entryPrice: real("entry_price").notNull(),
+  qty: real("qty").notNull(),
+  notionalUsdt: real("notional_usdt").notNull(),
+  leverage: real("leverage").default(1),
+  stopLoss: real("stop_loss"),
+  tp1: real("tp1"),
+  tp2: real("tp2"),
+  trailMode: varchar("trail_mode", { length: 20 }).default("none"),
+  trailPrice: real("trail_price"),
+  timeStopBars: integer("time_stop_bars"),
+  barsOpen: integer("bars_open").default(0),
+  initialRiskUsdt: real("initial_risk_usdt"),
+  feesPaidUsdt: real("fees_paid_usdt").default(0),
+  fundingPaidUsdt: real("funding_paid_usdt").default(0),
+  exitTs: bigint("exit_ts", { mode: "number" }),
+  exitPrice: real("exit_price"),
+  realizedPnlUsdt: real("realized_pnl_usdt"),
+  exitReason: varchar("exit_reason", { length: 20 }),
+  signalConfidence: real("signal_confidence"),
+  signalEdge: real("signal_edge"),
+}, (table) => ({
+  statusIdx: index("paper_positions_status_idx").on(table.status),
+  entryTsIdx: index("paper_positions_entry_ts_idx").on(table.entryTs),
+}));
+
+export const paperTrades = pgTable("paper_trades", {
+  id: serial("id").primaryKey(),
+  positionId: integer("position_id").notNull(),
+  ts: bigint("ts", { mode: "number" }).notNull(),
+  action: varchar("action", { length: 20 }).notNull(),
+  price: real("price").notNull(),
+  qty: real("qty").notNull(),
+  feeUsdt: real("fee_usdt").default(0),
+  slippageUsdt: real("slippage_usdt").default(0),
+  fundingUsdt: real("funding_usdt").default(0),
+  pnlUsdt: real("pnl_usdt").default(0),
+  reason: text("reason"),
+}, (table) => ({
+  positionIdIdx: index("paper_trades_position_id_idx").on(table.positionId),
+  tsIdx: index("paper_trades_ts_idx").on(table.ts),
+}));
+
+export const paperEquityCurve = pgTable("paper_equity_curve", {
+  id: serial("id").primaryKey(),
+  ts: bigint("ts", { mode: "number" }).notNull(),
+  equityUsdt: real("equity_usdt").notNull(),
+  drawdownPct: real("drawdown_pct").default(0),
+}, (table) => ({
+  tsIdx: index("paper_equity_curve_ts_idx").on(table.ts),
+}));
+
+export const insertCandleSchema = createInsertSchema(candles).omit({ id: true });
+export const insertFeatureSchema = createInsertSchema(features).omit({ id: true });
+export const insertPatternSchema = createInsertSchema(patterns).omit({ id: true });
+export const insertSignalSchema = createInsertSchema(signals).omit({ id: true });
+export const insertSentimentSchema = createInsertSchema(sentimentData).omit({ id: true });
+export const insertPaperPortfolioSchema = createInsertSchema(paperPortfolio).omit({ id: true });
+export const insertPaperPositionSchema = createInsertSchema(paperPositions).omit({ id: true });
+export const insertPaperTradeSchema = createInsertSchema(paperTrades).omit({ id: true });
+export const insertPaperEquitySchema = createInsertSchema(paperEquityCurve).omit({ id: true });
+
+export type InsertCandle = z.infer<typeof insertCandleSchema>;
+export type InsertFeature = z.infer<typeof insertFeatureSchema>;
+export type InsertPattern = z.infer<typeof insertPatternSchema>;
+export type InsertSignal = z.infer<typeof insertSignalSchema>;
+export type InsertSentiment = z.infer<typeof insertSentimentSchema>;
+export type InsertPaperPortfolio = z.infer<typeof insertPaperPortfolioSchema>;
+export type InsertPaperPosition = z.infer<typeof insertPaperPositionSchema>;
+export type InsertPaperTrade = z.infer<typeof insertPaperTradeSchema>;
+export type InsertPaperEquity = z.infer<typeof insertPaperEquitySchema>;
+
+export type DbCandle = typeof candles.$inferSelect;
+export type DbFeature = typeof features.$inferSelect;
+export type DbPattern = typeof patterns.$inferSelect;
+export type DbSignal = typeof signals.$inferSelect;
+export type DbSentimentData = typeof sentimentData.$inferSelect;
+export type BacktestRun = typeof backtestRuns.$inferSelect;
+export type PaperPortfolio = typeof paperPortfolio.$inferSelect;
+export type PaperPosition = typeof paperPositions.$inferSelect;
+export type PaperTrade = typeof paperTrades.$inferSelect;
+export type PaperEquityCurve = typeof paperEquityCurve.$inferSelect;
