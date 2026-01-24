@@ -48,6 +48,15 @@ The system operates with live data only - no simulated fallback. Shows error mes
   - Time stops (3 bars), position flip logic for strong signals
   - Equity curve tracking and performance analytics
   - API endpoints: /api/paper/portfolio, /api/paper/positions, /api/paper/trades, /api/paper/equity
+  - Automated execution integrated with refresh loop (evaluates every candle)
+  - Trade conditions: signal ≠ HOLD, no vetoReasons, valid levels, >= 1 supporting reason
+- **Confidence Calculation**: Weighted average formula (20-85% range):
+  - 40% directional strength (max(probUp, probDown))
+  - 25% regime clarity (adaptive to market conditions)
+  - 10% edge factor (relative to trading costs)
+  - 10% pattern maturity factor
+  - 10% model agreement (low variance = higher confidence)
+  - 5% trend alignment with Kalman filters
 
 ## User Preferences
 

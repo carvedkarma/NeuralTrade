@@ -33,6 +33,8 @@ import { computeFeatures, getLatestFeatures, detectCandlestickPatterns, analyzeV
 import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-engine";
 import { getSentimentData, interpretFearGreed, getNewsStats } from "./sentiment-api";
 import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime, getLastSimilarityDistribution, initializePatternClusters, getPatternClusterStats, updateDataCounts, canCreateNewPatterns, patternClusters } from "./pattern-memory";
+import { processCandle as processPaperTrade } from "./paper/engine";
+import { isAutoTradingEnabled, getConfig as getPaperConfig } from "./paper/config";
 
 export interface IStorage {
   getDashboardData(): Promise<DashboardData>;
@@ -720,6 +722,9 @@ export class MemStorage implements IStorage {
     const now = Date.now();
     
     if (now - this.lastBinanceUpdate < 60000 && this.candles.length > 0) {
+      if (isAutoTradingEnabled() && this.candles.length > 50) {
+        await this.executePaperTrade();
+      }
       return;
     }
     
@@ -841,7 +846,40 @@ export class MemStorage implements IStorage {
       this.executeStrategy();
     }
     
+    if (isAutoTradingEnabled() && this.candles.length > 50) {
+      await this.executePaperTrade();
+    }
+    
     this.trainOnHistoricalCandles();
+  }
+
+  private async executePaperTrade(): Promise<void> {
+    try {
+      if (this.candles.length < 50) return;
+      
+      const lastCandle = this.candles[this.candles.length - 1];
+      const feature = getLatestFeatures(this.candles);
+      if (!feature) return;
+      
+      const futuresData = await getFuturesData("BTCUSDT", lastCandle.close);
+      const shotPlan = await generateShotPlan(this.candles, feature, futuresData, true);
+      
+      const atr = this.indicators?.atr?.value ?? 100;
+      const kalmanFast = this.kalmanFastValues[this.kalmanFastValues.length - 1] ?? lastCandle.close;
+      
+      console.log(`[Paper Trading] Processing candle ${new Date(lastCandle.timestamp).toISOString()}, Signal: ${shotPlan.signal}, Confidence: ${(shotPlan.confidence * 100).toFixed(1)}%`);
+      
+      await processPaperTrade({
+        candle: lastCandle,
+        markPrice: lastCandle.close,
+        fundingRate: futuresData.fundingRate,
+        atr,
+        kalmanFast,
+        shotPlan,
+      });
+    } catch (error) {
+      console.error("[Paper Trading] Error executing trade:", error);
+    }
   }
 
   private generateFallbackCandles(): void {
