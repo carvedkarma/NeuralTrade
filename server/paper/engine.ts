@@ -253,7 +253,32 @@ function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConf
     return { allowed: false, reason: "No supporting reasons for trade" };
   }
   
-  return { allowed: true, reason: "All gating checks passed" };
+  if (shotPlan.combinedIntelligence) {
+    const ci = shotPlan.combinedIntelligence;
+    
+    if (ci.finalSignal === "HOLD") {
+      return { 
+        allowed: false, 
+        reason: `Combined Intelligence: ${ci.vetoes.join("; ") || "Systems recommend HOLD"}` 
+      };
+    }
+    
+    if (ci.strategyEV <= 0) {
+      return { 
+        allowed: false, 
+        reason: `Strategy Learner: Negative EV (${(ci.strategyEV * 100).toFixed(2)}%) for ${shotPlan.signal}` 
+      };
+    }
+    
+    if (!ci.systemsAgree && ci.patternWinRate < 0.5) {
+      return { 
+        allowed: false, 
+        reason: `ML and Strategy disagree, pattern win rate only ${(ci.patternWinRate * 100).toFixed(0)}%` 
+      };
+    }
+  }
+  
+  return { allowed: true, reason: "All gating checks passed (ML + Strategy Learner agree)" };
 }
 
 async function checkExposureLimits(

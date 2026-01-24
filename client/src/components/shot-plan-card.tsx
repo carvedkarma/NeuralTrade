@@ -260,6 +260,85 @@ export function ShotPlanCard({ shotPlan }: ShotPlanCardProps) {
           </div>
         )}
 
+        {shotPlan.combinedIntelligence && (
+          <div className="bg-gradient-to-r from-purple-500/10 to-blue-500/10 rounded-lg p-3 space-y-2 border border-purple-500/20" data-testid="section-combined-intelligence">
+            <div className="text-xs font-medium flex items-center gap-1.5 text-purple-300">
+              <Activity className="h-3.5 w-3.5" />
+              Combined Intelligence
+              <Badge 
+                variant="outline" 
+                className={`ml-auto text-[10px] ${
+                  shotPlan.combinedIntelligence.systemsAgree 
+                    ? "border-emerald-500/50 text-emerald-400" 
+                    : "border-amber-500/50 text-amber-400"
+                }`}
+                data-testid="badge-systems-agree"
+              >
+                {shotPlan.combinedIntelligence.systemsAgree ? "SYSTEMS AGREE" : "DIVERGENCE"}
+              </Badge>
+            </div>
+            
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div className="space-y-1">
+                <span className="text-muted-foreground">ML Direction</span>
+                <div className={`font-medium ${
+                  shotPlan.combinedIntelligence.mlDirection === "LONG" ? "text-emerald-400" :
+                  shotPlan.combinedIntelligence.mlDirection === "SHORT" ? "text-red-400" : "text-amber-400"
+                }`} data-testid="text-ml-direction">
+                  {shotPlan.combinedIntelligence.mlDirection} ({(shotPlan.combinedIntelligence.mlConfidence * 100).toFixed(0)}%)
+                </div>
+              </div>
+              <div className="space-y-1">
+                <span className="text-muted-foreground">Strategy Action</span>
+                <div className={`font-medium ${
+                  shotPlan.combinedIntelligence.strategyAction === "LONG" ? "text-emerald-400" :
+                  shotPlan.combinedIntelligence.strategyAction === "SHORT" ? "text-red-400" : "text-amber-400"
+                }`} data-testid="text-strategy-action">
+                  {shotPlan.combinedIntelligence.strategyAction}
+                </div>
+              </div>
+            </div>
+            
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <div className="space-y-0.5">
+                <span className="text-muted-foreground">Strategy EV</span>
+                <div className={`font-medium ${
+                  shotPlan.combinedIntelligence.strategyEV > 0 ? "text-emerald-400" : "text-red-400"
+                }`} data-testid="text-strategy-ev">
+                  {shotPlan.combinedIntelligence.strategyEV > 0 ? "+" : ""}{(shotPlan.combinedIntelligence.strategyEV * 100).toFixed(2)}%
+                </div>
+              </div>
+              <div className="space-y-0.5">
+                <span className="text-muted-foreground">Pattern WR</span>
+                <div className={`font-medium ${
+                  shotPlan.combinedIntelligence.patternWinRate >= 0.5 ? "text-emerald-400" : "text-amber-400"
+                }`} data-testid="text-pattern-win-rate">
+                  {(shotPlan.combinedIntelligence.patternWinRate * 100).toFixed(0)}%
+                </div>
+              </div>
+              <div className="space-y-0.5">
+                <span className="text-muted-foreground">Combined</span>
+                <div className="font-medium text-purple-300" data-testid="text-combined-score">
+                  {(shotPlan.combinedIntelligence.combinedScore * 100).toFixed(0)}%
+                </div>
+              </div>
+            </div>
+            
+            <div className="flex items-center justify-between pt-1 border-t border-purple-500/20">
+              <span className="text-xs text-muted-foreground">Final Signal:</span>
+              <Badge 
+                className={`text-xs ${
+                  shotPlan.combinedIntelligence.finalSignal === "LONG" ? "bg-emerald-500/20 text-emerald-400" :
+                  shotPlan.combinedIntelligence.finalSignal === "SHORT" ? "bg-red-500/20 text-red-400" : "bg-amber-500/20 text-amber-400"
+                }`}
+                data-testid="badge-final-signal"
+              >
+                {shotPlan.combinedIntelligence.finalSignal} ({(shotPlan.combinedIntelligence.finalConfidence * 100).toFixed(0)}%)
+              </Badge>
+            </div>
+          </div>
+        )}
+
         {shotPlan.reasons.length > 0 && (
           <div className="space-y-1">
             <div className="text-xs font-medium text-emerald-400 flex items-center gap-1">

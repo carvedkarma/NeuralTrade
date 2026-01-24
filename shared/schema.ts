@@ -192,6 +192,22 @@ export type ExpansionGate = z.infer<typeof expansionGateSchema>;
 export const edgeBucketSchema = z.enum(["none", "weak", "moderate", "strong"]);
 export type EdgeBucket = z.infer<typeof edgeBucketSchema>;
 
+export const combinedIntelligenceSchema = z.object({
+  mlDirection: signalTypeSchema,
+  mlConfidence: z.number(),
+  strategyAction: signalTypeSchema,
+  strategyEV: z.number(),
+  patternWinRate: z.number(),
+  patternSupport: z.number(),
+  combinedScore: z.number(),
+  systemsAgree: z.boolean(),
+  finalSignal: signalTypeSchema,
+  finalConfidence: z.number(),
+  reasoning: z.array(z.string()),
+  vetoes: z.array(z.string()),
+});
+export type CombinedIntelligence = z.infer<typeof combinedIntelligenceSchema>;
+
 export const shotPlanSchema = z.object({
   signal: signalTypeSchema,
   confidence: z.number(),
@@ -217,6 +233,7 @@ export const shotPlanSchema = z.object({
   patternMatchCount: z.number().optional(),
   modelConsensus: z.number().optional(),
   expansionGate: expansionGateSchema.optional(),
+  combinedIntelligence: combinedIntelligenceSchema.optional(),
 });
 export type ShotPlan = z.infer<typeof shotPlanSchema>;
 

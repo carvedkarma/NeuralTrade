@@ -1891,6 +1891,7 @@ export class MemStorage implements IStorage {
             vetoReasons: shotPlanResult.vetoReasons,
             patternMatchCount: shotPlanResult.patternMatches.length,
             modelConsensus: shotPlanResult.mlPredictions.consensus,
+            combinedIntelligence: shotPlanResult.combinedIntelligence,
           };
           this.lastShotPlanUpdate = now;
           

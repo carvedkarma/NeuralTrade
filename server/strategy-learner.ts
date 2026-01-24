@@ -1,4 +1,6 @@
 import type { Candle } from "@shared/schema";
+import { patternClusters, findSimilarPatterns, type PatternCluster, type PatternMatch } from "./pattern-memory";
+import type { FeatureVector } from "./feature-engine";
 
 interface ActionOutcome {
   action: "LONG" | "SHORT" | "HOLD";
@@ -82,6 +84,21 @@ export interface StrategyLearnerData {
     learnerEV: number;
     agreement: boolean;
   };
+}
+
+export interface CombinedIntelligence {
+  mlDirection: "LONG" | "SHORT" | "HOLD";
+  mlConfidence: number;
+  strategyAction: "LONG" | "SHORT" | "HOLD";
+  strategyEV: number;
+  patternWinRate: number;
+  patternSupport: number;
+  combinedScore: number;
+  systemsAgree: boolean;
+  finalSignal: "LONG" | "SHORT" | "HOLD";
+  finalConfidence: number;
+  reasoning: string[];
+  vetoes: string[];
 }
 
 export class StrategyLearner {
@@ -608,6 +625,117 @@ export class StrategyLearner {
         learnerEV: ev.bestEV,
         agreement: currentSignal === ev.bestAction,
       },
+    };
+  }
+
+  async getCombinedIntelligence(
+    candles: Candle[],
+    feature: FeatureVector,
+    mlDirection: "LONG" | "SHORT" | "HOLD",
+    mlConfidence: number
+  ): Promise<CombinedIntelligence> {
+    const ev = this.getExpectedValue(candles);
+    const policy = this.getPolicyPrediction(candles);
+    const reasoning: string[] = [];
+    const vetoes: string[] = [];
+    
+    let patternWinRate = 0;
+    let patternSupport = 0;
+    
+    try {
+      const patternMatches = await findSimilarPatterns(feature.embedding, 20, 0.65);
+      if (patternMatches.length > 0) {
+        patternSupport = patternMatches.length;
+        const wins = patternMatches.filter(p => p.won).length;
+        patternWinRate = wins / patternMatches.length;
+        
+        if (patternWinRate > 0.55) {
+          reasoning.push(`Pattern memory: ${(patternWinRate * 100).toFixed(0)}% win rate from ${patternSupport} matches`);
+        }
+      }
+      
+      for (const [id, cluster] of Array.from(patternClusters.entries())) {
+        if (cluster.maturity > 0.5 && cluster.support > 50) {
+          patternSupport += cluster.support;
+          const clusterWeight = cluster.support / Math.max(1, patternSupport);
+          patternWinRate = patternWinRate * (1 - clusterWeight) + cluster.winRate * clusterWeight;
+        }
+      }
+    } catch (e) {
+      console.warn("[Combined Intelligence] Pattern lookup failed:", e);
+    }
+    
+    const strategyAction = ev.bestAction;
+    const strategyEV = ev.bestEV;
+    
+    const systemsAgree = mlDirection === strategyAction || 
+      (mlDirection !== "HOLD" && strategyAction === "HOLD") ||
+      (mlDirection === "HOLD" && strategyAction === "HOLD");
+    
+    const directionMatch = mlDirection === strategyAction;
+    
+    let combinedScore = 0;
+    combinedScore += mlConfidence * 0.35;
+    combinedScore += (strategyEV > 0 ? Math.min(strategyEV * 10, 0.3) : strategyEV * 5) * 0.25;
+    combinedScore += patternWinRate * 0.25;
+    combinedScore += (directionMatch ? 0.15 : 0);
+    combinedScore = Math.max(0, Math.min(1, combinedScore));
+    
+    if (mlDirection !== "HOLD") {
+      reasoning.push(`ML predicts ${mlDirection} with ${(mlConfidence * 100).toFixed(0)}% confidence`);
+    }
+    if (strategyEV > 0) {
+      reasoning.push(`Strategy Learner: ${strategyAction} has positive EV (${(strategyEV * 100).toFixed(2)}%)`);
+    }
+    if (policy.pLongProfitable > 0.5 && mlDirection === "LONG") {
+      reasoning.push(`Policy model: ${(policy.pLongProfitable * 100).toFixed(0)}% LONG profitability`);
+    }
+    if (policy.pShortProfitable > 0.5 && mlDirection === "SHORT") {
+      reasoning.push(`Policy model: ${(policy.pShortProfitable * 100).toFixed(0)}% SHORT profitability`);
+    }
+    
+    if (mlDirection !== "HOLD" && strategyEV <= 0) {
+      vetoes.push(`Strategy Learner: ${mlDirection} has negative EV (${(strategyEV * 100).toFixed(2)}%)`);
+    }
+    if (mlDirection !== "HOLD" && !directionMatch && strategyAction !== "HOLD") {
+      vetoes.push(`Systems disagree: ML says ${mlDirection}, Strategy says ${strategyAction}`);
+    }
+    if (patternWinRate < 0.45 && patternSupport > 10) {
+      vetoes.push(`Pattern history: Only ${(patternWinRate * 100).toFixed(0)}% win rate`);
+    }
+    
+    let finalSignal: "LONG" | "SHORT" | "HOLD" = "HOLD";
+    let finalConfidence = combinedScore;
+    
+    const strategyApproves = (mlDirection === "LONG" && ev.longEV > 0) || 
+                             (mlDirection === "SHORT" && ev.shortEV > 0);
+    
+    if (mlDirection !== "HOLD" && strategyApproves && patternWinRate >= 0.45 && vetoes.length === 0) {
+      finalSignal = mlDirection;
+      finalConfidence = combinedScore * 1.1;
+    } else if (mlDirection !== "HOLD" && !strategyApproves) {
+      finalSignal = "HOLD";
+      finalConfidence = Math.max(0.3, combinedScore * 0.6);
+      if (vetoes.length === 0) {
+        vetoes.push(`Strategy Learner does not approve ${mlDirection} trade`);
+      }
+    }
+    
+    finalConfidence = Math.max(0, Math.min(1, finalConfidence));
+    
+    return {
+      mlDirection,
+      mlConfidence,
+      strategyAction,
+      strategyEV,
+      patternWinRate,
+      patternSupport,
+      combinedScore,
+      systemsAgree,
+      finalSignal,
+      finalConfidence,
+      reasoning,
+      vetoes,
     };
   }
 

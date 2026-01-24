@@ -3,6 +3,7 @@ import type { FeatureVector } from "./feature-engine";
 import { getEnsemblePrediction, type EnsemblePrediction } from "./ml-predictor";
 import { findSimilarPatterns, computePatternStats, type PatternMatch } from "./pattern-memory";
 import { getSentimentData, interpretFearGreed } from "./sentiment-api";
+import { strategyLearner, type CombinedIntelligence } from "./strategy-learner";
 
 function checkNewsFilter(newsScore: number, fearGreedValue: number): { shouldVeto: boolean; reason: string | null } {
   if (fearGreedValue >= 85 || fearGreedValue <= 10) {
@@ -55,6 +56,7 @@ export interface ShotPlan {
   patternMatches: PatternMatch[];
   mlPredictions: EnsemblePrediction;
   expansionGate: ExpansionGate;
+  combinedIntelligence?: CombinedIntelligence;
 }
 
 const FEES = 0.0004;
@@ -248,11 +250,46 @@ export async function generateShotPlan(
     if (patternStats.winRate > 0.55) reasons.push(`Pattern history: ${(patternStats.winRate * 100).toFixed(0)}% win rate`);
   }
   
-  const shouldTrade = vetoReasons.length === 0 && 
+  const baseShouldTrade = vetoReasons.length === 0 && 
                        ensemble.confidence >= 0.65 && 
                        ensemble.consensus >= 0.5 &&
                        patternMatches.length >= 10 &&
                        reasons.length >= 1;
+  
+  let combinedIntelligence: CombinedIntelligence | undefined;
+  let shouldTrade = baseShouldTrade;
+  
+  try {
+    combinedIntelligence = await strategyLearner.getCombinedIntelligence(
+      candles,
+      feature,
+      ensemble.direction,
+      ensemble.confidence
+    );
+    
+    if (combinedIntelligence.vetoes.length > 0) {
+      combinedIntelligence.vetoes.forEach(v => {
+        if (!vetoReasons.includes(v)) vetoReasons.push(v);
+      });
+    }
+    
+    combinedIntelligence.reasoning.forEach(r => {
+      if (!reasons.includes(r)) reasons.push(r);
+    });
+    
+    if (baseShouldTrade && combinedIntelligence.finalSignal === "HOLD") {
+      shouldTrade = false;
+      if (!vetoReasons.some(v => v.includes("Strategy Learner"))) {
+        vetoReasons.push("Combined Intelligence recommends HOLD");
+      }
+    }
+    
+    if (baseShouldTrade && combinedIntelligence.strategyEV > 0) {
+      reasons.push(`Strategy EV: +${(combinedIntelligence.strategyEV * 100).toFixed(2)}%`);
+    }
+  } catch (e) {
+    console.warn("[Signal Engine] Combined intelligence failed:", e);
+  }
   
   let entryZone: { low: number; high: number } | null = null;
   let stopLoss: number | null = null;
@@ -323,6 +360,7 @@ export async function generateShotPlan(
     patternMatches,
     mlPredictions: ensemble,
     expansionGate,
+    combinedIntelligence,
   };
 }
 
