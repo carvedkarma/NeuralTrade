@@ -36,6 +36,7 @@ import {
   PositionHistoryCard,
   AuditLogPanel
 } from "@/components/paper-trading-card";
+import { StrategyLearnerTab } from "@/components/strategy-learner-card";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -214,6 +215,7 @@ export default function Dashboard() {
             <TabsTrigger value="overview" data-testid="tab-overview">Overview</TabsTrigger>
             <TabsTrigger value="signal" data-testid="tab-signal">Signal</TabsTrigger>
             <TabsTrigger value="paper" data-testid="tab-paper">Paper Trading</TabsTrigger>
+            <TabsTrigger value="strategy-learner" data-testid="tab-strategy-learner">Strategy Learner</TabsTrigger>
             <TabsTrigger value="learning" data-testid="tab-learning">Learning</TabsTrigger>
             <TabsTrigger value="analysis" data-testid="tab-analysis">AI Analysis</TabsTrigger>
             <TabsTrigger value="indicators" data-testid="tab-indicators">Indicators</TabsTrigger>
@@ -312,6 +314,10 @@ export default function Dashboard() {
               </div>
               <AuditLogPanel />
             </div>
+          </TabsContent>
+
+          <TabsContent value="strategy-learner" className="mt-0">
+            <StrategyLearnerTab />
           </TabsContent>
 
           <TabsContent value="learning" className="mt-0">
