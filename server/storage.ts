@@ -36,7 +36,7 @@ import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRe
 import { processCandle as processPaperTrade } from "./paper/engine";
 import { isAutoTradingEnabled, isPaperTradingEnabled, getConfig as getPaperConfig } from "./paper/config";
 import { db } from "./db";
-import { learningState, socialMediaStats } from "./db/schema";
+import { learningState, socialMediaStats, patternClusters as patternClustersTable } from "./db/schema";
 import { eq } from "drizzle-orm";
 
 export interface IStorage {
@@ -325,6 +325,51 @@ export class MemStorage implements IStorage {
       
     } catch (error) {
       console.error("[Persistence] Error saving state:", error);
+    }
+  }
+
+  async getPersistenceStatus(): Promise<{
+    learningState: { epochs: number; lastSaved: number | null; patternsLearned: number } | null;
+    patternClusters: { count: number; lastUpdated: number | null } | null;
+    socialMediaStats: { platforms: string[]; totalReads: number } | null;
+    isHealthy: boolean;
+  }> {
+    try {
+      const learningStateRows = await db.select().from(learningState);
+      const patternClusterRows = await db.select().from(patternClustersTable);
+      const socialRows = await db.select().from(socialMediaStats);
+      
+      const firstLearningState = learningStateRows.length > 0 ? learningStateRows[0] : null;
+      const learningStateData = firstLearningState ? {
+        epochs: firstLearningState.epochsCompleted || 0,
+        lastSaved: firstLearningState.updatedTs || null,
+        patternsLearned: firstLearningState.patternsLearned || 0,
+      } : null;
+      
+      const patternClusterData = patternClusterRows.length > 0 ? {
+        count: patternClusterRows.length,
+        lastUpdated: Math.max(...patternClusterRows.map(r => r.updatedTs || 0)) || null,
+      } : null;
+      
+      const socialData = socialRows.length > 0 ? {
+        platforms: socialRows.map(r => r.platform),
+        totalReads: socialRows.reduce((acc, r) => acc + (r.itemsRead || 0), 0),
+      } : null;
+      
+      return {
+        learningState: learningStateData,
+        patternClusters: patternClusterData,
+        socialMediaStats: socialData,
+        isHealthy: !!(learningStateData || patternClusterData || socialData),
+      };
+    } catch (error) {
+      console.error("[Persistence] Error checking status:", error);
+      return {
+        learningState: null,
+        patternClusters: null,
+        socialMediaStats: null,
+        isHealthy: false,
+      };
     }
   }
 

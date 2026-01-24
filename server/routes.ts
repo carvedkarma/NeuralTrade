@@ -73,5 +73,15 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/persistence/status", async (req, res) => {
+    try {
+      const status = await storage.getPersistenceStatus();
+      res.json(status);
+    } catch (error) {
+      console.error("Error getting persistence status:", error);
+      res.status(500).json({ error: "Failed to get persistence status" });
+    }
+  });
+
   return httpServer;
 }
