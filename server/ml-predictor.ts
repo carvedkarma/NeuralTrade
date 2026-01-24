@@ -134,18 +134,49 @@ async function aiBasedPredict(
   futuresData: FuturesData
 ): Promise<MLPrediction | null> {
   try {
+    type SignalType = "bullish" | "bearish" | "neutral";
+    const rsiSignal: SignalType = feature.rsi14 < 30 ? "bullish" : feature.rsi14 > 70 ? "bearish" : "neutral";
+    const macdSignal: SignalType = feature.macdHist > 0 ? "bullish" : "bearish";
+    const obvSignal: SignalType = feature.obvSlope > 0 ? "bullish" : "bearish";
+    const adxSignal: SignalType = feature.adx > 25 ? "bullish" : "neutral";
+    const stochSignal: SignalType = feature.stochK < 20 ? "bullish" : feature.stochK > 80 ? "bearish" : "neutral";
+    const emaSignal: SignalType = feature.ema20Slope > 0 ? "bullish" : "bearish";
+    const volSignal: SignalType = feature.volumeRatio > 1.2 ? "bullish" : "neutral";
+    
     const indicators = {
-      rsi: { name: "RSI", value: feature.rsi14, signal: feature.rsi14 < 30 ? "bullish" : feature.rsi14 > 70 ? "bearish" : "neutral" as const, strength: Math.abs(feature.rsi14 - 50) / 50, description: "" },
-      macd: { name: "MACD", value: feature.macd, signal: feature.macdHist > 0 ? "bullish" : "bearish" as const, strength: 0.5, description: "" },
-      bollingerBands: { name: "BB", value: 0, signal: "neutral" as const, strength: 0.5, description: "" },
-      obv: { name: "OBV", value: feature.obv, signal: feature.obvSlope > 0 ? "bullish" : "bearish" as const, strength: 0.5, description: "" },
-      vwap: { name: "VWAP", value: 0, signal: "neutral" as const, strength: 0.5, description: "" },
-      atr: { name: "ATR", value: feature.atr14, signal: "neutral" as const, strength: 0.5, description: "" },
-      adx: { name: "ADX", value: feature.adx, signal: feature.adx > 25 ? "bullish" : "neutral" as const, strength: feature.adx / 100, description: "" },
-      stochastic: { name: "Stoch", value: feature.stochK, signal: feature.stochK < 20 ? "bullish" : feature.stochK > 80 ? "bearish" : "neutral" as const, strength: 0.5, description: "" },
+      rsi: { name: "RSI", value: feature.rsi14, signal: rsiSignal, strength: Math.abs(feature.rsi14 - 50) / 50, description: "" },
+      macd: { name: "MACD", value: feature.macd, signal: macdSignal, strength: 0.5, description: "", histogram: feature.macdHist, macdLine: feature.macd, signalLine: feature.macdSignal },
+      bollingerBands: { name: "BB", value: 0, signal: "neutral" as SignalType, strength: 0.5, description: "", upper: 0, middle: 0, lower: 0, percentB: 0.5 },
+      obv: { name: "OBV", value: feature.obv, signal: obvSignal, strength: 0.5, description: "" },
+      vwap: { name: "VWAP", value: 0, signal: "neutral" as SignalType, strength: 0.5, description: "" },
+      atr: { name: "ATR", value: feature.atr14, signal: "neutral" as SignalType, strength: 0.5, description: "" },
+      adx: { name: "ADX", value: feature.adx, signal: adxSignal, strength: feature.adx / 100, description: "", plusDI: feature.plusDi, minusDI: feature.minusDi },
+      stochastic: { name: "Stoch", value: feature.stochK, signal: stochSignal, strength: 0.5, description: "", k: feature.stochK, d: feature.stochD },
+      ema: { name: "EMA", value: feature.ema20, signal: emaSignal, strength: 0.5, description: "", ema9: feature.ema20, ema21: feature.ema20, ema50: feature.ema50, ema200: feature.ema50 },
+      supportResistance: { name: "S/R", value: 0, signal: "neutral" as SignalType, strength: 0.5, description: "", supports: [0], resistances: [0] },
+      volumeProfile: { name: "Vol", value: feature.volumeRatio, signal: volSignal, strength: 0.5, description: "", highVolumeZones: [0], pocPrice: 0 },
     };
     
-    const aiSignal = await openAISignal(candles, indicators, futuresData);
+    const whaleActivity = {
+      largeBuys: 0,
+      largeSells: 0,
+      netFlow: 0,
+      whaleActivity: "neutral" as const,
+    };
+    
+    const mtfScore = {
+      direction: "neutral" as const,
+      score: 0,
+      alignment: 0.5,
+      details: [
+        { timeframe: "5m", trend: "neutral" as const, weight: 1 },
+        { timeframe: "15m", trend: "neutral" as const, weight: 2 },
+        { timeframe: "1h", trend: "neutral" as const, weight: 3 },
+        { timeframe: "4h", trend: "neutral" as const, weight: 4 },
+      ],
+    };
+    
+    const aiSignal = await openAISignal(candles, indicators, futuresData, whaleActivity, mtfScore);
     
     if (!aiSignal) return null;
     
@@ -198,6 +229,25 @@ export async function getEnsemblePrediction(
   probDown /= totalWeight;
   probChop /= totalWeight;
   expectedMove /= totalWeight;
+  
+  const isChopRegime = feature.kalmanRegime === "chop";
+  
+  if (isChopRegime) {
+    return {
+      probUp: probUp * 0.3,
+      probDown: probDown * 0.3,
+      probChop: Math.max(probChop, 0.7),
+      expectedMove: 0,
+      confidence: 0.2,
+      direction: "HOLD",
+      models: {
+        rulebased: rulePrediction,
+        pattern: patternPrediction,
+        ai: aiPrediction,
+      },
+      consensus: 1.0,
+    };
+  }
   
   const votes = [rulePrediction.direction, patternPrediction.direction];
   if (aiPrediction) votes.push(aiPrediction.direction);

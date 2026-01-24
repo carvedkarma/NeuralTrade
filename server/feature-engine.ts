@@ -555,9 +555,22 @@ export function computeFeatures(candles: Candle[]): FeatureVector[] {
       atrVal / price > 0.005 ? "high" : "medium";
     
     const kalmanSpread = kalmanFastArr[i] - kalmanSlowArr[i];
-    const kalmanRegime: "bull" | "bear" | "chop" = 
-      kalmanSpread > atrVal * 0.5 ? "bull" :
-      kalmanSpread < -atrVal * 0.5 ? "bear" : "chop";
+    const effRatio = effRatioArr[i];
+    const kalmanSlope = i > 0 ? (kalmanFastArr[i] - kalmanFastArr[i - 1]) / price : 0;
+    
+    let kalmanRegime: "bull" | "bear" | "chop" = "chop";
+    const spreadThreshold = atrVal * 0.25;
+    const strongSpreadThreshold = atrVal * 0.4;
+    
+    if (kalmanSpread > strongSpreadThreshold) {
+      kalmanRegime = "bull";
+    } else if (kalmanSpread < -strongSpreadThreshold) {
+      kalmanRegime = "bear";
+    } else if (kalmanSpread > spreadThreshold && effRatio > 0.30 && kalmanSlope > 0) {
+      kalmanRegime = "bull";
+    } else if (kalmanSpread < -spreadThreshold && effRatio > 0.30 && kalmanSlope < 0) {
+      kalmanRegime = "bear";
+    }
     
     const embedding = [
       (closes[i] - closes[i - 1]) / closes[i - 1],

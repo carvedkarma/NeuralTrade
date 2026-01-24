@@ -18,7 +18,7 @@ export interface PatternMatch {
   dynamicThreshold: number;
 }
 
-export function mapKalmanToRegime(kalmanRegime: string): string {
+export function mapKalmanToRegime(kalmanRegime: string): "trend_up" | "trend_down" | "chop" | "shock" {
   switch (kalmanRegime) {
     case "bull": return "trend_up";
     case "bear": return "trend_down";
@@ -136,26 +136,68 @@ export async function storePattern(params: StorePatternParams): Promise<void> {
   });
 }
 
+export interface SimilarityDistribution {
+  min: number;
+  max: number;
+  mean: number;
+  median: number;
+  count: number;
+}
+
+let lastSimilarityDist: SimilarityDistribution = { min: 0, max: 0, mean: 0, median: 0, count: 0 };
+
+export function getLastSimilarityDistribution(): SimilarityDistribution {
+  return lastSimilarityDist;
+}
+
+function normalizeEmbedding(embedding: number[]): number[] {
+  const magnitude = Math.sqrt(embedding.reduce((sum, v) => sum + v * v, 0));
+  if (magnitude === 0 || !isFinite(magnitude)) {
+    return embedding.map(() => 0);
+  }
+  return embedding.map(v => v / magnitude);
+}
+
+function isValidEmbedding(embedding: number[]): boolean {
+  if (!Array.isArray(embedding) || embedding.length === 0) return false;
+  const allZero = embedding.every(v => v === 0);
+  const hasInvalid = embedding.some(v => !isFinite(v));
+  return !allZero && !hasInvalid;
+}
+
 export async function findSimilarPatterns(
   currentEmbedding: number[],
   topK: number = 50,
-  minSimilarity: number = 0.7,
+  minSimilarity: number = 0.6,
   embargoTimestamp?: number
 ): Promise<PatternMatch[]> {
   const allPatterns = await db.select().from(patterns).orderBy(desc(patterns.timestamp)).limit(10000);
   
   const matches: PatternMatch[] = [];
-  const embargoMs = embargoTimestamp || (Date.now() - 8 * 15 * 60 * 1000);
+  const allSimilarities: number[] = [];
+  
+  const embargoCandles = 16;
+  const embargoMs = embargoTimestamp || (Date.now() - embargoCandles * 15 * 60 * 1000);
+  
+  const normalizedCurrent = normalizeEmbedding(currentEmbedding);
+  if (!isValidEmbedding(normalizedCurrent)) {
+    console.warn("Invalid current embedding - all zeros or NaN values");
+    return [];
+  }
   
   for (const pattern of allPatterns) {
     if (pattern.timestamp > embargoMs) continue;
     
     const embedding = pattern.embedding as number[];
-    if (!Array.isArray(embedding)) continue;
+    if (!isValidEmbedding(embedding)) continue;
     
-    const similarity = cosineSimilarity(currentEmbedding, embedding);
+    const normalizedPattern = normalizeEmbedding(embedding);
+    const similarity = cosineSimilarity(normalizedCurrent, normalizedPattern);
     
-    if (similarity >= minSimilarity) {
+    if (!isFinite(similarity)) continue;
+    allSimilarities.push(similarity);
+    
+    if (similarity >= minSimilarity && similarity < 0.999) {
       matches.push({
         timestamp: pattern.timestamp,
         similarity,
@@ -170,6 +212,21 @@ export async function findSimilarPatterns(
         atrAtEntry: pattern.atrAtEntry || 0,
         dynamicThreshold: pattern.dynamicThreshold || 0.004,
       });
+    }
+  }
+  
+  if (allSimilarities.length > 0) {
+    allSimilarities.sort((a, b) => a - b);
+    const min = allSimilarities[0];
+    const max = allSimilarities[allSimilarities.length - 1];
+    const mean = allSimilarities.reduce((a, b) => a + b, 0) / allSimilarities.length;
+    const medianIdx = Math.floor(allSimilarities.length / 2);
+    const median = allSimilarities[medianIdx];
+    
+    lastSimilarityDist = { min, max, mean, median, count: allSimilarities.length };
+    
+    if (mean > 0.90) {
+      console.warn(`SIMILARITY WARNING: Avg similarity ${(mean * 100).toFixed(1)}% is too high! Distribution: min=${(min * 100).toFixed(1)}%, median=${(median * 100).toFixed(1)}%, max=${(max * 100).toFixed(1)}%`);
     }
   }
   
@@ -268,67 +325,98 @@ export function getPatternConfidence(stats: PatternStats): {
   };
 }
 
+export interface RegimeStats {
+  count: number;
+  winRate: number;
+  avgReturn: number;
+}
+
 export interface StoredPatternStats {
   totalPatterns: number;
   winRate: number;
   regimeBreakdown: Record<string, number>;
+  regimeStats: Record<string, RegimeStats>;
   avgThreshold: number;
   recentWinRate: number;
+  similarityHealthy: boolean;
 }
 
 export async function getStoredPatternStats(): Promise<StoredPatternStats> {
+  const emptyStats: StoredPatternStats = {
+    totalPatterns: 0,
+    winRate: 0,
+    regimeBreakdown: { trend_up: 0, trend_down: 0, chop: 0, shock: 0 },
+    regimeStats: {
+      trend_up: { count: 0, winRate: 0, avgReturn: 0 },
+      trend_down: { count: 0, winRate: 0, avgReturn: 0 },
+      chop: { count: 0, winRate: 0, avgReturn: 0 },
+      shock: { count: 0, winRate: 0, avgReturn: 0 },
+    },
+    avgThreshold: 0.004,
+    recentWinRate: 0,
+    similarityHealthy: false,
+  };
+  
   try {
     const allPatterns = await db.select().from(patterns).orderBy(desc(patterns.timestamp)).limit(5000);
     
     if (allPatterns.length === 0) {
-      return {
-        totalPatterns: 0,
-        winRate: 0,
-        regimeBreakdown: { trend_up: 0, trend_down: 0, chop: 0, shock: 0 },
-        avgThreshold: 0.004,
-        recentWinRate: 0,
-      };
+      return emptyStats;
     }
     
     const totalWins = allPatterns.filter(p => p.forwardWin).length;
     const winRate = totalWins / allPatterns.length;
     
     const regimeBreakdown: Record<string, number> = { trend_up: 0, trend_down: 0, chop: 0, shock: 0 };
+    const regimeWins: Record<string, number> = { trend_up: 0, trend_down: 0, chop: 0, shock: 0 };
+    const regimeReturns: Record<string, number[]> = { trend_up: [], trend_down: [], chop: [], shock: [] };
     let thresholdSum = 0;
     let thresholdCount = 0;
     
     for (const p of allPatterns) {
       const regime = p.regime || "chop";
-      if (regime in regimeBreakdown) {
-        regimeBreakdown[regime]++;
-      } else {
-        regimeBreakdown["chop"]++;
-      }
+      const validRegime = regime in regimeBreakdown ? regime : "chop";
+      
+      regimeBreakdown[validRegime]++;
+      if (p.forwardWin) regimeWins[validRegime]++;
+      if (p.forwardReturn8 !== null) regimeReturns[validRegime].push(p.forwardReturn8);
+      
       if (p.dynamicThreshold) {
         thresholdSum += p.dynamicThreshold;
         thresholdCount++;
       }
     }
     
+    const regimeStats: Record<string, RegimeStats> = {};
+    for (const regime of ["trend_up", "trend_down", "chop", "shock"]) {
+      const count = regimeBreakdown[regime];
+      const wins = regimeWins[regime];
+      const returns = regimeReturns[regime];
+      regimeStats[regime] = {
+        count,
+        winRate: count > 0 ? wins / count : 0,
+        avgReturn: returns.length > 0 ? returns.reduce((a, b) => a + b, 0) / returns.length : 0,
+      };
+    }
+    
     const recentPatterns = allPatterns.slice(0, Math.min(100, allPatterns.length));
     const recentWins = recentPatterns.filter(p => p.forwardWin).length;
     const recentWinRate = recentPatterns.length > 0 ? recentWins / recentPatterns.length : 0;
+    
+    const simDist = getLastSimilarityDistribution();
+    const similarityHealthy = simDist.mean > 0 && simDist.mean < 0.90;
     
     return {
       totalPatterns: allPatterns.length,
       winRate,
       regimeBreakdown,
+      regimeStats,
       avgThreshold: thresholdCount > 0 ? thresholdSum / thresholdCount : 0.004,
       recentWinRate,
+      similarityHealthy,
     };
   } catch (error) {
     console.error("Error getting stored pattern stats:", error);
-    return {
-      totalPatterns: 0,
-      winRate: 0,
-      regimeBreakdown: { trend_up: 0, trend_down: 0, chop: 0, shock: 0 },
-      avgThreshold: 0.004,
-      recentWinRate: 0,
-    };
+    return emptyStats;
   }
 }

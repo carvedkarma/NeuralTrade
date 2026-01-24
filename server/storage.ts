@@ -32,7 +32,7 @@ import { getFullBTCDataBinanceVision } from "./binance-vision";
 import { computeFeatures, getLatestFeatures, detectCandlestickPatterns, analyzeVolumeProfile, analyzeMultiTimeframePatterns, type FeatureVector, type CandlestickPattern, type VolumeProfile, type MultiTimeframeCorrelation } from "./feature-engine";
 import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-engine";
 import { getSentimentData, interpretFearGreed, getNewsStats } from "./sentiment-api";
-import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime } from "./pattern-memory";
+import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime, getLastSimilarityDistribution } from "./pattern-memory";
 
 export interface IStorage {
   getDashboardData(): Promise<DashboardData>;
@@ -266,6 +266,14 @@ export class MemStorage implements IStorage {
     
     console.log(`Starting DEEP training run... (${this.candles.length} candles, epoch ${this.learningStats.learningEpochs + 1})`);
     this.lastTrainingRun = now;
+    
+    const simDist = getLastSimilarityDistribution();
+    const similarityHealthy = simDist.mean === 0 || simDist.mean < 0.90;
+    
+    if (!similarityHealthy && simDist.count > 100) {
+      console.warn(`LEARNING FROZEN: Similarity too high (avg: ${(simDist.mean * 100).toFixed(1)}%). Fix pattern embedding diversity before storing more patterns.`);
+      return;
+    }
     
     try {
       const lookback = 8;
@@ -1175,6 +1183,8 @@ export class MemStorage implements IStorage {
           ? (this.learningStats.totalPatternsMatched / this.learningStats.totalPredictions) * 10 : 0,
         lastPatternAdded: this.learningStats.lastFeatureCompute || null,
         patternsByRegime: this.learningStats.patternsByRegime,
+        similarityDistribution: getLastSimilarityDistribution(),
+        similarityHealthy: getLastSimilarityDistribution().mean > 0 && getLastSimilarityDistribution().mean < 0.90,
         topPatternOutcomes: [
           { pattern: "RSI Oversold Bounce", winRate: 68, count: Math.floor(this.learningStats.totalPatternsMatched * 0.2) },
           { pattern: "MACD Crossover", winRate: 62, count: Math.floor(this.learningStats.totalPatternsMatched * 0.15) },

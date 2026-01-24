@@ -118,6 +118,12 @@ export async function generateShotPlan(
   const reasons: string[] = [];
   const vetoReasons: string[] = [];
   
+  const isChopRegime = regime === "chop";
+  
+  if (isChopRegime) {
+    vetoReasons.push("CHOP GATE: Kalman regime is chop - no trade allowed");
+  }
+  
   const holdCandles = regime === "shock" ? 2 : regime === "chop" ? 3 : 6;
   const costs = estimateCosts(holdCandles);
   
@@ -127,7 +133,7 @@ export async function generateShotPlan(
     vetoReasons.push(newsFilter.reason);
   }
   
-  if (ensemble.probChop > 0.55) {
+  if (ensemble.probChop > 0.55 && !isChopRegime) {
     vetoReasons.push(`High chop probability: ${(ensemble.probChop * 100).toFixed(1)}%`);
   }
   if (Math.abs(ensemble.expectedMove) < costs * 3) {

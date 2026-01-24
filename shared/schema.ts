@@ -233,6 +233,14 @@ export const dataSourceStatsSchema = z.object({
 });
 export type DataSourceStats = z.infer<typeof dataSourceStatsSchema>;
 
+export const similarityDistributionSchema = z.object({
+  min: z.number(),
+  max: z.number(),
+  mean: z.number(),
+  median: z.number(),
+  count: z.number(),
+});
+
 export const patternLearningStatsSchema = z.object({
   totalPatterns: z.number(),
   uniquePatterns: z.number(),
@@ -240,6 +248,8 @@ export const patternLearningStatsSchema = z.object({
   matchRate: z.number(),
   lastPatternAdded: z.number().nullable(),
   patternsByRegime: z.record(z.string(), z.number()),
+  similarityDistribution: similarityDistributionSchema.optional(),
+  similarityHealthy: z.boolean().optional(),
   topPatternOutcomes: z.array(z.object({
     pattern: z.string(),
     winRate: z.number(),
