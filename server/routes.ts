@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
-import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, incrementalUpdate, fillGaps } from "./historical-data";
+import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs } from "./historical-data";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -147,10 +147,22 @@ export async function registerRoutes(
   });
 
   app.get("/api/historical/backfill/progress", async (req, res) => {
+    const activeJob = await getActiveBackfillJob();
+    
     res.json({
       inProgress: backfillInProgress,
       progress: backfillProgress,
       message: backfillMessage,
+      job: activeJob ? {
+        id: activeJob.id,
+        status: activeJob.status,
+        candlesFetched: activeJob.candlesFetched,
+        candlesExpected: activeJob.candlesExpected,
+        progressPct: activeJob.progressPct,
+        currentCursor: activeJob.currentCursor,
+        startTs: activeJob.startTs,
+        resumable: activeJob.status === "running" || activeJob.status === "pending",
+      } : null,
     });
   });
 
@@ -175,6 +187,16 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error filling gaps:", error);
       res.status(500).json({ error: "Failed to fill gaps" });
+    }
+  });
+
+  app.get("/api/historical/incomplete-jobs", async (req, res) => {
+    try {
+      const result = await checkIncompleteBackfillJobs();
+      res.json(result);
+    } catch (error) {
+      console.error("Error checking incomplete jobs:", error);
+      res.status(500).json({ error: "Failed to check incomplete jobs" });
     }
   });
 

@@ -33,7 +33,8 @@ import {
   EquityPerformanceCard,
   RiskStatusCard,
   OpenPositionCard,
-  PositionHistoryCard
+  PositionHistoryCard,
+  AuditLogPanel
 } from "@/components/paper-trading-card";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff } from "lucide-react";
@@ -49,6 +50,19 @@ interface HistoricalStatus {
   startDate: string | null;
   endDate: string | null;
   backfillComplete: boolean;
+  completionPct: number;
+  expectedFor365Days: number;
+}
+
+interface IntegrityReport {
+  totalCandles: number;
+  daysOfData: number;
+  completionPct: number;
+  missingRanges: Array<{ start: string; end: string; gapCandles: number }>;
+  duplicateCount: number;
+  lastCandleTs: number | null;
+  alignmentHealthy: boolean;
+  overallHealth: "complete" | "missing_ranges" | "out_of_sync" | "no_data";
 }
 
 export default function Dashboard() {
@@ -63,6 +77,11 @@ export default function Dashboard() {
   const { data: historicalStatus } = useQuery<HistoricalStatus>({
     queryKey: ["/api/historical/status"],
     refetchInterval: backfillInProgress ? 2000 : 30000,
+  });
+
+  const { data: integrityReport } = useQuery<IntegrityReport>({
+    queryKey: ["/api/historical/integrity"],
+    refetchInterval: 60000,
   });
 
   const hasTriggeredAnalysis = useRef(false);
@@ -277,18 +296,21 @@ export default function Dashboard() {
           </TabsContent>
 
           <TabsContent value="paper" className="mt-0">
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-4 space-y-4">
-                <PerformanceCard />
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                <div className="lg:col-span-4 space-y-4">
+                  <PerformanceCard />
+                </div>
+                <div className="lg:col-span-4 space-y-4">
+                  <EquityPerformanceCard />
+                  <RiskStatusCard />
+                </div>
+                <div className="lg:col-span-4 space-y-4">
+                  <OpenPositionCard />
+                  <PositionHistoryCard />
+                </div>
               </div>
-              <div className="lg:col-span-4 space-y-4">
-                <EquityPerformanceCard />
-                <RiskStatusCard />
-              </div>
-              <div className="lg:col-span-4 space-y-4">
-                <OpenPositionCard />
-                <PositionHistoryCard />
-              </div>
+              <AuditLogPanel />
             </div>
           </TabsContent>
 
@@ -302,6 +324,7 @@ export default function Dashboard() {
                 <HistoricalLearningCard 
                   learningStats={data.learningStats}
                   historicalStatus={historicalStatus}
+                  integrityReport={integrityReport}
                   onBackfill={() => backfillMutation.mutate()}
                   backfillInProgress={backfillInProgress || backfillMutation.isPending}
                   backfillProgress={backfillProgress}

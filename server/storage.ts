@@ -1561,6 +1561,11 @@ export class MemStorage implements IStorage {
         learningProgress: Math.min(100, (this.learningStats.totalPredictions / 100) * 100),
         epochsCompleted: this.learningStats.learningEpochs,
         lastTrainingTime: this.learningStats.lastTrainingTime || null,
+        candlesUsedForTraining: this.candles.length,
+        candlesAvailable: this.learningStats.historicalCandlesProcessed + this.candles.length,
+        trainingCoverage: this.learningStats.historicalCandlesProcessed > 0 
+          ? Math.round((this.candles.length / (this.learningStats.historicalCandlesProcessed + this.candles.length)) * 100)
+          : 100,
       },
     };
   }

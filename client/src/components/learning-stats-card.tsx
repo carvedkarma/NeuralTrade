@@ -639,6 +639,41 @@ export function SocialAwarenessCard({ learningStats }: LearningStatsCardProps) {
           ))}
         </div>
 
+        {/* Sentiment Confidence Modifier */}
+        <div className="pt-2 border-t">
+          <div className="text-xs text-muted-foreground font-medium mb-2">Signal Confidence Impact</div>
+          <div className="bg-muted/30 rounded-lg p-3">
+            {(() => {
+              const sentiment = socialAwareness.globalSentiment;
+              const modifier = sentiment >= 0.6 ? +5 : sentiment <= 0.4 ? -5 : 0;
+              const direction = sentiment >= 0.6 ? "bullish" : sentiment <= 0.4 ? "bearish" : "neutral";
+              
+              return (
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Gauge className="h-4 w-4 text-muted-foreground" />
+                    <span className="text-sm">
+                      {direction === "bullish" && "Bullish sentiment boosts LONG confidence"}
+                      {direction === "bearish" && "Bearish sentiment boosts SHORT confidence"}
+                      {direction === "neutral" && "Neutral sentiment - no modifier"}
+                    </span>
+                  </div>
+                  <Badge 
+                    variant="outline" 
+                    className={
+                      modifier > 0 ? "text-emerald-400 border-emerald-500/30" :
+                      modifier < 0 ? "text-red-400 border-red-500/30" :
+                      "text-muted-foreground"
+                    }
+                  >
+                    {modifier > 0 ? `+${modifier}%` : modifier < 0 ? `${modifier}%` : "0%"}
+                  </Badge>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+
         {/* Last Update */}
         <div className="pt-2 border-t text-xs text-muted-foreground flex items-center gap-1">
           <Clock className="h-3 w-3" />
@@ -655,10 +690,24 @@ interface HistoricalDataStatus {
   startDate: string | null;
   endDate: string | null;
   backfillComplete: boolean;
+  completionPct: number;
+  expectedFor365Days: number;
+}
+
+interface IntegrityReport {
+  totalCandles: number;
+  daysOfData: number;
+  completionPct: number;
+  missingRanges: Array<{ start: string; end: string; gapCandles: number }>;
+  duplicateCount: number;
+  lastCandleTs: number | null;
+  alignmentHealthy: boolean;
+  overallHealth: "complete" | "missing_ranges" | "out_of_sync" | "no_data";
 }
 
 interface HistoricalLearningCardProps extends LearningStatsCardProps {
   historicalStatus?: HistoricalDataStatus | null;
+  integrityReport?: IntegrityReport | null;
   onBackfill?: () => void;
   backfillInProgress?: boolean;
   backfillProgress?: number;
@@ -667,6 +716,7 @@ interface HistoricalLearningCardProps extends LearningStatsCardProps {
 export function HistoricalLearningCard({ 
   learningStats, 
   historicalStatus,
+  integrityReport,
   onBackfill,
   backfillInProgress,
   backfillProgress
@@ -733,10 +783,58 @@ export function HistoricalLearningCard({
           </div>
         )}
         
+        {/* Data Completion Progress */}
+        <div className="bg-gradient-to-br from-blue-500/10 to-cyan-500/10 rounded-lg p-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium">Data Completion (1 Year Target)</span>
+            <span className="text-lg font-bold text-blue-400">
+              {(historicalStatus?.completionPct ?? 0).toFixed(1)}%
+            </span>
+          </div>
+          <Progress 
+            value={historicalStatus?.completionPct ?? 0} 
+            className="h-2"
+          />
+          <div className="text-xs text-muted-foreground mt-1">
+            {displayCandles.toLocaleString()} / {(historicalStatus?.expectedFor365Days ?? 35040).toLocaleString()} candles
+          </div>
+        </div>
+
+        {/* Data Health Status */}
+        {integrityReport && (
+          <div className="flex items-center gap-2 p-2 bg-muted/30 rounded">
+            {integrityReport.overallHealth === "complete" && (
+              <Badge variant="outline" className="text-emerald-400 bg-emerald-500/10 border-emerald-500/30">
+                <CheckCircle2 className="h-3 w-3 mr-1" /> Healthy
+              </Badge>
+            )}
+            {integrityReport.overallHealth === "missing_ranges" && (
+              <Badge variant="outline" className="text-amber-400 bg-amber-500/10 border-amber-500/30">
+                <AlertCircle className="h-3 w-3 mr-1" /> {integrityReport.missingRanges.length} Gaps
+              </Badge>
+            )}
+            {integrityReport.overallHealth === "out_of_sync" && (
+              <Badge variant="outline" className="text-red-400 bg-red-500/10 border-red-500/30">
+                <AlertCircle className="h-3 w-3 mr-1" /> Out of Sync
+              </Badge>
+            )}
+            {integrityReport.overallHealth === "no_data" && (
+              <Badge variant="outline" className="text-muted-foreground">
+                No Data
+              </Badge>
+            )}
+            <span className="text-xs text-muted-foreground ml-auto">
+              {integrityReport.duplicateCount > 0 && `${integrityReport.duplicateCount} dupes`}
+              {integrityReport.duplicateCount > 0 && !integrityReport.alignmentHealthy && " | "}
+              {!integrityReport.alignmentHealthy && "alignment issues"}
+            </span>
+          </div>
+        )}
+
         {/* Learning Progress */}
         <div className="bg-gradient-to-br from-indigo-500/10 to-purple-500/10 rounded-lg p-3">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium">Learning Progress</span>
+            <span className="text-sm font-medium">Training Progress</span>
             <span className="text-lg font-bold text-indigo-400">
               {historicalLearning.learningProgress.toFixed(0)}%
             </span>
@@ -784,9 +882,30 @@ export function HistoricalLearningCard({
           </div>
         </div>
 
-        {/* Data Range */}
+        {/* Training Range */}
         <div className="pt-2 border-t">
-          <div className="text-xs text-muted-foreground mb-2">Training Data Range</div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-xs text-muted-foreground">Training Coverage</div>
+            <Badge variant="outline" className={
+              (historicalLearning.trainingCoverage ?? 100) >= 80 
+                ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/30" 
+                : "text-amber-400 bg-amber-500/10 border-amber-500/30"
+            }>
+              {historicalLearning.trainingCoverage ?? 100}% Used
+            </Badge>
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-xs mb-3">
+            <div className="bg-muted/20 rounded p-2">
+              <div className="text-muted-foreground">In Training</div>
+              <div className="font-medium">{(historicalLearning.candlesUsedForTraining ?? 0).toLocaleString()}</div>
+            </div>
+            <div className="bg-muted/20 rounded p-2">
+              <div className="text-muted-foreground">Available</div>
+              <div className="font-medium">{(historicalLearning.candlesAvailable ?? 0).toLocaleString()}</div>
+            </div>
+          </div>
+          
+          <div className="text-xs text-muted-foreground mb-2">Data Range</div>
           <div className="flex items-center justify-between text-sm">
             <span className="font-medium">{historicalStatus?.startDate || historicalLearning.dataRangeStart}</span>
             <span className="text-muted-foreground">→</span>

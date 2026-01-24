@@ -606,6 +606,143 @@ export function PositionHistoryCard() {
   );
 }
 
+interface AuditEntry {
+  timestamp: number;
+  signal: string;
+  confidence: number;
+  regime: string;
+  edge: number;
+  costs: number;
+  edgeVsCosts: string;
+  decision: string;
+  reason: string;
+  positionSize: number;
+  exposureAfter: number;
+}
+
+export function AuditLogPanel() {
+  const { data: auditLogs } = useQuery<AuditEntry[]>({
+    queryKey: ["/api/paper/audit"],
+    refetchInterval: 5000,
+  });
+
+  if (!auditLogs || auditLogs.length === 0) {
+    return (
+      <Card data-testid="card-audit-log">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-medium flex items-center gap-2">
+            <Activity className="h-4 w-4 text-primary" />
+            Execution Audit Log
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground text-center py-6">
+            No trade attempts yet. Enable paper trading and wait for signals.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card data-testid="card-audit-log">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Activity className="h-4 w-4 text-primary" />
+            Execution Audit Log
+          </div>
+          <Badge variant="outline" className="text-xs">
+            {auditLogs.length} entries
+          </Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2 max-h-[400px] overflow-y-auto">
+        {auditLogs.slice().reverse().map((entry, idx) => {
+          const isExecuted = entry.decision === "ALLOWED" || entry.decision === "EXECUTE";
+          const isSkipped = entry.decision === "SKIP" || entry.decision === "HOLD";
+          const isBlocked = entry.decision === "BLOCKED";
+          
+          return (
+            <div 
+              key={idx} 
+              className={`p-3 rounded-lg border text-xs space-y-2 ${
+                isExecuted ? "border-emerald-500/30 bg-emerald-500/5" :
+                isBlocked ? "border-red-500/30 bg-red-500/5" :
+                "border-muted bg-muted/30"
+              }`}
+              data-testid={`audit-entry-${idx}`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Badge 
+                    variant="outline" 
+                    className={
+                      isExecuted ? "text-emerald-400 border-emerald-500/50" :
+                      isBlocked ? "text-red-400 border-red-500/50" :
+                      "text-muted-foreground"
+                    }
+                  >
+                    {entry.decision}
+                  </Badge>
+                  <Badge variant="secondary" className={
+                    entry.signal === "LONG" ? "bg-emerald-500/20 text-emerald-400" :
+                    entry.signal === "SHORT" ? "bg-red-500/20 text-red-400" :
+                    "bg-muted text-muted-foreground"
+                  }>
+                    {entry.signal}
+                  </Badge>
+                </div>
+                <span className="text-muted-foreground">
+                  {format(new Date(entry.timestamp), "HH:mm:ss")}
+                </span>
+              </div>
+              
+              <div className="text-muted-foreground italic">
+                {entry.reason}
+              </div>
+              
+              <div className="grid grid-cols-4 gap-2 pt-1">
+                <div>
+                  <div className="text-muted-foreground">Confidence</div>
+                  <div className="font-medium">{(entry.confidence * 100).toFixed(1)}%</div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">Edge</div>
+                  <div className={entry.edge > 0 ? "text-emerald-400 font-medium" : "text-red-400 font-medium"}>
+                    {entry.edge > 0 ? "+" : ""}{(entry.edge * 100).toFixed(3)}%
+                  </div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">Costs</div>
+                  <div className="font-medium">{(entry.costs * 100).toFixed(3)}%</div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">Regime</div>
+                  <div className="font-medium capitalize">{entry.regime}</div>
+                </div>
+              </div>
+              
+              {entry.positionSize > 0 && (
+                <div className="flex items-center gap-4 pt-1 border-t border-dashed">
+                  <div>
+                    <span className="text-muted-foreground">Size: </span>
+                    <span className="font-medium">{entry.positionSize.toFixed(6)} BTC</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">Exposure: </span>
+                    <span className="font-medium">{(entry.exposureAfter * 100).toFixed(1)}%</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </CardContent>
+    </Card>
+  );
+}
+
 export { PerformanceCard as PortfolioCard };
 export { EquityPerformanceCard as EquityCurveCard };
 export { RiskStatusCard as PaperTradingStatsCard };

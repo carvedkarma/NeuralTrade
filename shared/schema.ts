@@ -316,6 +316,9 @@ export const historicalLearningStatsSchema = z.object({
   learningProgress: z.number(),
   epochsCompleted: z.number(),
   lastTrainingTime: z.number().nullable(),
+  candlesUsedForTraining: z.number(),
+  candlesAvailable: z.number(),
+  trainingCoverage: z.number(),
 });
 export type HistoricalLearningStats = z.infer<typeof historicalLearningStatsSchema>;
 

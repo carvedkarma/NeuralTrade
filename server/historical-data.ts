@@ -1,6 +1,6 @@
 import { db } from "./db";
-import { candles, learningState } from "./db/schema";
-import { eq, and, gte, lte, sql, desc, asc } from "drizzle-orm";
+import { candles, learningState, backfillJobs } from "./db/schema";
+import { eq, and, gte, lte, sql, desc, asc, or, ne } from "drizzle-orm";
 
 const BINANCE_VISION_BASE = "https://data-api.binance.vision";
 const BINANCE_FAPI_BASE = "https://fapi.binance.com";
@@ -395,23 +395,126 @@ async function updateLearningState(symbol: string, timeframe: string): Promise<v
   }
 }
 
+async function findOrCreateBackfillJob(
+  symbol: string,
+  timeframe: string,
+  daysBack: number
+): Promise<{ id: number; startTs: number; currentCursor: number; candlesFetched: number; isResume: boolean }> {
+  const now = Date.now();
+  const startTs = now - (daysBack * 24 * 60 * 60 * 1000);
+  
+  const existingJob = await db.select()
+    .from(backfillJobs)
+    .where(and(
+      eq(backfillJobs.symbol, symbol),
+      eq(backfillJobs.timeframe, timeframe),
+      or(
+        eq(backfillJobs.status, "running"),
+        eq(backfillJobs.status, "pending")
+      )
+    ))
+    .limit(1);
+  
+  if (existingJob.length > 0 && existingJob[0].currentCursor) {
+    const job = existingJob[0];
+    console.log(`[Historical] Resuming backfill job ${job.id} from cursor ${new Date(job.currentCursor!).toISOString()}`);
+    
+    await db.update(backfillJobs)
+      .set({ status: "running", updatedTs: now })
+      .where(eq(backfillJobs.id, job.id));
+    
+    return {
+      id: job.id,
+      startTs: job.startTs ?? startTs,
+      currentCursor: job.currentCursor!,
+      candlesFetched: job.candlesFetched ?? 0,
+      isResume: true,
+    };
+  }
+  
+  const msPerCandle = timeframe === "15m" ? MS_PER_15M : 60 * 1000;
+  const expectedCandles = Math.floor((now - startTs) / msPerCandle);
+  
+  const [newJob] = await db.insert(backfillJobs)
+    .values({
+      symbol,
+      timeframe,
+      status: "running",
+      startTs,
+      endTs: now,
+      currentCursor: startTs,
+      candlesFetched: 0,
+      candlesExpected: expectedCandles,
+      progressPct: 0,
+      createdTs: now,
+      updatedTs: now,
+    })
+    .returning();
+  
+  console.log(`[Historical] Created new backfill job ${newJob.id}`);
+  
+  return {
+    id: newJob.id,
+    startTs,
+    currentCursor: startTs,
+    candlesFetched: 0,
+    isResume: false,
+  };
+}
+
+async function updateBackfillJobProgress(
+  jobId: number,
+  currentCursor: number,
+  candlesFetched: number,
+  progressPct: number,
+  status: string = "running"
+): Promise<void> {
+  await db.update(backfillJobs)
+    .set({
+      currentCursor,
+      candlesFetched,
+      progressPct,
+      status,
+      updatedTs: Date.now(),
+    })
+    .where(eq(backfillJobs.id, jobId));
+}
+
+export async function getActiveBackfillJob(symbol: string = "BTCUSDT", timeframe: string = "15m") {
+  const job = await db.select()
+    .from(backfillJobs)
+    .where(and(
+      eq(backfillJobs.symbol, symbol),
+      eq(backfillJobs.timeframe, timeframe),
+      eq(backfillJobs.status, "running")
+    ))
+    .limit(1);
+  
+  return job[0] ?? null;
+}
+
 export async function backfillHistoricalData(
   symbol: string = "BTCUSDT",
   timeframe: string = "15m",
   daysBack: number = BACKFILL_DAYS,
   onProgress?: (progress: number, message: string) => void
-): Promise<{ success: boolean; totalCandles: number; newCandles: number; gaps: number[] }> {
+): Promise<{ success: boolean; totalCandles: number; newCandles: number; gaps: number[]; jobId: number }> {
   const now = Date.now();
-  const startTime = now - (daysBack * 24 * 60 * 60 * 1000);
   const msPerCandle = timeframe === "15m" ? MS_PER_15M : 60 * 1000;
   
-  console.log(`[Historical] Starting backfill for ${symbol} ${timeframe}, ${daysBack} days back...`);
-  onProgress?.(0, `Starting backfill for ${daysBack} days of data...`);
+  const job = await findOrCreateBackfillJob(symbol, timeframe, daysBack);
   
-  let currentStart = startTime;
-  let totalNewCandles = 0;
+  console.log(`[Historical] ${job.isResume ? 'Resuming' : 'Starting'} backfill for ${symbol} ${timeframe}, ${daysBack} days back...`);
+  onProgress?.(0, job.isResume 
+    ? `Resuming backfill from ${new Date(job.currentCursor).toISOString().split('T')[0]}...`
+    : `Starting backfill for ${daysBack} days of data...`);
+  
+  let currentStart = job.currentCursor;
+  let totalNewCandles = job.candlesFetched;
   let batchCount = 0;
-  const expectedBatches = Math.ceil((now - startTime) / (CANDLES_PER_REQUEST * msPerCandle));
+  const expectedBatches = Math.ceil((now - job.startTs) / (CANDLES_PER_REQUEST * msPerCandle));
+  const completedBatches = Math.ceil((job.currentCursor - job.startTs) / (CANDLES_PER_REQUEST * msPerCandle));
+  batchCount = completedBatches;
   
   while (currentStart < now) {
     const batchEnd = Math.min(currentStart + (CANDLES_PER_REQUEST * msPerCandle), now);
@@ -422,33 +525,42 @@ export async function backfillHistoricalData(
       if (klines.length > 0) {
         const inserted = await upsertCandles(klines, symbol, timeframe);
         totalNewCandles += inserted;
-        
-        const progress = Math.min(100, Math.round((batchCount / expectedBatches) * 100));
-        onProgress?.(progress, `Fetched ${klines.length} candles, ${inserted} new. Total new: ${totalNewCandles}`);
-        
-        if (batchCount % 10 === 0) {
-          console.log(`[Historical] Progress: ${progress}%, ${totalNewCandles} new candles inserted`);
-        }
       }
+      
+      const progress = Math.min(99, Math.round((batchCount / expectedBatches) * 100));
+      onProgress?.(progress, `Fetched ${klines.length} candles. Total: ${totalNewCandles}`);
       
       currentStart = batchEnd;
       batchCount++;
       
+      if (batchCount % 5 === 0) {
+        await updateBackfillJobProgress(job.id, currentStart, totalNewCandles, progress);
+        console.log(`[Historical] Progress: ${progress}%, cursor saved at ${new Date(currentStart).toISOString()}`);
+      }
+      
       await new Promise(resolve => setTimeout(resolve, 100));
       
-    } catch (error) {
+    } catch (error: any) {
       console.error(`[Historical] Error in batch at ${new Date(currentStart).toISOString()}:`, error);
+      
+      await updateBackfillJobProgress(job.id, currentStart, totalNewCandles, 
+        Math.round((batchCount / expectedBatches) * 100), "error");
+      await db.update(backfillJobs)
+        .set({ errorMessage: error.message || "Unknown error" })
+        .where(eq(backfillJobs.id, job.id));
+      
       currentStart = batchEnd;
       batchCount++;
     }
   }
   
+  await updateBackfillJobProgress(job.id, now, totalNewCandles, 100, "completed");
   await updateLearningState(symbol, timeframe);
   
-  const gaps = await detectGaps(symbol, timeframe, startTime, now);
+  const gaps = await detectGaps(symbol, timeframe, job.startTs, now);
   
-  console.log(`[Historical] Backfill complete: ${totalNewCandles} new candles, ${gaps.length} gaps detected`);
-  onProgress?.(100, `Backfill complete! ${totalNewCandles} new candles added.`);
+  console.log(`[Historical] Backfill complete: ${totalNewCandles} candles, ${gaps.length} gaps detected`);
+  onProgress?.(100, `Backfill complete! ${totalNewCandles} candles stored.`);
   
   const rangeInfo = await getDataRangeInfo();
   
@@ -457,6 +569,7 @@ export async function backfillHistoricalData(
     totalCandles: rangeInfo.totalCandles,
     newCandles: totalNewCandles,
     gaps,
+    jobId: job.id,
   };
 }
 
@@ -660,4 +773,39 @@ export async function getCandlesInRange(startTs: number, endTs: number): Promise
       lte(candles.timestamp, endTs)
     ))
     .orderBy(asc(candles.timestamp));
+}
+
+export async function checkIncompleteBackfillJobs(): Promise<{
+  hasIncomplete: boolean;
+  jobId?: number;
+  symbol?: string;
+  timeframe?: string;
+  progressPct?: number;
+  candlesFetched?: number;
+  status?: string;
+}> {
+  const incompleteJobs = await db.select()
+    .from(backfillJobs)
+    .where(or(
+      eq(backfillJobs.status, "running"),
+      eq(backfillJobs.status, "pending")
+    ))
+    .limit(1);
+  
+  if (incompleteJobs.length > 0) {
+    const job = incompleteJobs[0];
+    console.log(`[Historical] Found incomplete backfill job ${job.id}: ${job.progressPct}% complete`);
+    
+    return {
+      hasIncomplete: true,
+      jobId: job.id,
+      symbol: job.symbol ?? "BTCUSDT",
+      timeframe: job.timeframe ?? "15m",
+      progressPct: job.progressPct ?? 0,
+      candlesFetched: job.candlesFetched ?? 0,
+      status: job.status ?? "unknown",
+    };
+  }
+  
+  return { hasIncomplete: false };
 }

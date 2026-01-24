@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { checkIncompleteBackfillJobs, backfillHistoricalData } from "./historical-data";
 
 const app = express();
 const httpServer = createServer(app);
@@ -93,6 +94,14 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+      
+      checkIncompleteBackfillJobs().then((result) => {
+        if (result.hasIncomplete && result.progressPct && result.progressPct < 100) {
+          log(`Found incomplete backfill job (${result.progressPct}% complete) - will resume on next backfill request`);
+        }
+      }).catch((err) => {
+        console.error("Error checking incomplete backfill jobs:", err);
+      });
     },
   );
 })();
