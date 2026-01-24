@@ -655,7 +655,7 @@ export function HistoricalLearningCard({ learningStats }: LearningStatsCardProps
             <BookOpen className="h-4 w-4 mx-auto mb-1 text-purple-400" />
             <div className="text-xs text-muted-foreground">Pattern Clusters</div>
             <div className="text-lg font-bold" data-testid="text-patterns-learned">
-              {patternLearning.totalPatterns}
+              {learningStats.patternLearning?.totalPatterns ?? 0}
             </div>
           </div>
           <div className="bg-muted/30 rounded-lg p-3 text-center">
