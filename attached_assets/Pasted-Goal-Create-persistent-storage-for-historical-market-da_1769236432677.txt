@@ -1,0 +1,223 @@
+Goal
+
+Create persistent storage for historical market data
+
+Backfill 1 year of BTCUSDT futures 15m candles (or 1m then resample)
+
+On every run: load past data + fetch new, fill gaps, dedupe
+
+Train models on all historical price-derived features only
+
+Use current sentiment (“feeling”) only for live signals, never for backtests
+
+UI must clearly show Historical (1y) vs Live Feeling (now)
+
+1) Persistent Storage (must survive restart)
+
+Use Postgres if available; otherwise SQLite stored at ./data/app.db (NOT /tmp, NOT memory).
+
+Tables
+candles_1m (optional but recommended)
+
+symbol TEXT
+
+ts TIMESTAMP (primary key with symbol)
+
+open, high, low, close NUMERIC
+
+volume NUMERIC
+
+candles_15m
+
+symbol
+
+ts (15m aligned)
+
+open, high, low, close, volume
+
+features_15m
+
+symbol
+
+ts
+
+40+ price-derived features only (rsi, macd, atr, kalman, returns, vol regime, etc.)
+
+feature_set_version
+
+training_state
+
+symbol
+
+last_ingested_1m_ts
+
+last_resampled_15m_ts
+
+last_features_ts
+
+last_train_ts
+
+model_version
+
+pattern_version
+
+data_range_start_ts
+
+data_range_end_ts
+
+sentiment_live (live-only)
+
+ts (now)
+
+fear_greed
+
+twitter_score
+
+reddit_score
+
+news_score
+
+global_sentiment_score
+
+sources_read_count
+
+notes_json
+
+✅ Key rule: No historical sentiment table until we have real time-aligned history.
+
+2) 1-Year Historical Backfill
+Data source for price
+
+Use Binance Futures (recommended):
+
+Klines endpoint for BTCUSDT 1m (then resample to 15m)
+OR directly 15m klines if you don’t need 1m precision.
+
+Backfill job
+
+Implement backfill(symbol, start_ts, end_ts):
+
+Fetch klines in batches (API limit safe)
+
+Insert with UPSERT (dedupe on symbol+ts)
+
+Validate candle continuity (no gaps)
+
+If gaps exist → refetch missing ranges
+
+Set “1 year” as:
+
+now - 370 days to now (buffer)
+
+3) Incremental Updates (Load past + get new)
+
+On server start and every N minutes:
+
+Read training_state.last_ingested_1m_ts
+
+Fetch new candles from that timestamp to now
+
+UPSERT into DB
+
+Resample to 15m (or fetch 15m directly) and UPSERT
+
+Compute features for new 15m candles only
+
+Update watermarks in training_state
+
+✅ Must be idempotent: restarting should never wipe progress.
+
+4) Training Rules (NO leakage)
+Training/backtesting uses ONLY:
+
+features_15m (price/volume derived)
+
+Forbidden in training/backtest:
+
+fear & greed today
+
+twitter/reddit/news today
+
+any live “feeling” fields
+
+Add a hard assertion in training code:
+
+if any feature name matches /sentiment|fear|twitter|reddit|news/i → throw error
+
+Training uses ALL historical data
+
+Use full 1-year dataset (or all stored)
+
+Walk-forward split (no shuffle)
+
+Save model artifacts to ./artifacts/models/<model_version>/
+
+Store model_version in DB
+
+5) Live Signal (price + feeling for now)
+
+Live pipeline:
+
+Build live candle/features from latest features_15m
+
+Run price-only model → base signal probabilities + expected move + regime
+
+Load current sentiment from sentiment_live (most recent)
+
+Apply bounded modifier (small influence):
+
+max ±5–10% impact on confidence/threshold
+
+never allow sentiment to create a trade by itself
+
+Output Shot Plan (LONG/SHORT/HOLD) + reasons
+
+6) UI: show “1 year history” clearly + “live feeling” clearly
+
+Update UI labels:
+
+Historical Data Learning card
+
+“Historical Candles (15m): X”
+
+“Historical Range: start_date → end_date”
+
+“Backtest trades: N”
+
+Add tag: “Backtest: Price-only (no sentiment)”
+
+Social & Global Awareness card
+
+Rename to “Live Feeling (Current)”
+
+Show:
+
+Last updated: X seconds ago
+
+“This affects live signals only, not backtests”
+
+Add a small disclaimer text:
+
+“Backtests use historical price/volume only. Live Feeling is real-time context and is not applied retroactively.”
+
+7) Definition of Done (acceptance checklist)
+
+Server restart does NOT reset:
+
+candles count
+
+training progress
+
+patterns
+
+model version
+
+Backfill loads ≥ 365 days of 15m candles
+
+Increment updates add new candles without duplicates
+
+Training uses full stored history (walk-forward)
+
+Sentiment never appears in historical training/backtest
+
+UI clearly separates “Historical 1y” vs “Live Feeling now”
