@@ -96,7 +96,10 @@ export function PerformanceCard() {
   });
 
   const startMutation = useMutation({
-    mutationFn: () => apiRequest("POST", "/api/paper/start"),
+    mutationFn: async () => {
+      await apiRequest("POST", "/api/paper/enable");
+      return apiRequest("POST", "/api/paper/start");
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/paper"] });
     },
