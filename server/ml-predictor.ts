@@ -213,27 +213,34 @@ function computeConfidence(
   const edge = Math.abs(expectedMove) / currentPrice;
   let edgePenalty = 1.0;
   if (edge <= costs) {
-    edgePenalty = Math.max(0.3, edge / costs);
+    edgePenalty = Math.max(0.5, 0.5 + (edge / costs) * 0.5);
   } else {
-    edgePenalty = Math.min(1.2, 1 + (edge - costs) / costs * 0.2);
+    edgePenalty = Math.min(1.2, 1 + (edge - costs) / costs * 0.1);
   }
   
-  const patternFactor = 0.4 + patternMaturity * 0.6;
+  const patternFactor = 0.6 + patternMaturity * 0.4;
   
   let agreement = 1.0;
   if (modelConfidences.length > 1) {
     const mean = modelConfidences.reduce((a, b) => a + b, 0) / modelConfidences.length;
     const variance = modelConfidences.reduce((sum, c) => sum + Math.pow(c - mean, 2), 0) / modelConfidences.length;
     const stdDev = Math.sqrt(variance);
-    agreement = Math.max(0.5, 1 - stdDev);
+    agreement = Math.max(0.7, 1 - stdDev * 0.5);
   }
   
   const trendStrength = Math.min(1.0, adx / 40);
-  const trendFactor = 0.7 + trendStrength * 0.3;
+  const trendFactor = 0.8 + trendStrength * 0.2;
   
-  let rawConfidence = baseConfidence * regimeClarity * edgePenalty * patternFactor * agreement * trendFactor;
+  const weightedConfidence = (
+    baseConfidence * 0.40 +
+    regimeClarity * 0.25 +
+    edgePenalty * 0.10 +
+    patternFactor * 0.10 +
+    agreement * 0.10 +
+    trendFactor * 0.05
+  );
   
-  const confidence = Math.max(0.15, Math.min(0.90, rawConfidence));
+  const confidence = Math.max(0.20, Math.min(0.85, weightedConfidence));
   
   return {
     confidence,
