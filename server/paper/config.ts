@@ -50,6 +50,10 @@ export const defaultConfig: PaperTradingConfig = {
 
 let currentConfig: PaperTradingConfig = { ...defaultConfig };
 
+export async function loadPaperState(): Promise<void> {
+  console.log("[Paper Config] Paper trading starts disabled by default (in-memory state)");
+}
+
 export function getConfig(): PaperTradingConfig {
   return { ...currentConfig };
 }
@@ -64,24 +68,29 @@ export function resetConfig(): PaperTradingConfig {
   return { ...currentConfig };
 }
 
-export function enablePaperTrading(): void {
+export async function enablePaperTrading(): Promise<void> {
   currentConfig.paperTradingEnabled = true;
+  console.log("[Paper Config] Paper trading enabled");
 }
 
-export function disablePaperTrading(): void {
+export async function disablePaperTrading(): Promise<void> {
   currentConfig.paperTradingEnabled = false;
+  currentConfig.isAutoTrading = false;
+  console.log("[Paper Config] Paper trading disabled");
 }
 
 export function isPaperTradingEnabled(): boolean {
   return currentConfig.paperTradingEnabled;
 }
 
-export function startAutoTrading(): void {
+export async function startAutoTrading(): Promise<void> {
   currentConfig.isAutoTrading = true;
+  console.log("[Paper Config] Auto-trading started");
 }
 
-export function stopAutoTrading(): void {
+export async function stopAutoTrading(): Promise<void> {
   currentConfig.isAutoTrading = false;
+  console.log("[Paper Config] Auto-trading stopped");
 }
 
 export function isAutoTradingEnabled(): boolean {

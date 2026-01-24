@@ -92,7 +92,7 @@ router.post("/reset", async (req, res) => {
 
 router.post("/enable", async (req, res) => {
   try {
-    enablePaperTrading();
+    await enablePaperTrading();
     console.log("[Paper] Paper trading ENABLED - system can now execute trades");
     res.json({ 
       message: "Paper trading enabled", 
@@ -107,7 +107,7 @@ router.post("/enable", async (req, res) => {
 
 router.post("/disable", async (req, res) => {
   try {
-    disablePaperTrading();
+    await disablePaperTrading();
     console.log("[Paper] Paper trading DISABLED - no trades will execute");
     res.json({ 
       message: "Paper trading disabled", 
@@ -130,7 +130,7 @@ router.post("/start", async (req, res) => {
       });
       return;
     }
-    startAutoTrading();
+    await startAutoTrading();
     console.log("[Paper] Auto-trading started");
     res.json({ 
       message: "Auto-trading started", 
@@ -145,7 +145,7 @@ router.post("/start", async (req, res) => {
 
 router.post("/stop", async (req, res) => {
   try {
-    stopAutoTrading();
+    await stopAutoTrading();
     console.log("[Paper] Auto-trading stopped");
     res.json({ 
       message: "Auto-trading stopped", 

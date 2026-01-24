@@ -3,6 +3,7 @@ import { registerRoutes, hydrateBackfillStateFromDb, backfillState } from "./rou
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { checkIncompleteBackfillJobs, backfillHistoricalData } from "./historical-data";
+import { loadPaperState } from "./paper/config";
 
 const app = express();
 const httpServer = createServer(app);
@@ -95,7 +96,9 @@ app.use((req, res, next) => {
     () => {
       log(`serving on port ${port}`);
       
-      hydrateBackfillStateFromDb().then(() => {
+      loadPaperState().then(() => {
+        return hydrateBackfillStateFromDb();
+      }).then(() => {
         return checkIncompleteBackfillJobs();
       }).then(async (result) => {
         if (result.hasIncomplete && result.progressPct !== undefined && result.progressPct < 100) {
