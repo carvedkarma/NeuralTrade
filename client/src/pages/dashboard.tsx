@@ -1,5 +1,5 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { SignalCard } from "@/components/signal-card";
 import { RegimeCard } from "@/components/regime-card";
 import { FeaturesCard } from "@/components/features-card";
@@ -43,10 +43,26 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { format } from "date-fns";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 
+interface HistoricalStatus {
+  totalCandles: number;
+  daysOfData: number;
+  startDate: string | null;
+  endDate: string | null;
+  backfillComplete: boolean;
+}
+
 export default function Dashboard() {
+  const [backfillInProgress, setBackfillInProgress] = useState(false);
+  const [backfillProgress, setBackfillProgress] = useState(0);
+
   const { data, isLoading, error, refetch, isFetching } = useQuery<DashboardData>({
     queryKey: ["/api/dashboard"],
     refetchInterval: 5000,
+  });
+
+  const { data: historicalStatus } = useQuery<HistoricalStatus>({
+    queryKey: ["/api/historical/status"],
+    refetchInterval: backfillInProgress ? 2000 : 30000,
   });
 
   const hasTriggeredAnalysis = useRef(false);
@@ -57,6 +73,32 @@ export default function Dashboard() {
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
     },
   });
+
+  const backfillMutation = useMutation({
+    mutationFn: async () => {
+      setBackfillInProgress(true);
+      setBackfillProgress(0);
+      const response = await apiRequest("POST", "/api/historical/backfill");
+      return response.json();
+    },
+    onSuccess: () => {
+      setBackfillInProgress(false);
+      setBackfillProgress(100);
+      queryClient.invalidateQueries({ queryKey: ["/api/historical/status"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
+    },
+    onError: () => {
+      setBackfillInProgress(false);
+    },
+  });
+
+  useEffect(() => {
+    if (backfillInProgress && historicalStatus) {
+      const targetCandles = 35040;
+      const progress = Math.min((historicalStatus.totalCandles / targetCandles) * 100, 99);
+      setBackfillProgress(progress);
+    }
+  }, [historicalStatus, backfillInProgress]);
 
   useEffect(() => {
     if (data && !data.aiAnalysis && !hasTriggeredAnalysis.current && !analyzeMutation.isPending) {
@@ -257,7 +299,13 @@ export default function Dashboard() {
               {/* Social Awareness & Historical Learning - Key new sections */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 <SocialAwarenessCard learningStats={data.learningStats} />
-                <HistoricalLearningCard learningStats={data.learningStats} />
+                <HistoricalLearningCard 
+                  learningStats={data.learningStats}
+                  historicalStatus={historicalStatus}
+                  onBackfill={() => backfillMutation.mutate()}
+                  backfillInProgress={backfillInProgress || backfillMutation.isPending}
+                  backfillProgress={backfillProgress}
+                />
               </div>
               
               {/* Data Sources & Pattern Memory */}

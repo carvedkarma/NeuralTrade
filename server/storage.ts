@@ -47,6 +47,7 @@ export interface IStorage {
   updateStrategySettings(settings: Partial<StrategyState>): void;
   getStrategyState(): StrategyState;
   requestAIAnalysis(): Promise<void>;
+  reloadHistoricalCandles(): Promise<void>;
 }
 
 class KalmanFilter {
@@ -210,8 +211,11 @@ export class MemStorage implements IStorage {
   private socialSimulationActive = false;
 
   constructor() {
-    this.loadPersistedState().then(() => {
+    this.loadPersistedState().then(async () => {
       console.log("[Persistence] State loaded from database");
+      
+      await this.reloadHistoricalCandles();
+      
       this.refreshData();
       this.startContinuousLearning();
       this.startSocialSimulation();
@@ -376,6 +380,29 @@ export class MemStorage implements IStorage {
         socialMediaStats: null,
         isHealthy: false,
       };
+    }
+  }
+
+  async reloadHistoricalCandles(): Promise<void> {
+    try {
+      const { loadCandlesFromDb, getDataRangeInfo } = await import("./historical-data");
+      
+      const rangeInfo = await getDataRangeInfo();
+      
+      if (rangeInfo.totalCandles > 0) {
+        const historicalCandles = await loadCandlesFromDb("BTCUSDT", "15m");
+        
+        if (historicalCandles.length > 0) {
+          this.candles = historicalCandles;
+          
+          this.learningStats.historicalCandlesProcessed = historicalCandles.length;
+          
+          console.log(`[Historical] Loaded ${historicalCandles.length} candles from database`);
+          console.log(`[Historical] Data range: ${new Date(rangeInfo.startTs!).toISOString().split('T')[0]} to ${new Date(rangeInfo.endTs!).toISOString().split('T')[0]}`);
+        }
+      }
+    } catch (error) {
+      console.error("[Historical] Error reloading candles from database:", error);
     }
   }
 

@@ -2,6 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
+import { backfillHistoricalData, getDataRangeInfo, incrementalUpdate, fillGaps } from "./historical-data";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -80,6 +81,94 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error getting persistence status:", error);
       res.status(500).json({ error: "Failed to get persistence status" });
+    }
+  });
+
+  app.get("/api/historical/status", async (req, res) => {
+    try {
+      const rangeInfo = await getDataRangeInfo();
+      const daysOfData = rangeInfo.startTs && rangeInfo.endTs 
+        ? Math.round((rangeInfo.endTs - rangeInfo.startTs) / (24 * 60 * 60 * 1000))
+        : 0;
+      
+      res.json({
+        ...rangeInfo,
+        daysOfData,
+        startDate: rangeInfo.startTs ? new Date(rangeInfo.startTs).toISOString().split('T')[0] : null,
+        endDate: rangeInfo.endTs ? new Date(rangeInfo.endTs).toISOString().split('T')[0] : null,
+      });
+    } catch (error) {
+      console.error("Error getting historical status:", error);
+      res.status(500).json({ error: "Failed to get historical status" });
+    }
+  });
+
+  let backfillInProgress = false;
+  let backfillProgress = 0;
+  let backfillMessage = "";
+
+  app.post("/api/historical/backfill", async (req, res) => {
+    if (backfillInProgress) {
+      return res.status(409).json({ 
+        error: "Backfill already in progress", 
+        progress: backfillProgress,
+        message: backfillMessage 
+      });
+    }
+
+    const days = req.body.days || 370;
+    backfillInProgress = true;
+    backfillProgress = 0;
+    backfillMessage = "Starting backfill...";
+
+    res.json({ status: "started", days });
+
+    backfillHistoricalData("BTCUSDT", "15m", days, (progress, message) => {
+      backfillProgress = progress;
+      backfillMessage = message;
+    }).then(result => {
+      console.log("[Historical] Backfill finished:", result);
+      backfillInProgress = false;
+      backfillProgress = 100;
+      backfillMessage = `Complete! ${result.totalCandles} candles stored.`;
+      
+      storage.reloadHistoricalCandles();
+    }).catch(error => {
+      console.error("[Historical] Backfill error:", error);
+      backfillInProgress = false;
+      backfillMessage = `Error: ${error.message}`;
+    });
+  });
+
+  app.get("/api/historical/backfill/progress", async (req, res) => {
+    res.json({
+      inProgress: backfillInProgress,
+      progress: backfillProgress,
+      message: backfillMessage,
+    });
+  });
+
+  app.post("/api/historical/update", async (req, res) => {
+    try {
+      const result = await incrementalUpdate();
+      await storage.reloadHistoricalCandles();
+      res.json(result);
+    } catch (error) {
+      console.error("Error in incremental update:", error);
+      res.status(500).json({ error: "Failed to update historical data" });
+    }
+  });
+
+  app.post("/api/historical/fill-gaps", async (req, res) => {
+    try {
+      const filled = await fillGaps();
+      if (filled > 0) {
+        await storage.reloadHistoricalCandles();
+      }
+      res.json({ filled });
+    } catch (error) {
+      console.error("Error filling gaps:", error);
+      res.status(500).json({ error: "Failed to fill gaps" });
     }
   });
 

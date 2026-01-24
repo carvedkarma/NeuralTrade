@@ -1,6 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { Button } from "@/components/ui/button";
 import type { LearningStats } from "@shared/schema";
 import { 
   Database, Cpu, Brain, Activity, Layers, Clock, 
@@ -518,11 +519,11 @@ export function SocialAwarenessCard({ learningStats }: LearningStatsCardProps) {
         <CardHeader className="pb-3">
           <CardTitle className="text-sm font-medium flex items-center gap-2">
             <Globe className="h-4 w-4 text-muted-foreground" />
-            Social & Global Awareness
+            Live Feeling (Current)
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="text-sm text-muted-foreground">Loading social awareness stats...</p>
+          <p className="text-sm text-muted-foreground">Loading live sentiment data...</p>
         </CardContent>
       </Card>
     );
@@ -576,13 +577,16 @@ export function SocialAwarenessCard({ learningStats }: LearningStatsCardProps) {
       <CardHeader className="pb-3">
         <CardTitle className="text-sm font-medium flex items-center gap-2">
           <Globe className="h-4 w-4 text-cyan-400" />
-          Social & Global Awareness
+          Live Feeling (Current)
           <Badge variant="outline" className="ml-auto text-xs">
             {socialAwareness.totalItemsRead} items read
           </Badge>
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
+        <div className="text-[10px] text-amber-500/80 bg-amber-500/10 rounded px-2 py-1 mb-2">
+          Affects live signals only, not backtests
+        </div>
         {/* Global Sentiment Summary */}
         <div className="bg-gradient-to-br from-cyan-500/10 to-blue-500/10 rounded-lg p-3">
           <div className="flex items-center justify-between mb-2">
@@ -645,7 +649,28 @@ export function SocialAwarenessCard({ learningStats }: LearningStatsCardProps) {
   );
 }
 
-export function HistoricalLearningCard({ learningStats }: LearningStatsCardProps) {
+interface HistoricalDataStatus {
+  totalCandles: number;
+  daysOfData: number;
+  startDate: string | null;
+  endDate: string | null;
+  backfillComplete: boolean;
+}
+
+interface HistoricalLearningCardProps extends LearningStatsCardProps {
+  historicalStatus?: HistoricalDataStatus | null;
+  onBackfill?: () => void;
+  backfillInProgress?: boolean;
+  backfillProgress?: number;
+}
+
+export function HistoricalLearningCard({ 
+  learningStats, 
+  historicalStatus,
+  onBackfill,
+  backfillInProgress,
+  backfillProgress
+}: HistoricalLearningCardProps) {
   if (!learningStats?.historicalLearning) {
     return (
       <Card data-testid="card-historical-learning-empty">
@@ -673,18 +698,41 @@ export function HistoricalLearningCard({ learningStats }: LearningStatsCardProps
     return `${Math.floor(seconds / 86400)}d ago`;
   };
 
+  const displayDays = historicalStatus?.daysOfData || 
+    Math.round((new Date(historicalLearning.dataRangeEnd).getTime() - 
+                new Date(historicalLearning.dataRangeStart).getTime()) / (24 * 60 * 60 * 1000));
+  
+  const displayCandles = historicalStatus?.totalCandles || historicalLearning.totalHistoricalCandles;
+
   return (
     <Card data-testid="card-historical-learning">
       <CardHeader className="pb-3">
         <CardTitle className="text-sm font-medium flex items-center gap-2">
           <History className="h-4 w-4 text-indigo-400" />
           Historical Data Learning
-          <Badge variant="outline" className="ml-auto text-xs">
-            {historicalLearning.yearsOfData} year{historicalLearning.yearsOfData !== 1 ? 's' : ''} of data
+          <Badge variant="outline" className="ml-auto text-xs bg-blue-500/10 text-blue-400 border-blue-500/30">
+            Price-only
           </Badge>
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
+        <div className="text-[10px] text-blue-500/80 bg-blue-500/10 rounded px-2 py-1 mb-2">
+          Backtests use historical price/volume only. No sentiment applied retroactively.
+        </div>
+        
+        {/* Backfill Status */}
+        {backfillInProgress && (
+          <div className="bg-gradient-to-br from-amber-500/10 to-orange-500/10 rounded-lg p-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium">Fetching Historical Data...</span>
+              <span className="text-lg font-bold text-amber-400">
+                {backfillProgress?.toFixed(0) || 0}%
+              </span>
+            </div>
+            <Progress value={backfillProgress || 0} className="h-2" />
+          </div>
+        )}
+        
         {/* Learning Progress */}
         <div className="bg-gradient-to-br from-indigo-500/10 to-purple-500/10 rounded-lg p-3">
           <div className="flex items-center justify-between mb-2">
@@ -706,10 +754,11 @@ export function HistoricalLearningCard({ learningStats }: LearningStatsCardProps
         <div className="grid grid-cols-2 gap-3">
           <div className="bg-muted/30 rounded-lg p-3 text-center">
             <Database className="h-4 w-4 mx-auto mb-1 text-blue-400" />
-            <div className="text-xs text-muted-foreground">Historical Candles</div>
+            <div className="text-xs text-muted-foreground">Historical Candles (15m)</div>
             <div className="text-lg font-bold" data-testid="text-historical-candles">
-              {historicalLearning.totalHistoricalCandles.toLocaleString()}
+              {displayCandles.toLocaleString()}
             </div>
+            <div className="text-[10px] text-muted-foreground">{displayDays} days</div>
           </div>
           <div className="bg-muted/30 rounded-lg p-3 text-center">
             <BookOpen className="h-4 w-4 mx-auto mb-1 text-purple-400" />
@@ -739,14 +788,34 @@ export function HistoricalLearningCard({ learningStats }: LearningStatsCardProps
         <div className="pt-2 border-t">
           <div className="text-xs text-muted-foreground mb-2">Training Data Range</div>
           <div className="flex items-center justify-between text-sm">
-            <span className="font-medium">{historicalLearning.dataRangeStart}</span>
+            <span className="font-medium">{historicalStatus?.startDate || historicalLearning.dataRangeStart}</span>
             <span className="text-muted-foreground">→</span>
-            <span className="font-medium">{historicalLearning.dataRangeEnd}</span>
+            <span className="font-medium">{historicalStatus?.endDate || historicalLearning.dataRangeEnd}</span>
           </div>
           <div className="text-xs text-muted-foreground mt-2 flex items-center gap-1">
             <Clock className="h-3 w-3" />
             Last training: {formatTime(historicalLearning.lastTrainingTime)}
           </div>
+          
+          {/* Backfill Button */}
+          {onBackfill && !backfillInProgress && displayDays < 300 && (
+            <Button
+              onClick={onBackfill}
+              variant="outline"
+              size="sm"
+              className="mt-3 w-full"
+              data-testid="button-backfill"
+            >
+              <Database className="h-3 w-3 mr-2" />
+              Fetch 1 Year Historical Data
+            </Button>
+          )}
+          {historicalStatus?.backfillComplete && (
+            <div className="mt-2 text-[10px] text-emerald-400 flex items-center gap-1">
+              <CheckCircle2 className="h-3 w-3" />
+              Historical data complete
+            </div>
+          )}
         </div>
       </CardContent>
     </Card>

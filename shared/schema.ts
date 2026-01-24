@@ -391,7 +391,8 @@ export type DashboardData = z.infer<typeof dashboardDataSchema>;
 
 export const candles = pgTable("candles", {
   id: serial("id").primaryKey(),
-  timestamp: integer("timestamp").notNull(),
+  symbol: varchar("symbol", { length: 20 }).notNull().default("BTCUSDT"),
+  timestamp: bigint("timestamp", { mode: "number" }).notNull(),
   timeframe: varchar("timeframe", { length: 10 }).notNull().default("15m"),
   open: real("open").notNull(),
   high: real("high").notNull(),
@@ -401,6 +402,8 @@ export const candles = pgTable("candles", {
 }, (table) => ({
   timestampIdx: index("candles_timestamp_idx").on(table.timestamp),
   timeframeIdx: index("candles_timeframe_idx").on(table.timeframe),
+  symbolIdx: index("candles_symbol_idx").on(table.symbol),
+  uniqueCandle: index("candles_unique_idx").on(table.symbol, table.timestamp, table.timeframe),
 }));
 
 export const features = pgTable("features", {
@@ -595,6 +598,9 @@ export const learningState = pgTable("learning_state", {
   lastTrainTs: bigint("last_train_ts", { mode: "number" }),
   lastFeatureTs: bigint("last_feature_ts", { mode: "number" }),
   lastIngestedTs: bigint("last_ingested_ts", { mode: "number" }),
+  dataRangeStartTs: bigint("data_range_start_ts", { mode: "number" }),
+  dataRangeEndTs: bigint("data_range_end_ts", { mode: "number" }),
+  totalCandles: integer("total_candles").default(0),
   modelVersion: varchar("model_version", { length: 50 }),
   patternsVersion: varchar("patterns_version", { length: 50 }),
   trainingProgress: real("training_progress").default(0),
@@ -603,6 +609,7 @@ export const learningState = pgTable("learning_state", {
   totalPredictions: integer("total_predictions").default(0),
   historicalWinRate: real("historical_win_rate").default(0),
   backtestTrades: integer("backtest_trades").default(0),
+  backfillComplete: boolean("backfill_complete").default(false),
   updatedTs: bigint("updated_ts", { mode: "number" }).notNull(),
 });
 

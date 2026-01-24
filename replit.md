@@ -35,12 +35,21 @@ The system operates with live data only - no simulated fallback. Shows error mes
 - **CoinGecko/CryptoCompare APIs** as fallbacks with aggressive caching
 - Dashboard now has tabbed navigation: Overview, Signal, Learning, AI Analysis, Indicators, Performance
 - **Learning Analytics Tab**: Shows ML/DL system learning progress with:
-  - Social & Global Awareness: Tracks reads from Fear & Greed Index, CryptoPanic News, Twitter/X, Reddit
-  - Historical Data Learning: Shows patterns learned, backtest trades, historical win rate
+  - **Live Feeling (Current)**: Renamed from "Social & Global Awareness" - tracks reads from Fear & Greed Index, CryptoPanic News, Twitter/X, Reddit
+    - Shows disclaimer: "Affects live signals only, not backtests" to clarify data separation
+  - **Historical Data Learning**: Shows patterns learned, backtest trades, historical win rate
+    - Shows "Price-only" badge with disclaimer: "Backtests use historical price/volume only. No sentiment applied retroactively."
+    - Includes "Fetch 1 Year Historical Data" button when less than 300 days of data
+    - Shows historical data range (startDate to endDate) and total candle count
+    - Progress bar during backfill operation
   - Data Sources tracking with attempts/successes for each API
   - Pattern Memory stats with regime breakdown
   - Feature Engine with 40 features across 6 categories
   - ML Ensemble Performance for all 3 models
+- **Data Separation Architecture**: Critical design principle separating live vs historical data:
+  - **Live sentiment data** (Fear & Greed, Twitter, Reddit, news) affects ONLY current signal generation
+  - **Historical backtesting** uses ONLY price/volume/technical indicators - no retroactive sentiment
+  - This prevents data leakage and ensures backtest validity
 - **Continuous Learning Loop**: Background loop refreshes data and trains every 30 seconds
 - **Social Media Simulation**: Accumulates Twitter/Reddit reads every 5 seconds with realistic numbers
 - **Real-time Dashboard**: Refreshes every 5 seconds for async real-time feel
