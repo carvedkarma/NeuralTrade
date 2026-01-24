@@ -268,18 +268,18 @@ export async function closePosition(
     const newEquity = portfolio.currentEquityUsdt + totalRealizedPnl;
     const newPeak = Math.max(portfolio.peakEquityUsdt, newEquity);
     const drawdown = newPeak > 0 ? ((newPeak - newEquity) / newPeak) * 100 : 0;
-    const maxDrawdown = Math.max(portfolio.maxDrawdownPct, drawdown);
+    const maxDrawdown = Math.max(portfolio.maxDrawdownPct ?? 0, drawdown);
 
     await storage.updatePortfolio({
       currentEquityUsdt: newEquity,
       availableBalanceUsdt: newEquity,
-      realizedPnlUsdt: portfolio.realizedPnlUsdt + totalRealizedPnl,
+      realizedPnlUsdt: (portfolio.realizedPnlUsdt ?? 0) + totalRealizedPnl,
       unrealizedPnlUsdt: 0,
       peakEquityUsdt: newPeak,
       maxDrawdownPct: maxDrawdown,
-      totalTrades: portfolio.totalTrades + 1,
-      winningTrades: totalRealizedPnl > 0 ? portfolio.winningTrades + 1 : portfolio.winningTrades,
-      losingTrades: totalRealizedPnl <= 0 ? portfolio.losingTrades + 1 : portfolio.losingTrades,
+      totalTrades: (portfolio.totalTrades ?? 0) + 1,
+      winningTrades: totalRealizedPnl > 0 ? (portfolio.winningTrades ?? 0) + 1 : portfolio.winningTrades ?? 0,
+      losingTrades: totalRealizedPnl <= 0 ? (portfolio.losingTrades ?? 0) + 1 : portfolio.losingTrades ?? 0,
     });
 
     await storage.recordEquityPoint(newEquity, drawdown);
@@ -396,6 +396,7 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
 export async function getPortfolioSummary() {
   const portfolio = await storage.getOrCreatePortfolio();
   const openPosition = await storage.getOpenPosition();
+  const config = getConfig();
   
   let unrealizedPnl = portfolio.unrealizedPnlUsdt;
   let exposure = 0;
@@ -404,26 +405,87 @@ export async function getPortfolioSummary() {
     exposure = openPosition.notionalUsdt;
   }
 
-  const winRate = portfolio.totalTrades > 0 
-    ? (portfolio.winningTrades / portfolio.totalTrades) * 100 
+  const totalTrades = portfolio.totalTrades ?? 0;
+  const winningTrades = portfolio.winningTrades ?? 0;
+  const losingTrades = portfolio.losingTrades ?? 0;
+  const realizedPnl = portfolio.realizedPnlUsdt ?? 0;
+  const unrealized = unrealizedPnl ?? 0;
+  
+  const winRate = totalTrades > 0 
+    ? (winningTrades / totalTrades) * 100 
     : 0;
 
+  const closedPositions = await storage.getPositions("CLOSED", 1000);
+  
+  let totalWinPct = 0;
+  let totalLossPct = 0;
+  let bestTrade = 0;
+  let worstTrade = 0;
+  let grossProfit = 0;
+  let grossLoss = 0;
+  const returns: number[] = [];
+
+  for (const pos of closedPositions) {
+    const pnl = pos.realizedPnlUsdt ?? 0;
+    const pct = pos.notionalUsdt > 0 ? (pnl / pos.notionalUsdt) * 100 : 0;
+    returns.push(pct);
+    
+    if (pnl > 0) {
+      totalWinPct += pct;
+      grossProfit += pnl;
+      if (pct > bestTrade) bestTrade = pct;
+    } else {
+      totalLossPct += Math.abs(pct);
+      grossLoss += Math.abs(pnl);
+      if (pct < worstTrade) worstTrade = pct;
+    }
+  }
+
+  const avgWin = winningTrades > 0 ? totalWinPct / winningTrades : 0;
+  const avgLoss = losingTrades > 0 ? totalLossPct / losingTrades : 0;
+  const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0;
+  
+  const expectancy = totalTrades > 0
+    ? (winRate / 100) * avgWin - ((100 - winRate) / 100) * avgLoss
+    : 0;
+
+  let sharpe = 0;
+  if (returns.length > 1) {
+    const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+    const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / (returns.length - 1);
+    const std = Math.sqrt(variance);
+    sharpe = std > 0 ? (mean / std) * Math.sqrt(252) : 0;
+  }
+
+  const equity = portfolio.currentEquityUsdt + unrealized;
+  const peak = portfolio.peakEquityUsdt;
+  const currentDrawdown = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
+
   return {
-    equity: portfolio.currentEquityUsdt + unrealizedPnl,
+    equity,
     startingEquity: portfolio.startingEquityUsdt,
     availableBalance: portfolio.availableBalanceUsdt,
-    realizedPnl: portfolio.realizedPnlUsdt,
-    unrealizedPnl,
-    totalPnl: portfolio.realizedPnlUsdt + unrealizedPnl,
-    maxDrawdown: portfolio.maxDrawdownPct,
-    totalTrades: portfolio.totalTrades,
-    winningTrades: portfolio.winningTrades,
-    losingTrades: portfolio.losingTrades,
+    realizedPnl,
+    unrealizedPnl: unrealized,
+    totalPnl: realizedPnl + unrealized,
+    maxDrawdown: portfolio.maxDrawdownPct ?? 0,
+    currentDrawdown,
+    totalTrades,
+    winningTrades,
+    losingTrades,
     winRate,
+    avgWin,
+    avgLoss,
+    sharpe,
+    expectancy,
+    bestTrade,
+    worstTrade,
+    profitFactor: profitFactor === Infinity ? 999.99 : profitFactor,
     exposure,
+    isAutoTrading: config.isAutoTrading,
     openPosition: openPosition ? {
       id: openPosition.id,
-      side: openPosition.side,
+      side: openPosition.side as "LONG" | "SHORT",
       entryPrice: openPosition.entryPrice,
       qty: openPosition.qty,
       notional: openPosition.notionalUsdt,
@@ -431,7 +493,7 @@ export async function getPortfolioSummary() {
       tp1: openPosition.tp1,
       tp2: openPosition.tp2,
       barsOpen: openPosition.barsOpen,
-      unrealizedPnl,
+      unrealizedPnl: unrealized,
       entryTs: openPosition.entryTs,
     } : null,
   };

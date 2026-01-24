@@ -29,11 +29,11 @@ import {
   HistoricalLearningCard
 } from "@/components/learning-stats-card";
 import {
-  PortfolioCard,
+  PerformanceCard,
+  EquityPerformanceCard,
+  RiskStatusCard,
   OpenPositionCard,
-  EquityCurveCard,
-  RecentTradesCard,
-  PaperTradingStatsCard
+  PositionHistoryCard
 } from "@/components/paper-trading-card";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff } from "lucide-react";
@@ -236,14 +236,16 @@ export default function Dashboard() {
 
           <TabsContent value="paper" className="mt-0">
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-8 space-y-4">
-                <EquityCurveCard />
-                <RecentTradesCard />
+              <div className="lg:col-span-4 space-y-4">
+                <PerformanceCard />
               </div>
               <div className="lg:col-span-4 space-y-4">
-                <PortfolioCard />
+                <EquityPerformanceCard />
+                <RiskStatusCard />
+              </div>
+              <div className="lg:col-span-4 space-y-4">
                 <OpenPositionCard />
-                <PaperTradingStatsCard />
+                <PositionHistoryCard />
               </div>
             </div>
           </TabsContent>

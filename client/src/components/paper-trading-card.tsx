@@ -6,17 +6,15 @@ import { Separator } from "@/components/ui/separator";
 import { 
   TrendingUp, 
   TrendingDown, 
-  Wallet, 
-  Target, 
-  AlertTriangle, 
-  RotateCcw,
-  DollarSign,
   BarChart3,
   Activity,
+  AlertTriangle,
+  Shield,
+  Play,
+  Square,
+  RotateCcw,
   Clock,
-  Percent,
-  ArrowUpRight,
-  ArrowDownRight
+  Target
 } from "lucide-react";
 import { format } from "date-fns";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -43,6 +41,15 @@ interface PortfolioSummary {
   losingTrades: number;
   winRate: number;
   exposure: number;
+  avgWin: number;
+  avgLoss: number;
+  sharpe: number;
+  expectancy: number;
+  currentDrawdown: number;
+  bestTrade: number;
+  worstTrade: number;
+  profitFactor: number;
+  isAutoTrading: boolean;
   openPosition: {
     id: number;
     side: "LONG" | "SHORT";
@@ -64,22 +71,42 @@ interface EquityPoint {
   drawdownPct: number;
 }
 
-interface Trade {
+interface Position {
   id: number;
-  positionId: number;
-  ts: number;
-  action: string;
-  price: number;
+  symbol: string;
+  side: string;
+  status: string;
+  entryTs: number;
+  entryPrice: number;
   qty: number;
-  feeUsdt: number;
-  pnlUsdt: number;
-  reason: string | null;
+  notionalUsdt: number;
+  stopLoss: number | null;
+  tp1: number | null;
+  tp2: number | null;
+  exitTs: number | null;
+  exitPrice: number | null;
+  realizedPnlUsdt: number | null;
+  exitReason: string | null;
 }
 
-export function PortfolioCard() {
+export function PerformanceCard() {
   const { data: portfolio } = useQuery<PortfolioSummary>({
     queryKey: ["/api/paper/portfolio"],
     refetchInterval: 5000,
+  });
+
+  const startMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/paper/start"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/paper"] });
+    },
+  });
+
+  const stopMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/paper/stop"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/paper"] });
+    },
   });
 
   const resetMutation = useMutation({
@@ -92,70 +119,308 @@ export function PortfolioCard() {
   if (!portfolio) return null;
 
   const pnlPct = ((portfolio.equity - portfolio.startingEquity) / portfolio.startingEquity) * 100;
-  const isProfitable = portfolio.totalPnl >= 0;
+  const isAutoTrading = portfolio.isAutoTrading ?? false;
 
   return (
-    <Card data-testid="card-portfolio">
+    <Card data-testid="card-performance">
       <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
         <CardTitle className="text-sm font-medium flex items-center gap-2">
-          <Wallet className="h-4 w-4 text-primary" />
-          Paper Portfolio
+          <BarChart3 className="h-4 w-4 text-primary" />
+          Performance
         </CardTitle>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => resetMutation.mutate()}
-          disabled={resetMutation.isPending}
-          data-testid="button-reset-portfolio"
+        <Badge 
+          variant="secondary"
+          className={pnlPct >= 0 ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}
+          data-testid="badge-pnl-pct"
         >
-          <RotateCcw className={`h-4 w-4 ${resetMutation.isPending ? "animate-spin" : ""}`} />
-        </Button>
+          {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}%
+        </Badge>
       </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="flex items-baseline justify-between">
-          <span className="text-2xl font-bold" data-testid="text-equity">
-            ${portfolio.equity.toFixed(2)}
-          </span>
-          <Badge 
-            variant={isProfitable ? "secondary" : "destructive"}
-            className={isProfitable ? "bg-emerald-500/20 text-emerald-400" : ""}
-            data-testid="badge-pnl-pct"
-          >
-            {isProfitable ? <ArrowUpRight className="h-3 w-3 mr-1" /> : <ArrowDownRight className="h-3 w-3 mr-1" />}
-            {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}%
-          </Badge>
+      <CardContent className="space-y-4">
+        <div className="text-center">
+          <p className="text-xs text-muted-foreground">Account Equity</p>
+          <p className="text-3xl font-bold text-emerald-400" data-testid="text-equity">
+            ${portfolio.equity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </p>
         </div>
 
-        <div className="grid grid-cols-2 gap-3 text-sm">
-          <div>
-            <p className="text-muted-foreground text-xs">Realized PnL</p>
-            <p className={`font-medium ${portfolio.realizedPnl >= 0 ? "text-emerald-400" : "text-red-400"}`} data-testid="text-realized-pnl">
-              {portfolio.realizedPnl >= 0 ? "+" : ""}${portfolio.realizedPnl.toFixed(2)}
-            </p>
+        <div className="flex justify-center gap-2">
+          {isAutoTrading ? (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => stopMutation.mutate()}
+              disabled={stopMutation.isPending}
+              className="gap-2"
+              data-testid="button-stop-trading"
+            >
+              <Square className="h-4 w-4" />
+              Stop Trading
+            </Button>
+          ) : (
+            <Button
+              variant="default"
+              size="sm"
+              onClick={() => startMutation.mutate()}
+              disabled={startMutation.isPending}
+              className="gap-2 bg-emerald-600"
+              data-testid="button-start-trading"
+            >
+              <Play className="h-4 w-4" />
+              Start Trading
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => resetMutation.mutate()}
+            disabled={resetMutation.isPending}
+            data-testid="button-reset"
+          >
+            <RotateCcw className={`h-4 w-4 ${resetMutation.isPending ? "animate-spin" : ""}`} />
+          </Button>
+        </div>
+
+        <div className="grid grid-cols-3 gap-2 text-center">
+          <div className="p-2 rounded bg-muted/30">
+            <p className="text-xs text-muted-foreground">Total</p>
+            <p className="text-lg font-semibold" data-testid="text-total">{portfolio.totalTrades}</p>
           </div>
-          <div>
-            <p className="text-muted-foreground text-xs">Unrealized PnL</p>
-            <p className={`font-medium ${portfolio.unrealizedPnl >= 0 ? "text-emerald-400" : "text-red-400"}`} data-testid="text-unrealized-pnl">
-              {portfolio.unrealizedPnl >= 0 ? "+" : ""}${portfolio.unrealizedPnl.toFixed(2)}
-            </p>
+          <div className="p-2 rounded bg-emerald-500/10">
+            <p className="text-xs text-muted-foreground">Wins</p>
+            <p className="text-lg font-semibold text-emerald-400" data-testid="text-wins">{portfolio.winningTrades}</p>
           </div>
-          <div>
-            <p className="text-muted-foreground text-xs">Win Rate</p>
-            <p className="font-medium" data-testid="text-win-rate">{portfolio.winRate.toFixed(1)}%</p>
+          <div className="p-2 rounded bg-red-500/10">
+            <p className="text-xs text-muted-foreground">Losses</p>
+            <p className="text-lg font-semibold text-red-400" data-testid="text-losses">{portfolio.losingTrades}</p>
           </div>
-          <div>
-            <p className="text-muted-foreground text-xs">Max Drawdown</p>
-            <p className="font-medium text-amber-400" data-testid="text-max-dd">{portfolio.maxDrawdown.toFixed(2)}%</p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Win Rate</span>
+            <span className={(portfolio.winRate ?? 0) >= 50 ? "text-emerald-400" : "text-red-400"}>
+              {(portfolio.winRate ?? 0).toFixed(1)}%
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Profit Factor</span>
+            <span className={(portfolio.profitFactor ?? 0) >= 1 ? "text-emerald-400" : "text-red-400"}>
+              {(portfolio.profitFactor ?? 0).toFixed(2)}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Avg Win</span>
+            <span className="text-emerald-400">+{(portfolio.avgWin ?? 0).toFixed(2)}%</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Avg Loss</span>
+            <span className="text-red-400">-{Math.abs(portfolio.avgLoss ?? 0).toFixed(2)}%</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Sharpe</span>
+            <span>{(portfolio.sharpe ?? 0).toFixed(2)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Expectancy</span>
+            <span className={(portfolio.expectancy ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}>
+              {(portfolio.expectancy ?? 0) >= 0 ? "+" : ""}{(portfolio.expectancy ?? 0).toFixed(2)}%
+            </span>
           </div>
         </div>
 
         <Separator />
 
-        <div className="flex justify-between text-xs text-muted-foreground">
-          <span>Trades: {portfolio.totalTrades}</span>
-          <span className="text-emerald-400">{portfolio.winningTrades}W</span>
-          <span className="text-red-400">{portfolio.losingTrades}L</span>
-          <span>Exposure: ${portfolio.exposure.toFixed(0)}</span>
+        <div className="space-y-2 text-sm">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-amber-400" />
+            <span className="text-muted-foreground">Max Drawdown</span>
+            <span className="ml-auto text-red-400">-{(portfolio.maxDrawdown ?? 0).toFixed(2)}%</span>
+          </div>
+          <div className="flex justify-between pl-6">
+            <span className="text-muted-foreground">Current DD</span>
+            <span className="text-red-400">-{(portfolio.currentDrawdown ?? 0).toFixed(2)}%</span>
+          </div>
+        </div>
+
+        <Separator />
+
+        <div className="flex justify-between text-sm">
+          <div className="flex items-center gap-1">
+            <TrendingUp className="h-3 w-3 text-emerald-400" />
+            <span className="text-muted-foreground">Best:</span>
+            <span className="text-emerald-400">+{(portfolio.bestTrade ?? 0).toFixed(2)}%</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <TrendingDown className="h-3 w-3 text-red-400" />
+            <span className="text-muted-foreground">Worst:</span>
+            <span className="text-red-400">{(portfolio.worstTrade ?? 0).toFixed(2)}%</span>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function EquityPerformanceCard() {
+  const { data: portfolio } = useQuery<PortfolioSummary>({
+    queryKey: ["/api/paper/portfolio"],
+    refetchInterval: 5000,
+  });
+
+  const { data: equityCurve } = useQuery<EquityPoint[]>({
+    queryKey: ["/api/paper/equity"],
+    refetchInterval: 10000,
+  });
+
+  if (!portfolio) return null;
+
+  const pnlPct = ((portfolio.equity - portfolio.startingEquity) / portfolio.startingEquity) * 100;
+  const chartData = equityCurve?.map((p) => ({
+    time: format(new Date(p.ts), "MM/dd HH:mm"),
+    equity: p.equityUsdt,
+  })) ?? [];
+
+  return (
+    <Card data-testid="card-equity-performance">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium flex items-center gap-2">
+          <Activity className="h-4 w-4 text-primary" />
+          Performance
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div>
+          <p className="text-xs text-muted-foreground flex items-center gap-1">
+            <BarChart3 className="h-3 w-3" />
+            Equity
+          </p>
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-bold" data-testid="text-equity-value">
+              ${portfolio.equity.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+            </span>
+            <Badge 
+              variant="secondary"
+              className={pnlPct >= 0 ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}
+            >
+              {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}%
+            </Badge>
+          </div>
+        </div>
+
+        {chartData.length > 1 ? (
+          <ResponsiveContainer width="100%" height={120}>
+            <LineChart data={chartData}>
+              <XAxis dataKey="time" tick={false} axisLine={false} />
+              <YAxis domain={['auto', 'auto']} hide />
+              <Tooltip 
+                contentStyle={{ 
+                  backgroundColor: 'hsl(var(--card))', 
+                  border: '1px solid hsl(var(--border))',
+                  borderRadius: '8px',
+                }}
+              />
+              <ReferenceLine y={portfolio.startingEquity} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" />
+              <Line 
+                type="monotone" 
+                dataKey="equity" 
+                stroke="hsl(var(--primary))" 
+                strokeWidth={2}
+                dot={false}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        ) : (
+          <div className="h-[120px] flex items-center justify-center text-muted-foreground text-xs">
+            Start trading to see equity curve
+          </div>
+        )}
+
+        <div className="grid grid-cols-3 gap-4 text-sm">
+          <div>
+            <p className="text-xs text-muted-foreground flex items-center gap-1">
+              <Target className="h-3 w-3" /> Win Rate
+            </p>
+            <p className={`font-medium ${(portfolio.winRate ?? 0) >= 50 ? "text-emerald-400" : "text-red-400"}`}>
+              {(portfolio.winRate ?? 0).toFixed(1)}%
+            </p>
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground flex items-center gap-1">
+              <TrendingUp className="h-3 w-3" /> Profit Factor
+            </p>
+            <p className="font-medium">{(portfolio.profitFactor ?? 0).toFixed(2)}</p>
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground flex items-center gap-1">
+              <Activity className="h-3 w-3" /> Trades
+            </p>
+            <p className="font-medium">{portfolio.totalTrades ?? 0}</p>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function RiskStatusCard() {
+  const { data: portfolio } = useQuery<PortfolioSummary>({
+    queryKey: ["/api/paper/portfolio"],
+    refetchInterval: 5000,
+  });
+
+  if (!portfolio) return null;
+
+  const currentDD = portfolio.currentDrawdown ?? 0;
+  const maxDD = portfolio.maxDrawdown ?? 0;
+  const exposurePct = portfolio.startingEquity > 0 
+    ? ((portfolio.exposure ?? 0) / portfolio.startingEquity) * 100 
+    : 0;
+
+  let riskLevel: "normal" | "warning" | "danger" = "normal";
+  let riskMessage = "Trading conditions are favorable";
+
+  if (currentDD > 10 || exposurePct > 50) {
+    riskLevel = "danger";
+    riskMessage = "High risk - consider reducing exposure";
+  } else if (currentDD > 5 || exposurePct > 30) {
+    riskLevel = "warning";
+    riskMessage = "Elevated risk - monitor closely";
+  }
+
+  const riskColors = {
+    normal: "bg-emerald-500/10 border-emerald-500/30 text-emerald-400",
+    warning: "bg-amber-500/10 border-amber-500/30 text-amber-400",
+    danger: "bg-red-500/10 border-red-500/30 text-red-400",
+  };
+
+  return (
+    <Card data-testid="card-risk-status">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium flex items-center gap-2">
+          <Shield className="h-4 w-4 text-primary" />
+          Risk Status
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className={`p-3 rounded border ${riskColors[riskLevel]}`}>
+          <p className="font-medium capitalize">{riskLevel}</p>
+          <p className="text-xs opacity-80">{riskMessage}</p>
+        </div>
+
+        <div className="space-y-2 text-sm">
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Current Drawdown</span>
+            <span className="text-red-400">-{currentDD.toFixed(2)}%</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Max Drawdown</span>
+            <span className="text-red-400">-{maxDD.toFixed(2)}%</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Market Exposure</span>
+            <span>{exposurePct.toFixed(0)}%</span>
+          </div>
         </div>
       </CardContent>
     </Card>
@@ -209,38 +474,36 @@ export function OpenPositionCard() {
         <div className="grid grid-cols-2 gap-3 text-sm">
           <div>
             <p className="text-muted-foreground text-xs">Entry Price</p>
-            <p className="font-medium" data-testid="text-entry-price">${pos.entryPrice.toFixed(2)}</p>
+            <p className="font-medium">${pos.entryPrice.toFixed(2)}</p>
           </div>
           <div>
             <p className="text-muted-foreground text-xs">Size</p>
-            <p className="font-medium" data-testid="text-size">{pos.qty.toFixed(6)} BTC</p>
+            <p className="font-medium">{pos.qty.toFixed(6)} BTC</p>
           </div>
           <div>
             <p className="text-muted-foreground text-xs">Notional</p>
-            <p className="font-medium" data-testid="text-notional">${pos.notional.toFixed(2)}</p>
+            <p className="font-medium">${pos.notional.toFixed(2)}</p>
           </div>
           <div>
             <p className="text-muted-foreground text-xs">Unrealized PnL</p>
-            <p className={`font-medium ${pos.unrealizedPnl >= 0 ? "text-emerald-400" : "text-red-400"}`} data-testid="text-pos-pnl">
+            <p className={`font-medium ${pos.unrealizedPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
               {pos.unrealizedPnl >= 0 ? "+" : ""}${pos.unrealizedPnl.toFixed(2)} ({pnlPct.toFixed(2)}%)
             </p>
           </div>
         </div>
 
-        <Separator />
-
         <div className="grid grid-cols-3 gap-2 text-xs">
           <div className="p-2 rounded bg-red-500/10 border border-red-500/20">
-            <p className="text-muted-foreground">Stop Loss</p>
-            <p className="font-medium text-red-400" data-testid="text-sl">${pos.stopLoss?.toFixed(2) ?? "N/A"}</p>
+            <p className="text-muted-foreground">SL</p>
+            <p className="font-medium text-red-400">${pos.stopLoss?.toFixed(0) ?? "N/A"}</p>
           </div>
           <div className="p-2 rounded bg-amber-500/10 border border-amber-500/20">
             <p className="text-muted-foreground">TP1</p>
-            <p className="font-medium text-amber-400" data-testid="text-tp1">${pos.tp1?.toFixed(2) ?? "N/A"}</p>
+            <p className="font-medium text-amber-400">${pos.tp1?.toFixed(0) ?? "N/A"}</p>
           </div>
           <div className="p-2 rounded bg-emerald-500/10 border border-emerald-500/20">
             <p className="text-muted-foreground">TP2</p>
-            <p className="font-medium text-emerald-400" data-testid="text-tp2">${pos.tp2?.toFixed(2) ?? "N/A"}</p>
+            <p className="font-medium text-emerald-400">${pos.tp2?.toFixed(0) ?? "N/A"}</p>
           </div>
         </div>
 
@@ -256,199 +519,94 @@ export function OpenPositionCard() {
   );
 }
 
-export function EquityCurveCard() {
-  const { data: equityCurve } = useQuery<EquityPoint[]>({
-    queryKey: ["/api/paper/equity"],
-    refetchInterval: 10000,
-  });
-
-  const { data: portfolio } = useQuery<PortfolioSummary>({
-    queryKey: ["/api/paper/portfolio"],
+export function PositionHistoryCard() {
+  const { data: positions } = useQuery<Position[]>({
+    queryKey: ["/api/paper/positions", "CLOSED"],
     refetchInterval: 5000,
   });
 
-  const chartData = equityCurve?.map((p) => ({
-    time: format(new Date(p.ts), "MM/dd HH:mm"),
-    equity: p.equityUsdt,
-    drawdown: p.drawdownPct,
-  })) ?? [];
-
-  const startEquity = portfolio?.startingEquity ?? 10000;
+  const closedPositions = positions?.filter(p => p.status === "CLOSED").slice(0, 10) ?? [];
 
   return (
-    <Card data-testid="card-equity-curve">
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium flex items-center gap-2">
-          <BarChart3 className="h-4 w-4 text-primary" />
-          Equity Curve
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        {chartData.length > 0 ? (
-          <ResponsiveContainer width="100%" height={200}>
-            <LineChart data={chartData}>
-              <XAxis 
-                dataKey="time" 
-                tick={{ fontSize: 10 }} 
-                tickLine={false}
-                axisLine={false}
-              />
-              <YAxis 
-                domain={['auto', 'auto']}
-                tick={{ fontSize: 10 }}
-                tickLine={false}
-                axisLine={false}
-                tickFormatter={(v) => `$${v.toFixed(0)}`}
-              />
-              <Tooltip 
-                contentStyle={{ 
-                  backgroundColor: 'hsl(var(--card))', 
-                  border: '1px solid hsl(var(--border))',
-                  borderRadius: '8px',
-                }}
-                labelStyle={{ color: 'hsl(var(--foreground))' }}
-              />
-              <ReferenceLine y={startEquity} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" />
-              <Line 
-                type="monotone" 
-                dataKey="equity" 
-                stroke="hsl(var(--primary))" 
-                strokeWidth={2}
-                dot={false}
-              />
-            </LineChart>
-          </ResponsiveContainer>
-        ) : (
-          <div className="h-[200px] flex items-center justify-center text-muted-foreground text-sm">
-            No equity data yet. Start trading to see your curve.
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-export function RecentTradesCard() {
-  const { data: trades } = useQuery<Trade[]>({
-    queryKey: ["/api/paper/trades"],
-    refetchInterval: 5000,
-  });
-
-  const recentTrades = trades?.slice(0, 10) ?? [];
-
-  return (
-    <Card data-testid="card-recent-trades">
+    <Card data-testid="card-position-history">
       <CardHeader className="pb-2">
         <CardTitle className="text-sm font-medium flex items-center gap-2">
           <Activity className="h-4 w-4 text-primary" />
-          Recent Paper Trades
+          Position History
         </CardTitle>
       </CardHeader>
       <CardContent>
-        {recentTrades.length > 0 ? (
-          <div className="space-y-2 max-h-[300px] overflow-y-auto">
-            {recentTrades.map((trade) => (
-              <div 
-                key={trade.id} 
-                className="flex items-center justify-between p-2 rounded bg-muted/30 text-xs"
-                data-testid={`trade-row-${trade.id}`}
-              >
-                <div className="flex items-center gap-2">
-                  <Badge 
-                    variant="secondary"
-                    className={
-                      trade.action === "OPEN" ? "bg-blue-500/20 text-blue-400" :
-                      trade.action === "CLOSE" ? "bg-slate-500/20 text-slate-400" :
-                      "bg-amber-500/20 text-amber-400"
-                    }
-                  >
-                    {trade.action}
-                  </Badge>
-                  <span className="text-muted-foreground">{trade.qty.toFixed(4)} BTC</span>
-                  <span>@ ${trade.price.toFixed(2)}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  {trade.pnlUsdt !== 0 && (
-                    <span className={trade.pnlUsdt >= 0 ? "text-emerald-400" : "text-red-400"}>
-                      {trade.pnlUsdt >= 0 ? "+" : ""}${trade.pnlUsdt.toFixed(2)}
-                    </span>
+        {closedPositions.length > 0 ? (
+          <div className="space-y-2 max-h-[400px] overflow-y-auto">
+            {closedPositions.map((pos) => {
+              const pnlPct = pos.notionalUsdt > 0 && pos.realizedPnlUsdt 
+                ? (pos.realizedPnlUsdt / pos.notionalUsdt) * 100 
+                : 0;
+              const isWin = (pos.realizedPnlUsdt ?? 0) > 0;
+
+              return (
+                <div 
+                  key={pos.id} 
+                  className="p-3 rounded bg-muted/30 space-y-2"
+                  data-testid={`position-row-${pos.id}`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Badge 
+                        variant="secondary"
+                        className={pos.side === "LONG" ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}
+                      >
+                        {pos.side}
+                      </Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {format(new Date(pos.entryTs), "MMM d HH:mm")}
+                      </span>
+                    </div>
+                    <Badge 
+                      variant="secondary"
+                      className={isWin ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}
+                    >
+                      {isWin ? "+" : ""}{pnlPct.toFixed(2)}%
+                    </Badge>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div>
+                      <span className="text-muted-foreground">Entry: </span>
+                      <span>${pos.entryPrice.toFixed(0)}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Exit: </span>
+                      <span>${pos.exitPrice?.toFixed(0) ?? "-"}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">PnL: </span>
+                      <span className={isWin ? "text-emerald-400" : "text-red-400"}>
+                        ${pos.realizedPnlUsdt?.toFixed(2) ?? "0"}
+                      </span>
+                    </div>
+                  </div>
+                  {pos.exitReason && (
+                    <div className="text-xs">
+                      <Badge variant="outline" className="text-xs">
+                        {pos.exitReason}
+                      </Badge>
+                    </div>
                   )}
-                  <span className="text-muted-foreground">
-                    {format(new Date(trade.ts), "HH:mm")}
-                  </span>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground text-center py-4">No trades yet</p>
+          <p className="text-sm text-muted-foreground text-center py-8">
+            No closed positions yet. Start trading to build history.
+          </p>
         )}
       </CardContent>
     </Card>
   );
 }
 
-export function PaperTradingStatsCard() {
-  const { data: portfolio } = useQuery<PortfolioSummary>({
-    queryKey: ["/api/paper/portfolio"],
-    refetchInterval: 5000,
-  });
-
-  if (!portfolio) return null;
-
-  const avgWin = portfolio.winningTrades > 0 
-    ? (portfolio.realizedPnl > 0 ? portfolio.realizedPnl / portfolio.winningTrades : 0)
-    : 0;
-  const avgLoss = portfolio.losingTrades > 0 
-    ? (portfolio.realizedPnl < 0 ? Math.abs(portfolio.realizedPnl) / portfolio.losingTrades : 0)
-    : 0;
-  const profitFactor = avgLoss > 0 ? avgWin / avgLoss : avgWin > 0 ? Infinity : 0;
-  const expectancy = portfolio.totalTrades > 0 
-    ? portfolio.realizedPnl / portfolio.totalTrades 
-    : 0;
-
-  return (
-    <Card data-testid="card-paper-stats">
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium flex items-center gap-2">
-          <Percent className="h-4 w-4 text-primary" />
-          Paper Trading Statistics
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="grid grid-cols-2 gap-3 text-sm">
-          <div>
-            <p className="text-muted-foreground text-xs">Total Trades</p>
-            <p className="font-medium" data-testid="text-total-trades">{portfolio.totalTrades}</p>
-          </div>
-          <div>
-            <p className="text-muted-foreground text-xs">Win Rate</p>
-            <p className="font-medium" data-testid="text-stats-winrate">{portfolio.winRate.toFixed(1)}%</p>
-          </div>
-          <div>
-            <p className="text-muted-foreground text-xs">Profit Factor</p>
-            <p className={`font-medium ${profitFactor >= 1 ? "text-emerald-400" : "text-red-400"}`} data-testid="text-pf">
-              {profitFactor === Infinity ? "∞" : profitFactor.toFixed(2)}
-            </p>
-          </div>
-          <div>
-            <p className="text-muted-foreground text-xs">Expectancy</p>
-            <p className={`font-medium ${expectancy >= 0 ? "text-emerald-400" : "text-red-400"}`} data-testid="text-expectancy">
-              ${expectancy.toFixed(2)}/trade
-            </p>
-          </div>
-          <div>
-            <p className="text-muted-foreground text-xs">Max Drawdown</p>
-            <p className="font-medium text-amber-400" data-testid="text-stats-dd">{portfolio.maxDrawdown.toFixed(2)}%</p>
-          </div>
-          <div>
-            <p className="text-muted-foreground text-xs">Total PnL</p>
-            <p className={`font-medium ${portfolio.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`} data-testid="text-total-pnl">
-              {portfolio.totalPnl >= 0 ? "+" : ""}${portfolio.totalPnl.toFixed(2)}
-            </p>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
+export { PerformanceCard as PortfolioCard };
+export { EquityPerformanceCard as EquityCurveCard };
+export { RiskStatusCard as PaperTradingStatsCard };
+export { PositionHistoryCard as RecentTradesCard };

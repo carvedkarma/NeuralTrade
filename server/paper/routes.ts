@@ -1,7 +1,7 @@
 import { Router } from "express";
 import * as storage from "./storage";
 import * as engine from "./engine";
-import { getConfig, updateConfig, resetConfig } from "./config";
+import { getConfig, updateConfig, resetConfig, startAutoTrading, stopAutoTrading, isAutoTradingEnabled } from "./config";
 
 const router = Router();
 
@@ -77,6 +77,28 @@ router.post("/reset", async (req, res) => {
   } catch (error) {
     console.error("Error resetting paper trading:", error);
     res.status(500).json({ error: "Failed to reset paper trading" });
+  }
+});
+
+router.post("/start", async (req, res) => {
+  try {
+    startAutoTrading();
+    console.log("[Paper] Auto-trading started");
+    res.json({ message: "Auto-trading started", isAutoTrading: true });
+  } catch (error) {
+    console.error("Error starting auto-trading:", error);
+    res.status(500).json({ error: "Failed to start auto-trading" });
+  }
+});
+
+router.post("/stop", async (req, res) => {
+  try {
+    stopAutoTrading();
+    console.log("[Paper] Auto-trading stopped");
+    res.json({ message: "Auto-trading stopped", isAutoTrading: false });
+  } catch (error) {
+    console.error("Error stopping auto-trading:", error);
+    res.status(500).json({ error: "Failed to stop auto-trading" });
   }
 });
 

@@ -10,6 +10,7 @@ export interface PaperTradingConfig {
   startingEquity: number;
   trailBufferAtrMultiplier: number;
   minPnlForTimeStop: number;
+  isAutoTrading: boolean;
 }
 
 export const defaultConfig: PaperTradingConfig = {
@@ -24,6 +25,7 @@ export const defaultConfig: PaperTradingConfig = {
   startingEquity: 10000,
   trailBufferAtrMultiplier: 0.2,
   minPnlForTimeStop: 0.003,
+  isAutoTrading: false,
 };
 
 let currentConfig: PaperTradingConfig = { ...defaultConfig };
@@ -40,4 +42,16 @@ export function updateConfig(updates: Partial<PaperTradingConfig>): PaperTrading
 export function resetConfig(): PaperTradingConfig {
   currentConfig = { ...defaultConfig };
   return { ...currentConfig };
+}
+
+export function startAutoTrading(): void {
+  currentConfig.isAutoTrading = true;
+}
+
+export function stopAutoTrading(): void {
+  currentConfig.isAutoTrading = false;
+}
+
+export function isAutoTradingEnabled(): boolean {
+  return currentConfig.isAutoTrading;
 }
