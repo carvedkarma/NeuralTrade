@@ -583,6 +583,53 @@ export const paperEquityCurve = pgTable("paper_equity_curve", {
   tsIdx: index("paper_equity_curve_ts_idx").on(table.ts),
 }));
 
+export const learningState = pgTable("learning_state", {
+  id: serial("id").primaryKey(),
+  key: varchar("key", { length: 50 }).notNull().unique(),
+  lastTrainTs: bigint("last_train_ts", { mode: "number" }),
+  lastFeatureTs: bigint("last_feature_ts", { mode: "number" }),
+  lastIngestedTs: bigint("last_ingested_ts", { mode: "number" }),
+  modelVersion: varchar("model_version", { length: 50 }),
+  patternsVersion: varchar("patterns_version", { length: 50 }),
+  trainingProgress: real("training_progress").default(0),
+  epochsCompleted: integer("epochs_completed").default(0),
+  isFrozen: boolean("is_frozen").default(false),
+  totalPredictions: integer("total_predictions").default(0),
+  historicalWinRate: real("historical_win_rate").default(0),
+  backtestTrades: integer("backtest_trades").default(0),
+  updatedTs: bigint("updated_ts", { mode: "number" }).notNull(),
+});
+
+export const patternClusters = pgTable("pattern_clusters", {
+  id: serial("id").primaryKey(),
+  clusterId: integer("cluster_id").notNull(),
+  regime: varchar("regime", { length: 20 }).notNull(),
+  centroid: jsonb("centroid").notNull(),
+  sampleCount: integer("sample_count").default(0),
+  winRate: real("win_rate").default(0),
+  avgReturn: real("avg_return").default(0),
+  avgMfe: real("avg_mfe").default(0),
+  avgMae: real("avg_mae").default(0),
+  avgTimeToMfe: real("avg_time_to_mfe").default(0),
+  isMature: boolean("is_mature").default(false),
+  createdTs: bigint("created_ts", { mode: "number" }).notNull(),
+  updatedTs: bigint("updated_ts", { mode: "number" }).notNull(),
+}, (table) => ({
+  regimeIdx: index("pattern_clusters_regime_idx").on(table.regime),
+  clusterIdIdx: index("pattern_clusters_cluster_id_idx").on(table.clusterId),
+}));
+
+export const socialMediaStats = pgTable("social_media_stats", {
+  id: serial("id").primaryKey(),
+  platform: varchar("platform", { length: 50 }).notNull(),
+  itemsRead: integer("items_read").default(0),
+  lastFetchTs: bigint("last_fetch_ts", { mode: "number" }),
+  sentiment: real("sentiment").default(0),
+  updatedTs: bigint("updated_ts", { mode: "number" }).notNull(),
+}, (table) => ({
+  platformIdx: index("social_media_stats_platform_idx").on(table.platform),
+}));
+
 export const insertCandleSchema = createInsertSchema(candles).omit({ id: true });
 export const insertFeatureSchema = createInsertSchema(features).omit({ id: true });
 export const insertPatternSchema = createInsertSchema(patterns).omit({ id: true });
@@ -592,6 +639,9 @@ export const insertPaperPortfolioSchema = createInsertSchema(paperPortfolio).omi
 export const insertPaperPositionSchema = createInsertSchema(paperPositions).omit({ id: true });
 export const insertPaperTradeSchema = createInsertSchema(paperTrades).omit({ id: true });
 export const insertPaperEquitySchema = createInsertSchema(paperEquityCurve).omit({ id: true });
+export const insertLearningStateSchema = createInsertSchema(learningState).omit({ id: true });
+export const insertPatternClusterSchema = createInsertSchema(patternClusters).omit({ id: true });
+export const insertSocialMediaStatsSchema = createInsertSchema(socialMediaStats).omit({ id: true });
 
 export type InsertCandle = z.infer<typeof insertCandleSchema>;
 export type InsertFeature = z.infer<typeof insertFeatureSchema>;
@@ -602,6 +652,9 @@ export type InsertPaperPortfolio = z.infer<typeof insertPaperPortfolioSchema>;
 export type InsertPaperPosition = z.infer<typeof insertPaperPositionSchema>;
 export type InsertPaperTrade = z.infer<typeof insertPaperTradeSchema>;
 export type InsertPaperEquity = z.infer<typeof insertPaperEquitySchema>;
+export type InsertLearningState = z.infer<typeof insertLearningStateSchema>;
+export type InsertPatternCluster = z.infer<typeof insertPatternClusterSchema>;
+export type InsertSocialMediaStats = z.infer<typeof insertSocialMediaStatsSchema>;
 
 export type DbCandle = typeof candles.$inferSelect;
 export type DbFeature = typeof features.$inferSelect;
@@ -613,3 +666,6 @@ export type PaperPortfolio = typeof paperPortfolio.$inferSelect;
 export type PaperPosition = typeof paperPositions.$inferSelect;
 export type PaperTrade = typeof paperTrades.$inferSelect;
 export type PaperEquityCurve = typeof paperEquityCurve.$inferSelect;
+export type LearningState = typeof learningState.$inferSelect;
+export type PatternCluster = typeof patternClusters.$inferSelect;
+export type SocialMediaStats = typeof socialMediaStats.$inferSelect;
