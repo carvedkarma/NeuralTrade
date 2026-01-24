@@ -461,15 +461,26 @@ export class MemStorage implements IStorage {
     const cooldown = isFirstRun ? 0 : 60000;
     
     if (now - this.lastTrainingRun < cooldown) return;
-    if (this.candles.length < 50) {
-      console.log(`Training skipped: only ${this.candles.length} candles available (need 50)`);
+    
+    // Load ALL historical candles from database for training
+    const { loadCandlesFromDb } = await import("./historical-data");
+    const trainingCandles = await loadCandlesFromDb("BTCUSDT", "15m");
+    
+    // Fall back to in-memory candles if DB is empty
+    const candlesToUse = trainingCandles.length > this.candles.length ? trainingCandles : this.candles;
+    
+    if (candlesToUse.length < 50) {
+      console.log(`Training skipped: only ${candlesToUse.length} candles available (need 50)`);
       return;
     }
     
-    console.log(`Starting DEEP training run... (${this.candles.length} candles, epoch ${this.learningStats.learningEpochs + 1})`);
+    // Update stats to reflect actual training data
+    this.learningStats.historicalCandlesProcessed = candlesToUse.length;
+    
+    console.log(`Starting DEEP training run... (${candlesToUse.length} candles from ${trainingCandles.length > this.candles.length ? 'DB' : 'memory'}, epoch ${this.learningStats.learningEpochs + 1})`);
     this.lastTrainingRun = now;
     
-    updateDataCounts(this.candles.length, this.learningStats.backtestTradesSimulated);
+    updateDataCounts(candlesToUse.length, this.learningStats.backtestTradesSimulated);
     
     const simDist = getLastSimilarityDistribution();
     const similarityHealthy = simDist.mean === 0 || simDist.mean < 0.90;
@@ -487,10 +498,10 @@ export class MemStorage implements IStorage {
       let bullishFound = 0;
       let bearishFound = 0;
       
-      console.log(`Deep analysis: processing candles from index 50 to ${this.candles.length - forwardLook}...`);
+      console.log(`Deep analysis: processing candles from index 50 to ${candlesToUse.length - forwardLook}...`);
       
-      for (let i = 50; i < this.candles.length - forwardLook; i += 2) {
-        const historicalSlice = this.candles.slice(0, i + 1);
+      for (let i = 50; i < candlesToUse.length - forwardLook; i += 2) {
+        const historicalSlice = candlesToUse.slice(0, i + 1);
         const feature = getLatestFeatures(historicalSlice);
         if (!feature) continue;
         
@@ -516,13 +527,13 @@ export class MemStorage implements IStorage {
           this.learningStats.volumeAnomalies++;
         }
         
-        const entryPrice = this.candles[i].close;
-        const return8 = ((this.candles[i + lookback]?.close || entryPrice) - entryPrice) / entryPrice;
-        const return16 = ((this.candles[i + forwardLook]?.close || entryPrice) - entryPrice) / entryPrice;
+        const entryPrice = candlesToUse[i].close;
+        const return8 = ((candlesToUse[i + lookback]?.close || entryPrice) - entryPrice) / entryPrice;
+        const return16 = ((candlesToUse[i + forwardLook]?.close || entryPrice) - entryPrice) / entryPrice;
         
         let atrSum = 0;
         for (let j = Math.max(0, i - 13); j <= i; j++) {
-          atrSum += this.candles[j].high - this.candles[j].low;
+          atrSum += candlesToUse[j].high - candlesToUse[j].low;
         }
         const atrAtEntry = atrSum / Math.min(14, i + 1);
         const dynamicThreshold = Math.max(0.0015, 0.9 * atrAtEntry / entryPrice);
@@ -530,9 +541,9 @@ export class MemStorage implements IStorage {
         let maxDrawdown = 0;
         let maxRunup = 0;
         let timeToMfe = 0;
-        for (let j = i + 1; j <= i + forwardLook && j < this.candles.length; j++) {
-          const low = this.candles[j].low;
-          const high = this.candles[j].high;
+        for (let j = i + 1; j <= i + forwardLook && j < candlesToUse.length; j++) {
+          const low = candlesToUse[j].low;
+          const high = candlesToUse[j].high;
           const dd = (low - entryPrice) / entryPrice;
           const ru = (high - entryPrice) / entryPrice;
           if (dd < maxDrawdown) maxDrawdown = dd;
@@ -563,19 +574,19 @@ export class MemStorage implements IStorage {
         if (patternsAdded >= 40) break;
       }
       
-      const latestVolProfile = analyzeVolumeProfile(this.candles);
+      const latestVolProfile = analyzeVolumeProfile(candlesToUse);
       this.learningStats.lastVolumeProfile = {
         buyVol: latestVolProfile.buyVolume,
         sellVol: latestVolProfile.sellVolume,
         ratio: latestVolProfile.volumeRatio,
       };
       
-      const latestPatterns = detectCandlestickPatterns(this.candles);
+      const latestPatterns = detectCandlestickPatterns(candlesToUse);
       if (latestPatterns.length > 0) {
         this.learningStats.lastCandlestickPattern = latestPatterns[0].name;
       }
       
-      const mtfAnalysis = analyzeMultiTimeframePatterns(this.candles);
+      const mtfAnalysis = analyzeMultiTimeframePatterns(candlesToUse);
       this.learningStats.multiTimeframeConfluence = mtfAnalysis.confluence;
       this.learningStats.multiTimeframeSignal = mtfAnalysis.overallSignal;
       this.learningStats.timeframeAlignments = mtfAnalysis.alignedTimeframes;
@@ -586,7 +597,7 @@ export class MemStorage implements IStorage {
         this.learningStats.patternsLearnedFromHistory += patternsAdded;
         this.learningStats.learningEpochs++;
         this.learningStats.lastTrainingTime = now;
-        this.learningStats.historicalCandlesProcessed += this.candles.length;
+        this.learningStats.historicalCandlesProcessed = candlesToUse.length;
         this.learningStats.backtestTradesSimulated += Math.floor(patternsAdded * 0.6);
         this.learningStats.candlestickPatternsDetected += candlestickPatternsFound;
         this.learningStats.bullishPatterns += bullishFound;
@@ -1561,11 +1572,9 @@ export class MemStorage implements IStorage {
         learningProgress: Math.min(100, (this.learningStats.totalPredictions / 100) * 100),
         epochsCompleted: this.learningStats.learningEpochs,
         lastTrainingTime: this.learningStats.lastTrainingTime || null,
-        candlesUsedForTraining: this.candles.length,
-        candlesAvailable: this.learningStats.historicalCandlesProcessed + this.candles.length,
-        trainingCoverage: this.learningStats.historicalCandlesProcessed > 0 
-          ? Math.round((this.candles.length / (this.learningStats.historicalCandlesProcessed + this.candles.length)) * 100)
-          : 100,
+        candlesUsedForTraining: this.learningStats.historicalCandlesProcessed || this.candles.length,
+        candlesAvailable: this.learningStats.historicalCandlesProcessed || this.candles.length,
+        trainingCoverage: 100,
       },
     };
   }

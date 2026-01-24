@@ -114,7 +114,8 @@ async function fetchKlinesBatchVision(
 }
 
 const CANDLES_PER_DAY = 96;
-const CANDLES_FOR_YEAR = 365 * CANDLES_PER_DAY;
+const TARGET_DAYS = 547; // 1.5 years
+const CANDLES_FOR_TARGET = TARGET_DAYS * CANDLES_PER_DAY; // ~52,512 candles
 
 export interface DataRangeInfo {
   startTs: number | null;
@@ -122,7 +123,7 @@ export interface DataRangeInfo {
   totalCandles: number;
   backfillComplete: boolean;
   daysOfData: number;
-  expectedFor365Days: number;
+  expectedForTarget: number;
   completionPct: number;
 }
 
@@ -167,7 +168,7 @@ export async function getDataRangeInfo(): Promise<DataRangeInfo> {
       const daysOfData = startTs && endTs 
         ? Math.round((endTs - startTs) / (24 * 60 * 60 * 1000))
         : 0;
-      const completionPct = Math.min((totalCandles / CANDLES_FOR_YEAR) * 100, 100);
+      const completionPct = Math.min((totalCandles / CANDLES_FOR_TARGET) * 100, 100);
       
       return {
         startTs,
@@ -175,7 +176,7 @@ export async function getDataRangeInfo(): Promise<DataRangeInfo> {
         totalCandles,
         backfillComplete: false,
         daysOfData,
-        expectedFor365Days: CANDLES_FOR_YEAR,
+        expectedForTarget: CANDLES_FOR_TARGET,
         completionPct,
       };
     }
@@ -186,7 +187,7 @@ export async function getDataRangeInfo(): Promise<DataRangeInfo> {
     const daysOfData = startTs && endTs 
       ? Math.round((endTs - startTs) / (24 * 60 * 60 * 1000))
       : 0;
-    const completionPct = Math.min((totalCandles / CANDLES_FOR_YEAR) * 100, 100);
+    const completionPct = Math.min((totalCandles / CANDLES_FOR_TARGET) * 100, 100);
     
     return {
       startTs,
@@ -194,7 +195,7 @@ export async function getDataRangeInfo(): Promise<DataRangeInfo> {
       totalCandles,
       backfillComplete: state[0].backfillComplete ?? false,
       daysOfData,
-      expectedFor365Days: CANDLES_FOR_YEAR,
+      expectedForTarget: CANDLES_FOR_TARGET,
       completionPct,
     };
   } catch (error) {
@@ -205,7 +206,7 @@ export async function getDataRangeInfo(): Promise<DataRangeInfo> {
       totalCandles: 0, 
       backfillComplete: false,
       daysOfData: 0,
-      expectedFor365Days: CANDLES_FOR_YEAR,
+      expectedForTarget: CANDLES_FOR_TARGET,
       completionPct: 0,
     };
   }
@@ -252,7 +253,7 @@ export async function getIntegrityReport(
     const startTs = oldest[0]?.ts ?? 0;
     const endTs = newest[0]?.ts ?? 0;
     const daysOfData = Math.round((endTs - startTs) / (24 * 60 * 60 * 1000));
-    const completionPct = Math.min((totalCandles / CANDLES_FOR_YEAR) * 100, 100);
+    const completionPct = Math.min((totalCandles / CANDLES_FOR_TARGET) * 100, 100);
     
     const duplicateCheck = await db.execute(sql`
       SELECT COUNT(*) - COUNT(DISTINCT timestamp) as duplicate_count

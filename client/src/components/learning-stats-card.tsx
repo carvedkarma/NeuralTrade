@@ -691,7 +691,7 @@ interface HistoricalDataStatus {
   endDate: string | null;
   backfillComplete: boolean;
   completionPct: number;
-  expectedFor365Days: number;
+  expectedForTarget: number;
 }
 
 interface IntegrityReport {
@@ -786,7 +786,7 @@ export function HistoricalLearningCard({
         {/* Data Completion Progress */}
         <div className="bg-gradient-to-br from-blue-500/10 to-cyan-500/10 rounded-lg p-3">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium">Data Completion (1 Year Target)</span>
+            <span className="text-sm font-medium">Data Completion (1.5 Year Target)</span>
             <span className="text-lg font-bold text-blue-400">
               {(historicalStatus?.completionPct ?? 0).toFixed(1)}%
             </span>
@@ -796,7 +796,7 @@ export function HistoricalLearningCard({
             className="h-2"
           />
           <div className="text-xs text-muted-foreground mt-1">
-            {displayCandles.toLocaleString()} / {(historicalStatus?.expectedFor365Days ?? 35040).toLocaleString()} candles
+            {displayCandles.toLocaleString()} / {(historicalStatus?.expectedForTarget ?? 52512).toLocaleString()} candles
           </div>
         </div>
 
@@ -926,7 +926,7 @@ export function HistoricalLearningCard({
               data-testid="button-backfill"
             >
               <Database className="h-3 w-3 mr-2" />
-              Fetch 1 Year Historical Data
+              Fetch 1.5 Year Historical Data
             </Button>
           )}
           {historicalStatus?.backfillComplete && (

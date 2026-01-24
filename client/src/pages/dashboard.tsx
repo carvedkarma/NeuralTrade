@@ -51,7 +51,7 @@ interface HistoricalStatus {
   endDate: string | null;
   backfillComplete: boolean;
   completionPct: number;
-  expectedFor365Days: number;
+  expectedForTarget: number;
 }
 
 interface IntegrityReport {
