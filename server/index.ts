@@ -1,5 +1,5 @@
 import express, { type Request, Response, NextFunction } from "express";
-import { registerRoutes } from "./routes";
+import { registerRoutes, hydrateBackfillStateFromDb, backfillState } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { checkIncompleteBackfillJobs, backfillHistoricalData } from "./historical-data";
@@ -95,9 +95,38 @@ app.use((req, res, next) => {
     () => {
       log(`serving on port ${port}`);
       
-      checkIncompleteBackfillJobs().then((result) => {
-        if (result.hasIncomplete && result.progressPct && result.progressPct < 100) {
-          log(`Found incomplete backfill job (${result.progressPct}% complete) - will resume on next backfill request`);
+      hydrateBackfillStateFromDb().then(() => {
+        return checkIncompleteBackfillJobs();
+      }).then(async (result) => {
+        if (result.hasIncomplete && result.progressPct !== undefined && result.progressPct < 100) {
+          log(`Found incomplete backfill job (${result.progressPct}% complete) - auto-resuming...`);
+          
+          backfillState.inProgress = true;
+          backfillState.progress = result.progressPct;
+          backfillState.message = `Resuming from ${result.progressPct}%...`;
+          
+          try {
+            const resumeResult = await backfillHistoricalData(
+              result.symbol || "BTCUSDT",
+              result.timeframe || "15m",
+              370,
+              (progress, message) => {
+                backfillState.progress = progress;
+                backfillState.message = message;
+                if (progress % 10 === 0) {
+                  log(`Backfill resume progress: ${progress}% - ${message}`);
+                }
+              }
+            );
+            backfillState.inProgress = false;
+            backfillState.progress = 100;
+            backfillState.message = `Complete! ${resumeResult.totalCandles} candles stored.`;
+            log(`Backfill auto-resume complete: ${resumeResult.newCandles} candles added`);
+          } catch (err: any) {
+            backfillState.inProgress = false;
+            backfillState.message = `Error: ${err.message}`;
+            console.error("Error auto-resuming backfill:", err);
+          }
         }
       }).catch((err) => {
         console.error("Error checking incomplete backfill jobs:", err);

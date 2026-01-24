@@ -410,26 +410,34 @@ async function findOrCreateBackfillJob(
       eq(backfillJobs.timeframe, timeframe),
       or(
         eq(backfillJobs.status, "running"),
-        eq(backfillJobs.status, "pending")
+        eq(backfillJobs.status, "pending"),
+        eq(backfillJobs.status, "error")
       )
     ))
+    .orderBy(desc(backfillJobs.id))
     .limit(1);
   
   if (existingJob.length > 0 && existingJob[0].currentCursor) {
     const job = existingJob[0];
-    console.log(`[Historical] Resuming backfill job ${job.id} from cursor ${new Date(job.currentCursor!).toISOString()}`);
     
-    await db.update(backfillJobs)
-      .set({ status: "running", updatedTs: now })
-      .where(eq(backfillJobs.id, job.id));
-    
-    return {
-      id: job.id,
-      startTs: job.startTs ?? startTs,
-      currentCursor: job.currentCursor!,
-      candlesFetched: job.candlesFetched ?? 0,
-      isResume: true,
-    };
+    const progress = job.progressPct ?? 0;
+    if (progress >= 100) {
+      console.log(`[Historical] Job ${job.id} already complete (${progress}%), creating new job`);
+    } else {
+      console.log(`[Historical] Resuming backfill job ${job.id} (status: ${job.status}) from cursor ${new Date(job.currentCursor!).toISOString()}`);
+      
+      await db.update(backfillJobs)
+        .set({ status: "running", updatedTs: now, errorMessage: null })
+        .where(eq(backfillJobs.id, job.id));
+      
+      return {
+        id: job.id,
+        startTs: job.startTs ?? startTs,
+        currentCursor: job.currentCursor!,
+        candlesFetched: job.candlesFetched ?? 0,
+        isResume: true,
+      };
+    }
   }
   
   const msPerCandle = timeframe === "15m" ? MS_PER_15M : 60 * 1000;
@@ -481,16 +489,28 @@ async function updateBackfillJobProgress(
 }
 
 export async function getActiveBackfillJob(symbol: string = "BTCUSDT", timeframe: string = "15m") {
-  const job = await db.select()
+  const jobs = await db.select()
     .from(backfillJobs)
     .where(and(
       eq(backfillJobs.symbol, symbol),
       eq(backfillJobs.timeframe, timeframe),
-      eq(backfillJobs.status, "running")
+      or(
+        eq(backfillJobs.status, "running"),
+        eq(backfillJobs.status, "pending"),
+        eq(backfillJobs.status, "error")
+      )
     ))
+    .orderBy(desc(backfillJobs.id))
     .limit(1);
   
-  return job[0] ?? null;
+  const job = jobs[0];
+  if (!job) return null;
+  
+  if (job.status === "error" && job.progressPct && job.progressPct >= 100) {
+    return null;
+  }
+  
+  return job;
 }
 
 export async function backfillHistoricalData(
@@ -788,23 +808,34 @@ export async function checkIncompleteBackfillJobs(): Promise<{
     .from(backfillJobs)
     .where(or(
       eq(backfillJobs.status, "running"),
-      eq(backfillJobs.status, "pending")
+      eq(backfillJobs.status, "pending"),
+      eq(backfillJobs.status, "error")
     ))
+    .orderBy(desc(backfillJobs.id))
     .limit(1);
   
   if (incompleteJobs.length > 0) {
     const job = incompleteJobs[0];
-    console.log(`[Historical] Found incomplete backfill job ${job.id}: ${job.progressPct}% complete`);
     
-    return {
-      hasIncomplete: true,
-      jobId: job.id,
-      symbol: job.symbol ?? "BTCUSDT",
-      timeframe: job.timeframe ?? "15m",
-      progressPct: job.progressPct ?? 0,
-      candlesFetched: job.candlesFetched ?? 0,
-      status: job.status ?? "unknown",
-    };
+    if (job.status === "error" && job.progressPct && job.progressPct >= 100) {
+      return { hasIncomplete: false };
+    }
+    
+    const isResumable = (job.progressPct ?? 0) < 100 && job.currentCursor;
+    
+    if (isResumable) {
+      console.log(`[Historical] Found incomplete backfill job ${job.id}: ${job.status}, ${job.progressPct}% complete`);
+      
+      return {
+        hasIncomplete: true,
+        jobId: job.id,
+        symbol: job.symbol ?? "BTCUSDT",
+        timeframe: job.timeframe ?? "15m",
+        progressPct: job.progressPct ?? 0,
+        candlesFetched: job.candlesFetched ?? 0,
+        status: job.status ?? "unknown",
+      };
+    }
   }
   
   return { hasIncomplete: false };

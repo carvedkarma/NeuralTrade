@@ -4,6 +4,27 @@ import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
 import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs } from "./historical-data";
 
+export const backfillState = {
+  inProgress: false,
+  progress: 0,
+  message: "",
+};
+
+export async function hydrateBackfillStateFromDb(): Promise<void> {
+  const activeJob = await getActiveBackfillJob();
+  if (activeJob) {
+    const isResumable = activeJob.status === "running" || activeJob.status === "pending" || 
+      (activeJob.status === "error" && activeJob.currentCursor && activeJob.progressPct && activeJob.progressPct < 100);
+    
+    if (isResumable) {
+      backfillState.inProgress = activeJob.status === "running";
+      backfillState.progress = activeJob.progressPct ?? 0;
+      backfillState.message = `Job ${activeJob.id}: ${activeJob.status} (${activeJob.progressPct ?? 0}%)`;
+      console.log(`[Routes] Hydrated backfill state from DB: job ${activeJob.id}, status=${activeJob.status}, ${activeJob.progressPct}%`);
+    }
+  }
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -109,50 +130,61 @@ export async function registerRoutes(
     }
   });
 
-  let backfillInProgress = false;
-  let backfillProgress = 0;
-  let backfillMessage = "";
-
   app.post("/api/historical/backfill", async (req, res) => {
-    if (backfillInProgress) {
+    if (backfillState.inProgress) {
       return res.status(409).json({ 
         error: "Backfill already in progress", 
-        progress: backfillProgress,
-        message: backfillMessage 
+        progress: backfillState.progress,
+        message: backfillState.message 
       });
     }
 
     const days = req.body.days || 370;
-    backfillInProgress = true;
-    backfillProgress = 0;
-    backfillMessage = "Starting backfill...";
+    backfillState.inProgress = true;
+    backfillState.progress = 0;
+    backfillState.message = "Starting backfill...";
 
     res.json({ status: "started", days });
 
     backfillHistoricalData("BTCUSDT", "15m", days, (progress, message) => {
-      backfillProgress = progress;
-      backfillMessage = message;
+      backfillState.progress = progress;
+      backfillState.message = message;
     }).then(result => {
       console.log("[Historical] Backfill finished:", result);
-      backfillInProgress = false;
-      backfillProgress = 100;
-      backfillMessage = `Complete! ${result.totalCandles} candles stored.`;
+      backfillState.inProgress = false;
+      backfillState.progress = 100;
+      backfillState.message = `Complete! ${result.totalCandles} candles stored.`;
       
       storage.reloadHistoricalCandles();
     }).catch(error => {
       console.error("[Historical] Backfill error:", error);
-      backfillInProgress = false;
-      backfillMessage = `Error: ${error.message}`;
+      backfillState.inProgress = false;
+      backfillState.message = `Error: ${error.message}`;
     });
   });
 
   app.get("/api/historical/backfill/progress", async (req, res) => {
     const activeJob = await getActiveBackfillJob();
     
+    const jobProgress = activeJob?.progressPct ?? 0;
+    const isResumable = activeJob && 
+      activeJob.currentCursor && 
+      jobProgress < 100 &&
+      (activeJob.status === "running" || activeJob.status === "pending" || activeJob.status === "error");
+    
+    const isRunning = backfillState.inProgress || activeJob?.status === "running";
+    const needsResume = !isRunning && !!isResumable;
+    const currentProgress = backfillState.inProgress ? backfillState.progress : jobProgress;
+    const currentMessage = backfillState.inProgress ? backfillState.message : 
+      (activeJob 
+        ? `Job ${activeJob.id}: ${activeJob.status} (${jobProgress}%)${needsResume ? " - will auto-resume" : ""}` 
+        : "No active job");
+    
     res.json({
-      inProgress: backfillInProgress,
-      progress: backfillProgress,
-      message: backfillMessage,
+      inProgress: isRunning,
+      needsResume,
+      progress: currentProgress,
+      message: currentMessage,
       job: activeJob ? {
         id: activeJob.id,
         status: activeJob.status,
@@ -161,7 +193,7 @@ export async function registerRoutes(
         progressPct: activeJob.progressPct,
         currentCursor: activeJob.currentCursor,
         startTs: activeJob.startTs,
-        resumable: activeJob.status === "running" || activeJob.status === "pending",
+        resumable: !!isResumable,
       } : null,
     });
   });
