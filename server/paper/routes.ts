@@ -1,7 +1,17 @@
 import { Router } from "express";
 import * as storage from "./storage";
 import * as engine from "./engine";
-import { getConfig, updateConfig, resetConfig, startAutoTrading, stopAutoTrading, isAutoTradingEnabled } from "./config";
+import { 
+  getConfig, 
+  updateConfig, 
+  resetConfig, 
+  startAutoTrading, 
+  stopAutoTrading, 
+  enablePaperTrading,
+  disablePaperTrading,
+  isPaperTradingEnabled,
+  isAutoTradingEnabled 
+} from "./config";
 
 const router = Router();
 
@@ -80,11 +90,53 @@ router.post("/reset", async (req, res) => {
   }
 });
 
+router.post("/enable", async (req, res) => {
+  try {
+    enablePaperTrading();
+    console.log("[Paper] Paper trading ENABLED - system can now execute trades");
+    res.json({ 
+      message: "Paper trading enabled", 
+      paperTradingEnabled: true,
+      isAutoTrading: isAutoTradingEnabled()
+    });
+  } catch (error) {
+    console.error("Error enabling paper trading:", error);
+    res.status(500).json({ error: "Failed to enable paper trading" });
+  }
+});
+
+router.post("/disable", async (req, res) => {
+  try {
+    disablePaperTrading();
+    console.log("[Paper] Paper trading DISABLED - no trades will execute");
+    res.json({ 
+      message: "Paper trading disabled", 
+      paperTradingEnabled: false,
+      isAutoTrading: false
+    });
+  } catch (error) {
+    console.error("Error disabling paper trading:", error);
+    res.status(500).json({ error: "Failed to disable paper trading" });
+  }
+});
+
 router.post("/start", async (req, res) => {
   try {
+    if (!isPaperTradingEnabled()) {
+      res.status(400).json({ 
+        error: "Paper trading is not enabled. Call /api/paper/enable first.",
+        paperTradingEnabled: false,
+        isAutoTrading: false
+      });
+      return;
+    }
     startAutoTrading();
     console.log("[Paper] Auto-trading started");
-    res.json({ message: "Auto-trading started", isAutoTrading: true });
+    res.json({ 
+      message: "Auto-trading started", 
+      isAutoTrading: true,
+      paperTradingEnabled: true
+    });
   } catch (error) {
     console.error("Error starting auto-trading:", error);
     res.status(500).json({ error: "Failed to start auto-trading" });
@@ -95,10 +147,45 @@ router.post("/stop", async (req, res) => {
   try {
     stopAutoTrading();
     console.log("[Paper] Auto-trading stopped");
-    res.json({ message: "Auto-trading stopped", isAutoTrading: false });
+    res.json({ 
+      message: "Auto-trading stopped", 
+      isAutoTrading: false,
+      paperTradingEnabled: isPaperTradingEnabled()
+    });
   } catch (error) {
     console.error("Error stopping auto-trading:", error);
     res.status(500).json({ error: "Failed to stop auto-trading" });
+  }
+});
+
+router.get("/audit", async (req, res) => {
+  try {
+    const auditLogs = engine.getAuditLog();
+    res.json(auditLogs);
+  } catch (error) {
+    console.error("Error getting audit log:", error);
+    res.status(500).json({ error: "Failed to get audit log" });
+  }
+});
+
+router.get("/status", async (req, res) => {
+  try {
+    const config = getConfig();
+    res.json({
+      paperTradingEnabled: config.paperTradingEnabled,
+      isAutoTrading: isAutoTradingEnabled(),
+      config: {
+        riskPerTradePct: config.riskPerTradePct,
+        maxRiskPerTradePct: config.maxRiskPerTradePct,
+        maxAccountExposurePct: config.maxAccountExposurePct,
+        minConfidence: config.minConfidence,
+        atrStopMultiplier: config.atrStopMultiplier,
+        minStopDistancePct: config.minStopDistancePct,
+      }
+    });
+  } catch (error) {
+    console.error("Error getting status:", error);
+    res.status(500).json({ error: "Failed to get status" });
   }
 });
 

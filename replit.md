@@ -40,16 +40,18 @@ The system operates with live data only - no simulated fallback. Shows error mes
 - **Social Media Simulation**: Accumulates Twitter/Reddit reads every 5 seconds with realistic numbers
 - **Real-time Dashboard**: Refreshes every 5 seconds for async real-time feel
 - **500 Historical Candles**: Fetches 5+ days of 15-minute data for better pattern matching
-- **Paper Trading System**: Comprehensive simulated trading with:
+- **Paper Trading System**: Conservative execution engine with strict gating:
+  - **Disabled by default**: Must call /api/paper/enable then /api/paper/start
   - Portfolio management with $10,000 starting equity
-  - Position sizing based on 0.5% risk per trade
+  - **Strict gating**: signal ∈ {LONG, SHORT}, confidence >= 65%, edge > costs, regime != chop
+  - **Risk management**: 0.25% risk per trade (max 0.5%), 100% max exposure
+  - **One position at a time**: No overlapping positions
+  - **ATR-based stops**: stop_distance = max(1.2 * ATR, min_stop_pct, fees+slippage)
+  - **Correct position sizing**: qty = risk_usdt / stop_distance
   - Realistic fees (0.04% taker, 0.02% maker) and slippage (2bps)
-  - Stop loss, dual take profits (TP1 50%, TP2 50%), trailing stops
-  - Time stops (3 bars), position flip logic for strong signals
-  - Equity curve tracking and performance analytics
-  - API endpoints: /api/paper/portfolio, /api/paper/positions, /api/paper/trades, /api/paper/equity
-  - Automated execution integrated with refresh loop (evaluates every candle)
-  - Trade conditions: signal ≠ HOLD, no vetoReasons, valid levels, >= 1 supporting reason
+  - **Execution audit log**: Every trade attempt logged with full reasoning
+  - API endpoints: /api/paper/enable, /api/paper/disable, /api/paper/start, /api/paper/stop, /api/paper/status, /api/paper/audit
+  - Expected behavior: Very few trades (1-3 per day), long stretches of no trades, flat equity curve early
 - **Confidence Calculation**: Weighted average formula (20-85% range):
   - 40% directional strength (max(probUp, probDown))
   - 25% regime clarity (adaptive to market conditions)

@@ -34,7 +34,7 @@ import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-en
 import { getSentimentData, interpretFearGreed, getNewsStats } from "./sentiment-api";
 import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime, getLastSimilarityDistribution, initializePatternClusters, getPatternClusterStats, updateDataCounts, canCreateNewPatterns, patternClusters } from "./pattern-memory";
 import { processCandle as processPaperTrade } from "./paper/engine";
-import { isAutoTradingEnabled, getConfig as getPaperConfig } from "./paper/config";
+import { isAutoTradingEnabled, isPaperTradingEnabled, getConfig as getPaperConfig } from "./paper/config";
 
 export interface IStorage {
   getDashboardData(): Promise<DashboardData>;

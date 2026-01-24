@@ -1,4 +1,4 @@
-import { getConfig, type PaperTradingConfig } from "./config";
+import { getConfig, getTotalCostsPct, isPaperTradingEnabled, type PaperTradingConfig } from "./config";
 import * as storage from "./storage";
 import type { PaperPosition } from "@shared/schema";
 import type { Candle } from "@shared/schema";
@@ -15,6 +15,39 @@ interface TradeContext {
   shotPlan: ShotPlan | null;
 }
 
+interface TradeAudit {
+  timestamp: number;
+  signal: string;
+  confidence: number;
+  regime: string;
+  edge: number;
+  costs: number;
+  edgeVsCosts: string;
+  positionSize: number;
+  exposureAfter: number;
+  decision: "ALLOWED" | "BLOCKED";
+  reason: string;
+}
+
+const auditLog: TradeAudit[] = [];
+
+function logAudit(audit: TradeAudit): void {
+  auditLog.push(audit);
+  if (auditLog.length > 100) auditLog.shift();
+  
+  const edgeStr = audit.edge > 0 ? `+${(audit.edge * 100).toFixed(3)}%` : `${(audit.edge * 100).toFixed(3)}%`;
+  const costsStr = `${(audit.costs * 100).toFixed(3)}%`;
+  
+  console.log(`[Paper Audit] ${audit.decision}: ${audit.reason}`);
+  console.log(`  Signal: ${audit.signal}, Confidence: ${(audit.confidence * 100).toFixed(1)}%, Regime: ${audit.regime}`);
+  console.log(`  Edge: ${edgeStr} vs Costs: ${costsStr} (${audit.edgeVsCosts})`);
+  console.log(`  Position Size: ${audit.positionSize.toFixed(6)}, Exposure After: ${(audit.exposureAfter * 100).toFixed(1)}%`);
+}
+
+export function getAuditLog(): TradeAudit[] {
+  return [...auditLog];
+}
+
 function applySlippage(price: number, side: "LONG" | "SHORT", slippageBps: number): number {
   const mult = side === "LONG" ? 1 + slippageBps / 10000 : 1 - slippageBps / 10000;
   return price * mult;
@@ -24,20 +57,40 @@ function calculateFee(notional: number, feePct: number): number {
   return notional * (feePct / 100);
 }
 
+function calculateStopDistance(
+  entryPrice: number,
+  atr: number,
+  side: "LONG" | "SHORT",
+  config: PaperTradingConfig
+): { stopLoss: number; stopDistance: number } {
+  const atrStop = atr * config.atrStopMultiplier;
+  const minStopAbs = entryPrice * (config.minStopDistancePct / 100);
+  const minCostStop = entryPrice * getTotalCostsPct() * 1.5;
+  
+  const stopDistance = Math.max(atrStop, minStopAbs, minCostStop);
+  
+  const stopLoss = side === "LONG" 
+    ? entryPrice - stopDistance 
+    : entryPrice + stopDistance;
+    
+  return { stopLoss, stopDistance };
+}
+
 function calculatePositionSize(
   equity: number,
-  entryPrice: number,
-  stopLoss: number,
-  riskPct: number
-): { qty: number; riskUsdt: number; notional: number } {
-  const riskUsdt = equity * (riskPct / 100);
-  const stopDistance = Math.abs(entryPrice - stopLoss);
-  if (stopDistance === 0) {
-    return { qty: 0, riskUsdt: 0, notional: 0 };
+  stopDistance: number,
+  riskPct: number,
+  maxRiskPct: number
+): { qty: number; riskUsdt: number } {
+  const actualRiskPct = Math.min(riskPct, maxRiskPct);
+  const riskUsdt = equity * (actualRiskPct / 100);
+  
+  if (stopDistance <= 0) {
+    return { qty: 0, riskUsdt: 0 };
   }
+  
   const qty = riskUsdt / stopDistance;
-  const notional = qty * entryPrice;
-  return { qty, riskUsdt, notional };
+  return { qty, riskUsdt };
 }
 
 function calculateUnrealizedPnl(position: PaperPosition, currentPrice: number): number {
@@ -121,15 +174,92 @@ function shouldFlip(
     (position.side === "LONG" && shotPlan.signal === "SHORT") ||
     (position.side === "SHORT" && shotPlan.signal === "LONG");
   if (!isOpposite) return false;
-  const costs = shotPlan.estimatedCosts || 0.001;
+  const costs = shotPlan.estimatedCosts || getTotalCostsPct();
   return shotPlan.confidence >= config.flipConfidenceThreshold && 
          shotPlan.edge > costs * config.flipEdgeMultiplier;
+}
+
+interface GatingResult {
+  allowed: boolean;
+  reason: string;
+}
+
+function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConfig): GatingResult {
+  if (!shotPlan) {
+    return { allowed: false, reason: "No shot plan available" };
+  }
+  
+  if (shotPlan.signal === "HOLD") {
+    console.log("[Paper ASSERTION] Attempted trade during HOLD signal - blocked");
+    return { allowed: false, reason: "HOLD signal - no trade allowed" };
+  }
+  
+  if (shotPlan.signal !== "LONG" && shotPlan.signal !== "SHORT") {
+    return { allowed: false, reason: `Invalid signal: ${shotPlan.signal}` };
+  }
+  
+  if (shotPlan.confidence < config.minConfidence) {
+    return { 
+      allowed: false, 
+      reason: `Confidence ${(shotPlan.confidence * 100).toFixed(1)}% < ${(config.minConfidence * 100).toFixed(1)}% minimum` 
+    };
+  }
+  
+  const costs = shotPlan.estimatedCosts || getTotalCostsPct();
+  if (shotPlan.edge <= costs) {
+    return { 
+      allowed: false, 
+      reason: `Edge ${(shotPlan.edge * 100).toFixed(3)}% <= Costs ${(costs * 100).toFixed(3)}%` 
+    };
+  }
+  
+  if (shotPlan.regime === "chop") {
+    return { allowed: false, reason: "Chop regime - no trades allowed" };
+  }
+  
+  if (!shotPlan.entryZone || !shotPlan.stopLoss || !shotPlan.takeProfit1 || !shotPlan.takeProfit2) {
+    return { allowed: false, reason: "Missing trade levels (entry/stop/TP)" };
+  }
+  
+  if (shotPlan.vetoReasons && shotPlan.vetoReasons.length > 0) {
+    return { allowed: false, reason: `Veto reasons: ${shotPlan.vetoReasons.join(", ")}` };
+  }
+  
+  if (!shotPlan.reasons || shotPlan.reasons.length < 1) {
+    return { allowed: false, reason: "No supporting reasons for trade" };
+  }
+  
+  return { allowed: true, reason: "All gating checks passed" };
+}
+
+async function checkExposureLimits(
+  notional: number,
+  equity: number,
+  config: PaperTradingConfig
+): Promise<GatingResult> {
+  const existingPosition = await storage.getOpenPosition();
+  
+  if (existingPosition) {
+    return { allowed: false, reason: "Position already open - one position at a time" };
+  }
+  
+  const newExposure = notional;
+  const exposurePct = (newExposure / equity) * 100;
+  
+  if (exposurePct > config.maxAccountExposurePct) {
+    return { 
+      allowed: false, 
+      reason: `Exposure ${exposurePct.toFixed(1)}% > ${config.maxAccountExposurePct}% max` 
+    };
+  }
+  
+  return { allowed: true, reason: "Exposure within limits" };
 }
 
 export async function openPosition(
   ctx: TradeContext,
   side: "LONG" | "SHORT",
-  stopLoss: number,
+  shotPlanStopLoss: number,
   tp1: number,
   tp2: number,
   confidence: number,
@@ -137,27 +267,63 @@ export async function openPosition(
 ): Promise<PaperPosition | null> {
   const config = getConfig();
   const portfolio = await storage.getOrCreatePortfolio();
-  const existingPosition = await storage.getOpenPosition();
   
-  if (existingPosition) {
-    console.log("[Paper] Position already open, skipping new entry");
-    return null;
-  }
-
   const entryPrice = applySlippage(ctx.candle.open, side, config.slippageBps);
-  const { qty, riskUsdt, notional } = calculatePositionSize(
-    portfolio.currentEquityUsdt,
+  
+  const { stopLoss, stopDistance } = calculateStopDistance(
     entryPrice,
-    stopLoss,
-    config.riskPerTradePct
+    ctx.atr,
+    side,
+    config
+  );
+  
+  const { qty, riskUsdt } = calculatePositionSize(
+    portfolio.currentEquityUsdt,
+    stopDistance,
+    config.riskPerTradePct,
+    config.maxRiskPerTradePct
   );
 
   if (qty <= 0) {
-    console.log("[Paper] Invalid position size, skipping");
+    console.log("[Paper] Invalid position size calculated, skipping");
+    return null;
+  }
+
+  const notional = qty * entryPrice;
+  
+  const exposureCheck = await checkExposureLimits(notional, portfolio.currentEquityUsdt, config);
+  if (!exposureCheck.allowed) {
+    logAudit({
+      timestamp: Date.now(),
+      signal: side,
+      confidence,
+      regime: ctx.shotPlan?.regime || "unknown",
+      edge,
+      costs: getTotalCostsPct(),
+      edgeVsCosts: edge > getTotalCostsPct() ? "PASS" : "FAIL",
+      positionSize: qty,
+      exposureAfter: notional / portfolio.currentEquityUsdt,
+      decision: "BLOCKED",
+      reason: exposureCheck.reason,
+    });
     return null;
   }
 
   const entryFee = calculateFee(notional, config.takerFeePct);
+
+  logAudit({
+    timestamp: Date.now(),
+    signal: side,
+    confidence,
+    regime: ctx.shotPlan?.regime || "unknown",
+    edge,
+    costs: getTotalCostsPct(),
+    edgeVsCosts: "PASS",
+    positionSize: qty,
+    exposureAfter: notional / portfolio.currentEquityUsdt,
+    decision: "ALLOWED",
+    reason: "All checks passed - opening position",
+  });
 
   const position = await storage.createPosition({
     symbol: "BTCUSDT",
@@ -196,14 +362,18 @@ export async function openPosition(
     slippageUsdt: Math.abs(entryPrice - ctx.candle.open) * qty,
     fundingUsdt: 0,
     pnlUsdt: 0,
-    reason: `${side} entry at ${entryPrice.toFixed(2)}`,
+    reason: `${side} entry @ ${entryPrice.toFixed(2)} | SL: ${stopLoss.toFixed(2)} | Risk: $${riskUsdt.toFixed(2)}`,
   });
 
   await storage.updatePortfolio({
     availableBalanceUsdt: portfolio.availableBalanceUsdt - riskUsdt,
   });
 
-  console.log(`[Paper] Opened ${side} position: ${qty.toFixed(6)} BTC @ ${entryPrice.toFixed(2)}`);
+  console.log(`[Paper] OPENED ${side}: ${qty.toFixed(6)} BTC @ ${entryPrice.toFixed(2)}`);
+  console.log(`  Stop: ${stopLoss.toFixed(2)} (${stopDistance.toFixed(2)} distance)`);
+  console.log(`  Risk: $${riskUsdt.toFixed(2)} (${config.riskPerTradePct}% of equity)`);
+  console.log(`  TP1: ${tp1.toFixed(2)}, TP2: ${tp2.toFixed(2)}`);
+  
   return position;
 }
 
@@ -233,7 +403,6 @@ export async function closePosition(
   
   const exitNotional = slippedExitPrice * qtyToClose;
   const exitFee = calculateFee(exitNotional, config.takerFeePct);
-  const totalFees = (position.feesPaidUsdt || 0) * (qtyToClose / position.qty) + exitFee;
   const netPnl = grossPnl - exitFee;
 
   await storage.createTrade({
@@ -246,7 +415,7 @@ export async function closePosition(
     slippageUsdt: Math.abs(slippedExitPrice - exitPrice) * qtyToClose,
     fundingUsdt: 0,
     pnlUsdt: netPnl,
-    reason: `${reason}: Exit @ ${slippedExitPrice.toFixed(2)}`,
+    reason: `${reason}: Exit @ ${slippedExitPrice.toFixed(2)} | PnL: ${netPnl >= 0 ? '+' : ''}$${netPnl.toFixed(2)}`,
   });
 
   if (isPartial) {
@@ -283,7 +452,7 @@ export async function closePosition(
     });
 
     await storage.recordEquityPoint(newEquity, drawdown);
-    console.log(`[Paper] Closed ${position.side} position: PnL ${totalRealizedPnl.toFixed(2)} USDT (${reason})`);
+    console.log(`[Paper] CLOSED ${position.side}: ${reason} | PnL: ${totalRealizedPnl >= 0 ? '+' : ''}$${totalRealizedPnl.toFixed(2)}`);
   }
 
   return { pnl: netPnl, isPartial };
@@ -291,23 +460,45 @@ export async function closePosition(
 
 export async function processCandle(ctx: TradeContext): Promise<void> {
   const config = getConfig();
+  
+  if (!isPaperTradingEnabled()) {
+    return;
+  }
+  
   const position = await storage.getOpenPosition();
+  const portfolio = await storage.getOrCreatePortfolio();
   
   if (!position) {
-    if (ctx.shotPlan && ctx.shotPlan.signal !== "HOLD" && ctx.shotPlan.vetoReasons.length === 0) {
-      const { entryZone, stopLoss, takeProfit1, takeProfit2 } = ctx.shotPlan;
-      if (entryZone && stopLoss && takeProfit1 && takeProfit2) {
-        await openPosition(
-          ctx,
-          ctx.shotPlan.signal as "LONG" | "SHORT",
-          stopLoss,
-          takeProfit1,
-          takeProfit2,
-          ctx.shotPlan.confidence,
-          ctx.shotPlan.edge
-        );
-      }
+    const gating = checkShotPlanGating(ctx.shotPlan, config);
+    
+    logAudit({
+      timestamp: Date.now(),
+      signal: ctx.shotPlan?.signal || "NONE",
+      confidence: ctx.shotPlan?.confidence || 0,
+      regime: ctx.shotPlan?.regime || "unknown",
+      edge: ctx.shotPlan?.edge || 0,
+      costs: ctx.shotPlan?.estimatedCosts || getTotalCostsPct(),
+      edgeVsCosts: (ctx.shotPlan?.edge || 0) > (ctx.shotPlan?.estimatedCosts || getTotalCostsPct()) ? "PASS" : "FAIL",
+      positionSize: 0,
+      exposureAfter: 0,
+      decision: gating.allowed ? "ALLOWED" : "BLOCKED",
+      reason: gating.reason,
+    });
+    
+    if (!gating.allowed) {
+      return;
     }
+    
+    const shotPlan = ctx.shotPlan!;
+    await openPosition(
+      ctx,
+      shotPlan.signal as "LONG" | "SHORT",
+      shotPlan.stopLoss!,
+      shotPlan.takeProfit1!,
+      shotPlan.takeProfit2!,
+      shotPlan.confidence,
+      shotPlan.edge
+    );
     return;
   }
 
@@ -361,17 +552,18 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
   }
 
   if (shouldFlip(position, ctx.shotPlan, config)) {
-    await closePosition(position, ctx.markPrice, "FLIP", ctx);
-    if (ctx.shotPlan && ctx.shotPlan.entryZone && ctx.shotPlan.stopLoss && 
-        ctx.shotPlan.takeProfit1 && ctx.shotPlan.takeProfit2) {
+    const gating = checkShotPlanGating(ctx.shotPlan, config);
+    if (gating.allowed) {
+      await closePosition(position, ctx.markPrice, "FLIP", ctx);
+      const shotPlan = ctx.shotPlan!;
       await openPosition(
         ctx,
-        ctx.shotPlan.signal as "LONG" | "SHORT",
-        ctx.shotPlan.stopLoss,
-        ctx.shotPlan.takeProfit1,
-        ctx.shotPlan.takeProfit2,
-        ctx.shotPlan.confidence,
-        ctx.shotPlan.edge
+        shotPlan.signal as "LONG" | "SHORT",
+        shotPlan.stopLoss!,
+        shotPlan.takeProfit1!,
+        shotPlan.takeProfit2!,
+        shotPlan.confidence,
+        shotPlan.edge
       );
     }
     return;
@@ -382,7 +574,6 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
     await storage.updatePosition(position.id, { trailPrice: newTrailPrice });
   }
 
-  const portfolio = await storage.getOrCreatePortfolio();
   const equity = portfolio.currentEquityUsdt + unrealizedPnl;
   const drawdown = portfolio.peakEquityUsdt > 0 
     ? ((portfolio.peakEquityUsdt - equity) / portfolio.peakEquityUsdt) * 100 
@@ -460,6 +651,7 @@ export async function getPortfolioSummary() {
   const equity = portfolio.currentEquityUsdt + unrealized;
   const peak = portfolio.peakEquityUsdt;
   const currentDrawdown = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
+  const exposurePct = equity > 0 ? (exposure / equity) * 100 : 0;
 
   return {
     equity,
@@ -482,7 +674,9 @@ export async function getPortfolioSummary() {
     worstTrade,
     profitFactor: profitFactor === Infinity ? 999.99 : profitFactor,
     exposure,
+    exposurePct,
     isAutoTrading: config.isAutoTrading,
+    isPaperTradingEnabled: config.paperTradingEnabled,
     openPosition: openPosition ? {
       id: openPosition.id,
       side: openPosition.side as "LONG" | "SHORT",
@@ -496,5 +690,6 @@ export async function getPortfolioSummary() {
       unrealizedPnl: unrealized,
       entryTs: openPosition.entryTs,
     } : null,
+    recentAuditLogs: auditLog.slice(-10),
   };
 }
