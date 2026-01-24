@@ -195,6 +195,68 @@ async function aiBasedPredict(
   }
 }
 
+function computeConfidence(
+  probUp: number,
+  probDown: number,
+  probChop: number,
+  expectedMove: number,
+  currentPrice: number,
+  costs: number,
+  patternMaturity: number,
+  modelConfidences: number[],
+  adx: number
+): { confidence: number; components: ConfidenceComponents } {
+  const baseConfidence = Math.max(probUp, probDown);
+  
+  const regimeClarity = 1 - probChop;
+  
+  const edge = Math.abs(expectedMove) / currentPrice;
+  let edgePenalty = 1.0;
+  if (edge <= costs) {
+    edgePenalty = Math.max(0.3, edge / costs);
+  } else {
+    edgePenalty = Math.min(1.2, 1 + (edge - costs) / costs * 0.2);
+  }
+  
+  const patternFactor = 0.4 + patternMaturity * 0.6;
+  
+  let agreement = 1.0;
+  if (modelConfidences.length > 1) {
+    const mean = modelConfidences.reduce((a, b) => a + b, 0) / modelConfidences.length;
+    const variance = modelConfidences.reduce((sum, c) => sum + Math.pow(c - mean, 2), 0) / modelConfidences.length;
+    const stdDev = Math.sqrt(variance);
+    agreement = Math.max(0.5, 1 - stdDev);
+  }
+  
+  const trendStrength = Math.min(1.0, adx / 40);
+  const trendFactor = 0.7 + trendStrength * 0.3;
+  
+  let rawConfidence = baseConfidence * regimeClarity * edgePenalty * patternFactor * agreement * trendFactor;
+  
+  const confidence = Math.max(0.15, Math.min(0.90, rawConfidence));
+  
+  return {
+    confidence,
+    components: {
+      base: baseConfidence,
+      regimeClarity,
+      edgePenalty,
+      patternFactor,
+      agreement,
+      trendFactor,
+    }
+  };
+}
+
+export interface ConfidenceComponents {
+  base: number;
+  regimeClarity: number;
+  edgePenalty: number;
+  patternFactor: number;
+  agreement: number;
+  trendFactor: number;
+}
+
 export async function getEnsemblePrediction(
   candles: Candle[],
   feature: FeatureVector,
@@ -231,14 +293,25 @@ export async function getEnsemblePrediction(
   expectedMove /= totalWeight;
   
   const isChopRegime = feature.kalmanRegime === "chop";
+  const currentPrice = feature.kalmanFast || 1;
+  const costs = 0.0013;
+  
+  const patternMaturity = patternPrediction.confidence > 0.5 ? Math.min(1.0, patternPrediction.confidence) : 0.3;
+  
+  const modelConfidences = [rulePrediction.confidence, patternPrediction.confidence];
+  if (aiPrediction) modelConfidences.push(aiPrediction.confidence);
   
   if (isChopRegime) {
+    const chopConfidence = computeConfidence(
+      probUp * 0.3, probDown * 0.3, 0.7, 0, currentPrice, costs, patternMaturity, modelConfidences, feature.adx
+    );
+    
     return {
       probUp: probUp * 0.3,
       probDown: probDown * 0.3,
       probChop: Math.max(probChop, 0.7),
       expectedMove: 0,
-      confidence: 0.2,
+      confidence: chopConfidence.confidence,
       direction: "HOLD",
       models: {
         rulebased: rulePrediction,
@@ -269,8 +342,9 @@ export async function getEnsemblePrediction(
     consensus = holdVotes / votes.length;
   }
   
-  const confidence = (rulePrediction.confidence + patternPrediction.confidence + (aiPrediction?.confidence || 0)) / 
-    (aiPrediction ? 3 : 2);
+  const { confidence } = computeConfidence(
+    probUp, probDown, probChop, expectedMove, currentPrice, costs, patternMaturity, modelConfidences, feature.adx
+  );
   
   return {
     probUp,

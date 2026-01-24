@@ -926,21 +926,27 @@ export class MemStorage implements IStorage {
     }
     
     let signal: SignalType = "HOLD";
-    let confidence = 0.5;
+    
+    const baseConfidence = Math.max(probUp, probDown);
+    const regimeClarity = 1 - probChop;
+    const adxVal = this.indicators?.adx?.value ?? 25;
+    const trendStrength = Math.min(1.0, adxVal / 40);
+    const trendFactor = 0.7 + trendStrength * 0.3;
+    
+    let confidence = baseConfidence * regimeClarity * trendFactor;
+    confidence = Math.max(0.15, Math.min(0.85, confidence));
     
     if (probChop < 0.45) {
       if (probUp > 0.55) {
         signal = "LONG";
-        confidence = probUp;
       } else if (probDown > 0.55) {
         signal = "SHORT";
-        confidence = probDown;
       }
     }
     
     if (this.aiSignal && this.aiSignal.confidence > 0.6) {
       signal = this.aiSignal.direction;
-      confidence = this.aiSignal.confidence;
+      confidence = Math.max(confidence, this.aiSignal.confidence * 0.9);
     }
     
     const expectedMove = volatility * 8 * (signal === "LONG" ? 1 : signal === "SHORT" ? -1 : 0);
@@ -1291,7 +1297,7 @@ export class MemStorage implements IStorage {
       historicalLearning: {
         totalHistoricalCandles: this.learningStats.historicalCandlesProcessed + this.candles.length,
         yearsOfData: Math.max(1, Math.ceil(timeRangeDays / 365)),
-        patternsLearnedFromHistory: patternClusters.length,
+        patternsLearnedFromHistory: patternClusters.size,
         backtestTrades: this.learningStats.backtestTradesSimulated + this.trades.filter(t => t.status === "closed").length,
         historicalWinRate: this.learningStats.historicalWinRate > 0 ? this.learningStats.historicalWinRate * 100 : 
           (this.trades.filter(t => t.status === "closed" && (t.pnlPercent ?? 0) > 0).length / 

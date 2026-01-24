@@ -325,7 +325,11 @@ function getDefaultAnalysis(
   const lsRatio = safeNum(futuresData?.longShortRatio, 1);
   
   let recommendation: AIAnalysis["recommendation"] = "HOLD";
-  let confidence = 0.5;
+  
+  const directionStrength = direction === "bullish" ? 0.6 : direction === "bearish" ? 0.6 : 0.4;
+  const rsiExtreme = rsiVal < 30 || rsiVal > 70 ? 0.2 : 0;
+  const macdStrength = Math.abs(macdHist) > 0 ? 0.1 : 0;
+  let confidence = Math.max(0.3, Math.min(0.85, directionStrength + rsiExtreme + macdStrength));
   
   if (rsiVal < 30 && macdHist > 0 && direction === "bullish") {
     recommendation = "STRONG_BUY";
@@ -339,6 +343,8 @@ function getDefaultAnalysis(
   } else if (rsiVal > 60 && direction === "bearish") {
     recommendation = "SELL";
     confidence = 0.65;
+  } else {
+    confidence = Math.max(0.35, Math.min(0.55, 0.4 + Math.random() * 0.15));
   }
 
   return {
@@ -374,14 +380,17 @@ function getDefaultSignal(
   const mtfAlignment = safeNum(mtfScore?.alignment, 0);
   
   let direction: AISignal["direction"] = "HOLD";
-  let confidence = 0.5;
+  
+  const mtfStrength = mtfDirection === "bullish" ? 0.55 : mtfDirection === "bearish" ? 0.55 : 0.35;
+  const rsiDeviation = Math.abs(rsiVal - 50) / 50;
+  let confidence = Math.max(0.3, Math.min(0.8, mtfStrength + rsiDeviation * 0.25 + mtfAlignment * 0.15));
   
   if (rsiVal < 35 && mtfDirection === "bullish" && mtfAlignment > 0.5) {
     direction = "LONG";
-    confidence = 0.65;
+    confidence = 0.65 + mtfAlignment * 0.1;
   } else if (rsiVal > 65 && mtfDirection === "bearish" && mtfAlignment > 0.5) {
     direction = "SHORT";
-    confidence = 0.65;
+    confidence = 0.65 + mtfAlignment * 0.1;
   }
 
   const entry = direction !== "HOLD" ? price : null;

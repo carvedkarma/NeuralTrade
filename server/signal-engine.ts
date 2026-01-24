@@ -208,9 +208,13 @@ export async function generateShotPlan(
   
   const edge = Math.abs(ensemble.expectedMove) / currentPrice - costs;
   
+  const displayConfidence = shouldTrade 
+    ? ensemble.confidence 
+    : ensemble.confidence * 0.7;
+  
   return {
     signal: shouldTrade ? ensemble.direction : "HOLD",
-    confidence: shouldTrade ? ensemble.confidence : 0.5,
+    confidence: displayConfidence,
     regime,
     strategy,
     entryZone,
