@@ -20,6 +20,16 @@ function checkNewsFilter(newsScore: number, fearGreedValue: number): { shouldVet
   return { shouldVeto: false, reason: null };
 }
 
+export interface ExpansionGate {
+  impulseCandle: boolean;
+  atrExpansion: boolean;
+  rangeBreak: boolean;
+  confirmed: boolean;
+  details: string;
+}
+
+export type EdgeBucket = "none" | "weak" | "moderate" | "strong";
+
 export interface ShotPlan {
   signal: "LONG" | "SHORT" | "HOLD";
   confidence: number;
@@ -34,6 +44,8 @@ export interface ShotPlan {
   expectedHoldTime: string;
   estimatedCosts: number;
   edge: number;
+  edgeBucket: EdgeBucket;
+  edgeMultiple: number;
   probUp: number;
   probDown: number;
   probChop: number;
@@ -42,15 +54,85 @@ export interface ShotPlan {
   vetoReasons: string[];
   patternMatches: PatternMatch[];
   mlPredictions: EnsemblePrediction;
+  expansionGate: ExpansionGate;
 }
 
 const FEES = 0.0004;
 const SLIPPAGE = 0.0002;
 const FUNDING_RISK = 0.0001;
+const EDGE_MULTIPLE_MIN = 1.5;
 
 function estimateCosts(holdCandles: number): number {
   const fundingPeriods = Math.ceil(holdCandles / 32);
   return FEES * 2 + SLIPPAGE * 2 + FUNDING_RISK * fundingPeriods;
+}
+
+function classifyEdgeBucket(edge: number, costs: number): EdgeBucket {
+  if (edge <= 0 || costs <= 0) return "none";
+  const multiple = edge / costs;
+  if (multiple < 1.0) return "none";
+  if (multiple < 1.5) return "weak";
+  if (multiple < 2.5) return "moderate";
+  return "strong";
+}
+
+function checkExpansionGate(
+  candles: Candle[],
+  atr14: number,
+  direction: "LONG" | "SHORT" | "HOLD"
+): ExpansionGate {
+  if (candles.length < 20 || direction === "HOLD") {
+    return {
+      impulseCandle: false,
+      atrExpansion: false,
+      rangeBreak: false,
+      confirmed: false,
+      details: "Insufficient data or HOLD signal"
+    };
+  }
+
+  const lastCandle = candles[candles.length - 1];
+  
+  const impulseThreshold = 0.6 * atr14;
+  const candleBody = Math.abs(lastCandle.close - lastCandle.open);
+  const impulseCandle = candleBody >= impulseThreshold;
+  
+  const currentRange = lastCandle.high - lastCandle.low;
+  const atrExpansion = currentRange >= atr14 * 1.15;
+  
+  const rangeLookback = candles.slice(-12, -1);
+  let rangeBreak = false;
+  
+  if (direction === "SHORT") {
+    const rangeLow = Math.min(...rangeLookback.map(c => c.low));
+    rangeBreak = lastCandle.close < rangeLow;
+  } else if (direction === "LONG") {
+    const rangeHigh = Math.max(...rangeLookback.map(c => c.high));
+    rangeBreak = lastCandle.close > rangeHigh;
+  }
+  
+  const volumeLookback = candles.slice(-20, -1);
+  const volumes = volumeLookback.map(c => c.volume).sort((a, b) => a - b);
+  const medianVolume = volumes[Math.floor(volumes.length / 2)];
+  const volumeConfirms = lastCandle.volume > medianVolume;
+  
+  const rangeBreakWithVolume = rangeBreak && volumeConfirms;
+  
+  const confirmed = impulseCandle || atrExpansion || rangeBreakWithVolume;
+  
+  const details: string[] = [];
+  if (impulseCandle) details.push(`Impulse: body ${candleBody.toFixed(0)} >= 0.6*ATR(${impulseThreshold.toFixed(0)})`);
+  if (atrExpansion) details.push(`ATR exp: range ${currentRange.toFixed(0)} >= 1.15*ATR(${(atr14 * 1.15).toFixed(0)})`);
+  if (rangeBreakWithVolume) details.push(`Range break + vol > median`);
+  if (!confirmed) details.push("Waiting for expansion confirmation");
+
+  return {
+    impulseCandle,
+    atrExpansion,
+    rangeBreak: rangeBreakWithVolume,
+    confirmed,
+    details: details.join("; ")
+  };
 }
 
 function calculateRiskReward(entry: number, stop: number, tp: number): number {
@@ -207,6 +289,10 @@ export async function generateShotPlan(
     : 0;
   
   const edge = Math.abs(ensemble.expectedMove) / currentPrice - costs;
+  const edgeBucket = classifyEdgeBucket(edge, costs);
+  const edgeMultiple = costs > 0 ? edge / costs : 0;
+  
+  const expansionGate = checkExpansionGate(candles, feature.atr14, ensemble.direction);
   
   const displayConfidence = shouldTrade 
     ? ensemble.confidence 
@@ -226,6 +312,8 @@ export async function generateShotPlan(
     expectedHoldTime: holdTimeStr,
     estimatedCosts: costs,
     edge,
+    edgeBucket,
+    edgeMultiple,
     probUp: ensemble.probUp,
     probDown: ensemble.probDown,
     probChop: ensemble.probChop,
@@ -234,6 +322,7 @@ export async function generateShotPlan(
     vetoReasons: shouldTrade ? [] : vetoReasons,
     patternMatches,
     mlPredictions: ensemble,
+    expansionGate,
   };
 }
 

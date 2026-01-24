@@ -23,6 +23,10 @@ interface TradeAudit {
   edge: number;
   costs: number;
   edgeVsCosts: string;
+  edgeBucket: string;
+  edgeMultiple: number;
+  expansionConfirmed: boolean;
+  expansionDetails: string;
   positionSize: number;
   exposureAfter: number;
   decision: "ALLOWED" | "BLOCKED";
@@ -30,6 +34,8 @@ interface TradeAudit {
 }
 
 const auditLog: TradeAudit[] = [];
+
+const EDGE_MULTIPLE_MIN = 1.5;
 
 function logAudit(audit: TradeAudit): void {
   auditLog.push(audit);
@@ -41,6 +47,8 @@ function logAudit(audit: TradeAudit): void {
   console.log(`[Paper Audit] ${audit.decision}: ${audit.reason}`);
   console.log(`  Signal: ${audit.signal}, Confidence: ${(audit.confidence * 100).toFixed(1)}%, Regime: ${audit.regime}`);
   console.log(`  Edge: ${edgeStr} vs Costs: ${costsStr} (${audit.edgeVsCosts})`);
+  console.log(`  Edge Bucket: ${audit.edgeBucket}, Multiple: ${audit.edgeMultiple.toFixed(2)}x costs`);
+  console.log(`  Expansion Gate: ${audit.expansionConfirmed ? "CONFIRMED" : "PENDING"} - ${audit.expansionDetails}`);
   console.log(`  Position Size: ${audit.positionSize.toFixed(6)}, Exposure After: ${(audit.exposureAfter * 100).toFixed(1)}%`);
 }
 
@@ -213,8 +221,24 @@ function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConf
     };
   }
   
+  const edgeMultiple = shotPlan.edgeMultiple ?? (costs > 0 ? shotPlan.edge / costs : 0);
+  if (edgeMultiple < EDGE_MULTIPLE_MIN) {
+    return { 
+      allowed: false, 
+      reason: `Edge multiple ${edgeMultiple.toFixed(2)}x < ${EDGE_MULTIPLE_MIN}x minimum (edge must be >= ${EDGE_MULTIPLE_MIN}x costs)` 
+    };
+  }
+  
   if (shotPlan.regime === "chop") {
     return { allowed: false, reason: "Chop regime - no trades allowed" };
+  }
+  
+  const isTrendTrade = shotPlan.regime === "trend_up" || shotPlan.regime === "trend_down";
+  if (isTrendTrade && shotPlan.expansionGate && !shotPlan.expansionGate.confirmed) {
+    return { 
+      allowed: false, 
+      reason: `Expansion gate not confirmed for trend trade: ${shotPlan.expansionGate.details}` 
+    };
   }
   
   if (!shotPlan.entryZone || !shotPlan.stopLoss || !shotPlan.takeProfit1 || !shotPlan.takeProfit2) {
@@ -292,6 +316,9 @@ export async function openPosition(
   const notional = qty * entryPrice;
   
   const exposureCheck = await checkExposureLimits(notional, portfolio.currentEquityUsdt, config);
+  const costs = getTotalCostsPct();
+  const edgeMultiple = costs > 0 ? edge / costs : 0;
+  
   if (!exposureCheck.allowed) {
     logAudit({
       timestamp: Date.now(),
@@ -299,8 +326,12 @@ export async function openPosition(
       confidence,
       regime: ctx.shotPlan?.regime || "unknown",
       edge,
-      costs: getTotalCostsPct(),
-      edgeVsCosts: edge > getTotalCostsPct() ? "PASS" : "FAIL",
+      costs,
+      edgeVsCosts: edge > costs ? "PASS" : "FAIL",
+      edgeBucket: ctx.shotPlan?.edgeBucket || "none",
+      edgeMultiple,
+      expansionConfirmed: ctx.shotPlan?.expansionGate?.confirmed || false,
+      expansionDetails: ctx.shotPlan?.expansionGate?.details || "N/A",
       positionSize: qty,
       exposureAfter: notional / portfolio.currentEquityUsdt,
       decision: "BLOCKED",
@@ -317,8 +348,12 @@ export async function openPosition(
     confidence,
     regime: ctx.shotPlan?.regime || "unknown",
     edge,
-    costs: getTotalCostsPct(),
+    costs,
     edgeVsCosts: "PASS",
+    edgeBucket: ctx.shotPlan?.edgeBucket || "none",
+    edgeMultiple,
+    expansionConfirmed: ctx.shotPlan?.expansionGate?.confirmed || false,
+    expansionDetails: ctx.shotPlan?.expansionGate?.details || "N/A",
     positionSize: qty,
     exposureAfter: notional / portfolio.currentEquityUsdt,
     decision: "ALLOWED",
@@ -470,15 +505,22 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
   
   if (!position) {
     const gating = checkShotPlanGating(ctx.shotPlan, config);
+    const shotPlanCosts = ctx.shotPlan?.estimatedCosts || getTotalCostsPct();
+    const shotPlanEdge = ctx.shotPlan?.edge || 0;
+    const shotPlanEdgeMultiple = shotPlanCosts > 0 ? shotPlanEdge / shotPlanCosts : 0;
     
     logAudit({
       timestamp: Date.now(),
       signal: ctx.shotPlan?.signal || "NONE",
       confidence: ctx.shotPlan?.confidence || 0,
       regime: ctx.shotPlan?.regime || "unknown",
-      edge: ctx.shotPlan?.edge || 0,
-      costs: ctx.shotPlan?.estimatedCosts || getTotalCostsPct(),
-      edgeVsCosts: (ctx.shotPlan?.edge || 0) > (ctx.shotPlan?.estimatedCosts || getTotalCostsPct()) ? "PASS" : "FAIL",
+      edge: shotPlanEdge,
+      costs: shotPlanCosts,
+      edgeVsCosts: shotPlanEdge > shotPlanCosts ? "PASS" : "FAIL",
+      edgeBucket: ctx.shotPlan?.edgeBucket || "none",
+      edgeMultiple: shotPlanEdgeMultiple,
+      expansionConfirmed: ctx.shotPlan?.expansionGate?.confirmed || false,
+      expansionDetails: ctx.shotPlan?.expansionGate?.details || "N/A",
       positionSize: 0,
       exposureAfter: 0,
       decision: gating.allowed ? "ALLOWED" : "BLOCKED",

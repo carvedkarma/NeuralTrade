@@ -180,6 +180,18 @@ export const performanceStatsSchema = z.object({
 });
 export type PerformanceStats = z.infer<typeof performanceStatsSchema>;
 
+export const expansionGateSchema = z.object({
+  impulseCandle: z.boolean(),
+  atrExpansion: z.boolean(),
+  rangeBreak: z.boolean(),
+  confirmed: z.boolean(),
+  details: z.string(),
+});
+export type ExpansionGate = z.infer<typeof expansionGateSchema>;
+
+export const edgeBucketSchema = z.enum(["none", "weak", "moderate", "strong"]);
+export type EdgeBucket = z.infer<typeof edgeBucketSchema>;
+
 export const shotPlanSchema = z.object({
   signal: signalTypeSchema,
   confidence: z.number(),
@@ -194,6 +206,8 @@ export const shotPlanSchema = z.object({
   expectedHoldTime: z.string(),
   estimatedCosts: z.number(),
   edge: z.number(),
+  edgeBucket: edgeBucketSchema.optional(),
+  edgeMultiple: z.number().optional(),
   probUp: z.number(),
   probDown: z.number(),
   probChop: z.number(),
@@ -202,6 +216,7 @@ export const shotPlanSchema = z.object({
   vetoReasons: z.array(z.string()),
   patternMatchCount: z.number().optional(),
   modelConsensus: z.number().optional(),
+  expansionGate: expansionGateSchema.optional(),
 });
 export type ShotPlan = z.infer<typeof shotPlanSchema>;
 

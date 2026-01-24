@@ -5,7 +5,7 @@ import type { ShotPlan } from "@shared/schema";
 import { 
   Target, TrendingUp, TrendingDown, Minus, Shield, Clock, 
   AlertTriangle, CheckCircle2, XCircle, DollarSign, Percent,
-  ArrowUpRight, ArrowDownRight
+  ArrowUpRight, ArrowDownRight, Zap, Activity
 } from "lucide-react";
 
 interface ShotPlanCardProps {
@@ -184,6 +184,81 @@ export function ShotPlanCard({ shotPlan }: ShotPlanCardProps) {
             </span>
           </div>
         </div>
+
+        {(shotPlan.edgeBucket || shotPlan.edgeMultiple !== undefined) && (
+          <div className="bg-muted/30 rounded-lg p-3 space-y-2" data-testid="section-edge-analysis">
+            <div className="text-xs font-medium text-muted-foreground flex items-center gap-1.5" data-testid="text-edge-analysis-header">
+              <Activity className="h-3 w-3" />
+              Edge Analysis
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="flex items-center gap-1.5">
+                <span className="text-muted-foreground">Bucket:</span>
+                <Badge 
+                  variant="outline"
+                  className="text-xs capitalize"
+                  data-testid="badge-edge-bucket"
+                >
+                  {shotPlan.edgeBucket || "none"}
+                </Badge>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-muted-foreground">Multiple:</span>
+                <span className={`font-medium ${
+                  (shotPlan.edgeMultiple || 0) >= 1.5 ? "text-emerald-400" : "text-amber-400"
+                }`} data-testid="text-edge-multiple">
+                  {(shotPlan.edgeMultiple || 0).toFixed(2)}x costs
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {shotPlan.expansionGate && (
+          <div className="bg-muted/30 rounded-lg p-3 space-y-2" data-testid="section-expansion-gate">
+            <div className={`text-xs font-medium flex items-center gap-1.5 ${
+              shotPlan.expansionGate.confirmed ? "text-emerald-400" : "text-amber-400"
+            }`} data-testid="text-expansion-gate-status">
+              <Zap className="h-3 w-3" />
+              Expansion Gate: {shotPlan.expansionGate.confirmed ? "CONFIRMED" : "PENDING"}
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <div className="flex items-center gap-1" data-testid="check-impulse">
+                {shotPlan.expansionGate.impulseCandle ? (
+                  <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                ) : (
+                  <XCircle className="h-3 w-3 text-muted-foreground" />
+                )}
+                <span className={shotPlan.expansionGate.impulseCandle ? "text-emerald-400" : "text-muted-foreground"}>
+                  Impulse
+                </span>
+              </div>
+              <div className="flex items-center gap-1" data-testid="check-atr">
+                {shotPlan.expansionGate.atrExpansion ? (
+                  <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                ) : (
+                  <XCircle className="h-3 w-3 text-muted-foreground" />
+                )}
+                <span className={shotPlan.expansionGate.atrExpansion ? "text-emerald-400" : "text-muted-foreground"}>
+                  ATR Exp.
+                </span>
+              </div>
+              <div className="flex items-center gap-1" data-testid="check-range-break">
+                {shotPlan.expansionGate.rangeBreak ? (
+                  <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                ) : (
+                  <XCircle className="h-3 w-3 text-muted-foreground" />
+                )}
+                <span className={shotPlan.expansionGate.rangeBreak ? "text-emerald-400" : "text-muted-foreground"}>
+                  Range Brk
+                </span>
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground" data-testid="text-expansion-details">
+              {shotPlan.expansionGate.details}
+            </p>
+          </div>
+        )}
 
         {shotPlan.reasons.length > 0 && (
           <div className="space-y-1">
