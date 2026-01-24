@@ -1,5 +1,5 @@
 import express, { type Request, Response, NextFunction } from "express";
-import { registerRoutes, hydrateBackfillStateFromDb, backfillState } from "./routes";
+import { registerRoutes, hydrateBackfillStateFromDb, initializeStrategyLearner, backfillState } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { checkIncompleteBackfillJobs, backfillHistoricalData } from "./historical-data";
@@ -98,6 +98,8 @@ app.use((req, res, next) => {
       
       loadPaperState().then(() => {
         return hydrateBackfillStateFromDb();
+      }).then(() => {
+        return initializeStrategyLearner();
       }).then(() => {
         return checkIncompleteBackfillJobs();
       }).then(async (result) => {

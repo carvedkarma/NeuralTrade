@@ -48,6 +48,7 @@ export interface IStorage {
   getStrategyState(): StrategyState;
   requestAIAnalysis(): Promise<void>;
   reloadHistoricalCandles(): Promise<void>;
+  getCandles(): Candle[];
 }
 
 class KalmanFilter {
@@ -433,6 +434,10 @@ export class MemStorage implements IStorage {
     }
   }
 
+  getCandles(): Candle[] {
+    return this.candles;
+  }
+
   private startContinuousLearning(): void {
     if (this.continuousLearningActive) return;
     this.continuousLearningActive = true;
@@ -659,6 +664,14 @@ export class MemStorage implements IStorage {
         
         await this.saveLearningStateToDb();
         console.log(`[Persistence] State saved after epoch ${this.learningStats.learningEpochs}`);
+      }
+      
+      // Train Strategy Learner on same batch of historical candles
+      try {
+        const { strategyLearner } = await import("./strategy-learner");
+        await strategyLearner.trainOnHistoricalData(candlesToUse, batchSize);
+      } catch (slErr) {
+        console.error("[Strategy Learner] Training error:", slErr);
       }
     } catch (error) {
       console.error("Error during deep training:", error);

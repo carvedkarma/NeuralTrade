@@ -679,6 +679,24 @@ export const backfillJobs = pgTable("backfill_jobs", {
   updatedTs: bigint("updated_ts", { mode: "number" }).notNull(),
 });
 
+export const strategyLearnerState = pgTable("strategy_learner_state", {
+  id: serial("id").primaryKey(),
+  epochsCompleted: integer("epochs_completed").default(0),
+  totalSamples: integer("total_samples").default(0),
+  modelAccuracy: real("model_accuracy").default(0),
+  longWinRate: real("long_win_rate").default(0),
+  shortWinRate: real("short_win_rate").default(0),
+  holdWinRate: real("hold_win_rate").default(1),
+  longExpectancy: real("long_expectancy").default(0),
+  shortExpectancy: real("short_expectancy").default(0),
+  holdExpectancy: real("hold_expectancy").default(0),
+  longPnl: real("long_pnl").default(0),
+  shortPnl: real("short_pnl").default(0),
+  lastTrainingTs: bigint("last_training_ts", { mode: "number" }),
+  trainingProgressIdx: integer("training_progress_idx").default(0),
+  updatedTs: bigint("updated_ts", { mode: "number" }).notNull(),
+});
+
 export const insertCandleSchema = createInsertSchema(candles).omit({ id: true });
 export const insertFeatureSchema = createInsertSchema(features).omit({ id: true });
 export const insertPatternSchema = createInsertSchema(patterns).omit({ id: true });
@@ -692,6 +710,7 @@ export const insertLearningStateSchema = createInsertSchema(learningState).omit(
 export const insertPatternClusterSchema = createInsertSchema(patternClusters).omit({ id: true });
 export const insertSocialMediaStatsSchema = createInsertSchema(socialMediaStats).omit({ id: true });
 export const insertBackfillJobSchema = createInsertSchema(backfillJobs).omit({ id: true });
+export const insertStrategyLearnerStateSchema = createInsertSchema(strategyLearnerState).omit({ id: true });
 
 export type InsertCandle = z.infer<typeof insertCandleSchema>;
 export type InsertFeature = z.infer<typeof insertFeatureSchema>;
@@ -706,6 +725,7 @@ export type InsertLearningState = z.infer<typeof insertLearningStateSchema>;
 export type InsertPatternCluster = z.infer<typeof insertPatternClusterSchema>;
 export type InsertSocialMediaStats = z.infer<typeof insertSocialMediaStatsSchema>;
 export type InsertBackfillJob = z.infer<typeof insertBackfillJobSchema>;
+export type InsertStrategyLearnerState = z.infer<typeof insertStrategyLearnerStateSchema>;
 
 export type DbCandle = typeof candles.$inferSelect;
 export type DbFeature = typeof features.$inferSelect;
@@ -721,3 +741,4 @@ export type LearningState = typeof learningState.$inferSelect;
 export type PatternCluster = typeof patternClusters.$inferSelect;
 export type SocialMediaStats = typeof socialMediaStats.$inferSelect;
 export type BackfillJob = typeof backfillJobs.$inferSelect;
+export type StrategyLearnerState = typeof strategyLearnerState.$inferSelect;

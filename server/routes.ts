@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
 import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs } from "./historical-data";
+import { strategyLearner } from "./strategy-learner";
 
 export const backfillState = {
   inProgress: false,
@@ -22,6 +23,14 @@ export async function hydrateBackfillStateFromDb(): Promise<void> {
       backfillState.message = `Job ${activeJob.id}: ${activeJob.status} (${activeJob.progressPct ?? 0}%)`;
       console.log(`[Routes] Hydrated backfill state from DB: job ${activeJob.id}, status=${activeJob.status}, ${activeJob.progressPct}%`);
     }
+  }
+}
+
+export async function initializeStrategyLearner(): Promise<void> {
+  try {
+    await strategyLearner.loadStateFromDb();
+  } catch (err) {
+    console.error("[Routes] Failed to initialize Strategy Learner:", err);
   }
 }
 
@@ -102,6 +111,21 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error getting persistence status:", error);
       res.status(500).json({ error: "Failed to get persistence status" });
+    }
+  });
+
+  app.get("/api/strategy-learner", async (req, res) => {
+    try {
+      const candles = storage.getCandles();
+      const dashboardData = await storage.getDashboardData();
+      const currentSignal = dashboardData.currentSignal.signal;
+      const currentConfidence = dashboardData.currentSignal.confidence;
+      
+      const data = strategyLearner.getData(candles, currentSignal, currentConfidence);
+      res.json(data);
+    } catch (error) {
+      console.error("Error getting strategy learner data:", error);
+      res.status(500).json({ error: "Failed to get strategy learner data" });
     }
   });
 

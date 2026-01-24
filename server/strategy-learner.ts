@@ -325,8 +325,9 @@ export class StrategyLearner {
     this.lastTrainingTime = Date.now();
     this.isTraining = false;
 
-    if (this.trainingEpochs % 10 === 0) {
+    if (this.trainingEpochs % 5 === 0) {
       console.log(`[Strategy Learner] Epoch ${this.trainingEpochs}: ${this.actionSamples.length} samples, ${this.actionPatterns.size} patterns`);
+      await this.saveStateToDb();
     }
   }
 
@@ -537,16 +538,17 @@ export class StrategyLearner {
   getActionPatterns(): ActionPattern[] {
     const patterns: ActionPattern[] = [];
 
-    for (const [patternId, data] of this.actionPatterns.entries()) {
+    const entries = Array.from(this.actionPatterns.entries());
+    for (const [patternId, data] of entries) {
       if (data.longTotal < 5 || data.shortTotal < 5) continue;
 
       const longWinRate = data.longWins / data.longTotal;
       const shortWinRate = data.shortWins / data.shortTotal;
       const longAvgReward = data.longRewards.length > 0 
-        ? data.longRewards.reduce((a, b) => a + b, 0) / data.longRewards.length 
+        ? data.longRewards.reduce((a: number, b: number) => a + b, 0) / data.longRewards.length 
         : 0;
       const shortAvgReward = data.shortRewards.length > 0 
-        ? data.shortRewards.reduce((a, b) => a + b, 0) / data.shortRewards.length 
+        ? data.shortRewards.reduce((a: number, b: number) => a + b, 0) / data.shortRewards.length 
         : 0;
 
       let bestAction: "LONG" | "SHORT" | "HOLD" = "HOLD";
@@ -607,6 +609,103 @@ export class StrategyLearner {
         agreement: currentSignal === ev.bestAction,
       },
     };
+  }
+
+  async saveStateToDb(): Promise<void> {
+    try {
+      const { db } = await import("./db");
+      const { strategyLearnerState } = await import("./db/schema");
+      const { eq } = await import("drizzle-orm");
+      
+      const longStats = this.computeActionStats(this.longOutcomes.map(o => o.pnl));
+      const shortStats = this.computeActionStats(this.shortOutcomes.map(o => o.pnl));
+      
+      const existingState = await db.select().from(strategyLearnerState).limit(1);
+      const now = Date.now();
+      
+      const stateData = {
+        epochsCompleted: this.trainingEpochs,
+        totalSamples: this.actionSamples.length,
+        modelAccuracy: this.modelAccuracy,
+        longWinRate: longStats.winRate,
+        shortWinRate: shortStats.winRate,
+        holdWinRate: 1,
+        longExpectancy: longStats.expectancy,
+        shortExpectancy: shortStats.expectancy,
+        holdExpectancy: 0,
+        longPnl: longStats.avgPnl,
+        shortPnl: shortStats.avgPnl,
+        lastTrainingTs: this.lastTrainingTime,
+        trainingProgressIdx: this.actionSamples.length,
+        updatedTs: now,
+      };
+
+      if (existingState.length > 0) {
+        await db.update(strategyLearnerState)
+          .set(stateData)
+          .where(eq(strategyLearnerState.id, existingState[0].id));
+      } else {
+        await db.insert(strategyLearnerState).values(stateData);
+      }
+      
+      console.log(`[Strategy Learner] State saved: ${this.trainingEpochs} epochs, ${this.actionSamples.length} samples`);
+    } catch (err) {
+      console.error("[Strategy Learner] Failed to save state:", err);
+    }
+  }
+
+  private computeActionStats(pnls: number[]): { winRate: number; expectancy: number; avgPnl: number } {
+    if (pnls.length === 0) return { winRate: 0, expectancy: 0, avgPnl: 0 };
+    const wins = pnls.filter(p => p > 0).length;
+    const winRate = wins / pnls.length;
+    const avgPnl = pnls.reduce((a, b) => a + b, 0) / pnls.length;
+    const avgWin = pnls.filter(p => p > 0).reduce((a, b) => a + b, 0) / Math.max(1, wins);
+    const avgLoss = pnls.filter(p => p <= 0).reduce((a, b) => a + b, 0) / Math.max(1, pnls.length - wins);
+    const expectancy = (winRate * avgWin) - ((1 - winRate) * Math.abs(avgLoss));
+    return { winRate, expectancy, avgPnl };
+  }
+
+  async loadStateFromDb(): Promise<boolean> {
+    try {
+      const { db } = await import("./db");
+      const { strategyLearnerState } = await import("./db/schema");
+      
+      const rows = await db.select().from(strategyLearnerState).limit(1);
+      if (rows.length === 0) return false;
+      
+      const state = rows[0];
+      this.trainingEpochs = state.epochsCompleted || 0;
+      this.modelAccuracy = state.modelAccuracy || 0;
+      this.lastTrainingTime = state.lastTrainingTs || null;
+      
+      if (state.longWinRate !== null && state.longWinRate > 0) {
+        const longCount = Math.floor((state.totalSamples || 0) / 3);
+        for (let i = 0; i < longCount; i++) {
+          this.longOutcomes.push({ 
+            pnl: state.longPnl || 0, 
+            mae: 0.5, 
+            mfe: 0.5 
+          });
+        }
+        const shortCount = longCount;
+        for (let i = 0; i < shortCount; i++) {
+          this.shortOutcomes.push({ 
+            pnl: state.shortPnl || 0, 
+            mae: 0.5, 
+            mfe: 0.5 
+          });
+        }
+        for (let i = 0; i < longCount; i++) {
+          this.holdOutcomes.push({ pnl: 0 });
+        }
+      }
+      
+      console.log(`[Strategy Learner] State restored: ${this.trainingEpochs} epochs, ${state.totalSamples} samples`);
+      return true;
+    } catch (err) {
+      console.error("[Strategy Learner] Failed to load state:", err);
+      return false;
+    }
   }
 }
 
