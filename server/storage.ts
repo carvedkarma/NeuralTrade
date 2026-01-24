@@ -32,7 +32,7 @@ import { getFullBTCDataBinanceVision } from "./binance-vision";
 import { computeFeatures, getLatestFeatures, detectCandlestickPatterns, analyzeVolumeProfile, analyzeMultiTimeframePatterns, type FeatureVector, type CandlestickPattern, type VolumeProfile, type MultiTimeframeCorrelation } from "./feature-engine";
 import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-engine";
 import { getSentimentData, interpretFearGreed, getNewsStats } from "./sentiment-api";
-import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime, getLastSimilarityDistribution } from "./pattern-memory";
+import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime, getLastSimilarityDistribution, initializePatternClusters, getPatternClusterStats, updateDataCounts, canCreateNewPatterns } from "./pattern-memory";
 
 export interface IStorage {
   getDashboardData(): Promise<DashboardData>;
@@ -202,6 +202,11 @@ export class MemStorage implements IStorage {
     this.refreshData();
     this.startContinuousLearning();
     this.startSocialSimulation();
+    initializePatternClusters().then(() => {
+      console.log("Pattern clusters initialized");
+    }).catch(err => {
+      console.error("Failed to initialize pattern clusters:", err);
+    });
   }
 
   private startContinuousLearning(): void {
@@ -266,6 +271,8 @@ export class MemStorage implements IStorage {
     
     console.log(`Starting DEEP training run... (${this.candles.length} candles, epoch ${this.learningStats.learningEpochs + 1})`);
     this.lastTrainingRun = now;
+    
+    updateDataCounts(this.candles.length, this.learningStats.backtestTradesSimulated);
     
     const simDist = getLastSimilarityDistribution();
     const similarityHealthy = simDist.mean === 0 || simDist.mean < 0.90;
@@ -1175,22 +1182,34 @@ export class MemStorage implements IStorage {
 
     return {
       dataSources,
-      patternLearning: {
-        totalPatterns: this.learningStats.totalPatternsMatched,
-        uniquePatterns: Math.floor(this.learningStats.totalPatternsMatched * 0.7),
-        avgSimilarity: this.learningStats.avgPatternSimilarity,
-        matchRate: this.learningStats.totalPredictions > 0 
-          ? (this.learningStats.totalPatternsMatched / this.learningStats.totalPredictions) * 10 : 0,
-        lastPatternAdded: this.learningStats.lastFeatureCompute || null,
-        patternsByRegime: this.learningStats.patternsByRegime,
-        similarityDistribution: getLastSimilarityDistribution(),
-        similarityHealthy: getLastSimilarityDistribution().mean > 0 && getLastSimilarityDistribution().mean < 0.90,
-        topPatternOutcomes: [
-          { pattern: "RSI Oversold Bounce", winRate: 68, count: Math.floor(this.learningStats.totalPatternsMatched * 0.2) },
-          { pattern: "MACD Crossover", winRate: 62, count: Math.floor(this.learningStats.totalPatternsMatched * 0.15) },
-          { pattern: "Bollinger Squeeze", winRate: 59, count: Math.floor(this.learningStats.totalPatternsMatched * 0.1) },
-        ],
-      },
+      patternLearning: (() => {
+        const clusterStats = getPatternClusterStats();
+        const simDist = getLastSimilarityDistribution();
+        return {
+          totalPatterns: clusterStats.total,
+          uniquePatterns: clusterStats.mature,
+          activePatterns: clusterStats.mature,
+          immaturePatterns: clusterStats.immature,
+          maxPatterns: 30,
+          avgSimilarity: this.learningStats.avgPatternSimilarity,
+          matchRate: this.learningStats.totalPredictions > 0 
+            ? (this.learningStats.totalPatternsMatched / this.learningStats.totalPredictions) * 10 : 0,
+          canCreatePatterns: canCreateNewPatterns(),
+          requiredData: { trades: 1000, candles: 30000 },
+          currentData: { trades: this.learningStats.backtestTradesSimulated, candles: this.candles.length },
+          lastPatternAdded: this.learningStats.lastFeatureCompute || null,
+          patternsByRegime: this.learningStats.patternsByRegime,
+          clustersByRegime: clusterStats.byRegime,
+          similarityDistribution: simDist,
+          similarityHealthy: simDist.mean > 0 && simDist.mean < 0.90,
+          minSupportRequired: 50,
+          topPatternOutcomes: clusterStats.mature > 0 ? [
+            { pattern: `${clusterStats.byRegime.trend_up.mature} trend_up clusters`, winRate: 0, count: clusterStats.byRegime.trend_up.total },
+            { pattern: `${clusterStats.byRegime.trend_down.mature} trend_down clusters`, winRate: 0, count: clusterStats.byRegime.trend_down.total },
+            { pattern: `${clusterStats.byRegime.chop.mature} chop clusters`, winRate: 0, count: clusterStats.byRegime.chop.total },
+          ] : [],
+        };
+      })(),
       featureComputation: {
         totalFeatures: 40,
         featuresComputed: this.learningStats.featureComputeCount,

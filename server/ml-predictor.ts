@@ -206,9 +206,9 @@ export async function getEnsemblePrediction(
   const aiPrediction = includeAI ? await aiBasedPredict(candles, feature, futuresData) : null;
   
   const weights = {
-    rulebased: 0.35,
-    pattern: 0.35,
-    ai: 0.30,
+    rulebased: 0.30,
+    pattern: 0.15,
+    ai: 0.55,
   };
   
   let totalWeight = weights.rulebased + weights.pattern;

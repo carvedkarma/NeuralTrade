@@ -3,6 +3,45 @@ import { patterns } from "./db/schema";
 import { desc, sql } from "drizzle-orm";
 import type { FeatureVector } from "./feature-engine";
 
+const MAX_PATTERNS_TOTAL = 30;
+const MIN_SAMPLES_PER_PATTERN = 50;
+const MIN_BACKTEST_TRADES = 1000;
+const MIN_CANDLES_15M = 30000;
+const EMBARGO_CANDLES = 16;
+
+let currentCandleCount = 0;
+let currentBacktestTrades = 0;
+
+export function updateDataCounts(candles: number, trades: number) {
+  currentCandleCount = candles;
+  currentBacktestTrades = trades;
+}
+
+export function canCreateNewPatterns(): boolean {
+  return currentBacktestTrades >= MIN_BACKTEST_TRADES && currentCandleCount >= MIN_CANDLES_15M;
+}
+
+export interface PatternCluster {
+  id: string;
+  regime: "trend_up" | "trend_down" | "chop" | "shock";
+  centroid: number[];
+  support: number;
+  wins: number;
+  winRate: number;
+  avgReturn: number;
+  maturity: number;
+  samples: PatternSample[];
+}
+
+export interface PatternSample {
+  timestamp: number;
+  embedding: number[];
+  forwardReturn8: number;
+  won: boolean;
+}
+
+let patternClusters: Map<string, PatternCluster> = new Map();
+
 export interface PatternMatch {
   timestamp: number;
   similarity: number;
@@ -16,6 +55,8 @@ export interface PatternMatch {
   label: string;
   atrAtEntry: number;
   dynamicThreshold: number;
+  clusterId?: string;
+  clusterMaturity?: number;
 }
 
 export function mapKalmanToRegime(kalmanRegime: string): "trend_up" | "trend_down" | "chop" | "shock" {
@@ -71,6 +112,7 @@ export interface PatternStats {
   worstCase: number;
   consistency: number;
   regimeBreakdown: Record<string, number>;
+  matureMatchCount: number;
 }
 
 function cosineSimilarity(a: number[], b: number[]): number {
@@ -90,16 +132,6 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return magnitude === 0 ? 0 : dotProduct / magnitude;
 }
 
-function euclideanDistance(a: number[], b: number[]): number {
-  if (a.length !== b.length) return Infinity;
-  
-  let sum = 0;
-  for (let i = 0; i < a.length; i++) {
-    sum += Math.pow(a[i] - b[i], 2);
-  }
-  return Math.sqrt(sum);
-}
-
 export interface StorePatternParams {
   feature: FeatureVector;
   forwardReturn8: number;
@@ -111,6 +143,44 @@ export interface StorePatternParams {
   dynamicThreshold: number;
 }
 
+function computeMaturity(support: number): number {
+  return Math.min(1, Math.max(0, support / 200));
+}
+
+function isPatternMature(cluster: PatternCluster): boolean {
+  return cluster.support >= MIN_SAMPLES_PER_PATTERN && cluster.maturity >= 0.25;
+}
+
+function generateClusterId(regime: string, index: number): string {
+  return `${regime}_cluster_${index}`;
+}
+
+async function findNearestCluster(
+  embedding: number[],
+  regime: "trend_up" | "trend_down" | "chop" | "shock"
+): Promise<{ cluster: PatternCluster | null; similarity: number }> {
+  let bestCluster: PatternCluster | null = null;
+  let bestSimilarity = 0;
+  
+  const clusters = Array.from(patternClusters.values());
+  for (const cluster of clusters) {
+    if (cluster.regime !== regime) continue;
+    
+    const similarity = cosineSimilarity(embedding, cluster.centroid);
+    if (similarity > bestSimilarity) {
+      bestSimilarity = similarity;
+      bestCluster = cluster;
+    }
+  }
+  
+  return { cluster: bestCluster, similarity: bestSimilarity };
+}
+
+function updateClusterCentroid(cluster: PatternCluster, newEmbedding: number[]): number[] {
+  const n = cluster.support;
+  return cluster.centroid.map((c, i) => (c * n + newEmbedding[i]) / (n + 1));
+}
+
 export async function storePattern(params: StorePatternParams): Promise<void> {
   const { feature, forwardReturn8, forwardReturn16, maxDrawdown, maxRunup, timeToMfe, atrAtEntry, dynamicThreshold } = params;
   
@@ -118,6 +188,66 @@ export async function storePattern(params: StorePatternParams): Promise<void> {
   const prediction = determinePrediction(regime);
   const actualOutcome = determineActualOutcome(forwardReturn8, dynamicThreshold);
   const won = determineWin(prediction, actualOutcome);
+  
+  const embedding = normalizeEmbedding(feature.embedding);
+  if (!isValidEmbedding(embedding)) {
+    return;
+  }
+  
+  const { cluster: nearestCluster, similarity } = await findNearestCluster(embedding, regime);
+  
+  const totalClusters = patternClusters.size;
+  const canCreate = canCreateNewPatterns();
+  
+  if (nearestCluster && similarity >= 0.7) {
+    nearestCluster.centroid = updateClusterCentroid(nearestCluster, embedding);
+    nearestCluster.support++;
+    if (won) nearestCluster.wins++;
+    nearestCluster.winRate = nearestCluster.wins / nearestCluster.support;
+    nearestCluster.avgReturn = (nearestCluster.avgReturn * (nearestCluster.support - 1) + forwardReturn8) / nearestCluster.support;
+    nearestCluster.maturity = computeMaturity(nearestCluster.support);
+    
+    nearestCluster.samples.push({
+      timestamp: feature.timestamp,
+      embedding,
+      forwardReturn8,
+      won,
+    });
+    
+    if (nearestCluster.samples.length > 200) {
+      nearestCluster.samples = nearestCluster.samples.slice(-200);
+    }
+  } else if (canCreate && totalClusters < MAX_PATTERNS_TOTAL) {
+    const regimeClusters = Array.from(patternClusters.values()).filter(c => c.regime === regime);
+    const newId = generateClusterId(regime, regimeClusters.length);
+    
+    const newCluster: PatternCluster = {
+      id: newId,
+      regime,
+      centroid: embedding,
+      support: 1,
+      wins: won ? 1 : 0,
+      winRate: won ? 1 : 0,
+      avgReturn: forwardReturn8,
+      maturity: computeMaturity(1),
+      samples: [{
+        timestamp: feature.timestamp,
+        embedding,
+        forwardReturn8,
+        won,
+      }],
+    };
+    
+    patternClusters.set(newId, newCluster);
+    console.log(`Created new pattern cluster: ${newId} (total: ${patternClusters.size}/${MAX_PATTERNS_TOTAL})`);
+  } else if (nearestCluster) {
+    nearestCluster.centroid = updateClusterCentroid(nearestCluster, embedding);
+    nearestCluster.support++;
+    if (won) nearestCluster.wins++;
+    nearestCluster.winRate = nearestCluster.wins / nearestCluster.support;
+    nearestCluster.avgReturn = (nearestCluster.avgReturn * (nearestCluster.support - 1) + forwardReturn8) / nearestCluster.support;
+    nearestCluster.maturity = computeMaturity(nearestCluster.support);
+  }
   
   await db.insert(patterns).values({
     timestamp: feature.timestamp,
@@ -169,15 +299,17 @@ export async function findSimilarPatterns(
   currentEmbedding: number[],
   topK: number = 50,
   minSimilarity: number = 0.6,
-  embargoTimestamp?: number
+  embargoTimestamp?: number,
+  currentTimestamp?: number
 ): Promise<PatternMatch[]> {
   const allPatterns = await db.select().from(patterns).orderBy(desc(patterns.timestamp)).limit(10000);
   
   const matches: PatternMatch[] = [];
   const allSimilarities: number[] = [];
   
-  const embargoCandles = 16;
-  const embargoMs = embargoTimestamp || (Date.now() - embargoCandles * 15 * 60 * 1000);
+  const embargoMs = embargoTimestamp || (Date.now() - EMBARGO_CANDLES * 15 * 60 * 1000);
+  const currentWindow = currentTimestamp || Date.now();
+  const windowBuffer = 15 * 60 * 1000;
   
   const normalizedCurrent = normalizeEmbedding(currentEmbedding);
   if (!isValidEmbedding(normalizedCurrent)) {
@@ -187,6 +319,7 @@ export async function findSimilarPatterns(
   
   for (const pattern of allPatterns) {
     if (pattern.timestamp > embargoMs) continue;
+    if (Math.abs(pattern.timestamp - currentWindow) < windowBuffer) continue;
     
     const embedding = pattern.embedding as number[];
     if (!isValidEmbedding(embedding)) continue;
@@ -197,7 +330,9 @@ export async function findSimilarPatterns(
     if (!isFinite(similarity)) continue;
     allSimilarities.push(similarity);
     
-    if (similarity >= minSimilarity && similarity < 0.999) {
+    if (similarity >= minSimilarity && similarity < 0.995) {
+      const clusterInfo = findClusterForPattern(pattern.regime || "chop", embedding);
+      
       matches.push({
         timestamp: pattern.timestamp,
         similarity,
@@ -211,6 +346,8 @@ export async function findSimilarPatterns(
         label: pattern.label || "unknown",
         atrAtEntry: pattern.atrAtEntry || 0,
         dynamicThreshold: pattern.dynamicThreshold || 0.004,
+        clusterId: clusterInfo?.clusterId,
+        clusterMaturity: clusterInfo?.maturity,
       });
     }
   }
@@ -225,8 +362,10 @@ export async function findSimilarPatterns(
     
     lastSimilarityDist = { min, max, mean, median, count: allSimilarities.length };
     
+    console.log(`Similarity distribution: min=${(min * 100).toFixed(1)}%, mean=${(mean * 100).toFixed(1)}%, median=${(median * 100).toFixed(1)}%, max=${(max * 100).toFixed(1)}% (n=${allSimilarities.length})`);
+    
     if (mean > 0.90) {
-      console.warn(`SIMILARITY WARNING: Avg similarity ${(mean * 100).toFixed(1)}% is too high! Distribution: min=${(min * 100).toFixed(1)}%, median=${(median * 100).toFixed(1)}%, max=${(max * 100).toFixed(1)}%`);
+      console.warn(`SIMILARITY WARNING: Avg similarity ${(mean * 100).toFixed(1)}% is too high! Target: 65-85%`);
     }
   }
   
@@ -235,10 +374,34 @@ export async function findSimilarPatterns(
   return matches.slice(0, topK);
 }
 
+function findClusterForPattern(regime: string, embedding: number[]): { clusterId: string; maturity: number } | null {
+  const normalizedEmb = normalizeEmbedding(embedding);
+  let bestCluster: PatternCluster | null = null;
+  let bestSimilarity = 0;
+  
+  const clusters = Array.from(patternClusters.values());
+  for (const cluster of clusters) {
+    if (cluster.regime !== regime) continue;
+    
+    const similarity = cosineSimilarity(normalizedEmb, cluster.centroid);
+    if (similarity > bestSimilarity && similarity >= 0.7) {
+      bestSimilarity = similarity;
+      bestCluster = cluster;
+    }
+  }
+  
+  if (bestCluster) {
+    return { clusterId: bestCluster.id, maturity: bestCluster.maturity };
+  }
+  return null;
+}
+
 export function computePatternStats(matches: PatternMatch[]): PatternStats {
-  if (matches.length === 0) {
+  const matureMatches = matches.filter(m => (m.clusterMaturity || 0) >= 0.25);
+  
+  if (matureMatches.length === 0) {
     return {
-      matchCount: 0,
+      matchCount: matches.length,
       avgReturn8: 0,
       avgReturn16: 0,
       winRate: 0,
@@ -251,43 +414,45 @@ export function computePatternStats(matches: PatternMatch[]): PatternStats {
       worstCase: 0,
       consistency: 0,
       regimeBreakdown: {},
+      matureMatchCount: 0,
     };
   }
   
-  const returns8 = matches.map(m => m.forwardReturn8);
-  const returns16 = matches.map(m => m.forwardReturn16);
-  const drawdowns = matches.map(m => m.maxDrawdown).sort((a, b) => a - b);
-  const runups = matches.map(m => m.maxRunup).sort((a, b) => b - a);
-  const timesToMfe = matches.map(m => m.timeToMfe);
-  const wins = matches.filter(m => m.won).length;
+  const returns8 = matureMatches.map(m => m.forwardReturn8);
+  const returns16 = matureMatches.map(m => m.forwardReturn16);
+  const drawdowns = matureMatches.map(m => m.maxDrawdown).sort((a, b) => a - b);
+  const runups = matureMatches.map(m => m.maxRunup).sort((a, b) => b - a);
+  const timesToMfe = matureMatches.map(m => m.timeToMfe);
+  const wins = matureMatches.filter(m => m.won).length;
   
   const regimeBreakdown: Record<string, number> = {};
-  for (const m of matches) {
+  for (const m of matureMatches) {
     regimeBreakdown[m.regime] = (regimeBreakdown[m.regime] || 0) + 1;
   }
   
-  const avgReturn8 = returns8.reduce((a, b) => a + b, 0) / matches.length;
-  const avgReturn16 = returns16.reduce((a, b) => a + b, 0) / matches.length;
+  const avgReturn8 = returns8.reduce((a, b) => a + b, 0) / matureMatches.length;
+  const avgReturn16 = returns16.reduce((a, b) => a + b, 0) / matureMatches.length;
   
-  const variance = returns8.reduce((sum, r) => sum + Math.pow(r - avgReturn8, 2), 0) / matches.length;
+  const variance = returns8.reduce((sum, r) => sum + Math.pow(r - avgReturn8, 2), 0) / matureMatches.length;
   const stdDev = Math.sqrt(variance);
   
-  const p70Index = Math.floor(matches.length * 0.7);
+  const p70Index = Math.floor(matureMatches.length * 0.7);
   
   return {
     matchCount: matches.length,
     avgReturn8,
     avgReturn16,
-    winRate: wins / matches.length,
-    avgDrawdown: drawdowns.reduce((a, b) => a + b, 0) / matches.length,
-    avgRunup: runups.reduce((a, b) => a + b, 0) / matches.length,
-    avgTimeToMfe: timesToMfe.reduce((a, b) => a + b, 0) / matches.length,
+    winRate: wins / matureMatches.length,
+    avgDrawdown: drawdowns.reduce((a, b) => a + b, 0) / matureMatches.length,
+    avgRunup: runups.reduce((a, b) => a + b, 0) / matureMatches.length,
+    avgTimeToMfe: timesToMfe.reduce((a, b) => a + b, 0) / matureMatches.length,
     mae70thPercentile: drawdowns[p70Index] || 0,
-    mfe70thPercentile: runups[Math.floor(matches.length * 0.3)] || 0,
+    mfe70thPercentile: runups[Math.floor(matureMatches.length * 0.3)] || 0,
     bestCase: Math.max(...returns8),
     worstCase: Math.min(...returns8),
     consistency: avgReturn8 === 0 ? 0 : 1 - (stdDev / Math.abs(avgReturn8)),
     regimeBreakdown,
+    matureMatchCount: matureMatches.length,
   };
 }
 
@@ -296,11 +461,11 @@ export function getPatternConfidence(stats: PatternStats): {
   confidence: number;
   reasoning: string;
 } {
-  if (stats.matchCount < 10) {
+  if (stats.matureMatchCount < 10) {
     return {
       direction: "HOLD",
       confidence: 0,
-      reasoning: `Insufficient pattern matches (${stats.matchCount}). Need at least 10 similar historical setups.`,
+      reasoning: `Insufficient mature pattern matches (${stats.matureMatchCount}/10). Need mature clusters with >= ${MIN_SAMPLES_PER_PATTERN} samples each.`,
     };
   }
   
@@ -321,7 +486,7 @@ export function getPatternConfidence(stats: PatternStats): {
   return {
     direction,
     confidence,
-    reasoning: `${stats.matchCount} similar patterns found. Win rate: ${(winRate * 100).toFixed(1)}%, Avg return: ${expectedReturn.toFixed(2)}%, Best: ${(stats.bestCase * 100).toFixed(2)}%, Worst: ${(stats.worstCase * 100).toFixed(2)}%`,
+    reasoning: `${stats.matchCount} similar patterns (${stats.matureMatchCount} mature). Win rate: ${(winRate * 100).toFixed(1)}%, Avg return: ${expectedReturn.toFixed(2)}%`,
   };
 }
 
@@ -331,19 +496,57 @@ export interface RegimeStats {
   avgReturn: number;
 }
 
+export interface ClusterSummary {
+  id: string;
+  regime: string;
+  support: number;
+  maturity: number;
+  winRate: number;
+  avgReturn: number;
+  isMature: boolean;
+}
+
 export interface StoredPatternStats {
   totalPatterns: number;
+  activePatterns: number;
+  immaturePatterns: number;
+  maxPatterns: number;
   winRate: number;
   regimeBreakdown: Record<string, number>;
   regimeStats: Record<string, RegimeStats>;
   avgThreshold: number;
   recentWinRate: number;
   similarityHealthy: boolean;
+  canCreatePatterns: boolean;
+  patternClusters: ClusterSummary[];
+  rawSampleCount: number;
+}
+
+export function getActivePatternClusters(): ClusterSummary[] {
+  const summaries: ClusterSummary[] = [];
+  
+  const clusters = Array.from(patternClusters.values());
+  for (const cluster of clusters) {
+    summaries.push({
+      id: cluster.id,
+      regime: cluster.regime,
+      support: cluster.support,
+      maturity: cluster.maturity,
+      winRate: cluster.winRate,
+      avgReturn: cluster.avgReturn,
+      isMature: isPatternMature(cluster),
+    });
+  }
+  
+  return summaries.sort((a, b) => b.support - a.support);
 }
 
 export async function getStoredPatternStats(): Promise<StoredPatternStats> {
   const emptyStats: StoredPatternStats = {
     totalPatterns: 0,
+    activePatterns: 0,
+    immaturePatterns: 0,
+    maxPatterns: MAX_PATTERNS_TOTAL,
     winRate: 0,
     regimeBreakdown: { trend_up: 0, trend_down: 0, chop: 0, shock: 0 },
     regimeStats: {
@@ -355,6 +558,9 @@ export async function getStoredPatternStats(): Promise<StoredPatternStats> {
     avgThreshold: 0.004,
     recentWinRate: 0,
     similarityHealthy: false,
+    canCreatePatterns: canCreateNewPatterns(),
+    patternClusters: [],
+    rawSampleCount: 0,
   };
   
   try {
@@ -406,17 +612,231 @@ export async function getStoredPatternStats(): Promise<StoredPatternStats> {
     const simDist = getLastSimilarityDistribution();
     const similarityHealthy = simDist.mean > 0 && simDist.mean < 0.90;
     
+    const clusterSummaries = getActivePatternClusters();
+    const matureClusters = clusterSummaries.filter(c => c.isMature);
+    const immatureClusters = clusterSummaries.filter(c => !c.isMature);
+    
     return {
-      totalPatterns: allPatterns.length,
+      totalPatterns: patternClusters.size,
+      activePatterns: matureClusters.length,
+      immaturePatterns: immatureClusters.length,
+      maxPatterns: MAX_PATTERNS_TOTAL,
       winRate,
       regimeBreakdown,
       regimeStats,
       avgThreshold: thresholdCount > 0 ? thresholdSum / thresholdCount : 0.004,
       recentWinRate,
       similarityHealthy,
+      canCreatePatterns: canCreateNewPatterns(),
+      patternClusters: clusterSummaries,
+      rawSampleCount: allPatterns.length,
     };
   } catch (error) {
     console.error("Error getting stored pattern stats:", error);
     return emptyStats;
   }
+}
+
+export async function initializePatternClusters(): Promise<void> {
+  try {
+    const allPatterns = await db.select().from(patterns).orderBy(desc(patterns.timestamp)).limit(10000);
+    
+    if (allPatterns.length === 0) {
+      console.log("No patterns to cluster");
+      return;
+    }
+    
+    patternClusters.clear();
+    
+    const regimePatterns: Record<string, typeof allPatterns> = {
+      trend_up: [],
+      trend_down: [],
+      chop: [],
+      shock: [],
+    };
+    
+    for (const p of allPatterns) {
+      const regime = p.regime || "chop";
+      if (regime in regimePatterns) {
+        regimePatterns[regime].push(p);
+      }
+    }
+    
+    const clustersPerRegime = Math.floor(MAX_PATTERNS_TOTAL / 4);
+    
+    for (const regime of ["trend_up", "trend_down", "chop", "shock"] as const) {
+      const regimeData = regimePatterns[regime];
+      if (regimeData.length === 0) continue;
+      
+      const sampleSize = Math.min(regimeData.length, 1000);
+      const sampledPatterns = regimeData.slice(0, sampleSize);
+      
+      const numClusters = Math.min(clustersPerRegime, Math.ceil(sampledPatterns.length / MIN_SAMPLES_PER_PATTERN));
+      
+      if (numClusters === 0) continue;
+      
+      const clustersForRegime = kMeansClustering(sampledPatterns, numClusters, regime);
+      
+      for (const cluster of clustersForRegime) {
+        patternClusters.set(cluster.id, cluster);
+      }
+    }
+    
+    console.log(`Initialized ${patternClusters.size} pattern clusters (max: ${MAX_PATTERNS_TOTAL})`);
+    const clustersForLog = Array.from(patternClusters.entries());
+    for (const [id, cluster] of clustersForLog) {
+      console.log(`  ${id}: support=${cluster.support}, maturity=${cluster.maturity.toFixed(2)}, winRate=${(cluster.winRate * 100).toFixed(1)}%`);
+    }
+  } catch (error) {
+    console.error("Error initializing pattern clusters:", error);
+  }
+}
+
+function kMeansClustering(
+  patternsData: any[],
+  k: number,
+  regime: "trend_up" | "trend_down" | "chop" | "shock"
+): PatternCluster[] {
+  if (patternsData.length === 0 || k === 0) return [];
+  
+  const validPatterns = patternsData.filter(p => {
+    const emb = p.embedding as number[];
+    return isValidEmbedding(emb);
+  });
+  
+  if (validPatterns.length < k) {
+    k = validPatterns.length;
+  }
+  
+  if (k === 0) return [];
+  
+  const step = Math.floor(validPatterns.length / k);
+  let centroids: number[][] = [];
+  for (let i = 0; i < k; i++) {
+    const p = validPatterns[i * step];
+    centroids.push(normalizeEmbedding(p.embedding as number[]));
+  }
+  
+  const assignments: number[] = new Array(validPatterns.length).fill(0);
+  
+  for (let iter = 0; iter < 10; iter++) {
+    for (let i = 0; i < validPatterns.length; i++) {
+      const emb = normalizeEmbedding(validPatterns[i].embedding as number[]);
+      let bestCluster = 0;
+      let bestSim = -1;
+      
+      for (let c = 0; c < k; c++) {
+        const sim = cosineSimilarity(emb, centroids[c]);
+        if (sim > bestSim) {
+          bestSim = sim;
+          bestCluster = c;
+        }
+      }
+      
+      assignments[i] = bestCluster;
+    }
+    
+    const newCentroids: number[][] = [];
+    for (let c = 0; c < k; c++) {
+      const clusterPatterns = validPatterns.filter((_, i) => assignments[i] === c);
+      if (clusterPatterns.length === 0) {
+        newCentroids.push(centroids[c]);
+        continue;
+      }
+      
+      const embLength = (clusterPatterns[0].embedding as number[]).length;
+      const avgEmb = new Array(embLength).fill(0);
+      
+      for (const p of clusterPatterns) {
+        const emb = normalizeEmbedding(p.embedding as number[]);
+        for (let i = 0; i < embLength; i++) {
+          avgEmb[i] += emb[i];
+        }
+      }
+      
+      for (let i = 0; i < embLength; i++) {
+        avgEmb[i] /= clusterPatterns.length;
+      }
+      
+      newCentroids.push(normalizeEmbedding(avgEmb));
+    }
+    
+    centroids = newCentroids;
+  }
+  
+  const clusters: PatternCluster[] = [];
+  
+  for (let c = 0; c < k; c++) {
+    const clusterPatterns = validPatterns.filter((_, i) => assignments[i] === c);
+    if (clusterPatterns.length < 5) continue;
+    
+    const wins = clusterPatterns.filter(p => p.forwardWin).length;
+    const returns = clusterPatterns.map(p => p.forwardReturn8 || 0);
+    const avgReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
+    
+    const cluster: PatternCluster = {
+      id: generateClusterId(regime, c),
+      regime,
+      centroid: centroids[c],
+      support: clusterPatterns.length,
+      wins,
+      winRate: wins / clusterPatterns.length,
+      avgReturn,
+      maturity: computeMaturity(clusterPatterns.length),
+      samples: clusterPatterns.slice(0, 200).map(p => ({
+        timestamp: p.timestamp,
+        embedding: normalizeEmbedding(p.embedding as number[]),
+        forwardReturn8: p.forwardReturn8 || 0,
+        won: p.forwardWin || false,
+      })),
+    };
+    
+    clusters.push(cluster);
+  }
+  
+  return clusters;
+}
+
+export function getMatureClusterCount(): number {
+  let count = 0;
+  const clusters = Array.from(patternClusters.values());
+  for (const cluster of clusters) {
+    if (isPatternMature(cluster)) count++;
+  }
+  return count;
+}
+
+export function getPatternClusterStats(): {
+  total: number;
+  mature: number;
+  immature: number;
+  byRegime: Record<string, { total: number; mature: number }>;
+} {
+  const byRegime: Record<string, { total: number; mature: number }> = {
+    trend_up: { total: 0, mature: 0 },
+    trend_down: { total: 0, mature: 0 },
+    chop: { total: 0, mature: 0 },
+    shock: { total: 0, mature: 0 },
+  };
+  
+  let total = 0;
+  let mature = 0;
+  
+  const clusters = Array.from(patternClusters.values());
+  for (const cluster of clusters) {
+    total++;
+    byRegime[cluster.regime].total++;
+    
+    if (isPatternMature(cluster)) {
+      mature++;
+      byRegime[cluster.regime].mature++;
+    }
+  }
+  
+  return {
+    total,
+    mature,
+    immature: total - mature,
+    byRegime,
+  };
 }

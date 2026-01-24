@@ -114,6 +114,14 @@ export function PatternLearningCard({ learningStats }: LearningStatsCardProps) {
   }
 
   const { patternLearning } = learningStats;
+  const pl = patternLearning as any;
+  const activePatterns = pl.activePatterns || 0;
+  const immaturePatterns = pl.immaturePatterns || 0;
+  const maxPatterns = pl.maxPatterns || 30;
+  const canCreate = pl.canCreatePatterns ?? false;
+  const minSupport = pl.minSupportRequired || 50;
+  const simDist = pl.similarityDistribution;
+  const similarityHealthy = pl.similarityHealthy ?? true;
 
   return (
     <Card data-testid="card-pattern-learning">
@@ -121,49 +129,83 @@ export function PatternLearningCard({ learningStats }: LearningStatsCardProps) {
         <CardTitle className="text-sm font-medium flex items-center gap-2">
           <Layers className="h-4 w-4 text-primary" />
           Pattern Memory
+          {!canCreate && (
+            <Badge variant="outline" className="ml-auto text-xs text-amber-400">
+              Learning Frozen
+            </Badge>
+          )}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-2 gap-3">
-          <div className="bg-muted/30 rounded p-2">
-            <div className="text-xs text-muted-foreground">Patterns Stored</div>
-            <div className="text-lg font-bold" data-testid="text-patterns-stored">
-              {patternLearning.totalPatterns}
+        <div className="grid grid-cols-3 gap-2">
+          <div className="bg-muted/30 rounded p-2 text-center">
+            <div className="text-xs text-muted-foreground">Active</div>
+            <div className="text-lg font-bold text-emerald-400" data-testid="text-active-patterns">
+              {activePatterns}
             </div>
+            <div className="text-[10px] text-muted-foreground">/{maxPatterns} max</div>
           </div>
-          <div className="bg-muted/30 rounded p-2">
-            <div className="text-xs text-muted-foreground">Avg Similarity</div>
-            <div className="text-lg font-bold" data-testid="text-avg-similarity">
-              {(patternLearning.avgSimilarity * 100).toFixed(0)}%
+          <div className="bg-muted/30 rounded p-2 text-center">
+            <div className="text-xs text-muted-foreground">Immature</div>
+            <div className="text-lg font-bold text-amber-400" data-testid="text-immature-patterns">
+              {immaturePatterns}
+            </div>
+            <div className="text-[10px] text-muted-foreground">&lt;{minSupport} samples</div>
+          </div>
+          <div className="bg-muted/30 rounded p-2 text-center">
+            <div className="text-xs text-muted-foreground">Similarity</div>
+            <div className={`text-lg font-bold ${similarityHealthy ? 'text-emerald-400' : 'text-red-400'}`} data-testid="text-avg-similarity">
+              {simDist?.mean ? (simDist.mean * 100).toFixed(0) : (patternLearning.avgSimilarity * 100).toFixed(0)}%
+            </div>
+            <div className="text-[10px] text-muted-foreground">
+              {similarityHealthy ? 'healthy' : 'too high'}
             </div>
           </div>
         </div>
 
+        {simDist && simDist.count > 0 && (
+          <div className="bg-muted/20 rounded p-2 text-xs">
+            <div className="text-muted-foreground mb-1">Similarity Distribution</div>
+            <div className="flex justify-between">
+              <span>Min: {(simDist.min * 100).toFixed(0)}%</span>
+              <span>Median: {(simDist.median * 100).toFixed(0)}%</span>
+              <span>Max: {(simDist.max * 100).toFixed(0)}%</span>
+            </div>
+          </div>
+        )}
+
+        {!canCreate && pl.requiredData && (
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded p-2 text-xs">
+            <div className="font-medium text-amber-400 mb-1">Pattern creation frozen</div>
+            <div className="text-muted-foreground">
+              Need {pl.requiredData.trades} trades (have {pl.currentData?.trades || 0}) and{' '}
+              {pl.requiredData.candles} candles (have {pl.currentData?.candles || 0})
+            </div>
+          </div>
+        )}
+
         <div className="space-y-2">
-          <div className="text-xs font-medium text-muted-foreground">Patterns by Regime</div>
-          {Object.entries(patternLearning.patternsByRegime).map(([regime, count]) => (
+          <div className="text-xs font-medium text-muted-foreground">Clusters by Regime</div>
+          {pl.clustersByRegime && Object.entries(pl.clustersByRegime).map(([regime, stats]: [string, any]) => (
             <div key={regime} className="flex items-center justify-between text-xs">
               <span className="capitalize">{regime.replace("_", " ")}</span>
               <div className="flex items-center gap-2">
-                <Progress value={(count / patternLearning.totalPatterns) * 100} className="w-20 h-1.5" />
-                <span className="font-mono w-8 text-right">{count}</span>
+                <Badge variant="outline" className={stats.mature > 0 ? "text-emerald-400" : "text-muted-foreground"}>
+                  {stats.mature} mature
+                </Badge>
+                <span className="text-muted-foreground">/ {stats.total} total</span>
               </div>
             </div>
           ))}
         </div>
 
-        {patternLearning.topPatternOutcomes.length > 0 && (
+        {patternLearning.topPatternOutcomes && patternLearning.topPatternOutcomes.length > 0 && activePatterns > 0 && (
           <div className="space-y-2 pt-2 border-t">
-            <div className="text-xs font-medium text-muted-foreground">Top Pattern Outcomes</div>
+            <div className="text-xs font-medium text-muted-foreground">Cluster Summary</div>
             {patternLearning.topPatternOutcomes.map((pattern, i) => (
               <div key={i} className="flex items-center justify-between text-xs bg-muted/20 rounded p-1.5">
                 <span>{pattern.pattern}</span>
-                <div className="flex items-center gap-2">
-                  <Badge variant="outline" className="text-[10px] text-emerald-400">
-                    {pattern.winRate}% win
-                  </Badge>
-                  <span className="text-muted-foreground">({pattern.count})</span>
-                </div>
+                <span className="text-muted-foreground">({pattern.count} total)</span>
               </div>
             ))}
           </div>
