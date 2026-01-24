@@ -1,6 +1,6 @@
 import { db } from "./db";
-import { patterns } from "./db/schema";
-import { desc, sql } from "drizzle-orm";
+import { patterns, patternClusters as patternClustersTable } from "./db/schema";
+import { desc, sql, eq } from "drizzle-orm";
 import type { FeatureVector } from "./feature-engine";
 
 const MAX_PATTERNS_TOTAL = 30;
@@ -839,4 +839,95 @@ export function getPatternClusterStats(): {
     immature: total - mature,
     byRegime,
   };
+}
+
+export async function loadPatternClustersFromDb(): Promise<void> {
+  try {
+    const rows = await db.select().from(patternClustersTable);
+    
+    if (rows.length === 0) {
+      console.log("[Pattern Persistence] No saved clusters found in database");
+      return;
+    }
+    
+    patternClusters.clear();
+    
+    for (const row of rows) {
+      const centroid = Array.isArray(row.centroid) ? row.centroid as number[] : [];
+      
+      const cluster: PatternCluster = {
+        id: `${row.regime}_${row.clusterId}`,
+        regime: row.regime as "trend_up" | "trend_down" | "chop" | "shock",
+        centroid,
+        support: row.sampleCount || 0,
+        wins: Math.round((row.winRate || 0) * (row.sampleCount || 0)),
+        winRate: row.winRate || 0,
+        avgReturn: row.avgReturn || 0,
+        maturity: (row.sampleCount || 0) >= MIN_SAMPLES_PER_PATTERN ? 1 : (row.sampleCount || 0) / MIN_SAMPLES_PER_PATTERN,
+        samples: [],
+      };
+      
+      patternClusters.set(cluster.id, cluster);
+    }
+    
+    console.log(`[Pattern Persistence] Loaded ${rows.length} clusters from database`);
+    
+  } catch (error) {
+    console.error("[Pattern Persistence] Error loading clusters:", error);
+  }
+}
+
+export async function savePatternClustersToDb(): Promise<void> {
+  try {
+    const now = Date.now();
+    const clusters = Array.from(patternClusters.values());
+    
+    if (clusters.length === 0) {
+      return;
+    }
+    
+    for (const cluster of clusters) {
+      const parts = cluster.id.split("_");
+      const clusterId = parseInt(parts[parts.length - 1]) || 0;
+      
+      const clusterData = {
+        clusterId,
+        regime: cluster.regime,
+        centroid: cluster.centroid,
+        sampleCount: cluster.support,
+        winRate: cluster.winRate,
+        avgReturn: cluster.avgReturn,
+        avgMfe: 0,
+        avgMae: 0,
+        avgTimeToMfe: 0,
+        isMature: isPatternMature(cluster),
+        createdTs: now,
+        updatedTs: now,
+      };
+      
+      const [existing] = await db.select()
+        .from(patternClustersTable)
+        .where(eq(patternClustersTable.clusterId, clusterId))
+        .limit(1);
+      
+      if (existing) {
+        await db.update(patternClustersTable)
+          .set({ 
+            sampleCount: clusterData.sampleCount,
+            winRate: clusterData.winRate,
+            avgReturn: clusterData.avgReturn,
+            isMature: clusterData.isMature,
+            updatedTs: now,
+          })
+          .where(eq(patternClustersTable.id, existing.id));
+      } else {
+        await db.insert(patternClustersTable).values(clusterData);
+      }
+    }
+    
+    console.log(`[Pattern Persistence] Saved ${clusters.length} clusters to database`);
+    
+  } catch (error) {
+    console.error("[Pattern Persistence] Error saving clusters:", error);
+  }
 }

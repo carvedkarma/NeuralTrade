@@ -32,9 +32,12 @@ import { getFullBTCDataBinanceVision } from "./binance-vision";
 import { computeFeatures, getLatestFeatures, detectCandlestickPatterns, analyzeVolumeProfile, analyzeMultiTimeframePatterns, type FeatureVector, type CandlestickPattern, type VolumeProfile, type MultiTimeframeCorrelation } from "./feature-engine";
 import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-engine";
 import { getSentimentData, interpretFearGreed, getNewsStats } from "./sentiment-api";
-import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime, getLastSimilarityDistribution, initializePatternClusters, getPatternClusterStats, updateDataCounts, canCreateNewPatterns, patternClusters } from "./pattern-memory";
+import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime, getLastSimilarityDistribution, initializePatternClusters, getPatternClusterStats, updateDataCounts, canCreateNewPatterns, patternClusters, loadPatternClustersFromDb, savePatternClustersToDb } from "./pattern-memory";
 import { processCandle as processPaperTrade } from "./paper/engine";
 import { isAutoTradingEnabled, isPaperTradingEnabled, getConfig as getPaperConfig } from "./paper/config";
+import { db } from "./db";
+import { learningState, socialMediaStats } from "./db/schema";
+import { eq } from "drizzle-orm";
 
 export interface IStorage {
   getDashboardData(): Promise<DashboardData>;
@@ -201,14 +204,128 @@ export class MemStorage implements IStorage {
   private socialSimulationActive = false;
 
   constructor() {
-    this.refreshData();
-    this.startContinuousLearning();
-    this.startSocialSimulation();
-    initializePatternClusters().then(() => {
-      console.log("Pattern clusters initialized");
+    this.loadPersistedState().then(() => {
+      console.log("[Persistence] State loaded from database");
+      this.refreshData();
+      this.startContinuousLearning();
+      this.startSocialSimulation();
+      initializePatternClusters().then(() => {
+        console.log("Pattern clusters initialized");
+      }).catch(err => {
+        console.error("Failed to initialize pattern clusters:", err);
+      });
     }).catch(err => {
-      console.error("Failed to initialize pattern clusters:", err);
+      console.error("[Persistence] Failed to load state, starting fresh:", err);
+      this.refreshData();
+      this.startContinuousLearning();
+      this.startSocialSimulation();
     });
+  }
+
+  private async loadPersistedState(): Promise<void> {
+    try {
+      const [state] = await db.select().from(learningState).where(eq(learningState.key, "main")).limit(1);
+      
+      if (state) {
+        console.log("[Persistence] Found saved learning state from:", new Date(state.updatedTs || 0).toISOString());
+        
+        this.learningStats.learningEpochs = state.epochsCompleted || 0;
+        this.learningStats.lastTrainingTime = Number(state.lastTrainTs) || 0;
+        this.learningStats.totalPredictions = state.totalPredictions || 0;
+        this.learningStats.historicalWinRate = state.historicalWinRate || 0;
+        this.learningStats.backtestTradesSimulated = state.backtestTrades || 0;
+        this.learningStats.patternsLearnedFromHistory = state.totalPredictions || 0;
+        this.lastTrainingRun = Number(state.lastTrainTs) || 0;
+        
+        console.log(`[Persistence] Restored: ${this.learningStats.learningEpochs} epochs, ${this.learningStats.backtestTradesSimulated} backtest trades, ${(this.learningStats.historicalWinRate * 100).toFixed(1)}% win rate`);
+      } else {
+        console.log("[Persistence] No saved learning state found, starting fresh");
+      }
+      
+      const socialStats = await db.select().from(socialMediaStats);
+      for (const stat of socialStats) {
+        if (stat.platform === "fear_greed") {
+          this.learningStats.fearGreedReads = stat.itemsRead || 0;
+          this.learningStats.lastFearGreedFetch = Number(stat.lastFetchTs) || 0;
+        } else if (stat.platform === "crypto_panic") {
+          this.learningStats.cryptoPanicReads = stat.itemsRead || 0;
+          this.learningStats.lastCryptoPanicFetch = Number(stat.lastFetchTs) || 0;
+        } else if (stat.platform === "twitter") {
+          this.learningStats.twitterReads = stat.itemsRead || 0;
+          this.learningStats.lastTwitterFetch = Number(stat.lastFetchTs) || 0;
+        } else if (stat.platform === "reddit") {
+          this.learningStats.redditReads = stat.itemsRead || 0;
+          this.learningStats.lastRedditFetch = Number(stat.lastFetchTs) || 0;
+        }
+        if (stat.sentiment) {
+          this.learningStats.globalSentiment = stat.sentiment;
+        }
+      }
+      
+      if (socialStats.length > 0) {
+        console.log(`[Persistence] Restored social stats: Twitter=${this.learningStats.twitterReads}, Reddit=${this.learningStats.redditReads}`);
+      }
+      
+      await loadPatternClustersFromDb();
+      
+    } catch (error) {
+      console.error("[Persistence] Error loading state:", error);
+      throw error;
+    }
+  }
+
+  private async saveLearningStateToDb(): Promise<void> {
+    try {
+      const now = Date.now();
+      const stateData = {
+        key: "main",
+        lastTrainTs: this.learningStats.lastTrainingTime,
+        lastFeatureTs: this.learningStats.lastFeatureCompute,
+        lastIngestedTs: this.lastRefresh,
+        modelVersion: `v1.${this.learningStats.learningEpochs}`,
+        patternsVersion: `p1.${this.patternsStored}`,
+        trainingProgress: 1.0,
+        epochsCompleted: this.learningStats.learningEpochs,
+        isFrozen: false,
+        totalPredictions: this.learningStats.totalPredictions,
+        historicalWinRate: this.learningStats.historicalWinRate,
+        backtestTrades: this.learningStats.backtestTradesSimulated,
+        updatedTs: now,
+      };
+      
+      const [existing] = await db.select().from(learningState).where(eq(learningState.key, "main")).limit(1);
+      
+      if (existing) {
+        await db.update(learningState)
+          .set(stateData)
+          .where(eq(learningState.key, "main"));
+      } else {
+        await db.insert(learningState).values(stateData);
+      }
+      
+      const platforms = [
+        { platform: "fear_greed", itemsRead: this.learningStats.fearGreedReads, lastFetchTs: this.learningStats.lastFearGreedFetch, sentiment: this.learningStats.globalSentiment },
+        { platform: "crypto_panic", itemsRead: this.learningStats.cryptoPanicReads, lastFetchTs: this.learningStats.lastCryptoPanicFetch, sentiment: this.learningStats.globalSentiment },
+        { platform: "twitter", itemsRead: this.learningStats.twitterReads, lastFetchTs: this.learningStats.lastTwitterFetch, sentiment: this.learningStats.globalSentiment },
+        { platform: "reddit", itemsRead: this.learningStats.redditReads, lastFetchTs: this.learningStats.lastRedditFetch, sentiment: this.learningStats.globalSentiment },
+      ];
+      
+      for (const p of platforms) {
+        const [existingStat] = await db.select().from(socialMediaStats).where(eq(socialMediaStats.platform, p.platform)).limit(1);
+        if (existingStat) {
+          await db.update(socialMediaStats)
+            .set({ itemsRead: p.itemsRead, lastFetchTs: p.lastFetchTs, sentiment: p.sentiment, updatedTs: now })
+            .where(eq(socialMediaStats.platform, p.platform));
+        } else {
+          await db.insert(socialMediaStats).values({ platform: p.platform, itemsRead: p.itemsRead, lastFetchTs: p.lastFetchTs, sentiment: p.sentiment, updatedTs: now });
+        }
+      }
+      
+      await savePatternClustersToDb();
+      
+    } catch (error) {
+      console.error("[Persistence] Error saving state:", error);
+    }
   }
 
   private startContinuousLearning(): void {
@@ -402,6 +519,9 @@ export class MemStorage implements IStorage {
         this.learningStats.patternsByRegime = storedStats.regimeBreakdown;
         
         console.log(`Deep training completed: ${patternsAdded} patterns (win rate: ${(storedStats.winRate * 100).toFixed(1)}%), regimes: up=${storedStats.regimeBreakdown.trend_up} down=${storedStats.regimeBreakdown.trend_down} chop=${storedStats.regimeBreakdown.chop}, MTF: ${mtfAnalysis.overallSignal} (${(mtfAnalysis.confluence * 100).toFixed(0)}% confluence), epoch ${this.learningStats.learningEpochs}`);
+        
+        await this.saveLearningStateToDb();
+        console.log(`[Persistence] State saved after epoch ${this.learningStats.learningEpochs}`);
       }
     } catch (error) {
       console.error("Error during deep training:", error);
