@@ -146,6 +146,12 @@ export class MemStorage implements IStorage {
     ruleBasedPredictions: { long: 0, short: 0, hold: 0 },
     patternPredictions: { long: 0, short: 0, hold: 0 },
     aiPredictions: { long: 0, short: 0, hold: 0 },
+    // Directional prediction tracking (excludes HOLD)
+    ruleBasedDirectional: { total: 0, correct: 0 },
+    patternDirectional: { total: 0, correct: 0 },
+    aiDirectional: { total: 0, correct: 0 },
+    lastPriceAtPrediction: 0,
+    lastPredictionSignals: { ruleBased: "HOLD", pattern: "HOLD", ai: "HOLD" } as { ruleBased: string, pattern: string, ai: string },
     totalPatternsMatched: 0,
     avgPatternSimilarity: 0,
     lastPatternMatchCount: 0,
@@ -343,7 +349,7 @@ export class MemStorage implements IStorage {
       const learningStateData = firstLearningState ? {
         epochs: firstLearningState.epochsCompleted || 0,
         lastSaved: firstLearningState.updatedTs || null,
-        patternsLearned: firstLearningState.patternsLearned || 0,
+        patternsLearned: firstLearningState.totalPredictions || 0,
       } : null;
       
       const patternClusterData = patternClusterRows.length > 0 ? {
@@ -1348,6 +1354,15 @@ export class MemStorage implements IStorage {
       },
     ];
 
+    // Calculate directional accuracy (excludes HOLD - the only meaningful metric)
+    const calcDirectionalAccuracy = (stats: { total: number, correct: number }) => 
+      stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : null;
+    
+    const calcHoldRate = (dist: { long: number, short: number, hold: number }) => {
+      const total = dist.long + dist.short + dist.hold;
+      return total > 0 ? Math.round((dist.hold / total) * 100) : 100;
+    };
+
     const modelPerformance: ModelPerformanceStats[] = [
       {
         modelName: "Rule-Based",
@@ -1355,10 +1370,13 @@ export class MemStorage implements IStorage {
         predictionsToday: this.learningStats.ruleBasedPredictions.long + 
           this.learningStats.ruleBasedPredictions.short + 
           this.learningStats.ruleBasedPredictions.hold,
-        accuracy: 65,
+        accuracy: 0, // Deprecated - use directionalAccuracy instead
+        directionalAccuracy: calcDirectionalAccuracy(this.learningStats.ruleBasedDirectional),
+        holdRate: calcHoldRate(this.learningStats.ruleBasedPredictions),
         avgConfidence: 0.6,
         lastPrediction: this.learningStats.lastFeatureCompute || null,
         signalDistribution: this.learningStats.ruleBasedPredictions,
+        directionalStats: this.learningStats.ruleBasedDirectional,
       },
       {
         modelName: "Pattern Memory",
@@ -1366,10 +1384,13 @@ export class MemStorage implements IStorage {
         predictionsToday: this.learningStats.patternPredictions.long + 
           this.learningStats.patternPredictions.short + 
           this.learningStats.patternPredictions.hold,
-        accuracy: 62,
+        accuracy: 0, // Deprecated - use directionalAccuracy instead
+        directionalAccuracy: calcDirectionalAccuracy(this.learningStats.patternDirectional),
+        holdRate: calcHoldRate(this.learningStats.patternPredictions),
         avgConfidence: this.learningStats.avgPatternSimilarity || 0.5,
         lastPrediction: this.learningStats.lastFeatureCompute || null,
         signalDistribution: this.learningStats.patternPredictions,
+        directionalStats: this.learningStats.patternDirectional,
       },
       {
         modelName: "OpenAI GPT",
@@ -1377,10 +1398,13 @@ export class MemStorage implements IStorage {
         predictionsToday: this.learningStats.aiPredictions.long + 
           this.learningStats.aiPredictions.short + 
           this.learningStats.aiPredictions.hold,
-        accuracy: 58,
+        accuracy: 0, // Deprecated - use directionalAccuracy instead
+        directionalAccuracy: calcDirectionalAccuracy(this.learningStats.aiDirectional),
+        holdRate: calcHoldRate(this.learningStats.aiPredictions),
         avgConfidence: 0.55,
         lastPrediction: this.lastAIUpdate || null,
         signalDistribution: this.learningStats.aiPredictions,
+        directionalStats: this.learningStats.aiDirectional,
       },
     ];
 
@@ -1753,6 +1777,45 @@ export class MemStorage implements IStorage {
           };
           this.lastShotPlanUpdate = now;
           
+          // Evaluate previous directional predictions before making new ones
+          // Directional accuracy only counts when BOTH prediction was LONG/SHORT AND actual outcome was LONG/SHORT
+          // Skip evaluation when market was flat (HOLD outcome) - we can't judge direction in flat markets
+          const currentPrice = this.candles[this.candles.length - 1]?.close || 0;
+          if (this.learningStats.lastPriceAtPrediction > 0 && currentPrice > 0) {
+            const priceChange = (currentPrice - this.learningStats.lastPriceAtPrediction) / this.learningStats.lastPriceAtPrediction;
+            const threshold = 0.001; // 0.1% noise threshold for determining direction
+            
+            const actualDirection = priceChange > threshold ? "LONG" : priceChange < -threshold ? "SHORT" : "HOLD";
+            
+            // ONLY evaluate directional predictions when market actually moved (not flat/HOLD)
+            // This ensures directional accuracy measures "when we picked a side, were we right?"
+            if (actualDirection !== "HOLD") {
+              const prevSignals = this.learningStats.lastPredictionSignals;
+              
+              // Evaluate each model's directional prediction (only if they predicted LONG or SHORT)
+              if (prevSignals.ruleBased !== "HOLD") {
+                this.learningStats.ruleBasedDirectional.total++;
+                if (prevSignals.ruleBased === actualDirection) {
+                  this.learningStats.ruleBasedDirectional.correct++;
+                }
+              }
+              
+              if (prevSignals.pattern !== "HOLD") {
+                this.learningStats.patternDirectional.total++;
+                if (prevSignals.pattern === actualDirection) {
+                  this.learningStats.patternDirectional.correct++;
+                }
+              }
+              
+              if (prevSignals.ai !== "HOLD") {
+                this.learningStats.aiDirectional.total++;
+                if (prevSignals.ai === actualDirection) {
+                  this.learningStats.aiDirectional.correct++;
+                }
+              }
+            }
+          }
+          
           this.learningStats.totalPredictions++;
           this.learningStats.lastPatternMatchCount = shotPlanResult.patternMatches.length;
           this.learningStats.totalPatternsMatched += shotPlanResult.patternMatches.length;
@@ -1775,6 +1838,16 @@ export class MemStorage implements IStorage {
           this.learningStats.patternPredictions[patternSig === "LONG" ? "long" : patternSig === "SHORT" ? "short" : "hold"]++;
           const aiSig = shotPlanResult.mlPredictions.models.ai?.direction || "HOLD";
           this.learningStats.aiPredictions[aiSig === "LONG" ? "long" : aiSig === "SHORT" ? "short" : "hold"]++;
+          
+          // Store current predictions for next evaluation (only if we have valid price)
+          if (currentPrice > 0) {
+            this.learningStats.lastPredictionSignals = {
+              ruleBased: ruleSig,
+              pattern: patternSig,
+              ai: aiSig,
+            };
+            this.learningStats.lastPriceAtPrediction = currentPrice;
+          }
         }
       } catch (error) {
         console.error("Error generating shot plan:", error);

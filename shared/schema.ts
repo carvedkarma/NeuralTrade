@@ -277,7 +277,9 @@ export const modelPerformanceStatsSchema = z.object({
   modelName: z.string(),
   weight: z.number(),
   predictionsToday: z.number(),
-  accuracy: z.number(),
+  accuracy: z.number(), // Deprecated - use directionalAccuracy instead
+  directionalAccuracy: z.number().nullable(), // Accuracy on LONG/SHORT only (excludes HOLD)
+  holdRate: z.number(), // Percentage of predictions that are HOLD
   avgConfidence: z.number(),
   lastPrediction: z.number().nullable(),
   signalDistribution: z.object({
@@ -285,6 +287,10 @@ export const modelPerformanceStatsSchema = z.object({
     short: z.number(),
     hold: z.number(),
   }),
+  directionalStats: z.object({
+    total: z.number(), // LONG + SHORT count
+    correct: z.number(), // How many were correct
+  }).optional(),
 });
 export type ModelPerformanceStats = z.infer<typeof modelPerformanceStatsSchema>;
 

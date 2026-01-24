@@ -314,6 +314,19 @@ export function ModelPerformanceCard({ learningStats }: LearningStatsCardProps) 
 
   const { modelPerformance, ensembleStats } = learningStats;
 
+  // Calculate overall signal frequency from all models
+  const totalSignals = modelPerformance.reduce((acc, m) => ({
+    long: acc.long + m.signalDistribution.long,
+    short: acc.short + m.signalDistribution.short,
+    hold: acc.hold + m.signalDistribution.hold,
+  }), { long: 0, short: 0, hold: 0 });
+  const totalCount = totalSignals.long + totalSignals.short + totalSignals.hold;
+  const signalPcts = totalCount > 0 ? {
+    long: ((totalSignals.long / totalCount) * 100).toFixed(0),
+    short: ((totalSignals.short / totalCount) * 100).toFixed(0),
+    hold: ((totalSignals.hold / totalCount) * 100).toFixed(0),
+  } : { long: "0", short: "0", hold: "100" };
+
   return (
     <Card data-testid="card-model-performance">
       <CardHeader className="pb-3">
@@ -344,44 +357,91 @@ export function ModelPerformanceCard({ learningStats }: LearningStatsCardProps) 
           </div>
         </div>
 
-        <div className="space-y-3">
-          {modelPerformance.map((model, i) => (
-            <div key={i} className="bg-muted/20 rounded p-2 space-y-2" data-testid={`model-${model.modelName.toLowerCase().replace(/\s/g, '-')}`}>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Zap className="h-3 w-3 text-primary" />
-                  <span className="text-sm font-medium">{model.modelName}</span>
-                  <Badge variant="outline" className="text-[10px]">{model.weight}%</Badge>
-                </div>
-                <span className="text-xs text-muted-foreground">
-                  {model.predictionsToday} predictions
-                </span>
-              </div>
-              
-              <div className="flex items-center gap-2">
-                <div className="flex-1">
-                  <div className="flex justify-between text-xs text-muted-foreground mb-1">
-                    <span>Accuracy</span>
-                    <span>{model.accuracy}%</span>
-                  </div>
-                  <Progress value={model.accuracy} className="h-1.5" />
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2 text-xs">
-                <Badge variant="outline" className="text-emerald-400 text-[10px]">
-                  <TrendingUp className="h-2 w-2 mr-1" />
-                  {model.signalDistribution.long} Long
-                </Badge>
-                <Badge variant="outline" className="text-red-400 text-[10px]">
-                  {model.signalDistribution.short} Short
-                </Badge>
-                <Badge variant="outline" className="text-muted-foreground text-[10px]">
-                  {model.signalDistribution.hold} Hold
-                </Badge>
-              </div>
+        {/* Signal Frequency Breakdown */}
+        <div className="bg-muted/20 rounded p-2">
+          <div className="text-xs font-medium text-muted-foreground mb-2">Signal Frequency (All Models)</div>
+          <div className="flex items-center gap-2 text-xs">
+            <Badge variant="outline" className="text-emerald-400">
+              <TrendingUp className="h-2.5 w-2.5 mr-1" />
+              {signalPcts.long}% Long
+            </Badge>
+            <Badge variant="outline" className="text-red-400">
+              {signalPcts.short}% Short
+            </Badge>
+            <Badge variant="outline" className="text-muted-foreground">
+              {signalPcts.hold}% Hold
+            </Badge>
+          </div>
+          {Number(signalPcts.hold) > 80 && (
+            <div className="text-[10px] text-amber-400 mt-1">
+              System is conservative - mostly HOLD (normal in choppy markets)
             </div>
-          ))}
+          )}
+        </div>
+
+        <div className="space-y-3">
+          {modelPerformance.map((model, i) => {
+            const m = model as any; // Access optional fields
+            const hasDirectionalData = m.directionalStats && m.directionalStats.total > 0;
+            
+            return (
+              <div key={i} className="bg-muted/20 rounded p-2 space-y-2" data-testid={`model-${model.modelName.toLowerCase().replace(/\s/g, '-')}`}>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Zap className="h-3 w-3 text-primary" />
+                    <span className="text-sm font-medium">{model.modelName}</span>
+                    <Badge variant="outline" className="text-[10px]">{model.weight}%</Badge>
+                  </div>
+                  <span className="text-xs text-muted-foreground">
+                    {model.predictionsToday} predictions
+                  </span>
+                </div>
+                
+                {/* Directional Accuracy (excludes HOLD) */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="flex flex-col">
+                    <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                      <span>Dir. Accuracy (ex-HOLD)</span>
+                      <span className={hasDirectionalData ? (m.directionalAccuracy >= 50 ? "text-emerald-400" : "text-amber-400") : "text-muted-foreground"}>
+                        {hasDirectionalData ? `${m.directionalAccuracy}%` : "N/A"}
+                      </span>
+                    </div>
+                    <Progress 
+                      value={hasDirectionalData ? m.directionalAccuracy : 0} 
+                      className={`h-1.5 ${!hasDirectionalData ? "opacity-30" : ""}`} 
+                    />
+                    {hasDirectionalData && (
+                      <div className="text-[10px] text-muted-foreground mt-0.5">
+                        {m.directionalStats.correct}/{m.directionalStats.total} correct
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex flex-col">
+                    <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                      <span>HOLD Rate</span>
+                      <span className={(m.holdRate || 0) > 80 ? "text-amber-400" : "text-muted-foreground"}>
+                        {m.holdRate || 0}%
+                      </span>
+                    </div>
+                    <Progress value={m.holdRate || 0} className="h-1.5" />
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 text-xs">
+                  <Badge variant="outline" className="text-emerald-400 text-[10px]">
+                    <TrendingUp className="h-2 w-2 mr-1" />
+                    {model.signalDistribution.long} Long
+                  </Badge>
+                  <Badge variant="outline" className="text-red-400 text-[10px]">
+                    {model.signalDistribution.short} Short
+                  </Badge>
+                  <Badge variant="outline" className="text-muted-foreground text-[10px]">
+                    {model.signalDistribution.hold} Hold
+                  </Badge>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </CardContent>
     </Card>
@@ -667,10 +727,11 @@ export function HistoricalLearningCard({ learningStats }: LearningStatsCardProps
           </div>
           <div className="bg-muted/30 rounded-lg p-3 text-center">
             <TrendingUp className="h-4 w-4 mx-auto mb-1 text-emerald-400" />
-            <div className="text-xs text-muted-foreground">Historical Win Rate</div>
+            <div className="text-xs text-muted-foreground">Backtest Win Rate</div>
             <div className="text-lg font-bold text-emerald-400" data-testid="text-historical-winrate">
               {historicalLearning.historicalWinRate.toFixed(1)}%
             </div>
+            <div className="text-[10px] text-muted-foreground">(executed trades only)</div>
           </div>
         </div>
 
