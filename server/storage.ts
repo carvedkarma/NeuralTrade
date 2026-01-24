@@ -1466,8 +1466,8 @@ export class MemStorage implements IStorage {
           matchRate: this.learningStats.totalPredictions > 0 
             ? (this.learningStats.totalPatternsMatched / this.learningStats.totalPredictions) * 10 : 0,
           canCreatePatterns: canCreateNewPatterns(),
-          requiredData: { trades: 1000, candles: 30000 },
-          currentData: { trades: this.learningStats.backtestTradesSimulated, candles: this.candles.length },
+          requiredData: { trades: 500, candles: 2000 },
+          currentData: { trades: this.learningStats.backtestTradesSimulated, candles: this.learningStats.historicalCandlesProcessed || this.candles.length },
           lastPatternAdded: this.learningStats.lastFeatureCompute || null,
           patternsByRegime: this.learningStats.patternsByRegime,
           clustersByRegime: clusterStats.byRegime,

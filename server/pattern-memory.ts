@@ -5,8 +5,8 @@ import type { FeatureVector } from "./feature-engine";
 
 const MAX_PATTERNS_TOTAL = 30;
 const MIN_SAMPLES_PER_PATTERN = 50;
-const MIN_BACKTEST_TRADES = 1000;
-const MIN_CANDLES_15M = 30000;
+const MIN_BACKTEST_TRADES = 500;
+const MIN_CANDLES_15M = 2000; // ~20 days of 15m data
 const EMBARGO_CANDLES = 16;
 
 let currentCandleCount = 0;
