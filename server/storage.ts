@@ -32,7 +32,7 @@ import { getFullBTCDataBinanceVision } from "./binance-vision";
 import { computeFeatures, getLatestFeatures, detectCandlestickPatterns, analyzeVolumeProfile, analyzeMultiTimeframePatterns, type FeatureVector, type CandlestickPattern, type VolumeProfile, type MultiTimeframeCorrelation } from "./feature-engine";
 import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-engine";
 import { getSentimentData, interpretFearGreed, getNewsStats } from "./sentiment-api";
-import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime, getLastSimilarityDistribution, initializePatternClusters, getPatternClusterStats, updateDataCounts, canCreateNewPatterns, patternClusters, loadPatternClustersFromDb, savePatternClustersToDb } from "./pattern-memory";
+import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime, getLastSimilarityDistribution, initializePatternClusters, getPatternClusterStats, updateDataCounts, canCreateNewPatterns, canCreateNewPatternsWithCounts, getPatternRequirements, patternClusters, loadPatternClustersFromDb, savePatternClustersToDb } from "./pattern-memory";
 import { processCandle as processPaperTrade } from "./paper/engine";
 import { isAutoTradingEnabled, isPaperTradingEnabled, getConfig as getPaperConfig } from "./paper/config";
 import { db } from "./db";
@@ -1465,8 +1465,11 @@ export class MemStorage implements IStorage {
           avgSimilarity: this.learningStats.avgPatternSimilarity,
           matchRate: this.learningStats.totalPredictions > 0 
             ? (this.learningStats.totalPatternsMatched / this.learningStats.totalPredictions) * 10 : 0,
-          canCreatePatterns: canCreateNewPatterns(),
-          requiredData: { trades: 500, candles: 2000 },
+          canCreatePatterns: canCreateNewPatternsWithCounts(
+            this.learningStats.historicalCandlesProcessed || this.candles.length,
+            this.learningStats.backtestTradesSimulated
+          ),
+          requiredData: getPatternRequirements(),
           currentData: { trades: this.learningStats.backtestTradesSimulated, candles: this.learningStats.historicalCandlesProcessed || this.candles.length },
           lastPatternAdded: this.learningStats.lastFeatureCompute || null,
           patternsByRegime: this.learningStats.patternsByRegime,

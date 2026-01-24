@@ -18,7 +18,17 @@ export function updateDataCounts(candles: number, trades: number) {
 }
 
 export function canCreateNewPatterns(): boolean {
-  return currentBacktestTrades >= MIN_BACKTEST_TRADES && currentCandleCount >= MIN_CANDLES_15M;
+  const meetsTradeReq = currentBacktestTrades >= MIN_BACKTEST_TRADES;
+  const meetsCandleReq = currentCandleCount >= MIN_CANDLES_15M;
+  return meetsTradeReq && meetsCandleReq;
+}
+
+export function canCreateNewPatternsWithCounts(candles: number, trades: number): boolean {
+  return trades >= MIN_BACKTEST_TRADES && candles >= MIN_CANDLES_15M;
+}
+
+export function getPatternRequirements() {
+  return { minTrades: MIN_BACKTEST_TRADES, minCandles: MIN_CANDLES_15M };
 }
 
 export interface PatternCluster {
