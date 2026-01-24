@@ -59,6 +59,13 @@ The system operates with live data only - no simulated fallback. Shows error mes
   - 10% pattern maturity factor
   - 10% model agreement (low variance = higher confidence)
   - 5% trend alignment with Kalman filters
+- **Persistence System**: All learning state survives server restarts:
+  - **Database Tables**: learning_state, pattern_clusters, social_media_stats
+  - **Auto-save**: State saved after each training epoch completion
+  - **Auto-load**: State restored from database on startup before learning loops start
+  - **Persistence Status API**: GET /api/persistence/status returns epochs, clusters, social reads, isHealthy
+  - **Pattern clusters**: K-means centroids, win rates, sample counts saved to PostgreSQL
+  - **Social stats**: Twitter, Reddit, Fear & Greed, CryptoPanic read counts persisted
 
 ## User Preferences
 
