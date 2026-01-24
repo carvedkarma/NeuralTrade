@@ -643,6 +643,22 @@ export const socialMediaStats = pgTable("social_media_stats", {
   platformIdx: index("social_media_stats_platform_idx").on(table.platform),
 }));
 
+export const backfillJobs = pgTable("backfill_jobs", {
+  id: serial("id").primaryKey(),
+  symbol: varchar("symbol", { length: 20 }).notNull(),
+  timeframe: varchar("timeframe", { length: 10 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("pending"),
+  startTs: bigint("start_ts", { mode: "number" }),
+  endTs: bigint("end_ts", { mode: "number" }),
+  currentCursor: bigint("current_cursor", { mode: "number" }),
+  candlesFetched: integer("candles_fetched").default(0),
+  candlesExpected: integer("candles_expected").default(0),
+  progressPct: real("progress_pct").default(0),
+  errorMessage: text("error_message"),
+  createdTs: bigint("created_ts", { mode: "number" }).notNull(),
+  updatedTs: bigint("updated_ts", { mode: "number" }).notNull(),
+});
+
 export const insertCandleSchema = createInsertSchema(candles).omit({ id: true });
 export const insertFeatureSchema = createInsertSchema(features).omit({ id: true });
 export const insertPatternSchema = createInsertSchema(patterns).omit({ id: true });
@@ -655,6 +671,7 @@ export const insertPaperEquitySchema = createInsertSchema(paperEquityCurve).omit
 export const insertLearningStateSchema = createInsertSchema(learningState).omit({ id: true });
 export const insertPatternClusterSchema = createInsertSchema(patternClusters).omit({ id: true });
 export const insertSocialMediaStatsSchema = createInsertSchema(socialMediaStats).omit({ id: true });
+export const insertBackfillJobSchema = createInsertSchema(backfillJobs).omit({ id: true });
 
 export type InsertCandle = z.infer<typeof insertCandleSchema>;
 export type InsertFeature = z.infer<typeof insertFeatureSchema>;
@@ -668,6 +685,7 @@ export type InsertPaperEquity = z.infer<typeof insertPaperEquitySchema>;
 export type InsertLearningState = z.infer<typeof insertLearningStateSchema>;
 export type InsertPatternCluster = z.infer<typeof insertPatternClusterSchema>;
 export type InsertSocialMediaStats = z.infer<typeof insertSocialMediaStatsSchema>;
+export type InsertBackfillJob = z.infer<typeof insertBackfillJobSchema>;
 
 export type DbCandle = typeof candles.$inferSelect;
 export type DbFeature = typeof features.$inferSelect;
@@ -682,3 +700,4 @@ export type PaperEquityCurve = typeof paperEquityCurve.$inferSelect;
 export type LearningState = typeof learningState.$inferSelect;
 export type PatternCluster = typeof patternClusters.$inferSelect;
 export type SocialMediaStats = typeof socialMediaStats.$inferSelect;
+export type BackfillJob = typeof backfillJobs.$inferSelect;

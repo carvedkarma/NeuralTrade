@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
-import { backfillHistoricalData, getDataRangeInfo, incrementalUpdate, fillGaps } from "./historical-data";
+import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, incrementalUpdate, fillGaps } from "./historical-data";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -87,19 +87,25 @@ export async function registerRoutes(
   app.get("/api/historical/status", async (req, res) => {
     try {
       const rangeInfo = await getDataRangeInfo();
-      const daysOfData = rangeInfo.startTs && rangeInfo.endTs 
-        ? Math.round((rangeInfo.endTs - rangeInfo.startTs) / (24 * 60 * 60 * 1000))
-        : 0;
       
       res.json({
         ...rangeInfo,
-        daysOfData,
         startDate: rangeInfo.startTs ? new Date(rangeInfo.startTs).toISOString().split('T')[0] : null,
         endDate: rangeInfo.endTs ? new Date(rangeInfo.endTs).toISOString().split('T')[0] : null,
       });
     } catch (error) {
       console.error("Error getting historical status:", error);
       res.status(500).json({ error: "Failed to get historical status" });
+    }
+  });
+
+  app.get("/api/historical/integrity", async (req, res) => {
+    try {
+      const report = await getIntegrityReport();
+      res.json(report);
+    } catch (error) {
+      console.error("Error getting integrity report:", error);
+      res.status(500).json({ error: "Failed to get integrity report" });
     }
   });
 

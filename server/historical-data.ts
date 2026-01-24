@@ -113,12 +113,31 @@ async function fetchKlinesBatchVision(
   }
 }
 
-export async function getDataRangeInfo(): Promise<{
+const CANDLES_PER_DAY = 96;
+const CANDLES_FOR_YEAR = 365 * CANDLES_PER_DAY;
+
+export interface DataRangeInfo {
   startTs: number | null;
   endTs: number | null;
   totalCandles: number;
   backfillComplete: boolean;
-}> {
+  daysOfData: number;
+  expectedFor365Days: number;
+  completionPct: number;
+}
+
+export interface IntegrityReport {
+  totalCandles: number;
+  daysOfData: number;
+  completionPct: number;
+  missingRanges: Array<{ start: string; end: string; gapCandles: number }>;
+  duplicateCount: number;
+  lastCandleTs: number | null;
+  alignmentHealthy: boolean;
+  overallHealth: "complete" | "missing_ranges" | "out_of_sync" | "no_data";
+}
+
+export async function getDataRangeInfo(): Promise<DataRangeInfo> {
   try {
     const state = await db.select().from(learningState).where(eq(learningState.key, "btcusdt_15m")).limit(1);
     
@@ -142,23 +161,155 @@ export async function getDataRangeInfo(): Promise<{
         .orderBy(desc(candles.timestamp))
         .limit(1);
       
+      const totalCandles = Number(candleCount[0]?.count ?? 0);
+      const startTs = oldest[0]?.ts ?? null;
+      const endTs = newest[0]?.ts ?? null;
+      const daysOfData = startTs && endTs 
+        ? Math.round((endTs - startTs) / (24 * 60 * 60 * 1000))
+        : 0;
+      const completionPct = Math.min((totalCandles / CANDLES_FOR_YEAR) * 100, 100);
+      
       return {
-        startTs: oldest[0]?.ts ?? null,
-        endTs: newest[0]?.ts ?? null,
-        totalCandles: Number(candleCount[0]?.count ?? 0),
+        startTs,
+        endTs,
+        totalCandles,
         backfillComplete: false,
+        daysOfData,
+        expectedFor365Days: CANDLES_FOR_YEAR,
+        completionPct,
       };
     }
     
+    const totalCandles = state[0].totalCandles ?? 0;
+    const startTs = state[0].dataRangeStartTs ?? null;
+    const endTs = state[0].dataRangeEndTs ?? null;
+    const daysOfData = startTs && endTs 
+      ? Math.round((endTs - startTs) / (24 * 60 * 60 * 1000))
+      : 0;
+    const completionPct = Math.min((totalCandles / CANDLES_FOR_YEAR) * 100, 100);
+    
     return {
-      startTs: state[0].dataRangeStartTs ?? null,
-      endTs: state[0].dataRangeEndTs ?? null,
-      totalCandles: state[0].totalCandles ?? 0,
+      startTs,
+      endTs,
+      totalCandles,
       backfillComplete: state[0].backfillComplete ?? false,
+      daysOfData,
+      expectedFor365Days: CANDLES_FOR_YEAR,
+      completionPct,
     };
   } catch (error) {
     console.error("[Historical] Error getting data range:", error);
-    return { startTs: null, endTs: null, totalCandles: 0, backfillComplete: false };
+    return { 
+      startTs: null, 
+      endTs: null, 
+      totalCandles: 0, 
+      backfillComplete: false,
+      daysOfData: 0,
+      expectedFor365Days: CANDLES_FOR_YEAR,
+      completionPct: 0,
+    };
+  }
+}
+
+export async function getIntegrityReport(
+  symbol: string = "BTCUSDT",
+  timeframe: string = "15m"
+): Promise<IntegrityReport> {
+  try {
+    const msPerCandle = timeframe === "15m" ? MS_PER_15M : 60 * 1000;
+    
+    const candleCount = await db.select({ count: sql<number>`count(*)` })
+      .from(candles)
+      .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, timeframe)));
+    
+    const totalCandles = Number(candleCount[0]?.count ?? 0);
+    
+    if (totalCandles === 0) {
+      return {
+        totalCandles: 0,
+        daysOfData: 0,
+        completionPct: 0,
+        missingRanges: [],
+        duplicateCount: 0,
+        lastCandleTs: null,
+        alignmentHealthy: true,
+        overallHealth: "no_data",
+      };
+    }
+    
+    const oldest = await db.select({ ts: candles.timestamp })
+      .from(candles)
+      .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, timeframe)))
+      .orderBy(asc(candles.timestamp))
+      .limit(1);
+    
+    const newest = await db.select({ ts: candles.timestamp })
+      .from(candles)
+      .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, timeframe)))
+      .orderBy(desc(candles.timestamp))
+      .limit(1);
+    
+    const startTs = oldest[0]?.ts ?? 0;
+    const endTs = newest[0]?.ts ?? 0;
+    const daysOfData = Math.round((endTs - startTs) / (24 * 60 * 60 * 1000));
+    const completionPct = Math.min((totalCandles / CANDLES_FOR_YEAR) * 100, 100);
+    
+    const duplicateCheck = await db.execute(sql`
+      SELECT COUNT(*) - COUNT(DISTINCT timestamp) as duplicate_count
+      FROM candles 
+      WHERE symbol = ${symbol} AND timeframe = ${timeframe}
+    `);
+    const duplicateCount = Number((duplicateCheck as any)[0]?.duplicate_count ?? 0);
+    
+    const allTimestamps = await db.select({ ts: candles.timestamp })
+      .from(candles)
+      .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, timeframe)))
+      .orderBy(asc(candles.timestamp));
+    
+    const missingRanges: Array<{ start: string; end: string; gapCandles: number }> = [];
+    
+    for (let i = 1; i < allTimestamps.length; i++) {
+      const expected = allTimestamps[i - 1].ts + msPerCandle;
+      const actual = allTimestamps[i].ts;
+      
+      if (actual - expected > msPerCandle * 1.5) {
+        const gapCandles = Math.floor((actual - expected) / msPerCandle);
+        missingRanges.push({
+          start: new Date(expected).toISOString(),
+          end: new Date(actual).toISOString(),
+          gapCandles,
+        });
+      }
+    }
+    
+    const alignmentHealthy = allTimestamps.every(t => t.ts % msPerCandle === 0);
+    
+    let overallHealth: "complete" | "missing_ranges" | "out_of_sync" | "no_data" = "complete";
+    if (missingRanges.length > 0) overallHealth = "missing_ranges";
+    if (duplicateCount > 0 || !alignmentHealthy) overallHealth = "out_of_sync";
+    
+    return {
+      totalCandles,
+      daysOfData,
+      completionPct,
+      missingRanges: missingRanges.slice(0, 20),
+      duplicateCount,
+      lastCandleTs: endTs,
+      alignmentHealthy,
+      overallHealth,
+    };
+  } catch (error) {
+    console.error("[Historical] Error getting integrity report:", error);
+    return {
+      totalCandles: 0,
+      daysOfData: 0,
+      completionPct: 0,
+      missingRanges: [],
+      duplicateCount: 0,
+      lastCandleTs: null,
+      alignmentHealthy: false,
+      overallHealth: "out_of_sync",
+    };
   }
 }
 
