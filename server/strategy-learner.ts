@@ -147,8 +147,10 @@ export class StrategyLearner {
     const atrPercent = (atr / entryPrice) * 100;
     
     // Regime-based multipliers (matching paper engine exit logic)
-    const stopMultiplier = regime === "trend" ? 0.9 : 0.7;  // Tighter stops in chop
-    const tpMultiplier = regime === "trend" ? 1.1 : 0.8;    // Quicker exits in chop
+    // detectRegime returns "trend_up", "trend_down", or "chop"
+    const isTrend = regime.startsWith("trend");
+    const stopMultiplier = isTrend ? 0.9 : 0.7;  // Tighter stops in chop
+    const tpMultiplier = isTrend ? 1.1 : 0.8;    // Quicker exits in chop
     
     // Calculate stop and TP distances
     const stopDistance = Math.max(atrPercent * stopMultiplier, 0.3);  // Min 0.3%
@@ -242,26 +244,6 @@ export class StrategyLearner {
     }
 
     return samples;
-  }
-  
-  private computeATR(candles: Candle[], idx: number, period: number = 14): number {
-    const start = Math.max(0, idx - period);
-    let atrSum = 0;
-    let count = 0;
-    
-    for (let i = start + 1; i <= idx; i++) {
-      const c = candles[i];
-      const prev = candles[i - 1];
-      const tr = Math.max(
-        c.high - c.low,
-        Math.abs(c.high - prev.close),
-        Math.abs(c.low - prev.close)
-      );
-      atrSum += tr;
-      count++;
-    }
-    
-    return count > 0 ? atrSum / count : candles[idx].high - candles[idx].low;
   }
 
   private computeStateFeatures(candles: Candle[], idx: number): number[] {
