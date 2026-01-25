@@ -288,6 +288,19 @@ export interface FeatureVector {
   volumeRatio: number;
   priceVelocity: number;
   priceAcceleration: number;
+  
+  // Cross-asset features - ETH, SOL, BNB relative to BTC
+  ethBtcCorrelation: number;     // 20-period rolling correlation
+  solBtcCorrelation: number;     // 20-period rolling correlation  
+  bnbBtcCorrelation: number;     // 20-period rolling correlation
+  ethRelativeStrength: number;   // ETH return / BTC return (1 = equal, >1 = ETH outperforming)
+  solRelativeStrength: number;   // SOL return / BTC return
+  bnbRelativeStrength: number;   // BNB return / BTC return
+  ethMomentumDivergence: number; // ETH momentum - BTC momentum (positive = ETH leading)
+  solMomentumDivergence: number; // SOL momentum - BTC momentum
+  bnbMomentumDivergence: number; // BNB momentum - BTC momentum
+  cryptoSectorMomentum: number;  // Average altcoin momentum vs BTC (market breadth)
+  
   embedding: number[];
 }
 
@@ -693,11 +706,174 @@ export function computeFeatures(candles: Candle[]): FeatureVector[] {
       volumeRatio: volumes[i] / avgVol,
       priceVelocity: (closes[i] - closes[i - 3]) / (3 * atrVal),
       priceAcceleration: ((closes[i] - closes[i - 3]) - (closes[i - 3] - closes[i - 6])) / (3 * atrVal),
+      
+      // Cross-asset features - defaults to 0 when cross-asset data not available
+      // These are computed by enrichFeaturesWithCrossAsset() when data is present
+      ethBtcCorrelation: 0,
+      solBtcCorrelation: 0,
+      bnbBtcCorrelation: 0,
+      ethRelativeStrength: 0,
+      solRelativeStrength: 0,
+      bnbRelativeStrength: 0,
+      ethMomentumDivergence: 0,
+      solMomentumDivergence: 0,
+      bnbMomentumDivergence: 0,
+      cryptoSectorMomentum: 0,
+      
       embedding,
     });
   }
   
   return features;
+}
+
+/**
+ * Compute rolling correlation between two price series
+ */
+function computeCorrelation(series1: number[], series2: number[], period: number = 20): number {
+  if (series1.length < period || series2.length < period) return 0;
+  
+  const recent1 = series1.slice(-period);
+  const recent2 = series2.slice(-period);
+  
+  const mean1 = recent1.reduce((a, b) => a + b, 0) / period;
+  const mean2 = recent2.reduce((a, b) => a + b, 0) / period;
+  
+  let numerator = 0;
+  let sumSq1 = 0;
+  let sumSq2 = 0;
+  
+  for (let i = 0; i < period; i++) {
+    const diff1 = recent1[i] - mean1;
+    const diff2 = recent2[i] - mean2;
+    numerator += diff1 * diff2;
+    sumSq1 += diff1 * diff1;
+    sumSq2 += diff2 * diff2;
+  }
+  
+  const denominator = Math.sqrt(sumSq1) * Math.sqrt(sumSq2);
+  return denominator > 0 ? numerator / denominator : 0;
+}
+
+/**
+ * Enrich BTC features with cross-asset correlation and relative strength data
+ * @param btcFeatures - BTC feature vectors to enrich
+ * @param btcCandles - BTC candle data
+ * @param ethCandles - ETH candle data (must be aligned by timestamp with BTC)
+ * @param solCandles - SOL candle data (must be aligned by timestamp with BTC)
+ * @param bnbCandles - BNB candle data (must be aligned by timestamp with BTC)
+ */
+export function enrichFeaturesWithCrossAsset(
+  btcFeatures: FeatureVector[],
+  btcCandles: Candle[],
+  ethCandles: Candle[],
+  solCandles: Candle[],
+  bnbCandles: Candle[]
+): FeatureVector[] {
+  if (!ethCandles.length || !solCandles.length || !bnbCandles.length) {
+    console.log("[Cross-Asset] No altcoin data available, using defaults");
+    return btcFeatures;
+  }
+  
+  // Create timestamp-indexed maps for fast lookup
+  const ethByTime = new Map(ethCandles.map(c => [c.timestamp, c]));
+  const solByTime = new Map(solCandles.map(c => [c.timestamp, c]));
+  const bnbByTime = new Map(bnbCandles.map(c => [c.timestamp, c]));
+  
+  const btcReturns: number[] = [];
+  const ethReturns: number[] = [];
+  const solReturns: number[] = [];
+  const bnbReturns: number[] = [];
+  
+  // Build aligned return series
+  for (let i = 1; i < btcCandles.length; i++) {
+    const ts = btcCandles[i].timestamp;
+    const prevTs = btcCandles[i - 1].timestamp;
+    
+    const eth = ethByTime.get(ts);
+    const prevEth = ethByTime.get(prevTs);
+    const sol = solByTime.get(ts);
+    const prevSol = solByTime.get(prevTs);
+    const bnb = bnbByTime.get(ts);
+    const prevBnb = bnbByTime.get(prevTs);
+    
+    if (eth && prevEth && sol && prevSol && bnb && prevBnb) {
+      btcReturns.push((btcCandles[i].close - btcCandles[i - 1].close) / btcCandles[i - 1].close);
+      ethReturns.push((eth.close - prevEth.close) / prevEth.close);
+      solReturns.push((sol.close - prevSol.close) / prevSol.close);
+      bnbReturns.push((bnb.close - prevBnb.close) / prevBnb.close);
+    }
+  }
+  
+  if (btcReturns.length < 20) {
+    console.log(`[Cross-Asset] Insufficient aligned data (${btcReturns.length} points), using defaults`);
+    return btcFeatures;
+  }
+  
+  // Compute cross-asset features for each BTC feature vector
+  const period = 20;
+  const momentumPeriod = 10;
+  
+  return btcFeatures.map((feature, idx) => {
+    // Find corresponding index in returns array
+    const returnIdx = Math.min(idx, btcReturns.length - 1);
+    
+    if (returnIdx < period) {
+      return feature; // Not enough history yet
+    }
+    
+    // Correlations over trailing 20 periods
+    const ethCorr = computeCorrelation(
+      btcReturns.slice(0, returnIdx + 1),
+      ethReturns.slice(0, returnIdx + 1),
+      period
+    );
+    const solCorr = computeCorrelation(
+      btcReturns.slice(0, returnIdx + 1),
+      solReturns.slice(0, returnIdx + 1),
+      period
+    );
+    const bnbCorr = computeCorrelation(
+      btcReturns.slice(0, returnIdx + 1),
+      bnbReturns.slice(0, returnIdx + 1),
+      period
+    );
+    
+    // Relative strength: sum of returns over momentum period
+    const btcMom = btcReturns.slice(returnIdx - momentumPeriod + 1, returnIdx + 1).reduce((a, b) => a + b, 0);
+    const ethMom = ethReturns.slice(returnIdx - momentumPeriod + 1, returnIdx + 1).reduce((a, b) => a + b, 0);
+    const solMom = solReturns.slice(returnIdx - momentumPeriod + 1, returnIdx + 1).reduce((a, b) => a + b, 0);
+    const bnbMom = bnbReturns.slice(returnIdx - momentumPeriod + 1, returnIdx + 1).reduce((a, b) => a + b, 0);
+    
+    // Relative strength (1.0 = equal, >1 = altcoin outperforming)
+    const safeBtcMom = Math.abs(btcMom) > 0.0001 ? btcMom : 0.0001;
+    const ethRS = ethMom / safeBtcMom;
+    const solRS = solMom / safeBtcMom;
+    const bnbRS = bnbMom / safeBtcMom;
+    
+    // Momentum divergence (positive = altcoin leading)
+    const ethDivergence = ethMom - btcMom;
+    const solDivergence = solMom - btcMom;
+    const bnbDivergence = bnbMom - btcMom;
+    
+    // Sector momentum (average altcoin momentum vs BTC - market breadth)
+    const avgAltMom = (ethMom + solMom + bnbMom) / 3;
+    const sectorMomentum = avgAltMom - btcMom;
+    
+    return {
+      ...feature,
+      ethBtcCorrelation: ethCorr,
+      solBtcCorrelation: solCorr,
+      bnbBtcCorrelation: bnbCorr,
+      ethRelativeStrength: Math.max(-5, Math.min(5, ethRS)), // Clamp to [-5, 5]
+      solRelativeStrength: Math.max(-5, Math.min(5, solRS)),
+      bnbRelativeStrength: Math.max(-5, Math.min(5, bnbRS)),
+      ethMomentumDivergence: ethDivergence * 100, // Scale for better neural network learning
+      solMomentumDivergence: solDivergence * 100,
+      bnbMomentumDivergence: bnbDivergence * 100,
+      cryptoSectorMomentum: sectorMomentum * 100,
+    };
+  });
 }
 
 export function getLatestFeatures(candles: Candle[]): FeatureVector | null {

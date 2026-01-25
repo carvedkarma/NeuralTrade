@@ -29,7 +29,7 @@ import { analyzeMarket, generateAISignal } from "./ai-analysis";
 import { getFullBTCData, getBTCPrice } from "./coingecko";
 import { getFullBTCDataCryptoCompare } from "./cryptocompare";
 import { getFullBTCDataBinanceVision } from "./binance-vision";
-import { computeFeatures, getLatestFeatures, detectCandlestickPatterns, analyzeVolumeProfile, analyzeMultiTimeframePatterns, type FeatureVector, type CandlestickPattern, type VolumeProfile, type MultiTimeframeCorrelation } from "./feature-engine";
+import { computeFeatures, getLatestFeatures, detectCandlestickPatterns, analyzeVolumeProfile, analyzeMultiTimeframePatterns, enrichFeaturesWithCrossAsset, type FeatureVector, type CandlestickPattern, type VolumeProfile, type MultiTimeframeCorrelation } from "./feature-engine";
 import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-engine";
 import { getSentimentData, interpretFearGreed, getNewsStats } from "./sentiment-api";
 import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime, getLastSimilarityDistribution, initializePatternClusters, getPatternClusterStats, updateDataCounts, canCreateNewPatterns, canCreateNewPatternsWithCounts, getPatternRequirements, patternClusters, loadPatternClustersFromDb, savePatternClustersToDb } from "./pattern-memory";
@@ -762,6 +762,23 @@ export class MemStorage implements IStorage {
       return;
     }
     
+    // Load cross-asset data for ETH, SOL, BNB correlation features
+    const ethCandles = await loadCandlesFromDb("ETHUSDT", "15m");
+    const solCandles = await loadCandlesFromDb("SOLUSDT", "15m");
+    const bnbCandles = await loadCandlesFromDb("BNBUSDT", "15m");
+    const hasCrossAssetData = ethCandles.length > 0 && solCandles.length > 0 && bnbCandles.length > 0;
+    
+    // Create timestamp-indexed maps for cross-asset lookups
+    const ethByTime = new Map(ethCandles.map(c => [c.timestamp, c]));
+    const solByTime = new Map(solCandles.map(c => [c.timestamp, c]));
+    const bnbByTime = new Map(bnbCandles.map(c => [c.timestamp, c]));
+    
+    if (hasCrossAssetData) {
+      console.log(`[Cross-Asset] Loaded ${ethCandles.length} ETH, ${solCandles.length} SOL, ${bnbCandles.length} BNB candles for correlation learning`);
+    } else {
+      console.log(`[Cross-Asset] No altcoin data available (ETH:${ethCandles.length}, SOL:${solCandles.length}, BNB:${bnbCandles.length}). Training with BTC-only features.`);
+    }
+    
     // Update stats to reflect actual training data
     this.learningStats.historicalCandlesProcessed = candlesToUse.length;
     
@@ -796,6 +813,7 @@ export class MemStorage implements IStorage {
       let candlestickPatternsFound = 0;
       let bullishFound = 0;
       let bearishFound = 0;
+      let crossAssetEnriched = 0;
       
       // Process 500 candles per epoch for thorough deep learning
       const batchSize = 500;
@@ -803,8 +821,67 @@ export class MemStorage implements IStorage {
       
       for (let i = startIdx; i < endIdx; i++) {
         const historicalSlice = candlesToUse.slice(Math.max(0, i - 200), i + 1);
-        const feature = getLatestFeatures(historicalSlice);
+        let feature = getLatestFeatures(historicalSlice);
         if (!feature) continue;
+        
+        // Enrich with cross-asset features if altcoin data is available
+        if (hasCrossAssetData && historicalSlice.length >= 25) {
+          const period = 20;
+          const momentumPeriod = 10;
+          
+          // Get aligned slices for this time window
+          const btcSlice = historicalSlice.slice(-period - 1);
+          const ethSlice = btcSlice.map(c => ethByTime.get(c.timestamp)).filter(Boolean) as typeof ethCandles;
+          const solSlice = btcSlice.map(c => solByTime.get(c.timestamp)).filter(Boolean) as typeof solCandles;
+          const bnbSlice = btcSlice.map(c => bnbByTime.get(c.timestamp)).filter(Boolean) as typeof bnbCandles;
+          
+          if (ethSlice.length >= period && solSlice.length >= period && bnbSlice.length >= period) {
+            // Calculate returns for correlation
+            const btcReturns = btcSlice.slice(1).map((c, idx) => (c.close - btcSlice[idx].close) / btcSlice[idx].close);
+            const ethReturns = ethSlice.slice(1).map((c, idx) => (c.close - ethSlice[idx].close) / ethSlice[idx].close);
+            const solReturns = solSlice.slice(1).map((c, idx) => (c.close - solSlice[idx].close) / solSlice[idx].close);
+            const bnbReturns = bnbSlice.slice(1).map((c, idx) => (c.close - bnbSlice[idx].close) / bnbSlice[idx].close);
+            
+            // Correlation helper
+            const calcCorr = (a: number[], b: number[]): number => {
+              const n = Math.min(a.length, b.length);
+              if (n < 5) return 0;
+              const meanA = a.slice(0, n).reduce((s, v) => s + v, 0) / n;
+              const meanB = b.slice(0, n).reduce((s, v) => s + v, 0) / n;
+              let num = 0, ssA = 0, ssB = 0;
+              for (let j = 0; j < n; j++) {
+                const dA = a[j] - meanA, dB = b[j] - meanB;
+                num += dA * dB;
+                ssA += dA * dA;
+                ssB += dB * dB;
+              }
+              const denom = Math.sqrt(ssA) * Math.sqrt(ssB);
+              return denom > 0 ? num / denom : 0;
+            };
+            
+            // Momentum sums for relative strength
+            const btcMom = btcReturns.slice(-momentumPeriod).reduce((s, v) => s + v, 0);
+            const ethMom = ethReturns.slice(-momentumPeriod).reduce((s, v) => s + v, 0);
+            const solMom = solReturns.slice(-momentumPeriod).reduce((s, v) => s + v, 0);
+            const bnbMom = bnbReturns.slice(-momentumPeriod).reduce((s, v) => s + v, 0);
+            const safeBtcMom = Math.abs(btcMom) > 0.0001 ? btcMom : 0.0001;
+            
+            feature = {
+              ...feature,
+              ethBtcCorrelation: calcCorr(btcReturns, ethReturns),
+              solBtcCorrelation: calcCorr(btcReturns, solReturns),
+              bnbBtcCorrelation: calcCorr(btcReturns, bnbReturns),
+              ethRelativeStrength: Math.max(-5, Math.min(5, ethMom / safeBtcMom)),
+              solRelativeStrength: Math.max(-5, Math.min(5, solMom / safeBtcMom)),
+              bnbRelativeStrength: Math.max(-5, Math.min(5, bnbMom / safeBtcMom)),
+              ethMomentumDivergence: (ethMom - btcMom) * 100,
+              solMomentumDivergence: (solMom - btcMom) * 100,
+              bnbMomentumDivergence: (bnbMom - btcMom) * 100,
+              cryptoSectorMomentum: ((ethMom + solMom + bnbMom) / 3 - btcMom) * 100,
+            };
+            crossAssetEnriched++;
+          }
+        }
         
         const candlestickPatterns = detectCandlestickPatterns(historicalSlice);
         const volumeProfile = analyzeVolumeProfile(historicalSlice);
@@ -915,7 +992,7 @@ export class MemStorage implements IStorage {
         this.learningStats.historicalWinRate = storedStats.winRate;
         this.learningStats.patternsByRegime = storedStats.regimeBreakdown;
         
-        console.log(`Deep training completed: ${patternsAdded} patterns (win rate: ${(storedStats.winRate * 100).toFixed(1)}%), regimes: up=${storedStats.regimeBreakdown.trend_up} down=${storedStats.regimeBreakdown.trend_down} chop=${storedStats.regimeBreakdown.chop}, MTF: ${mtfAnalysis.overallSignal} (${(mtfAnalysis.confluence * 100).toFixed(0)}% confluence), epoch ${this.learningStats.learningEpochs}`);
+        console.log(`Deep training completed: ${patternsAdded} patterns (win rate: ${(storedStats.winRate * 100).toFixed(1)}%), cross-asset enriched: ${crossAssetEnriched}/${endIdx - startIdx}, regimes: up=${storedStats.regimeBreakdown.trend_up} down=${storedStats.regimeBreakdown.trend_down} chop=${storedStats.regimeBreakdown.chop}, epoch ${this.learningStats.learningEpochs}`);
         
         await this.saveLearningStateToDb();
         console.log(`[Persistence] State saved after epoch ${this.learningStats.learningEpochs}`);
