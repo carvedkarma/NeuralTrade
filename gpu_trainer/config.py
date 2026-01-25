@@ -87,6 +87,10 @@ class Config:
     redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379")
     api_port: int = 8000
     
+    # Replit proxy URL for fetching Binance data (bypasses Australian geoblocking)
+    # Set this to your Replit app URL, e.g., "https://your-app.replit.app"
+    replit_proxy_url: str = os.getenv("REPLIT_PROXY_URL", "")
+    
     def __post_init__(self):
         self.data_dir.mkdir(exist_ok=True)
         self.model_dir.mkdir(exist_ok=True)

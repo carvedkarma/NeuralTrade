@@ -41,24 +41,42 @@ def check_gpu():
         return False
 
 async def fetch_data(args):
-    """Fetch historical data from Binance."""
+    """Fetch historical data from Binance (or via Replit proxy if configured)."""
     from data.pipeline import BinanceDataFetcher
     from config import config
     
-    logger.info("Fetching historical data from Binance...")
+    replit_url = getattr(args, 'replit_proxy', None) or config.replit_proxy_url
     
-    fetcher = BinanceDataFetcher(config.data.symbols, config.data.timeframes)
+    if replit_url:
+        logger.info(f"Using Replit proxy at: {replit_url}")
+    else:
+        logger.info("No Replit proxy configured. Trying direct Binance access...")
+        logger.info("Tip: Set REPLIT_PROXY_URL or use --replit-proxy <url>")
+    
+    fetcher = BinanceDataFetcher(
+        config.data.symbols, 
+        config.data.timeframes,
+        replit_proxy_url=replit_url
+    )
     
     try:
         data = await fetcher.fetch_all_historical(args.candles)
         
+        total_candles = 0
         for symbol, timeframes in data.items():
             for tf, df in timeframes.items():
-                path = config.data_dir / f"{symbol}_{tf}.parquet"
-                df.to_parquet(path)
-                logger.info(f"Saved {len(df)} candles for {symbol} {tf}")
-                
-        logger.info("Data fetch complete!")
+                if len(df) > 0:
+                    path = config.data_dir / f"{symbol}_{tf}.parquet"
+                    df.to_parquet(path)
+                    total_candles += len(df)
+                    logger.info(f"Saved {len(df)} candles for {symbol} {tf}")
+                else:
+                    logger.warning(f"No data received for {symbol} {tf}")
+        
+        if total_candles > 0:
+            logger.info(f"Data fetch complete! Total: {total_candles} candles")
+        else:
+            logger.error("No data was fetched. Check your connection or Replit proxy URL.")
         
     finally:
         await fetcher.close()
@@ -269,6 +287,8 @@ def main():
     
     fetch_parser = subparsers.add_parser("fetch", help="Fetch historical data")
     fetch_parser.add_argument("--candles", type=int, default=50000, help="Number of candles to fetch")
+    fetch_parser.add_argument("--replit-proxy", type=str, dest="replit_proxy",
+                              help="Replit proxy URL for Binance data (e.g., https://your-app.replit.app)")
     
     train_parser = subparsers.add_parser("train", help="Train a neural network model")
     train_parser.add_argument("--model", type=str, required=True,

@@ -322,5 +322,92 @@ export async function registerRoutes(
     }
   });
 
+  // Data Proxy Endpoints - Allow local GPU trainer to fetch Binance data through Replit
+  const BINANCE_VISION_URL = "https://data-api.binance.vision/api/v3";
+  
+  app.get("/api/data/klines", async (req, res) => {
+    try {
+      const { symbol = "BTCUSDT", interval = "15m", limit = "1000", startTime, endTime } = req.query;
+      
+      const params = new URLSearchParams({
+        symbol: String(symbol),
+        interval: String(interval),
+        limit: String(Math.min(Number(limit), 1000))
+      });
+      
+      if (startTime) params.append("startTime", String(startTime));
+      if (endTime) params.append("endTime", String(endTime));
+      
+      const url = `${BINANCE_VISION_URL}/klines?${params.toString()}`;
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        console.error(`[Data Proxy] Binance error: ${response.status}`);
+        return res.status(response.status).json({ error: `Binance returned ${response.status}` });
+      }
+      
+      const data = await response.json();
+      
+      // Transform to cleaner format
+      const candles = data.map((k: any[]) => ({
+        timestamp: k[0],
+        open: parseFloat(k[1]),
+        high: parseFloat(k[2]),
+        low: parseFloat(k[3]),
+        close: parseFloat(k[4]),
+        volume: parseFloat(k[5]),
+        closeTime: k[6],
+        quoteVolume: parseFloat(k[7]),
+        trades: k[8],
+        takerBuyBase: parseFloat(k[9]),
+        takerBuyQuote: parseFloat(k[10])
+      }));
+      
+      console.log(`[Data Proxy] Fetched ${candles.length} candles for ${symbol} ${interval}`);
+      res.json({ candles, count: candles.length, symbol, interval });
+    } catch (error) {
+      console.error("[Data Proxy] Error fetching klines:", error);
+      res.status(500).json({ error: "Failed to fetch klines from Binance" });
+    }
+  });
+  
+  app.get("/api/data/orderbook", async (req, res) => {
+    try {
+      const { symbol = "BTCUSDT", limit = "100" } = req.query;
+      
+      const url = `${BINANCE_VISION_URL}/depth?symbol=${symbol}&limit=${Math.min(Number(limit), 1000)}`;
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        return res.status(response.status).json({ error: `Binance returned ${response.status}` });
+      }
+      
+      const data = await response.json();
+      res.json(data);
+    } catch (error) {
+      console.error("[Data Proxy] Error fetching orderbook:", error);
+      res.status(500).json({ error: "Failed to fetch orderbook" });
+    }
+  });
+  
+  app.get("/api/data/ticker", async (req, res) => {
+    try {
+      const { symbol = "BTCUSDT" } = req.query;
+      
+      const url = `${BINANCE_VISION_URL}/ticker/24hr?symbol=${symbol}`;
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        return res.status(response.status).json({ error: `Binance returned ${response.status}` });
+      }
+      
+      const data = await response.json();
+      res.json(data);
+    } catch (error) {
+      console.error("[Data Proxy] Error fetching ticker:", error);
+      res.status(500).json({ error: "Failed to fetch ticker" });
+    }
+  });
+
   return httpServer;
 }

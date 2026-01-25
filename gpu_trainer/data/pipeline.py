@@ -19,11 +19,12 @@ class BinanceDataFetcher:
     BINANCE_API_URL = "https://api.binance.com/api/v3"
     CRYPTOCOMPARE_URL = "https://min-api.cryptocompare.com/data/v2"
     
-    def __init__(self, symbols: List[str], timeframes: List[str]):
+    def __init__(self, symbols: List[str], timeframes: List[str], replit_proxy_url: Optional[str] = None):
         self.symbols = symbols
         self.timeframes = timeframes
         self.session = None
         self.working_source = None
+        self.replit_proxy_url = replit_proxy_url
         
     async def _get_session(self):
         if self.session is None:
@@ -53,15 +54,69 @@ class BinanceDataFetcher:
             print(f"[{source_name}] Error: {e}")
         return None
     
+    async def _fetch_replit_proxy(self, symbol: str, timeframe: str, limit: int,
+                                   end_time: Optional[int] = None) -> List[Dict]:
+        if not self.replit_proxy_url:
+            return []
+        
+        params: Dict[str, Any] = {
+            "symbol": symbol,
+            "interval": timeframe,
+            "limit": min(limit, 1000)
+        }
+        if end_time:
+            params["endTime"] = end_time
+        
+        url = f"{self.replit_proxy_url}/api/data/klines"
+        data = await self._try_fetch(url, params, "Replit Proxy")
+        
+        if data and "candles" in data:
+            candles = []
+            for c in data["candles"]:
+                candles.append({
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "timestamp": c["timestamp"],
+                    "open": float(c["open"]),
+                    "high": float(c["high"]),
+                    "low": float(c["low"]),
+                    "close": float(c["close"]),
+                    "volume": float(c["volume"]),
+                    "close_time": c["closeTime"],
+                    "quote_volume": float(c["quoteVolume"]),
+                    "trades": c["trades"],
+                    "taker_buy_base": float(c["takerBuyBase"]),
+                    "taker_buy_quote": float(c["takerBuyQuote"])
+                })
+            if candles:
+                print(f"[Replit Proxy] Successfully fetched {len(candles)} candles")
+            return candles
+        return []
+    
     async def fetch_klines(self, symbol: str, timeframe: str, limit: int = 1000, 
                           start_time: Optional[int] = None, 
                           end_time: Optional[int] = None) -> List[Dict]:
+        # If we already have a working source, try it first
+        if self.working_source == "Replit Proxy":
+            proxy_data = await self._fetch_replit_proxy(symbol, timeframe, limit, end_time)
+            if proxy_data:
+                return proxy_data
+            self.working_source = None
+        
         if self.working_source == "CryptoCompare":
             cc_data = await self._fetch_cryptocompare(symbol, timeframe, limit, end_time)
             if cc_data:
                 return cc_data
             self.working_source = None
         
+        # Try Replit Proxy first (bypasses Australia Binance block)
+        if self.replit_proxy_url:
+            proxy_data = await self._fetch_replit_proxy(symbol, timeframe, limit, end_time)
+            if proxy_data:
+                self.working_source = "Replit Proxy"
+                return proxy_data
+        
+        # Then try direct Binance access
         params: Dict[str, Any] = {
             "symbol": symbol,
             "interval": timeframe,
@@ -77,7 +132,7 @@ class BinanceDataFetcher:
             (f"{self.BINANCE_API_URL}/klines", params, "Binance API"),
         ]
         
-        if self.working_source and self.working_source != "CryptoCompare":
+        if self.working_source and self.working_source not in ["CryptoCompare", "Replit Proxy"]:
             sources = [s for s in sources if s[2] == self.working_source] + \
                       [s for s in sources if s[2] != self.working_source]
         
@@ -88,6 +143,7 @@ class BinanceDataFetcher:
                 print(f"[{source_name}] Successfully fetched {len(data)} candles")
                 return [self._parse_kline(k, symbol, timeframe) for k in data]
         
+        # Last resort: CryptoCompare
         cc_data = await self._fetch_cryptocompare(symbol, timeframe, limit, end_time)
         if cc_data:
             self.working_source = "CryptoCompare"
