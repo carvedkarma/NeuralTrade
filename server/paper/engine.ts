@@ -371,13 +371,17 @@ function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConf
     return { allowed: false, reason: "No shot plan available" };
   }
   
-  if (shotPlan.signal === "HOLD") {
-    console.log("[Paper ASSERTION] Attempted trade during HOLD signal - blocked");
-    return { allowed: false, reason: "HOLD signal - no trade allowed" };
+  // Use combined intelligence signal when available (smarter - considers pattern history + strategy learner)
+  const effectiveSignal = shotPlan.combinedIntelligence?.finalSignal || shotPlan.signal;
+  const effectiveConfidence = shotPlan.combinedIntelligence?.finalConfidence || shotPlan.confidence;
+  
+  if (effectiveSignal === "HOLD") {
+    console.log("[Paper] Combined Intelligence says HOLD - respecting smart signal");
+    return { allowed: false, reason: "Combined Intelligence: HOLD signal" };
   }
   
-  if (shotPlan.signal !== "LONG" && shotPlan.signal !== "SHORT") {
-    return { allowed: false, reason: `Invalid signal: ${shotPlan.signal}` };
+  if (effectiveSignal !== "LONG" && effectiveSignal !== "SHORT") {
+    return { allowed: false, reason: `Invalid signal: ${effectiveSignal}` };
   }
   
   if (shotPlan.confidence < config.minConfidence) {
@@ -707,10 +711,14 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
     const shotPlanEdge = ctx.shotPlan?.edge || 0;
     const shotPlanEdgeMultiple = shotPlanCosts > 0 ? shotPlanEdge / shotPlanCosts : 0;
     
+    // Use combined intelligence signal for logging (the actual signal being used)
+    const effectiveSignal = ctx.shotPlan?.combinedIntelligence?.finalSignal || ctx.shotPlan?.signal || "NONE";
+    const effectiveConfidence = ctx.shotPlan?.combinedIntelligence?.finalConfidence || ctx.shotPlan?.confidence || 0;
+    
     logAudit({
       timestamp: Date.now(),
-      signal: ctx.shotPlan?.signal || "NONE",
-      confidence: ctx.shotPlan?.confidence || 0,
+      signal: effectiveSignal,
+      confidence: effectiveConfidence,
       regime: ctx.shotPlan?.regime || "unknown",
       edge: shotPlanEdge,
       costs: shotPlanCosts,
@@ -730,13 +738,17 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
     }
     
     const shotPlan = ctx.shotPlan!;
+    // Use combined intelligence signal when available
+    const tradeSignal = (shotPlan.combinedIntelligence?.finalSignal || shotPlan.signal) as "LONG" | "SHORT";
+    const tradeConfidence = shotPlan.combinedIntelligence?.finalConfidence || shotPlan.confidence;
+    
     await openPosition(
       ctx,
-      shotPlan.signal as "LONG" | "SHORT",
+      tradeSignal,
       shotPlan.stopLoss!,
       shotPlan.takeProfit1!,
       shotPlan.takeProfit2!,
-      shotPlan.confidence,
+      tradeConfidence,
       shotPlan.edge
     );
     return;
