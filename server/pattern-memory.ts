@@ -566,27 +566,19 @@ export function getPatternConfidence(stats: PatternStats): {
   confidence: number;
   reasoning: string;
 } {
-  if (stats.matureMatchCount < 10) {
-    return {
-      direction: "HOLD",
-      confidence: 0,
-      reasoning: `Insufficient mature pattern matches (${stats.matureMatchCount}/10). Need mature clusters with >= ${MIN_SAMPLES_PER_PATTERN} samples each.`,
-    };
-  }
+  // AGGRESSIVE MODE: Removed minimum mature match requirement
+  // Previously: if (stats.matureMatchCount < 10) { return HOLD }
+  // Now: Always output a direction based on available pattern data
   
   const expectedReturn = stats.avgReturn8 * 100;
   const winRate = stats.winRate;
   
-  if (winRate < 0.45 || Math.abs(expectedReturn) < 0.1) {
-    return {
-      direction: "HOLD",
-      confidence: 0.3,
-      reasoning: `Weak pattern signal. Win rate: ${(winRate * 100).toFixed(1)}%, Avg return: ${expectedReturn.toFixed(2)}%`,
-    };
-  }
+  // AGGRESSIVE MODE: Always output a direction based on expected return
+  // Previously: if (winRate < 0.45 || Math.abs(expectedReturn) < 0.1) { return HOLD }
+  // Now: Just pick direction based on expected return
   
-  const direction: "LONG" | "SHORT" = expectedReturn > 0 ? "LONG" : "SHORT";
-  const confidence = Math.min(0.9, (winRate * 0.6 + stats.consistency * 0.4));
+  const direction: "LONG" | "SHORT" = expectedReturn >= 0 ? "LONG" : "SHORT";
+  const confidence = Math.max(0.3, Math.min(0.9, (winRate * 0.6 + stats.consistency * 0.4)));
   
   return {
     direction,

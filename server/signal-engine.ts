@@ -313,11 +313,9 @@ export async function generateShotPlan(
     if (patternStats.winRate > 0.55) reasons.push(`Pattern history: ${(patternStats.winRate * 100).toFixed(0)}% win rate`);
   }
   
-  const baseShouldTrade = vetoReasons.length === 0 && 
-                       ensemble.confidence >= 0.65 && 
-                       ensemble.consensus >= 0.5 &&
-                       patternMatches.length >= 10 &&
-                       reasons.length >= 1;
+  // AGGRESSIVE MODE: Lower thresholds and allow trades with fewer requirements
+  const baseShouldTrade = ensemble.confidence >= 0.30 &&  // Lowered from 0.65 to 0.30
+                       ensemble.direction !== "HOLD";     // Just needs a direction
   
   let combinedIntelligence: CombinedIntelligence | undefined;
   let shouldTrade = baseShouldTrade;
@@ -340,12 +338,9 @@ export async function generateShotPlan(
       if (!reasons.includes(r)) reasons.push(r);
     });
     
-    if (baseShouldTrade && combinedIntelligence.finalSignal === "HOLD") {
-      shouldTrade = false;
-      if (!vetoReasons.some(v => v.includes("Strategy Learner"))) {
-        vetoReasons.push("Combined Intelligence recommends HOLD");
-      }
-    }
+    // AGGRESSIVE MODE: Don't block trades based on combined intelligence HOLD
+    // Previously: if (baseShouldTrade && combinedIntelligence.finalSignal === "HOLD") { shouldTrade = false; }
+    // Now: Continue with trade if there's a directional signal
     
     if (baseShouldTrade && combinedIntelligence.strategyEV > 0) {
       reasons.push(`Strategy EV: +${(combinedIntelligence.strategyEV * 100).toFixed(2)}%`);
@@ -360,7 +355,9 @@ export async function generateShotPlan(
   let takeProfit2: number | null = null;
   let trailingStop: number | null = null;
   
-  if (shouldTrade && ensemble.direction !== "HOLD") {
+  // AGGRESSIVE MODE: Always generate trade levels when there's a directional signal
+  // This allows paper trading to act on signals even with veto reasons
+  if (ensemble.direction !== "HOLD") {
     const atr = feature.atr14;
     
     if (ensemble.direction === "LONG") {
@@ -404,18 +401,18 @@ export async function generateShotPlan(
     patternMatches
   );
   
-  // Quality gate: reject if quality score is below threshold
-  if (shouldTrade && qualityResult.qualityScore < MIN_QUALITY_SCORE) {
-    shouldTrade = false;
-    vetoReasons.push(`Quality score too low: ${qualityResult.qualityScore.toFixed(0)} (need ${MIN_QUALITY_SCORE}+)`);
-  }
+  // AGGRESSIVE MODE: Remove quality gate - let paper trading act on all signals
+  // Previously: if (shouldTrade && qualityResult.qualityScore < MIN_QUALITY_SCORE) { shouldTrade = false; }
   
-  const displayConfidence = shouldTrade 
-    ? ensemble.confidence 
-    : ensemble.confidence * 0.7;
+  // AGGRESSIVE MODE: Use full confidence for display
+  const displayConfidence = ensemble.confidence;
+  
+  // AGGRESSIVE MODE: Output the ML direction even if traditional gates would block
+  // This enables paper trading to take more trades and learn from outcomes
+  const finalSignal = ensemble.direction !== "HOLD" ? ensemble.direction : "HOLD";
   
   return {
-    signal: shouldTrade ? ensemble.direction : "HOLD",
+    signal: finalSignal,
     confidence: displayConfidence,
     regime,
     strategy,
@@ -434,8 +431,8 @@ export async function generateShotPlan(
     probDown: ensemble.probDown,
     probChop: ensemble.probChop,
     expectedMove: ensemble.expectedMove,
-    reasons: shouldTrade ? reasons : [],
-    vetoReasons: shouldTrade ? [] : vetoReasons,
+    reasons,  // AGGRESSIVE MODE: Always include reasons
+    vetoReasons,  // AGGRESSIVE MODE: Still track vetoes for analysis but don't block
     patternMatches,
     mlPredictions: ensemble,
     expansionGate,

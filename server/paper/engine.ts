@@ -387,25 +387,12 @@ function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConf
     };
   }
   
-  const costs = shotPlan.estimatedCosts || getTotalCostsPct();
-  if (shotPlan.edge <= costs) {
-    return { 
-      allowed: false, 
-      reason: `Edge ${(shotPlan.edge * 100).toFixed(3)}% <= Costs ${(costs * 100).toFixed(3)}%` 
-    };
-  }
+  // AGGRESSIVE MODE: Allow trades even with negative edge (removed edge check)
+  // The system will learn from outcomes to improve future signals
   
-  const edgeMultiple = shotPlan.edgeMultiple ?? (costs > 0 ? shotPlan.edge / costs : 0);
-  if (edgeMultiple < EDGE_MULTIPLE_MIN) {
-    return { 
-      allowed: false, 
-      reason: `Edge multiple ${edgeMultiple.toFixed(2)}x < ${EDGE_MULTIPLE_MIN}x minimum (edge must be >= ${EDGE_MULTIPLE_MIN}x costs)` 
-    };
-  }
-  
-  if (shotPlan.regime === "chop") {
-    return { allowed: false, reason: "Chop regime - no trades allowed" };
-  }
+  // AGGRESSIVE MODE: Allow chop regime trades for mean-reversion opportunities
+  // Previously: if (shotPlan.regime === "chop") { return blocked; }
+  // Now allowing chop trades with tighter stops
   
   const isTrendTrade = shotPlan.regime === "trend_up" || shotPlan.regime === "trend_down";
   if (isTrendTrade && shotPlan.expansionGate && !shotPlan.expansionGate.confirmed) {
@@ -419,40 +406,32 @@ function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConf
     return { allowed: false, reason: "Missing trade levels (entry/stop/TP)" };
   }
   
-  if (shotPlan.vetoReasons && shotPlan.vetoReasons.length > 0) {
-    return { allowed: false, reason: `Veto reasons: ${shotPlan.vetoReasons.join(", ")}` };
-  }
+  // AGGRESSIVE MODE: Ignore veto reasons - let the system trade based on signal
+  // Previously: if (shotPlan.vetoReasons && shotPlan.vetoReasons.length > 0) { return blocked; }
   
-  if (!shotPlan.reasons || shotPlan.reasons.length < 1) {
-    return { allowed: false, reason: "No supporting reasons for trade" };
-  }
+  // AGGRESSIVE MODE: No minimum reasons required
+  // Previously: if (!shotPlan.reasons || shotPlan.reasons.length < 1) { return blocked; }
   
+  // AGGRESSIVE MODE: Relaxed combined intelligence checks
   if (shotPlan.combinedIntelligence) {
     const ci = shotPlan.combinedIntelligence;
     
-    if (ci.finalSignal === "HOLD") {
+    // Only block if ML system explicitly says HOLD with very high confidence
+    if (ci.finalSignal === "HOLD" && ci.finalConfidence > 0.8) {
       return { 
         allowed: false, 
-        reason: `Combined Intelligence: ${ci.vetoes.join("; ") || "Systems recommend HOLD"}` 
+        reason: `Combined Intelligence: High-confidence HOLD (${(ci.finalConfidence * 100).toFixed(0)}%)` 
       };
     }
     
-    if (ci.strategyEV <= 0) {
-      return { 
-        allowed: false, 
-        reason: `Strategy Learner: Negative EV (${(ci.strategyEV * 100).toFixed(2)}%) for ${shotPlan.signal}` 
-      };
-    }
+    // AGGRESSIVE MODE: Allow negative EV trades - system learns from outcomes
+    // Previously: if (ci.strategyEV <= 0) { return blocked; }
     
-    if (!ci.systemsAgree && ci.patternWinRate < 0.5) {
-      return { 
-        allowed: false, 
-        reason: `ML and Strategy disagree, pattern win rate only ${(ci.patternWinRate * 100).toFixed(0)}%` 
-      };
-    }
+    // AGGRESSIVE MODE: Trade even if systems disagree
+    // Previously: if (!ci.systemsAgree && ci.patternWinRate < 0.5) { return blocked; }
   }
   
-  return { allowed: true, reason: "All gating checks passed (ML + Strategy Learner agree)" };
+  return { allowed: true, reason: "AGGRESSIVE MODE: Trade allowed based on signal direction" };
 }
 
 async function checkExposureLimits(

@@ -51,10 +51,10 @@ export const defaultConfig: PaperTradingConfig = {
   paperTradingEnabled: false,
   isAutoTrading: false,
   
-  riskPerTradePct: 0.25,
-  maxRiskPerTradePct: 0.5,
-  maxAccountExposurePct: 100,
-  minConfidence: 0.65,
+  riskPerTradePct: 0.5,             // Increased from 0.25% to 0.5% risk per trade
+  maxRiskPerTradePct: 1.0,          // Increased from 0.5% to 1.0% max risk
+  maxAccountExposurePct: 500,       // AGGRESSIVE: Increased to 500% for 5x leverage futures
+  minConfidence: 0.35,              // Lowered from 65% to 35% - more aggressive
   
   takerFeePct: 0.04,
   makerFeePct: 0.02,
@@ -91,7 +91,7 @@ export const defaultConfig: PaperTradingConfig = {
   failureStopEnabled: true,     // Enable Kalman+MACD failure detection
   
   // Quality score gate
-  minQualityScore: 70,          // Require quality >= 70 to trade
+  minQualityScore: 35,          // Lowered from 70 to 35 - more aggressive
   
   // Performance metrics tracking
   trackRMultiple: true,         // Track R-multiple per trade

@@ -74,14 +74,19 @@ function ruleBasedPredict(feature: FeatureVector): MLPrediction {
   let direction: "LONG" | "SHORT" | "HOLD" = "HOLD";
   let confidence = 0;
   
-  if (probUp > 0.5 && probUp > probDown + 0.15) {
+  // AGGRESSIVE MODE: Lowered thresholds for direction assignment
+  // Previously: probUp > 0.5 && probUp > probDown + 0.15
+  // Now: Just needs to be the highest probability
+  if (probUp >= probDown && probUp >= probChop) {
     direction = "LONG";
     confidence = probUp;
-  } else if (probDown > 0.5 && probDown > probUp + 0.15) {
+  } else if (probDown >= probUp && probDown >= probChop) {
     direction = "SHORT";
     confidence = probDown;
   } else {
-    confidence = probChop;
+    // Chop is highest - but still pick a direction based on second highest
+    direction = probUp > probDown ? "LONG" : "SHORT";
+    confidence = Math.max(probUp, probDown);
   }
   
   return {
@@ -347,26 +352,10 @@ export async function getEnsemblePrediction(
   const modelConfidences = [rulePrediction.confidence, patternPrediction.confidence];
   if (aiPrediction) modelConfidences.push(aiPrediction.confidence);
   
-  if (isChopRegime) {
-    const chopConfidence = computeConfidence(
-      probUp * 0.3, probDown * 0.3, 0.7, 0, currentPrice, costs, patternMaturity, modelConfidences, feature.adx
-    );
-    
-    return {
-      probUp: probUp * 0.3,
-      probDown: probDown * 0.3,
-      probChop: Math.max(probChop, 0.7),
-      expectedMove: 0,
-      confidence: chopConfidence.confidence,
-      direction: "HOLD",
-      models: {
-        rulebased: rulePrediction,
-        pattern: patternPrediction,
-        ai: aiPrediction,
-      },
-      consensus: 1.0,
-    };
-  }
+  // AGGRESSIVE MODE: Don't force HOLD in chop regimes
+  // Previously: if (isChopRegime) { return { direction: "HOLD", ... }; }
+  // Now: Allow mean-reversion trades even in choppy markets
+  // The paper trading system will use tighter stops for chop regime trades
   
   const votes = [rulePrediction.direction, patternPrediction.direction];
   if (aiPrediction) votes.push(aiPrediction.direction);
@@ -375,17 +364,21 @@ export async function getEnsemblePrediction(
   const shortVotes = votes.filter(v => v === "SHORT").length;
   const holdVotes = votes.filter(v => v === "HOLD").length;
   
-  let direction: "LONG" | "SHORT" | "HOLD" = "HOLD";
+  // AGGRESSIVE MODE: Always pick LONG or SHORT based on probability comparison
+  // Never output HOLD - the system needs to trade to learn
+  let direction: "LONG" | "SHORT" | "HOLD";
   let consensus = 0;
   
-  if (longVotes > shortVotes && longVotes > holdVotes) {
+  if (longVotes > shortVotes) {
     direction = "LONG";
     consensus = longVotes / votes.length;
-  } else if (shortVotes > longVotes && shortVotes > holdVotes) {
+  } else if (shortVotes > longVotes) {
     direction = "SHORT";
     consensus = shortVotes / votes.length;
   } else {
-    consensus = holdVotes / votes.length;
+    // Tie between LONG and SHORT (or no votes) - use probability to decide
+    direction = probUp >= probDown ? "LONG" : "SHORT";
+    consensus = Math.max(longVotes, shortVotes) / votes.length || 0.5;
   }
   
   const { confidence } = computeConfidence(
