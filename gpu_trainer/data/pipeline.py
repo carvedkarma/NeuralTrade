@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import aiohttp
 import asyncio
 from datetime import datetime, timedelta
@@ -15,34 +15,140 @@ import joblib
 from tqdm import tqdm
 
 class BinanceDataFetcher:
-    BASE_URL = "https://api.binance.com/api/v3"
+    BINANCE_VISION_URL = "https://data-api.binance.vision/api/v3"
+    BINANCE_API_URL = "https://api.binance.com/api/v3"
+    CRYPTOCOMPARE_URL = "https://min-api.cryptocompare.com/data/v2"
     
     def __init__(self, symbols: List[str], timeframes: List[str]):
         self.symbols = symbols
         self.timeframes = timeframes
         self.session = None
+        self.working_source = None
         
     async def _get_session(self):
         if self.session is None:
-            self.session = aiohttp.ClientSession()
+            timeout = aiohttp.ClientTimeout(total=30)
+            self.session = aiohttp.ClientSession(timeout=timeout)
         return self.session
     
+    async def _try_fetch(self, url: str, params: Dict, source_name: str) -> Optional[Any]:
+        try:
+            session = await self._get_session()
+            async with session.get(url, params=params) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                elif resp.status == 429:
+                    print(f"[{source_name}] Rate limited (429)")
+                elif resp.status == 403:
+                    print(f"[{source_name}] Forbidden (403) - possibly blocked")
+                elif resp.status == 451:
+                    print(f"[{source_name}] Geoblocked (451)")
+                else:
+                    print(f"[{source_name}] HTTP {resp.status}")
+        except aiohttp.ClientConnectorError as e:
+            print(f"[{source_name}] Connection failed: {e}")
+        except asyncio.TimeoutError:
+            print(f"[{source_name}] Timeout")
+        except Exception as e:
+            print(f"[{source_name}] Error: {e}")
+        return None
+    
     async def fetch_klines(self, symbol: str, timeframe: str, limit: int = 1000, 
-                          start_time: Optional[int] = None) -> List[Dict]:
-        session = await self._get_session()
-        params = {
+                          start_time: Optional[int] = None, 
+                          end_time: Optional[int] = None) -> List[Dict]:
+        if self.working_source == "CryptoCompare":
+            cc_data = await self._fetch_cryptocompare(symbol, timeframe, limit, end_time)
+            if cc_data:
+                return cc_data
+            self.working_source = None
+        
+        params: Dict[str, Any] = {
             "symbol": symbol,
             "interval": timeframe,
             "limit": limit
         }
         if start_time:
             params["startTime"] = start_time
-            
-        async with session.get(f"{self.BASE_URL}/klines", params=params) as resp:
-            if resp.status == 200:
-                data = await resp.json()
+        if end_time:
+            params["endTime"] = end_time
+        
+        sources = [
+            (f"{self.BINANCE_VISION_URL}/klines", params, "Binance Vision"),
+            (f"{self.BINANCE_API_URL}/klines", params, "Binance API"),
+        ]
+        
+        if self.working_source and self.working_source != "CryptoCompare":
+            sources = [s for s in sources if s[2] == self.working_source] + \
+                      [s for s in sources if s[2] != self.working_source]
+        
+        for url, p, source_name in sources:
+            data = await self._try_fetch(url, p, source_name)
+            if data:
+                self.working_source = source_name
+                print(f"[{source_name}] Successfully fetched {len(data)} candles")
                 return [self._parse_kline(k, symbol, timeframe) for k in data]
+        
+        cc_data = await self._fetch_cryptocompare(symbol, timeframe, limit, end_time)
+        if cc_data:
+            self.working_source = "CryptoCompare"
+            return cc_data
+        
+        return []
+    
+    async def _fetch_cryptocompare(self, symbol: str, timeframe: str, limit: int, 
+                                    end_time: Optional[int] = None) -> List[Dict]:
+        if end_time:
             return []
+        
+        fsym = symbol.replace("USDT", "")
+        tsym = "USDT"
+        
+        tf_map = {"1m": "minute", "5m": "minute", "15m": "minute", "1h": "hour", "4h": "hour", "1d": "day"}
+        endpoint = tf_map.get(timeframe, "minute")
+        
+        aggregate = 1
+        if timeframe == "5m":
+            aggregate = 5
+        elif timeframe == "15m":
+            aggregate = 15
+        elif timeframe == "4h":
+            aggregate = 4
+        
+        url = f"{self.CRYPTOCOMPARE_URL}/histo{endpoint}"
+        params: Dict[str, Any] = {
+            "fsym": fsym, 
+            "tsym": tsym, 
+            "limit": 2000,
+            "aggregate": aggregate
+        }
+        
+        data = await self._try_fetch(url, params, "CryptoCompare")
+        if data and "Data" in data and "Data" in data["Data"]:
+            candles = []
+            for c in data["Data"]["Data"]:
+                if c.get("close", 0) == 0 and c.get("open", 0) == 0:
+                    continue
+                ts_ms = c["time"] * 1000
+                candles.append({
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "timestamp": ts_ms,
+                    "open": float(c["open"]),
+                    "high": float(c["high"]),
+                    "low": float(c["low"]),
+                    "close": float(c["close"]),
+                    "volume": float(c.get("volumefrom", 0)),
+                    "close_time": ts_ms,
+                    "quote_volume": float(c.get("volumeto", 0)),
+                    "trades": 0,
+                    "taker_buy_base": 0,
+                    "taker_buy_quote": 0
+                })
+            candles.sort(key=lambda x: x["timestamp"])
+            if candles:
+                print(f"[CryptoCompare] Fetched {len(candles)} most recent candles (max 2000, no pagination)")
+            return candles
+        return []
     
     def _parse_kline(self, kline: List, symbol: str, timeframe: str) -> Dict:
         return {
@@ -68,33 +174,56 @@ class BinanceDataFetcher:
             all_data[symbol] = {}
             for timeframe in self.timeframes:
                 candles = []
-                end_time = None
+                oldest_ts = None
                 
                 while len(candles) < lookback_candles:
                     batch = await self.fetch_klines(
                         symbol, timeframe, limit=1000,
-                        start_time=end_time
+                        end_time=oldest_ts
                     )
                     if not batch:
+                        if self.working_source == "CryptoCompare":
+                            print(f"[CryptoCompare] Limited to {len(candles)} candles (no pagination)")
                         break
-                    candles.extend(batch)
-                    end_time = batch[-1]["timestamp"] + 1
-                    await asyncio.sleep(0.1)
                     
-                df = pd.DataFrame(candles[:lookback_candles])
-                df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
-                df.set_index("datetime", inplace=True)
-                all_data[symbol][timeframe] = df
+                    batch.sort(key=lambda x: x["timestamp"])
+                    
+                    if oldest_ts is None:
+                        candles = batch + candles
+                    else:
+                        new_candles = [c for c in batch if c["timestamp"] < oldest_ts]
+                        if not new_candles:
+                            break
+                        candles = new_candles + candles
+                    
+                    oldest_ts = candles[0]["timestamp"] - 1
+                    await asyncio.sleep(0.1)
+                
+                candles.sort(key=lambda x: x["timestamp"])
+                candles = candles[-lookback_candles:] if len(candles) > lookback_candles else candles
+                    
+                if candles:
+                    df = pd.DataFrame(candles)
+                    df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+                    df.set_index("datetime", inplace=True)
+                    all_data[symbol][timeframe] = df
+                    print(f"Fetched {len(candles)} total candles for {symbol} {timeframe}")
+                else:
+                    all_data[symbol][timeframe] = pd.DataFrame()
                 
         return all_data
     
     async def fetch_order_book(self, symbol: str, limit: int = 100) -> Dict:
-        session = await self._get_session()
         params = {"symbol": symbol, "limit": limit}
         
-        async with session.get(f"{self.BASE_URL}/depth", params=params) as resp:
-            if resp.status == 200:
-                data = await resp.json()
+        sources = [
+            (f"{self.BINANCE_VISION_URL}/depth", "Binance Vision"),
+            (f"{self.BINANCE_API_URL}/depth", "Binance API"),
+        ]
+        
+        for url, source_name in sources:
+            data = await self._try_fetch(url, params, source_name)
+            if data and "bids" in data and "asks" in data:
                 bids = np.array([[float(p), float(q)] for p, q in data["bids"]])
                 asks = np.array([[float(p), float(q)] for p, q in data["asks"]])
                 
