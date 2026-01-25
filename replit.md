@@ -19,6 +19,8 @@ Key capabilities include:
 - **Continuous Learning Loop**: The system continuously refreshes data and trains models to adapt to market changes.
 - **Advanced Exit Logic**: Implements dynamic take-profit targets, MFE tracking, and failure stop detection for optimized trade exits.
 - **Persistence System**: All learning states, including pattern clusters and social media stats, are persisted in a database to survive restarts.
+- **Multi-Asset Data Management**: GUI-based download/clear for 1-15 years of historical data (BTC, ETH, SOL, BNB). Auto-detects stored data, all 3 learning systems share the same dataset.
+- **Unified Learning Controller**: Synchronizes Strategy Learner, Pattern Memory, and GPU Trainer to process the same historical data range.
 
 ## User Preferences
 

@@ -297,6 +297,144 @@ export async function registerRoutes(
     }
   });
 
+  // Multi-asset data management routes
+  app.get("/api/data/summary", async (req, res) => {
+    try {
+      const { getMultiAssetDataSummary } = await import("./historical-data");
+      const summary = await getMultiAssetDataSummary();
+      res.json(summary);
+    } catch (error) {
+      console.error("Error getting data summary:", error);
+      res.status(500).json({ error: "Failed to get data summary" });
+    }
+  });
+
+  app.get("/api/data/download/status", async (req, res) => {
+    try {
+      const { getBulkDownloadStatus } = await import("./historical-data");
+      const status = getBulkDownloadStatus();
+      res.json(status);
+    } catch (error) {
+      console.error("Error getting download status:", error);
+      res.status(500).json({ error: "Failed to get download status" });
+    }
+  });
+
+  app.post("/api/data/download", async (req, res) => {
+    try {
+      const { years = 1, assets } = req.body;
+      
+      if (years < 1 || years > 15) {
+        return res.status(400).json({ error: "Years must be between 1 and 15" });
+      }
+      
+      const { downloadMultiAssetData, getSupportedAssets } = await import("./historical-data");
+      const supportedAssets = getSupportedAssets();
+      const assetsToDownload = assets || supportedAssets;
+      
+      // Start download in background
+      res.json({ 
+        message: `Started downloading ${years} years of data for ${assetsToDownload.length} assets`,
+        assets: assetsToDownload,
+        estimatedCandles: Math.floor(years * 365 * 24 * 4) * assetsToDownload.length,
+      });
+      
+      // Run download async, reload data when complete
+      downloadMultiAssetData(years, assetsToDownload).then(async (result) => {
+        console.log("[Data Download] Complete:", result);
+        // Reload historical candles into memory
+        await storage.reloadHistoricalCandles();
+        console.log("[Data Download] Reloaded candles into memory, all learning systems now use new data");
+      }).catch(err => {
+        console.error("[Data Download] Error:", err);
+      });
+      
+    } catch (error) {
+      console.error("Error starting download:", error);
+      res.status(500).json({ error: "Failed to start download" });
+    }
+  });
+
+  app.post("/api/data/clear", async (req, res) => {
+    try {
+      const { clearAllAssetData } = await import("./historical-data");
+      const result = await clearAllAssetData();
+      
+      // Reset all learning systems
+      resetUnifiedLearning();
+      await storage.resetLearningState();
+      await strategyLearner.reset();
+      
+      // Reload in-memory candles (will be empty after clear)
+      await storage.reloadHistoricalCandles();
+      
+      res.json({ 
+        success: result.success,
+        candlesDeleted: result.candlesDeleted,
+        message: `Cleared ${result.candlesDeleted} candles and reset all learning systems`
+      });
+    } catch (error) {
+      console.error("Error clearing data:", error);
+      res.status(500).json({ error: "Failed to clear data" });
+    }
+  });
+
+  app.get("/api/data/assets", async (req, res) => {
+    try {
+      const { getSupportedAssets } = await import("./historical-data");
+      res.json({ assets: getSupportedAssets() });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to get supported assets" });
+    }
+  });
+
+  // GPU data export - returns all stored candles for training
+  app.get("/api/data/export/:symbol", async (req, res) => {
+    try {
+      const { symbol } = req.params;
+      const { loadAssetCandlesFromDb } = await import("./historical-data");
+      const candles = await loadAssetCandlesFromDb(symbol.toUpperCase());
+      
+      res.json({
+        symbol: symbol.toUpperCase(),
+        candles,
+        count: candles.length,
+        source: "database",
+      });
+    } catch (error) {
+      console.error("Error exporting data:", error);
+      res.status(500).json({ error: "Failed to export data" });
+    }
+  });
+
+  // Export all assets at once for GPU trainer
+  app.get("/api/data/export-all", async (req, res) => {
+    try {
+      const { loadAssetCandlesFromDb, getSupportedAssets, getMultiAssetDataSummary } = await import("./historical-data");
+      const assets = getSupportedAssets();
+      const summary = await getMultiAssetDataSummary();
+      
+      const exportData: Record<string, any> = {};
+      for (const symbol of assets) {
+        const candles = await loadAssetCandlesFromDb(symbol);
+        exportData[symbol] = {
+          candles,
+          count: candles.length,
+        };
+      }
+      
+      res.json({
+        assets: exportData,
+        summary,
+        source: "database",
+        exportedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error("Error exporting all data:", error);
+      res.status(500).json({ error: "Failed to export all data" });
+    }
+  });
+
   app.get("/api/gpu/status", async (req, res) => {
     try {
       const metrics = await gpuBridge.getGPUMetrics();

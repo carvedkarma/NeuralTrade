@@ -46,6 +46,7 @@ import {
   AuditLogPanel
 } from "@/components/paper-trading-card";
 import { StrategyLearnerTab } from "@/components/strategy-learner-card";
+import { DataManagementCard } from "@/components/data-management-card";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -428,6 +429,9 @@ export default function Dashboard() {
 
           <TabsContent value="learning" className="mt-0">
             <div className="space-y-4">
+              {/* Data Management - Download/Clear historical data for all assets */}
+              <DataManagementCard />
+              
               <LearningOverviewCard learningStats={data.learningStats} />
               
               {/* Unified Learning Progress - All 3 systems synchronized */}

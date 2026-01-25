@@ -841,3 +841,300 @@ export async function checkIncompleteBackfillJobs(): Promise<{
   
   return { hasIncomplete: false };
 }
+
+// Multi-asset data management
+const SUPPORTED_ASSETS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"];
+
+export interface AssetDataSummary {
+  symbol: string;
+  totalCandles: number;
+  startTs: number | null;
+  endTs: number | null;
+  daysOfData: number;
+  yearsOfData: number;
+  startDate: string | null;
+  endDate: string | null;
+}
+
+export interface MultiAssetDataSummary {
+  assets: AssetDataSummary[];
+  totalCandles: number;
+  alignedTimeRange: {
+    startTs: number | null;
+    endTs: number | null;
+    startDate: string | null;
+    endDate: string | null;
+  };
+  allAssetsAvailable: boolean;
+}
+
+export async function getMultiAssetDataSummary(): Promise<MultiAssetDataSummary> {
+  const assetSummaries: AssetDataSummary[] = [];
+  
+  for (const symbol of SUPPORTED_ASSETS) {
+    const candleCount = await db.select({ count: sql<number>`count(*)` })
+      .from(candles)
+      .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, "15m")));
+    
+    const totalCandles = Number(candleCount[0]?.count ?? 0);
+    
+    if (totalCandles === 0) {
+      assetSummaries.push({
+        symbol,
+        totalCandles: 0,
+        startTs: null,
+        endTs: null,
+        daysOfData: 0,
+        yearsOfData: 0,
+        startDate: null,
+        endDate: null,
+      });
+      continue;
+    }
+    
+    const oldest = await db.select({ ts: candles.timestamp })
+      .from(candles)
+      .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, "15m")))
+      .orderBy(asc(candles.timestamp))
+      .limit(1);
+    
+    const newest = await db.select({ ts: candles.timestamp })
+      .from(candles)
+      .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, "15m")))
+      .orderBy(desc(candles.timestamp))
+      .limit(1);
+    
+    const startTs = oldest[0]?.ts ?? null;
+    const endTs = newest[0]?.ts ?? null;
+    const daysOfData = startTs && endTs ? Math.round((endTs - startTs) / (24 * 60 * 60 * 1000)) : 0;
+    const yearsOfData = Math.round(daysOfData / 365 * 10) / 10;
+    
+    assetSummaries.push({
+      symbol,
+      totalCandles,
+      startTs,
+      endTs,
+      daysOfData,
+      yearsOfData,
+      startDate: startTs ? new Date(startTs).toISOString().split("T")[0] : null,
+      endDate: endTs ? new Date(endTs).toISOString().split("T")[0] : null,
+    });
+  }
+  
+  const assetsWithData = assetSummaries.filter(a => a.totalCandles > 0);
+  const allAssetsAvailable = assetsWithData.length === SUPPORTED_ASSETS.length;
+  
+  let alignedStart: number | null = null;
+  let alignedEnd: number | null = null;
+  
+  if (assetsWithData.length > 0) {
+    alignedStart = Math.max(...assetsWithData.map(a => a.startTs!));
+    alignedEnd = Math.min(...assetsWithData.map(a => a.endTs!));
+  }
+  
+  return {
+    assets: assetSummaries,
+    totalCandles: assetSummaries.reduce((sum, a) => sum + a.totalCandles, 0),
+    alignedTimeRange: {
+      startTs: alignedStart,
+      endTs: alignedEnd,
+      startDate: alignedStart ? new Date(alignedStart).toISOString().split("T")[0] : null,
+      endDate: alignedEnd ? new Date(alignedEnd).toISOString().split("T")[0] : null,
+    },
+    allAssetsAvailable,
+  };
+}
+
+export interface BulkDownloadProgress {
+  symbol: string;
+  status: "pending" | "downloading" | "complete" | "error";
+  progress: number;
+  candlesFetched: number;
+  totalExpected: number;
+  error?: string;
+}
+
+export interface BulkDownloadResult {
+  success: boolean;
+  assetsDownloaded: string[];
+  totalCandlesFetched: number;
+  errors: { symbol: string; error: string }[];
+}
+
+let bulkDownloadInProgress = false;
+let bulkDownloadProgress: Map<string, BulkDownloadProgress> = new Map();
+
+export function getBulkDownloadStatus(): { inProgress: boolean; progress: BulkDownloadProgress[] } {
+  return {
+    inProgress: bulkDownloadInProgress,
+    progress: Array.from(bulkDownloadProgress.values()),
+  };
+}
+
+export async function downloadMultiAssetData(
+  years: number,
+  assets: string[] = SUPPORTED_ASSETS,
+  onProgress?: (symbol: string, progress: number, candlesFetched: number) => void
+): Promise<BulkDownloadResult> {
+  if (bulkDownloadInProgress) {
+    throw new Error("Bulk download already in progress");
+  }
+  
+  bulkDownloadInProgress = true;
+  bulkDownloadProgress.clear();
+  
+  const daysToFetch = years * 365;
+  const candlesExpected = Math.floor(daysToFetch * 24 * 4); // 15-min candles
+  const now = Date.now();
+  const startTime = now - (daysToFetch * 24 * 60 * 60 * 1000);
+  
+  const results: BulkDownloadResult = {
+    success: true,
+    assetsDownloaded: [],
+    totalCandlesFetched: 0,
+    errors: [],
+  };
+  
+  for (const symbol of assets) {
+    bulkDownloadProgress.set(symbol, {
+      symbol,
+      status: "pending",
+      progress: 0,
+      candlesFetched: 0,
+      totalExpected: candlesExpected,
+    });
+  }
+  
+  try {
+    for (const symbol of assets) {
+      bulkDownloadProgress.set(symbol, {
+        symbol,
+        status: "downloading",
+        progress: 0,
+        candlesFetched: 0,
+        totalExpected: candlesExpected,
+      });
+      
+      console.log(`[Bulk Download] Starting ${symbol}: fetching ${years} years (${candlesExpected} candles)`);
+      
+      try {
+        let cursor = startTime;
+        let totalFetched = 0;
+        
+        while (cursor < now) {
+          const batchEnd = Math.min(cursor + (CANDLES_PER_REQUEST * MS_PER_15M), now);
+          
+          const klines = await fetchKlinesBatch(symbol, "15m", cursor, batchEnd);
+          
+          if (klines.length > 0) {
+            const candleInserts = klines.map(k => ({
+              symbol,
+              timestamp: k.openTime,
+              timeframe: "15m" as const,
+              open: parseFloat(k.open),
+              high: parseFloat(k.high),
+              low: parseFloat(k.low),
+              close: parseFloat(k.close),
+              volume: parseFloat(k.volume),
+            }));
+            
+            for (const candle of candleInserts) {
+              await db.insert(candles)
+                .values(candle)
+                .onConflictDoNothing();
+            }
+            
+            totalFetched += klines.length;
+            cursor = klines[klines.length - 1].openTime + MS_PER_15M;
+          } else {
+            cursor = batchEnd + MS_PER_15M;
+          }
+          
+          const progress = Math.min(((cursor - startTime) / (now - startTime)) * 100, 100);
+          bulkDownloadProgress.set(symbol, {
+            symbol,
+            status: "downloading",
+            progress,
+            candlesFetched: totalFetched,
+            totalExpected: candlesExpected,
+          });
+          
+          if (onProgress) {
+            onProgress(symbol, progress, totalFetched);
+          }
+          
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        
+        bulkDownloadProgress.set(symbol, {
+          symbol,
+          status: "complete",
+          progress: 100,
+          candlesFetched: totalFetched,
+          totalExpected: candlesExpected,
+        });
+        
+        results.assetsDownloaded.push(symbol);
+        results.totalCandlesFetched += totalFetched;
+        
+        console.log(`[Bulk Download] Completed ${symbol}: ${totalFetched} candles`);
+        
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        bulkDownloadProgress.set(symbol, {
+          symbol,
+          status: "error",
+          progress: 0,
+          candlesFetched: 0,
+          totalExpected: candlesExpected,
+          error: errorMsg,
+        });
+        results.errors.push({ symbol, error: errorMsg });
+        results.success = false;
+        console.error(`[Bulk Download] Error fetching ${symbol}:`, errorMsg);
+      }
+    }
+  } finally {
+    bulkDownloadInProgress = false;
+  }
+  
+  return results;
+}
+
+export async function clearAllAssetData(): Promise<{ success: boolean; candlesDeleted: number }> {
+  try {
+    const countResult = await db.select({ count: sql<number>`count(*)` }).from(candles);
+    const totalCandles = Number(countResult[0]?.count ?? 0);
+    
+    await db.delete(candles);
+    await db.delete(learningState);
+    await db.delete(backfillJobs);
+    
+    console.log(`[Data Clear] Deleted ${totalCandles} candles and reset learning state`);
+    
+    return { success: true, candlesDeleted: totalCandles };
+  } catch (error) {
+    console.error("[Data Clear] Error:", error);
+    return { success: false, candlesDeleted: 0 };
+  }
+}
+
+export async function loadAssetCandlesFromDb(symbol: string, timeframe: string = "15m"): Promise<any[]> {
+  const result = await db.select()
+    .from(candles)
+    .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, timeframe)))
+    .orderBy(asc(candles.timestamp));
+  
+  return result.map(c => ({
+    timestamp: c.timestamp,
+    open: c.open,
+    high: c.high,
+    low: c.low,
+    close: c.close,
+    volume: c.volume,
+  }));
+}
+
+export function getSupportedAssets(): string[] {
+  return SUPPORTED_ASSETS;
+}
