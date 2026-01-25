@@ -3,6 +3,7 @@ import * as storage from "./storage";
 import type { PaperPosition } from "@shared/schema";
 import type { Candle } from "@shared/schema";
 import type { ShotPlan } from "../signal-engine";
+import { getRegimeRiskParams, type MarketRegime } from "../feature-engine";
 
 export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK";
 
@@ -78,13 +79,11 @@ function calculateStopDistance(
   // ATR as percentage of price
   const atrPct = (atr / entryPrice) * 100;
   
-  // Select ATR multiplier based on regime
-  let atrMultiplier = config.atrStopMultiplier;
-  if (regime === "trend_up" || regime === "trend_down") {
-    atrMultiplier = config.trendStopMultiplier;  // 0.9x for trend trades
-  } else if (regime === "chop") {
-    atrMultiplier = config.chopStopMultiplier;   // 0.7x for mean reversion
-  }
+  // Use shared regime risk params for consistency across system
+  const regimeParams = getRegimeRiskParams((regime as MarketRegime) || "chop");
+  
+  // Apply regime-specific stop multiplier
+  const atrMultiplier = regimeParams.stopMultiplier;
   
   const atrStop = atr * atrMultiplier;
   const minStopAbs = entryPrice * (config.minStopDistancePct / 100);
@@ -99,7 +98,7 @@ function calculateStopDistance(
   return { stopLoss, stopDistance, atrPct };
 }
 
-// Calculate regime-based take profit targets
+// Calculate regime-based take profit targets using shared params
 function calculateTakeProfits(
   entryPrice: number,
   atr: number,
@@ -108,22 +107,40 @@ function calculateTakeProfits(
   regime?: string,
   hasExpansion?: boolean
 ): { tp1: number; tp2: number | null } {
-  let tp1Mult: number;
-  let tp2Mult: number | null;
+  // Use shared regime risk params for consistency
+  const regimeParams = getRegimeRiskParams((regime as MarketRegime) || "chop");
+  const rrRatio = regimeParams.rrRatio;
+  const stopMult = regimeParams.stopMultiplier;
   
   const isTrend = regime === "trend_up" || regime === "trend_down";
   
+  // Calculate TP based on regime R:R ratio and stop distance
+  let tp1Mult: number;
+  let tp2Mult: number | null;
+  
   if (isTrend && hasExpansion) {
-    // Trend + expansion: let winners run (RR=1.22, 2.22)
-    tp1Mult = config.trendExpansionTp1;    // 1.1x ATR
-    tp2Mult = config.trendExpansionTp2;    // 2.0x ATR
+    // Trend + expansion: use full R:R for TP1, 2x for TP2
+    tp1Mult = stopMult * rrRatio;        // 1.0 * 2.0 = 2.0x ATR
+    tp2Mult = stopMult * rrRatio * 1.5;  // Extended target
   } else if (isTrend) {
-    // Trend without expansion: conservative (RR=1.11)
-    tp1Mult = config.trendNoExpansionTp1;  // 1.0x ATR
+    // Trend without expansion: conservative R:R
+    tp1Mult = stopMult * rrRatio * 0.8;  // Slightly reduced
+    tp2Mult = null;
+  } else if (regime === "shock") {
+    // Shock: quick exits at reduced R:R
+    tp1Mult = stopMult * rrRatio;        // 0.7 * 1.2 = 0.84x ATR
+    tp2Mult = null;
+  } else if (regime === "quiet") {
+    // Quiet: await breakout with wide target
+    tp1Mult = stopMult * rrRatio;        // 0.8 * 2.0 = 1.6x ATR
+    tp2Mult = stopMult * rrRatio * 1.5;  // Extended for breakout
+  } else if (regime === "ranging") {
+    // Ranging: mean reversion targets
+    tp1Mult = stopMult * rrRatio;        // 0.75 * 1.5 = 1.125x ATR
     tp2Mult = null;
   } else {
-    // Chop/mean-reversion: quick exits (RR=1.14)
-    tp1Mult = config.chopTp1;              // 0.8x ATR
+    // Chop/default: conservative quick exits
+    tp1Mult = stopMult * rrRatio;        // 0.6 * 1.3 = 0.78x ATR
     tp2Mult = null;
   }
   
@@ -391,12 +408,31 @@ function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConf
     };
   }
   
-  // AGGRESSIVE MODE: Allow trades even with negative edge (removed edge check)
-  // The system will learn from outcomes to improve future signals
+  // SELECTIVE MODE: Require positive edge for trades
+  const edge = shotPlan.edge ?? 0;
+  if (edge <= 0) {
+    return { 
+      allowed: false, 
+      reason: `Negative or zero edge: ${(edge * 100).toFixed(3)}%. No trade without positive expected value.` 
+    };
+  }
   
-  // AGGRESSIVE MODE: Allow chop regime trades for mean-reversion opportunities
-  // Previously: if (shotPlan.regime === "chop") { return blocked; }
-  // Now allowing chop trades with tighter stops
+  // SELECTIVE MODE: Block low-probability regime trades
+  const blockedRegimes = ["chop"];  // Only block pure chop - allow quiet/ranging/shock with caution
+  if (blockedRegimes.includes(shotPlan.regime)) {
+    return { 
+      allowed: false, 
+      reason: `${shotPlan.regime} regime detected - no directional edge. HOLD until trend emerges.` 
+    };
+  }
+  
+  // SELECTIVE MODE: Require extra confidence for volatile regimes
+  if (shotPlan.regime === "shock" && shotPlan.confidence < 0.75) {
+    return {
+      allowed: false,
+      reason: `Shock regime requires 75%+ confidence (got ${(shotPlan.confidence * 100).toFixed(0)}%)`
+    };
+  }
   
   const isTrendTrade = shotPlan.regime === "trend_up" || shotPlan.regime === "trend_down";
   if (isTrendTrade && shotPlan.expansionGate && !shotPlan.expansionGate.confirmed) {
@@ -410,32 +446,52 @@ function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConf
     return { allowed: false, reason: "Missing trade levels (entry/stop/TP)" };
   }
   
-  // AGGRESSIVE MODE: Ignore veto reasons - let the system trade based on signal
-  // Previously: if (shotPlan.vetoReasons && shotPlan.vetoReasons.length > 0) { return blocked; }
+  // SELECTIVE MODE: Block trades with veto reasons - these are serious warnings
+  if (shotPlan.vetoReasons && shotPlan.vetoReasons.length > 0) {
+    return { 
+      allowed: false, 
+      reason: `Veto reasons present: ${shotPlan.vetoReasons.slice(0, 2).join('; ')}` 
+    };
+  }
   
-  // AGGRESSIVE MODE: No minimum reasons required
-  // Previously: if (!shotPlan.reasons || shotPlan.reasons.length < 1) { return blocked; }
+  // SELECTIVE MODE: Require at least 2 supporting reasons for a trade
+  if (!shotPlan.reasons || shotPlan.reasons.length < 2) {
+    return { 
+      allowed: false, 
+      reason: `Insufficient confluence: ${shotPlan.reasons?.length ?? 0}/2 minimum reasons required` 
+    };
+  }
   
-  // AGGRESSIVE MODE: Relaxed combined intelligence checks
+  // SELECTIVE MODE: Full combined intelligence checks
   if (shotPlan.combinedIntelligence) {
     const ci = shotPlan.combinedIntelligence;
     
-    // Only block if ML system explicitly says HOLD with very high confidence
-    if (ci.finalSignal === "HOLD" && ci.finalConfidence > 0.8) {
+    // Block if ML system says HOLD
+    if (ci.finalSignal === "HOLD") {
       return { 
         allowed: false, 
-        reason: `Combined Intelligence: High-confidence HOLD (${(ci.finalConfidence * 100).toFixed(0)}%)` 
+        reason: `Combined Intelligence: HOLD signal (${(ci.finalConfidence * 100).toFixed(0)}% confidence)` 
       };
     }
     
-    // AGGRESSIVE MODE: Allow negative EV trades - system learns from outcomes
-    // Previously: if (ci.strategyEV <= 0) { return blocked; }
+    // SELECTIVE MODE: Block negative EV trades
+    if (ci.strategyEV <= 0) {
+      return { 
+        allowed: false, 
+        reason: `Negative strategy EV: ${(ci.strategyEV * 100).toFixed(2)}%. No trade without positive expectancy.` 
+      };
+    }
     
-    // AGGRESSIVE MODE: Trade even if systems disagree
-    // Previously: if (!ci.systemsAgree && ci.patternWinRate < 0.5) { return blocked; }
+    // SELECTIVE MODE: Require system agreement OR high pattern win rate
+    if (!ci.systemsAgree && ci.patternWinRate < 0.5) {
+      return { 
+        allowed: false, 
+        reason: `Systems disagree and pattern win rate ${(ci.patternWinRate * 100).toFixed(0)}% < 50%. HOLD.` 
+      };
+    }
   }
   
-  return { allowed: true, reason: "AGGRESSIVE MODE: Trade allowed based on signal direction" };
+  return { allowed: true, reason: "SELECTIVE MODE: All quality gates passed" };
 }
 
 async function checkExposureLimits(

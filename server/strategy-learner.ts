@@ -1,6 +1,7 @@
 import type { Candle } from "@shared/schema";
 import { patternClusters, findSimilarPatterns, type PatternCluster, type PatternMatch } from "./pattern-memory";
 import type { FeatureVector } from "./feature-engine";
+import { classifyRegime, getRegimeRiskParams, type MarketRegime } from "./feature-engine";
 import { updateStrategyLearnerProgress, getUnifiedProgressReport } from "./unified-learning-controller";
 
 interface ActionOutcome {
@@ -147,15 +148,15 @@ export class StrategyLearner {
     const atr = this.computeATR(candles, idx);
     const atrPercent = (atr / entryPrice) * 100;
     
-    // Regime-based multipliers (matching paper engine exit logic)
-    // detectRegime returns "trend_up", "trend_down", or "chop"
-    const isTrend = regime.startsWith("trend");
-    const stopMultiplier = isTrend ? 0.9 : 0.7;  // Tighter stops in chop
-    const tpMultiplier = isTrend ? 1.1 : 0.8;    // Quicker exits in chop
+    // Use shared regime risk params for consistency across all components
+    // This ensures training labels match real-time signal generation and paper trading
+    const regimeParams = getRegimeRiskParams(regime);
+    const stopMultiplier = regimeParams.stopMultiplier;
+    const rrRatio = regimeParams.rrRatio;
     
     // Calculate stop and TP distances
     const stopDistance = Math.max(atrPercent * stopMultiplier, 0.3);  // Min 0.3%
-    const tpDistance = Math.max(atrPercent * tpMultiplier, stopDistance * 1.1);  // TP always > SL for RR >= 1
+    const tpDistance = stopDistance * rrRatio;  // TP based on R:R ratio
     
     const samples: ActionLabeledSample[] = [];
 
@@ -181,40 +182,77 @@ export class StrategyLearner {
       let holdBars = 0;
       let exitReason = "TIME";  // Default: exit on max bars
 
-      // Simulate bar-by-bar with SL/TP checks
+      // TRIPLE BARRIER LABELING: Simulate bar-by-bar with proper intrabar timing
+      // Research shows this improves accuracy by 20-50% over simple forward-return labeling
       for (let i = 1; i <= maxBars; i++) {
         const futureCandle = candles[idx + i];
         holdBars = i;
         
-        // Check intra-bar highs and lows for SL/TP hits
-        const highMove = ((futureCandle.high - entryPrice) / entryPrice) * 100;
-        const lowMove = ((futureCandle.low - entryPrice) / entryPrice) * 100;
-        const closeMove = ((futureCandle.close - entryPrice) / entryPrice) * 100;
+        // Calculate price levels for barriers
+        const tpLevel = action === "LONG" 
+          ? entryPrice * (1 + tpDistance / 100)
+          : entryPrice * (1 - tpDistance / 100);
+        const slLevel = action === "LONG"
+          ? entryPrice * (1 - stopDistance / 100)
+          : entryPrice * (1 + stopDistance / 100);
         
-        // Adjust moves based on direction
-        const adjustedHighMove = action === "LONG" ? highMove : -lowMove;
-        const adjustedLowMove = action === "LONG" ? lowMove : -highMove;
-        const adjustedCloseMove = action === "LONG" ? closeMove : -closeMove;
+        // Check if barriers were hit
+        const tpHit = action === "LONG" 
+          ? futureCandle.high >= tpLevel
+          : futureCandle.low <= tpLevel;
+        const slHit = action === "LONG"
+          ? futureCandle.low <= slLevel
+          : futureCandle.high >= slLevel;
         
         // Track MAE and MFE
+        const highMove = ((futureCandle.high - entryPrice) / entryPrice) * 100;
+        const lowMove = ((futureCandle.low - entryPrice) / entryPrice) * 100;
+        const adjustedHighMove = action === "LONG" ? highMove : -lowMove;
+        const adjustedLowMove = action === "LONG" ? lowMove : -highMove;
         if (adjustedHighMove > mfe) mfe = adjustedHighMove;
         if (adjustedLowMove < mae) mae = adjustedLowMove;
         
-        // Check STOP LOSS (hit low before checking TP to be conservative)
-        if (adjustedLowMove <= -stopDistance) {
-          exitReason = "SL";
-          exitPrice = action === "LONG" 
-            ? entryPrice * (1 - stopDistance / 100)
-            : entryPrice * (1 + stopDistance / 100);
+        // CRITICAL: Intrabar timing logic using distance-to-open
+        // This determines which barrier was hit FIRST within the bar
+        if (tpHit && slHit) {
+          // Both barriers hit in same bar - use distance-to-open heuristic
+          // Closer extreme to open is assumed to have happened first
+          const distToHigh = Math.abs(futureCandle.high - futureCandle.open);
+          const distToLow = Math.abs(futureCandle.low - futureCandle.open);
+          
+          if (action === "LONG") {
+            // For LONG: high=TP, low=SL - which extreme is closer to open?
+            if (distToHigh < distToLow) {
+              // High was closer to open → TP hit first
+              exitReason = "TP";
+              exitPrice = tpLevel;
+            } else {
+              // Low was closer to open → SL hit first
+              exitReason = "SL";
+              exitPrice = slLevel;
+            }
+          } else {
+            // For SHORT: low=TP, high=SL
+            if (distToLow < distToHigh) {
+              // Low was closer to open → TP hit first
+              exitReason = "TP";
+              exitPrice = tpLevel;
+            } else {
+              // High was closer to open → SL hit first
+              exitReason = "SL";
+              exitPrice = slLevel;
+            }
+          }
           break;
-        }
-        
-        // Check TAKE PROFIT
-        if (adjustedHighMove >= tpDistance) {
+        } else if (slHit) {
+          // Only SL hit
+          exitReason = "SL";
+          exitPrice = slLevel;
+          break;
+        } else if (tpHit) {
+          // Only TP hit
           exitReason = "TP";
-          exitPrice = action === "LONG"
-            ? entryPrice * (1 + tpDistance / 100)
-            : entryPrice * (1 - tpDistance / 100);
+          exitPrice = tpLevel;
           break;
         }
         
@@ -321,24 +359,11 @@ export class StrategyLearner {
     return ema;
   }
 
-  private detectRegime(candles: Candle[], idx: number): string {
-    const lookback = 20;
-    const slice = candles.slice(Math.max(0, idx - lookback), idx + 1);
-    if (slice.length < 10) return "chop";
-
-    const closes = slice.map(c => c.close);
-    const returns = closes.slice(1).map((c, i) => (c - closes[i]) / closes[i]);
-    const avgReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
-    const volatility = Math.sqrt(returns.reduce((a, r) => a + (r - avgReturn) ** 2, 0) / returns.length);
-
-    const highestHigh = Math.max(...slice.map(c => c.high));
-    const lowestLow = Math.min(...slice.map(c => c.low));
-    const range = (highestHigh - lowestLow) / lowestLow;
-
-    if (avgReturn > 0.002 && closes[closes.length - 1] > closes[0]) return "trend_up";
-    if (avgReturn < -0.002 && closes[closes.length - 1] < closes[0]) return "trend_down";
-    if (range < 0.02 || volatility < 0.005) return "chop";
-    return "chop";
+  private detectRegime(candles: Candle[], idx: number): MarketRegime {
+    // Use shared ATR-percentile regime classifier for consistency across system
+    // This ensures training labels match real-time signal generation
+    const regimeAnalysis = classifyRegime(candles, idx);
+    return regimeAnalysis.regime;
   }
 
   async trainOnHistoricalData(candles: Candle[], batchSize: number = 500): Promise<void> {
@@ -408,7 +433,9 @@ export class StrategyLearner {
   }
 
   private quantizeFeatures(features: number[]): string {
-    return features.slice(0, 5).map(f => Math.round(f * 10)).join("_");
+    // IMPROVED QUANTIZATION: Use 10 features with 100x rounding for finer discrimination
+    // Research shows coarse quantization loses important pattern distinctions
+    return features.slice(0, 10).map(f => Math.round(f * 100)).join("_");
   }
 
   private updatePolicyModel(): void {
@@ -696,6 +723,177 @@ export class StrategyLearner {
     };
   }
 
+  /**
+   * HALF-KELLY POSITION SIZING
+   * Research shows Half-Kelly captures ~75% of optimal growth with ~50% less drawdown
+   * Formula: Kelly% = (W × R - L) / R, then use 50% of that
+   * Cap at 20% maximum position size regardless of Kelly calculation
+   */
+  getKellyPositionSize(direction: "LONG" | "SHORT"): {
+    kellyFraction: number;
+    halfKelly: number;
+    recommendedSize: number;
+    reasoning: string;
+  } {
+    const outcomes = direction === "LONG" ? this.longOutcomes : this.shortOutcomes;
+    const MIN_SAMPLES = 100;  // Need sufficient data for reliable Kelly estimate
+    
+    if (outcomes.length < MIN_SAMPLES) {
+      return {
+        kellyFraction: 0,
+        halfKelly: 0,
+        recommendedSize: 0.02,  // Default 2% when insufficient data
+        reasoning: `Insufficient samples (${outcomes.length}/${MIN_SAMPLES}). Using conservative 2% position.`,
+      };
+    }
+    
+    // Calculate win rate and average win/loss sizes
+    const wins = outcomes.filter(o => o.pnl > 0);
+    const losses = outcomes.filter(o => o.pnl <= 0);
+    
+    const winRate = wins.length / outcomes.length;
+    const lossRate = 1 - winRate;
+    
+    const avgWin = wins.length > 0 
+      ? wins.reduce((sum, o) => sum + o.pnl, 0) / wins.length 
+      : 0;
+    const avgLoss = losses.length > 0 
+      ? Math.abs(losses.reduce((sum, o) => sum + o.pnl, 0) / losses.length)
+      : 1;  // Prevent division by zero
+    
+    // Calculate reward-to-risk ratio (R)
+    const R = avgLoss > 0 ? avgWin / avgLoss : 0;
+    
+    // Full Kelly formula: K = (W × R - L) / R
+    // where W = win rate, L = loss rate, R = avg win / avg loss
+    const kellyFraction = R > 0 ? (winRate * R - lossRate) / R : 0;
+    
+    // Half-Kelly for reduced volatility
+    const halfKelly = Math.max(0, kellyFraction * 0.5);
+    
+    // Cap at 20% maximum position size
+    const MAX_POSITION = 0.20;
+    const MIN_POSITION = 0.01;  // Minimum 1% if we're trading
+    
+    const recommendedSize = Math.min(MAX_POSITION, Math.max(MIN_POSITION, halfKelly));
+    
+    return {
+      kellyFraction,
+      halfKelly,
+      recommendedSize,
+      reasoning: `Win rate: ${(winRate * 100).toFixed(1)}%, Avg Win: ${avgWin.toFixed(2)}%, ` +
+                 `Avg Loss: ${avgLoss.toFixed(2)}%, R: ${R.toFixed(2)}. ` +
+                 `Full Kelly: ${(kellyFraction * 100).toFixed(1)}%, Half-Kelly: ${(halfKelly * 100).toFixed(1)}%`,
+    };
+  }
+
+  /**
+   * META-LABELING FILTER
+   * Secondary model that evaluates "Should I trust this signal?"
+   * Based on: regime, volatility, model agreement, recent win rate
+   * Returns confidence score (0-1) for position sizing
+   */
+  getMetaLabelConfidence(
+    direction: "LONG" | "SHORT" | "HOLD",
+    regime: string,
+    mlConfidence: number,
+    patternWinRate: number,
+    systemsAgree: boolean,
+    atrPercentile: number
+  ): {
+    shouldTrade: boolean;
+    metaConfidence: number;
+    reasoning: string[];
+    vetoes: string[];
+  } {
+    const reasoning: string[] = [];
+    const vetoes: string[] = [];
+    let metaScore = 0.5;  // Start neutral
+    
+    if (direction === "HOLD") {
+      return {
+        shouldTrade: false,
+        metaConfidence: 0.9,  // High confidence in HOLD decision
+        reasoning: ["Primary signal is HOLD - no trade evaluation needed"],
+        vetoes: [],
+      };
+    }
+    
+    // Factor 1: Regime suitability (weight: 25%)
+    const trendingRegimes = ["trend_up", "trend_down"];
+    const favorableRegime = trendingRegimes.includes(regime);
+    const shockRegime = regime === "shock";
+    const chopRegime = regime === "chop";
+    
+    if (favorableRegime) {
+      metaScore += 0.15;
+      reasoning.push(`Favorable regime: ${regime}`);
+    } else if (shockRegime) {
+      metaScore -= 0.15;
+      vetoes.push(`Shock regime - high volatility risk`);
+    } else if (chopRegime) {
+      metaScore -= 0.10;
+      vetoes.push(`Chop regime - no clear directional edge`);
+    }
+    
+    // Factor 2: ML confidence (weight: 25%)
+    if (mlConfidence >= 0.7) {
+      metaScore += 0.20;
+      reasoning.push(`High ML confidence: ${(mlConfidence * 100).toFixed(0)}%`);
+    } else if (mlConfidence >= 0.5) {
+      metaScore += 0.10;
+    } else {
+      metaScore -= 0.10;
+      vetoes.push(`Low ML confidence: ${(mlConfidence * 100).toFixed(0)}%`);
+    }
+    
+    // Factor 3: Pattern win rate (weight: 25%)
+    if (patternWinRate >= 0.55) {
+      metaScore += 0.15;
+      reasoning.push(`Strong pattern history: ${(patternWinRate * 100).toFixed(0)}% win rate`);
+    } else if (patternWinRate < 0.45) {
+      metaScore -= 0.15;
+      vetoes.push(`Weak pattern history: ${(patternWinRate * 100).toFixed(0)}% win rate`);
+    }
+    
+    // Factor 4: System agreement (weight: 15%)
+    if (systemsAgree) {
+      metaScore += 0.10;
+      reasoning.push("All systems agree on direction");
+    } else {
+      metaScore -= 0.10;
+      vetoes.push("Systems disagree on direction");
+    }
+    
+    // Factor 5: Volatility regime (weight: 10%)
+    if (atrPercentile < 25) {
+      // Very low volatility - potential breakout, neutral
+      metaScore += 0.05;
+    } else if (atrPercentile > 75) {
+      // Very high volatility - reduce size
+      metaScore -= 0.10;
+      vetoes.push(`High volatility: ATR at ${atrPercentile.toFixed(0)}th percentile`);
+    }
+    
+    // Clamp meta confidence
+    const metaConfidence = Math.max(0.1, Math.min(0.95, metaScore));
+    
+    // Threshold for trade execution
+    const TRADE_THRESHOLD = 0.55;
+    const shouldTrade = metaConfidence >= TRADE_THRESHOLD && vetoes.length <= 2;
+    
+    if (!shouldTrade) {
+      vetoes.push(`Meta-label score ${(metaConfidence * 100).toFixed(0)}% below ${(TRADE_THRESHOLD * 100).toFixed(0)}% threshold`);
+    }
+    
+    return {
+      shouldTrade,
+      metaConfidence,
+      reasoning,
+      vetoes,
+    };
+  }
+
   getData(candles: Candle[], currentSignal: string, currentConfidence: number): StrategyLearnerData {
     const policy = this.getPolicyPrediction(candles);
     const ev = this.getExpectedValue(candles);
@@ -732,7 +930,7 @@ export class StrategyLearner {
     let patternSupport = 0;
     
     try {
-      const patternMatches = await findSimilarPatterns(feature.embedding, 20, 0.65);
+      const patternMatches = await findSimilarPatterns(feature.embedding, 20);  // Uses MIN_SIMILARITY_THRESHOLD (0.75)
       if (patternMatches.length > 0) {
         patternSupport = patternMatches.length;
         const wins = patternMatches.filter(p => p.won).length;

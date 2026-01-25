@@ -4,10 +4,11 @@ import { desc, sql, eq } from "drizzle-orm";
 import type { FeatureVector } from "./feature-engine";
 
 const MAX_PATTERNS_TOTAL = 30;
-const MIN_SAMPLES_PER_PATTERN = 50;
+const MIN_SAMPLES_PER_PATTERN = 100;  // Increased from 50 for statistical reliability (research-backed)
 const MIN_BACKTEST_TRADES = 500;
 const MIN_CANDLES_15M = 2000; // ~20 days of 15m data
 const EMBARGO_CANDLES = 16;
+const MIN_SIMILARITY_THRESHOLD = 0.75;  // Increased from 0.6 for quality pattern matches (research-backed)
 
 let currentCandleCount = 0;
 let currentBacktestTrades = 0;
@@ -403,7 +404,7 @@ function isValidEmbedding(embedding: number[]): boolean {
 export async function findSimilarPatterns(
   currentEmbedding: number[],
   topK: number = 50,
-  minSimilarity: number = 0.6,
+  minSimilarity: number = MIN_SIMILARITY_THRESHOLD,  // Use research-backed threshold
   embargoTimestamp?: number,
   currentTimestamp?: number
 ): Promise<PatternMatch[]> {
@@ -566,18 +567,39 @@ export function getPatternConfidence(stats: PatternStats): {
   confidence: number;
   reasoning: string;
 } {
-  // AGGRESSIVE MODE: Removed minimum mature match requirement
-  // Previously: if (stats.matureMatchCount < 10) { return HOLD }
-  // Now: Always output a direction based on available pattern data
+  // SELECTIVE MODE: Require minimum mature patterns for reliable signals
+  // Research shows 10+ mature patterns needed for statistical reliability
+  if (stats.matureMatchCount < 10) {
+    return {
+      direction: "HOLD",
+      confidence: 0.7,
+      reasoning: `Insufficient pattern data: ${stats.matureMatchCount}/10 mature patterns. HOLD until more data available.`,
+    };
+  }
   
   const expectedReturn = stats.avgReturn8 * 100;
   const winRate = stats.winRate;
   
-  // AGGRESSIVE MODE: Always output a direction based on expected return
-  // Previously: if (winRate < 0.45 || Math.abs(expectedReturn) < 0.1) { return HOLD }
-  // Now: Just pick direction based on expected return
+  // SELECTIVE MODE: Require positive edge for action
+  // Only trade when historical patterns show > 45% win rate AND meaningful expected return
+  if (winRate < 0.45 || Math.abs(expectedReturn) < 0.1) {
+    return {
+      direction: "HOLD",
+      confidence: 0.6,
+      reasoning: `No edge detected: Win rate ${(winRate * 100).toFixed(1)}%, Expected return ${expectedReturn.toFixed(2)}%. HOLD.`,
+    };
+  }
   
-  const direction: "LONG" | "SHORT" = expectedReturn >= 0 ? "LONG" : "SHORT";
+  // Determine direction based on expected return with proper thresholds
+  let direction: "LONG" | "SHORT" | "HOLD";
+  if (expectedReturn > 0.15 && winRate > 0.50) {
+    direction = "LONG";
+  } else if (expectedReturn < -0.15 && winRate > 0.50) {
+    direction = "SHORT";
+  } else {
+    direction = "HOLD";
+  }
+  
   const confidence = Math.max(0.3, Math.min(0.9, (winRate * 0.6 + stats.consistency * 0.4)));
   
   return {

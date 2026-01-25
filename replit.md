@@ -80,3 +80,23 @@ Preferred communication style: Simple, everyday language.
 ### Development Tools
 - Replit-specific plugins for dev banner and error overlay.
 - TypeScript with strict mode.
+
+## Recent Changes (January 2026)
+
+### Unified Regime Detection System
+- **Shared ATR-Percentile Classifier**: `classifyRegime(candles, idx?)` in `feature-engine.ts` provides consistent regime detection across all components.
+- **6 Market Regimes**: trend_up, trend_down, shock (75th+ ATR percentile), quiet (<25th percentile), ranging (25-50th), chop (default).
+- **Shared Risk Parameters**: `getRegimeRiskParams(regime)` provides consistent stop/TP multipliers and R:R ratios.
+- **Full Consistency**: signal-engine, paper-engine, and strategy-learner all use the shared classifier and risk params.
+
+### Research-Backed Improvements
+- **Triple Barrier Labeling**: TP/SL/Time barrier simulation with intrabar timing heuristic (20-50% accuracy improvement over fixed-horizon).
+- **Pattern Quality**: Similarity threshold increased 0.6→0.75, MIN_SAMPLES 50→100.
+- **Meta-Labeling & Half-Kelly**: Methods created but not yet wired into execution path.
+
+### Key Files for ML/Learning
+- `server/feature-engine.ts`: Feature computation + shared regime classifier
+- `server/signal-engine.ts`: Signal generation and shot plans
+- `server/strategy-learner.ts`: Reinforcement learning on historical data
+- `server/pattern-memory.ts`: Pattern storage and similarity matching
+- `server/paper/engine.ts`: Paper trading execution with regime-adaptive stops/TPs

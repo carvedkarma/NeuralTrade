@@ -1,5 +1,6 @@
 import type { Candle, FuturesData, Signal } from "@shared/schema";
 import type { FeatureVector } from "./feature-engine";
+import { classifyRegime, getRegimeRiskParams, type MarketRegime } from "./feature-engine";
 import { getEnsemblePrediction, type EnsemblePrediction } from "./ml-predictor";
 import { findSimilarPatterns, computePatternStats, type PatternMatch } from "./pattern-memory";
 import { getSentimentData, interpretFearGreed } from "./sentiment-api";
@@ -34,7 +35,7 @@ export type EdgeBucket = "none" | "weak" | "moderate" | "strong";
 export interface ShotPlan {
   signal: "LONG" | "SHORT" | "HOLD";
   confidence: number;
-  regime: "trend_up" | "trend_down" | "chop" | "shock";
+  regime: "trend_up" | "trend_down" | "chop" | "shock" | "quiet" | "ranging";
   strategy: string;
   entryZone: { low: number; high: number } | null;
   stopLoss: number | null;
@@ -206,18 +207,8 @@ function calculateRiskReward(entry: number, stop: number, tp: number): number {
   return risk === 0 ? 0 : reward / risk;
 }
 
-function getRegime(feature: FeatureVector): "trend_up" | "trend_down" | "chop" | "shock" {
-  if (feature.volatilityRegime === "high" && feature.adx > 40) {
-    return "shock";
-  }
-  if (feature.kalmanRegime === "bull" && feature.adx > 25) {
-    return "trend_up";
-  }
-  if (feature.kalmanRegime === "bear" && feature.adx > 25) {
-    return "trend_down";
-  }
-  return "chop";
-}
+// Note: getRegime is now replaced by classifyRegime from feature-engine
+// This wrapper function allows signal-engine to use classifyRegime with candle data
 
 function selectStrategy(regime: string, feature: FeatureVector): string {
   if (regime === "shock") {
@@ -225,6 +216,12 @@ function selectStrategy(regime: string, feature: FeatureVector): string {
   }
   if (regime === "chop") {
     return "Mean Reversion";
+  }
+  if (regime === "quiet") {
+    return "Breakout Anticipation";
+  }
+  if (regime === "ranging") {
+    return "Range Trading";
   }
   if (feature.efficiencyRatio > 0.6) {
     return "Kalman Trend Follow";
@@ -238,6 +235,8 @@ function selectStrategy(regime: string, feature: FeatureVector): string {
 function getEstimatedHoldTime(regime: string, feature: FeatureVector): string {
   if (regime === "shock") return "1-2 candles (15-30min)";
   if (regime === "chop") return "2-4 candles (30min-1h)";
+  if (regime === "quiet") return "6-12 candles (1.5-3h) - await breakout";
+  if (regime === "ranging") return "3-6 candles (45min-1.5h)";
   if (feature.volatilityRegime === "high") return "2-4 candles (30min-1h)";
   if (feature.adx > 40) return "4-8 candles (1-2h)";
   return "4-6 candles (1-1.5h)";
@@ -250,7 +249,10 @@ export async function generateShotPlan(
   includeAI: boolean = true
 ): Promise<ShotPlan> {
   const currentPrice = candles[candles.length - 1].close;
-  const regime = getRegime(feature);
+  
+  // Use shared ATR-percentile regime classifier for consistency across system
+  const regimeAnalysis = classifyRegime(candles);
+  const regime = regimeAnalysis.regime;
   const strategy = selectStrategy(regime, feature);
   const holdTimeStr = getEstimatedHoldTime(regime, feature);
   
@@ -259,7 +261,7 @@ export async function generateShotPlan(
     getSentimentData()
   ]);
   
-  const patternMatches = await findSimilarPatterns(feature.embedding, 20, 0.65);
+  const patternMatches = await findSimilarPatterns(feature.embedding, 20);  // Uses MIN_SIMILARITY_THRESHOLD (0.75)
   const patternStats = computePatternStats(patternMatches);
   
   const reasons: string[] = [];
@@ -313,9 +315,10 @@ export async function generateShotPlan(
     if (patternStats.winRate > 0.55) reasons.push(`Pattern history: ${(patternStats.winRate * 100).toFixed(0)}% win rate`);
   }
   
-  // AGGRESSIVE MODE: Lower thresholds and allow trades with fewer requirements
-  const baseShouldTrade = ensemble.confidence >= 0.30 &&  // Lowered from 0.65 to 0.30
-                       ensemble.direction !== "HOLD";     // Just needs a direction
+  // SELECTIVE MODE: Require high confidence for trades
+  // Research shows 65%+ confidence threshold reduces false positives significantly
+  const baseShouldTrade = ensemble.confidence >= 0.65 &&  // Restored proper threshold
+                       ensemble.direction !== "HOLD";     // Must have directional signal
   
   let combinedIntelligence: CombinedIntelligence | undefined;
   let shouldTrade = baseShouldTrade;
@@ -338,12 +341,19 @@ export async function generateShotPlan(
       if (!reasons.includes(r)) reasons.push(r);
     });
     
-    // AGGRESSIVE MODE: Don't block trades based on combined intelligence HOLD
-    // Previously: if (baseShouldTrade && combinedIntelligence.finalSignal === "HOLD") { shouldTrade = false; }
-    // Now: Continue with trade if there's a directional signal
+    // SELECTIVE MODE: Respect combined intelligence HOLD signals
+    // If the strategy learner says HOLD, we should listen
+    if (baseShouldTrade && combinedIntelligence.finalSignal === "HOLD") {
+      shouldTrade = false;
+      vetoReasons.push("Combined Intelligence recommends HOLD");
+    }
     
     if (baseShouldTrade && combinedIntelligence.strategyEV > 0) {
       reasons.push(`Strategy EV: +${(combinedIntelligence.strategyEV * 100).toFixed(2)}%`);
+    } else if (baseShouldTrade && combinedIntelligence.strategyEV <= 0) {
+      // Negative EV is a strong signal to not trade
+      shouldTrade = false;
+      vetoReasons.push(`Negative Strategy EV: ${(combinedIntelligence.strategyEV * 100).toFixed(2)}%`);
     }
   } catch (e) {
     console.warn("[Signal Engine] Combined intelligence failed:", e);
@@ -401,15 +411,18 @@ export async function generateShotPlan(
     patternMatches
   );
   
-  // AGGRESSIVE MODE: Remove quality gate - let paper trading act on all signals
-  // Previously: if (shouldTrade && qualityResult.qualityScore < MIN_QUALITY_SCORE) { shouldTrade = false; }
+  // SELECTIVE MODE: Enforce quality gate - only take high-quality setups
+  const MIN_QUALITY_SCORE = 0.5;  // Minimum quality threshold
+  if (shouldTrade && qualityResult.qualityScore < MIN_QUALITY_SCORE) {
+    shouldTrade = false;
+    vetoReasons.push(`Quality score ${qualityResult.qualityScore.toFixed(2)} < ${MIN_QUALITY_SCORE} minimum`);
+  }
   
-  // AGGRESSIVE MODE: Use full confidence for display
-  const displayConfidence = ensemble.confidence;
+  // SELECTIVE MODE: Adjust confidence based on quality
+  const displayConfidence = shouldTrade ? ensemble.confidence : Math.min(ensemble.confidence, 0.4);
   
-  // AGGRESSIVE MODE: Output the ML direction even if traditional gates would block
-  // This enables paper trading to take more trades and learn from outcomes
-  const finalSignal = ensemble.direction !== "HOLD" ? ensemble.direction : "HOLD";
+  // SELECTIVE MODE: Respect shouldTrade flag - output HOLD when gates block
+  const finalSignal = shouldTrade ? ensemble.direction : "HOLD";
   
   return {
     signal: finalSignal,
@@ -431,8 +444,8 @@ export async function generateShotPlan(
     probDown: ensemble.probDown,
     probChop: ensemble.probChop,
     expectedMove: ensemble.expectedMove,
-    reasons,  // AGGRESSIVE MODE: Always include reasons
-    vetoReasons,  // AGGRESSIVE MODE: Still track vetoes for analysis but don't block
+    reasons,
+    vetoReasons,
     patternMatches,
     mlPredictions: ensemble,
     expansionGate,

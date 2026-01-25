@@ -1033,3 +1033,182 @@ export function analyzeMultiTimeframePatterns(candles: Candle[]): MultiTimeframe
     description,
   };
 }
+
+/**
+ * SHARED ATR-PERCENTILE REGIME CLASSIFIER
+ * Used by signal-engine, strategy-learner, and paper engine for consistency
+ * 
+ * Classifies market regime based on ATR percentile ranking:
+ * - 75th+ percentile = shock (extreme volatility)
+ * - 50-75th percentile = trending (high volatility, directional)
+ * - 25-50th percentile = ranging (moderate volatility)
+ * - Below 25th percentile = quiet (low volatility, compression)
+ * - Default = chop (no clear pattern)
+ */
+export type MarketRegime = "trend_up" | "trend_down" | "shock" | "quiet" | "ranging" | "chop";
+
+export interface RegimeAnalysis {
+  regime: MarketRegime;
+  atrPercentile: number;
+  efficiencyRatio: number;
+  isTrending: boolean;
+  reasoning: string;
+}
+
+export function classifyRegime(candles: Candle[], idx?: number): RegimeAnalysis {
+  const targetIdx = idx !== undefined ? idx : candles.length - 1;
+  if (targetIdx < 20 || candles.length < 21) {
+    return {
+      regime: "chop",
+      atrPercentile: 50,
+      efficiencyRatio: 0,
+      isTrending: false,
+      reasoning: "Insufficient data for regime classification",
+    };
+  }
+  
+  const lookback = 20;
+  const atrLookback = 100;
+  const slice = candles.slice(Math.max(0, targetIdx - lookback), targetIdx + 1);
+  const closes = slice.map(c => c.close);
+  
+  // Calculate current ATR
+  let atrSum = 0;
+  for (let i = Math.max(1, targetIdx - 13); i <= targetIdx; i++) {
+    const candle = candles[i];
+    const prevClose = candles[i - 1].close;
+    const tr = Math.max(
+      candle.high - candle.low,
+      Math.abs(candle.high - prevClose),
+      Math.abs(candle.low - prevClose)
+    );
+    atrSum += tr;
+  }
+  const currentATR = atrSum / 14;
+  const currentPrice = closes[closes.length - 1];
+  const atrPercent = (currentATR / currentPrice) * 100;
+  
+  // Calculate historical ATR values for percentile ranking
+  const atrHistory: number[] = [];
+  const histStart = Math.max(14, targetIdx - atrLookback);
+  for (let i = histStart; i <= targetIdx; i++) {
+    let histAtrSum = 0;
+    for (let j = Math.max(1, i - 13); j <= i; j++) {
+      const candle = candles[j];
+      const prevClose = candles[j - 1].close;
+      const tr = Math.max(
+        candle.high - candle.low,
+        Math.abs(candle.high - prevClose),
+        Math.abs(candle.low - prevClose)
+      );
+      histAtrSum += tr;
+    }
+    const histATR = histAtrSum / 14;
+    const histPrice = candles[i].close;
+    atrHistory.push((histATR / histPrice) * 100);
+  }
+  
+  // Calculate ATR percentile
+  const atrPercentile = atrHistory.length > 0 
+    ? (atrHistory.filter(a => a < atrPercent).length / atrHistory.length) * 100
+    : 50;
+  
+  // Calculate efficiency ratio for trend detection
+  const netMove = Math.abs(closes[closes.length - 1] - closes[0]);
+  const totalMove = closes.slice(1).reduce((sum, c, i) => sum + Math.abs(c - closes[i]), 0);
+  const efficiencyRatio = totalMove > 0 ? netMove / totalMove : 0;
+  
+  // Determine trend direction
+  const returns = closes.slice(1).map((c, i) => (c - closes[i]) / closes[i]);
+  const avgReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
+  const isBullish = avgReturn > 0 && closes[closes.length - 1] > closes[0];
+  const isBearish = avgReturn < 0 && closes[closes.length - 1] < closes[0];
+  
+  // REGIME CLASSIFICATION
+  let regime: MarketRegime;
+  let reasoning: string;
+  
+  if (atrPercentile >= 75) {
+    regime = "shock";
+    reasoning = `ATR at ${atrPercentile.toFixed(0)}th percentile - extreme volatility`;
+  } else if (atrPercentile >= 50 && efficiencyRatio >= 0.3) {
+    if (isBullish) {
+      regime = "trend_up";
+      reasoning = `ATR ${atrPercentile.toFixed(0)}th pct, ER ${(efficiencyRatio * 100).toFixed(0)}% - bullish trend`;
+    } else if (isBearish) {
+      regime = "trend_down";
+      reasoning = `ATR ${atrPercentile.toFixed(0)}th pct, ER ${(efficiencyRatio * 100).toFixed(0)}% - bearish trend`;
+    } else {
+      regime = "chop";
+      reasoning = `ATR ${atrPercentile.toFixed(0)}th pct but no clear direction`;
+    }
+  } else if (atrPercentile >= 25 && efficiencyRatio < 0.3) {
+    regime = "ranging";
+    reasoning = `ATR ${atrPercentile.toFixed(0)}th pct, low ER - ranging market`;
+  } else if (atrPercentile < 25) {
+    regime = "quiet";
+    reasoning = `ATR at ${atrPercentile.toFixed(0)}th percentile - low volatility compression`;
+  } else {
+    regime = "chop";
+    reasoning = `No clear regime pattern detected`;
+  }
+  
+  return {
+    regime,
+    atrPercentile,
+    efficiencyRatio,
+    isTrending: regime === "trend_up" || regime === "trend_down",
+    reasoning,
+  };
+}
+
+/**
+ * Get regime-adaptive risk/reward parameters
+ * Returns appropriate stop and TP multipliers based on current regime
+ */
+export function getRegimeRiskParams(regime: MarketRegime): {
+  stopMultiplier: number;
+  rrRatio: number;
+  maxPositionSize: number;
+  reasoning: string;
+} {
+  switch (regime) {
+    case "trend_up":
+    case "trend_down":
+      return {
+        stopMultiplier: 1.0,    // Full ATR for stop
+        rrRatio: 2.0,           // 2:1 reward-to-risk
+        maxPositionSize: 0.15,  // 15% max position
+        reasoning: "Trending - wide stops, let winners run",
+      };
+    case "shock":
+      return {
+        stopMultiplier: 0.7,    // Tighter stops in volatile conditions
+        rrRatio: 1.2,           // Quick exits
+        maxPositionSize: 0.05,  // Reduced position size
+        reasoning: "Shock - reduced exposure, quick exits",
+      };
+    case "quiet":
+      return {
+        stopMultiplier: 0.8,    // Moderate stops
+        rrRatio: 2.0,           // Wide target for breakout
+        maxPositionSize: 0.10,  // Moderate position
+        reasoning: "Quiet - await breakout, wide targets",
+      };
+    case "ranging":
+      return {
+        stopMultiplier: 0.75,   // Tighter for mean reversion
+        rrRatio: 1.5,           // Moderate targets
+        maxPositionSize: 0.10,  // Moderate position
+        reasoning: "Ranging - quick profits, mean reversion",
+      };
+    case "chop":
+    default:
+      return {
+        stopMultiplier: 0.6,    // Very tight stops
+        rrRatio: 1.3,           // Conservative targets
+        maxPositionSize: 0.03,  // Minimal position
+        reasoning: "Chop - minimal exposure recommended",
+      };
+  }
+}
