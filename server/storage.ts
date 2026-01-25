@@ -623,15 +623,24 @@ export class MemStorage implements IStorage {
     
     if (now - this.lastTrainingRun < cooldown) return;
     
-    // Load ALL historical candles from database for training
-    const { loadCandlesFromDb } = await import("./historical-data");
+    // Load historical candles from database - ONLY train on downloaded data, not live feed
+    const { loadCandlesFromDb, getMultiAssetDataSummary } = await import("./historical-data");
+    
+    // Check if user has downloaded historical data
+    const dataSummary = await getMultiAssetDataSummary();
+    const btcData = dataSummary.assets.find(a => a.symbol === "BTCUSDT");
+    
+    // Only train if historical data was explicitly downloaded (minimum 1000 candles = ~10 days)
+    if (!btcData || btcData.totalCandles < 1000) {
+      // Silent skip - don't spam logs when user hasn't downloaded data yet
+      return;
+    }
+    
     const trainingCandles = await loadCandlesFromDb("BTCUSDT", "15m");
+    const candlesToUse = trainingCandles;
     
-    // Fall back to in-memory candles if DB is empty
-    const candlesToUse = trainingCandles.length > this.candles.length ? trainingCandles : this.candles;
-    
-    if (candlesToUse.length < 50) {
-      console.log(`Training skipped: only ${candlesToUse.length} candles available (need 50)`);
+    if (candlesToUse.length < 1000) {
+      console.log(`[Learning] Waiting for historical data download (${candlesToUse.length} candles, need 1000+)`);
       return;
     }
     
