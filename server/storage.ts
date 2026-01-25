@@ -479,6 +479,22 @@ export class MemStorage implements IStorage {
       this.learningStats.deepLearningIndex = 50;
       this.learningStats.deepLearningComplete = false;
       this.learningStats.deepLearningPassCount = 0;
+      // Reset remaining fields
+      this.learningStats.lastBinanceFetch = 0;
+      this.learningStats.lastCoingeckoFetch = 0;
+      this.learningStats.lastCryptocompareFetch = 0;
+      this.learningStats.binanceError = false;
+      this.learningStats.coingeckoError = false;
+      this.learningStats.cryptocompareError = false;
+      this.learningStats.lastPriceAtPrediction = 0;
+      this.learningStats.lastPredictionSignals = { ruleBased: "HOLD", pattern: "HOLD", ai: "HOLD" };
+      this.learningStats.lastFeatureCompute = 0;
+      this.learningStats.lastCandlestickPattern = "";
+      this.learningStats.lastVolumeProfile = { buyVol: 0, sellVol: 0, ratio: 1 };
+      this.learningStats.multiTimeframeConfluence = 0;
+      this.learningStats.multiTimeframeSignal = "neutral";
+      this.learningStats.timeframeAlignments = 0;
+      this.learningStats.divergenceDetected = false;
       
       console.log("[Persistence] All learning data has been reset");
     } catch (error) {

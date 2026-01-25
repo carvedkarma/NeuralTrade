@@ -858,6 +858,12 @@ export class StrategyLearner {
     
     this.actionPatterns.clear();
     
+    // Clear pattern clusters in memory
+    import("./pattern-memory").then(({ resetPatternClusters }) => {
+      resetPatternClusters();
+      console.log("[Strategy Learner] Pattern clusters cleared");
+    }).catch(err => console.error("[Strategy Learner] Failed to clear pattern clusters:", err));
+    
     // Clear database state (fire and forget)
     this.clearDbState().catch(err => console.error("[Strategy Learner] Failed to clear DB state:", err));
     
