@@ -1,0 +1,205 @@
+1) Improve Win/Loss Ratio (make winners bigger than losers)
+A) ATR-scaled stop + ATR-scaled targets (no fixed %)
+
+Use ATR in percent of price on 15m:
+
+ATR_pct = ATR(14) / close
+
+Initial Stop (tight but not noise-tight):
+
+Trend trades: SL = 0.9 × ATR_pct
+
+Mean reversion: SL = 0.7 × ATR_pct
+
+Targets (based on regime + expansion)
+
+Trend + expansion: TP1 = 1.0 × ATR_pct, TP2 = 1.8 × ATR_pct
+
+Trend no expansion: TP1 = 0.7 × ATR_pct, no TP2
+
+Chop/mean reversion: TP1 = 0.6 × ATR_pct, no TP2
+
+This alone fixes “fixed percentages” and adapts to volatility.
+
+B) Let winners run (MFE-aware trailing)
+
+Know this rule by heart:
+
+After TP1 hits, don’t use a dumb trail. Use a giveback trail.
+
+Track peak_profit_pct
+
+Activate trailing once profit ≥ 0.6 × ATR_pct
+
+Exit remainder if:
+
+giveback >= max(0.35×ATR_pct, 0.5×TP1)
+
+This prevents “winner → breakeven → loser.”
+
+C) Cut losers faster (time stop + failure stop)
+
+Two fast exits that help win/loss ratio without lowering win rate too much:
+
+Time stop
+
+If bars held ≥ 4 and profit < 0.15×ATR_pct → exit (trade didn’t move)
+
+Failure stop
+
+For SHORT: if close reclaims Kalman fast AND MACD hist flips positive → exit early
+
+For LONG: if close loses Kalman fast AND MACD hist flips negative → exit early
+
+These are “setup invalidated” exits.
+
+2) Filter for higher quality setups (trade only when big moves possible)
+A) Pattern confidence > 70% (but make it real)
+
+Don’t use raw “confidence.” Use maturity-weighted EV confidence.
+
+Require:
+
+pattern_samples >= 100 (or 50 minimum early)
+
+EV_adj > 0 (after costs)
+
+and quality_score >= 70
+
+Quality score definition (simple, robust):
+
+quality = 0.4*EV_score + 0.3*expansion_score + 0.2*regime_clarity + 0.1*maturity
+
+
+Where:
+
+EV_score scales EV relative to costs (e.g., EV / costs capped 0–1)
+
+expansion_score from predictor (0–1)
+
+regime_clarity = |trend_up - trend_down| (0–1)
+
+maturity = log(samples)/log(target_samples)
+
+B) Only trade during volatility expansion
+
+You already have an expansion predictor. Make it a hard gate:
+
+Trade only if:
+
+predicted_ATR >= current_ATR × 1.05 (or expansion_prob ≥ 0.60)
+
+If contraction expected:
+
+force HOLD (unless mean-reversion strategy explicitly allows contraction)
+
+C) Multiple timeframe alignment (keep it lightweight)
+
+Don’t build a complex MTF system yet. Do this minimal version:
+
+Compute regime on:
+
+15m (primary)
+
+1h (confirmation = 4× 15m candles)
+
+Rules:
+
+Trend trade LONG only if 15m trend_up AND 1h not trend_down
+
+Trend trade SHORT only if 15m trend_down AND 1h not trend_up
+
+If disagreement → HOLD or mean-reversion only
+
+That’s enough to remove a lot of chop/trap trades.
+
+3) Track “quality” metrics (and show when big wins are possible)
+A) Average winner / average loser ratio (W/L)
+
+Compute on executed trades only (exclude HOLD):
+
+avg_win = mean(pnl_net where pnl_net > 0)
+avg_loss = abs(mean(pnl_net where pnl_net < 0))
+win_loss_ratio = avg_win / avg_loss
+
+
+Target: > 1.2 for stability, > 1.5 ideal.
+
+B) Profit factor
+profit_factor = gross_profit / gross_loss
+
+
+Target: > 1.2 early, > 1.5 strong.
+
+C) Expected R-multiple per trade (best metric)
+
+Define R as your initial stop distance in %:
+
+R = SL_pct
+R_multiple = pnl_net_pct / SL_pct
+expectancy_R = mean(R_multiple)
+
+
+Target: > 0.10R (good), > 0.20R (strong) over 200+ trades.
+
+This makes your performance comparable across volatility regimes.
+
+The most important integration rule (do not forget)
+
+Even with better exits, still:
+
+EV gate first
+
+Expansion gate second
+
+Then trade
+
+Then MFE-aware exits
+
+If you let low-EV trades in, no exit model will save you long term.
+
+Copy/paste task list for your Replit agent
+
+Replace fixed SL/TP with ATR-based:
+
+compute ATR_pct (ATR14/close)
+
+set SL, TP1, TP2 based on regime + expansion
+
+Add MFE-aware trailing after TP1:
+
+track peak_profit_pct
+
+giveback exit logic
+
+Add time stop + failure stop:
+
+time stop at 4 bars if no progress
+
+invalidate exits using Kalman fast + MACD histogram flip
+
+Add hard “Expansion Gate”:
+
+only trade trend setups if predicted_ATR >= current_ATR×1.05 (or prob >= 0.6)
+
+Add lightweight multi-timeframe alignment:
+
+compute 1h regime
+
+veto trades when 15m and 1h conflict
+
+Add “Quality Score” and show it:
+
+quality score combines EV, expansion, regime clarity, maturity
+
+enforce quality >= 70 to trade
+
+Add performance metrics page:
+
+avg_win, avg_loss, W/L ratio
+
+profit factor
+
+expectancy in R-multiples
+
+all computed on executed trades only (exclude HOLD)
