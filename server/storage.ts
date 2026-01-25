@@ -220,6 +220,10 @@ export class MemStorage implements IStorage {
   private patternsStored = 0;
   private continuousLearningActive = false;
   private socialSimulationActive = false;
+  
+  // MANUAL TRAINING CONTROL: Training only starts when user clicks "Start Learning"
+  private strategyLearningEnabled = false;
+  private patternLearningEnabled = false;
 
   constructor() {
     this.loadPersistedState().then(async () => {
@@ -227,18 +231,21 @@ export class MemStorage implements IStorage {
       
       await this.reloadHistoricalCandles();
       
-      this.refreshData();
-      this.startContinuousLearning();
+      // Start data refresh loop (fetches market data only - NO training)
+      this.startDataRefreshLoop();
       this.startSocialSentimentTracking();
-      initializePatternClusters().then(() => {
-        console.log("Pattern clusters initialized");
+      
+      // Load existing pattern clusters from DB (read-only, no new pattern creation)
+      loadPatternClustersFromDb().then(() => {
+        console.log("[Persistence] Pattern clusters loaded from DB (training disabled until Start Learning clicked)");
       }).catch(err => {
-        console.error("Failed to initialize pattern clusters:", err);
+        console.error("Failed to load pattern clusters:", err);
       });
+      
+      console.log("[Manual Training] System ready - click 'Start Learning' to begin training");
     }).catch(err => {
       console.error("[Persistence] Failed to load state, starting fresh:", err);
-      this.refreshData();
-      this.startContinuousLearning();
+      this.startDataRefreshLoop();
       this.startSocialSentimentTracking();
     });
   }
@@ -312,7 +319,8 @@ export class MemStorage implements IStorage {
         console.log(`[Persistence] Restored social stats: Twitter=${this.learningStats.twitterReads}, Reddit=${this.learningStats.redditReads}`);
       }
       
-      await loadPatternClustersFromDb();
+      // Pattern clusters are loaded in constructor after loadPersistedState() completes
+      // initializePatternClusters() only called when user clicks Start Learning
       
       // Initialize backtest stats from strategy learner after it loads
       // Uses 5-second delay to ensure strategy learner has finished restoring its state
@@ -607,23 +615,80 @@ export class MemStorage implements IStorage {
     return this.candles;
   }
 
-  private startContinuousLearning(): void {
+  // Data refresh loop - fetches market data but does NOT train unless manually enabled
+  private startDataRefreshLoop(): void {
     if (this.continuousLearningActive) return;
     this.continuousLearningActive = true;
     
-    const learningLoop = async () => {
+    const dataRefreshLoop = async () => {
       while (this.continuousLearningActive) {
         try {
           await this.refreshData();
         } catch (error) {
-          console.error("Continuous learning error:", error);
+          console.error("Data refresh error:", error);
         }
         await new Promise(resolve => setTimeout(resolve, 30000));
       }
     };
     
-    learningLoop();
-    console.log("Continuous learning loop started (30s interval)");
+    dataRefreshLoop();
+    console.log("[Data Refresh] Market data loop started (30s interval) - training disabled until Start Learning clicked");
+  }
+  
+  // Manual start for strategy learning - called when user clicks "Start Learning"
+  async startStrategyLearningManual(): Promise<{ success: boolean; message: string }> {
+    if (this.strategyLearningEnabled) {
+      return { success: false, message: "Strategy learning already running" };
+    }
+    
+    const { loadCandlesFromDb, getMultiAssetDataSummary } = await import("./historical-data");
+    const dataSummary = await getMultiAssetDataSummary();
+    const btcData = dataSummary.assets.find(a => a.symbol === "BTCUSDT");
+    
+    if (!btcData || btcData.totalCandles < 1000) {
+      return { 
+        success: false, 
+        message: `Need at least 1000 candles to start training (have ${btcData?.totalCandles || 0}). Please download historical data first.` 
+      };
+    }
+    
+    this.strategyLearningEnabled = true;
+    this.patternLearningEnabled = true;
+    
+    // Initialize pattern clusters now that user clicked Start Learning
+    initializePatternClusters().then(() => {
+      console.log("[Strategy Learning] Pattern clusters initialized");
+    }).catch(err => {
+      console.error("Failed to initialize pattern clusters:", err);
+    });
+    
+    console.log(`[Strategy Learning] STARTED - processing ${btcData.totalCandles} candles`);
+    
+    // Trigger immediate training run
+    this.trainOnHistoricalCandles();
+    
+    return { success: true, message: `Strategy learning started with ${btcData.totalCandles} candles` };
+  }
+  
+  // Stop strategy learning
+  stopStrategyLearning(): { success: boolean; message: string } {
+    if (!this.strategyLearningEnabled) {
+      return { success: false, message: "Strategy learning not running" };
+    }
+    
+    this.strategyLearningEnabled = false;
+    this.patternLearningEnabled = false;
+    console.log("[Strategy Learning] STOPPED by user");
+    
+    return { success: true, message: "Strategy learning stopped" };
+  }
+  
+  // Get learning status
+  getManualLearningStatus(): { strategyEnabled: boolean; patternEnabled: boolean } {
+    return {
+      strategyEnabled: this.strategyLearningEnabled,
+      patternEnabled: this.patternLearningEnabled,
+    };
   }
 
   // CRITICAL FIX: Track real social API reads, not simulated data
@@ -1317,7 +1382,10 @@ export class MemStorage implements IStorage {
       await this.executePaperTrade();
     }
     
-    this.trainOnHistoricalCandles();
+    // MANUAL TRAINING CONTROL: Only train when user has clicked "Start Learning"
+    if (this.strategyLearningEnabled) {
+      this.trainOnHistoricalCandles();
+    }
   }
 
   private async executePaperTrade(): Promise<void> {

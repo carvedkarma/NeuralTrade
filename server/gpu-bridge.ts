@@ -178,50 +178,89 @@ class GPUTrainerBridge {
   
   /**
    * Convert FeatureVector to array format for GPU prediction
+   * Maps all FeatureVector properties including OHLCV for neural network input
    */
   featureVectorToArray(feature: FeatureVector): number[] {
-    return [
+    // Convert kalmanRegime to numeric: bull=1, bear=-1, chop=0
+    const kalmanRegimeNum = feature.kalmanRegime === "bull" ? 1 : 
+                            feature.kalmanRegime === "bear" ? -1 : 0;
+    
+    // Convert volatilityRegime to numeric: high=1, medium=0.5, low=0
+    const volatilityRegimeNum = feature.volatilityRegime === "high" ? 1 : 
+                                feature.volatilityRegime === "medium" ? 0.5 : 0;
+    
+    // Core features (48 values) + embedding (24 values) = 72 total features
+    const coreFeatures = [
+      // OHLCV data (10 features) - raw price action for neural networks
       feature.price,
       feature.open,
       feature.high,
       feature.low,
+      feature.close,
       feature.volume,
+      feature.normalizedPrice,
+      feature.normalizedVolume,
+      feature.candleBody,
+      feature.candleRange,
+      
+      // Price returns at multiple lookbacks (4 features)
+      feature.returns1,
+      feature.returns2,
+      feature.returns4,
+      feature.returns8,
+      
+      // EMA features (5 features)
+      feature.ema20,
+      feature.ema50,
+      feature.ema20Slope,
+      feature.ema50Slope,
+      feature.emaDistance,
+      
+      // Breakout distances (2 features)
+      feature.breakoutDistanceHigh,
+      feature.breakoutDistanceLow,
+      
+      // Volatility features (4 features)
+      feature.efficiencyRatio,
+      feature.atr14,
+      feature.volatility,
+      feature.bollingerWidth,
+      volatilityRegimeNum,
+      
+      // Momentum indicators (7 features)
       feature.rsi14,
-      feature.rsi7,
       feature.macd,
       feature.macdSignal,
       feature.macdHist,
-      feature.bbUpper,
-      feature.bbMiddle,
-      feature.bbLower,
-      feature.bbWidth,
-      feature.bbPosition,
-      feature.atr14,
-      feature.atr7,
+      feature.stochK,
+      feature.stochD,
+      feature.momentum,
+      
+      // Trend indicators (4 features)
       feature.adx,
       feature.plusDi,
       feature.minusDi,
-      feature.stochK,
-      feature.stochD,
+      feature.trendStrength,
+      
+      // Volume features (3 features)
       feature.obv,
-      feature.obvSma,
+      feature.obvSlope,
       feature.volumeRatio,
-      feature.volatility20,
-      feature.volatility50,
-      feature.priceChange1,
-      feature.priceChange5,
-      feature.priceChange20,
-      feature.ema9,
-      feature.ema21,
-      feature.sma50,
-      feature.sma200,
+      
+      // Kalman filter features (4 features)
       feature.kalmanFast,
       feature.kalmanSlow,
-      feature.kalmanRegime === "up" ? 1 : feature.kalmanRegime === "down" ? -1 : 0,
-      feature.efficiencyRatio,
-      feature.trendStrength,
-      feature.momentum
+      feature.kalmanSpread,
+      kalmanRegimeNum,
+      
+      // Price position and velocity (3 features)
+      feature.pricePosition,
+      feature.priceVelocity,
+      feature.priceAcceleration,
     ];
+    
+    // Append the 24-dimensional embedding for pattern matching
+    return [...coreFeatures, ...feature.embedding];
   }
   
   /**

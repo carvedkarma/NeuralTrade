@@ -1160,8 +1160,49 @@ interface NNDownloadProgress {
 
 const nnDownloadProgress = new Map<string, NNDownloadProgress>();
 
+// Flag to cancel ongoing NN download
+let nnDownloadCancelled = false;
+
 export function getNNDownloadProgress(): NNDownloadProgress[] {
   return Array.from(nnDownloadProgress.values());
+}
+
+// Cancel ongoing NN download
+export function cancelNNDownload(): { success: boolean; message: string } {
+  nnDownloadCancelled = true;
+  console.log("[NN Download] Cancel requested");
+  return { success: true, message: "Download cancellation requested" };
+}
+
+// Clear all NN data from database
+export async function clearNNData(): Promise<{ success: boolean; message: string; deletedCandles: number }> {
+  try {
+    let deletedTotal = 0;
+    
+    for (const tf of NN_TIMEFRAMES) {
+      for (const symbol of SUPPORTED_ASSETS) {
+        // Count before deleting
+        const countResult = await db.select({ count: sql<number>`count(*)` })
+          .from(candles)
+          .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, tf)));
+        const count = Number(countResult[0]?.count ?? 0);
+        
+        // Delete
+        await db.delete(candles)
+          .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, tf)));
+        deletedTotal += count;
+      }
+    }
+    
+    // Clear progress tracking
+    nnDownloadProgress.clear();
+    
+    console.log(`[NN Data] Cleared ${deletedTotal} candles from NN timeframes`);
+    return { success: true, message: `Cleared ${deletedTotal} candles`, deletedCandles: deletedTotal };
+  } catch (error) {
+    console.error("[NN Data] Error clearing data:", error);
+    return { success: false, message: String(error), deletedCandles: 0 };
+  }
 }
 
 export async function getNNDataSummary(): Promise<{
@@ -1198,7 +1239,10 @@ export async function getNNDataSummary(): Promise<{
 export async function downloadNNData(
   years: number = 3,
   onProgress?: (symbol: string, timeframe: string, progress: number) => void
-): Promise<{ success: boolean; totalCandles: number }> {
+): Promise<{ success: boolean; totalCandles: number; cancelled?: boolean }> {
+  // Reset cancel flag at start
+  nnDownloadCancelled = false;
+  
   const now = Date.now();
   const startTime = now - (years * 365 * 24 * 60 * 60 * 1000);
   let totalCandles = 0;
@@ -1219,9 +1263,21 @@ export async function downloadNNData(
 
   try {
     for (const tf of NN_TIMEFRAMES) {
+      // Check for cancellation between timeframes
+      if (nnDownloadCancelled) {
+        console.log("[NN Download] Cancelled by user");
+        return { success: false, totalCandles, cancelled: true };
+      }
+      
       const msPerCandle = MS_PER_TIMEFRAME[tf];
       
       for (const symbol of SUPPORTED_ASSETS) {
+        // Check for cancellation between symbols
+        if (nnDownloadCancelled) {
+          console.log("[NN Download] Cancelled by user");
+          return { success: false, totalCandles, cancelled: true };
+        }
+        
         const key = `${symbol}_${tf}`;
         
         nnDownloadProgress.set(key, {
@@ -1238,6 +1294,12 @@ export async function downloadNNData(
         let fetched = 0;
 
         while (cursor < now) {
+          // Check for cancellation in download loop
+          if (nnDownloadCancelled) {
+            console.log("[NN Download] Cancelled by user during fetch");
+            return { success: false, totalCandles, cancelled: true };
+          }
+          
           const batchEnd = Math.min(cursor + (CANDLES_PER_REQUEST * msPerCandle), now);
 
           try {

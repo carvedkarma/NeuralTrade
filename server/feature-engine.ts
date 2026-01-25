@@ -238,6 +238,19 @@ export function analyzeVolumeProfile(candles: Candle[]): VolumeProfile {
 
 export interface FeatureVector {
   timestamp: number;
+  
+  // OHLCV data - essential for neural networks to see raw price action
+  price: number;         // Current close price
+  open: number;          // Current candle open
+  high: number;          // Current candle high
+  low: number;           // Current candle low
+  close: number;         // Current candle close
+  volume: number;        // Current candle volume
+  normalizedPrice: number;    // Price normalized by ATR (price / ATR)
+  normalizedVolume: number;   // Volume normalized by average (volume / avgVolume)
+  candleBody: number;         // Body size as % of range: |close - open| / (high - low)
+  candleRange: number;        // Range as % of price: (high - low) / close
+  
   returns1: number;
   returns2: number;
   returns4: number;
@@ -621,8 +634,28 @@ export function computeFeatures(candles: Candle[]): FeatureVector[] {
       volRegime === "high" ? 1 : volRegime === "low" ? -1 : 0,
     ];
     
+    // OHLCV normalized features for neural networks
+    const currentCandle = candles[i];
+    const candleRange = currentCandle.high - currentCandle.low;
+    const candleBodyVal = Math.abs(currentCandle.close - currentCandle.open);
+    
     features.push({
       timestamp: candles[i].timestamp,
+      
+      // Raw OHLCV data
+      price: price,
+      open: currentCandle.open,
+      high: currentCandle.high,
+      low: currentCandle.low,
+      close: currentCandle.close,
+      volume: currentCandle.volume,
+      
+      // Normalized OHLCV for neural networks
+      normalizedPrice: price / atrVal,
+      normalizedVolume: volumes[i] / avgVol,
+      candleBody: candleRange > 0 ? candleBodyVal / candleRange : 0,
+      candleRange: candleRange / price,
+      
       returns1: (closes[i] - closes[i - 1]) / closes[i - 1],
       returns2: (closes[i] - closes[i - 2]) / closes[i - 2],
       returns4: (closes[i] - closes[i - 4]) / closes[i - 4],

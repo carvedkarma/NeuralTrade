@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
-import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes } from "./historical-data";
+import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes, clearNNData, cancelNNDownload } from "./historical-data";
 import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
 import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning } from "./unified-learning-controller";
@@ -241,6 +241,65 @@ export async function registerRoutes(
 
   app.get("/api/nn-data/timeframes", async (req, res) => {
     res.json({ timeframes: getNNTimeframes() });
+  });
+
+  // Clear all NN data
+  app.post("/api/nn-data/clear", async (req, res) => {
+    try {
+      console.log("[API] Clear NN data requested");
+      const result = await clearNNData();
+      res.json(result);
+    } catch (error) {
+      console.error("Error clearing NN data:", error);
+      res.status(500).json({ success: false, message: "Failed to clear NN data" });
+    }
+  });
+
+  // Cancel ongoing NN download
+  app.post("/api/nn-data/cancel", async (req, res) => {
+    try {
+      console.log("[API] Cancel NN download requested");
+      const result = cancelNNDownload();
+      res.json(result);
+    } catch (error) {
+      console.error("Error cancelling NN download:", error);
+      res.status(500).json({ success: false, message: "Failed to cancel download" });
+    }
+  });
+
+  // Manual start for Strategy Learning (continuous learning with pattern memory)
+  app.post("/api/strategy-learning/start", async (req, res) => {
+    try {
+      console.log("[API] Manual Strategy Learning start requested");
+      const result = await storage.startStrategyLearningManual();
+      res.json(result);
+    } catch (error) {
+      console.error("Error starting strategy learning:", error);
+      res.status(500).json({ success: false, message: "Failed to start strategy learning" });
+    }
+  });
+
+  // Stop Strategy Learning
+  app.post("/api/strategy-learning/stop", async (req, res) => {
+    try {
+      console.log("[API] Stop Strategy Learning requested");
+      const result = storage.stopStrategyLearning();
+      res.json(result);
+    } catch (error) {
+      console.error("Error stopping strategy learning:", error);
+      res.status(500).json({ success: false, message: "Failed to stop strategy learning" });
+    }
+  });
+
+  // Get manual learning status
+  app.get("/api/learning/manual-status", async (req, res) => {
+    try {
+      const status = storage.getManualLearningStatus();
+      res.json(status);
+    } catch (error) {
+      console.error("Error getting manual learning status:", error);
+      res.status(500).json({ error: "Failed to get manual learning status" });
+    }
   });
 
   app.get("/api/historical/status", async (req, res) => {

@@ -4,9 +4,10 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest } from "@/lib/queryClient";
-import { Database, Download, FileJson, Loader2, Clock, CheckCircle, AlertCircle } from "lucide-react";
+import { Database, Download, FileJson, Loader2, Clock, CheckCircle, AlertCircle, Trash2, XCircle } from "lucide-react";
 import { useState } from "react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useToast } from "@/hooks/use-toast";
 
 interface TimeframeData {
   timeframe: string;
@@ -28,6 +29,7 @@ interface DownloadProgress {
 
 export function NeuralNetworkDataCard() {
   const [selectedYears, setSelectedYears] = useState("3");
+  const { toast } = useToast();
 
   const { data: summary, isLoading } = useQuery<NNDataSummary>({
     queryKey: ["/api/nn-data/summary"],
@@ -44,6 +46,26 @@ export function NeuralNetworkDataCard() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/nn-data/summary"] });
       queryClient.invalidateQueries({ queryKey: ["/api/nn-data/progress"] });
+    },
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/nn-data/cancel"),
+    onSuccess: () => {
+      toast({ title: "Download Cancelled", description: "Download cancellation requested" });
+      queryClient.invalidateQueries({ queryKey: ["/api/nn-data/progress"] });
+    },
+  });
+
+  const clearMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/nn-data/clear"),
+    onSuccess: (data: unknown) => {
+      const result = data as { deletedCandles?: number };
+      toast({ 
+        title: "Data Cleared", 
+        description: `Cleared ${result.deletedCandles?.toLocaleString() || 0} candles` 
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/nn-data/summary"] });
     },
   });
 
@@ -178,15 +200,45 @@ export function NeuralNetworkDataCard() {
                 )}
               </Button>
 
-              {hasAnyData && (
+              {isDownloading && (
                 <Button
                   variant="outline"
-                  onClick={() => window.open("/api/nn-data/export", "_blank")}
-                  data-testid="button-export-nn-data"
+                  onClick={() => cancelMutation.mutate()}
+                  disabled={cancelMutation.isPending}
+                  className="border-red-500/50 text-red-400"
+                  data-testid="button-cancel-nn-download"
                 >
-                  <FileJson className="h-4 w-4 mr-2" />
-                  Export JSON
+                  <XCircle className="h-4 w-4 mr-2" />
+                  Cancel
                 </Button>
+              )}
+
+              {hasAnyData && !isDownloading && (
+                <>
+                  <Button
+                    variant="outline"
+                    onClick={() => window.open("/api/nn-data/export", "_blank")}
+                    data-testid="button-export-nn-data"
+                  >
+                    <FileJson className="h-4 w-4 mr-2" />
+                    Export JSON
+                  </Button>
+                  
+                  <Button
+                    variant="outline"
+                    onClick={() => clearMutation.mutate()}
+                    disabled={clearMutation.isPending}
+                    className="border-red-500/50 text-red-400"
+                    data-testid="button-clear-nn-data"
+                  >
+                    {clearMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-4 w-4 mr-2" />
+                    )}
+                    Clear Data
+                  </Button>
+                </>
               )}
             </div>
 
