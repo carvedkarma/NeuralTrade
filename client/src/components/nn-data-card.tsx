@@ -4,10 +4,15 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest } from "@/lib/queryClient";
-import { Database, Download, FileJson, Loader2, Clock, CheckCircle, AlertCircle, Trash2, XCircle } from "lucide-react";
+import { Database, Download, FileJson, Loader2, Clock, CheckCircle, AlertCircle, Trash2, XCircle, PlayCircle } from "lucide-react";
 import { useState } from "react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
+
+interface ResumableStatus {
+  canResume: boolean;
+  details: { symbol: string; timeframe: string; lastTimestamp: number | null; candleCount: number }[];
+}
 
 interface TimeframeData {
   timeframe: string;
@@ -66,10 +71,28 @@ export function NeuralNetworkDataCard() {
         description: `Cleared ${result.deletedCandles?.toLocaleString() || 0} candles` 
       });
       queryClient.invalidateQueries({ queryKey: ["/api/nn-data/summary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/nn-data/resumable"] });
+    },
+  });
+
+  // Query for resumable status
+  const { data: resumableStatus } = useQuery<ResumableStatus>({
+    queryKey: ["/api/nn-data/resumable"],
+    refetchInterval: 30000,
+  });
+
+  // Resume mutation - passes the selected years to ensure consistent data range
+  const resumeMutation = useMutation({
+    mutationFn: (years: number) => apiRequest("POST", "/api/nn-data/resume", { years }),
+    onSuccess: () => {
+      toast({ title: "Resume Started", description: "Continuing download from where it stopped" });
+      queryClient.invalidateQueries({ queryKey: ["/api/nn-data/summary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/nn-data/progress"] });
     },
   });
 
   const isDownloading = progressData?.progress?.some(p => p.status === "downloading") || false;
+  const canResume = resumableStatus?.canResume && !isDownloading;
   const downloadProgress = progressData?.progress || [];
 
   const getTimeframeTotal = (tf: TimeframeData): number => {
@@ -91,7 +114,7 @@ export function NeuralNetworkDataCard() {
           </Badge>
         </div>
         <CardDescription>
-          Separate data for GPU training: 1m, 5m, 1h, 4h timeframes (Strategy Learner uses 15m)
+          GPU training data: 1m, 5m, 15m, 1h, 4h timeframes across BTC, ETH, SOL, BNB
         </CardDescription>
       </CardHeader>
 
@@ -102,7 +125,7 @@ export function NeuralNetworkDataCard() {
           </div>
         ) : (
           <>
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
               {summary?.timeframes.map(tf => {
                 const total = getTimeframeTotal(tf);
                 const hasData = total > 0;
@@ -195,10 +218,27 @@ export function NeuralNetworkDataCard() {
                 ) : (
                   <>
                     <Download className="h-4 w-4 mr-2" />
-                    Download All Timeframes
+                    Download All
                   </>
                 )}
               </Button>
+
+              {canResume && (
+                <Button
+                  onClick={() => resumeMutation.mutate(Number(selectedYears))}
+                  disabled={resumeMutation.isPending}
+                  variant="outline"
+                  className="border-emerald-500/50 text-emerald-400"
+                  data-testid="button-resume-nn-download"
+                >
+                  {resumeMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <PlayCircle className="h-4 w-4 mr-2" />
+                  )}
+                  Resume
+                </Button>
+              )}
 
               {isDownloading && (
                 <Button
@@ -243,8 +283,8 @@ export function NeuralNetworkDataCard() {
             </div>
 
             <p className="text-xs text-muted-foreground">
-              This data is separate from 15m data used by Strategy Learner and Pattern Memory.
-              Multi-timeframe data allows the GPU neural networks to learn patterns across different time scales.
+              5 timeframes × 4 assets = 20 data streams for GPU neural network training.
+              Strategy Learner and Pattern Memory share the 15m BTC data.
             </p>
           </>
         )}

@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
-import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes, clearNNData, cancelNNDownload } from "./historical-data";
+import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes, clearNNData, cancelNNDownload, getResumableStatus, resumeNNDataDownload } from "./historical-data";
 import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
 import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning } from "./unified-learning-controller";
@@ -218,7 +218,7 @@ export async function registerRoutes(
   app.post("/api/nn-data/download", async (req, res) => {
     const years = req.body.years || 3;
     
-    res.json({ started: true, message: `Starting download for ${years} year(s) of multi-timeframe data (1m, 5m, 1h, 4h)` });
+    res.json({ started: true, message: `Starting download for ${years} year(s) of multi-timeframe data (1m, 5m, 15m, 1h, 4h)` });
     
     downloadNNData(years, (symbol, timeframe, progress) => {
       console.log(`[NN Data] ${symbol} ${timeframe}: ${progress.toFixed(1)}%`);
@@ -264,6 +264,35 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error cancelling NN download:", error);
       res.status(500).json({ success: false, message: "Failed to cancel download" });
+    }
+  });
+
+  // Get resumable download status
+  app.get("/api/nn-data/resumable", async (req, res) => {
+    try {
+      const status = await getResumableStatus();
+      res.json(status);
+    } catch (error) {
+      console.error("Error checking resumable status:", error);
+      res.status(500).json({ canResume: false, details: [] });
+    }
+  });
+
+  // Resume NN data download from where it left off
+  app.post("/api/nn-data/resume", async (req, res) => {
+    try {
+      const years = req.body.years || 3; // Default to 3 years for resume
+      console.log(`[API] Resume NN download requested (${years} years)`);
+      // Start the resume download in background
+      resumeNNDataDownload(years).then(result => {
+        console.log(`[API] Resume download completed: ${result.totalCandles} new candles`);
+      }).catch(err => {
+        console.error("[API] Resume download error:", err);
+      });
+      res.json({ success: true, message: `Resume download started (${years} year${years > 1 ? 's' : ''})` });
+    } catch (error) {
+      console.error("Error resuming NN download:", error);
+      res.status(500).json({ success: false, message: "Failed to resume download" });
     }
   });
 

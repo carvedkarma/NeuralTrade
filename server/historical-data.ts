@@ -1139,13 +1139,14 @@ export function getSupportedAssets(): string[] {
   return SUPPORTED_ASSETS;
 }
 
-// Neural Network multi-timeframe support
-const NN_TIMEFRAMES = ["1m", "5m", "1h", "4h"] as const;
+// Neural Network multi-timeframe support (5 timeframes x 4 assets = 20 data streams)
+const NN_TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h"] as const;
 type NNTimeframe = typeof NN_TIMEFRAMES[number];
 
 const MS_PER_TIMEFRAME: Record<NNTimeframe, number> = {
   "1m": 60 * 1000,
   "5m": 5 * 60 * 1000,
+  "15m": 15 * 60 * 1000,
   "1h": 60 * 60 * 1000,
   "4h": 4 * 60 * 60 * 1000,
 };
@@ -1416,4 +1417,189 @@ export async function exportNNData(): Promise<{
 
 export function getNNTimeframes(): string[] {
   return [...NN_TIMEFRAMES];
+}
+
+// Get resumable download status - checks what's already downloaded for each symbol/timeframe
+export async function getResumableStatus(): Promise<{
+  canResume: boolean;
+  details: { symbol: string; timeframe: string; lastTimestamp: number | null; candleCount: number }[];
+}> {
+  const details: { symbol: string; timeframe: string; lastTimestamp: number | null; candleCount: number }[] = [];
+  
+  for (const tf of NN_TIMEFRAMES) {
+    for (const symbol of SUPPORTED_ASSETS) {
+      // Get count and max timestamp for this symbol/timeframe
+      const result = await db.select({
+        count: sql<number>`count(*)`,
+        maxTs: sql<number>`max(timestamp)`,
+      })
+        .from(candles)
+        .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, tf)));
+      
+      const count = Number(result[0]?.count ?? 0);
+      const maxTs = result[0]?.maxTs ? Number(result[0].maxTs) : null;
+      
+      details.push({
+        symbol,
+        timeframe: tf,
+        lastTimestamp: maxTs,
+        candleCount: count,
+      });
+    }
+  }
+  
+  // Can resume if any symbol/timeframe has partial data (some candles but not up to date)
+  const now = Date.now();
+  const oneHourAgo = now - (60 * 60 * 1000);
+  const canResume = details.some(d => d.candleCount > 0 && (d.lastTimestamp === null || d.lastTimestamp < oneHourAgo));
+  
+  return { canResume, details };
+}
+
+// Resume download from where it left off
+export async function resumeNNDataDownload(
+  years: number = 3,
+  onProgress?: (symbol: string, timeframe: string, progress: number) => void
+): Promise<{ success: boolean; totalCandles: number; resumed: boolean }> {
+  const now = Date.now();
+  let totalCandles = 0;
+  const startTime = now - (years * 365 * 24 * 60 * 60 * 1000);
+  
+  // Reset cancellation flag
+  nnDownloadCancelled = false;
+  
+  console.log(`[NN Resume] Starting resume for ${years} year(s) of data across all symbol/timeframes`);
+  
+  try {
+    for (const tf of NN_TIMEFRAMES) {
+      if (nnDownloadCancelled) {
+        console.log("[NN Resume] Cancelled by user");
+        return { success: false, totalCandles, resumed: true };
+      }
+      
+      const msPerCandle = MS_PER_TIMEFRAME[tf];
+      
+      for (const symbol of SUPPORTED_ASSETS) {
+        if (nnDownloadCancelled) {
+          console.log("[NN Resume] Cancelled by user");
+          return { success: false, totalCandles, resumed: true };
+        }
+        
+        const key = `${symbol}_${tf}`;
+        
+        // Get the last downloaded timestamp for this symbol/timeframe
+        const lastResult = await db.select({
+          maxTs: sql<number>`max(timestamp)`,
+          count: sql<number>`count(*)`,
+        })
+          .from(candles)
+          .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, tf)));
+        
+        const existingCount = Number(lastResult[0]?.count ?? 0);
+        const lastTimestamp = lastResult[0]?.maxTs ? Number(lastResult[0].maxTs) : null;
+        
+        // Start from last timestamp + 1 candle, or from the years-based start time if no data
+        let cursor = lastTimestamp ? lastTimestamp + msPerCandle : startTime;
+        
+        // Skip if already up to date (within last hour)
+        if (lastTimestamp && lastTimestamp > now - (60 * 60 * 1000)) {
+          console.log(`[NN Resume] ${symbol} ${tf}: Already up to date (${existingCount} candles)`);
+          nnDownloadProgress.set(key, {
+            symbol,
+            timeframe: tf,
+            status: "complete",
+            progress: 100,
+            candlesFetched: existingCount,
+          });
+          continue;
+        }
+        
+        nnDownloadProgress.set(key, {
+          symbol,
+          timeframe: tf,
+          status: "downloading",
+          progress: 0,
+          candlesFetched: existingCount,
+        });
+        
+        console.log(`[NN Resume] Resuming ${symbol} ${tf} from ${new Date(cursor).toISOString()} (${existingCount} existing candles)`);
+        
+        let fetched = 0;
+        const startCursor = cursor;
+        
+        while (cursor < now) {
+          if (nnDownloadCancelled) {
+            console.log("[NN Resume] Cancelled by user during fetch");
+            return { success: false, totalCandles, resumed: true };
+          }
+          
+          const batchEnd = Math.min(cursor + (CANDLES_PER_REQUEST * msPerCandle), now);
+          
+          try {
+            const klines = await fetchKlinesBatch(symbol, tf, cursor, batchEnd);
+            
+            if (klines.length > 0) {
+              const candleInserts = klines.map(k => ({
+                symbol,
+                timestamp: k.openTime,
+                timeframe: tf,
+                open: parseFloat(k.open),
+                high: parseFloat(k.high),
+                low: parseFloat(k.low),
+                close: parseFloat(k.close),
+                volume: parseFloat(k.volume),
+              }));
+              
+              for (const candle of candleInserts) {
+                await db.insert(candles)
+                  .values(candle)
+                  .onConflictDoNothing();
+              }
+              
+              fetched += klines.length;
+              cursor = klines[klines.length - 1].openTime + msPerCandle;
+            } else {
+              cursor = batchEnd + msPerCandle;
+            }
+            
+            const progress = Math.min(((cursor - startCursor) / (now - startCursor)) * 100, 100);
+            nnDownloadProgress.set(key, {
+              symbol,
+              timeframe: tf,
+              status: "downloading",
+              progress,
+              candlesFetched: existingCount + fetched,
+            });
+            
+            if (onProgress) {
+              onProgress(symbol, tf, progress);
+            }
+            
+            await new Promise(resolve => setTimeout(resolve, 50));
+          } catch (error) {
+            console.error(`[NN Resume] Error fetching ${symbol} ${tf}:`, error);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            cursor = batchEnd + msPerCandle;
+          }
+        }
+        
+        nnDownloadProgress.set(key, {
+          symbol,
+          timeframe: tf,
+          status: "complete",
+          progress: 100,
+          candlesFetched: existingCount + fetched,
+        });
+        
+        totalCandles += fetched;
+        console.log(`[NN Resume] Completed ${symbol} ${tf}: +${fetched} new candles (${existingCount + fetched} total)`);
+      }
+    }
+    
+    console.log(`[NN Resume] All timeframes complete: ${totalCandles} new candles fetched`);
+    return { success: true, totalCandles, resumed: true };
+  } catch (error) {
+    console.error("[NN Resume] Error:", error);
+    return { success: false, totalCandles, resumed: true };
+  }
 }
