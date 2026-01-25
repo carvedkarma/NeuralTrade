@@ -18,6 +18,13 @@ The system operates with live data only - no simulated fallback. Shows error mes
 
 ## Recent Changes (January 2026)
 
+- **DATA PROXY FOR GEOBLOCKED REGIONS** (Jan 25):
+  - New /api/data/klines, /api/data/orderbook, /api/data/ticker proxy endpoints
+  - Routes Binance requests through Replit server (bypasses Australian geoblocking)
+  - GPU trainer uses Replit proxy as PRIMARY source when REPLIT_PROXY_URL is set
+  - Fallback chain: Replit Proxy → Binance Vision → Binance API → CryptoCompare
+  - CLI: `python main.py fetch --candles 50000 --replit-proxy https://your-app.replit.app`
+  - Or set env: `REPLIT_PROXY_URL=https://your-app.replit.app`
 - **GPU NEURAL NETWORK TRAINING UI** (Jan 25):
   - New GPUTrainingSection in Learning tab showing GPU trainer status
   - GPUStatusCard: GPU availability, VRAM usage, uptime, loaded models
