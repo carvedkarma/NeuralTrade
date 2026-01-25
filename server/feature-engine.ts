@@ -720,11 +720,91 @@ export function computeFeatures(candles: Candle[]): FeatureVector[] {
       bnbMomentumDivergence: 0,
       cryptoSectorMomentum: 0,
       
-      embedding,
+      embedding: sanitizeArray(embedding),
     });
   }
   
-  return features;
+  // Sanitize all feature vectors to prevent NaN/Infinity propagation
+  return features.map(sanitizeFeatureVector);
+}
+
+/**
+ * FEATURE SANITIZATION: Prevent NaN/Infinity from corrupting ML predictions
+ * Replaces invalid values with safe defaults to ensure system stability
+ */
+function sanitizeValue(val: number, defaultVal: number = 0): number {
+  if (!Number.isFinite(val)) return defaultVal;
+  return val;
+}
+
+function sanitizeArray(arr: number[]): number[] {
+  return arr.map(v => sanitizeValue(v, 0));
+}
+
+function sanitizeFeatureVector(f: FeatureVector): FeatureVector {
+  // CRITICAL: Sanitize price first since other defaults depend on it
+  const safePrice = sanitizeValue(f.price, 50000);  // Reasonable BTC default
+  const safeAtr = sanitizeValue(f.atr14, safePrice * 0.01);  // Default 1% ATR
+  
+  return {
+    ...f,
+    price: safePrice,
+    open: sanitizeValue(f.open, safePrice),
+    high: sanitizeValue(f.high, safePrice),
+    low: sanitizeValue(f.low, safePrice),
+    close: sanitizeValue(f.close, safePrice),
+    volume: sanitizeValue(f.volume, 0),
+    normalizedPrice: sanitizeValue(f.normalizedPrice, 1),
+    normalizedVolume: sanitizeValue(f.normalizedVolume, 1),
+    candleBody: sanitizeValue(f.candleBody, 0),
+    candleRange: sanitizeValue(f.candleRange, 0),
+    returns1: sanitizeValue(f.returns1, 0),
+    returns2: sanitizeValue(f.returns2, 0),
+    returns4: sanitizeValue(f.returns4, 0),
+    returns8: sanitizeValue(f.returns8, 0),
+    ema20: sanitizeValue(f.ema20, safePrice),
+    ema50: sanitizeValue(f.ema50, safePrice),
+    ema20Slope: sanitizeValue(f.ema20Slope, 0),
+    ema50Slope: sanitizeValue(f.ema50Slope, 0),
+    emaDistance: sanitizeValue(f.emaDistance, 0),
+    breakoutDistanceHigh: sanitizeValue(f.breakoutDistanceHigh, 0),
+    breakoutDistanceLow: sanitizeValue(f.breakoutDistanceLow, 0),
+    efficiencyRatio: sanitizeValue(f.efficiencyRatio, 0.5),
+    atr14: safeAtr,
+    volatility: sanitizeValue(f.volatility, 0),
+    bollingerWidth: sanitizeValue(f.bollingerWidth, 0),
+    rsi14: sanitizeValue(f.rsi14, 50),
+    macd: sanitizeValue(f.macd, 0),
+    macdSignal: sanitizeValue(f.macdSignal, 0),
+    macdHist: sanitizeValue(f.macdHist, 0),
+    adx: sanitizeValue(f.adx, 25),
+    plusDi: sanitizeValue(f.plusDi, 25),
+    minusDi: sanitizeValue(f.minusDi, 25),
+    stochK: sanitizeValue(f.stochK, 50),
+    stochD: sanitizeValue(f.stochD, 50),
+    obv: sanitizeValue(f.obv, 0),
+    obvSlope: sanitizeValue(f.obvSlope, 0),
+    kalmanFast: sanitizeValue(f.kalmanFast, safePrice),
+    kalmanSlow: sanitizeValue(f.kalmanSlow, safePrice),
+    kalmanSpread: sanitizeValue(f.kalmanSpread, 0),
+    pricePosition: sanitizeValue(f.pricePosition, 0.5),
+    trendStrength: sanitizeValue(f.trendStrength, 25),
+    momentum: sanitizeValue(f.momentum, 0),
+    volumeRatio: sanitizeValue(f.volumeRatio, 1),
+    priceVelocity: sanitizeValue(f.priceVelocity, 0),
+    priceAcceleration: sanitizeValue(f.priceAcceleration, 0),
+    ethBtcCorrelation: sanitizeValue(f.ethBtcCorrelation, 0),
+    solBtcCorrelation: sanitizeValue(f.solBtcCorrelation, 0),
+    bnbBtcCorrelation: sanitizeValue(f.bnbBtcCorrelation, 0),
+    ethRelativeStrength: sanitizeValue(f.ethRelativeStrength, 1),
+    solRelativeStrength: sanitizeValue(f.solRelativeStrength, 1),
+    bnbRelativeStrength: sanitizeValue(f.bnbRelativeStrength, 1),
+    ethMomentumDivergence: sanitizeValue(f.ethMomentumDivergence, 0),
+    solMomentumDivergence: sanitizeValue(f.solMomentumDivergence, 0),
+    bnbMomentumDivergence: sanitizeValue(f.bnbMomentumDivergence, 0),
+    cryptoSectorMomentum: sanitizeValue(f.cryptoSectorMomentum, 0),
+    embedding: sanitizeArray(f.embedding),
+  };
 }
 
 /**

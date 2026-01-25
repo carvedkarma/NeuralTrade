@@ -101,6 +101,7 @@ export interface CombinedIntelligence {
   finalConfidence: number;
   reasoning: string[];
   vetoes: string[];
+  atrPercentile: number;  // Used by Meta-Labeling for volatility-adjusted gating
 }
 
 export class StrategyLearner {
@@ -1013,6 +1014,10 @@ export class StrategyLearner {
     
     finalConfidence = Math.max(0, Math.min(1, finalConfidence));
     
+    // Get ATR percentile for Meta-Labeling volatility filter
+    const regimeAnalysis = classifyRegime(candles);
+    const atrPercentile = regimeAnalysis.atrPercentile;
+    
     return {
       mlDirection,
       mlConfidence,
@@ -1026,6 +1031,7 @@ export class StrategyLearner {
       finalConfidence,
       reasoning,
       vetoes,
+      atrPercentile,
     };
   }
 
