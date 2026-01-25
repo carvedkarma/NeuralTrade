@@ -50,10 +50,21 @@ class GPUTrainerGUI:
         self.fetch_thread = None
         self.stop_training_flag = threading.Event()
         
+        self.current_model = None
+        self.current_epoch = 0
+        self.total_epochs = 0
+        self.train_loss = None
+        self.val_loss = None
+        self.models_completed = []
+        self.gpu_name = None
+        self.gpu_memory_used = None
+        self.gpu_memory_total = None
+        
         self.create_widgets()
         self.wire_stdout_to_log()
         self.check_gpu_status()
         self.process_log_queue()
+        self.start_status_push()
     
     def wire_stdout_to_log(self):
         self.original_stdout = sys.stdout
@@ -147,7 +158,7 @@ class GPUTrainerGUI:
         proxy_frame.pack(fill=tk.X, pady=(0, 10))
         
         ttk.Label(proxy_frame, text="Replit Proxy URL:").pack(anchor=tk.W)
-        self.proxy_url_var = tk.StringVar(value=os.getenv("REPLIT_PROXY_URL", "https://web-app-carvedkarma.replit.app"))
+        self.proxy_url_var = tk.StringVar(value=os.getenv("REPLIT_PROXY_URL", "https://99f68291-4a03-450a-9815-ebee9435cee2-00-2os5ge21n6uho.spock.replit.dev"))
         proxy_entry = ttk.Entry(proxy_frame, textvariable=self.proxy_url_var, width=40)
         proxy_entry.pack(fill=tk.X, pady=(2, 0))
         
@@ -280,12 +291,17 @@ class GPUTrainerGUI:
                 import torch
                 if torch.cuda.is_available():
                     name = torch.cuda.get_device_name(0)
-                    mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
-                    status = f"[OK] GPU: {name} ({mem:.1f} GB)"
-                    self.log(f"GPU Detected: {name} with {mem:.1f} GB VRAM")
+                    mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                    mem_used = torch.cuda.memory_allocated(0) / 1024**3
+                    status = f"[OK] GPU: {name} ({mem_total:.1f} GB)"
+                    self.log(f"GPU Detected: {name} with {mem_total:.1f} GB VRAM")
+                    self.gpu_name = name
+                    self.gpu_memory_total = mem_total
+                    self.gpu_memory_used = mem_used
                 else:
                     status = "[WARN] No GPU - Using CPU"
                     self.log("WARNING: No GPU detected. Training will be slow on CPU.")
+                    self.gpu_name = None
             except ImportError:
                 status = "[ERROR] PyTorch not installed"
                 self.log("ERROR: PyTorch not installed. Run: pip install torch")
@@ -324,6 +340,45 @@ class GPUTrainerGUI:
             with open(filename, 'w') as f:
                 f.write(self.log_text.get(1.0, tk.END))
             self.log(f"Log saved to: {filename}")
+    
+    def start_status_push(self):
+        def push_loop():
+            while True:
+                self.push_status_to_replit()
+                import time
+                time.sleep(5)
+        
+        push_thread = threading.Thread(target=push_loop, daemon=True)
+        push_thread.start()
+        
+    def push_status_to_replit(self):
+        try:
+            import requests
+            proxy_url = self.proxy_url_var.get().strip()
+            if not proxy_url:
+                return
+            
+            status = {
+                "gpuAvailable": self.gpu_name is not None,
+                "gpuName": self.gpu_name,
+                "gpuMemoryUsed": self.gpu_memory_used,
+                "gpuMemoryTotal": self.gpu_memory_total,
+                "isTraining": self.is_training,
+                "trainingProgress": (self.current_epoch / self.total_epochs * 100) if self.total_epochs > 0 else 0,
+                "currentModel": self.current_model,
+                "currentEpoch": self.current_epoch,
+                "totalEpochs": self.total_epochs,
+                "trainLoss": self.train_loss,
+                "valLoss": self.val_loss,
+                "modelsLoaded": [],
+                "modelsCompleted": self.models_completed
+            }
+            
+            url = f"{proxy_url}/api/gpu/push-status"
+            response = requests.post(url, json=status, timeout=5)
+            
+        except Exception:
+            pass
             
     def test_proxy(self):
         def do_test():
@@ -555,10 +610,15 @@ class GPUTrainerGUI:
                 
                 trainer = Trainer(model, train_loader, val_loader, config, device=config.device)
                 
-                original_callback = trainer.epoch_callback if hasattr(trainer, 'epoch_callback') else None
+                self.current_model = model_type
+                self.total_epochs = epochs
                 
                 def progress_callback(epoch, train_loss, val_loss):
                     progress = (epoch + 1) / epochs * 100
+                    self.current_epoch = epoch + 1
+                    self.train_loss = train_loss
+                    self.val_loss = val_loss
+                    
                     self.root.after(0, lambda: self.train_progress.config(value=progress))
                     self.root.after(0, lambda: self.train_status_label.config(
                         text=f"Epoch {epoch+1}/{epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}"
@@ -574,6 +634,7 @@ class GPUTrainerGUI:
                 history = trainer.train(epochs=epochs)
                 
                 if self.is_training:
+                    self.models_completed.append(model_type)
                     save_path = config.model_dir / f"{model_type}_trained.pt"
                     model.save(str(save_path))
                     self.log(f"")

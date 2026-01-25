@@ -86,15 +86,30 @@ export default function Dashboard() {
     refetchInterval: 60000,
   });
 
-  const { data: gpuStatus } = useQuery<{ connected: boolean; metrics: GPUMetrics | null }>({
-    queryKey: ["/api/gpu/status"],
+  const { data: gpuStatus } = useQuery<{ 
+    connected: boolean; 
+    isStale: boolean;
+    gpuAvailable: boolean;
+    gpuName: string | null;
+    gpuMemoryUsed: number | null;
+    gpuMemoryTotal: number | null;
+    isTraining: boolean;
+    trainingProgress: number;
+    currentModel: string | null;
+    currentEpoch: number;
+    totalEpochs: number;
+    trainLoss: number | null;
+    valLoss: number | null;
+    modelsCompleted: string[];
+  }>({
+    queryKey: ["/api/gpu/pushed-status"],
     refetchInterval: 5000,
   });
 
   const trainModelMutation = useMutation({
     mutationFn: (modelType: string) => apiRequest("POST", "/api/gpu/train", { modelType, epochs: 100 }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/gpu/status"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/gpu/pushed-status"] });
     },
   });
 
@@ -339,7 +354,25 @@ export default function Dashboard() {
               
               {/* GPU Neural Network Training - NEW */}
               <GPUTrainingSection 
-                gpuMetrics={gpuStatus?.metrics}
+                gpuMetrics={gpuStatus ? {
+                  gpuAvailable: gpuStatus.connected && gpuStatus.gpuAvailable,
+                  gpuName: gpuStatus.gpuName,
+                  gpuMemoryUsed: gpuStatus.gpuMemoryUsed,
+                  gpuMemoryTotal: gpuStatus.gpuMemoryTotal,
+                  gpuMemoryPercent: gpuStatus.gpuMemoryTotal ? 
+                    ((gpuStatus.gpuMemoryUsed || 0) / gpuStatus.gpuMemoryTotal) * 100 : 0,
+                  modelsLoaded: gpuStatus.modelsCompleted || [],
+                  uptime: 0,
+                  isTraining: gpuStatus.isTraining,
+                  trainingProgress: gpuStatus.trainingProgress,
+                  currentModel: gpuStatus.currentModel,
+                  trainingMetrics: {
+                    epoch: gpuStatus.currentEpoch,
+                    totalEpochs: gpuStatus.totalEpochs,
+                    trainLoss: gpuStatus.trainLoss || 0,
+                    valLoss: gpuStatus.valLoss || 0
+                  }
+                } : null}
                 onStartTraining={(modelType) => trainModelMutation.mutate(modelType)}
               />
               

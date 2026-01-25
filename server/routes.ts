@@ -322,6 +322,47 @@ export async function registerRoutes(
     }
   });
 
+  // GPU Status Push Endpoint - Receives status updates from local GPU trainer
+  // This allows the dashboard to know when the GPU is connected and training
+  app.post("/api/gpu/push-status", (req, res) => {
+    try {
+      const status = req.body;
+      gpuBridge.updatePushedStatus({
+        connected: true,
+        lastPush: Date.now(),
+        gpuAvailable: status.gpuAvailable ?? false,
+        gpuName: status.gpuName ?? null,
+        gpuMemoryUsed: status.gpuMemoryUsed ?? null,
+        gpuMemoryTotal: status.gpuMemoryTotal ?? null,
+        isTraining: status.isTraining ?? false,
+        trainingProgress: status.trainingProgress ?? 0,
+        currentModel: status.currentModel ?? null,
+        currentEpoch: status.currentEpoch ?? 0,
+        totalEpochs: status.totalEpochs ?? 0,
+        trainLoss: status.trainLoss ?? null,
+        valLoss: status.valLoss ?? null,
+        modelsLoaded: status.modelsLoaded ?? [],
+        modelsCompleted: status.modelsCompleted ?? []
+      });
+      console.log(`[GPU Push] Received status update - GPU: ${status.gpuName}, Training: ${status.isTraining}`);
+      res.json({ success: true, received: Date.now() });
+    } catch (error) {
+      console.error("[GPU Push] Error:", error);
+      res.status(500).json({ error: "Failed to process status update" });
+    }
+  });
+
+  // Get pushed GPU status (for dashboard to poll)
+  app.get("/api/gpu/pushed-status", (req, res) => {
+    const status = gpuBridge.getPushedStatus();
+    const isStale = status.lastPush ? Date.now() - status.lastPush > 30000 : true;
+    res.json({
+      ...status,
+      connected: status.connected && !isStale,
+      isStale
+    });
+  });
+
   // Data Proxy Endpoints - Allow local GPU trainer to fetch Binance data through Replit
   const BINANCE_VISION_URL = "https://data-api.binance.vision/api/v3";
   

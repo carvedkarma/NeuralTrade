@@ -40,14 +40,65 @@ interface GPUTrainingStatus {
   metrics: Record<string, number>;
 }
 
+interface PushedGPUStatus {
+  connected: boolean;
+  lastPush: number | null;
+  gpuAvailable: boolean;
+  gpuName: string | null;
+  gpuMemoryUsed: number | null;
+  gpuMemoryTotal: number | null;
+  isTraining: boolean;
+  trainingProgress: number;
+  currentModel: string | null;
+  currentEpoch: number;
+  totalEpochs: number;
+  trainLoss: number | null;
+  valLoss: number | null;
+  modelsLoaded: string[];
+  modelsCompleted: string[];
+}
+
 class GPUTrainerBridge {
   private baseUrl: string;
   private isAvailable: boolean = false;
   private lastHealthCheck: number = 0;
   private healthCheckInterval: number = 30000; // 30 seconds
   
+  // Pushed status from remote GPU trainer
+  private pushedStatus: PushedGPUStatus = {
+    connected: false,
+    lastPush: null,
+    gpuAvailable: false,
+    gpuName: null,
+    gpuMemoryUsed: null,
+    gpuMemoryTotal: null,
+    isTraining: false,
+    trainingProgress: 0,
+    currentModel: null,
+    currentEpoch: 0,
+    totalEpochs: 0,
+    trainLoss: null,
+    valLoss: null,
+    modelsLoaded: [],
+    modelsCompleted: []
+  };
+  
   constructor(baseUrl: string = "http://localhost:8000") {
     this.baseUrl = baseUrl;
+  }
+  
+  /**
+   * Update pushed status from remote GPU trainer
+   */
+  updatePushedStatus(status: PushedGPUStatus): void {
+    this.pushedStatus = status;
+  }
+  
+  /**
+   * Get pushed status (for dashboard)
+   */
+  getPushedStatus(): PushedGPUStatus {
+    return this.pushedStatus;
   }
   
   /**
