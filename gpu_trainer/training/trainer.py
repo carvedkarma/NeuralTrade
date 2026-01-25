@@ -11,7 +11,7 @@ from datetime import datetime
 import json
 from tqdm import tqdm
 import logging
-from tensorboard import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
