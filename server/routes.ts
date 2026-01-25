@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
-import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs } from "./historical-data";
+import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes } from "./historical-data";
 import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
 import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning } from "./unified-learning-controller";
@@ -146,6 +146,101 @@ export async function registerRoutes(
       console.error("Error resetting learning data:", error);
       res.status(500).json({ error: "Failed to reset learning data" });
     }
+  });
+
+  // Manual start for Strategy Learner
+  app.post("/api/strategy-learner/start", async (req, res) => {
+    try {
+      console.log("[API] Manual Strategy Learner training requested");
+      const result = await strategyLearner.startManual();
+      res.json(result);
+    } catch (error) {
+      console.error("Error starting strategy learner:", error);
+      res.status(500).json({ success: false, message: "Failed to start strategy learner" });
+    }
+  });
+
+  // Manual start for Deep Learning / Pattern Memory
+  app.post("/api/deep-learning/start", async (req, res) => {
+    try {
+      console.log("[API] Manual Deep Learning training requested");
+      const result = await storage.startDeepLearningManual();
+      res.json(result);
+    } catch (error) {
+      console.error("Error starting deep learning:", error);
+      res.status(500).json({ success: false, message: "Failed to start deep learning" });
+    }
+  });
+
+  // Get training status for both systems
+  app.get("/api/training/status", async (req, res) => {
+    try {
+      const storageStatus = storage.getTrainingStatus();
+      const strategyStarted = strategyLearner.hasStartedTraining();
+      
+      res.json({
+        deepLearning: {
+          started: storageStatus.deepLearningStarted,
+          progress: storageStatus.deepLearningProgress,
+        },
+        strategyLearner: {
+          started: strategyStarted,
+          epochs: storageStatus.strategyLearnerEpochs,
+        },
+      });
+    } catch (error) {
+      console.error("Error getting training status:", error);
+      res.status(500).json({ error: "Failed to get training status" });
+    }
+  });
+
+  // Neural Network multi-timeframe data endpoints
+  app.get("/api/nn-data/summary", async (req, res) => {
+    try {
+      const summary = await getNNDataSummary();
+      res.json(summary);
+    } catch (error) {
+      console.error("Error getting NN data summary:", error);
+      res.status(500).json({ error: "Failed to get NN data summary" });
+    }
+  });
+
+  app.get("/api/nn-data/progress", async (req, res) => {
+    try {
+      const progress = getNNDownloadProgress();
+      res.json({ progress });
+    } catch (error) {
+      console.error("Error getting NN download progress:", error);
+      res.status(500).json({ error: "Failed to get NN download progress" });
+    }
+  });
+
+  app.post("/api/nn-data/download", async (req, res) => {
+    const years = req.body.years || 3;
+    
+    res.json({ started: true, message: `Starting download for ${years} year(s) of multi-timeframe data (1m, 5m, 1h, 4h)` });
+    
+    downloadNNData(years, (symbol, timeframe, progress) => {
+      console.log(`[NN Data] ${symbol} ${timeframe}: ${progress.toFixed(1)}%`);
+    }).then(result => {
+      console.log(`[NN Data] Download complete: ${result.totalCandles} candles`);
+    }).catch(error => {
+      console.error("[NN Data] Download error:", error);
+    });
+  });
+
+  app.get("/api/nn-data/export", async (req, res) => {
+    try {
+      const data = await exportNNData();
+      res.json(data);
+    } catch (error) {
+      console.error("Error exporting NN data:", error);
+      res.status(500).json({ error: "Failed to export NN data" });
+    }
+  });
+
+  app.get("/api/nn-data/timeframes", async (req, res) => {
+    res.json({ timeframes: getNNTimeframes() });
   });
 
   app.get("/api/historical/status", async (req, res) => {

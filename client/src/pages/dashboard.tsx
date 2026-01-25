@@ -47,8 +47,9 @@ import {
 } from "@/components/paper-trading-card";
 import { StrategyLearnerTab } from "@/components/strategy-learner-card";
 import { DataManagementCard } from "@/components/data-management-card";
+import { NeuralNetworkDataCard } from "@/components/nn-data-card";
 import type { DashboardData } from "@shared/schema";
-import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff, Brain } from "lucide-react";
+import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff, Brain, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -146,8 +147,25 @@ export default function Dashboard() {
     refetchInterval: 10000,
   });
 
+  const { data: trainingStatus } = useQuery<{
+    deepLearning: { started: boolean; progress: number };
+    strategyLearner: { started: boolean; epochs: number };
+  }>({
+    queryKey: ["/api/training/status"],
+    refetchInterval: 5000,
+  });
+
   // Check if historical data has been downloaded (minimum 1000 candles)
   const hasHistoricalData = dataSummary && dataSummary.totalCandles >= 1000;
+  const hasDeepLearningStarted = trainingStatus?.deepLearning?.started || false;
+
+  const startDeepLearningMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/deep-learning/start"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/training/status"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
+    },
+  });
 
   const resetLearningMutation = useMutation({
     mutationFn: () => apiRequest("POST", "/api/unified-learning/reset"),
@@ -397,6 +415,9 @@ export default function Dashboard() {
 
           <TabsContent value="gpu-training" className="mt-0">
             <div className="space-y-4">
+              {/* Neural Network Multi-Timeframe Data */}
+              <NeuralNetworkDataCard />
+              
               {/* GPU Training Status */}
               <GPUTrainingSection 
                 gpuMetrics={gpuStatus ? {
@@ -458,6 +479,39 @@ export default function Dashboard() {
                   <p className="mt-2 text-xs text-muted-foreground">
                     Current data: {dataSummary?.totalCandles?.toLocaleString() || 0} candles (need 1,000+)
                   </p>
+                </div>
+              ) : !hasDeepLearningStarted ? (
+                <div className="p-6 rounded-lg border border-emerald-500/30 bg-emerald-500/10" data-testid="learning-ready">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="flex items-center gap-2 text-emerald-400">
+                        <Brain className="h-5 w-5" />
+                        <span className="font-medium">Ready to Train - Pattern Memory & Deep Learning</span>
+                      </div>
+                      <p className="mt-2 text-sm text-muted-foreground">
+                        Historical data loaded: {dataSummary?.totalCandles?.toLocaleString()} candles.
+                        Click Start Learning to begin training the Pattern Memory and Deep Learning systems.
+                      </p>
+                    </div>
+                    <Button
+                      onClick={() => startDeepLearningMutation.mutate()}
+                      disabled={startDeepLearningMutation.isPending}
+                      className="bg-emerald-600"
+                      data-testid="button-start-deep-learning"
+                    >
+                      {startDeepLearningMutation.isPending ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          Training...
+                        </>
+                      ) : (
+                        <>
+                          <Play className="h-4 w-4 mr-2" />
+                          Start Learning
+                        </>
+                      )}
+                    </Button>
+                  </div>
                 </div>
               ) : (
                 <>

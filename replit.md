@@ -21,6 +21,8 @@ Key capabilities include:
 - **Persistence System**: All learning states, including pattern clusters and social media stats, are persisted in a database to survive restarts.
 - **Multi-Asset Data Management**: GUI-based download/clear for 1-15 years of historical data (BTC, ETH, SOL, BNB). Auto-detects stored data, all 3 learning systems share the same dataset.
 - **Unified Learning Controller**: Synchronizes Strategy Learner, Pattern Memory, and GPU Trainer to process the same historical data range.
+- **Manual Training Controls**: Start Learning buttons for Strategy Learner and Deep Learning systems - training only begins when explicitly triggered after data is downloaded.
+- **Multi-Timeframe Neural Network Data**: Separate data pipeline for GPU neural networks (1m, 5m, 1h, 4h timeframes) distinct from the 15m data used by Strategy Learner and Pattern Memory.
 
 ## User Preferences
 

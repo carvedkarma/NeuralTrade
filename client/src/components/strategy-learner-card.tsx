@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,8 +14,11 @@ import {
   Activity,
   AlertTriangle,
   CheckCircle2,
-  Loader2
+  Loader2,
+  Play
 } from "lucide-react";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 
 interface ActionOutcome {
   action: "LONG" | "SHORT" | "HOLD";
@@ -585,7 +588,14 @@ interface DataSummary {
   totalCandles: number;
 }
 
+interface TrainingStatus {
+  deepLearning: { started: boolean; progress: number };
+  strategyLearner: { started: boolean; epochs: number };
+}
+
 export function StrategyLearnerTab() {
+  const { toast } = useToast();
+  
   const { data, isLoading, error } = useQuery<StrategyLearnerData>({
     queryKey: ["/api/strategy-learner"],
     refetchInterval: 5000,
@@ -596,8 +606,34 @@ export function StrategyLearnerTab() {
     refetchInterval: 10000,
   });
 
+  const { data: trainingStatus } = useQuery<TrainingStatus>({
+    queryKey: ["/api/training/status"],
+    refetchInterval: 5000,
+  });
+
+  const startTrainingMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/strategy-learner/start"),
+    onSuccess: (response: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/strategy-learner"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/training/status"] });
+      toast({
+        title: response.success ? "Training Started" : "Training Failed",
+        description: response.message,
+        variant: response.success ? "default" : "destructive",
+      });
+    },
+    onError: () => {
+      toast({
+        title: "Error",
+        description: "Failed to start training",
+        variant: "destructive",
+      });
+    },
+  });
+
   // Check if historical data has been downloaded
   const hasHistoricalData = dataSummary && dataSummary.totalCandles >= 1000;
+  const hasStartedTraining = trainingStatus?.strategyLearner?.started || (data?.trainingProgress?.epochsCompleted ?? 0) > 0;
 
   if (isLoading) {
     return (
@@ -625,6 +661,44 @@ export function StrategyLearnerTab() {
         <p className="mt-2 text-xs text-muted-foreground">
           Current data: {dataSummary?.totalCandles?.toLocaleString() || 0} candles (need 1,000+)
         </p>
+      </div>
+    );
+  }
+
+  // Show "Not started" state with Start button when training hasn't begun
+  if (!hasStartedTraining) {
+    return (
+      <div className="p-6 rounded-lg border border-emerald-500/30 bg-emerald-500/10" data-testid="strategy-learner-ready">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="flex items-center gap-2 text-emerald-400">
+              <Brain className="h-5 w-5" />
+              <span className="font-medium">Ready to Train</span>
+            </div>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Historical data loaded: {dataSummary?.totalCandles?.toLocaleString()} candles.
+              Click Start Learning to begin training the Strategy Learner.
+            </p>
+          </div>
+          <Button
+            onClick={() => startTrainingMutation.mutate()}
+            disabled={startTrainingMutation.isPending}
+            className="bg-emerald-600"
+            data-testid="button-start-strategy-learner"
+          >
+            {startTrainingMutation.isPending ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                Training...
+              </>
+            ) : (
+              <>
+                <Play className="h-4 w-4 mr-2" />
+                Start Learning
+              </>
+            )}
+          </Button>
+        </div>
       </div>
     );
   }

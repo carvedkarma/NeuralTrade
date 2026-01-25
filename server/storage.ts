@@ -525,6 +525,59 @@ export class MemStorage implements IStorage {
     }
   }
 
+  // Manual trigger for deep learning / pattern memory training
+  async startDeepLearningManual(): Promise<{ success: boolean; message: string }> {
+    try {
+      const { loadCandlesFromDb, getMultiAssetDataSummary } = await import("./historical-data");
+      
+      // Check if historical data exists
+      const dataSummary = await getMultiAssetDataSummary();
+      const btcData = dataSummary.assets.find(a => a.symbol === "BTCUSDT");
+      
+      if (!btcData || btcData.totalCandles < 1000) {
+        return { 
+          success: false, 
+          message: `Need at least 1,000 candles to train. Currently have ${btcData?.totalCandles || 0}. Download historical data first.` 
+        };
+      }
+      
+      // Reset training state to allow fresh training
+      this.learningStats.deepLearningComplete = false;
+      this.learningStats.deepLearningIndex = 50;
+      this.learningStats.deepLearningPassCount = 0;
+      this.lastTrainingRun = 0;
+      
+      console.log("[Deep Learning] Manual training triggered - resetting progress and starting fresh");
+      
+      // Trigger training immediately
+      await this.trainOnHistoricalCandles();
+      
+      return { 
+        success: true, 
+        message: `Training started with ${btcData.totalCandles.toLocaleString()} candles` 
+      };
+    } catch (error) {
+      console.error("[Deep Learning] Manual start error:", error);
+      return { success: false, message: "Failed to start training" };
+    }
+  }
+
+  // Get training status for UI
+  getTrainingStatus(): { 
+    deepLearningStarted: boolean; 
+    strategyLearnerStarted: boolean;
+    deepLearningProgress: number;
+    strategyLearnerEpochs: number;
+  } {
+    return {
+      deepLearningStarted: this.learningStats.deepLearningIndex > 50 || this.learningStats.deepLearningComplete,
+      strategyLearnerStarted: this.learningStats.learningEpochs > 0,
+      deepLearningProgress: this.learningStats.deepLearningComplete ? 100 : 
+        Math.min(99, ((this.learningStats.deepLearningIndex - 50) / (this.learningStats.historicalCandlesProcessed - 66)) * 100) || 0,
+      strategyLearnerEpochs: this.learningStats.learningEpochs,
+    };
+  }
+
   async reloadHistoricalCandles(): Promise<void> {
     try {
       const { loadCandlesFromDb, getDataRangeInfo } = await import("./historical-data");

@@ -1138,3 +1138,220 @@ export async function loadAssetCandlesFromDb(symbol: string, timeframe: string =
 export function getSupportedAssets(): string[] {
   return SUPPORTED_ASSETS;
 }
+
+// Neural Network multi-timeframe support
+const NN_TIMEFRAMES = ["1m", "5m", "1h", "4h"] as const;
+type NNTimeframe = typeof NN_TIMEFRAMES[number];
+
+const MS_PER_TIMEFRAME: Record<NNTimeframe, number> = {
+  "1m": 60 * 1000,
+  "5m": 5 * 60 * 1000,
+  "1h": 60 * 60 * 1000,
+  "4h": 4 * 60 * 60 * 1000,
+};
+
+interface NNDownloadProgress {
+  symbol: string;
+  timeframe: string;
+  status: "pending" | "downloading" | "complete" | "error";
+  progress: number;
+  candlesFetched: number;
+}
+
+const nnDownloadProgress = new Map<string, NNDownloadProgress>();
+
+export function getNNDownloadProgress(): NNDownloadProgress[] {
+  return Array.from(nnDownloadProgress.values());
+}
+
+export async function getNNDataSummary(): Promise<{
+  timeframes: { timeframe: string; assets: { symbol: string; candles: number }[] }[];
+  totalCandles: number;
+}> {
+  const result: { timeframes: { timeframe: string; assets: { symbol: string; candles: number }[] }[]; totalCandles: number } = {
+    timeframes: [],
+    totalCandles: 0,
+  };
+
+  for (const tf of NN_TIMEFRAMES) {
+    const tfData: { timeframe: string; assets: { symbol: string; candles: number }[] } = {
+      timeframe: tf,
+      assets: [],
+    };
+
+    for (const symbol of SUPPORTED_ASSETS) {
+      const countResult = await db.select({ count: sql<number>`count(*)` })
+        .from(candles)
+        .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, tf)));
+      
+      const count = Number(countResult[0]?.count ?? 0);
+      tfData.assets.push({ symbol, candles: count });
+      result.totalCandles += count;
+    }
+
+    result.timeframes.push(tfData);
+  }
+
+  return result;
+}
+
+export async function downloadNNData(
+  years: number = 3,
+  onProgress?: (symbol: string, timeframe: string, progress: number) => void
+): Promise<{ success: boolean; totalCandles: number }> {
+  const now = Date.now();
+  const startTime = now - (years * 365 * 24 * 60 * 60 * 1000);
+  let totalCandles = 0;
+
+  // Initialize progress for all symbol/timeframe combinations
+  for (const symbol of SUPPORTED_ASSETS) {
+    for (const tf of NN_TIMEFRAMES) {
+      const key = `${symbol}_${tf}`;
+      nnDownloadProgress.set(key, {
+        symbol,
+        timeframe: tf,
+        status: "pending",
+        progress: 0,
+        candlesFetched: 0,
+      });
+    }
+  }
+
+  try {
+    for (const tf of NN_TIMEFRAMES) {
+      const msPerCandle = MS_PER_TIMEFRAME[tf];
+      
+      for (const symbol of SUPPORTED_ASSETS) {
+        const key = `${symbol}_${tf}`;
+        
+        nnDownloadProgress.set(key, {
+          symbol,
+          timeframe: tf,
+          status: "downloading",
+          progress: 0,
+          candlesFetched: 0,
+        });
+
+        console.log(`[NN Download] Starting ${symbol} ${tf}: ${years} years`);
+
+        let cursor = startTime;
+        let fetched = 0;
+
+        while (cursor < now) {
+          const batchEnd = Math.min(cursor + (CANDLES_PER_REQUEST * msPerCandle), now);
+
+          try {
+            const klines = await fetchKlinesBatch(symbol, tf, cursor, batchEnd);
+
+            if (klines.length > 0) {
+              const candleInserts = klines.map(k => ({
+                symbol,
+                timestamp: k.openTime,
+                timeframe: tf,
+                open: parseFloat(k.open),
+                high: parseFloat(k.high),
+                low: parseFloat(k.low),
+                close: parseFloat(k.close),
+                volume: parseFloat(k.volume),
+              }));
+
+              for (const candle of candleInserts) {
+                await db.insert(candles)
+                  .values(candle)
+                  .onConflictDoNothing();
+              }
+
+              fetched += klines.length;
+              cursor = klines[klines.length - 1].openTime + msPerCandle;
+            } else {
+              cursor = batchEnd + msPerCandle;
+            }
+
+            const progress = Math.min(((cursor - startTime) / (now - startTime)) * 100, 100);
+            nnDownloadProgress.set(key, {
+              symbol,
+              timeframe: tf,
+              status: "downloading",
+              progress,
+              candlesFetched: fetched,
+            });
+
+            if (onProgress) {
+              onProgress(symbol, tf, progress);
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 50));
+          } catch (error) {
+            console.error(`[NN Download] Error fetching ${symbol} ${tf}:`, error);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            cursor = batchEnd + msPerCandle;
+          }
+        }
+
+        nnDownloadProgress.set(key, {
+          symbol,
+          timeframe: tf,
+          status: "complete",
+          progress: 100,
+          candlesFetched: fetched,
+        });
+
+        totalCandles += fetched;
+        console.log(`[NN Download] Completed ${symbol} ${tf}: ${fetched} candles`);
+      }
+    }
+
+    console.log(`[NN Download] All timeframes complete: ${totalCandles} total candles`);
+    return { success: true, totalCandles };
+  } catch (error) {
+    console.error("[NN Download] Error:", error);
+    return { success: false, totalCandles };
+  }
+}
+
+export async function exportNNData(): Promise<{
+  timeframes: {
+    [tf: string]: {
+      [symbol: string]: { candles: any[] };
+    };
+  };
+  totalCandles: number;
+}> {
+  const result: {
+    timeframes: { [tf: string]: { [symbol: string]: { candles: any[] } } };
+    totalCandles: number;
+  } = {
+    timeframes: {},
+    totalCandles: 0,
+  };
+
+  for (const tf of NN_TIMEFRAMES) {
+    result.timeframes[tf] = {};
+
+    for (const symbol of SUPPORTED_ASSETS) {
+      const data = await db.select()
+        .from(candles)
+        .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, tf)))
+        .orderBy(asc(candles.timestamp));
+
+      result.timeframes[tf][symbol] = {
+        candles: data.map(c => ({
+          timestamp: c.timestamp,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+          volume: c.volume,
+        })),
+      };
+
+      result.totalCandles += data.length;
+    }
+  }
+
+  return result;
+}
+
+export function getNNTimeframes(): string[] {
+  return [...NN_TIMEFRAMES];
+}

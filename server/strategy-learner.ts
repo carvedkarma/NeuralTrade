@@ -982,6 +982,62 @@ export class StrategyLearner {
     }
   }
 
+  // Manual trigger for strategy learner training
+  async startManual(): Promise<{ success: boolean; message: string; epochsRun: number }> {
+    try {
+      const { loadCandlesFromDb, getMultiAssetDataSummary } = await import("./historical-data");
+      
+      // Check if historical data exists
+      const dataSummary = await getMultiAssetDataSummary();
+      const btcData = dataSummary.assets.find((a: { symbol: string }) => a.symbol === "BTCUSDT");
+      
+      if (!btcData || btcData.totalCandles < 1000) {
+        return { 
+          success: false, 
+          message: `Need at least 1,000 candles to train. Currently have ${btcData?.totalCandles || 0}. Download historical data first.`,
+          epochsRun: 0
+        };
+      }
+      
+      // Load candles from database
+      const candles = await loadCandlesFromDb("BTCUSDT", "15m");
+      
+      if (candles.length < 1000) {
+        return { 
+          success: false, 
+          message: `Not enough candles loaded. Have ${candles.length}, need 1,000+`,
+          epochsRun: 0
+        };
+      }
+      
+      // Reset training progress to allow fresh training
+      this.trainingProgressIdx = 0;
+      this.trainingEpochs = 0;
+      
+      console.log(`[Strategy Learner] Manual training triggered with ${candles.length.toLocaleString()} candles`);
+      
+      // Run multiple training epochs
+      const epochsToRun = 5;
+      for (let i = 0; i < epochsToRun; i++) {
+        await this.trainOnHistoricalData(candles, 2000);
+      }
+      
+      return { 
+        success: true, 
+        message: `Training completed: ${this.trainingEpochs} epochs on ${candles.length.toLocaleString()} candles`,
+        epochsRun: this.trainingEpochs
+      };
+    } catch (error) {
+      console.error("[Strategy Learner] Manual start error:", error);
+      return { success: false, message: "Failed to start training", epochsRun: 0 };
+    }
+  }
+
+  // Check if training has started
+  hasStartedTraining(): boolean {
+    return this.trainingEpochs > 0 || this.actionSamples.length > 0;
+  }
+
   // Reset all learning state and clear database
   reset(): void {
     console.log("[Strategy Learner] Resetting all learning data...");
