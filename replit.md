@@ -18,6 +18,15 @@ The system operates with live data only - no simulated fallback. Shows error mes
 
 ## Recent Changes (January 2026)
 
+- **GPU NEURAL NETWORK TRAINING UI** (Jan 25):
+  - New GPUTrainingSection in Learning tab showing GPU trainer status
+  - GPUStatusCard: GPU availability, VRAM usage, uptime, loaded models
+  - TrainingProgressCard: Real-time loss curves (train/validation) with Recharts
+  - ModelComparisonCard: Shows all 7 neural networks (Transformer, LSTM, CNN, TFT, VAE, GNN, RL PPO) with accuracy/loss/status
+  - Offline detection: Shows setup instructions when local GPU trainer not connected
+  - API endpoints: GET /api/gpu/status, POST /api/gpu/train, GET /api/gpu/health
+  - Auto-refresh every 5 seconds for real-time updates
+  - GPU bridge (server/gpu-bridge.ts) connects to local FastAPI trainer on http://localhost:8000
 - **ACTION-BASED ML ENSEMBLE** (Major Refactor - Jan 25):
   - Models now output P(LONG), P(SHORT), P(HOLD) probabilities instead of forced directions
   - Ensemble aggregates Expected Value (EV) per action across all models
