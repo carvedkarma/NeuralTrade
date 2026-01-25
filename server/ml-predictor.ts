@@ -28,71 +28,95 @@ export interface EnsemblePrediction {
   consensus: number;
 }
 
+// ACTION-BASED MODEL: Each model outputs P(LONG), P(SHORT), P(HOLD)
+// HOLD is a valid action when signals are neutral or conflicting
 function ruleBasedPredict(feature: FeatureVector): MLPrediction {
   let bullScore = 0;
   let bearScore = 0;
-  let chopScore = 0;
+  let holdScore = 0;  // Renamed from chopScore to holdScore for action-based thinking
   
-  if (feature.rsi14 < 30) bullScore += 2;
-  else if (feature.rsi14 > 70) bearScore += 2;
-  else chopScore += 1;
+  // RSI signals - with proper HOLD zone
+  if (feature.rsi14 < 25) bullScore += 2.5;  // Strong oversold
+  else if (feature.rsi14 < 35) bullScore += 1.0;  // Mild oversold
+  else if (feature.rsi14 > 75) bearScore += 2.5;  // Strong overbought
+  else if (feature.rsi14 > 65) bearScore += 1.0;  // Mild overbought
+  else holdScore += 2.0;  // Neutral zone = HOLD
   
-  if (feature.macdHist > 0 && feature.macdHist > feature.macd * 0.1) bullScore += 1.5;
-  else if (feature.macdHist < 0 && feature.macdHist < feature.macd * 0.1) bearScore += 1.5;
+  // MACD signals - require meaningful momentum
+  const macdStrength = Math.abs(feature.macdHist) / (Math.abs(feature.macd) + 0.01);
+  if (feature.macdHist > 0 && macdStrength > 0.15) bullScore += 1.5;
+  else if (feature.macdHist < 0 && macdStrength > 0.15) bearScore += 1.5;
+  else holdScore += 1.0;  // Weak MACD = no edge
   
+  // Kalman regime - crucial for HOLD decision
   if (feature.kalmanRegime === "bull") bullScore += 2;
   else if (feature.kalmanRegime === "bear") bearScore += 2;
-  else chopScore += 2;
+  else holdScore += 3;  // CHOP regime = strongly favor HOLD
   
-  if (feature.adx > 25) {
+  // ADX trend strength - low ADX means HOLD
+  if (feature.adx > 30) {
     if (feature.plusDi > feature.minusDi) bullScore += 1.5;
     else bearScore += 1.5;
+  } else if (feature.adx > 20) {
+    // Moderate trend - weak signal
+    if (feature.plusDi > feature.minusDi) bullScore += 0.5;
+    else bearScore += 0.5;
   } else {
-    chopScore += 1.5;
+    holdScore += 2.5;  // Low ADX = no trend = HOLD
   }
   
-  if (feature.stochK < 20) bullScore += 1;
-  else if (feature.stochK > 80) bearScore += 1;
+  // Stochastic - only at extremes
+  if (feature.stochK < 15) bullScore += 1.5;
+  else if (feature.stochK > 85) bearScore += 1.5;
+  else holdScore += 0.5;
   
-  if (feature.efficiencyRatio > 0.6) {
-    if (feature.returns4 > 0) bullScore += 1;
-    else bearScore += 1;
+  // Efficiency ratio - choppy market = HOLD
+  if (feature.efficiencyRatio > 0.65) {
+    if (feature.returns4 > 0.002) bullScore += 1;
+    else if (feature.returns4 < -0.002) bearScore += 1;
+  } else if (feature.efficiencyRatio < 0.35) {
+    holdScore += 2;  // Very choppy = strong HOLD
   } else {
-    chopScore += 1;
+    holdScore += 0.5;
   }
   
-  if (feature.emaDistance > 1) bearScore += 0.5;
-  else if (feature.emaDistance < -1) bullScore += 0.5;
+  // EMA distance - for mean reversion at extremes only
+  if (feature.emaDistance > 1.5) bearScore += 0.5;
+  else if (feature.emaDistance < -1.5) bullScore += 0.5;
   
-  const total = bullScore + bearScore + chopScore;
-  const probUp = bullScore / total;
-  const probDown = bearScore / total;
-  const probChop = chopScore / total;
+  const total = bullScore + bearScore + holdScore;
   
-  const expectedMove = (probUp - probDown) * feature.atr14 * 2;
+  // Convert scores to ACTION probabilities (not direction probabilities)
+  const pLong = bullScore / total;
+  const pShort = bearScore / total;
+  const pHold = holdScore / total;
   
+  const expectedMove = (pLong - pShort) * feature.atr14 * 2;
+  
+  // ACTION-BASED DIRECTION: HOLD is a valid output when it has highest probability
   let direction: "LONG" | "SHORT" | "HOLD" = "HOLD";
   let confidence = 0;
   
-  // AGGRESSIVE MODE: Lowered thresholds for direction assignment
-  // Previously: probUp > 0.5 && probUp > probDown + 0.15
-  // Now: Just needs to be the highest probability
-  if (probUp >= probDown && probUp >= probChop) {
+  // Require clear edge for action - otherwise HOLD
+  const actionThreshold = 0.40;  // Need 40% probability for action
+  const edgeThreshold = 0.12;    // Need 12% edge over next best action
+  
+  if (pLong > actionThreshold && pLong > pShort + edgeThreshold && pLong > pHold) {
     direction = "LONG";
-    confidence = probUp;
-  } else if (probDown >= probUp && probDown >= probChop) {
+    confidence = pLong;
+  } else if (pShort > actionThreshold && pShort > pLong + edgeThreshold && pShort > pHold) {
     direction = "SHORT";
-    confidence = probDown;
+    confidence = pShort;
   } else {
-    // Chop is highest - but still pick a direction based on second highest
-    direction = probUp > probDown ? "LONG" : "SHORT";
-    confidence = Math.max(probUp, probDown);
+    // Not enough edge - HOLD
+    direction = "HOLD";
+    confidence = pHold;
   }
   
   return {
-    probUp,
-    probDown,
-    probChop,
+    probUp: pLong,
+    probDown: pShort,
+    probChop: pHold,
     expectedMove,
     confidence,
     direction,
@@ -100,57 +124,112 @@ function ruleBasedPredict(feature: FeatureVector): MLPrediction {
   };
 }
 
+// ACTION-BASED PATTERN MODEL: HOLD when pattern EV < 0 or insufficient history
 async function patternBasedPredict(feature: FeatureVector): Promise<MLPrediction> {
   try {
     const matches = await findSimilarPatterns(feature.embedding, 50, 0.6);
     const stats = computePatternStats(matches);
-    const { direction, confidence, reasoning } = getPatternConfidence(stats);
-    
-    // CRITICAL FIX: Calculate probabilities from pattern match data
-    // Use direction-specific win rates when available
     const totalMatches = matches.length;
-    if (totalMatches < 10) {
-      // Insufficient data - return uncertain prediction
+    
+    // Insufficient pattern history - strong HOLD signal
+    if (totalMatches < 15) {
       return {
-        probUp: 0.33,
-        probDown: 0.33,
-        probChop: 0.34,
+        probUp: 0.15,
+        probDown: 0.15,
+        probChop: 0.70,  // High HOLD probability when we don't have enough data
         expectedMove: 0,
-        confidence: 0.2,
+        confidence: 0.70,  // Confident in HOLD, not in direction
         direction: "HOLD",
         model: "pattern_memory",
       };
     }
     
-    // Count patterns by their historical outcomes (actual P&L direction)
-    let upWins = 0;
-    let downWins = 0;
-    let totalWeightedUp = 0;
-    let totalWeightedDown = 0;
+    // Calculate EV for each action from historical pattern outcomes
+    let longEV = 0;
+    let shortEV = 0;
+    let longWins = 0;
+    let shortWins = 0;
+    let longCount = 0;
+    let shortCount = 0;
     
     for (const match of matches) {
-      const weight = match.similarity;  // Weight by similarity
-      if (match.forwardReturn8 > 0.001) {  // 0.1% threshold for meaningful move
-        upWins += weight;
-      } else if (match.forwardReturn8 < -0.001) {
-        downWins += weight;
-      }
-      totalWeightedUp += match.forwardReturn8 > 0 ? weight * Math.abs(match.forwardReturn8) : 0;
-      totalWeightedDown += match.forwardReturn8 < 0 ? weight * Math.abs(match.forwardReturn8) : 0;
+      const weight = match.similarity;
+      const ret = match.forwardReturn8;
+      
+      // Calculate EV if we had taken LONG at this pattern
+      longEV += weight * ret;  // Positive return = LONG wins
+      if (ret > 0.001) longWins += weight;
+      longCount += weight;
+      
+      // Calculate EV if we had taken SHORT at this pattern  
+      shortEV += weight * (-ret);  // Negative return = SHORT wins
+      if (ret < -0.001) shortWins += weight;
+      shortCount += weight;
     }
     
-    const totalWeight = upWins + downWins;
-    const probUp = totalWeight > 0 ? upWins / totalWeight * 0.8 : 0.33;
-    const probDown = totalWeight > 0 ? downWins / totalWeight * 0.8 : 0.33;
-    const probChop = Math.max(0.1, 1 - probUp - probDown);  // At least 10% chop probability
+    // Normalize EVs
+    const avgLongEV = longCount > 0 ? longEV / longCount : 0;
+    const avgShortEV = shortCount > 0 ? shortEV / shortCount : 0;
     
-    // Expected move based on weighted average of historical returns
+    // Win rates for each direction
+    const longWinRate = longCount > 0 ? longWins / longCount : 0;
+    const shortWinRate = shortCount > 0 ? shortWins / shortCount : 0;
+    
+    // Trading costs (fees + slippage)
+    const tradingCosts = 0.0013;  // 0.13% round trip
+    
+    // ACTION-BASED: Use EV directly for action selection
+    const netLongEV = avgLongEV - tradingCosts;
+    const netShortEV = avgShortEV - tradingCosts;
+    
+    // EV thresholds for action
+    const evThreshold = 0.0005;  // 0.05% minimum EV after costs
+    const winRateThreshold = 0.45;  // 45% minimum historical win rate
+    
+    // Directly select action based on max EV (not probability normalization)
+    let direction: "LONG" | "SHORT" | "HOLD" = "HOLD";
+    let confidence = 0;
+    
+    // Find max EV action
+    const maxEV = Math.max(netLongEV, netShortEV, 0);  // 0 = HOLD EV
+    
+    if (maxEV <= 0 || maxEV < evThreshold) {
+      // No action has positive EV - HOLD is best
+      direction = "HOLD";
+      confidence = 0.7;  // High confidence in HOLD when no edge exists
+    } else if (netLongEV >= netShortEV && netLongEV > evThreshold && longWinRate > winRateThreshold) {
+      // LONG has highest positive EV and meets win rate threshold
+      direction = "LONG";
+      confidence = Math.min(0.85, 0.5 + netLongEV * 10 + longWinRate * 0.3);
+    } else if (netShortEV > netLongEV && netShortEV > evThreshold && shortWinRate > winRateThreshold) {
+      // SHORT has highest positive EV and meets win rate threshold
+      direction = "SHORT";
+      confidence = Math.min(0.85, 0.5 + netShortEV * 10 + shortWinRate * 0.3);
+    } else {
+      // EV positive but win rate too low - HOLD
+      direction = "HOLD";
+      confidence = 0.6;
+    }
+    
+    // Convert EV to probabilities for ensemble aggregation
+    // Use sigmoid-like transformation of EV
+    const sigmoid = (x: number) => 1 / (1 + Math.exp(-x * 100));
+    const pLong = netLongEV > 0 && longWinRate > winRateThreshold ? sigmoid(netLongEV) : 0.1;
+    const pShort = netShortEV > 0 && shortWinRate > winRateThreshold ? sigmoid(netShortEV) : 0.1;
+    const pHold = Math.max(0.2, 1 - pLong - pShort);
+    
+    // Normalize probabilities
+    const total = pLong + pShort + pHold;
+    const normPLong = pLong / total;
+    const normPShort = pShort / total;
+    const normPHold = pHold / total;
+    
     const expectedMove = stats.avgReturn8 * feature.kalmanFast;
     
     return {
-      probUp,
-      probDown,
-      probChop,
+      probUp: normPLong,
+      probDown: normPShort,
+      probChop: normPHold,
       expectedMove,
       confidence,
       direction,
@@ -159,11 +238,11 @@ async function patternBasedPredict(feature: FeatureVector): Promise<MLPrediction
   } catch (error) {
     console.error("Pattern prediction error:", error);
     return {
-      probUp: 0.33,
-      probDown: 0.33,
-      probChop: 0.34,
+      probUp: 0.15,
+      probDown: 0.15,
+      probChop: 0.70,
       expectedMove: 0,
-      confidence: 0,
+      confidence: 0.70,
       direction: "HOLD",
       model: "pattern_memory",
     };
@@ -306,6 +385,7 @@ export interface ConfidenceComponents {
   trendFactor: number;
 }
 
+// ACTION-BASED ENSEMBLE: Aggregate EV per action, select max EV, HOLD if max EV <= 0
 export async function getEnsemblePrediction(
   candles: Candle[],
   feature: FeatureVector,
@@ -316,47 +396,54 @@ export async function getEnsemblePrediction(
   const patternPrediction = await patternBasedPredict(feature);
   const aiPrediction = includeAI ? await aiBasedPredict(candles, feature, futuresData) : null;
   
-  // CRITICAL FIX: Use researched weights 35/35/30 (Rule/Pattern/AI)
-  // Pattern memory deserves equal weight to rule-based given historical data
+  // Model weights - can be adjusted based on recent performance
   const weights = {
     rulebased: 0.35,
     pattern: 0.35,
     ai: 0.30,
   };
   
+  // Trading costs for EV calculation
+  const tradingCosts = 0.0013;  // 0.13% round trip (fees + slippage)
+  const currentPrice = feature.kalmanFast || 1;
+  
+  // STEP 1: Aggregate weighted action probabilities from all models
+  // probUp = P(LONG action is profitable)
+  // probDown = P(SHORT action is profitable)  
+  // probChop = P(HOLD action is best)
   let totalWeight = weights.rulebased + weights.pattern;
-  let probUp = rulePrediction.probUp * weights.rulebased + patternPrediction.probUp * weights.pattern;
-  let probDown = rulePrediction.probDown * weights.rulebased + patternPrediction.probDown * weights.pattern;
-  let probChop = rulePrediction.probChop * weights.rulebased + patternPrediction.probChop * weights.pattern;
+  let pLong = rulePrediction.probUp * weights.rulebased + patternPrediction.probUp * weights.pattern;
+  let pShort = rulePrediction.probDown * weights.rulebased + patternPrediction.probDown * weights.pattern;
+  let pHold = rulePrediction.probChop * weights.rulebased + patternPrediction.probChop * weights.pattern;
   let expectedMove = rulePrediction.expectedMove * weights.rulebased + patternPrediction.expectedMove * weights.pattern;
   
   if (aiPrediction) {
     totalWeight += weights.ai;
-    probUp += aiPrediction.probUp * weights.ai;
-    probDown += aiPrediction.probDown * weights.ai;
-    probChop += aiPrediction.probChop * weights.ai;
+    pLong += aiPrediction.probUp * weights.ai;
+    pShort += aiPrediction.probDown * weights.ai;
+    pHold += aiPrediction.probChop * weights.ai;
     expectedMove += aiPrediction.expectedMove * weights.ai;
   }
   
-  probUp /= totalWeight;
-  probDown /= totalWeight;
-  probChop /= totalWeight;
+  // Normalize probabilities
+  pLong /= totalWeight;
+  pShort /= totalWeight;
+  pHold /= totalWeight;
   expectedMove /= totalWeight;
   
-  const isChopRegime = feature.kalmanRegime === "chop";
-  const currentPrice = feature.kalmanFast || 1;
-  const costs = 0.0013;
+  // STEP 2: Calculate Expected Value (EV) for each action
+  // EV(LONG) = P(price goes up) * avg_up_return - P(price goes down) * avg_down_return - costs
+  // Simplified: EV(LONG) = pLong * expectedMove - costs (if expectedMove is positive)
   
-  const patternMaturity = patternPrediction.confidence > 0.5 ? Math.min(1.0, patternPrediction.confidence) : 0.3;
+  const atr = feature.atr14;
+  const avgWinSize = atr * 1.2 / currentPrice;  // Expected winner size as %
+  const avgLossSize = atr * 0.8 / currentPrice; // Expected loser size as %
   
-  const modelConfidences = [rulePrediction.confidence, patternPrediction.confidence];
-  if (aiPrediction) modelConfidences.push(aiPrediction.confidence);
+  const evLong = pLong * avgWinSize - (1 - pLong) * avgLossSize - tradingCosts;
+  const evShort = pShort * avgWinSize - (1 - pShort) * avgLossSize - tradingCosts;
+  const evHold = 0;  // HOLD has zero EV but also zero risk
   
-  // AGGRESSIVE MODE: Don't force HOLD in chop regimes
-  // Previously: if (isChopRegime) { return { direction: "HOLD", ... }; }
-  // Now: Allow mean-reversion trades even in choppy markets
-  // The paper trading system will use tighter stops for chop regime trades
-  
+  // STEP 3: Count model votes for consensus tracking
   const votes = [rulePrediction.direction, patternPrediction.direction];
   if (aiPrediction) votes.push(aiPrediction.direction);
   
@@ -364,31 +451,71 @@ export async function getEnsemblePrediction(
   const shortVotes = votes.filter(v => v === "SHORT").length;
   const holdVotes = votes.filter(v => v === "HOLD").length;
   
-  // AGGRESSIVE MODE: Always pick LONG or SHORT based on probability comparison
-  // Never output HOLD - the system needs to trade to learn
+  // STEP 4: Select action with HIGHEST EV (action-based, not direction-based)
+  // This is the institutional approach: only trade when EV is positive
   let direction: "LONG" | "SHORT" | "HOLD";
   let consensus = 0;
   
-  if (longVotes > shortVotes) {
+  // Find max EV action
+  const maxEV = Math.max(evLong, evShort, evHold);
+  
+  // Minimum EV threshold to take action (must cover costs with margin)
+  const minActionEV = tradingCosts * 0.5;  // Need at least 50% of costs as expected profit
+  
+  if (maxEV <= 0 || maxEV < minActionEV) {
+    // No action has positive EV - HOLD
+    direction = "HOLD";
+    consensus = holdVotes / votes.length;
+  } else if (evLong >= evShort && evLong > minActionEV) {
+    // LONG has highest positive EV
     direction = "LONG";
     consensus = longVotes / votes.length;
-  } else if (shortVotes > longVotes) {
+  } else if (evShort > evLong && evShort > minActionEV) {
+    // SHORT has highest positive EV
     direction = "SHORT";
     consensus = shortVotes / votes.length;
   } else {
-    // Tie between LONG and SHORT (or no votes) - use probability to decide
-    direction = probUp >= probDown ? "LONG" : "SHORT";
-    consensus = Math.max(longVotes, shortVotes) / votes.length || 0.5;
+    // Edge case - default to HOLD
+    direction = "HOLD";
+    consensus = holdVotes / votes.length;
   }
   
+  // STEP 5: Additional regime-based HOLD enforcement
+  // Even with positive EV, avoid trading in very choppy conditions
+  const isChopRegime = feature.kalmanRegime === "chop";
+  const isLowADX = feature.adx < 20;
+  
+  if (direction !== "HOLD" && isChopRegime && isLowADX) {
+    // Chop regime with weak trend - reduce confidence or switch to HOLD
+    if (maxEV < tradingCosts * 1.5) {
+      direction = "HOLD";
+      consensus = 0.5;
+    }
+  }
+  
+  // STEP 6: GPT veto - if AI strongly says HOLD and we're about to trade
+  if (aiPrediction && aiPrediction.direction === "HOLD" && direction !== "HOLD") {
+    // AI is saying HOLD but ensemble wants to trade
+    // Only override if AI confidence is high and our EV is marginal
+    if (aiPrediction.confidence > 0.6 && maxEV < tradingCosts * 2) {
+      direction = "HOLD";
+      consensus = 0.5;
+    }
+  }
+  
+  // Compute confidence for the chosen action
+  const patternMaturity = patternPrediction.confidence > 0.5 ? Math.min(1.0, patternPrediction.confidence) : 0.3;
+  const modelConfidences = [rulePrediction.confidence, patternPrediction.confidence];
+  if (aiPrediction) modelConfidences.push(aiPrediction.confidence);
+  
   const { confidence } = computeConfidence(
-    probUp, probDown, probChop, expectedMove, currentPrice, costs, patternMaturity, modelConfidences, feature.adx
+    pLong, pShort, pHold, expectedMove, currentPrice, tradingCosts, patternMaturity, modelConfidences, feature.adx
   );
   
   return {
-    probUp,
-    probDown,
-    probChop,
+    probUp: pLong,
+    probDown: pShort,
+    probChop: pHold,
     expectedMove,
     confidence,
     direction,

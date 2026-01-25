@@ -18,12 +18,20 @@ The system operates with live data only - no simulated fallback. Shows error mes
 
 ## Recent Changes (January 2026)
 
-- **ML Ensemble Predictor**: Combines 3 models (rule-based, pattern, OpenAI) with weighted voting
-- **Directional Accuracy Metrics**: Evaluates model performance excluding HOLD predictions:
-  - Directional accuracy only counted when prediction was LONG/SHORT AND market moved
-  - Flat market outcomes (no meaningful price movement) are excluded from accuracy calculation
-  - Each model shows: Dir. Accuracy (ex-HOLD), HOLD Rate, Signal Frequency breakdown (% LONG/SHORT/HOLD)
-  - 0.1% price change threshold determines if market actually moved
+- **ACTION-BASED ML ENSEMBLE** (Major Refactor - Jan 25):
+  - Models now output P(LONG), P(SHORT), P(HOLD) probabilities instead of forced directions
+  - Ensemble aggregates Expected Value (EV) per action across all models
+  - Selects action with HIGHEST EV; enforces HOLD if max EV <= 0
+  - Prevents overtrading by requiring positive EV after costs
+  - Rule-based model: HOLD when RSI neutral (35-65), ADX < 20, or chop regime
+  - Pattern model: HOLD when historical EV < 0 or win rate < 45%
+  - GPT acts as EV modifier/veto - can override when confident HOLD
+  - Key insight: "Action worth taking" > "Direction agreement"
+- **UI Metrics Updated**: 
+  - HOLD Rate shown as primary metric (>60% = selective/good)
+  - Action Distribution replaces Signal Frequency
+  - Selectivity indicator based on HOLD percentage
+- **ML Ensemble Predictor**: Combines 3 models (rule-based, pattern, OpenAI) with EV-weighted voting
 - **Pattern Memory System**: Stores historical setups in PostgreSQL with embeddings for similarity search
 - **Feature Engine**: 40+ features including efficiency ratios, Kalman filters, regime detection
 - **Shot Plan Generation**: Comprehensive trade plans with entry/stop/TP zones and reasoning

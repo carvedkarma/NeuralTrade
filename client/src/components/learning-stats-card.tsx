@@ -358,26 +358,30 @@ export function ModelPerformanceCard({ learningStats }: LearningStatsCardProps) 
           </div>
         </div>
 
-        {/* Signal Frequency Breakdown */}
+        {/* Action-Based Signal Breakdown */}
         <div className="bg-muted/20 rounded p-2">
-          <div className="text-xs font-medium text-muted-foreground mb-2">Signal Frequency (All Models)</div>
+          <div className="text-xs font-medium text-muted-foreground mb-2">Action Distribution (EV-Based)</div>
           <div className="flex items-center gap-2 text-xs">
-            <Badge variant="outline" className="text-emerald-400">
+            <Badge variant="outline" className={Number(signalPcts.hold) > 50 ? "text-emerald-400" : "text-amber-400"}>
+              {signalPcts.hold}% HOLD
+            </Badge>
+            <Badge variant="outline" className="text-blue-400">
               <TrendingUp className="h-2.5 w-2.5 mr-1" />
               {signalPcts.long}% Long
             </Badge>
             <Badge variant="outline" className="text-red-400">
               {signalPcts.short}% Short
             </Badge>
-            <Badge variant="outline" className="text-muted-foreground">
-              {signalPcts.hold}% Hold
-            </Badge>
           </div>
-          {Number(signalPcts.hold) > 80 && (
-            <div className="text-[10px] text-amber-400 mt-1">
-              System is conservative - mostly HOLD (normal in choppy markets)
-            </div>
-          )}
+          <div className="text-[10px] mt-1">
+            {Number(signalPcts.hold) > 70 ? (
+              <span className="text-emerald-400">Highly selective - only trading high-EV setups</span>
+            ) : Number(signalPcts.hold) > 40 ? (
+              <span className="text-amber-400">Moderately selective - filtering low-EV trades</span>
+            ) : (
+              <span className="text-red-400">Low selectivity - consider tightening criteria</span>
+            )}
+          </div>
         </div>
 
         <div className="space-y-3">
@@ -398,33 +402,37 @@ export function ModelPerformanceCard({ learningStats }: LearningStatsCardProps) 
                   </span>
                 </div>
                 
-                {/* Directional Accuracy (excludes HOLD) */}
+                {/* Action-Based Metrics (HOLD rate is the key metric now) */}
                 <div className="grid grid-cols-2 gap-2">
                   <div className="flex flex-col">
                     <div className="flex justify-between text-xs text-muted-foreground mb-1">
-                      <span>Dir. Accuracy (ex-HOLD)</span>
-                      <span className={hasDirectionalData ? (m.directionalAccuracy >= 50 ? "text-emerald-400" : "text-amber-400") : "text-muted-foreground"}>
-                        {hasDirectionalData ? `${m.directionalAccuracy}%` : "N/A"}
-                      </span>
-                    </div>
-                    <Progress 
-                      value={hasDirectionalData ? m.directionalAccuracy : 0} 
-                      className={`h-1.5 ${!hasDirectionalData ? "opacity-30" : ""}`} 
-                    />
-                    {hasDirectionalData && (
-                      <div className="text-[10px] text-muted-foreground mt-0.5">
-                        {m.directionalStats.correct}/{m.directionalStats.total} correct
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex flex-col">
-                    <div className="flex justify-between text-xs text-muted-foreground mb-1">
                       <span>HOLD Rate</span>
-                      <span className={(m.holdRate || 0) > 80 ? "text-amber-400" : "text-muted-foreground"}>
+                      <span className={
+                        (m.holdRate || 0) > 60 ? "text-emerald-400" : 
+                        (m.holdRate || 0) > 30 ? "text-amber-400" : "text-red-400"
+                      }>
                         {m.holdRate || 0}%
                       </span>
                     </div>
                     <Progress value={m.holdRate || 0} className="h-1.5" />
+                    <div className="text-[10px] text-muted-foreground mt-0.5">
+                      {(m.holdRate || 0) > 60 ? "Selective (good)" : 
+                       (m.holdRate || 0) > 30 ? "Moderate" : "Overtrading risk"}
+                    </div>
+                  </div>
+                  <div className="flex flex-col">
+                    <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                      <span>Action Rate</span>
+                      <span className="text-muted-foreground">
+                        {100 - (m.holdRate || 0)}%
+                      </span>
+                    </div>
+                    <Progress value={100 - (m.holdRate || 0)} className="h-1.5" />
+                    {hasDirectionalData && (
+                      <div className="text-[10px] text-muted-foreground mt-0.5">
+                        {m.directionalStats.correct}/{m.directionalStats.total} actions profitable
+                      </div>
+                    )}
                   </div>
                 </div>
 
