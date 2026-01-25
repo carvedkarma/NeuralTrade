@@ -29,6 +29,13 @@ import {
   HistoricalLearningCard
 } from "@/components/learning-stats-card";
 import { GPUTrainingSection, type GPUMetrics } from "@/components/gpu-training-card";
+import { 
+  CrossAssetOverviewCard, 
+  CorrelationMatrixCard, 
+  RelativeStrengthCard, 
+  PriceComparisonChart,
+  type CrossAssetData 
+} from "@/components/cross-asset-card";
 import {
   PerformanceCard,
   EquityPerformanceCard,
@@ -111,6 +118,11 @@ export default function Dashboard() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/gpu/pushed-status"] });
     },
+  });
+
+  const { data: crossAssetData } = useQuery<CrossAssetData>({
+    queryKey: ["/api/cross-asset"],
+    refetchInterval: 30000, // Refresh every 30 seconds
   });
 
   const hasTriggeredAnalysis = useRef(false);
@@ -239,10 +251,11 @@ export default function Dashboard() {
         )}
         
         <Tabs defaultValue="overview" className="w-full">
-          <TabsList className="mb-4" data-testid="tabs-list">
+          <TabsList className="mb-4 flex-wrap" data-testid="tabs-list">
             <TabsTrigger value="overview" data-testid="tab-overview">Overview</TabsTrigger>
             <TabsTrigger value="signal" data-testid="tab-signal">Signal</TabsTrigger>
             <TabsTrigger value="paper" data-testid="tab-paper">Paper Trading</TabsTrigger>
+            <TabsTrigger value="gpu-training" data-testid="tab-gpu-training">GPU Training</TabsTrigger>
             <TabsTrigger value="strategy-learner" data-testid="tab-strategy-learner">Strategy Learner</TabsTrigger>
             <TabsTrigger value="learning" data-testid="tab-learning">Learning</TabsTrigger>
             <TabsTrigger value="analysis" data-testid="tab-analysis">AI Analysis</TabsTrigger>
@@ -344,15 +357,9 @@ export default function Dashboard() {
             </div>
           </TabsContent>
 
-          <TabsContent value="strategy-learner" className="mt-0">
-            <StrategyLearnerTab />
-          </TabsContent>
-
-          <TabsContent value="learning" className="mt-0">
+          <TabsContent value="gpu-training" className="mt-0">
             <div className="space-y-4">
-              <LearningOverviewCard learningStats={data.learningStats} />
-              
-              {/* GPU Neural Network Training - NEW */}
+              {/* GPU Training Status */}
               <GPUTrainingSection 
                 gpuMetrics={gpuStatus ? {
                   gpuAvailable: gpuStatus.connected && gpuStatus.gpuAvailable,
@@ -375,6 +382,27 @@ export default function Dashboard() {
                 } : null}
                 onStartTraining={(modelType) => trainModelMutation.mutate(modelType)}
               />
+              
+              {/* Cross-Asset Analysis */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <CrossAssetOverviewCard data={crossAssetData} />
+                <CorrelationMatrixCard data={crossAssetData} />
+              </div>
+              
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <RelativeStrengthCard data={crossAssetData} />
+                <PriceComparisonChart data={crossAssetData} />
+              </div>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="strategy-learner" className="mt-0">
+            <StrategyLearnerTab />
+          </TabsContent>
+
+          <TabsContent value="learning" className="mt-0">
+            <div className="space-y-4">
+              <LearningOverviewCard learningStats={data.learningStats} />
               
               {/* Social Awareness & Historical Learning - Key new sections */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

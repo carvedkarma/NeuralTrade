@@ -8,12 +8,14 @@ Key capabilities include:
 - **ML Ensemble Predictor**: Combines rule-based, pattern-based, and OpenAI models with weighted voting for action-based predictions (P(LONG), P(SHORT), P(HOLD)).
 - **Pattern Memory System**: Stores and searches historical trade setups using cosine similarity.
 - **Comprehensive Feature Engine**: Computes over 40 diverse features (price, volatility, momentum, regime, Kalman filters).
+- **Cross-Asset Learning**: Fetches and analyzes ETH, SOL, BNB alongside BTC for correlation signals, lead/lag detection, and relative strength.
 - **Shot Plan Generation**: Provides detailed trade plans including entry/exit zones, risk-reward ratios, and estimated hold times.
 - **Gatekeeper Logic**: Ensures trades are only taken with high confidence, positive edge, and sufficient supporting reasons, promoting selective trading.
 - **Sentiment Integration**: Incorporates Fear & Greed Index, social sentiment, and news sentiment with caching.
 - **Real-time Market Data**: Utilizes Binance Vision API as primary, with CoinGecko and CryptoCompare as fallbacks, and includes a data proxy for geoblocked regions.
 - **Multi-timeframe Confluence**: Scores signals across 5m, 15m, 1h, and 4h timeframes.
 - **Automated Paper Trading**: Features an ATR-based risk management system and performance analytics for simulated trading.
+- **GPU Neural Network Training**: 6+ deep learning architectures (Transformer, TFT, LSTM, CNN, VAE, GNN) trainable on local GPU with real-time status push.
 - **Continuous Learning Loop**: The system continuously refreshes data and trains models to adapt to market changes.
 - **Advanced Exit Logic**: Implements dynamic take-profit targets, MFE tracking, and failure stop detection for optimized trade exits.
 - **Persistence System**: All learning states, including pattern clusters and social media stats, are persisted in a database to survive restarts.
@@ -31,8 +33,8 @@ Preferred communication style: Simple, everyday language.
 - **UI Components**: shadcn/ui built on Radix UI, styled with Tailwind CSS for theming.
 - **Charts**: Recharts for data visualization.
 - **Animations**: Framer Motion.
-- **Navigation**: Tabbed interface including Overview, Signal, Paper Trading, Learning, AI Analysis, Indicators, Performance views.
-- **GPU Training UI**: Displays real-time GPU trainer status, loss curves, and model comparison.
+- **Navigation**: Tabbed interface including Overview, Signal, Paper Trading, GPU Training, Strategy Learner, Learning, AI Analysis, Indicators, Performance views.
+- **GPU Training Tab**: Dedicated tab displaying real-time GPU trainer status, loss curves, model comparison, and cross-asset analysis (correlations, relative strength, normalized price charts).
 
 ### Backend Architecture
 - **Runtime**: Node.js with Express.js.

@@ -450,5 +450,189 @@ export async function registerRoutes(
     }
   });
 
+  // Cross-asset data endpoint with real correlation calculations
+  app.get("/api/cross-asset", async (req, res) => {
+    try {
+      const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"];
+      
+      // Fetch 24hr ticker data for all symbols
+      const tickerPromises = symbols.map(async (symbol) => {
+        try {
+          const url = `${BINANCE_VISION_URL}/ticker/24hr?symbol=${symbol}`;
+          const response = await fetch(url);
+          if (response.ok) {
+            const data = await response.json();
+            return {
+              symbol,
+              price: parseFloat(data.lastPrice),
+              change24h: parseFloat(data.priceChangePercent),
+              volume24h: parseFloat(data.volume),
+              lastUpdate: Date.now()
+            };
+          }
+        } catch (e) {
+          console.error(`[Cross-Asset] Error fetching ${symbol}:`, e);
+        }
+        return null;
+      });
+      
+      const tickerResults = await Promise.all(tickerPromises);
+      const validSymbols = tickerResults.filter(Boolean) as Array<{
+        symbol: string;
+        price: number;
+        change24h: number;
+        volume24h: number;
+        lastUpdate: number;
+      }>;
+      
+      if (validSymbols.length < 2) {
+        return res.json({ 
+          symbols: validSymbols,
+          correlations: [],
+          marketMomentum: { allUp: false, allDown: false, mixed: true, avgChange: 0, btcDominance: 50 },
+          relativeStrength: [],
+          priceHistory: []
+        });
+      }
+      
+      // Calculate market momentum
+      const changes = validSymbols.map(s => s.change24h);
+      const avgChange = changes.reduce((a, b) => a + b, 0) / changes.length;
+      const allUp = changes.every(c => c > 0);
+      const allDown = changes.every(c => c < 0);
+      
+      // Calculate relative strength vs BTC
+      const btcData = validSymbols.find(s => s.symbol === "BTCUSDT");
+      const btcChange = btcData?.change24h ?? 0;
+      const relativeStrength = validSymbols
+        .filter(s => s.symbol !== "BTCUSDT")
+        .map(s => ({
+          symbol: s.symbol,
+          rsVsBtc: s.change24h - btcChange
+        }));
+      
+      // Calculate real correlations from recent price data
+      // Fetch 100 recent candles for each symbol to calculate correlations
+      const klinePromises = symbols.map(async (symbol) => {
+        try {
+          const url = `${BINANCE_VISION_URL}/klines?symbol=${symbol}&interval=15m&limit=100`;
+          const response = await fetch(url);
+          if (response.ok) {
+            const data = await response.json();
+            return {
+              symbol,
+              prices: data.map((k: any[]) => parseFloat(k[4])), // Close prices
+              timestamps: data.map((k: any[]) => k[0])
+            };
+          }
+        } catch (e) {
+          console.error(`[Cross-Asset] Error fetching klines for ${symbol}:`, e);
+        }
+        return null;
+      });
+      
+      const klineResults = await Promise.all(klinePromises);
+      const validKlines = klineResults.filter(Boolean) as Array<{
+        symbol: string;
+        prices: number[];
+        timestamps: number[];
+      }>;
+      
+      // Calculate returns for correlation
+      const calculateReturns = (prices: number[]) => {
+        const returns = [];
+        for (let i = 1; i < prices.length; i++) {
+          returns.push((prices[i] - prices[i-1]) / prices[i-1]);
+        }
+        return returns;
+      };
+      
+      // Calculate Pearson correlation between two arrays
+      const pearsonCorrelation = (x: number[], y: number[]): number => {
+        const n = Math.min(x.length, y.length);
+        if (n < 5) return 0;
+        
+        let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0, sumY2 = 0;
+        for (let i = 0; i < n; i++) {
+          sumX += x[i];
+          sumY += y[i];
+          sumXY += x[i] * y[i];
+          sumX2 += x[i] * x[i];
+          sumY2 += y[i] * y[i];
+        }
+        
+        const numerator = n * sumXY - sumX * sumY;
+        const denominator = Math.sqrt((n * sumX2 - sumX * sumX) * (n * sumY2 - sumY * sumY));
+        
+        return denominator === 0 ? 0 : numerator / denominator;
+      };
+      
+      // Calculate lead/lag by checking if lagged returns improve correlation
+      const detectLeadLag = (btcReturns: number[], altReturns: number[], symbol: string): string => {
+        const noLag = Math.abs(pearsonCorrelation(btcReturns, altReturns));
+        const btcLeads = Math.abs(pearsonCorrelation(btcReturns.slice(0, -1), altReturns.slice(1)));
+        const altLeads = Math.abs(pearsonCorrelation(btcReturns.slice(1), altReturns.slice(0, -1)));
+        
+        if (btcLeads > noLag && btcLeads > altLeads) return "BTC leads";
+        if (altLeads > noLag && altLeads > btcLeads) return `${symbol.replace("USDT", "")} leads`;
+        return "Synchronized";
+      };
+      
+      const btcKlines = validKlines.find(k => k.symbol === "BTCUSDT");
+      const btcReturns = btcKlines ? calculateReturns(btcKlines.prices) : [];
+      
+      const correlations = validKlines
+        .filter(k => k.symbol !== "BTCUSDT")
+        .map(k => {
+          const altReturns = calculateReturns(k.prices);
+          const corr20 = btcReturns.length >= 20 && altReturns.length >= 20
+            ? pearsonCorrelation(btcReturns.slice(-20), altReturns.slice(-20))
+            : 0;
+          const corr60 = btcReturns.length >= 60 && altReturns.length >= 60
+            ? pearsonCorrelation(btcReturns.slice(-60), altReturns.slice(-60))
+            : pearsonCorrelation(btcReturns, altReturns);
+          
+          return {
+            pair: `BTC/${k.symbol.replace("USDT", "")}`,
+            correlation20: parseFloat(corr20.toFixed(4)),
+            correlation60: parseFloat(corr60.toFixed(4)),
+            leadLag: detectLeadLag(btcReturns, altReturns, k.symbol)
+          };
+        });
+      
+      // Calculate BTC dominance approximation
+      const totalVolume = validSymbols.reduce((sum, s) => sum + s.volume24h * s.price, 0);
+      const btcVolume = btcData ? btcData.volume24h * btcData.price : 0;
+      const btcDominance = totalVolume > 0 ? (btcVolume / totalVolume) * 100 : 50;
+      
+      // Build price history for charts (normalized)
+      const priceHistory = btcKlines?.timestamps.map((ts, idx) => {
+        const point: any = { timestamp: ts };
+        for (const k of validKlines) {
+          const shortName = k.symbol.replace("USDT", "");
+          point[shortName] = k.prices[idx] || 0;
+        }
+        return point;
+      }) || [];
+      
+      res.json({
+        symbols: validSymbols,
+        correlations,
+        marketMomentum: {
+          allUp,
+          allDown,
+          mixed: !allUp && !allDown,
+          avgChange,
+          btcDominance
+        },
+        relativeStrength,
+        priceHistory: priceHistory.slice(-50) // Last 50 data points
+      });
+    } catch (error) {
+      console.error("[Cross-Asset] Error:", error);
+      res.status(500).json({ error: "Failed to fetch cross-asset data" });
+    }
+  });
+
   return httpServer;
 }
