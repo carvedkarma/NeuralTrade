@@ -668,9 +668,9 @@ export class StrategyLearner {
     const strategyAction = ev.bestAction;
     const strategyEV = ev.bestEV;
     
-    const systemsAgree = mlDirection === strategyAction || 
-      (mlDirection !== "HOLD" && strategyAction === "HOLD") ||
-      (mlDirection === "HOLD" && strategyAction === "HOLD");
+    // CRITICAL FIX: Systems only agree when they give the SAME direction
+    // (ML=LONG, Strategy=HOLD) is NOT agreement - it's a caution signal
+    const systemsAgree = mlDirection === strategyAction;
     
     const directionMatch = mlDirection === strategyAction;
     
@@ -694,8 +694,11 @@ export class StrategyLearner {
       reasoning.push(`Policy model: ${(policy.pShortProfitable * 100).toFixed(0)}% SHORT profitability`);
     }
     
-    if (mlDirection !== "HOLD" && strategyEV <= 0) {
-      vetoes.push(`Strategy Learner: ${mlDirection} has negative EV (${(strategyEV * 100).toFixed(2)}%)`);
+    // CRITICAL FIX: Check EV for the SPECIFIC direction, not overall bestEV
+    const directionEV = mlDirection === "LONG" ? ev.longEV : 
+                        mlDirection === "SHORT" ? ev.shortEV : 0;
+    if (mlDirection !== "HOLD" && directionEV <= 0) {
+      vetoes.push(`Strategy Learner: ${mlDirection} has negative EV (${(directionEV * 100).toFixed(2)}%)`);
     }
     if (mlDirection !== "HOLD" && !directionMatch && strategyAction !== "HOLD") {
       vetoes.push(`Systems disagree: ML says ${mlDirection}, Strategy says ${strategyAction}`);
@@ -707,8 +710,8 @@ export class StrategyLearner {
     let finalSignal: "LONG" | "SHORT" | "HOLD" = "HOLD";
     let finalConfidence = combinedScore;
     
-    const strategyApproves = (mlDirection === "LONG" && ev.longEV > 0) || 
-                             (mlDirection === "SHORT" && ev.shortEV > 0);
+    // CRITICAL FIX: Use already-computed directionEV for consistency
+    const strategyApproves = directionEV > 0;
     
     if (mlDirection !== "HOLD" && strategyApproves && patternWinRate >= 0.45 && vetoes.length === 0) {
       finalSignal = mlDirection;

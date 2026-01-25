@@ -14,55 +14,23 @@ export interface SentimentData {
 let cachedFearGreed: { data: FearGreedData | null; timestamp: number } = { data: null, timestamp: 0 };
 const CACHE_TTL = 300000;
 
-let newsSimulationState = {
+// CRITICAL FIX: Track real news API reads, not simulated data
+// User requirement: NO fake or sample data - only real live data
+let realNewsState = {
   articles: [] as { title: string; sentiment: string; source: string; timestamp: number }[],
-  lastUpdate: 0,
+  lastFetch: 0,
   totalReads: 0,
+  apiAvailable: false,
 };
 
-const NEWS_HEADLINES = [
-  { title: "Bitcoin whales accumulating amid market uncertainty", sentiment: "bullish", source: "CryptoNews" },
-  { title: "BTC breaks key resistance level, analysts bullish", sentiment: "bullish", source: "CoinDesk" },
-  { title: "Institutional investors increase Bitcoin exposure", sentiment: "bullish", source: "Bloomberg Crypto" },
-  { title: "On-chain metrics suggest strong accumulation phase", sentiment: "bullish", source: "Glassnode" },
-  { title: "Bitcoin ETF sees record inflows this week", sentiment: "bullish", source: "Reuters" },
-  { title: "Technical analysis points to potential breakout", sentiment: "bullish", source: "TradingView" },
-  { title: "Market volatility increases as Bitcoin tests support", sentiment: "bearish", source: "CryptoNews" },
-  { title: "Miners selling pressure intensifies", sentiment: "bearish", source: "CoinDesk" },
-  { title: "Regulatory concerns weigh on crypto markets", sentiment: "bearish", source: "Bloomberg Crypto" },
-  { title: "Exchange outflows suggest cautious sentiment", sentiment: "bearish", source: "Glassnode" },
-  { title: "Bitcoin funding rates turn negative", sentiment: "bearish", source: "CoinGlass" },
-  { title: "Leverage ratio reaches concerning levels", sentiment: "bearish", source: "CryptoQuant" },
-  { title: "BTC consolidates in tight range ahead of Fed decision", sentiment: "neutral", source: "CoinDesk" },
-  { title: "Market awaits clarity on macro conditions", sentiment: "neutral", source: "Reuters" },
-  { title: "Trading volume declines as market digests gains", sentiment: "neutral", source: "CryptoNews" },
-];
+// Cache TTL for news - 5 minutes
+const NEWS_CACHE_TTL = 300000;
 
-function getSimulatedNews(): { title: string; sentiment: string; source: string }[] {
-  const now = Date.now();
-  
-  if (now - newsSimulationState.lastUpdate > 30000) {
-    const numArticles = 3 + Math.floor(Math.random() * 3);
-    const shuffled = [...NEWS_HEADLINES].sort(() => Math.random() - 0.5);
-    newsSimulationState.articles = shuffled.slice(0, numArticles).map(n => ({
-      ...n,
-      timestamp: now - Math.floor(Math.random() * 3600000),
-    }));
-    newsSimulationState.lastUpdate = now;
-    newsSimulationState.totalReads += numArticles;
-  }
-  
-  return newsSimulationState.articles.map(a => ({
-    title: a.title,
-    sentiment: a.sentiment,
-    source: a.source,
-  }));
-}
-
-export function getNewsStats(): { totalReads: number; lastUpdate: number } {
+export function getNewsStats(): { totalReads: number; lastUpdate: number; apiAvailable: boolean } {
   return {
-    totalReads: newsSimulationState.totalReads,
-    lastUpdate: newsSimulationState.lastUpdate,
+    totalReads: realNewsState.totalReads,
+    lastUpdate: realNewsState.lastFetch,
+    apiAvailable: realNewsState.apiAvailable,
   };
 }
 
@@ -94,8 +62,56 @@ export async function getFearGreedIndex(): Promise<FearGreedData | null> {
   }
 }
 
+// CRITICAL FIX: Return only real news data - no simulation
+// When news API is unavailable, return empty array (not fake data)
 export async function getCryptoNews(): Promise<{ title: string; sentiment: string; source: string }[]> {
-  return getSimulatedNews();
+  const now = Date.now();
+  
+  // Return cached if still valid
+  if (realNewsState.articles.length > 0 && now - realNewsState.lastFetch < NEWS_CACHE_TTL) {
+    return realNewsState.articles.map(a => ({
+      title: a.title,
+      sentiment: a.sentiment,
+      source: a.source,
+    }));
+  }
+  
+  // Try to fetch from CryptoPanic API (free tier)
+  try {
+    // Note: CryptoPanic requires API key for full access, but provides limited free access
+    const response = await fetch("https://cryptopanic.com/api/v1/posts/?auth_token=public&currencies=BTC&kind=news&filter=hot", {
+      headers: { 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(5000),
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      if (data.results && Array.isArray(data.results)) {
+        realNewsState.articles = data.results.slice(0, 5).map((item: any) => ({
+          title: item.title || "Untitled",
+          sentiment: item.votes?.positive > item.votes?.negative ? "bullish" : 
+                     item.votes?.negative > item.votes?.positive ? "bearish" : "neutral",
+          source: item.domain || "CryptoPanic",
+          timestamp: new Date(item.published_at).getTime(),
+        }));
+        realNewsState.lastFetch = now;
+        realNewsState.totalReads += realNewsState.articles.length;
+        realNewsState.apiAvailable = true;
+        console.log(`[Sentiment] Fetched ${realNewsState.articles.length} real news articles`);
+      }
+    }
+  } catch (error) {
+    // API unavailable - this is fine, we just won't have news sentiment
+    realNewsState.apiAvailable = false;
+    console.log("[Sentiment] News API unavailable - using price-only signals");
+  }
+  
+  // Return real cached data or empty array (never fake data)
+  return realNewsState.articles.map(a => ({
+    title: a.title,
+    sentiment: a.sentiment,
+    source: a.source,
+  }));
 }
 
 export async function getSentimentData(): Promise<SentimentData> {

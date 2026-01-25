@@ -41,6 +41,13 @@ export interface PatternCluster {
   avgReturn: number;
   maturity: number;
   samples: PatternSample[];
+  // Direction-specific stats for accurate win rate calculation
+  longWins: number;
+  longTotal: number;
+  longAvgPnL: number;
+  shortWins: number;
+  shortTotal: number;
+  shortAvgPnL: number;
 }
 
 export interface PatternSample {
@@ -48,6 +55,8 @@ export interface PatternSample {
   embedding: number[];
   forwardReturn8: number;
   won: boolean;
+  direction: "LONG" | "SHORT" | "HOLD";  // Direction of the trade taken
+  actualPnL: number;  // Actual P&L after direction adjustment
 }
 
 export let patternClusters: Map<string, PatternCluster> = new Map();
@@ -67,6 +76,10 @@ export interface PatternMatch {
   dynamicThreshold: number;
   clusterId?: string;
   clusterMaturity?: number;
+  direction?: "LONG" | "SHORT" | "HOLD";  // Trade direction
+  actualPnL?: number;  // Direction-adjusted P&L
+  longWinRate?: number;  // Cluster's LONG win rate
+  shortWinRate?: number;  // Cluster's SHORT win rate
 }
 
 export function mapKalmanToRegime(kalmanRegime: string): "trend_up" | "trend_down" | "chop" | "shock" {
@@ -105,7 +118,44 @@ export function determineWin(
   prediction: "up" | "down" | "chop",
   actualOutcome: "up" | "down" | "chop"
 ): boolean {
+  // DEPRECATED: This only checks regime match, not actual profitability
+  // Use determineWinByPnL instead for accurate win determination
   return prediction === actualOutcome;
+}
+
+// CORRECT: Win determination based on actual P&L (the only metric that matters)
+export function determineWinByPnL(
+  direction: "LONG" | "SHORT" | "HOLD",
+  forwardReturn: number,
+  costs: number = 0.0013  // Default: 0.08% fees*2 + 0.02% slippage*2 + 0.01% funding
+): { won: boolean; actualPnL: number } {
+  if (direction === "HOLD") {
+    return { won: false, actualPnL: 0 };
+  }
+  
+  // For LONG: profit if price went up (positive return)
+  // For SHORT: profit if price went down (negate the return)
+  const directionMultiplier = direction === "LONG" ? 1 : -1;
+  const grossPnL = forwardReturn * directionMultiplier;
+  const actualPnL = grossPnL - costs;
+  
+  // A win is when actual P&L after costs is positive
+  const won = actualPnL > 0;
+  
+  return { won, actualPnL };
+}
+
+// Determine direction based on regime and features
+export function determineDirection(
+  regime: "trend_up" | "trend_down" | "chop" | "shock"
+): "LONG" | "SHORT" | "HOLD" {
+  switch (regime) {
+    case "trend_up": return "LONG";
+    case "trend_down": return "SHORT";
+    case "chop": return "HOLD";
+    case "shock": return "HOLD";
+    default: return "HOLD";
+  }
 }
 
 export interface PatternStats {
@@ -151,6 +201,7 @@ export interface StorePatternParams {
   timeToMfe: number;
   atrAtEntry: number;
   dynamicThreshold: number;
+  direction?: "LONG" | "SHORT" | "HOLD";  // Explicit direction override
 }
 
 function computeMaturity(support: number): number {
@@ -195,9 +246,13 @@ export async function storePattern(params: StorePatternParams): Promise<void> {
   const { feature, forwardReturn8, forwardReturn16, maxDrawdown, maxRunup, timeToMfe, atrAtEntry, dynamicThreshold } = params;
   
   const regime = mapKalmanToRegime(feature.kalmanRegime);
-  const prediction = determinePrediction(regime);
   const actualOutcome = determineActualOutcome(forwardReturn8, dynamicThreshold);
-  const won = determineWin(prediction, actualOutcome);
+  
+  // CRITICAL FIX: Use direction from regime or explicit override
+  const direction = params.direction || determineDirection(regime);
+  
+  // CRITICAL FIX: Win is determined by actual P&L > 0 after costs, NOT regime match
+  const { won, actualPnL } = determineWinByPnL(direction, forwardReturn8);
   
   const embedding = normalizeEmbedding(feature.embedding);
   if (!isValidEmbedding(embedding)) {
@@ -209,19 +264,44 @@ export async function storePattern(params: StorePatternParams): Promise<void> {
   const totalClusters = patternClusters.size;
   const canCreate = canCreateNewPatterns();
   
+  // Helper to update direction-specific stats on a cluster
+  const updateClusterDirectionStats = (cluster: PatternCluster, dir: "LONG" | "SHORT" | "HOLD", pnl: number, isWin: boolean) => {
+    if (dir === "LONG") {
+      cluster.longTotal = (cluster.longTotal || 0) + 1;
+      if (isWin) cluster.longWins = (cluster.longWins || 0) + 1;
+      const prevAvg = cluster.longAvgPnL || 0;
+      const prevCount = cluster.longTotal - 1;
+      cluster.longAvgPnL = prevCount > 0 ? (prevAvg * prevCount + pnl) / cluster.longTotal : pnl;
+    } else if (dir === "SHORT") {
+      cluster.shortTotal = (cluster.shortTotal || 0) + 1;
+      if (isWin) cluster.shortWins = (cluster.shortWins || 0) + 1;
+      const prevAvg = cluster.shortAvgPnL || 0;
+      const prevCount = cluster.shortTotal - 1;
+      cluster.shortAvgPnL = prevCount > 0 ? (prevAvg * prevCount + pnl) / cluster.shortTotal : pnl;
+    }
+    // Update overall win rate from direction-specific stats
+    const totalTrades = (cluster.longTotal || 0) + (cluster.shortTotal || 0);
+    const totalWins = (cluster.longWins || 0) + (cluster.shortWins || 0);
+    cluster.winRate = totalTrades > 0 ? totalWins / totalTrades : 0;
+    cluster.wins = totalWins;
+  };
+  
   if (nearestCluster && similarity >= 0.7) {
     nearestCluster.centroid = updateClusterCentroid(nearestCluster, embedding);
     nearestCluster.support++;
-    if (won) nearestCluster.wins++;
-    nearestCluster.winRate = nearestCluster.wins / nearestCluster.support;
     nearestCluster.avgReturn = (nearestCluster.avgReturn * (nearestCluster.support - 1) + forwardReturn8) / nearestCluster.support;
     nearestCluster.maturity = computeMaturity(nearestCluster.support);
+    
+    // CRITICAL: Update direction-specific stats
+    updateClusterDirectionStats(nearestCluster, direction, actualPnL, won);
     
     nearestCluster.samples.push({
       timestamp: feature.timestamp,
       embedding,
       forwardReturn8,
       won,
+      direction,
+      actualPnL,
     });
     
     if (nearestCluster.samples.length > 200) {
@@ -245,7 +325,16 @@ export async function storePattern(params: StorePatternParams): Promise<void> {
         embedding,
         forwardReturn8,
         won,
+        direction,
+        actualPnL,
       }],
+      // Initialize direction-specific stats
+      longWins: direction === "LONG" && won ? 1 : 0,
+      longTotal: direction === "LONG" ? 1 : 0,
+      longAvgPnL: direction === "LONG" ? actualPnL : 0,
+      shortWins: direction === "SHORT" && won ? 1 : 0,
+      shortTotal: direction === "SHORT" ? 1 : 0,
+      shortAvgPnL: direction === "SHORT" ? actualPnL : 0,
     };
     
     patternClusters.set(newId, newCluster);
@@ -253,10 +342,9 @@ export async function storePattern(params: StorePatternParams): Promise<void> {
   } else if (nearestCluster) {
     nearestCluster.centroid = updateClusterCentroid(nearestCluster, embedding);
     nearestCluster.support++;
-    if (won) nearestCluster.wins++;
-    nearestCluster.winRate = nearestCluster.wins / nearestCluster.support;
     nearestCluster.avgReturn = (nearestCluster.avgReturn * (nearestCluster.support - 1) + forwardReturn8) / nearestCluster.support;
     nearestCluster.maturity = computeMaturity(nearestCluster.support);
+    updateClusterDirectionStats(nearestCluster, direction, actualPnL, won);
   }
   
   await db.insert(patterns).values({

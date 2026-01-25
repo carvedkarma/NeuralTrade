@@ -223,7 +223,7 @@ export class MemStorage implements IStorage {
       
       this.refreshData();
       this.startContinuousLearning();
-      this.startSocialSimulation();
+      this.startSocialSentimentTracking();
       initializePatternClusters().then(() => {
         console.log("Pattern clusters initialized");
       }).catch(err => {
@@ -233,7 +233,7 @@ export class MemStorage implements IStorage {
       console.error("[Persistence] Failed to load state, starting fresh:", err);
       this.refreshData();
       this.startContinuousLearning();
-      this.startSocialSimulation();
+      this.startSocialSentimentTracking();
     });
   }
 
@@ -287,11 +287,15 @@ export class MemStorage implements IStorage {
           this.learningStats.cryptoPanicReads = stat.itemsRead || 0;
           this.learningStats.lastCryptoPanicFetch = Number(stat.lastFetchTs) || 0;
         } else if (stat.platform === "twitter") {
-          this.learningStats.twitterReads = stat.itemsRead || 0;
-          this.learningStats.lastTwitterFetch = Number(stat.lastFetchTs) || 0;
+          // Twitter API not connected - do NOT restore fake data
+          // Keep at 0 to show "API Not Connected" in UI
+          this.learningStats.twitterReads = 0;
+          this.learningStats.lastTwitterFetch = 0;
         } else if (stat.platform === "reddit") {
-          this.learningStats.redditReads = stat.itemsRead || 0;
-          this.learningStats.lastRedditFetch = Number(stat.lastFetchTs) || 0;
+          // Reddit API not connected - do NOT restore fake data
+          // Keep at 0 to show "API Not Connected" in UI
+          this.learningStats.redditReads = 0;
+          this.learningStats.lastRedditFetch = 0;
         }
         if (stat.sentiment) {
           this.learningStats.globalSentiment = stat.sentiment;
@@ -341,11 +345,13 @@ export class MemStorage implements IStorage {
         await db.insert(learningState).values(stateData);
       }
       
+      // Only persist Fear & Greed and CryptoPanic - Twitter/Reddit require API keys we don't have
       const platforms = [
         { platform: "fear_greed", itemsRead: this.learningStats.fearGreedReads, lastFetchTs: this.learningStats.lastFearGreedFetch, sentiment: this.learningStats.globalSentiment },
         { platform: "crypto_panic", itemsRead: this.learningStats.cryptoPanicReads, lastFetchTs: this.learningStats.lastCryptoPanicFetch, sentiment: this.learningStats.globalSentiment },
-        { platform: "twitter", itemsRead: this.learningStats.twitterReads, lastFetchTs: this.learningStats.lastTwitterFetch, sentiment: this.learningStats.globalSentiment },
-        { platform: "reddit", itemsRead: this.learningStats.redditReads, lastFetchTs: this.learningStats.lastRedditFetch, sentiment: this.learningStats.globalSentiment },
+        // Twitter and Reddit not persisted - API keys not available
+        // { platform: "twitter", itemsRead: 0, lastFetchTs: 0, sentiment: 0.5 },
+        // { platform: "reddit", itemsRead: 0, lastFetchTs: 0, sentiment: 0.5 },
       ];
       
       for (const p of platforms) {
@@ -457,34 +463,47 @@ export class MemStorage implements IStorage {
     console.log("Continuous learning loop started (30s interval)");
   }
 
-  private startSocialSimulation(): void {
+  // CRITICAL FIX: Track real social API reads, not simulated data
+  // User requirement: NO fake or sample data - only real live data
+  private startSocialSentimentTracking(): void {
     if (this.socialSimulationActive) return;
     this.socialSimulationActive = true;
     
-    const simulateSocialFeeds = () => {
+    const updateSocialSentiment = async () => {
       const now = Date.now();
       
-      this.learningStats.twitterReads += Math.floor(50 + Math.random() * 150);
-      this.learningStats.redditReads += Math.floor(20 + Math.random() * 80);
-      this.learningStats.lastTwitterFetch = now;
-      this.learningStats.lastRedditFetch = now;
-      
-      const twitterSentiment = 0.4 + Math.random() * 0.3;
-      const redditSentiment = 0.35 + Math.random() * 0.35;
-      const fgWeight = this.learningStats.fearGreedReads > 0 ? 0.4 : 0;
-      const twWeight = 0.35;
-      const rdWeight = 0.25;
-      
-      const fgSentiment = this.learningStats.globalSentiment;
-      this.learningStats.globalSentiment = 
-        fgWeight * fgSentiment + twWeight * twitterSentiment + rdWeight * redditSentiment;
-      
-      this.learningStats.lastSocialUpdate = now;
+      // Use real Fear & Greed API data only
+      try {
+        const { getSentimentData, getNewsStats } = await import("./sentiment-api");
+        const sentiment = await getSentimentData();
+        const newsStats = getNewsStats();
+        
+        if (sentiment.fearGreed) {
+          this.learningStats.fearGreedReads++;
+          this.learningStats.lastFearGreedFetch = now;
+          this.learningStats.globalSentiment = sentiment.fearGreed.value / 100;
+        }
+        
+        // Only count real news reads, not simulated
+        if (newsStats.apiAvailable) {
+          this.learningStats.cryptoPanicReads = newsStats.totalReads;
+          this.learningStats.lastSocialUpdate = now;
+        }
+        
+        // Note: Twitter/Reddit require API keys which we don't have
+        // We track these as 0 (not available) rather than fake data
+        // UI should show "API Not Connected" instead of fake numbers
+        
+      } catch (e) {
+        // Sentiment API failed - continue without updating
+        console.log("[Social] Sentiment API unavailable");
+      }
     };
     
-    setInterval(simulateSocialFeeds, 5000);
-    simulateSocialFeeds();
-    console.log("Social media simulation started (5s interval)");
+    // Check real sentiment every 60 seconds (not 5s like fake data)
+    setInterval(updateSocialSentiment, 60000);
+    updateSocialSentiment();
+    console.log("Real social sentiment tracking started (60s interval)");
   }
 
   private async trainOnHistoricalCandles(): Promise<void> {
@@ -2004,11 +2023,10 @@ export class MemStorage implements IStorage {
         this.learningStats.globalSentiment = sentimentData.socialSentiment;
         this.learningStats.lastSocialUpdate = now;
         
-        // Simulate Twitter/Reddit reads from sentiment API interpretation
-        this.learningStats.twitterReads += Math.floor(Math.random() * 5) + 3;
-        this.learningStats.lastTwitterFetch = now;
-        this.learningStats.redditReads += Math.floor(Math.random() * 3) + 2;
-        this.learningStats.lastRedditFetch = now;
+        // REMOVED: Fake Twitter/Reddit simulation
+        // Twitter/Reddit require API keys we don't have
+        // UI will show "API Not Connected" with 0 reads
+        // This maintains data integrity per user requirements
         
       } catch (error) {
         console.error("Error fetching sentiment:", error);

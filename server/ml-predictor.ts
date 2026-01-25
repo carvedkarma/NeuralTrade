@@ -101,15 +101,52 @@ async function patternBasedPredict(feature: FeatureVector): Promise<MLPrediction
     const stats = computePatternStats(matches);
     const { direction, confidence, reasoning } = getPatternConfidence(stats);
     
-    const probUp = direction === "LONG" ? stats.winRate : (1 - stats.winRate) * 0.5;
-    const probDown = direction === "SHORT" ? stats.winRate : (1 - stats.winRate) * 0.5;
-    const probChop = 1 - probUp - probDown;
+    // CRITICAL FIX: Calculate probabilities from pattern match data
+    // Use direction-specific win rates when available
+    const totalMatches = matches.length;
+    if (totalMatches < 10) {
+      // Insufficient data - return uncertain prediction
+      return {
+        probUp: 0.33,
+        probDown: 0.33,
+        probChop: 0.34,
+        expectedMove: 0,
+        confidence: 0.2,
+        direction: "HOLD",
+        model: "pattern_memory",
+      };
+    }
+    
+    // Count patterns by their historical outcomes (actual P&L direction)
+    let upWins = 0;
+    let downWins = 0;
+    let totalWeightedUp = 0;
+    let totalWeightedDown = 0;
+    
+    for (const match of matches) {
+      const weight = match.similarity;  // Weight by similarity
+      if (match.forwardReturn8 > 0.001) {  // 0.1% threshold for meaningful move
+        upWins += weight;
+      } else if (match.forwardReturn8 < -0.001) {
+        downWins += weight;
+      }
+      totalWeightedUp += match.forwardReturn8 > 0 ? weight * Math.abs(match.forwardReturn8) : 0;
+      totalWeightedDown += match.forwardReturn8 < 0 ? weight * Math.abs(match.forwardReturn8) : 0;
+    }
+    
+    const totalWeight = upWins + downWins;
+    const probUp = totalWeight > 0 ? upWins / totalWeight * 0.8 : 0.33;
+    const probDown = totalWeight > 0 ? downWins / totalWeight * 0.8 : 0.33;
+    const probChop = Math.max(0.1, 1 - probUp - probDown);  // At least 10% chop probability
+    
+    // Expected move based on weighted average of historical returns
+    const expectedMove = stats.avgReturn8 * feature.kalmanFast;
     
     return {
       probUp,
       probDown,
       probChop,
-      expectedMove: stats.avgReturn8 * feature.kalmanFast,
+      expectedMove,
       confidence,
       direction,
       model: "pattern_memory",
@@ -274,10 +311,12 @@ export async function getEnsemblePrediction(
   const patternPrediction = await patternBasedPredict(feature);
   const aiPrediction = includeAI ? await aiBasedPredict(candles, feature, futuresData) : null;
   
+  // CRITICAL FIX: Use researched weights 35/35/30 (Rule/Pattern/AI)
+  // Pattern memory deserves equal weight to rule-based given historical data
   const weights = {
-    rulebased: 0.30,
-    pattern: 0.15,
-    ai: 0.55,
+    rulebased: 0.35,
+    pattern: 0.35,
+    ai: 0.30,
   };
   
   let totalWeight = weights.rulebased + weights.pattern;
