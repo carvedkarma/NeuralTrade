@@ -5,6 +5,7 @@ import paperRoutes from "./paper/routes";
 import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs } from "./historical-data";
 import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
+import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning } from "./unified-learning-controller";
 
 export const backfillState = {
   inProgress: false,
@@ -271,6 +272,28 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error checking incomplete jobs:", error);
       res.status(500).json({ error: "Failed to check incomplete jobs" });
+    }
+  });
+
+  app.get("/api/unified-learning/progress", async (req, res) => {
+    try {
+      const progress = getUnifiedProgressReport();
+      res.json(progress);
+    } catch (error) {
+      console.error("Error getting unified learning progress:", error);
+      res.status(500).json({ error: "Failed to get unified learning progress" });
+    }
+  });
+
+  app.post("/api/unified-learning/reset", async (req, res) => {
+    try {
+      resetUnifiedLearning();
+      await storage.resetLearningState();
+      await strategyLearner.reset();
+      res.json({ success: true, message: "All learning systems reset for synchronized training" });
+    } catch (error) {
+      console.error("Error resetting unified learning:", error);
+      res.status(500).json({ error: "Failed to reset learning" });
     }
   });
 

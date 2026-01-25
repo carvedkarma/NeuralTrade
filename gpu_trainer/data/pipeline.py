@@ -86,7 +86,7 @@ class BinanceDataFetcher:
         return []
     
     def fetch_historical_sync(self, symbol: str, timeframe: str, 
-                               num_candles: int = 50000) -> pd.DataFrame:
+                               num_candles: int = 175000) -> pd.DataFrame:
         print(f"[Sync] Fetching {num_candles:,} candles for {symbol} {timeframe}...")
         
         all_candles = []
@@ -128,7 +128,7 @@ class BinanceDataFetcher:
         print(f"[Sync] Completed {symbol} {timeframe}: {len(df):,} unique candles")
         return df
     
-    def fetch_all_historical_sync(self, num_candles: int = 50000, 
+    def fetch_all_historical_sync(self, num_candles: int = 175000, 
                                     progress_callback=None) -> Dict[str, Dict[str, pd.DataFrame]]:
         results = {}
         

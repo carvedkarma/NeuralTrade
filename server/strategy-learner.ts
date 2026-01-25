@@ -1,6 +1,7 @@
 import type { Candle } from "@shared/schema";
 import { patternClusters, findSimilarPatterns, type PatternCluster, type PatternMatch } from "./pattern-memory";
 import type { FeatureVector } from "./feature-engine";
+import { updateStrategyLearnerProgress, getUnifiedProgressReport } from "./unified-learning-controller";
 
 interface ActionOutcome {
   action: "LONG" | "SHORT" | "HOLD";
@@ -391,6 +392,7 @@ export class StrategyLearner {
     
     // Update trainingProgressIdx to where we just finished
     this.trainingProgressIdx = endIdx;
+    updateStrategyLearnerProgress(endIdx);
 
     this.updatePolicyModel();
     this.updateExpansionModel(candles);

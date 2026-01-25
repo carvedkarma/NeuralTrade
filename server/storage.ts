@@ -34,6 +34,7 @@ import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-en
 import { getSentimentData, interpretFearGreed, getNewsStats } from "./sentiment-api";
 import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime, getLastSimilarityDistribution, initializePatternClusters, getPatternClusterStats, updateDataCounts, canCreateNewPatterns, canCreateNewPatternsWithCounts, getPatternRequirements, patternClusters, loadPatternClustersFromDb, savePatternClustersToDb } from "./pattern-memory";
 import { processCandle as processPaperTrade } from "./paper/engine";
+import { initializeUnifiedLearning, updatePatternMemoryProgress, getUnifiedProgressReport } from "./unified-learning-controller";
 import { isAutoTradingEnabled, isPaperTradingEnabled, getConfig as getPaperConfig } from "./paper/config";
 import { db } from "./db";
 import { learningState, socialMediaStats, patternClusters as patternClustersTable } from "./db/schema";
@@ -538,6 +539,8 @@ export class MemStorage implements IStorage {
           
           this.learningStats.historicalCandlesProcessed = historicalCandles.length;
           
+          initializeUnifiedLearning(historicalCandles.length);
+          
           console.log(`[Historical] Loaded ${historicalCandles.length} candles from database`);
           console.log(`[Historical] Data range: ${new Date(rangeInfo.startTs!).toISOString().split('T')[0]} to ${new Date(rangeInfo.endTs!).toISOString().split('T')[0]}`);
         }
@@ -639,19 +642,16 @@ export class MemStorage implements IStorage {
     const forwardLook = 16;
     const maxIndex = candlesToUse.length - forwardLook;
     
-    // Resume from where we left off, or start fresh if complete
+    // Resume from where we left off - NO MULTIPLE PASSES (train each candle once only)
     let startIdx = this.learningStats.deepLearningIndex;
     if (startIdx >= maxIndex || this.learningStats.deepLearningComplete) {
-      // Start a new pass through the data
-      startIdx = 50;
-      this.learningStats.deepLearningPassCount++;
-      this.learningStats.deepLearningComplete = false;
-      console.log(`[Deep Learning] Starting pass #${this.learningStats.deepLearningPassCount + 1} over ${candlesToUse.length} candles`);
+      // STOP - we've already processed all historical data once
+      console.log(`[Deep Learning] Training COMPLETE - all ${candlesToUse.length} historical candles processed (no re-processing)`);
+      return;
     }
     
-    const passNumber = this.learningStats.deepLearningPassCount + 1;
     const progressPct = ((startIdx - 50) / (maxIndex - 50) * 100).toFixed(1);
-    console.log(`[Deep Learning] Pass ${passNumber}: Processing from index ${startIdx} (${progressPct}% complete), epoch ${this.learningStats.learningEpochs + 1}`);
+    console.log(`[Deep Learning] Processing from index ${startIdx} (${progressPct}% complete), epoch ${this.learningStats.learningEpochs + 1}`);
     this.lastTrainingRun = now;
     
     updateDataCounts(candlesToUse.length, this.learningStats.backtestTradesSimulated);
@@ -748,9 +748,11 @@ export class MemStorage implements IStorage {
       
       // Update progress tracker
       this.learningStats.deepLearningIndex = endIdx;
+      updatePatternMemoryProgress(endIdx);
+      
       if (endIdx >= maxIndex) {
         this.learningStats.deepLearningComplete = true;
-        console.log(`[Deep Learning] Pass ${passNumber} COMPLETE! Processed all ${candlesToUse.length} historical candles.`);
+        console.log(`[Deep Learning] Training COMPLETE! Processed all ${candlesToUse.length} historical candles (single pass only).`);
       }
       
       const latestVolProfile = analyzeVolumeProfile(candlesToUse);

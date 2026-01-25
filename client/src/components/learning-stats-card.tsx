@@ -948,3 +948,136 @@ export function HistoricalLearningCard({
     </Card>
   );
 }
+
+interface UnifiedProgressSystem {
+  name: string;
+  index: number;
+  progress: number;
+  complete: boolean;
+}
+
+interface UnifiedLearningProgressProps {
+  progress?: {
+    overallProgress: number;
+    systems: UnifiedProgressSystem[];
+    totalCandles: number;
+    trainableCandles: number;
+    allAligned: boolean;
+  };
+  onReset?: () => void;
+}
+
+export function UnifiedLearningProgressCard({ progress, onReset }: UnifiedLearningProgressProps) {
+  if (!progress) {
+    return (
+      <Card data-testid="card-unified-learning-empty">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-medium flex items-center gap-2">
+            <Layers className="h-4 w-4 text-muted-foreground" />
+            Unified Learning Progress
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">Loading unified progress...</p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const getSystemIcon = (name: string) => {
+    if (name.includes("Strategy")) return <Target className="h-3 w-3" />;
+    if (name.includes("Pattern")) return <Brain className="h-3 w-3" />;
+    if (name.includes("GPU")) return <Cpu className="h-3 w-3" />;
+    return <Activity className="h-3 w-3" />;
+  };
+
+  const getProgressColor = (progress: number) => {
+    if (progress >= 100) return "bg-emerald-500";
+    if (progress >= 50) return "bg-blue-500";
+    return "bg-amber-500";
+  };
+
+  return (
+    <Card data-testid="card-unified-learning">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm font-medium flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Layers className="h-4 w-4 text-primary" />
+            Synchronized Learning (5 Years)
+          </div>
+          {progress.allAligned ? (
+            <Badge variant="outline" className="text-emerald-400 bg-emerald-500/20">
+              <CheckCircle2 className="h-3 w-3 mr-1" />
+              Aligned
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="text-amber-400 bg-amber-500/20">
+              <AlertCircle className="h-3 w-3 mr-1" />
+              Syncing
+            </Badge>
+          )}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-1">
+          <div className="flex justify-between text-xs">
+            <span className="text-muted-foreground">Overall Progress</span>
+            <span className="font-medium">{progress.overallProgress.toFixed(1)}%</span>
+          </div>
+          <Progress value={progress.overallProgress} className="h-2" />
+        </div>
+
+        <div className="space-y-3">
+          {progress.systems.map((system) => (
+            <div key={system.name} className="space-y-1" data-testid={`system-${system.name.toLowerCase().replace(/\s/g, '-')}`}>
+              <div className="flex items-center justify-between text-xs">
+                <div className="flex items-center gap-1.5">
+                  {getSystemIcon(system.name)}
+                  <span>{system.name}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground">
+                    {system.index.toLocaleString()} / {progress.trainableCandles.toLocaleString()}
+                  </span>
+                  {system.complete && (
+                    <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                  )}
+                </div>
+              </div>
+              <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                <div 
+                  className={`h-full ${getProgressColor(system.progress)} transition-all duration-300`}
+                  style={{ width: `${Math.min(system.progress, 100)}%` }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="pt-2 border-t text-xs">
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Total Candles Available:</span>
+            <span className="font-medium">{progress.totalCandles.toLocaleString()}</span>
+          </div>
+          <div className="flex justify-between mt-1">
+            <span className="text-muted-foreground">Trainable Candles:</span>
+            <span className="font-medium">{progress.trainableCandles.toLocaleString()}</span>
+          </div>
+        </div>
+
+        {onReset && (
+          <Button
+            onClick={onReset}
+            variant="outline"
+            size="sm"
+            className="w-full mt-2"
+            data-testid="button-reset-learning"
+          >
+            <History className="h-3 w-3 mr-2" />
+            Reset All Learning Systems
+          </Button>
+        )}
+      </CardContent>
+    </Card>
+  );
+}

@@ -7,6 +7,7 @@
  */
 
 import { FeatureVector } from "./feature-engine";
+import { updateGpuTrainerProgress, getUnifiedProgressReport } from "./unified-learning-controller";
 
 interface GPUPredictionResponse {
   action: "LONG" | "SHORT" | "HOLD";
@@ -92,6 +93,12 @@ class GPUTrainerBridge {
    */
   updatePushedStatus(status: PushedGPUStatus): void {
     this.pushedStatus = status;
+    
+    if (status.connected && status.trainingProgress > 0) {
+      const unifiedReport = getUnifiedProgressReport();
+      const estimatedIdx = Math.floor((status.trainingProgress / 100) * unifiedReport.trainableCandles) + 50;
+      updateGpuTrainerProgress(estimatedIdx, status.trainingProgress >= 100);
+    }
   }
   
   /**

@@ -26,7 +26,8 @@ import {
   ModelPerformanceCard, 
   LearningOverviewCard,
   SocialAwarenessCard,
-  HistoricalLearningCard
+  HistoricalLearningCard,
+  UnifiedLearningProgressCard
 } from "@/components/learning-stats-card";
 import { GPUTrainingSection, type GPUMetrics } from "@/components/gpu-training-card";
 import { 
@@ -124,6 +125,31 @@ export default function Dashboard() {
     queryKey: ["/api/cross-asset"],
     refetchInterval: 30000, // Refresh every 30 seconds
   });
+
+  const { data: unifiedProgress } = useQuery<{
+    overallProgress: number;
+    systems: { name: string; index: number; progress: number; complete: boolean }[];
+    totalCandles: number;
+    trainableCandles: number;
+    allAligned: boolean;
+  }>({
+    queryKey: ["/api/unified-learning/progress"],
+    refetchInterval: 10000,
+  });
+
+  const resetLearningMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/unified-learning/reset"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/unified-learning/progress"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard"] });
+    },
+  });
+
+  const handleResetLearning = () => {
+    if (confirm("This will reset all 3 learning systems (Strategy Learner, Pattern Memory, GPU Trainer). Are you sure?")) {
+      resetLearningMutation.mutate();
+    }
+  };
 
   const hasTriggeredAnalysis = useRef(false);
   
@@ -403,6 +429,12 @@ export default function Dashboard() {
           <TabsContent value="learning" className="mt-0">
             <div className="space-y-4">
               <LearningOverviewCard learningStats={data.learningStats} />
+              
+              {/* Unified Learning Progress - All 3 systems synchronized */}
+              <UnifiedLearningProgressCard 
+                progress={unifiedProgress}
+                onReset={handleResetLearning}
+              />
               
               {/* Social Awareness & Historical Learning - Key new sections */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

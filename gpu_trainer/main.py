@@ -286,7 +286,7 @@ def main():
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
     
     fetch_parser = subparsers.add_parser("fetch", help="Fetch historical data")
-    fetch_parser.add_argument("--candles", type=int, default=50000, help="Number of candles to fetch")
+    fetch_parser.add_argument("--candles", type=int, default=175000, help="Number of candles to fetch (default: 5 years of 15m data)")
     fetch_parser.add_argument("--replit-proxy", type=str, dest="replit_proxy",
                               help="Replit proxy URL for Binance data (e.g., https://your-app.replit.app)")
     

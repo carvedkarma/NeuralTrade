@@ -6,7 +6,7 @@ const BINANCE_VISION_BASE = "https://data-api.binance.vision";
 const BINANCE_FAPI_BASE = "https://fapi.binance.com";
 const CANDLES_PER_REQUEST = 1000;
 const MS_PER_15M = 15 * 60 * 1000;
-const BACKFILL_DAYS = 370;
+const BACKFILL_DAYS = 1826; // 5 years of historical data
 
 interface BinanceKline {
   openTime: number;
@@ -114,8 +114,8 @@ async function fetchKlinesBatchVision(
 }
 
 const CANDLES_PER_DAY = 96;
-const TARGET_DAYS = 547; // 1.5 years
-const CANDLES_FOR_TARGET = TARGET_DAYS * CANDLES_PER_DAY; // ~52,512 candles
+const TARGET_DAYS = 1826; // 5 years of data for comprehensive training
+const CANDLES_FOR_TARGET = TARGET_DAYS * CANDLES_PER_DAY; // ~175,296 candles
 
 export interface DataRangeInfo {
   startTs: number | null;
