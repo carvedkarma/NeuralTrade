@@ -663,6 +663,36 @@ export class StrategyLearner {
       isTraining: this.isTraining,
     };
   }
+  
+  // Get backtest training stats for ML ensemble display
+  getBacktestStats(): { 
+    longCount: number; 
+    shortCount: number; 
+    longWins: number; 
+    shortWins: number;
+    longWinRate: number;
+    shortWinRate: number;
+    totalTrades: number;
+    overallWinRate: number;
+  } {
+    const longCount = this.longOutcomes.length;
+    const shortCount = this.shortOutcomes.length;
+    const longWins = this.longOutcomes.filter(o => o.pnl > 0).length;
+    const shortWins = this.shortOutcomes.filter(o => o.pnl > 0).length;
+    const totalTrades = longCount + shortCount;
+    const totalWins = longWins + shortWins;
+    
+    return {
+      longCount,
+      shortCount,
+      longWins,
+      shortWins,
+      longWinRate: longCount > 0 ? longWins / longCount : 0,
+      shortWinRate: shortCount > 0 ? shortWins / shortCount : 0,
+      totalTrades,
+      overallWinRate: totalTrades > 0 ? totalWins / totalTrades : 0,
+    };
+  }
 
   getData(candles: Candle[], currentSignal: string, currentConfidence: number): StrategyLearnerData {
     const policy = this.getPolicyPrediction(candles);

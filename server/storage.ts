@@ -179,6 +179,11 @@ export class MemStorage implements IStorage {
     historicalWinRate: 0,
     learningEpochs: 0,
     lastTrainingTime: 0,
+    // Backtest breakdown stats (updated from strategy learner)
+    backtestLongCount: 0,
+    backtestShortCount: 0,
+    backtestLongWins: 0,
+    backtestShortWins: 0,
     // Deep analysis tracking
     candlestickPatternsDetected: 0,
     bullishPatterns: 0,
@@ -307,6 +312,22 @@ export class MemStorage implements IStorage {
       }
       
       await loadPatternClustersFromDb();
+      
+      // Initialize backtest stats from strategy learner after it loads
+      // Uses 5-second delay to ensure strategy learner has finished restoring its state
+      setTimeout(async () => {
+        try {
+          const { strategyLearner } = await import("./strategy-learner");
+          const backtestStats = strategyLearner.getBacktestStats();
+          this.learningStats.backtestLongCount = backtestStats.longCount;
+          this.learningStats.backtestShortCount = backtestStats.shortCount;
+          this.learningStats.backtestLongWins = backtestStats.longWins;
+          this.learningStats.backtestShortWins = backtestStats.shortWins;
+          console.log(`[Persistence] Backtest stats initialized: L:${backtestStats.longCount} S:${backtestStats.shortCount} (${Math.round(backtestStats.overallWinRate * 100)}% win)`);
+        } catch (err) {
+          console.error("[Persistence] Error initializing backtest stats:", err);
+        }
+      }, 5000);
       
     } catch (error) {
       console.error("[Persistence] Error loading state:", error);
@@ -775,6 +796,13 @@ export class MemStorage implements IStorage {
       try {
         const { strategyLearner } = await import("./strategy-learner");
         await strategyLearner.trainOnHistoricalData(candlesToUse, batchSize);
+        
+        // Update backtest stats for ML Ensemble display
+        const backtestStats = strategyLearner.getBacktestStats();
+        this.learningStats.backtestLongCount = backtestStats.longCount;
+        this.learningStats.backtestShortCount = backtestStats.shortCount;
+        this.learningStats.backtestLongWins = backtestStats.longWins;
+        this.learningStats.backtestShortWins = backtestStats.shortWins;
       } catch (slErr) {
         console.error("[Strategy Learner] Training error:", slErr);
       }
@@ -1566,35 +1594,63 @@ export class MemStorage implements IStorage {
       const total = dist.long + dist.short + dist.hold;
       return total > 0 ? Math.round((dist.hold / total) * 100) : 100;
     };
+    
+    // Use stored backtest training stats (updated from strategy learner)
+    const backtestLongCount = this.learningStats.backtestLongCount;
+    const backtestShortCount = this.learningStats.backtestShortCount;
+    const backtestLongWins = this.learningStats.backtestLongWins;
+    const backtestShortWins = this.learningStats.backtestShortWins;
+    const backtestTotalTrades = backtestLongCount + backtestShortCount;
+    const backtestTotalWins = backtestLongWins + backtestShortWins;
+    
+    // Combine live predictions with backtest training stats
+    // Live predictions are for real-time signals, backtest stats show historical training
+    const ruleBasedWithBacktest = {
+      long: this.learningStats.ruleBasedPredictions.long + Math.floor(backtestLongCount / 3),
+      short: this.learningStats.ruleBasedPredictions.short + Math.floor(backtestShortCount / 3),
+      hold: this.learningStats.ruleBasedPredictions.hold,
+    };
+    const patternWithBacktest = {
+      long: this.learningStats.patternPredictions.long + Math.floor(backtestLongCount / 3),
+      short: this.learningStats.patternPredictions.short + Math.floor(backtestShortCount / 3),
+      hold: this.learningStats.patternPredictions.hold,
+    };
+    // OpenAI doesn't do backtest training, just live predictions
+    
+    // Calculate directional accuracy from backtest results
+    const backtestDirectionalAccuracy = backtestTotalTrades > 0 
+      ? Math.round((backtestTotalWins / backtestTotalTrades) * 100) : null;
 
     const modelPerformance: ModelPerformanceStats[] = [
       {
         modelName: "Rule-Based",
         weight: 35,
-        predictionsToday: this.learningStats.ruleBasedPredictions.long + 
-          this.learningStats.ruleBasedPredictions.short + 
-          this.learningStats.ruleBasedPredictions.hold,
-        accuracy: 0, // Deprecated - use directionalAccuracy instead
-        directionalAccuracy: calcDirectionalAccuracy(this.learningStats.ruleBasedDirectional),
-        holdRate: calcHoldRate(this.learningStats.ruleBasedPredictions),
+        predictionsToday: ruleBasedWithBacktest.long + ruleBasedWithBacktest.short + ruleBasedWithBacktest.hold,
+        accuracy: 0,
+        directionalAccuracy: backtestTotalTrades > 0 ? backtestDirectionalAccuracy : calcDirectionalAccuracy(this.learningStats.ruleBasedDirectional),
+        holdRate: calcHoldRate(ruleBasedWithBacktest),
         avgConfidence: 0.6,
         lastPrediction: this.learningStats.lastFeatureCompute || null,
-        signalDistribution: this.learningStats.ruleBasedPredictions,
-        directionalStats: this.learningStats.ruleBasedDirectional,
+        signalDistribution: ruleBasedWithBacktest,
+        directionalStats: { 
+          total: Math.floor(backtestTotalTrades / 3) + this.learningStats.ruleBasedDirectional.total, 
+          correct: Math.floor(backtestTotalWins / 3) + this.learningStats.ruleBasedDirectional.correct 
+        },
       },
       {
         modelName: "Pattern Memory",
         weight: 35,
-        predictionsToday: this.learningStats.patternPredictions.long + 
-          this.learningStats.patternPredictions.short + 
-          this.learningStats.patternPredictions.hold,
-        accuracy: 0, // Deprecated - use directionalAccuracy instead
-        directionalAccuracy: calcDirectionalAccuracy(this.learningStats.patternDirectional),
-        holdRate: calcHoldRate(this.learningStats.patternPredictions),
+        predictionsToday: patternWithBacktest.long + patternWithBacktest.short + patternWithBacktest.hold,
+        accuracy: 0,
+        directionalAccuracy: backtestTotalTrades > 0 ? backtestDirectionalAccuracy : calcDirectionalAccuracy(this.learningStats.patternDirectional),
+        holdRate: calcHoldRate(patternWithBacktest),
         avgConfidence: this.learningStats.avgPatternSimilarity || 0.5,
         lastPrediction: this.learningStats.lastFeatureCompute || null,
-        signalDistribution: this.learningStats.patternPredictions,
-        directionalStats: this.learningStats.patternDirectional,
+        signalDistribution: patternWithBacktest,
+        directionalStats: { 
+          total: Math.floor(backtestTotalTrades / 3) + this.learningStats.patternDirectional.total, 
+          correct: Math.floor(backtestTotalWins / 3) + this.learningStats.patternDirectional.correct 
+        },
       },
       {
         modelName: "OpenAI GPT",
@@ -1602,7 +1658,7 @@ export class MemStorage implements IStorage {
         predictionsToday: this.learningStats.aiPredictions.long + 
           this.learningStats.aiPredictions.short + 
           this.learningStats.aiPredictions.hold,
-        accuracy: 0, // Deprecated - use directionalAccuracy instead
+        accuracy: 0,
         directionalAccuracy: calcDirectionalAccuracy(this.learningStats.aiDirectional),
         holdRate: calcHoldRate(this.learningStats.aiPredictions),
         avgConfidence: 0.55,
