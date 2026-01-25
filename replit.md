@@ -92,7 +92,11 @@ Preferred communication style: Simple, everyday language.
 ### Research-Backed Improvements
 - **Triple Barrier Labeling**: TP/SL/Time barrier simulation with intrabar timing heuristic (20-50% accuracy improvement over fixed-horizon).
 - **Pattern Quality**: Similarity threshold increased 0.6→0.75, MIN_SAMPLES 50→100.
-- **Meta-Labeling & Half-Kelly**: Methods created but not yet wired into execution path.
+- **Meta-Labeling Filter (WIRED)**: Secondary confidence filter integrated into paper trading gate logic. Requires 55%+ meta-label confidence for execution (research: improves precision 37%→56%).
+- **Half-Kelly Position Sizing (WIRED)**: Dynamic position sizing based on historical edge now active in paper trading. Captures ~75% optimal growth with ~50% less drawdown. Caps at 20% max position, 1% minimum.
+- **Feature Sanitization**: All 81 features validated with `sanitizeFeatureVector()` to prevent NaN/Infinity propagation into ML models. Safe defaults for all feature values.
+- **Trade Audit Enhancement**: Added `sizingMethod` tracking to audit logs for risk governance (shows Half-Kelly vs fixed sizing).
+- **Max 2 Vetoes Rule**: Gating logic allows up to 2 vetoes before blocking trades. Improves trade flow while maintaining selectivity.
 
 ### Key Files for ML/Learning
 - `server/feature-engine.ts`: Feature computation + shared regime classifier
