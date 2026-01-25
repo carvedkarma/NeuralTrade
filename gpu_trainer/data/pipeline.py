@@ -96,27 +96,24 @@ class BinanceDataFetcher:
     async def fetch_klines(self, symbol: str, timeframe: str, limit: int = 1000, 
                           start_time: Optional[int] = None, 
                           end_time: Optional[int] = None) -> List[Dict]:
-        # If we already have a working source, try it first
-        if self.working_source == "Replit Proxy":
+        # If Replit Proxy is configured, use ONLY that source
+        # This avoids DNS/connection errors from trying blocked Binance APIs
+        if self.replit_proxy_url:
             proxy_data = await self._fetch_replit_proxy(symbol, timeframe, limit, end_time)
             if proxy_data:
+                self.working_source = "Replit Proxy"
                 return proxy_data
-            self.working_source = None
+            # If proxy fails, don't fall back to Binance (it's likely blocked)
+            print(f"[Replit Proxy] Failed to fetch {symbol} {timeframe} - no fallback when proxy is configured")
+            return []
         
+        # No proxy configured - try direct Binance access (for non-geoblocked regions)
         if self.working_source == "CryptoCompare":
             cc_data = await self._fetch_cryptocompare(symbol, timeframe, limit, end_time)
             if cc_data:
                 return cc_data
             self.working_source = None
         
-        # Try Replit Proxy first (bypasses Australia Binance block)
-        if self.replit_proxy_url:
-            proxy_data = await self._fetch_replit_proxy(symbol, timeframe, limit, end_time)
-            if proxy_data:
-                self.working_source = "Replit Proxy"
-                return proxy_data
-        
-        # Then try direct Binance access
         params: Dict[str, Any] = {
             "symbol": symbol,
             "interval": timeframe,
