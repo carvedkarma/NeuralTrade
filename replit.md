@@ -7,8 +7,8 @@ An institutional-grade AI-driven BTCUSDT futures trading signal dashboard. The p
 Key capabilities include:
 - **ML Ensemble Predictor**: Combines rule-based, pattern-based, and OpenAI models with weighted voting for action-based predictions (P(LONG), P(SHORT), P(HOLD)).
 - **Pattern Memory System**: Stores and searches historical trade setups using cosine similarity.
-- **Comprehensive Feature Engine**: Computes over 40 diverse features (price, volatility, momentum, regime, Kalman filters).
-- **Cross-Asset Learning**: Fetches and analyzes ETH, SOL, BNB alongside BTC for correlation signals, lead/lag detection, and relative strength.
+- **Comprehensive Feature Engine**: Computes 82 features total (58 core + 24 embedding), including OHLCV data, momentum, volatility, regime, and Kalman filters.
+- **Cross-Asset Learning**: Integrates ETH, SOL, BNB data with 10 cross-asset features: correlations (ethBtcCorrelation, solBtcCorrelation, bnbBtcCorrelation), relative strength (ethRelativeStrength, solRelativeStrength, bnbRelativeStrength), momentum divergence (ethMomentumDivergence, solMomentumDivergence, bnbMomentumDivergence), and cryptoSectorMomentum.
 - **Shot Plan Generation**: Provides detailed trade plans including entry/exit zones, risk-reward ratios, and estimated hold times.
 - **Gatekeeper Logic**: Ensures trades are only taken with high confidence, positive edge, and sufficient supporting reasons, promoting selective trading.
 - **Sentiment Integration**: Incorporates Fear & Greed Index, social sentiment, and news sentiment with caching.
