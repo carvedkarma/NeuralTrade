@@ -715,6 +715,14 @@ export const strategyLearnerState = pgTable("strategy_learner_state", {
   shortPnl: real("short_pnl").default(0),
   lastTrainingTs: bigint("last_training_ts", { mode: "number" }),
   trainingProgressIdx: integer("training_progress_idx").default(0),
+  // Win/loss counts for proper restoration
+  longWins: integer("long_wins").default(0),
+  longLosses: integer("long_losses").default(0),
+  shortWins: integer("short_wins").default(0),
+  shortLosses: integer("short_losses").default(0),
+  // Average PnL for wins and losses (to recreate distribution)
+  avgWinPnl: real("avg_win_pnl").default(0),
+  avgLossPnl: real("avg_loss_pnl").default(0),
   updatedTs: bigint("updated_ts", { mode: "number" }).notNull(),
 });
 

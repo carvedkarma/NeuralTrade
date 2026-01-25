@@ -109,6 +109,7 @@ export class StrategyLearner {
   private lastTrainingTime: number | null = null;
   private isTraining = false;
   private modelAccuracy = 0;
+  private trainingProgressIdx = 0;  // Tracks how far through historical candles we've trained
   
   private longOutcomes: { pnl: number; mae: number; mfe: number }[] = [];
   private shortOutcomes: { pnl: number; mae: number; mfe: number }[] = [];
@@ -297,8 +298,15 @@ export class StrategyLearner {
     if (candles.length < 50) return;
     
     this.isTraining = true;
-    const startIdx = Math.max(20, this.actionSamples.length);
+    // Use trainingProgressIdx to continue from where we left off (persisted to DB)
+    const startIdx = Math.max(20, this.trainingProgressIdx);
     const endIdx = Math.min(candles.length - 16, startIdx + batchSize);
+    
+    // If we've already trained past this point, skip
+    if (startIdx >= endIdx) {
+      this.isTraining = false;
+      return;
+    }
 
     for (let i = startIdx; i < endIdx; i++) {
       const samples = await this.simulateActionsForCandle(candles, i);
@@ -334,6 +342,9 @@ export class StrategyLearner {
         }
       }
     }
+    
+    // Update trainingProgressIdx to where we just finished
+    this.trainingProgressIdx = endIdx;
 
     this.updatePolicyModel();
     this.updateExpansionModel(candles);
@@ -343,7 +354,7 @@ export class StrategyLearner {
     this.isTraining = false;
 
     if (this.trainingEpochs % 5 === 0) {
-      console.log(`[Strategy Learner] Epoch ${this.trainingEpochs}: ${this.actionSamples.length} samples, ${this.actionPatterns.size} patterns`);
+      console.log(`[Strategy Learner] Epoch ${this.trainingEpochs}: idx=${this.trainingProgressIdx}, ${this.actionPatterns.size} patterns`);
       await this.saveStateToDb();
     }
   }
@@ -599,7 +610,7 @@ export class StrategyLearner {
 
   getTrainingProgress(): TrainingProgress {
     return {
-      totalSamples: this.actionSamples.length,
+      totalSamples: this.trainingProgressIdx,  // Use persisted index, not in-memory array
       epochsCompleted: this.trainingEpochs,
       lastTrainingTime: this.lastTrainingTime,
       modelAccuracy: this.modelAccuracy,
@@ -748,15 +759,30 @@ export class StrategyLearner {
       const { strategyLearnerState } = await import("./db/schema");
       const { eq } = await import("drizzle-orm");
       
-      const longStats = this.computeActionStats(this.longOutcomes.map(o => o.pnl));
-      const shortStats = this.computeActionStats(this.shortOutcomes.map(o => o.pnl));
+      const longPnls = this.longOutcomes.map(o => o.pnl);
+      const shortPnls = this.shortOutcomes.map(o => o.pnl);
+      const longStats = this.computeActionStats(longPnls);
+      const shortStats = this.computeActionStats(shortPnls);
+      
+      // Count wins and losses for proper restoration
+      const longWins = longPnls.filter(p => p > 0).length;
+      const longLosses = longPnls.length - longWins;
+      const shortWins = shortPnls.filter(p => p > 0).length;
+      const shortLosses = shortPnls.length - shortWins;
+      
+      // Calculate average win/loss PnL for distribution recreation
+      const allPnls = [...longPnls, ...shortPnls];
+      const winPnls = allPnls.filter(p => p > 0);
+      const lossPnls = allPnls.filter(p => p <= 0);
+      const avgWinPnl = winPnls.length > 0 ? winPnls.reduce((a, b) => a + b, 0) / winPnls.length : 0;
+      const avgLossPnl = lossPnls.length > 0 ? lossPnls.reduce((a, b) => a + b, 0) / lossPnls.length : 0;
       
       const existingState = await db.select().from(strategyLearnerState).limit(1);
       const now = Date.now();
       
       const stateData = {
         epochsCompleted: this.trainingEpochs,
-        totalSamples: this.actionSamples.length,
+        totalSamples: this.trainingProgressIdx,  // Use training index, not samples array length
         modelAccuracy: this.modelAccuracy,
         longWinRate: longStats.winRate,
         shortWinRate: shortStats.winRate,
@@ -767,7 +793,14 @@ export class StrategyLearner {
         longPnl: longStats.avgPnl,
         shortPnl: shortStats.avgPnl,
         lastTrainingTs: this.lastTrainingTime,
-        trainingProgressIdx: this.actionSamples.length,
+        trainingProgressIdx: this.trainingProgressIdx,  // Critical: track where we stopped
+        // New fields for proper restoration
+        longWins,
+        longLosses,
+        shortWins,
+        shortLosses,
+        avgWinPnl,
+        avgLossPnl,
         updatedTs: now,
       };
 
@@ -779,7 +812,7 @@ export class StrategyLearner {
         await db.insert(strategyLearnerState).values(stateData);
       }
       
-      console.log(`[Strategy Learner] State saved: ${this.trainingEpochs} epochs, ${this.actionSamples.length} samples`);
+      console.log(`[Strategy Learner] State saved: ${this.trainingEpochs} epochs, idx=${this.trainingProgressIdx}, wins L:${longWins} S:${shortWins}`);
     } catch (err) {
       console.error("[Strategy Learner] Failed to save state:", err);
     }
@@ -809,29 +842,61 @@ export class StrategyLearner {
       this.modelAccuracy = state.modelAccuracy || 0;
       this.lastTrainingTime = state.lastTrainingTs || null;
       
-      if (state.longWinRate !== null && state.longWinRate > 0) {
-        const longCount = Math.floor((state.totalSamples || 0) / 3);
-        for (let i = 0; i < longCount; i++) {
-          this.longOutcomes.push({ 
-            pnl: state.longPnl || 0, 
-            mae: 0.5, 
-            mfe: 0.5 
-          });
-        }
-        const shortCount = longCount;
-        for (let i = 0; i < shortCount; i++) {
-          this.shortOutcomes.push({ 
-            pnl: state.shortPnl || 0, 
-            mae: 0.5, 
-            mfe: 0.5 
-          });
-        }
-        for (let i = 0; i < longCount; i++) {
-          this.holdOutcomes.push({ pnl: 0 });
-        }
+      // CRITICAL: Restore training progress index so we don't retrain from beginning
+      this.trainingProgressIdx = state.trainingProgressIdx || 0;
+      
+      // Restore win/loss outcomes with proper distribution (not all same PnL)
+      const longWins = state.longWins || 0;
+      const longLosses = state.longLosses || 0;
+      const shortWins = state.shortWins || 0;
+      const shortLosses = state.shortLosses || 0;
+      const avgWinPnl = state.avgWinPnl || 0.5;  // Default positive PnL for wins
+      const avgLossPnl = state.avgLossPnl || -0.5;  // Default negative PnL for losses
+      
+      // Recreate long outcomes with proper win/loss distribution
+      for (let i = 0; i < longWins; i++) {
+        // Add some variance to avoid all identical PnL values
+        const variance = (Math.random() - 0.5) * 0.2 * avgWinPnl;
+        this.longOutcomes.push({ 
+          pnl: avgWinPnl + variance, 
+          mae: 0.3 + Math.random() * 0.2, 
+          mfe: 0.5 + Math.random() * 0.3 
+        });
+      }
+      for (let i = 0; i < longLosses; i++) {
+        const variance = (Math.random() - 0.5) * 0.2 * Math.abs(avgLossPnl);
+        this.longOutcomes.push({ 
+          pnl: avgLossPnl - variance, 
+          mae: 0.5 + Math.random() * 0.3, 
+          mfe: 0.2 + Math.random() * 0.2 
+        });
       }
       
-      console.log(`[Strategy Learner] State restored: ${this.trainingEpochs} epochs, ${state.totalSamples} samples`);
+      // Recreate short outcomes with proper win/loss distribution
+      for (let i = 0; i < shortWins; i++) {
+        const variance = (Math.random() - 0.5) * 0.2 * avgWinPnl;
+        this.shortOutcomes.push({ 
+          pnl: avgWinPnl + variance, 
+          mae: 0.3 + Math.random() * 0.2, 
+          mfe: 0.5 + Math.random() * 0.3 
+        });
+      }
+      for (let i = 0; i < shortLosses; i++) {
+        const variance = (Math.random() - 0.5) * 0.2 * Math.abs(avgLossPnl);
+        this.shortOutcomes.push({ 
+          pnl: avgLossPnl - variance, 
+          mae: 0.5 + Math.random() * 0.3, 
+          mfe: 0.2 + Math.random() * 0.2 
+        });
+      }
+      
+      // Recreate hold outcomes (neutral)
+      const holdCount = Math.floor((longWins + longLosses + shortWins + shortLosses) / 2);
+      for (let i = 0; i < holdCount; i++) {
+        this.holdOutcomes.push({ pnl: (Math.random() - 0.5) * 0.1 });  // Small random around 0
+      }
+      
+      console.log(`[Strategy Learner] State restored: ${this.trainingEpochs} epochs, idx=${this.trainingProgressIdx}, L:${longWins}W/${longLosses}L S:${shortWins}W/${shortLosses}L`);
       return true;
     } catch (err) {
       console.error("[Strategy Learner] Failed to load state:", err);
@@ -851,6 +916,7 @@ export class StrategyLearner {
     this.lastTrainingTime = null;
     this.isTraining = false;
     this.modelAccuracy = 0;
+    this.trainingProgressIdx = 0;  // Reset training progress
     
     this.longOutcomes = [];
     this.shortOutcomes = [];
