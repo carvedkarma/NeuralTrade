@@ -61,6 +61,13 @@ export interface PatternSample {
 
 export let patternClusters: Map<string, PatternCluster> = new Map();
 
+// Reset all pattern clusters to empty state
+export function resetPatternClusters(): void {
+  console.log("[Pattern Memory] Resetting all pattern clusters...");
+  patternClusters = new Map();
+  console.log("[Pattern Memory] All pattern clusters have been reset");
+}
+
 export interface PatternMatch {
   timestamp: number;
   similarity: number;
@@ -886,7 +893,16 @@ function kMeansClustering(
         embedding: normalizeEmbedding(p.embedding as number[]),
         forwardReturn8: p.forwardReturn8 || 0,
         won: p.forwardWin || false,
+        direction: "HOLD" as "LONG" | "SHORT" | "HOLD",  // Historical patterns default to HOLD
+        actualPnL: p.forwardReturn8 || 0,  // Use forward return as P&L
       })),
+      // Direction-aware properties (initialize from historical data)
+      longWins: 0,
+      longTotal: 0,
+      longAvgPnL: 0,
+      shortWins: 0,
+      shortTotal: 0,
+      shortAvgPnL: 0,
     };
     
     clusters.push(cluster);
@@ -963,6 +979,13 @@ export async function loadPatternClustersFromDb(): Promise<void> {
         avgReturn: row.avgReturn || 0,
         maturity: (row.sampleCount || 0) >= MIN_SAMPLES_PER_PATTERN ? 1 : (row.sampleCount || 0) / MIN_SAMPLES_PER_PATTERN,
         samples: [],
+        // Direction-aware properties (initialize from historical data)
+        longWins: 0,
+        longTotal: 0,
+        longAvgPnL: 0,
+        shortWins: 0,
+        shortTotal: 0,
+        shortAvgPnL: 0,
       };
       
       patternClusters.set(cluster.id, cluster);

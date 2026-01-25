@@ -417,6 +417,76 @@ export class MemStorage implements IStorage {
     }
   }
 
+  // Reset all learning data in database and in-memory state
+  async resetLearningState(): Promise<void> {
+    try {
+      console.log("[Persistence] Resetting all learning data...");
+      
+      // Clear database tables
+      await db.delete(learningState);
+      await db.delete(patternClustersTable);
+      await db.delete(socialMediaStats);
+      
+      // Reset pattern memory clusters
+      const { resetPatternClusters } = await import("./pattern-memory");
+      resetPatternClusters();
+      
+      // Reset in-memory learning stats to initial values
+      this.learningStats.binanceAttempts = 0;
+      this.learningStats.coingeckoAttempts = 0;
+      this.learningStats.cryptocompareAttempts = 0;
+      this.learningStats.binanceSuccesses = 0;
+      this.learningStats.coingeckoSuccesses = 0;
+      this.learningStats.cryptocompareSuccesses = 0;
+      this.learningStats.totalPredictions = 0;
+      this.learningStats.sessionStart = Date.now();
+      this.learningStats.ruleBasedPredictions = { long: 0, short: 0, hold: 0 };
+      this.learningStats.patternPredictions = { long: 0, short: 0, hold: 0 };
+      this.learningStats.aiPredictions = { long: 0, short: 0, hold: 0 };
+      this.learningStats.ruleBasedDirectional = { total: 0, correct: 0 };
+      this.learningStats.patternDirectional = { total: 0, correct: 0 };
+      this.learningStats.aiDirectional = { total: 0, correct: 0 };
+      this.learningStats.totalPatternsMatched = 0;
+      this.learningStats.avgPatternSimilarity = 0;
+      this.learningStats.lastPatternMatchCount = 0;
+      this.learningStats.featureComputeCount = 0;
+      this.learningStats.totalComputeTime = 0;
+      this.learningStats.patternsByRegime = { trend_up: 0, trend_down: 0, chop: 0, shock: 0 };
+      this.learningStats.fearGreedReads = 0;
+      this.learningStats.lastFearGreedFetch = 0;
+      this.learningStats.cryptoPanicReads = 0;
+      this.learningStats.lastCryptoPanicFetch = 0;
+      this.learningStats.twitterReads = 0;
+      this.learningStats.lastTwitterFetch = 0;
+      this.learningStats.redditReads = 0;
+      this.learningStats.lastRedditFetch = 0;
+      this.learningStats.globalSentiment = 0.5;
+      this.learningStats.lastSocialUpdate = 0;
+      this.learningStats.historicalCandlesProcessed = 0;
+      this.learningStats.patternsLearnedFromHistory = 0;
+      this.learningStats.backtestTradesSimulated = 0;
+      this.learningStats.historicalWinRate = 0;
+      this.learningStats.learningEpochs = 0;
+      this.learningStats.lastTrainingTime = 0;
+      this.learningStats.candlestickPatternsDetected = 0;
+      this.learningStats.bullishPatterns = 0;
+      this.learningStats.bearishPatterns = 0;
+      this.learningStats.volumeAnomalies = 0;
+      this.learningStats.trendReversals = 0;
+      this.learningStats.supportBounces = 0;
+      this.learningStats.resistanceRejections = 0;
+      this.learningStats.patternTypesLearned = {};
+      this.learningStats.deepLearningIndex = 50;
+      this.learningStats.deepLearningComplete = false;
+      this.learningStats.deepLearningPassCount = 0;
+      
+      console.log("[Persistence] All learning data has been reset");
+    } catch (error) {
+      console.error("[Persistence] Error resetting learning state:", error);
+      throw error;
+    }
+  }
+
   async reloadHistoricalCandles(): Promise<void> {
     try {
       const { loadCandlesFromDb, getDataRangeInfo } = await import("./historical-data");

@@ -364,6 +364,117 @@ export function ActionPatternsCard({ patterns }: { patterns: ActionPattern[] }) 
   );
 }
 
+export function HighWinStrategiesCard({ patterns }: { patterns: ActionPattern[] }) {
+  // Sort by the best win rate (either long or short) and filter for >50% win rate
+  const highWinPatterns = patterns
+    .map(p => ({
+      ...p,
+      bestWinRate: Math.max(p.longWinRate, p.shortWinRate),
+      winningDirection: p.longWinRate > p.shortWinRate ? "LONG" : "SHORT" as "LONG" | "SHORT",
+    }))
+    .filter(p => p.bestWinRate >= 0.45 && p.sampleCount >= 10) // At least 45% win rate and 10 samples
+    .sort((a, b) => b.bestWinRate - a.bestWinRate)
+    .slice(0, 10);
+
+  return (
+    <Card data-testid="card-high-win-strategies">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium flex items-center gap-2">
+          <Target className="h-4 w-4 text-emerald-400" />
+          High Win Rate Strategies
+          <Badge variant="outline" className="ml-auto text-xs bg-emerald-500/10 text-emerald-400 border-emerald-500/30">
+            Top Performers
+          </Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-2 max-h-80 overflow-y-auto">
+          {highWinPatterns.length === 0 ? (
+            <div className="text-center py-6">
+              <Target className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
+              <p className="text-sm text-muted-foreground">
+                No high win rate strategies found yet
+              </p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Strategies need 45%+ win rate and 10+ samples to appear here
+              </p>
+            </div>
+          ) : (
+            highWinPatterns.map((pattern, index) => (
+              <div 
+                key={pattern.patternId} 
+                className="p-3 rounded-lg border bg-gradient-to-r from-emerald-500/5 to-transparent"
+                data-testid={`high-win-strategy-${index}`}
+              >
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <Badge 
+                      variant="outline" 
+                      className={`text-xs ${
+                        pattern.regime === "trend_up" ? "bg-emerald-500/10 text-emerald-400" :
+                        pattern.regime === "trend_down" ? "bg-red-500/10 text-red-400" :
+                        "bg-yellow-500/10 text-yellow-400"
+                      }`}
+                    >
+                      {pattern.regime.replace("_", " ")}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">
+                      {pattern.sampleCount} trades
+                    </span>
+                  </div>
+                  <Badge 
+                    className={`${
+                      pattern.winningDirection === "LONG" 
+                        ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30" 
+                        : "bg-red-500/20 text-red-400 border-red-500/30"
+                    }`}
+                    variant="outline"
+                  >
+                    {pattern.winningDirection}
+                    <span className="ml-1 font-bold">{(pattern.bestWinRate * 100).toFixed(0)}%</span>
+                  </Badge>
+                </div>
+                <div className="grid grid-cols-4 gap-2 text-xs">
+                  <div className="text-center p-1 rounded bg-muted/30">
+                    <div className="text-muted-foreground">Long WR</div>
+                    <div className={pattern.longWinRate >= 0.5 ? "text-emerald-400 font-medium" : "text-muted-foreground"}>
+                      {(pattern.longWinRate * 100).toFixed(0)}%
+                    </div>
+                  </div>
+                  <div className="text-center p-1 rounded bg-muted/30">
+                    <div className="text-muted-foreground">Short WR</div>
+                    <div className={pattern.shortWinRate >= 0.5 ? "text-red-400 font-medium" : "text-muted-foreground"}>
+                      {(pattern.shortWinRate * 100).toFixed(0)}%
+                    </div>
+                  </div>
+                  <div className="text-center p-1 rounded bg-muted/30">
+                    <div className="text-muted-foreground">Long Avg</div>
+                    <div className={pattern.longAvgReward >= 0 ? "text-emerald-400" : "text-red-400"}>
+                      {pattern.longAvgReward >= 0 ? "+" : ""}{pattern.longAvgReward.toFixed(2)}%
+                    </div>
+                  </div>
+                  <div className="text-center p-1 rounded bg-muted/30">
+                    <div className="text-muted-foreground">Short Avg</div>
+                    <div className={pattern.shortAvgReward >= 0 ? "text-emerald-400" : "text-red-400"}>
+                      {pattern.shortAvgReward >= 0 ? "+" : ""}{pattern.shortAvgReward.toFixed(2)}%
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-2 flex items-center justify-between text-xs">
+                  <span className="text-muted-foreground">Edge Advantage:</span>
+                  <span className="text-emerald-400 font-medium">
+                    +{(pattern.actionAdvantage * 100).toFixed(2)}%
+                  </span>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function TrainingStatusCard({ progress }: { progress: StrategyLearnerData["trainingProgress"] }) {
   return (
     <Card data-testid="card-training-status">
@@ -501,6 +612,9 @@ export function StrategyLearnerTab() {
 
   return (
     <div className="space-y-4" data-testid="strategy-learner-content">
+      {/* High Win Strategies - Featured at the top */}
+      <HighWinStrategiesCard patterns={data.actionPatterns} />
+      
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
         <div className="lg:col-span-8 space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

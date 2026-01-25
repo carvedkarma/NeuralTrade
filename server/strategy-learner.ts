@@ -838,6 +838,42 @@ export class StrategyLearner {
       return false;
     }
   }
+
+  // Reset all learning state and clear database
+  reset(): void {
+    console.log("[Strategy Learner] Resetting all learning data...");
+    
+    // Clear in-memory state
+    this.actionSamples = [];
+    this.policyWeights.clear();
+    this.expansionModel = { weights: [], bias: 0 };
+    this.trainingEpochs = 0;
+    this.lastTrainingTime = null;
+    this.isTraining = false;
+    this.modelAccuracy = 0;
+    
+    this.longOutcomes = [];
+    this.shortOutcomes = [];
+    this.holdOutcomes = [];
+    
+    this.actionPatterns.clear();
+    
+    // Clear database state (fire and forget)
+    this.clearDbState().catch(err => console.error("[Strategy Learner] Failed to clear DB state:", err));
+    
+    console.log("[Strategy Learner] All learning data has been reset");
+  }
+
+  private async clearDbState(): Promise<void> {
+    try {
+      const { db } = await import("./db");
+      const { strategyLearnerState } = await import("./db/schema");
+      await db.delete(strategyLearnerState);
+      console.log("[Strategy Learner] Database state cleared");
+    } catch (err) {
+      console.error("[Strategy Learner] Failed to clear DB state:", err);
+    }
+  }
 }
 
 export const strategyLearner = new StrategyLearner();

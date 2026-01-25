@@ -129,6 +129,23 @@ export async function registerRoutes(
     }
   });
 
+  // Reset all learning data and strategy learner
+  app.post("/api/learning/reset", async (req, res) => {
+    try {
+      // Reset strategy learner
+      strategyLearner.reset();
+      
+      // Reset storage learning state
+      await storage.resetLearningState();
+      
+      console.log("[API] All learning data and strategy learner have been reset");
+      res.json({ success: true, message: "Learning data reset successfully" });
+    } catch (error) {
+      console.error("Error resetting learning data:", error);
+      res.status(500).json({ error: "Failed to reset learning data" });
+    }
+  });
+
   app.get("/api/historical/status", async (req, res) => {
     try {
       const rangeInfo = await getDataRangeInfo();
