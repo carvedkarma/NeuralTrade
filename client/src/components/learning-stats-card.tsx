@@ -891,7 +891,7 @@ export function HistoricalLearningCard({
                 ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/30" 
                 : "text-amber-400 bg-amber-500/10 border-amber-500/30"
             }>
-              {historicalLearning.trainingCoverage ?? 100}% Used
+              {(historicalLearning.trainingCoverage ?? 100).toFixed(1)}% Used
             </Badge>
           </div>
           <div className="grid grid-cols-2 gap-2 text-xs mb-3">
