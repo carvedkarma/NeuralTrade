@@ -19,12 +19,144 @@ class BinanceDataFetcher:
     BINANCE_API_URL = "https://api.binance.com/api/v3"
     CRYPTOCOMPARE_URL = "https://min-api.cryptocompare.com/data/v2"
     
-    def __init__(self, symbols: List[str], timeframes: List[str], replit_proxy_url: Optional[str] = None):
+    def __init__(self, symbols: List[str], timeframes: List[str], replit_proxy_url: Optional[str] = None, use_sync: bool = False):
         self.symbols = symbols
         self.timeframes = timeframes
         self.session = None
         self.working_source = None
         self.replit_proxy_url = replit_proxy_url
+        self.use_sync = use_sync
+    
+    def _fetch_replit_proxy_sync(self, symbol: str, timeframe: str, limit: int,
+                                  end_time: Optional[int] = None) -> List[Dict]:
+        if not self.replit_proxy_url:
+            return []
+        
+        try:
+            import requests
+            
+            params: Dict[str, Any] = {
+                "symbol": symbol,
+                "interval": timeframe,
+                "limit": min(limit, 1000)
+            }
+            if end_time:
+                params["endTime"] = end_time
+            
+            url = f"{self.replit_proxy_url}/api/data/klines"
+            print(f"[Replit Proxy] Fetching {symbol} {timeframe} (limit={params['limit']})...")
+            
+            response = requests.get(url, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if "candles" in data:
+                    candles = []
+                    for c in data["candles"]:
+                        candles.append({
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "timestamp": c["timestamp"],
+                            "open": float(c["open"]),
+                            "high": float(c["high"]),
+                            "low": float(c["low"]),
+                            "close": float(c["close"]),
+                            "volume": float(c["volume"]),
+                            "close_time": c["closeTime"],
+                            "quote_volume": float(c["quoteVolume"]),
+                            "trades": c["trades"],
+                            "taker_buy_base": float(c["takerBuyBase"]),
+                            "taker_buy_quote": float(c["takerBuyQuote"])
+                        })
+                    if candles:
+                        print(f"[Replit Proxy] Successfully fetched {len(candles)} candles for {symbol} {timeframe}")
+                    return candles
+            else:
+                print(f"[Replit Proxy] HTTP {response.status_code}: {response.text[:100]}")
+        except Exception as e:
+            print(f"[Replit Proxy] Sync fetch error: {e}")
+        return []
+    
+    def fetch_klines_sync(self, symbol: str, timeframe: str, limit: int = 1000,
+                          end_time: Optional[int] = None) -> List[Dict]:
+        if self.replit_proxy_url:
+            return self._fetch_replit_proxy_sync(symbol, timeframe, limit, end_time)
+        
+        print(f"[Sync] No Replit proxy configured - cannot fetch {symbol}")
+        return []
+    
+    def fetch_historical_sync(self, symbol: str, timeframe: str, 
+                               num_candles: int = 50000) -> pd.DataFrame:
+        print(f"[Sync] Fetching {num_candles:,} candles for {symbol} {timeframe}...")
+        
+        all_candles = []
+        end_time = None
+        remaining = num_candles
+        batch_size = 1000
+        fetched = 0
+        
+        while remaining > 0:
+            fetch_count = min(batch_size, remaining)
+            candles = self.fetch_klines_sync(symbol, timeframe, fetch_count, end_time)
+            
+            if not candles:
+                print(f"[Sync] No more data available for {symbol} {timeframe}")
+                break
+            
+            all_candles = candles + all_candles
+            remaining -= len(candles)
+            fetched += len(candles)
+            
+            pct = (fetched / num_candles) * 100
+            print(f"[{symbol} {timeframe}] Progress: {fetched:,}/{num_candles:,} ({pct:.1f}%)")
+            
+            if len(candles) < batch_size:
+                break
+                
+            end_time = candles[0]["timestamp"] - 1
+            
+            import time
+            time.sleep(0.1)
+        
+        if not all_candles:
+            return pd.DataFrame()
+        
+        df = pd.DataFrame(all_candles)
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        df = df.drop_duplicates(subset=["timestamp"])
+        
+        print(f"[Sync] Completed {symbol} {timeframe}: {len(df):,} unique candles")
+        return df
+    
+    def fetch_all_historical_sync(self, num_candles: int = 50000, 
+                                    progress_callback=None) -> Dict[str, Dict[str, pd.DataFrame]]:
+        results = {}
+        
+        total_pairs = len(self.symbols) * len(self.timeframes)
+        current = 0
+        
+        print(f"[Sync] Fetching {num_candles:,} candles for {len(self.symbols)} symbols, {len(self.timeframes)} timeframes")
+        print(f"[Sync] Total pairs to fetch: {total_pairs}")
+        
+        for symbol in self.symbols:
+            results[symbol] = {}
+            for timeframe in self.timeframes:
+                current += 1
+                print(f"")
+                print(f"=== [{current}/{total_pairs}] Fetching {symbol} {timeframe} ===")
+                
+                if progress_callback:
+                    progress_callback(current, total_pairs, symbol, timeframe)
+                
+                df = self.fetch_historical_sync(symbol, timeframe, num_candles)
+                results[symbol][timeframe] = df
+        
+        if progress_callback:
+            progress_callback(total_pairs, total_pairs, "", "")
+        
+        print(f"")
+        print(f"[Sync] All fetches complete!")
+        return results
         
     async def _get_session(self):
         if self.session is None:
