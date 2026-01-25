@@ -28,6 +28,7 @@ import {
   SocialAwarenessCard,
   HistoricalLearningCard
 } from "@/components/learning-stats-card";
+import { GPUTrainingSection, type GPUMetrics } from "@/components/gpu-training-card";
 import {
   PerformanceCard,
   EquityPerformanceCard,
@@ -83,6 +84,18 @@ export default function Dashboard() {
   const { data: integrityReport } = useQuery<IntegrityReport>({
     queryKey: ["/api/historical/integrity"],
     refetchInterval: 60000,
+  });
+
+  const { data: gpuStatus } = useQuery<{ connected: boolean; metrics: GPUMetrics | null }>({
+    queryKey: ["/api/gpu/status"],
+    refetchInterval: 5000,
+  });
+
+  const trainModelMutation = useMutation({
+    mutationFn: (modelType: string) => apiRequest("POST", "/api/gpu/train", { modelType, epochs: 100 }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/gpu/status"] });
+    },
   });
 
   const hasTriggeredAnalysis = useRef(false);
@@ -323,6 +336,12 @@ export default function Dashboard() {
           <TabsContent value="learning" className="mt-0">
             <div className="space-y-4">
               <LearningOverviewCard learningStats={data.learningStats} />
+              
+              {/* GPU Neural Network Training - NEW */}
+              <GPUTrainingSection 
+                gpuMetrics={gpuStatus?.metrics}
+                onStartTraining={(modelType) => trainModelMutation.mutate(modelType)}
+              />
               
               {/* Social Awareness & Historical Learning - Key new sections */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

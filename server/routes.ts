@@ -4,6 +4,7 @@ import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
 import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs } from "./historical-data";
 import { strategyLearner } from "./strategy-learner";
+import { gpuBridge } from "./gpu-bridge";
 
 export const backfillState = {
   inProgress: false,
@@ -270,6 +271,54 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error checking incomplete jobs:", error);
       res.status(500).json({ error: "Failed to check incomplete jobs" });
+    }
+  });
+
+  app.get("/api/gpu/status", async (req, res) => {
+    try {
+      const metrics = await gpuBridge.getGPUMetrics();
+      res.json({
+        connected: metrics !== null,
+        metrics: metrics || {
+          gpuAvailable: false,
+          gpuName: null,
+          gpuMemoryUsed: null,
+          gpuMemoryTotal: null,
+          gpuMemoryPercent: 0,
+          modelsLoaded: [],
+          uptime: 0,
+          isTraining: false,
+          trainingProgress: 0,
+          currentModel: null,
+          trainingMetrics: {}
+        }
+      });
+    } catch (error) {
+      console.error("Error fetching GPU status:", error);
+      res.json({ connected: false, metrics: null });
+    }
+  });
+
+  app.post("/api/gpu/train", async (req, res) => {
+    try {
+      const { modelType, epochs = 100 } = req.body;
+      if (!modelType) {
+        return res.status(400).json({ error: "modelType is required" });
+      }
+      const started = await gpuBridge.startTraining(modelType, epochs);
+      res.json({ success: started });
+    } catch (error) {
+      console.error("Error starting GPU training:", error);
+      res.status(500).json({ error: "Failed to start training" });
+    }
+  });
+
+  app.get("/api/gpu/health", async (req, res) => {
+    try {
+      const health = await gpuBridge.checkHealth();
+      res.json({ available: health !== null, health });
+    } catch (error) {
+      res.json({ available: false, health: null });
     }
   });
 
