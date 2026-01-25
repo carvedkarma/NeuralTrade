@@ -208,12 +208,13 @@ export function DataManagementCard() {
                   Download Data
                 </Button>
               ) : (
-                <div className="flex-1 flex gap-2">
+                <div className="flex-1 flex flex-wrap gap-2 items-center">
+                  <span className="text-sm text-muted-foreground">Years:</span>
                   <Select value={selectedYears} onValueChange={setSelectedYears}>
-                    <SelectTrigger className="w-24" data-testid="select-years">
-                      <SelectValue />
+                    <SelectTrigger className="w-28" data-testid="select-years">
+                      <SelectValue placeholder="Select years">{selectedYears} year{parseInt(selectedYears) > 1 ? "s" : ""}</SelectValue>
                     </SelectTrigger>
-                    <SelectContent>
+                    <SelectContent className="z-50">
                       {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map((y) => (
                         <SelectItem key={y} value={y.toString()}>
                           {y} year{y > 1 ? "s" : ""}
