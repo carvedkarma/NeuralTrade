@@ -580,17 +580,51 @@ export function ComparisonCard({ comparison }: { comparison: StrategyLearnerData
   );
 }
 
+interface DataSummary {
+  assets: { symbol: string; totalCandles: number }[];
+  totalCandles: number;
+}
+
 export function StrategyLearnerTab() {
   const { data, isLoading, error } = useQuery<StrategyLearnerData>({
     queryKey: ["/api/strategy-learner"],
     refetchInterval: 5000,
   });
 
+  const { data: dataSummary } = useQuery<DataSummary>({
+    queryKey: ["/api/data/summary"],
+    refetchInterval: 10000,
+  });
+
+  // Check if historical data has been downloaded
+  const hasHistoricalData = dataSummary && dataSummary.totalCandles >= 1000;
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12" data-testid="strategy-learner-loading">
         <Loader2 className="h-8 w-8 animate-spin text-primary" />
         <span className="ml-2 text-muted-foreground">Loading Strategy Learner...</span>
+      </div>
+    );
+  }
+
+  // Show "waiting for data" when no historical data downloaded
+  if (!hasHistoricalData) {
+    return (
+      <div className="p-6 rounded-lg border border-blue-500/30 bg-blue-500/10" data-testid="strategy-learner-waiting">
+        <div className="flex items-center gap-2 text-blue-400">
+          <Brain className="h-5 w-5" />
+          <span className="font-medium">Waiting for Historical Data</span>
+        </div>
+        <p className="mt-2 text-sm text-muted-foreground">
+          The Strategy Learner requires historical data to train its policy model. 
+          Go to the <span className="text-primary font-medium">GPU Training</span> tab and use 
+          the <span className="text-primary font-medium">Data Management</span> panel to download 
+          1+ years of historical data.
+        </p>
+        <p className="mt-2 text-xs text-muted-foreground">
+          Current data: {dataSummary?.totalCandles?.toLocaleString() || 0} candles (need 1,000+)
+        </p>
       </div>
     );
   }

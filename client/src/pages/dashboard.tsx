@@ -48,7 +48,7 @@ import {
 import { StrategyLearnerTab } from "@/components/strategy-learner-card";
 import { DataManagementCard } from "@/components/data-management-card";
 import type { DashboardData } from "@shared/schema";
-import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff } from "lucide-react";
+import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff, Brain } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -137,6 +137,17 @@ export default function Dashboard() {
     queryKey: ["/api/unified-learning/progress"],
     refetchInterval: 10000,
   });
+
+  const { data: dataSummary } = useQuery<{
+    assets: { symbol: string; totalCandles: number }[];
+    totalCandles: number;
+  }>({
+    queryKey: ["/api/data/summary"],
+    refetchInterval: 10000,
+  });
+
+  // Check if historical data has been downloaded (minimum 1000 candles)
+  const hasHistoricalData = dataSummary && dataSummary.totalCandles >= 1000;
 
   const resetLearningMutation = useMutation({
     mutationFn: () => apiRequest("POST", "/api/unified-learning/reset"),
@@ -429,41 +440,61 @@ export default function Dashboard() {
 
           <TabsContent value="learning" className="mt-0">
             <div className="space-y-4">
-              {/* Data Management - Download/Clear historical data for all assets */}
+              {/* Data Management - Always show so user can download data */}
               <DataManagementCard />
               
-              <LearningOverviewCard learningStats={data.learningStats} />
-              
-              {/* Unified Learning Progress - All 3 systems synchronized */}
-              <UnifiedLearningProgressCard 
-                progress={unifiedProgress}
-                onReset={handleResetLearning}
-              />
-              
-              {/* Social Awareness & Historical Learning - Key new sections */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <SocialAwarenessCard learningStats={data.learningStats} />
-                <HistoricalLearningCard 
-                  learningStats={data.learningStats}
-                  historicalStatus={historicalStatus}
-                  integrityReport={integrityReport}
-                  onBackfill={() => backfillMutation.mutate()}
-                  backfillInProgress={backfillInProgress || backfillMutation.isPending}
-                  backfillProgress={backfillProgress}
-                />
-              </div>
-              
-              {/* Data Sources & Pattern Memory */}
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-                <div className="lg:col-span-6 space-y-4">
-                  <DataSourcesCard learningStats={data.learningStats} />
-                  <PatternLearningCard learningStats={data.learningStats} />
+              {/* Show waiting state when no historical data */}
+              {!hasHistoricalData ? (
+                <div className="p-6 rounded-lg border border-blue-500/30 bg-blue-500/10" data-testid="learning-waiting">
+                  <div className="flex items-center gap-2 text-blue-400">
+                    <Brain className="h-5 w-5" />
+                    <span className="font-medium">Waiting for Historical Data</span>
+                  </div>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    All learning systems require historical data to train. Use the 
+                    <span className="text-primary font-medium"> Data Management </span>
+                    panel above to download 1+ years of historical data for BTC, ETH, SOL, and BNB.
+                  </p>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Current data: {dataSummary?.totalCandles?.toLocaleString() || 0} candles (need 1,000+)
+                  </p>
                 </div>
-                <div className="lg:col-span-6 space-y-4">
-                  <FeatureComputationCard learningStats={data.learningStats} />
-                  <ModelPerformanceCard learningStats={data.learningStats} />
-                </div>
-              </div>
+              ) : (
+                <>
+                  <LearningOverviewCard learningStats={data.learningStats} />
+                  
+                  {/* Unified Learning Progress - All 3 systems synchronized */}
+                  <UnifiedLearningProgressCard 
+                    progress={unifiedProgress}
+                    onReset={handleResetLearning}
+                  />
+                  
+                  {/* Social Awareness & Historical Learning - Key new sections */}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <SocialAwarenessCard learningStats={data.learningStats} />
+                    <HistoricalLearningCard 
+                      learningStats={data.learningStats}
+                      historicalStatus={historicalStatus}
+                      integrityReport={integrityReport}
+                      onBackfill={() => backfillMutation.mutate()}
+                      backfillInProgress={backfillInProgress || backfillMutation.isPending}
+                      backfillProgress={backfillProgress}
+                    />
+                  </div>
+                  
+                  {/* Data Sources & Pattern Memory */}
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                    <div className="lg:col-span-6 space-y-4">
+                      <DataSourcesCard learningStats={data.learningStats} />
+                      <PatternLearningCard learningStats={data.learningStats} />
+                    </div>
+                    <div className="lg:col-span-6 space-y-4">
+                      <FeatureComputationCard learningStats={data.learningStats} />
+                      <ModelPerformanceCard learningStats={data.learningStats} />
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           </TabsContent>
 
