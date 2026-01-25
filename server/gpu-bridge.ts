@@ -189,7 +189,7 @@ class GPUTrainerBridge {
     const volatilityRegimeNum = feature.volatilityRegime === "high" ? 1 : 
                                 feature.volatilityRegime === "medium" ? 0.5 : 0;
     
-    // Core features (58 values) + embedding (24 values) = 82 total features
+    // Core features (57 values) + embedding (24 values) = 81 total features
     const coreFeatures = [
       // OHLCV data (10 features) - raw price action for neural networks
       feature.price,
@@ -220,7 +220,7 @@ class GPUTrainerBridge {
       feature.breakoutDistanceHigh,
       feature.breakoutDistanceLow,
       
-      // Volatility features (4 features)
+      // Volatility features (5 features)
       feature.efficiencyRatio,
       feature.atr14,
       feature.volatility,
@@ -272,7 +272,7 @@ class GPUTrainerBridge {
     ];
     
     // Append the 24-dimensional embedding for pattern matching
-    // Total: 58 core features + 24 embedding = 82 features
+    // Total: 57 core features + 24 embedding = 81 features
     return [...coreFeatures, ...feature.embedding];
   }
   
