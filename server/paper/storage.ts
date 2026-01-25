@@ -79,6 +79,12 @@ export async function updatePosition(id: number, updates: Partial<PaperPosition>
   return updated;
 }
 
+export async function updatePositionPeakProfit(id: number, peakProfit: number): Promise<void> {
+  await db.update(paperPositions)
+    .set({ peakProfit })
+    .where(eq(paperPositions.id, id));
+}
+
 export async function createTrade(trade: Omit<PaperTrade, "id">): Promise<PaperTrade> {
   const [created] = await db.insert(paperTrades).values(trade).returning();
   return created;

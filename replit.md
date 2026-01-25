@@ -57,7 +57,7 @@ The system operates with live data only - no simulated fallback. Shows error mes
 - **Paper Trading System**: Conservative execution engine with strict gating:
   - **Disabled by default**: Must call /api/paper/enable then /api/paper/start
   - Portfolio management with $10,000 starting equity
-  - **Strict gating**: signal ∈ {LONG, SHORT}, confidence >= 65%, edge > costs, regime != chop
+  - **Strict gating**: signal ∈ {LONG, SHORT}, confidence >= 65%, edge > costs, regime != chop, quality score >= 70
   - **Risk management**: 0.25% risk per trade (max 0.5%), 100% max exposure
   - **One position at a time**: No overlapping positions
   - **ATR-based stops**: stop_distance = max(1.2 * ATR, min_stop_pct, fees+slippage)
@@ -66,6 +66,26 @@ The system operates with live data only - no simulated fallback. Shows error mes
   - **Execution audit log**: Every trade attempt logged with full reasoning
   - API endpoints: /api/paper/enable, /api/paper/disable, /api/paper/start, /api/paper/stop, /api/paper/status, /api/paper/audit
   - Expected behavior: Very few trades (1-3 per day), long stretches of no trades, flat equity curve early
+- **Advanced Exit Logic** (January 2026): Comprehensive exit management to improve win/loss ratio:
+  - **Regime-Based ATR Multipliers**: Trend trades use 0.9x ATR stops, chop trades use 0.7x (tighter)
+  - **Dynamic Take Profit Targets**: Based on regime + expansion (RR >= 1 always):
+    - Trend with expansion: TP1=1.1x ATR, TP2=2.0x ATR (RR=1.22, let winners run)
+    - Trend without expansion: TP1=1.0x ATR (RR=1.11)
+    - Chop regime: TP1=0.8x ATR (RR=1.14, quick exits)
+  - **MFE Tracking (Maximum Favorable Excursion)**: Tracks peak profit per position
+    - Trailing activates at 0.6x ATR profit (mfeActivationThresholdAtr)
+    - Exits on giveback >= max(0.35x ATR, 0.5x TP1)
+    - Database tracks peakProfit and initialStopDistance for R-multiple analysis
+  - **Failure Stop Detection**: Early exit when trade thesis invalidates
+    - Kalman fast trend flips against position direction
+    - MACD histogram flips against position direction
+    - Exit reason: "FAILURE" vs normal "SL" stop loss
+  - **Quality Score Gating** (0-100 scale, minimum 70 for trades):
+    - 40% EV score: edge / costs (capped at 3x for max score)
+    - 30% Expansion score: impulse candle, ATR expansion, range break
+    - 20% Regime clarity: |probUp - probDown|
+    - 10% Maturity score: log(pattern samples) / log(100)
+  - **Exit Reasons**: SL, TP1, TP2, TRAIL, TIME, FLIP, MANUAL, FAILURE, MFE_GIVEBACK
 - **Confidence Calculation**: Weighted average formula (20-85% range):
   - 40% directional strength (max(probUp, probDown))
   - 25% regime clarity (adaptive to market conditions)

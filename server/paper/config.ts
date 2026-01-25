@@ -21,6 +21,30 @@ export interface PaperTradingConfig {
   startingEquity: number;
   trailBufferAtrMultiplier: number;
   minPnlForTimeStop: number;
+  
+  // Regime-based ATR multipliers for stops
+  trendStopMultiplier: number;      // 0.9x ATR for trend trades (tighter)
+  chopStopMultiplier: number;       // 0.7x ATR for chop/mean-reversion (tightest)
+  
+  // Regime-based take profit targets (ATR multiples)
+  trendExpansionTp1: number;        // 1.0x ATR TP1 when trend + expansion
+  trendExpansionTp2: number;        // 1.8x ATR TP2 when trend + expansion
+  trendNoExpansionTp1: number;      // 0.7x ATR TP1 when trend, no expansion
+  chopTp1: number;                  // 0.6x ATR TP1 for chop/mean-reversion
+  
+  // MFE-aware trailing stops
+  mfeTrailActivation: number;       // Activate trail when profit >= X * ATR_pct
+  mfeGivebackPct: number;           // Exit remainder if giveback >= X% of peak
+  mfeMinGiveback: number;           // Min giveback threshold (ATR multiple)
+  
+  // Failure stop parameters
+  failureStopEnabled: boolean;      // Enable Kalman+MACD failure detection
+  
+  // Quality score gate
+  minQualityScore: number;          // Minimum quality score to trade (0-100)
+  
+  // Performance metrics tracking
+  trackRMultiple: boolean;          // Track R-multiple per trade
 }
 
 export const defaultConfig: PaperTradingConfig = {
@@ -39,13 +63,38 @@ export const defaultConfig: PaperTradingConfig = {
   minStopDistancePct: 0.15,
   atrStopMultiplier: 1.2,
   
-  timeStopBars: 3,
+  timeStopBars: 4,              // Exit if no progress after 4 bars
   flipConfidenceThreshold: 0.75,
   flipEdgeMultiplier: 3,
   
   startingEquity: 10000,
   trailBufferAtrMultiplier: 0.2,
-  minPnlForTimeStop: 0.003,
+  minPnlForTimeStop: 0.15,      // 0.15x ATR_pct minimum profit after time stop bars
+  
+  // Regime-based ATR multipliers for stops
+  trendStopMultiplier: 0.9,     // Tighter stop for trend trades
+  chopStopMultiplier: 0.7,      // Tightest stop for mean-reversion
+  
+  // Regime-based take profit targets (ATR multiples)
+  // NOTE: TP must be >= Stop to ensure RR >= 1 (winners bigger than losers)
+  trendExpansionTp1: 1.1,       // Trend + expansion: TP1 = 1.1x ATR (RR = 1.22 vs 0.9x stop)
+  trendExpansionTp2: 2.0,       // Trend + expansion: TP2 = 2.0x ATR (let winners run)
+  trendNoExpansionTp1: 1.0,     // Trend no expansion: TP1 = 1.0x ATR (RR = 1.11 vs 0.9x stop)
+  chopTp1: 0.8,                 // Chop/mean-reversion: TP1 = 0.8x ATR (RR = 1.14 vs 0.7x stop)
+  
+  // MFE-aware trailing stops
+  mfeTrailActivation: 0.6,      // Activate trail when profit >= 0.6x ATR_pct
+  mfeGivebackPct: 0.5,          // Exit if giveback >= 50% of TP1
+  mfeMinGiveback: 0.35,         // Min giveback = 0.35x ATR_pct
+  
+  // Failure stop parameters
+  failureStopEnabled: true,     // Enable Kalman+MACD failure detection
+  
+  // Quality score gate
+  minQualityScore: 70,          // Require quality >= 70 to trade
+  
+  // Performance metrics tracking
+  trackRMultiple: true,         // Track R-multiple per trade
 };
 
 let currentConfig: PaperTradingConfig = { ...defaultConfig };

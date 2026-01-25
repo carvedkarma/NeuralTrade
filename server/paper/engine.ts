@@ -4,7 +4,7 @@ import type { PaperPosition } from "@shared/schema";
 import type { Candle } from "@shared/schema";
 import type { ShotPlan } from "../signal-engine";
 
-export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL";
+export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK";
 
 interface TradeContext {
   candle: Candle;
@@ -13,6 +13,8 @@ interface TradeContext {
   atr: number;
   kalmanFast: number;
   shotPlan: ShotPlan | null;
+  macdHistogram?: number;       // For failure stop detection
+  prevMacdHistogram?: number;   // Previous MACD histogram value
 }
 
 interface TradeAudit {
@@ -69,9 +71,22 @@ function calculateStopDistance(
   entryPrice: number,
   atr: number,
   side: "LONG" | "SHORT",
-  config: PaperTradingConfig
-): { stopLoss: number; stopDistance: number } {
-  const atrStop = atr * config.atrStopMultiplier;
+  config: PaperTradingConfig,
+  regime?: string,
+  hasExpansion?: boolean
+): { stopLoss: number; stopDistance: number; atrPct: number } {
+  // ATR as percentage of price
+  const atrPct = (atr / entryPrice) * 100;
+  
+  // Select ATR multiplier based on regime
+  let atrMultiplier = config.atrStopMultiplier;
+  if (regime === "trend_up" || regime === "trend_down") {
+    atrMultiplier = config.trendStopMultiplier;  // 0.9x for trend trades
+  } else if (regime === "chop") {
+    atrMultiplier = config.chopStopMultiplier;   // 0.7x for mean reversion
+  }
+  
+  const atrStop = atr * atrMultiplier;
   const minStopAbs = entryPrice * (config.minStopDistancePct / 100);
   const minCostStop = entryPrice * getTotalCostsPct() * 1.5;
   
@@ -81,7 +96,51 @@ function calculateStopDistance(
     ? entryPrice - stopDistance 
     : entryPrice + stopDistance;
     
-  return { stopLoss, stopDistance };
+  return { stopLoss, stopDistance, atrPct };
+}
+
+// Calculate regime-based take profit targets
+function calculateTakeProfits(
+  entryPrice: number,
+  atr: number,
+  side: "LONG" | "SHORT",
+  config: PaperTradingConfig,
+  regime?: string,
+  hasExpansion?: boolean
+): { tp1: number; tp2: number | null } {
+  let tp1Mult: number;
+  let tp2Mult: number | null;
+  
+  const isTrend = regime === "trend_up" || regime === "trend_down";
+  
+  if (isTrend && hasExpansion) {
+    // Trend + expansion: let winners run (RR=1.22, 2.22)
+    tp1Mult = config.trendExpansionTp1;    // 1.1x ATR
+    tp2Mult = config.trendExpansionTp2;    // 2.0x ATR
+  } else if (isTrend) {
+    // Trend without expansion: conservative (RR=1.11)
+    tp1Mult = config.trendNoExpansionTp1;  // 1.0x ATR
+    tp2Mult = null;
+  } else {
+    // Chop/mean-reversion: quick exits (RR=1.14)
+    tp1Mult = config.chopTp1;              // 0.8x ATR
+    tp2Mult = null;
+  }
+  
+  const tp1Distance = atr * tp1Mult;
+  const tp2Distance = tp2Mult ? atr * tp2Mult : null;
+  
+  if (side === "LONG") {
+    return {
+      tp1: entryPrice + tp1Distance,
+      tp2: tp2Distance ? entryPrice + tp2Distance : null,  // null when no TP2 intended
+    };
+  } else {
+    return {
+      tp1: entryPrice - tp1Distance,
+      tp2: tp2Distance ? entryPrice - tp2Distance : null,  // null when no TP2 intended
+    };
+  }
 }
 
 function calculatePositionSize(
@@ -144,6 +203,121 @@ function checkTrailingStop(position: PaperPosition, candle: Candle): boolean {
   }
 }
 
+// MFE-aware trailing stop with giveback logic
+function updateMfeAwareTrailingStop(
+  position: PaperPosition, 
+  currentPrice: number,
+  atr: number,
+  config: PaperTradingConfig
+): { newTrailPrice: number | null; shouldExit: boolean; exitReason: string; newPeakProfit: number } {
+  const atrPct = atr / position.entryPrice;
+  const currentProfitPct = position.side === "LONG"
+    ? (currentPrice - position.entryPrice) / position.entryPrice
+    : (position.entryPrice - currentPrice) / position.entryPrice;
+  
+  // peakProfit is stored as absolute PnL: priceDiff * qty
+  // Convert to percentage for comparison: peakProfit / (entryPrice * qty)
+  const notionalValue = position.entryPrice * position.qty;
+  const peakProfitPct = position.peakProfit && notionalValue > 0
+    ? position.peakProfit / notionalValue 
+    : Math.max(currentProfitPct, 0);
+  
+  // Track new peak
+  const newPeakProfitPct = Math.max(peakProfitPct, currentProfitPct);
+  const newPeakProfit = newPeakProfitPct * notionalValue;  // Store as absolute PnL
+  
+  if (position.trailMode === "none") {
+    return { newTrailPrice: null, shouldExit: false, exitReason: "", newPeakProfit };
+  }
+  
+  // Only activate trailing after reaching activation threshold (0.6x ATR_pct)
+  const activationThreshold = config.mfeTrailActivation * atrPct;
+  if (newPeakProfitPct < activationThreshold) {
+    return { newTrailPrice: null, shouldExit: false, exitReason: "", newPeakProfit };
+  }
+  
+  // Calculate giveback from peak
+  const givebackPct = newPeakProfitPct - currentProfitPct;
+  
+  // Check if giveback exceeds threshold: max(0.35×ATR_pct, 0.5×TP1_distance)
+  const tp1Distance = position.tp1 
+    ? Math.abs(position.tp1 - position.entryPrice) / position.entryPrice 
+    : atrPct;
+  const minGiveback = config.mfeMinGiveback * atrPct;
+  const maxGiveback = Math.max(minGiveback, config.mfeGivebackPct * tp1Distance);
+  
+  if (givebackPct >= maxGiveback && currentProfitPct > 0) {
+    return { 
+      newTrailPrice: null, 
+      shouldExit: true, 
+      exitReason: `MFE Giveback: ${(givebackPct * 100).toFixed(2)}% from peak ${(newPeakProfitPct * 100).toFixed(2)}%`,
+      newPeakProfit
+    };
+  }
+  
+  // Standard Kalman-based trailing (as backup)
+  const buffer = atr * config.trailBufferAtrMultiplier;
+  let newTrailPrice = position.trailPrice;
+  
+  if (position.side === "LONG") {
+    const kalmanTrail = currentPrice - buffer;
+    if (!position.trailPrice || kalmanTrail > position.trailPrice) {
+      newTrailPrice = kalmanTrail;
+    }
+  } else {
+    const kalmanTrail = currentPrice + buffer;
+    if (!position.trailPrice || kalmanTrail < position.trailPrice) {
+      newTrailPrice = kalmanTrail;
+    }
+  }
+  
+  return { newTrailPrice, shouldExit: false, exitReason: "", newPeakProfit };
+}
+
+// Failure stop: exit early when setup is invalidated (Kalman + MACD flip)
+function checkFailureStop(
+  position: PaperPosition,
+  ctx: TradeContext,
+  config: PaperTradingConfig
+): { shouldExit: boolean; reason: string } {
+  if (!config.failureStopEnabled) {
+    return { shouldExit: false, reason: "" };
+  }
+  
+  const currentPrice = ctx.candle.close;
+  const macdHist = ctx.macdHistogram ?? 0;
+  const prevMacdHist = ctx.prevMacdHistogram ?? 0;
+  
+  // For LONG: exit if close loses Kalman fast AND MACD histogram flips negative
+  if (position.side === "LONG") {
+    const losesKalman = currentPrice < ctx.kalmanFast;
+    const macdFlipsNegative = macdHist < 0 && prevMacdHist >= 0;
+    
+    if (losesKalman && macdFlipsNegative) {
+      return { 
+        shouldExit: true, 
+        reason: "Failure Stop: Price below Kalman fast + MACD histogram flipped negative"
+      };
+    }
+  }
+  
+  // For SHORT: exit if close reclaims Kalman fast AND MACD histogram flips positive
+  if (position.side === "SHORT") {
+    const reclaimsKalman = currentPrice > ctx.kalmanFast;
+    const macdFlipsPositive = macdHist > 0 && prevMacdHist <= 0;
+    
+    if (reclaimsKalman && macdFlipsPositive) {
+      return { 
+        shouldExit: true, 
+        reason: "Failure Stop: Price above Kalman fast + MACD histogram flipped positive"
+      };
+    }
+  }
+  
+  return { shouldExit: false, reason: "" };
+}
+
+// Legacy trailing stop for compatibility
 function updateTrailingStop(
   position: PaperPosition, 
   kalmanFast: number, 
@@ -309,8 +483,8 @@ export async function openPosition(
   ctx: TradeContext,
   side: "LONG" | "SHORT",
   shotPlanStopLoss: number,
-  tp1: number,
-  tp2: number,
+  shotPlanTp1: number,
+  shotPlanTp2: number,
   confidence: number,
   edge: number
 ): Promise<PaperPosition | null> {
@@ -318,12 +492,27 @@ export async function openPosition(
   const portfolio = await storage.getOrCreatePortfolio();
   
   const entryPrice = applySlippage(ctx.candle.open, side, config.slippageBps);
+  const regime = ctx.shotPlan?.regime || "unknown";
+  const hasExpansion = ctx.shotPlan?.expansionGate?.confirmed || false;
   
-  const { stopLoss, stopDistance } = calculateStopDistance(
+  // Use regime-based ATR stop calculation
+  const { stopLoss, stopDistance, atrPct } = calculateStopDistance(
     entryPrice,
     ctx.atr,
     side,
-    config
+    config,
+    regime,
+    hasExpansion
+  );
+  
+  // Use regime-based take profit targets
+  const { tp1, tp2 } = calculateTakeProfits(
+    entryPrice,
+    ctx.atr,
+    side,
+    config,
+    regime,
+    hasExpansion
   );
   
   const { qty, riskUsdt } = calculatePositionSize(
@@ -410,6 +599,10 @@ export async function openPosition(
     exitReason: null,
     signalConfidence: confidence,
     signalEdge: edge,
+    // MFE tracking and R-multiple fields
+    peakProfit: 0,                      // Initialize MFE at 0
+    initialStopDistance: stopDistance,  // Store for R-multiple calculation
+    regime: regime,                     // Store regime for analysis
   });
 
   await storage.createTrade({
@@ -430,9 +623,10 @@ export async function openPosition(
   });
 
   console.log(`[Paper] OPENED ${side}: ${qty.toFixed(6)} BTC @ ${entryPrice.toFixed(2)}`);
-  console.log(`  Stop: ${stopLoss.toFixed(2)} (${stopDistance.toFixed(2)} distance)`);
+  console.log(`  Regime: ${regime}, Expansion: ${hasExpansion ? "YES" : "NO"}`);
+  console.log(`  Stop: ${stopLoss.toFixed(2)} (${stopDistance.toFixed(2)} distance, R=1)`);
   console.log(`  Risk: $${riskUsdt.toFixed(2)} (${config.riskPerTradePct}% of equity)`);
-  console.log(`  TP1: ${tp1.toFixed(2)}, TP2: ${tp2.toFixed(2)}`);
+  console.log(`  TP1: ${tp1.toFixed(2)}, TP2: ${tp2 ? tp2.toFixed(2) : "N/A"}`);
   
   return position;
 }
@@ -569,14 +763,42 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
     return;
   }
 
+  // Track MFE (Maximum Favorable Excursion) - peak profit so far
+  const currentPnl = calculateUnrealizedPnl(position, ctx.candle.close);
+  const currentPeakProfit = position.peakProfit ?? 0;
+  const newPeakProfit = Math.max(currentPeakProfit, currentPnl);
+  
   await storage.updatePosition(position.id, {
     barsOpen: (position.barsOpen || 0) + 1,
+    peakProfit: newPeakProfit,  // Update MFE tracking
   });
 
   const slHit = checkStopLoss(position, ctx.candle);
   const tp1Hit = checkTp1(position, ctx.candle);
   const tp2Hit = checkTp2(position, ctx.candle);
   const trailHit = checkTrailingStop(position, ctx.candle);
+  
+  // Check failure stop (Kalman + MACD flip invalidation)
+  const failureCheck = checkFailureStop(position, ctx, config);
+  if (failureCheck.shouldExit) {
+    console.log(`[Paper] FAILURE STOP: ${failureCheck.reason}`);
+    await closePosition(position, ctx.candle.close, "FAILURE", ctx);
+    return;
+  }
+  
+  // Check MFE-aware trailing with giveback logic
+  const mfeTrail = updateMfeAwareTrailingStop(position, ctx.candle.close, ctx.atr, config);
+  
+  // Update peak profit tracking
+  if (mfeTrail.newPeakProfit && mfeTrail.newPeakProfit > (position.peakProfit || 0)) {
+    await storage.updatePositionPeakProfit(position.id, mfeTrail.newPeakProfit);
+  }
+  
+  if (mfeTrail.shouldExit) {
+    console.log(`[Paper] MFE GIVEBACK EXIT: ${mfeTrail.exitReason}`);
+    await closePosition(position, ctx.candle.close, "MFE_GIVEBACK", ctx);
+    return;
+  }
 
   if (slHit && tp1Hit) {
     await closePosition(position, position.stopLoss!, "SL", ctx);

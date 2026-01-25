@@ -57,12 +57,75 @@ export interface ShotPlan {
   mlPredictions: EnsemblePrediction;
   expansionGate: ExpansionGate;
   combinedIntelligence?: CombinedIntelligence;
+  // Quality score (0-100) combining EV, expansion, regime clarity, maturity
+  qualityScore: number;
+  qualityBreakdown: {
+    evScore: number;           // 40% weight: EV relative to costs (0-1)
+    expansionScore: number;    // 30% weight: expansion probability (0-1)
+    regimeClarity: number;     // 20% weight: |trend_up - trend_down| (0-1)
+    maturityScore: number;     // 10% weight: pattern sample maturity (0-1)
+  };
 }
 
 const FEES = 0.0004;
 const SLIPPAGE = 0.0002;
 const FUNDING_RISK = 0.0001;
 const EDGE_MULTIPLE_MIN = 1.5;
+const MIN_QUALITY_SCORE = 70;  // Minimum quality score required for trades
+
+// Calculate quality score (0-100) based on:
+// - 40% EV score (edge relative to costs)
+// - 30% expansion score (predicted volatility expansion)
+// - 20% regime clarity (|trend_up - trend_down|)
+// - 10% maturity score (pattern sample count)
+function calculateQualityScore(
+  edge: number,
+  costs: number,
+  expansionGate: ExpansionGate,
+  probUp: number,
+  probDown: number,
+  patternMatches: PatternMatch[]
+): { qualityScore: number; breakdown: { evScore: number; expansionScore: number; regimeClarity: number; maturityScore: number } } {
+  // EV score: edge / costs, capped at 0-1 (edge needs to be 3x costs for max score)
+  const evScore = costs > 0 ? Math.min(1, Math.max(0, (edge / costs) / 3)) : 0;
+  
+  // Expansion score: how many primary conditions are met (0-1)
+  // NOTE: "confirmed" is derived from other conditions, so we don't count it separately
+  const primaryExpansionConditions = [
+    expansionGate.impulseCandle,
+    expansionGate.atrExpansion,
+    expansionGate.rangeBreak
+  ].filter(Boolean).length;
+  const expansionScore = primaryExpansionConditions / 3;
+  
+  // Regime clarity: |probUp - probDown| (0-1)
+  const regimeClarity = Math.abs(probUp - probDown);
+  
+  // Maturity score: log(samples) / log(target_samples), target = 100
+  const sampleCount = patternMatches.length;
+  const targetSamples = 100;
+  const maturityScore = sampleCount > 0 
+    ? Math.min(1, Math.log(sampleCount + 1) / Math.log(targetSamples + 1))
+    : 0;
+  
+  // Weighted combination
+  const qualityScore = (
+    evScore * 0.40 +
+    expansionScore * 0.30 +
+    regimeClarity * 0.20 +
+    maturityScore * 0.10
+  ) * 100;  // Convert to 0-100 scale
+  
+  return {
+    qualityScore,
+    breakdown: {
+      evScore,
+      expansionScore,
+      regimeClarity,
+      maturityScore,
+    }
+  };
+}
 
 function estimateCosts(holdCandles: number): number {
   const fundingPeriods = Math.ceil(holdCandles / 32);
@@ -331,6 +394,22 @@ export async function generateShotPlan(
   
   const expansionGate = checkExpansionGate(candles, feature.atr14, ensemble.direction);
   
+  // Calculate quality score for trade setup
+  const qualityResult = calculateQualityScore(
+    edge,
+    costs,
+    expansionGate,
+    ensemble.probUp,
+    ensemble.probDown,
+    patternMatches
+  );
+  
+  // Quality gate: reject if quality score is below threshold
+  if (shouldTrade && qualityResult.qualityScore < MIN_QUALITY_SCORE) {
+    shouldTrade = false;
+    vetoReasons.push(`Quality score too low: ${qualityResult.qualityScore.toFixed(0)} (need ${MIN_QUALITY_SCORE}+)`);
+  }
+  
   const displayConfidence = shouldTrade 
     ? ensemble.confidence 
     : ensemble.confidence * 0.7;
@@ -361,6 +440,8 @@ export async function generateShotPlan(
     mlPredictions: ensemble,
     expansionGate,
     combinedIntelligence,
+    qualityScore: qualityResult.qualityScore,
+    qualityBreakdown: qualityResult.breakdown,
   };
 }
 
