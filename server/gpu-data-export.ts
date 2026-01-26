@@ -402,6 +402,55 @@ export const TRADING_COSTS = {
   totalRoundTrip: 0.0009,
 };
 
+// Institution-grade horizon-specific configuration
+export const HORIZON_CONFIG = {
+  h15: {
+    bars: 15,
+    purpose: "active_trades",
+    minEdge: 0.0015,           // 15 bps minimum edge after costs
+    minConfidence: 1.25,        // μ/σ ratio threshold
+    weight: 0.5,                // Training/prediction weight
+    maxHoldBars: 15,            // Time stop: forced exit at horizon
+  },
+  h60: {
+    bars: 60,
+    purpose: "swing_intraday",
+    minEdge: 0.0025,           // 25 bps minimum edge after costs
+    minConfidence: 1.10,        // μ/σ ratio threshold
+    weight: 0.35,               // Training/prediction weight
+    maxHoldBars: 60,            // Time stop: forced exit at horizon
+  },
+  h240: {
+    bars: 240,
+    purpose: "trend_filter",
+    minEdge: 0.0040,           // 40 bps minimum edge after costs
+    minConfidence: 0.90,        // μ/σ ratio threshold (trend is slower)
+    weight: 0.15,               // Confirmation only, not primary trading
+    maxHoldBars: 240,           // Time stop: forced exit at horizon
+  },
+};
+
+// NO-TRADE conditions (critical for precision)
+export const NO_TRADE_CONDITIONS = {
+  // Edge dead zone: if |edge| < threshold, signal is noise
+  deadZoneThreshold: 0.0015,    // ±15 bps dead zone
+  
+  // Uncertainty spike: if σ > 95th percentile, skip
+  uncertaintyPercentile: 0.95,
+  maxUncertaintyMultiplier: 2.5, // σ > 2.5x median = panic
+  
+  // Horizon disagreement: if μ_15 and μ_60 disagree in sign, skip
+  horizonDisagreementVeto: true,
+  
+  // Loss streak: if recent losses >= threshold, reduce or skip
+  maxLossStreak: 3,
+  lossStreakSizeReduction: 0.5, // Cut size by 50% after loss streak
+  
+  // Funding rate flip: aggressive funding change = caution
+  fundingFlipWindow: 4,         // bars
+  fundingFlipThreshold: 0.001,  // 10 bps flip is aggressive
+};
+
 export function getGPUTrainerConfig() {
   return {
     architecture: {
@@ -438,14 +487,12 @@ export function getGPUTrainerConfig() {
       tradeWorthyLoss: "bce",
       tradeWorthyWeight: 0.15,
     },
-    horizons: {
-      h1: { minutes: 15, weight: 0.5 },
-      h2: { minutes: 60, weight: 0.35 },
-      h3: { minutes: 240, weight: 0.15 },
-    },
+    horizons: HORIZON_CONFIG,
+    noTradeConditions: NO_TRADE_CONDITIONS,
     thresholds: {
-      minReturnForTrade: 0.001,
-      minConfidenceForTrade: 0.6,
+      // Deprecated: Use horizons.hX.minEdge instead
+      minReturnForTrade: 0.0015,
+      minConfidenceForTrade: 1.25,
       maxUncertaintyForTrade: 0.02,
     },
     tradingCosts: TRADING_COSTS,
@@ -479,6 +526,20 @@ export interface EnhancedLabels {
   sampleWeight: number;
 }
 
+// Get horizon-specific minimum edge threshold
+function getMinEdgeForHorizon(horizon: number): number {
+  if (horizon <= 15) return HORIZON_CONFIG.h15.minEdge;
+  if (horizon <= 60) return HORIZON_CONFIG.h60.minEdge;
+  return HORIZON_CONFIG.h240.minEdge;
+}
+
+// Get horizon-specific minimum confidence threshold
+function getMinConfidenceForHorizon(horizon: number): number {
+  if (horizon <= 15) return HORIZON_CONFIG.h15.minConfidence;
+  if (horizon <= 60) return HORIZON_CONFIG.h60.minConfidence;
+  return HORIZON_CONFIG.h240.minConfidence;
+}
+
 export function getEnhancedLabels(
   closes: number[],
   highs: number[],
@@ -502,12 +563,17 @@ export function getEnhancedLabels(
       const futureClose = closes[futureIdx];
       const logReturn = Math.log(futureClose / currentClose);
       
+      // Use horizon-specific minimum edge threshold
+      const horizonMinEdge = getMinEdgeForHorizon(h);
       const edge = Math.abs(logReturn) - costs.totalRoundTrip;
       
       rawReturns.push(logReturn);
       costAdjustedEdges.push(edge);
-      directions.push(logReturn > costs.totalRoundTrip ? 1 : logReturn < -costs.totalRoundTrip ? -1 : 0);
       
+      // Direction uses horizon-specific dead zone threshold
+      directions.push(logReturn > horizonMinEdge ? 1 : logReturn < -horizonMinEdge ? -1 : 0);
+      
+      // Calculate clean move ratio (directional excursion analysis)
       let maxFavorable = 0;
       let maxAdverse = 0;
       const exitDir = logReturn >= 0 ? 1 : -1;
@@ -525,7 +591,8 @@ export function getEnhancedLabels(
         ? maxFavorable / (maxFavorable + maxAdverse) 
         : 0;
       
-      const isTradeWorthy = edge > 0.001 && cleanMoveRatio > 0.5 ? 1 : 0;
+      // Trade-worthiness uses horizon-specific edge threshold
+      const isTradeWorthy = edge > horizonMinEdge && cleanMoveRatio > 0.5 ? 1 : 0;
       tradeWorthy.push(isTradeWorthy);
       
       maxAbsReturn = Math.max(maxAbsReturn, Math.abs(logReturn));
@@ -537,6 +604,7 @@ export function getEnhancedLabels(
     }
   }
   
+  // Sample weighting: prioritize high-move samples in volatile regimes
   const moveWeight = Math.pow(maxAbsReturn / 0.01, 0.5);
   const volatilityMultiplier = volatility20 > 0.015 ? 1.5 : volatility20 < 0.005 ? 0.3 : 1.0;
   const rawWeight = moveWeight * volatilityMultiplier;

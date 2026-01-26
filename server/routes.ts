@@ -20,7 +20,9 @@ import {
   generateWalkForwardFolds,
   computeRobustScalers,
   getEnhancedLabels,
-  TRADING_COSTS
+  TRADING_COSTS,
+  HORIZON_CONFIG,
+  NO_TRADE_CONDITIONS
 } from "./gpu-data-export";
 
 export const backfillState = {
@@ -1092,6 +1094,20 @@ export async function registerRoutes(
         totalRoundTrip: "Total cost for open+close trade (0.09%)",
       },
       usage: "Subtract totalRoundTrip from raw returns to get tradable edge"
+    });
+  });
+
+  // Institution-grade horizon configuration endpoint
+  app.get("/api/gpu-export/horizon-config", (req, res) => {
+    res.json({
+      horizons: HORIZON_CONFIG,
+      noTradeConditions: NO_TRADE_CONDITIONS,
+      tradingCosts: TRADING_COSTS,
+      usage: {
+        horizons: "Use minEdge and minConfidence per horizon for trade filtering",
+        noTrade: "Apply vetoes: dead zone, uncertainty spike, horizon disagreement, loss streak",
+        decisionLogic: "15 & 60 bars are primary trading horizons, 240 is trend confirmation only"
+      }
     });
   });
 

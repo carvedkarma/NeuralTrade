@@ -67,6 +67,60 @@ class RLConfig:
     initial_capital: float = 10000.0
     max_position_size: float = 1.0
     transaction_cost: float = 0.001
+
+@dataclass
+class HorizonConfig:
+    """Institution-grade horizon-specific thresholds"""
+    bars: int = 15
+    purpose: str = "active_trades"
+    min_edge: float = 0.0015          # Minimum edge after costs (log)
+    min_confidence: float = 1.25       # μ/σ ratio threshold
+    weight: float = 0.5                # Training/prediction weight
+    max_hold_bars: int = 15            # Time stop: forced exit
+
+@dataclass
+class NoTradeConfig:
+    """Institution-grade NO-TRADE conditions"""
+    dead_zone_threshold: float = 0.0015     # ±15 bps dead zone
+    uncertainty_percentile: float = 0.95
+    max_uncertainty_multiplier: float = 2.5  # σ > 2.5x median = panic
+    horizon_disagreement_veto: bool = True
+    max_loss_streak: int = 3
+    loss_streak_size_reduction: float = 0.5
+    funding_flip_window: int = 4
+    funding_flip_threshold: float = 0.001
+
+@dataclass
+class InstitutionConfig:
+    """Institution-grade trading configuration"""
+    # Horizon-specific configs
+    h15: HorizonConfig = field(default_factory=lambda: HorizonConfig(
+        bars=15, purpose="active_trades", min_edge=0.0015, min_confidence=1.25, weight=0.5, max_hold_bars=15
+    ))
+    h60: HorizonConfig = field(default_factory=lambda: HorizonConfig(
+        bars=60, purpose="swing_intraday", min_edge=0.0025, min_confidence=1.10, weight=0.35, max_hold_bars=60
+    ))
+    h240: HorizonConfig = field(default_factory=lambda: HorizonConfig(
+        bars=240, purpose="trend_filter", min_edge=0.0040, min_confidence=0.90, weight=0.15, max_hold_bars=240
+    ))
+    
+    no_trade: NoTradeConfig = field(default_factory=NoTradeConfig)
+    
+    # Trading costs (futures)
+    maker_fee: float = 0.0002
+    taker_fee: float = 0.0004
+    slippage: float = 0.0001
+    spread_estimate: float = 0.0002
+    total_round_trip: float = 0.0009
+    
+    # Position sizing
+    risk_cap_per_trade: float = 0.0025   # 0.25% equity per trade
+    min_size_pct: float = 0.0005         # 0.05% minimum
+    max_size_pct: float = 0.003          # 0.30% maximum
+    
+    # Expected performance bounds (overfit detection)
+    max_realistic_sharpe: float = 3.0
+    max_realistic_win_rate: float = 0.65
     
 @dataclass
 class Config:
@@ -74,6 +128,7 @@ class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     rl: RLConfig = field(default_factory=RLConfig)
+    institution: InstitutionConfig = field(default_factory=InstitutionConfig)
     
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     seed: int = 42

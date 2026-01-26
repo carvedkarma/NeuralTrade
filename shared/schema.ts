@@ -593,6 +593,7 @@ export const paperPositions = pgTable("paper_positions", {
   trailPrice: real("trail_price"),
   timeStopBars: integer("time_stop_bars"),
   barsOpen: integer("bars_open").default(0),
+  primaryHorizon: integer("primary_horizon").default(15),
   initialRiskUsdt: real("initial_risk_usdt"),
   feesPaidUsdt: real("fees_paid_usdt").default(0),
   fundingPaidUsdt: real("funding_paid_usdt").default(0),

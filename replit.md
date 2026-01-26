@@ -122,13 +122,32 @@ Preferred communication style: Simple, everyday language.
 - **Sample Weighting**: sqrt(|return|/0.01) × volatility_multiplier (1.5x if vol>0.015, 0.3x if vol<0.005), clamped [0.1, 5.0].
 - **Trade-Worthy Labels**: Binary label = 1 if edge > 0.001 AND clean_move_ratio > 0.5 (favorable excursion / total excursion).
 
+### Institution-Grade Trade Decision Engine (January 2026)
+- **Horizon-Specific Thresholds**: Different min edge requirements per horizon: 15b=15bps, 60b=25bps, 240b=40bps.
+- **Confidence Ratio Gates**: μ/σ minimum thresholds: 15b≥1.25, 60b≥1.10, 240b≥0.90.
+- **Multi-Horizon Decision Logic**: 15 & 60 bars are primary trading horizons, 240 is trend confirmation only.
+- **NO-TRADE Conditions**: Dead zone (±15bps), uncertainty spike (>95th percentile), horizon disagreement, loss streak ≥3.
+- **Bounded Kelly Sizing**: size = (E/V) * risk_cap, clamped [0.05%, 0.30%] of equity.
+- **Time Stops**: Forced exit at horizon expiry (15/60/240 bars max).
+- **Trade Decision Engine**: `server/trade-decision-engine.ts` - institution-grade decision logic.
+- **Horizon Config Endpoint**: `/api/gpu-export/horizon-config` exposes all thresholds and NO-TRADE conditions.
+
+### Trade Decision Engine Integration (January 2026)
+- **Full Gating Integration**: `checkShotPlanGating()` now calls `getTradeDecision()` to use the full decision engine logic.
+- **Dynamic Horizon Selection**: `openPosition()` receives `tradeDecision` and sets `primaryHorizon` dynamically (15 or 60 bars).
+- **Horizon-Specific Time Stops**: `checkTimeStop()` uses `HORIZON_CONFIG[primaryHorizon].maxHoldBars` instead of global config.
+- **Loss Streak Persistence**: `initializeLossStreak()` loads recent loss count from database on startup. `recordTradeResult()` updates in-memory counter after each trade.
+- **Position Schema Update**: Added `primaryHorizon` field to `paperPositions` table (defaults to 15).
+- **Helper Functions**: `createHorizonPredictions()` derives h15/h60/h240 from shot plan; `createMarketContext()` builds market context with loss streak.
+
 ### Key Files for ML/Learning
 - `server/feature-engine.ts`: Feature computation + shared regime classifier
 - `server/signal-engine.ts`: Signal generation and shot plans
 - `server/strategy-learner.ts`: Reinforcement learning on historical data
 - `server/pattern-memory.ts`: Pattern storage and similarity matching
-- `server/paper/engine.ts`: Paper trading execution with regime-adaptive stops/TPs
+- `server/trade-decision-engine.ts`: Institution-grade trade decision logic
 - `server/gpu-data-export.ts`: GPU export API endpoints and data preparation
+- `server/paper/engine.ts`: Paper trading execution with regime-adaptive stops/TPs
 - `server/ml-predictor.ts`: ML ensemble predictor with GPU integration
 - `gpu_trainer/data/pipeline.py`: Python data fetcher for GPU trainer
 - `gpu_trainer/config.py`: GPU trainer configuration

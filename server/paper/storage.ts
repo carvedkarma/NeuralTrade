@@ -130,3 +130,25 @@ export async function getEquityCurve(range?: "7d" | "30d" | "all"): Promise<Pape
     .from(paperEquityCurve)
     .orderBy(paperEquityCurve.ts);
 }
+
+/**
+ * Get consecutive losing trades at the end of the trade history
+ * Used for institution-grade loss streak tracking
+ */
+export async function getRecentLossStreak(): Promise<number> {
+  const recentTrades = await db.select()
+    .from(paperTrades)
+    .orderBy(desc(paperTrades.id))
+    .limit(10);
+  
+  let lossStreak = 0;
+  for (const trade of recentTrades) {
+    const pnl = trade.pnlUsdt ?? 0;
+    if (pnl < 0) {
+      lossStreak++;
+    } else {
+      break; // Stop counting at first win
+    }
+  }
+  return lossStreak;
+}

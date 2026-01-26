@@ -5,6 +5,15 @@ import type { Candle } from "@shared/schema";
 import type { ShotPlan } from "../signal-engine";
 import { getRegimeRiskParams, classifyRegime, type MarketRegime } from "../feature-engine";
 import { strategyLearner } from "../strategy-learner";
+import { 
+  checkNoTradeConditions,
+  computePositionSize as computeDecisionEngineSize,
+  makeTradeDecision,
+  type HorizonPredictions,
+  type MarketContext,
+  type TradeDecision
+} from "../trade-decision-engine";
+import { HORIZON_CONFIG, NO_TRADE_CONDITIONS } from "../gpu-data-export";
 
 export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK";
 
@@ -41,6 +50,126 @@ interface TradeAudit {
 const auditLog: TradeAudit[] = [];
 
 const EDGE_MULTIPLE_MIN = 1.5;
+
+// Institution-grade loss streak tracking (in-memory for fast access, initialized from DB)
+let recentLossStreak = 0;
+let lossStreakInitialized = false;
+
+/**
+ * Create HorizonPredictions from shot plan data
+ * Uses edge as h15 mu, derives h60 and h240 from trend context
+ */
+function createHorizonPredictions(
+  shotPlan: ShotPlan | null,
+  edge: number,
+  confidence: number
+): HorizonPredictions {
+  // Default uncertainty estimate based on confidence
+  // Higher confidence = lower sigma
+  const baseSigma = 0.003; // 30 bps base uncertainty
+  const sigmaMultiplier = confidence > 0.6 ? 0.7 : (confidence > 0.4 ? 1.0 : 1.5);
+  const sigma15 = baseSigma * sigmaMultiplier;
+  
+  // H15: Use shot plan edge directly
+  const mu15 = edge;
+  const direction15 = edge > 0 ? 1 : (edge < 0 ? -1 : 0);
+  
+  // H60: Assume similar trend direction, slightly dampened
+  const mu60 = mu15 * 0.8;
+  const sigma60 = sigma15 * 1.2;
+  const direction60 = direction15;
+  
+  // H240: Trend filter - use shot plan regime to infer
+  let mu240 = mu15 * 0.5; // Default: weaker version of short-term signal
+  if (shotPlan?.regime === "trend_up") {
+    mu240 = Math.abs(mu15) * 0.4; // Positive trend
+  } else if (shotPlan?.regime === "trend_down") {
+    mu240 = -Math.abs(mu15) * 0.4; // Negative trend
+  } else if (shotPlan?.regime === "chop") {
+    mu240 = 0; // Neutral in chop
+  }
+  const sigma240 = sigma15 * 1.5;
+  const direction240 = mu240 > 0 ? 1 : (mu240 < 0 ? -1 : 0);
+  
+  return {
+    h15: {
+      horizon: 15,
+      mu: mu15,
+      sigma: sigma15,
+      direction: direction15,
+      confidence: Math.abs(mu15) / sigma15,
+      meetsThreshold: Math.abs(mu15) >= HORIZON_CONFIG.h15.minEdge
+    },
+    h60: {
+      horizon: 60,
+      mu: mu60,
+      sigma: sigma60,
+      direction: direction60,
+      confidence: Math.abs(mu60) / sigma60,
+      meetsThreshold: Math.abs(mu60) >= HORIZON_CONFIG.h60.minEdge
+    },
+    h240: {
+      horizon: 240,
+      mu: mu240,
+      sigma: sigma240,
+      direction: direction240,
+      confidence: Math.abs(mu240) / sigma240,
+      meetsThreshold: Math.abs(mu240) >= HORIZON_CONFIG.h240.minEdge
+    }
+  };
+}
+
+/**
+ * Create MarketContext from TradeContext
+ */
+function createMarketContext(
+  ctx: TradeContext,
+  volatilityPercentile: number = 0.5
+): MarketContext {
+  return {
+    atr14: ctx.atr,
+    volatility20: ctx.atr / ctx.markPrice, // ATR as % of price
+    volatilityPercentile,
+    recentLosses: recentLossStreak,
+    fundingRate: ctx.fundingRate,
+    fundingRateChange: 0, // Would need historical funding data
+    spreadProxy: 0.0001 // Default spread estimate
+  };
+}
+
+/**
+ * Get trade decision from the institution-grade decision engine
+ */
+function getTradeDecision(
+  ctx: TradeContext,
+  shotPlan: ShotPlan | null,
+  edge: number,
+  confidence: number
+): TradeDecision {
+  const predictions = createHorizonPredictions(shotPlan, edge, confidence);
+  const marketCtx = createMarketContext(ctx);
+  return makeTradeDecision(predictions, marketCtx);
+}
+
+export async function initializeLossStreak(): Promise<void> {
+  if (!lossStreakInitialized) {
+    recentLossStreak = await storage.getRecentLossStreak();
+    lossStreakInitialized = true;
+    console.log(`[Paper] Initialized loss streak from DB: ${recentLossStreak}`);
+  }
+}
+
+export function getRecentLossStreakSync(): number {
+  return recentLossStreak;
+}
+
+export function recordTradeResult(isWin: boolean): void {
+  if (isWin) {
+    recentLossStreak = 0;
+  } else {
+    recentLossStreak++;
+  }
+}
 
 function logAudit(audit: TradeAudit): void {
   auditLog.push(audit);
@@ -387,7 +516,20 @@ function updateTrailingStop(
 
 function checkTimeStop(position: PaperPosition, pnlR: number, config: PaperTradingConfig): boolean {
   const barsOpen = position.barsOpen || 0;
-  return barsOpen >= config.timeStopBars && pnlR < config.minPnlForTimeStop;
+  
+  // INSTITUTION-GRADE: Use horizon-specific maxHoldBars if primaryHorizon is set
+  const primaryHorizon = position.primaryHorizon ?? 15;
+  let maxBars = config.timeStopBars;
+  
+  if (primaryHorizon === 15) {
+    maxBars = HORIZON_CONFIG.h15.maxHoldBars;
+  } else if (primaryHorizon === 60) {
+    maxBars = HORIZON_CONFIG.h60.maxHoldBars;
+  } else if (primaryHorizon === 240) {
+    maxBars = HORIZON_CONFIG.h240.maxHoldBars;
+  }
+  
+  return barsOpen >= maxBars && pnlR < config.minPnlForTimeStop;
 }
 
 function shouldFlip(
@@ -408,9 +550,10 @@ function shouldFlip(
 interface GatingResult {
   allowed: boolean;
   reason: string;
+  tradeDecision?: TradeDecision;  // Include decision for use in openPosition
 }
 
-function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConfig): GatingResult {
+function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConfig, ctx?: TradeContext): GatingResult {
   if (!shotPlan) {
     return { allowed: false, reason: "No shot plan available" };
   }
@@ -442,6 +585,39 @@ function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConf
       allowed: false, 
       reason: `Negative or zero edge: ${(edge * 100).toFixed(3)}%. No trade without positive expected value.` 
     };
+  }
+  
+  // INSTITUTION-GRADE: Use trade decision engine for comprehensive veto checks
+  let tradeDecision: TradeDecision | undefined;
+  if (ctx) {
+    tradeDecision = getTradeDecision(ctx, shotPlan, edge, effectiveConfidence);
+    
+    // If decision engine says HOLD, veto the trade with its reasons
+    if (tradeDecision.action === "HOLD") {
+      const reason = tradeDecision.vetoes.length > 0 
+        ? `DECISION_ENGINE: ${tradeDecision.vetoes.join('; ')}`
+        : `DECISION_ENGINE: ${tradeDecision.reasons.join('; ')}`;
+      console.log(`[Paper] Trade decision engine vetoed: ${reason}`);
+      return { allowed: false, reason, tradeDecision };
+    }
+  } else {
+    // Fallback to basic checks if no TradeContext
+    // INSTITUTION-GRADE: Edge dead zone check
+    if (Math.abs(edge) < NO_TRADE_CONDITIONS.deadZoneThreshold) {
+      return {
+        allowed: false,
+        reason: `DEAD_ZONE: |edge|=${(Math.abs(edge) * 100).toFixed(2)} bps < ${(NO_TRADE_CONDITIONS.deadZoneThreshold * 100).toFixed(0)} bps minimum`
+      };
+    }
+    
+    // INSTITUTION-GRADE: Loss streak check
+    const currentLossStreak = recentLossStreak;
+    if (currentLossStreak >= NO_TRADE_CONDITIONS.maxLossStreak) {
+      return {
+        allowed: false,
+        reason: `LOSS_STREAK: ${currentLossStreak} consecutive losses >= ${NO_TRADE_CONDITIONS.maxLossStreak} max. Cool down required.`
+      };
+    }
   }
   
   // SELECTIVE MODE: Block low-probability regime trades
@@ -541,7 +717,7 @@ function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConf
     console.log(`[Paper] Meta-Label PASS: ${(metaLabel.metaConfidence * 100).toFixed(0)}% confidence - ${metaLabel.reasoning.join(', ')}`);
   }
   
-  return { allowed: true, reason: "SELECTIVE MODE: All quality gates passed (including Meta-Label)" };
+  return { allowed: true, reason: "SELECTIVE MODE: All quality gates passed (including Meta-Label)", tradeDecision };
 }
 
 async function checkExposureLimits(
@@ -575,7 +751,8 @@ export async function openPosition(
   shotPlanTp1: number,
   shotPlanTp2: number,
   confidence: number,
-  edge: number
+  edge: number,
+  tradeDecision?: TradeDecision  // Institution-grade decision for horizon selection
 ): Promise<PaperPosition | null> {
   const config = getConfig();
   const portfolio = await storage.getOrCreatePortfolio();
@@ -682,6 +859,7 @@ export async function openPosition(
     trailPrice: null,
     timeStopBars: config.timeStopBars,
     barsOpen: 0,
+    primaryHorizon: tradeDecision?.primaryHorizon || 15,  // Use decision engine's selected horizon
     initialRiskUsdt: riskUsdt,
     feesPaidUsdt: entryFee,
     fundingPaidUsdt: 0,
@@ -799,6 +977,9 @@ export async function closePosition(
 
     await storage.recordEquityPoint(newEquity, drawdown);
     console.log(`[Paper] CLOSED ${position.side}: ${reason} | PnL: ${totalRealizedPnl >= 0 ? '+' : ''}$${totalRealizedPnl.toFixed(2)}`);
+    
+    // INSTITUTION-GRADE: Track loss streak for NO-TRADE conditions
+    recordTradeResult(totalRealizedPnl > 0);
   }
 
   return { pnl: netPnl, isPartial };
@@ -806,6 +987,9 @@ export async function closePosition(
 
 export async function processCandle(ctx: TradeContext): Promise<void> {
   const config = getConfig();
+  
+  // Initialize loss streak from DB on first run
+  await initializeLossStreak();
   
   if (!isPaperTradingEnabled()) {
     return;
@@ -815,7 +999,7 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
   const portfolio = await storage.getOrCreatePortfolio();
   
   if (!position) {
-    const gating = checkShotPlanGating(ctx.shotPlan, config);
+    const gating = checkShotPlanGating(ctx.shotPlan, config, ctx);
     const shotPlanCosts = ctx.shotPlan?.estimatedCosts || getTotalCostsPct();
     const shotPlanEdge = ctx.shotPlan?.edge || 0;
     const shotPlanEdgeMultiple = shotPlanCosts > 0 ? shotPlanEdge / shotPlanCosts : 0;
@@ -859,7 +1043,8 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
       shotPlan.takeProfit1!,
       shotPlan.takeProfit2!,
       tradeConfidence,
-      shotPlan.edge
+      shotPlan.edge,
+      gating.tradeDecision  // Pass trade decision for horizon selection
     );
     return;
   }
@@ -942,7 +1127,7 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
   }
 
   if (shouldFlip(position, ctx.shotPlan, config)) {
-    const gating = checkShotPlanGating(ctx.shotPlan, config);
+    const gating = checkShotPlanGating(ctx.shotPlan, config, ctx);
     if (gating.allowed) {
       await closePosition(position, ctx.markPrice, "FLIP", ctx);
       const shotPlan = ctx.shotPlan!;
@@ -953,7 +1138,8 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
         shotPlan.takeProfit1!,
         shotPlan.takeProfit2!,
         shotPlan.confidence,
-        shotPlan.edge
+        shotPlan.edge,
+        gating.tradeDecision  // Pass trade decision for horizon selection
       );
     }
     return;
