@@ -1051,7 +1051,7 @@ class GPUTrainerGUI:
                 config.training.epochs = epochs
                 config.training.learning_rate = lr
                 
-                trainer = Trainer(model, train_loader, val_loader, config, device=config.device)
+                trainer = Trainer(model, train_loader, val_loader, config, device=config.device, gui_mode=True)
                 
                 self.current_model = model_type
                 self.total_epochs = epochs

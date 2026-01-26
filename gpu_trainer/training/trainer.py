@@ -25,8 +25,10 @@ class Trainer:
         val_loader: DataLoader,
         config,
         device: str = "cuda",
-        mixed_precision: bool = True
+        mixed_precision: bool = True,
+        gui_mode: bool = False
     ):
+        self.gui_mode = gui_mode  # Disable tqdm in GUI mode to prevent UI freeze
         self.model = model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -63,9 +65,13 @@ class Trainer:
         correct = 0
         total = 0
         
-        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}")
+        # Use tqdm only in non-GUI mode (tqdm floods stdout and freezes GUI)
+        if self.gui_mode:
+            loader = self.train_loader
+        else:
+            loader = tqdm(self.train_loader, desc=f"Epoch {epoch}")
         
-        for batch_idx, (data, target) in enumerate(pbar):
+        for batch_idx, (data, target) in enumerate(loader):
             data, target = data.to(self.device), target.to(self.device)
             
             self.optimizer.zero_grad()
@@ -98,10 +104,12 @@ class Trainer:
             self.writer.add_scalar("train/lr", self.scheduler.get_last_lr()[0], self.global_step)
             self.global_step += 1
             
-            pbar.set_postfix({
-                "loss": f"{total_loss / (batch_idx + 1):.4f}",
-                "acc": f"{100. * correct / total:.2f}%"
-            })
+            # Only update tqdm in non-GUI mode
+            if not self.gui_mode:
+                loader.set_postfix({
+                    "loss": f"{total_loss / (batch_idx + 1):.4f}",
+                    "acc": f"{100. * correct / total:.2f}%"
+                })
             
             # Yield to UI thread every batch to prevent GUI freeze
             time.sleep(0)
@@ -187,13 +195,15 @@ class Trainer:
             self.writer.add_scalar("val/acc", val_metrics["val_acc"], epoch)
             self.writer.add_scalar("val/directional_acc", val_metrics["directional_acc"], epoch)
             
-            logger.info(
-                f"Epoch {epoch}: "
-                f"Train Loss: {train_metrics['train_loss']:.4f}, "
-                f"Val Loss: {val_metrics['val_loss']:.4f}, "
-                f"Val Acc: {val_metrics['val_acc']:.2f}%, "
-                f"Dir Acc: {val_metrics['directional_acc']:.2f}%"
-            )
+            # Only log in non-GUI mode (GUI has its own progress callback)
+            if not self.gui_mode:
+                logger.info(
+                    f"Epoch {epoch}: "
+                    f"Train Loss: {train_metrics['train_loss']:.4f}, "
+                    f"Val Loss: {val_metrics['val_loss']:.4f}, "
+                    f"Val Acc: {val_metrics['val_acc']:.2f}%, "
+                    f"Dir Acc: {val_metrics['directional_acc']:.2f}%"
+                )
             
             if val_metrics["val_loss"] < self.best_val_loss:
                 self.best_val_loss = val_metrics["val_loss"]
@@ -203,7 +213,8 @@ class Trainer:
                 self.patience_counter += 1
                 
             if self.patience_counter >= self.config.training.patience:
-                logger.info(f"Early stopping at epoch {epoch}")
+                if not self.gui_mode:
+                    logger.info(f"Early stopping at epoch {epoch}")
                 break
                 
             if epoch % 10 == 0:
@@ -228,7 +239,8 @@ class Trainer:
             "config": self.config
         }
         torch.save(checkpoint, path)
-        logger.info(f"Saved checkpoint to {path}")
+        if not self.gui_mode:
+            logger.info(f"Saved checkpoint to {path}")
         
     def load_checkpoint(self, filename: str):
         path = Path(self.config.training.checkpoint_dir) / filename
