@@ -8,7 +8,7 @@ const MIN_SAMPLES_PER_PATTERN = 100;  // Increased from 50 for statistical relia
 const MIN_BACKTEST_TRADES = 500;
 const MIN_CANDLES_15M = 2000; // ~20 days of 15m data
 const EMBARGO_CANDLES = 16;
-const MIN_SIMILARITY_THRESHOLD = 0.75;  // Increased from 0.6 for quality pattern matches (research-backed)
+const MIN_SIMILARITY_THRESHOLD = 0.82;  // Institutional-grade: increased from 0.75 for higher precision (less false positives)
 
 let currentCandleCount = 0;
 let currentBacktestTrades = 0;
@@ -326,7 +326,7 @@ export async function storePattern(params: StorePatternParams): Promise<void> {
     cluster.wins = totalWins;
   };
   
-  if (nearestCluster && similarity >= 0.7) {
+  if (nearestCluster && similarity >= MIN_SIMILARITY_THRESHOLD) {
     nearestCluster.centroid = updateClusterCentroid(nearestCluster, embedding);
     nearestCluster.support++;
     nearestCluster.avgReturn = (nearestCluster.avgReturn * (nearestCluster.support - 1) + forwardReturn8) / nearestCluster.support;
@@ -593,7 +593,7 @@ function findClusterForPattern(regime: string, embedding: number[]): { clusterId
     if (cluster.regime !== regime) continue;
     
     const similarity = cosineSimilarity(normalizedEmb, cluster.centroid);
-    if (similarity > bestSimilarity && similarity >= 0.7) {
+    if (similarity > bestSimilarity && similarity >= MIN_SIMILARITY_THRESHOLD) {
       bestSimilarity = similarity;
       bestCluster = cluster;
     }

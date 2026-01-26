@@ -788,9 +788,20 @@ export class MemStorage implements IStorage {
     
     // Resume from where we left off - NO MULTIPLE PASSES (train each candle once only)
     let startIdx = this.learningStats.deepLearningIndex;
-    if (startIdx >= maxIndex || this.learningStats.deepLearningComplete) {
-      // STOP - we've already processed all historical data once
-      console.log(`[Deep Learning] Training COMPLETE - all ${candlesToUse.length} historical candles processed (no re-processing)`);
+    
+    // RESEARCH-BACKED: Detect new data beyond trained range and reset completion flag
+    // This ensures the model continues learning as new market data arrives
+    if (this.learningStats.deepLearningComplete && startIdx < maxIndex) {
+      // New data has arrived since training completed - resume training
+      console.log(`[Deep Learning] New data detected! Resuming training from index ${startIdx} (maxIndex: ${maxIndex})`);
+      this.learningStats.deepLearningComplete = false;
+    }
+    
+    if (startIdx >= maxIndex) {
+      if (!this.learningStats.deepLearningComplete) {
+        console.log(`[Deep Learning] Training COMPLETE - all ${candlesToUse.length} historical candles processed (no re-processing)`);
+        this.learningStats.deepLearningComplete = true;
+      }
       return;
     }
     
