@@ -169,21 +169,37 @@ export function NeuralNetworkDataCard() {
               <div className="space-y-2 p-3 bg-muted/30 rounded-lg">
                 <div className="text-sm font-medium flex items-center gap-2">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  Downloading...
+                  Parallel Downloads ({downloadProgress.filter(p => p.status === "downloading").length} active)
                 </div>
                 {downloadProgress
-                  .filter(p => p.status === "downloading")
+                  .filter(p => p.status === "downloading" || p.status === "pending")
+                  .sort((a, b) => {
+                    // Show downloading first, then pending
+                    if (a.status === "downloading" && b.status !== "downloading") return -1;
+                    if (a.status !== "downloading" && b.status === "downloading") return 1;
+                    return 0;
+                  })
+                  .slice(0, 12) // Show up to 12 items to avoid overwhelming UI
                   .map(p => (
                     <div key={`${p.symbol}_${p.timeframe}`} className="space-y-1">
                       <div className="flex justify-between text-xs">
-                        <span>
-                          {p.symbol} {p.timeframe}
+                        <span className={p.status === "downloading" ? "text-emerald-400" : "text-muted-foreground"}>
+                          {p.symbol.replace("USDT", "")} {p.timeframe}
+                          {p.status === "pending" && " (queued)"}
                         </span>
-                        <span>{p.progress.toFixed(0)}%</span>
+                        <span>{p.status === "downloading" ? `${p.progress.toFixed(0)}%` : "waiting"}</span>
                       </div>
-                      <Progress value={p.progress} className="h-1" />
+                      <Progress 
+                        value={p.status === "downloading" ? p.progress : 0} 
+                        className={`h-1 ${p.status === "pending" ? "opacity-40" : ""}`} 
+                      />
                     </div>
                   ))}
+                {downloadProgress.filter(p => p.status === "pending").length > 8 && (
+                  <div className="text-xs text-muted-foreground text-center">
+                    +{downloadProgress.filter(p => p.status === "pending").length - 8} more queued...
+                  </div>
+                )}
               </div>
             )}
 
