@@ -113,8 +113,13 @@ export function NeuralNetworkDataCard() {
   const hasAnyData = summary && summary.totalCandles > 0;
   
   const completedStreams = downloadProgress.filter(p => p.status === "complete").length;
+  const activeStreams = downloadProgress.filter(p => p.status === "downloading");
   const totalStreams = downloadProgress.length || 20;
-  const overallProgress = totalStreams > 0 ? Math.round((completedStreams / totalStreams) * 100) : 0;
+  
+  const activeProgress = activeStreams.reduce((sum, p) => sum + p.progress, 0) / 100;
+  const overallProgress = totalStreams > 0 
+    ? Math.round(((completedStreams + activeProgress) / totalStreams) * 100) 
+    : 0;
   
   const estimatedCandles: Record<string, number> = {
     "1": 2100000,
@@ -140,7 +145,8 @@ export function NeuralNetworkDataCard() {
               <AlertDialogTrigger asChild>
                 <Button
                   size="lg"
-                  className="bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-semibold shadow-lg"
+                  disabled={downloadMutation.isPending}
+                  className="bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-semibold shadow-lg"
                   data-testid="button-download-all-prominent"
                 >
                   <HardDrive className="h-5 w-5 mr-2" />
@@ -178,7 +184,7 @@ export function NeuralNetworkDataCard() {
                       <div className="flex items-center gap-2 mt-2">
                         <span className="text-sm">Download period:</span>
                         <Select value={selectedYears} onValueChange={setSelectedYears}>
-                          <SelectTrigger className="w-28">
+                          <SelectTrigger className="w-28" data-testid="select-download-years-dialog">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
@@ -193,7 +199,7 @@ export function NeuralNetworkDataCard() {
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
-                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogCancel data-testid="button-cancel-download-dialog">Cancel</AlertDialogCancel>
                   <AlertDialogAction
                     onClick={() => {
                       downloadMutation.mutate(Number(selectedYears));
@@ -202,7 +208,8 @@ export function NeuralNetworkDataCard() {
                         description: `Downloading ${selectedYears} years of GPU training data...` 
                       });
                     }}
-                    className="bg-purple-600 hover:bg-purple-700"
+                    className="bg-purple-600"
+                    data-testid="button-start-download-confirm"
                   >
                     <Download className="h-4 w-4 mr-2" />
                     Start Download
@@ -222,6 +229,7 @@ export function NeuralNetworkDataCard() {
                 onClick={() => cancelMutation.mutate()}
                 disabled={cancelMutation.isPending}
                 className="border-red-500/50 text-red-400"
+                data-testid="button-cancel-download-header"
               >
                 <XCircle className="h-4 w-4 mr-1" />
                 Cancel
@@ -344,7 +352,7 @@ export function NeuralNetworkDataCard() {
                 <Button
                   onClick={() => resumeMutation.mutate(Number(selectedYears))}
                   disabled={resumeMutation.isPending}
-                  className="bg-emerald-600 hover:bg-emerald-700"
+                  className="bg-emerald-600"
                   data-testid="button-resume-nn-download"
                 >
                   {resumeMutation.isPending ? (
@@ -392,10 +400,11 @@ export function NeuralNetworkDataCard() {
                         </AlertDialogDescription>
                       </AlertDialogHeader>
                       <AlertDialogFooter>
-                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogCancel data-testid="button-cancel-clear-dialog">Cancel</AlertDialogCancel>
                         <AlertDialogAction
                           onClick={() => clearMutation.mutate()}
-                          className="bg-red-600 hover:bg-red-700"
+                          className="bg-red-600"
+                          data-testid="button-confirm-clear-data"
                         >
                           <Trash2 className="h-4 w-4 mr-2" />
                           Clear All Data
