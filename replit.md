@@ -117,6 +117,10 @@ Preferred communication style: Simple, everyday language.
 - **Quantile Uncertainty**: Uses (q90-q10)/|q50| spread for confidence, with NaN guards and divide-by-zero protection.
 - **Python Pipeline**: `gpu_trainer/data/pipeline.py` contains `DashboardAPIFetcher` class with async/sync methods.
 - **Feature Parity**: `compute_features_from_spec()` in Python matches TypeScript FEATURE_SPECS exactly, including `volatility_regime` with quantile_bucket.
+- **Enhanced Labels API**: `/api/gpu-export/enhanced-labels` exports rawReturns, costAdjustedEdges, directions, tradeWorthy, sampleWeight for GPU trainer consumption.
+- **Cost-Adjusted Edge**: All edge calculations subtract 0.09% round-trip costs (makerFee + takerFee + slippage + spread).
+- **Sample Weighting**: sqrt(|return|/0.01) × volatility_multiplier (1.5x if vol>0.015, 0.3x if vol<0.005), clamped [0.1, 5.0].
+- **Trade-Worthy Labels**: Binary label = 1 if edge > 0.001 AND clean_move_ratio > 0.5 (favorable excursion / total excursion).
 
 ### Key Files for ML/Learning
 - `server/feature-engine.ts`: Feature computation + shared regime classifier
