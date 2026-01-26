@@ -1199,10 +1199,19 @@ async function getExistingDataRange(symbol: string, tf: string): Promise<{ minTs
     .from(candles)
     .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, tf)));
   
+  // Safely parse values - SQL can return strings or null
+  const rawMinTs = result[0]?.minTs;
+  const rawMaxTs = result[0]?.maxTs;
+  const rawCount = result[0]?.count;
+  
+  const minTs = rawMinTs !== null && rawMinTs !== undefined ? Number(rawMinTs) : null;
+  const maxTs = rawMaxTs !== null && rawMaxTs !== undefined ? Number(rawMaxTs) : null;
+  const count = Number(rawCount ?? 0);
+  
   return {
-    minTs: result[0]?.minTs ?? null,
-    maxTs: result[0]?.maxTs ?? null,
-    count: Number(result[0]?.count ?? 0)
+    minTs: minTs !== null && !isNaN(minTs) ? minTs : null,
+    maxTs: maxTs !== null && !isNaN(maxTs) ? maxTs : null,
+    count: isNaN(count) ? 0 : count
   };
 }
 
@@ -1379,8 +1388,14 @@ async function downloadSingleStream(
   
   // Smart resume: start from where we left off
   let cursor = targetStartTime;
-  if (existing.maxTs && existing.maxTs > targetStartTime) {
-    cursor = existing.maxTs + msPerCandle;
+  // Validate maxTs is a valid number before using it
+  const maxTsValid = existing.maxTs !== null && 
+    typeof existing.maxTs === 'number' && 
+    !isNaN(existing.maxTs) && 
+    existing.maxTs > 0;
+    
+  if (maxTsValid && existing.maxTs! > targetStartTime) {
+    cursor = existing.maxTs! + msPerCandle;
     console.log(`[NN Download] Resuming ${symbol} ${tf}: from ${new Date(cursor).toISOString().split('T')[0]} (have ${existing.count} candles)`);
   } else {
     console.log(`[NN Download] Starting ${symbol} ${tf}: full download from ${new Date(targetStartTime).toISOString().split('T')[0]}`);
