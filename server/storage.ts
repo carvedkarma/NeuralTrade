@@ -549,26 +549,93 @@ export class MemStorage implements IStorage {
         };
       }
       
+      // Prevent multiple concurrent training loops
+      if (this.isContinuousTrainingActive) {
+        return { success: false, message: "Training already in progress" };
+      }
+      
       // Reset training state to allow fresh training
       this.learningStats.deepLearningComplete = false;
       this.learningStats.deepLearningIndex = 50;
       this.learningStats.deepLearningPassCount = 0;
       this.lastTrainingRun = 0;
       
-      console.log("[Deep Learning] Manual training triggered - resetting progress and starting fresh");
+      const totalCandles = btcData.totalCandles;
+      console.log(`[Deep Learning] Manual training triggered - processing ${totalCandles.toLocaleString()} candles continuously`);
       
-      // Trigger training immediately
-      await this.trainOnHistoricalCandles();
+      // Run training in background loop until complete
+      this.runContinuousTraining(totalCandles);
       
       return { 
         success: true, 
-        message: `Training started with ${btcData.totalCandles.toLocaleString()} candles` 
+        message: `Training started - processing ${totalCandles.toLocaleString()} candles (500 per batch)` 
       };
     } catch (error) {
       console.error("[Deep Learning] Manual start error:", error);
       return { success: false, message: "Failed to start training" };
     }
   }
+  
+  // Flag to control continuous training
+  private isContinuousTrainingActive = false;
+  
+  // Stop continuous training
+  stopContinuousTraining(): void {
+    this.isContinuousTrainingActive = false;
+    console.log("[Deep Learning] Stop requested");
+  }
+  
+  // Continuous training loop - processes all candles in batches
+  private async runContinuousTraining(totalCandles: number): Promise<void> {
+    const startTime = Date.now();
+    let batchCount = 0;
+    this.isContinuousTrainingActive = true;
+    
+    while (!this.learningStats.deepLearningComplete && this.isContinuousTrainingActive) {
+      const prevIdx = this.learningStats.deepLearningIndex;
+      
+      batchCount++;
+      const candlesProcessed = prevIdx - 50;
+      const progressPct = Math.min(100, (candlesProcessed / (totalCandles - 66) * 100)).toFixed(1);
+      const candlesRemaining = Math.max(0, totalCandles - prevIdx - 16);
+      
+      // Estimate time remaining
+      const elapsedMs = Date.now() - startTime;
+      const candlesPerMs = candlesProcessed > 0 ? candlesProcessed / elapsedMs : 0.5;
+      const etaMs = candlesPerMs > 0 ? candlesRemaining / candlesPerMs : 0;
+      const etaMinutes = (etaMs / 1000 / 60).toFixed(1);
+      
+      console.log(`[Deep Learning] Batch ${batchCount}: ${candlesProcessed.toLocaleString()}/${totalCandles.toLocaleString()} candles (${progressPct}%) - ETA: ${etaMinutes}min`);
+      
+      try {
+        // Bypass cooldown for continuous training
+        await this.trainOnHistoricalCandles(true);
+      } catch (error) {
+        console.error(`[Deep Learning] Batch ${batchCount} error:`, error);
+        // Small delay before retry
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        continue;
+      }
+      
+      // Check if progress was made (batch actually processed)
+      if (this.learningStats.deepLearningIndex === prevIdx) {
+        // No progress - training must be complete or stuck
+        console.log(`[Deep Learning] No progress in batch ${batchCount} - checking completion status`);
+        break;
+      }
+      
+      // Small delay to prevent blocking event loop and allow UI updates
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    
+    this.isContinuousTrainingActive = false;
+    
+    if (this.learningStats.deepLearningComplete) {
+      const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
+      console.log(`[Deep Learning] COMPLETE! Processed ${totalCandles.toLocaleString()} candles in ${batchCount} batches (${elapsed} minutes)`);
+    }
+  }
+  
 
   // Get training status for UI
   getTrainingStatus(): { 
@@ -658,6 +725,12 @@ export class MemStorage implements IStorage {
     this.strategyLearningEnabled = true;
     this.patternLearningEnabled = true;
     
+    // Reset progress to start fresh
+    this.learningStats.deepLearningComplete = false;
+    this.learningStats.deepLearningIndex = 50;
+    this.learningStats.deepLearningPassCount = 0;
+    this.lastTrainingRun = 0;
+    
     // Initialize pattern clusters now that user clicked Start Learning
     initializePatternClusters().then(() => {
       console.log("[Strategy Learning] Pattern clusters initialized");
@@ -665,22 +738,24 @@ export class MemStorage implements IStorage {
       console.error("Failed to initialize pattern clusters:", err);
     });
     
-    console.log(`[Strategy Learning] STARTED - processing ${btcData.totalCandles} candles`);
+    const totalCandles = btcData.totalCandles;
+    console.log(`[Strategy Learning] STARTED - processing ${totalCandles.toLocaleString()} candles continuously`);
     
-    // Trigger immediate training run
-    this.trainOnHistoricalCandles();
+    // Run training in background loop until complete or stopped
+    this.runContinuousTraining(totalCandles);
     
-    return { success: true, message: `Strategy learning started with ${btcData.totalCandles} candles` };
+    return { success: true, message: `Strategy learning started - processing ${totalCandles.toLocaleString()} candles (500 per batch)` };
   }
   
   // Stop strategy learning
   stopStrategyLearning(): { success: boolean; message: string } {
-    if (!this.strategyLearningEnabled) {
+    if (!this.strategyLearningEnabled && !this.isContinuousTrainingActive) {
       return { success: false, message: "Strategy learning not running" };
     }
     
     this.strategyLearningEnabled = false;
     this.patternLearningEnabled = false;
+    this.isContinuousTrainingActive = false;  // Stop the continuous loop
     console.log("[Strategy Learning] STOPPED by user");
     
     return { success: true, message: "Strategy learning stopped" };
@@ -737,12 +812,12 @@ export class MemStorage implements IStorage {
     console.log("Real social sentiment tracking started (60s interval)");
   }
 
-  private async trainOnHistoricalCandles(): Promise<void> {
+  private async trainOnHistoricalCandles(bypassCooldown = false): Promise<void> {
     const now = Date.now();
     const isFirstRun = this.lastTrainingRun === 0;
     const cooldown = isFirstRun ? 0 : 30000;
     
-    if (now - this.lastTrainingRun < cooldown) return;
+    if (!bypassCooldown && (now - this.lastTrainingRun < cooldown)) return;
     
     // Load historical candles from database - ONLY train on downloaded data, not live feed
     const { loadCandlesFromDb, getMultiAssetDataSummary } = await import("./historical-data");
