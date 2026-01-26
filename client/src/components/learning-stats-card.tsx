@@ -961,6 +961,13 @@ interface UnifiedProgressSystem {
   isActive?: boolean;
 }
 
+interface DecisionInfo {
+  signal: "LONG" | "SHORT" | "HOLD" | "NO_SIGNAL";
+  confidence: number;
+  source: string;
+  ready: boolean;
+}
+
 interface UnifiedLearningProgressProps {
   progress?: {
     overallProgress: number;
@@ -971,6 +978,12 @@ interface UnifiedLearningProgressProps {
     completedCount?: number;
     stagedDecisionReady?: boolean;
     stagedDecisionWeight?: number;
+    gpuTrainerStats?: {
+      totalCandles: number;
+      byTimeframe: Record<string, number>;
+    };
+    combinedLearningDecision?: DecisionInfo;
+    gpuDecision?: DecisionInfo;
   };
   onReset?: () => void;
 }
@@ -1078,34 +1091,106 @@ export function UnifiedLearningProgressCard({ progress, onReset }: UnifiedLearni
           ))}
         </div>
 
-        {progress.stagedDecisionReady !== undefined && (
-          <div className="pt-2 border-t">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-muted-foreground">Decision Engine</span>
-              {progress.stagedDecisionReady ? (
-                <Badge variant="outline" className="text-emerald-400 bg-emerald-500/20">
-                  <CheckCircle2 className="h-3 w-3 mr-1" />
-                  {progress.completedCount}/3 Systems Ready
+        {/* Two Decision Panels */}
+        <div className="pt-3 border-t space-y-2">
+          <div className="text-xs font-medium text-muted-foreground mb-2">Decision Outputs</div>
+          
+          {/* Combined Learning Decision */}
+          <div className="p-2 bg-muted/30 rounded" data-testid="combined-learning-decision">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-xs">
+                <Brain className="h-3 w-3 text-purple-400" />
+                <span>Combined Learning</span>
+              </div>
+              {progress.combinedLearningDecision?.ready ? (
+                <Badge 
+                  variant="outline" 
+                  className={
+                    progress.combinedLearningDecision.signal === "LONG" 
+                      ? "text-emerald-400 bg-emerald-500/20"
+                      : progress.combinedLearningDecision.signal === "SHORT"
+                      ? "text-red-400 bg-red-500/20"
+                      : "text-amber-400 bg-amber-500/20"
+                  }
+                >
+                  {progress.combinedLearningDecision.signal}
+                  {progress.combinedLearningDecision.confidence > 0 && (
+                    <span className="ml-1 opacity-70">
+                      ({(progress.combinedLearningDecision.confidence * 100).toFixed(0)}%)
+                    </span>
+                  )}
                 </Badge>
               ) : (
-                <Badge variant="outline" className="text-amber-400 bg-amber-500/20">
+                <Badge variant="outline" className="text-muted-foreground">
                   <Clock className="h-3 w-3 mr-1" />
-                  Waiting for Training
+                  Waiting
                 </Badge>
               )}
             </div>
+            <div className="text-[10px] text-muted-foreground mt-1">
+              Strategy Learner + Pattern Memory
+            </div>
           </div>
-        )}
+          
+          {/* GPU Decision */}
+          <div className="p-2 bg-muted/30 rounded" data-testid="gpu-decision">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-xs">
+                <Cpu className="h-3 w-3 text-blue-400" />
+                <span>GPU Neural Network</span>
+              </div>
+              {progress.gpuDecision?.ready ? (
+                <Badge 
+                  variant="outline" 
+                  className={
+                    progress.gpuDecision.signal === "LONG" 
+                      ? "text-emerald-400 bg-emerald-500/20"
+                      : progress.gpuDecision.signal === "SHORT"
+                      ? "text-red-400 bg-red-500/20"
+                      : "text-amber-400 bg-amber-500/20"
+                  }
+                >
+                  {progress.gpuDecision.signal}
+                  {progress.gpuDecision.confidence > 0 && (
+                    <span className="ml-1 opacity-70">
+                      ({(progress.gpuDecision.confidence * 100).toFixed(0)}%)
+                    </span>
+                  )}
+                </Badge>
+              ) : (
+                <Badge variant="outline" className="text-muted-foreground">
+                  <Clock className="h-3 w-3 mr-1" />
+                  Waiting
+                </Badge>
+              )}
+            </div>
+            <div className="text-[10px] text-muted-foreground mt-1">
+              Multi-timeframe Deep Learning
+            </div>
+          </div>
+        </div>
 
-        <div className="pt-2 border-t text-xs">
+        {/* Data Statistics */}
+        <div className="pt-2 border-t text-xs space-y-2">
           <div className="flex justify-between">
-            <span className="text-muted-foreground">Total Candles Available:</span>
-            <span className="font-medium">{progress.totalCandles.toLocaleString()}</span>
+            <span className="text-muted-foreground">Strategy/Pattern (15m):</span>
+            <span className="font-medium">{progress.trainableCandles.toLocaleString()} candles</span>
           </div>
-          <div className="flex justify-between mt-1">
-            <span className="text-muted-foreground">Trainable Candles:</span>
-            <span className="font-medium">{progress.trainableCandles.toLocaleString()}</span>
-          </div>
+          {progress.gpuTrainerStats && progress.gpuTrainerStats.totalCandles > 0 && (
+            <div className="space-y-1">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">GPU Trainer (All TFs):</span>
+                <span className="font-medium text-blue-400">{progress.gpuTrainerStats.totalCandles.toLocaleString()} candles</span>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {Object.entries(progress.gpuTrainerStats.byTimeframe).map(([tf, count]) => (
+                  <Badge key={tf} variant="outline" className="text-[10px] px-1.5 py-0">
+                    {tf}: {(count as number).toLocaleString()}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {onReset && (

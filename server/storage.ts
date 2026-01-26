@@ -34,7 +34,7 @@ import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-en
 import { getSentimentData, interpretFearGreed, getNewsStats } from "./sentiment-api";
 import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime, getLastSimilarityDistribution, initializePatternClusters, getPatternClusterStats, updateDataCounts, canCreateNewPatterns, canCreateNewPatternsWithCounts, getPatternRequirements, patternClusters, loadPatternClustersFromDb, savePatternClustersToDb } from "./pattern-memory";
 import { processCandle as processPaperTrade } from "./paper/engine";
-import { initializeUnifiedLearning, updatePatternMemoryProgress, getUnifiedProgressReport } from "./unified-learning-controller";
+import { initializeUnifiedLearning, updatePatternMemoryProgress, getUnifiedProgressReport, refreshGpuTrainerStats } from "./unified-learning-controller";
 import { isAutoTradingEnabled, isPaperTradingEnabled, getConfig as getPaperConfig } from "./paper/config";
 import { db } from "./db";
 import { learningState, socialMediaStats, patternClusters as patternClustersTable } from "./db/schema";
@@ -601,6 +601,9 @@ export class MemStorage implements IStorage {
           this.learningStats.historicalCandlesProcessed = historicalCandles.length;
           
           initializeUnifiedLearning(historicalCandles.length);
+          
+          // Refresh GPU trainer stats to show actual multi-timeframe candle counts
+          await refreshGpuTrainerStats();
           
           console.log(`[Historical] Loaded ${historicalCandles.length} candles from database`);
           console.log(`[Historical] Data range: ${new Date(rangeInfo.startTs!).toISOString().split('T')[0]} to ${new Date(rangeInfo.endTs!).toISOString().split('T')[0]}`);

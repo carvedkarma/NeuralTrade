@@ -3,6 +3,43 @@ import { sql } from "drizzle-orm";
 import { candles } from "@shared/schema";
 import { eq, asc } from "drizzle-orm";
 
+// GPU Trainer multi-timeframe stats (cached)
+let gpuTrainerStats = {
+  totalCandles: 0,
+  byTimeframe: {} as Record<string, number>,
+  lastUpdated: 0,
+};
+
+export async function refreshGpuTrainerStats(): Promise<void> {
+  try {
+    const result = await db.execute(sql`
+      SELECT timeframe, COUNT(*) as count 
+      FROM candles 
+      GROUP BY timeframe
+    `);
+    
+    const rows = result as any[];
+    gpuTrainerStats.byTimeframe = {};
+    gpuTrainerStats.totalCandles = 0;
+    
+    for (const row of rows) {
+      const count = parseInt(row.count);
+      gpuTrainerStats.byTimeframe[row.timeframe] = count;
+      gpuTrainerStats.totalCandles += count;
+    }
+    gpuTrainerStats.lastUpdated = Date.now();
+    
+    console.log(`[Unified Controller] GPU Trainer stats: ${gpuTrainerStats.totalCandles.toLocaleString()} total candles`);
+    console.log(`[Unified Controller] By timeframe:`, gpuTrainerStats.byTimeframe);
+  } catch (error) {
+    console.error("[Unified Controller] Failed to refresh GPU trainer stats:", error);
+  }
+}
+
+export function getGpuTrainerStats() {
+  return { ...gpuTrainerStats };
+}
+
 export interface UnifiedLearningState {
   sharedProgressIndex: number;
   totalCandlesAvailable: number;
@@ -210,6 +247,13 @@ export interface SystemTrainingStatus {
   isActive: boolean;
 }
 
+export interface DecisionInfo {
+  signal: "LONG" | "SHORT" | "HOLD" | "NO_SIGNAL";
+  confidence: number;
+  source: string;
+  ready: boolean;
+}
+
 export interface EnhancedProgressReport {
   overallProgress: number;
   systems: SystemTrainingStatus[];
@@ -219,6 +263,16 @@ export interface EnhancedProgressReport {
   completedCount: number;
   stagedDecisionReady: boolean;
   stagedDecisionWeight: number;
+  
+  // GPU Trainer specific stats
+  gpuTrainerStats: {
+    totalCandles: number;
+    byTimeframe: Record<string, number>;
+  };
+  
+  // Two separate decision displays
+  combinedLearningDecision: DecisionInfo;
+  gpuDecision: DecisionInfo;
 }
 
 export function getUnifiedProgressReport(): EnhancedProgressReport {
@@ -269,6 +323,27 @@ export function getUnifiedProgressReport(): EnhancedProgressReport {
   const stagedDecisionReady = completedCount >= 1;
   const stagedDecisionWeight = completedCount / 3;
   
+  // Combined Learning Decision (Strategy Learner + Pattern Memory consensus)
+  const slComplete = unifiedState.strategyLearnerComplete;
+  const pmComplete = unifiedState.patternMemoryComplete;
+  const combinedLearningReady = slComplete && pmComplete;
+  
+  const combinedLearningDecision: DecisionInfo = {
+    signal: combinedLearningReady ? "HOLD" : "NO_SIGNAL", // Will be updated by actual prediction system
+    confidence: combinedLearningReady ? 0.5 : 0,
+    source: "Strategy Learner + Pattern Memory",
+    ready: combinedLearningReady,
+  };
+  
+  // GPU Decision (separate GPU Trainer prediction)
+  const gpuReady = unifiedState.gpuTrainerExported;
+  const gpuDecision: DecisionInfo = {
+    signal: gpuReady ? "HOLD" : "NO_SIGNAL", // Will be updated by GPU trainer predictions
+    confidence: gpuReady ? 0.5 : 0,
+    source: "GPU Neural Network",
+    ready: gpuReady,
+  };
+  
   return {
     overallProgress: avgProgress,
     systems,
@@ -278,6 +353,12 @@ export function getUnifiedProgressReport(): EnhancedProgressReport {
     completedCount,
     stagedDecisionReady,
     stagedDecisionWeight,
+    gpuTrainerStats: {
+      totalCandles: gpuTrainerStats.totalCandles,
+      byTimeframe: gpuTrainerStats.byTimeframe,
+    },
+    combinedLearningDecision,
+    gpuDecision,
   };
 }
 
