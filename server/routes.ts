@@ -5,7 +5,8 @@ import paperRoutes from "./paper/routes";
 import { db } from "./db";
 import { candles } from "@shared/schema";
 import { and, eq, gte, lte, asc } from "drizzle-orm";
-import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes, clearNNData, cancelNNDownload, getResumableStatus, resumeNNDataDownload, getDownloadETA } from "./historical-data";
+import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes, clearNNData, cancelNNDownload, getResumableStatus, resumeNNDataDownload, getDownloadETA, streamNNDataBulk } from "./historical-data";
+import zlib from "zlib";
 import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
 import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning, loadCandleTimestamps } from "./unified-learning-controller";
@@ -274,6 +275,36 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error exporting NN data:", error);
       res.status(500).json({ error: "Failed to export NN data" });
+    }
+  });
+
+  // Bulk export endpoint for GPU trainer - streams gzipped NDJSON
+  app.get("/api/nn-data/bulk-export", async (req, res) => {
+    const timeframe = req.query.timeframe as string | undefined;
+    const symbol = req.query.symbol as string | undefined;
+    
+    console.log(`[Bulk Export] Request received - timeframe: ${timeframe || 'all'}, symbol: ${symbol || 'all'}`);
+    
+    // Set headers for streaming gzipped response
+    res.setHeader('Content-Type', 'application/x-ndjson');
+    res.setHeader('Content-Encoding', 'gzip');
+    res.setHeader('Transfer-Encoding', 'chunked');
+    res.setHeader('Content-Disposition', 'attachment; filename="gpu-training-data.ndjson.gz"');
+    
+    const gzip = zlib.createGzip({ level: 6 });
+    gzip.pipe(res);
+    
+    try {
+      for await (const line of streamNNDataBulk(timeframe, symbol)) {
+        gzip.write(line);
+      }
+      gzip.end();
+    } catch (error) {
+      console.error("[Bulk Export] Error:", error);
+      gzip.destroy();
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Failed to export bulk data" });
+      }
     }
   });
 

@@ -476,7 +476,20 @@ class GPUTrainerGUI:
                     use_sync=True
                 )
                 
-                data = fetcher.fetch_all_historical_sync(candles, progress_callback=progress_callback)
+                # Use bulk download from Replit if proxy is configured (much faster)
+                if proxy_url:
+                    self.log(f"Using bulk download from Replit (faster)...")
+                    data = fetcher.fetch_bulk_from_replit(progress_callback=progress_callback)
+                    
+                    # Fallback to individual fetches if bulk failed
+                    if not data or all(
+                        not any(len(df) > 0 for df in tfs.values()) 
+                        for tfs in data.values()
+                    ):
+                        self.log(f"Bulk download empty, falling back to individual fetches...")
+                        data = fetcher.fetch_all_historical_sync(candles, progress_callback=progress_callback)
+                else:
+                    data = fetcher.fetch_all_historical_sync(candles, progress_callback=progress_callback)
                 
                 total_candles = 0
                 for symbol, timeframes in data.items():

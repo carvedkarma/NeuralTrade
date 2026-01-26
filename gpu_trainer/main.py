@@ -60,7 +60,22 @@ async def fetch_data(args):
     )
     
     try:
-        data = await fetcher.fetch_all_historical(args.candles)
+        # Use bulk download from Replit if proxy is configured (much faster)
+        if replit_url:
+            logger.info("Attempting bulk download from Replit (faster)...")
+            data = fetcher.fetch_bulk_from_replit()
+            
+            # Check if we got any data
+            has_data = any(
+                any(len(df) > 0 for df in tfs.values())
+                for tfs in data.values()
+            ) if data else False
+            
+            if not has_data:
+                logger.warning("Bulk download empty, falling back to individual fetches...")
+                data = await fetcher.fetch_all_historical(args.candles)
+        else:
+            data = await fetcher.fetch_all_historical(args.candles)
         
         total_candles = 0
         for symbol, timeframes in data.items():

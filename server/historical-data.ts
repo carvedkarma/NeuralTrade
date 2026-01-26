@@ -1,6 +1,6 @@
 import { db } from "./db";
 import { candles, learningState, backfillJobs } from "./db/schema";
-import { eq, and, gte, lte, sql, desc, asc, or, ne } from "drizzle-orm";
+import { eq, and, gte, gt, lte, sql, desc, asc, or, ne } from "drizzle-orm";
 
 const BINANCE_VISION_BASE = "https://data-api.binance.vision";
 const BINANCE_FAPI_BASE = "https://fapi.binance.com";
@@ -1655,6 +1655,114 @@ export async function exportNNData(): Promise<{
 
 export function getNNTimeframes(): string[] {
   return [...NN_TIMEFRAMES];
+}
+
+// Bulk export for GPU trainer - returns all candles organized by timeframe/symbol
+export async function exportNNDataBulk(timeframe?: string, symbol?: string): Promise<{
+  candles: any[];
+  meta: { totalCandles: number; timeframes: string[]; symbols: string[] };
+}> {
+  const tfs = timeframe ? [timeframe] : NN_TIMEFRAMES;
+  const syms = symbol ? [symbol] : SUPPORTED_ASSETS;
+  
+  const allCandles: any[] = [];
+  
+  for (const tf of tfs) {
+    for (const sym of syms) {
+      const data = await db.select()
+        .from(candles)
+        .where(and(eq(candles.symbol, sym), eq(candles.timeframe, tf)))
+        .orderBy(asc(candles.timestamp));
+      
+      for (const c of data) {
+        allCandles.push({
+          s: sym,
+          tf: tf,
+          t: c.timestamp,
+          o: c.open,
+          h: c.high,
+          l: c.low,
+          c: c.close,
+          v: c.volume,
+        });
+      }
+    }
+  }
+  
+  return {
+    candles: allCandles,
+    meta: {
+      totalCandles: allCandles.length,
+      timeframes: [...tfs],
+      symbols: [...syms],
+    },
+  };
+}
+
+// Stream bulk export for large datasets - returns readable stream of NDJSON
+// Uses keyset pagination (timestamp > lastTs) for efficient large dataset handling
+// Timestamps are unique per symbol+timeframe - enforced by DB unique index (candles_unique_idx)
+export async function* streamNNDataBulk(timeframe?: string, symbol?: string): AsyncGenerator<string> {
+  const tfs = timeframe ? [timeframe] : NN_TIMEFRAMES;
+  const syms = symbol ? [symbol] : SUPPORTED_ASSETS;
+  
+  let totalCandles = 0;
+  
+  // First, yield metadata line
+  yield JSON.stringify({ type: 'meta', timeframes: [...tfs], symbols: [...syms] }) + '\n';
+  
+  for (const tf of tfs) {
+    for (const sym of syms) {
+      console.log(`[Bulk Export] Streaming ${sym} ${tf}...`);
+      
+      // Use keyset pagination with strict gt (greater than) for safety
+      const BATCH_SIZE = 50000;
+      let lastTimestamp: number | null = null;
+      
+      while (true) {
+        // Build query with optional timestamp filter
+        let batch;
+        if (lastTimestamp === null) {
+          batch = await db.select()
+            .from(candles)
+            .where(and(eq(candles.symbol, sym), eq(candles.timeframe, tf)))
+            .orderBy(asc(candles.timestamp))
+            .limit(BATCH_SIZE);
+        } else {
+          // Use strict gt (greater than) to avoid any possibility of duplicates or skips
+          batch = await db.select()
+            .from(candles)
+            .where(and(eq(candles.symbol, sym), eq(candles.timeframe, tf), gt(candles.timestamp, lastTimestamp)))
+            .orderBy(asc(candles.timestamp))
+            .limit(BATCH_SIZE);
+        }
+        
+        if (batch.length === 0) break;
+        
+        for (const c of batch) {
+          yield JSON.stringify({
+            s: sym,
+            tf: tf,
+            t: c.timestamp,
+            o: c.open,
+            h: c.high,
+            l: c.low,
+            c: c.close,
+            v: c.volume,
+          }) + '\n';
+          totalCandles++;
+        }
+        
+        // Set lastTimestamp to the final row's timestamp (no +1 here, we add +1 in query)
+        lastTimestamp = batch[batch.length - 1].timestamp;
+        if (batch.length < BATCH_SIZE) break;
+      }
+    }
+  }
+  
+  // Final summary line
+  yield JSON.stringify({ type: 'summary', totalCandles }) + '\n';
+  console.log(`[Bulk Export] Complete: ${totalCandles.toLocaleString()} candles`);
 }
 
 // Get resumable download status - checks what's already downloaded for each symbol/timeframe

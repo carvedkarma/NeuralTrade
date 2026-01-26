@@ -7,6 +7,7 @@ import aiohttp
 import asyncio
 from datetime import datetime, timedelta
 import json
+import gzip
 from pathlib import Path
 import pywt
 from scipy import stats
@@ -157,6 +158,157 @@ class BinanceDataFetcher:
         print(f"")
         print(f"[Sync] All fetches complete!")
         return results
+    
+    def fetch_bulk_from_replit(self, progress_callback=None) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """
+        Bulk download all GPU training data from Replit server in one request.
+        This is much faster than fetching candle-by-candle.
+        """
+        if not self.replit_proxy_url:
+            print("[Bulk Download] No Replit proxy URL configured!")
+            return {}
+        
+        import requests
+        
+        url = f"{self.replit_proxy_url}/api/nn-data/bulk-export"
+        print(f"[Bulk Download] Fetching all data from Replit: {url}")
+        
+        try:
+            response = requests.get(url, stream=True, timeout=600)  # 10 min timeout for large data
+            
+            if response.status_code != 200:
+                print(f"[Bulk Download] HTTP {response.status_code}: {response.text[:200]}")
+                return {}
+            
+            # Parse gzipped NDJSON stream
+            results: Dict[str, Dict[str, List]] = {}
+            total_candles = 0
+            meta = None
+            summary = None
+            parse_errors = 0
+            
+            # Decompress gzip stream
+            decompressor = gzip.GzipFile(fileobj=response.raw)
+            
+            print("[Bulk Download] Receiving data stream...")
+            
+            for line_bytes in decompressor:
+                line = line_bytes.decode('utf-8').strip()
+                if not line:
+                    continue
+                
+                try:
+                    obj = json.loads(line)
+                    
+                    if obj.get('type') == 'meta':
+                        meta = obj
+                        print(f"[Bulk Download] Meta: {len(meta.get('timeframes', []))} timeframes, {len(meta.get('symbols', []))} symbols")
+                        
+                        # Initialize results structure
+                        for sym in meta.get('symbols', []):
+                            results[sym] = {}
+                            for tf in meta.get('timeframes', []):
+                                results[sym][tf] = []
+                    
+                    elif obj.get('type') == 'summary':
+                        summary = obj
+                        print(f"[Bulk Download] Server reports: {obj.get('totalCandles', 0):,} candles")
+                    
+                    else:
+                        # This is a candle record
+                        sym = obj.get('s')
+                        tf = obj.get('tf')
+                        
+                        if sym and tf and sym in results and tf in results[sym]:
+                            results[sym][tf].append({
+                                'timestamp': obj['t'],
+                                'open': float(obj['o']),
+                                'high': float(obj['h']),
+                                'low': float(obj['l']),
+                                'close': float(obj['c']),
+                                'volume': float(obj['v']),
+                            })
+                            total_candles += 1
+                            
+                            if total_candles % 500000 == 0:
+                                print(f"[Bulk Download] Progress: {total_candles:,} candles...")
+                                if progress_callback:
+                                    progress_callback(total_candles, -1, "", "")
+                
+                except json.JSONDecodeError as e:
+                    parse_errors += 1
+                    if parse_errors <= 5:
+                        print(f"[Bulk Download] JSON parse error: {e}")
+                    continue
+            
+            # Verify stream integrity - REQUIRE summary and exact match for data safety
+            if not meta:
+                print("[Bulk Download] INTEGRITY ERROR: No metadata received - stream corrupted")
+                return {}
+            
+            if not summary:
+                print("[Bulk Download] INTEGRITY ERROR: No summary received - stream may be truncated")
+                print("[Bulk Download] Returning empty to trigger fallback")
+                return {}
+            
+            expected = summary.get('totalCandles', 0)
+            if total_candles != expected:
+                print(f"[Bulk Download] INTEGRITY ERROR: Expected {expected:,} candles but received {total_candles:,}")
+                print("[Bulk Download] Stream corrupted or truncated - returning empty to trigger fallback")
+                return {}
+            
+            if parse_errors > 0:
+                print(f"[Bulk Download] WARNING: {parse_errors} parse errors encountered")
+                # Only fail on significant parse errors (more than 0.1% of data)
+                if parse_errors > max(10, total_candles * 0.001):
+                    print("[Bulk Download] Too many parse errors - returning empty to trigger fallback")
+                    return {}
+            
+            print(f"[Bulk Download] Integrity verified: {total_candles:,} candles match server count")
+            
+            # Convert lists to DataFrames
+            df_results: Dict[str, Dict[str, pd.DataFrame]] = {}
+            
+            for sym in results:
+                df_results[sym] = {}
+                for tf in results[sym]:
+                    if results[sym][tf]:
+                        df = pd.DataFrame(results[sym][tf])
+                        df = df.sort_values('timestamp').reset_index(drop=True)
+                        df_results[sym][tf] = df
+                        print(f"[Bulk Download] {sym} {tf}: {len(df):,} candles")
+                    else:
+                        df_results[sym][tf] = pd.DataFrame()
+            
+            # Verify all expected symbol/timeframe pairs have data
+            expected_pairs = len(meta.get('symbols', [])) * len(meta.get('timeframes', []))
+            actual_pairs = sum(1 for sym in df_results for tf in df_results[sym] if len(df_results[sym][tf]) > 0)
+            
+            if actual_pairs == 0:
+                print("[Bulk Download] INTEGRITY ERROR: No data received for any symbol/timeframe")
+                return {}
+            
+            if actual_pairs < expected_pairs:
+                missing = []
+                for sym in meta.get('symbols', []):
+                    for tf in meta.get('timeframes', []):
+                        if sym not in df_results or tf not in df_results.get(sym, {}) or len(df_results[sym][tf]) == 0:
+                            missing.append(f"{sym}/{tf}")
+                print(f"[Bulk Download] INTEGRITY ERROR: Missing data for {len(missing)} pairs: {missing[:5]}...")
+                print("[Bulk Download] Returning empty to trigger fallback")
+                return {}
+            
+            print(f"[Bulk Download] Total: {total_candles:,} candles downloaded from Replit")
+            return df_results
+            
+        except requests.exceptions.Timeout:
+            print("[Bulk Download] Request timed out after 10 minutes")
+            return {}
+        except Exception as e:
+            print(f"[Bulk Download] Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return {}
         
     async def _get_session(self):
         if self.session is None:
