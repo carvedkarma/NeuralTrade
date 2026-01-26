@@ -513,12 +513,17 @@ class GPUTrainerGUI:
     def start_training(self):
         if self.is_training:
             return
+        
+        # Define the dataset being trained
+        training_symbol = "BTCUSDT"
+        training_timeframe = "15m"
+        data_filename = f"{training_symbol}_{training_timeframe}.parquet"
             
-        data_path = Path(__file__).parent / "data_cache" / "BTCUSDT_15m.parquet"
+        data_path = Path(__file__).parent / "data_cache" / data_filename
         if not data_path.exists():
             result = messagebox.askyesno(
                 "No Data", 
-                "No training data found. Would you like to fetch data first?"
+                f"No training data found for {training_symbol} {training_timeframe}.\nWould you like to fetch data first?"
             )
             if result:
                 self.start_fetch()
@@ -536,6 +541,15 @@ class GPUTrainerGUI:
                 batch_size = int(self.batch_var.get())
                 lr = float(self.lr_var.get())
                 
+                # PROMINENT DATASET LOGGING - Critical for data isolation awareness
+                self.log(f"")
+                self.log(f"{'='*70}")
+                self.log(f"   TRAINING DATASET INFORMATION")
+                self.log(f"{'='*70}")
+                self.log(f"   Symbol:    {training_symbol}")
+                self.log(f"   Timeframe: {training_timeframe}")
+                self.log(f"   Data File: {data_filename}")
+                self.log(f"{'='*70}")
                 self.log(f"")
                 self.log(f"Starting training: {model_type.upper()} model")
                 self.log(f"Epochs: {epochs}, Batch: {batch_size}, LR: {lr}")
@@ -551,6 +565,34 @@ class GPUTrainerGUI:
                 
                 df = pd.read_parquet(data_path)
                 self.log(f"Loaded {len(df):,} candles from cache")
+                
+                # Validate loaded data for symbol/timeframe isolation
+                self.log(f"")
+                self.log(f"[Data Validation] Verifying data integrity...")
+                if "symbol" in df.columns:
+                    unique_symbols = df["symbol"].unique().tolist()
+                    if len(unique_symbols) == 1 and unique_symbols[0] == training_symbol:
+                        self.log(f"[Data Validation] Symbol check PASSED: {training_symbol}")
+                    else:
+                        self.log(f"[Data Validation] WARNING: Unexpected symbols in data: {unique_symbols}")
+                
+                if "timeframe" in df.columns:
+                    unique_tfs = df["timeframe"].unique().tolist()
+                    if len(unique_tfs) == 1 and unique_tfs[0] == training_timeframe:
+                        self.log(f"[Data Validation] Timeframe check PASSED: {training_timeframe}")
+                    else:
+                        self.log(f"[Data Validation] WARNING: Unexpected timeframes in data: {unique_tfs}")
+                
+                if "timestamp" in df.columns:
+                    n_unique = df["timestamp"].nunique()
+                    if n_unique == len(df):
+                        self.log(f"[Data Validation] No duplicate timestamps: {n_unique:,} unique")
+                    else:
+                        dup_count = len(df) - n_unique
+                        self.log(f"[Data Validation] WARNING: {dup_count} duplicate timestamps found")
+                
+                self.log(f"[Data Validation] Complete")
+                self.log(f"")
                 
                 engineer = FeatureEngineer()
                 features_df = engineer.compute_technical_features(df)
