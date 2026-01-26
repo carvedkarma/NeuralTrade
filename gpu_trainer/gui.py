@@ -656,12 +656,23 @@ class GPUTrainerGUI:
                 )
                 
                 # Use bulk download (much faster)
-                self.log(f"Using bulk streaming download...")
+                self.log(f"Using bulk streaming download from Replit...")
+                self.log(f"URL: {proxy_url}/api/nn-data/bulk-export")
                 data = fetcher.fetch_bulk_from_replit(progress_callback=progress_callback)
+                
+                # Log bulk download result
+                if data:
+                    total_in_bulk = sum(len(df) for tfs in data.values() for df in tfs.values() if hasattr(df, '__len__'))
+                    self.log(f"Bulk download returned {total_in_bulk:,} total candles")
+                else:
+                    self.log(f"Bulk download returned empty")
                 
                 # Fallback to individual fetches if bulk failed
                 if not data or all(not any(len(df) > 0 for df in tfs.values()) for tfs in data.values()):
-                    self.log(f"Bulk download failed, using individual fetches...")
+                    self.log(f"")
+                    self.log(f"[WARNING] Bulk download failed!")
+                    self.log(f"Falling back to individual fetches via Replit proxy...")
+                    self.log(f"(This is slower but uses same data source)")
                     # Reset progress for individual fetches
                     self.root.after(0, lambda: self._update_fetch_progress(0, -1, 0))
                     data = fetcher.fetch_all_historical_sync(100000, progress_callback=progress_callback)

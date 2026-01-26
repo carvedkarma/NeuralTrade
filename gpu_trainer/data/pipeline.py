@@ -176,12 +176,21 @@ class BinanceDataFetcher:
         
         url = f"{self.replit_proxy_url}/api/nn-data/bulk-export"
         print(f"[Bulk Download] Fetching all data from Replit: {url}")
+        print(f"[Bulk Download] Proxy URL: {self.replit_proxy_url}")
         
         try:
+            print(f"[Bulk Download] Sending request...")
             response = requests.get(url, stream=True, timeout=600)  # 10 min timeout for large data
+            print(f"[Bulk Download] Response status: {response.status_code}")
+            print(f"[Bulk Download] Response headers: {dict(response.headers)}")
             
             if response.status_code != 200:
-                print(f"[Bulk Download] HTTP {response.status_code}: {response.text[:200]}")
+                print(f"[Bulk Download] HTTP ERROR {response.status_code}")
+                try:
+                    body = response.text[:500]
+                    print(f"[Bulk Download] Response body: {body}")
+                except:
+                    pass
                 return {}
             
             # Parse gzipped NDJSON stream

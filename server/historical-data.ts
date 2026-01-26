@@ -1706,10 +1706,23 @@ export async function* streamNNDataBulk(timeframe?: string, symbol?: string): As
   const tfs = timeframe ? [timeframe] : NN_TIMEFRAMES;
   const syms = symbol ? [symbol] : SUPPORTED_ASSETS;
   
+  // First count total candles for accurate progress
+  let estimatedTotal = 0;
+  for (const tf of tfs) {
+    for (const sym of syms) {
+      const countResult = await db.select({ count: sql<number>`count(*)` })
+        .from(candles)
+        .where(and(eq(candles.symbol, sym), eq(candles.timeframe, tf)));
+      estimatedTotal += Number(countResult[0]?.count ?? 0);
+    }
+  }
+  
+  console.log(`[Bulk Export] Total candles to stream: ${estimatedTotal.toLocaleString()}`);
+  
   let totalCandles = 0;
   
-  // First, yield metadata line
-  yield JSON.stringify({ type: 'meta', timeframes: [...tfs], symbols: [...syms] }) + '\n';
+  // First, yield metadata line with total count for client progress
+  yield JSON.stringify({ type: 'meta', timeframes: [...tfs], symbols: [...syms], totalCandles: estimatedTotal }) + '\n';
   
   for (const tf of tfs) {
     for (const sym of syms) {
