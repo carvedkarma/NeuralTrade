@@ -1671,10 +1671,15 @@ export async function getResumableStatus(): Promise<{
     }
   }
   
-  // Can resume if any symbol/timeframe has partial data (some candles but not up to date)
+  // Can resume if any symbol/timeframe has:
+  // 1. No data at all (count = 0) - needs full download
+  // 2. Partial data (some candles but not up to date)
   const now = Date.now();
   const oneHourAgo = now - (60 * 60 * 1000);
-  const canResume = details.some(d => d.candleCount > 0 && (d.lastTimestamp === null || d.lastTimestamp < oneHourAgo));
+  const canResume = details.some(d => 
+    d.candleCount === 0 || // No data at all for this timeframe
+    (d.candleCount > 0 && (d.lastTimestamp === null || d.lastTimestamp < oneHourAgo))
+  );
   
   return { canResume, details };
 }
