@@ -566,22 +566,32 @@ class GPUTrainerGUI:
                 df = pd.read_parquet(data_path)
                 self.log(f"Loaded {len(df):,} candles from cache")
                 
-                # Validate loaded data for symbol/timeframe isolation
+                # Validate loaded data for symbol/timeframe isolation - BLOCKING on critical errors
                 self.log(f"")
                 self.log(f"[Data Validation] Verifying data integrity...")
+                validation_failed = False
+                
                 if "symbol" in df.columns:
                     unique_symbols = df["symbol"].unique().tolist()
                     if len(unique_symbols) == 1 and unique_symbols[0] == training_symbol:
                         self.log(f"[Data Validation] Symbol check PASSED: {training_symbol}")
+                    elif len(unique_symbols) > 1:
+                        self.log(f"[Data Validation] CRITICAL: Multiple symbols detected: {unique_symbols}")
+                        self.log(f"[Data Validation] ABORTING TRAINING - Data contamination detected!")
+                        validation_failed = True
                     else:
-                        self.log(f"[Data Validation] WARNING: Unexpected symbols in data: {unique_symbols}")
+                        self.log(f"[Data Validation] WARNING: Unexpected symbol in data: {unique_symbols}")
                 
                 if "timeframe" in df.columns:
                     unique_tfs = df["timeframe"].unique().tolist()
                     if len(unique_tfs) == 1 and unique_tfs[0] == training_timeframe:
                         self.log(f"[Data Validation] Timeframe check PASSED: {training_timeframe}")
+                    elif len(unique_tfs) > 1:
+                        self.log(f"[Data Validation] CRITICAL: Multiple timeframes detected: {unique_tfs}")
+                        self.log(f"[Data Validation] ABORTING TRAINING - Data contamination detected!")
+                        validation_failed = True
                     else:
-                        self.log(f"[Data Validation] WARNING: Unexpected timeframes in data: {unique_tfs}")
+                        self.log(f"[Data Validation] WARNING: Unexpected timeframe in data: {unique_tfs}")
                 
                 if "timestamp" in df.columns:
                     n_unique = df["timestamp"].nunique()
@@ -591,7 +601,13 @@ class GPUTrainerGUI:
                         dup_count = len(df) - n_unique
                         self.log(f"[Data Validation] WARNING: {dup_count} duplicate timestamps found")
                 
-                self.log(f"[Data Validation] Complete")
+                if validation_failed:
+                    self.log(f"[Data Validation] FAILED - Training aborted for data safety")
+                    self.log(f"")
+                    self.root.after(0, self.training_complete)
+                    return
+                
+                self.log(f"[Data Validation] PASSED - Data integrity verified")
                 self.log(f"")
                 
                 engineer = FeatureEngineer()
