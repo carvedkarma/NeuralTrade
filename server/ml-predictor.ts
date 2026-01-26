@@ -175,8 +175,8 @@ async function patternBasedPredict(feature: FeatureVector): Promise<MLPrediction
     const longWinRate = longCount > 0 ? longWins / longCount : 0;
     const shortWinRate = shortCount > 0 ? shortWins / shortCount : 0;
     
-    // Trading costs (fees + slippage)
-    const tradingCosts = 0.0013;  // 0.13% round trip
+    // STANDARDIZED: 0.10% round-trip trading costs (aligned with all systems)
+    const tradingCosts = 0.0010;  // 0.10% round trip (maker fees + slippage + funding)
     
     // ACTION-BASED: Use EV directly for action selection
     const netLongEV = avgLongEV - tradingCosts;
