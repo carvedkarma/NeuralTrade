@@ -952,6 +952,171 @@ class DashboardAPIFetcher:
         except Exception as e:
             print(f"[Dashboard API Sync] Error getting enhanced labels: {e}")
         return pd.DataFrame()
+    
+    def validate_data_integrity_sync(self, symbol: str, timeframe: str,
+                                      start_ts: int = None, end_ts: int = None) -> Dict:
+        """
+        Validate data integrity before training to ensure no cross-contamination.
+        This calls the Replit dashboard's validation endpoint and checks for:
+        - Symbol/timeframe mismatches
+        - Duplicate timestamps
+        - Data gaps
+        
+        Returns a report dict with 'valid' boolean and any warnings.
+        """
+        import requests
+        params = {"symbol": symbol, "timeframe": timeframe}
+        if start_ts:
+            params["startTs"] = start_ts
+        if end_ts:
+            params["endTs"] = end_ts
+        
+        print(f"")
+        print(f"{'='*60}")
+        print(f"[Data Validation] Checking integrity for {symbol} {timeframe}")
+        print(f"{'='*60}")
+        
+        try:
+            resp = requests.get(f"{self.dashboard_url}/api/gpu-export/validate-integrity",
+                               params=params, timeout=30)
+            if resp.status_code == 200:
+                report = resp.json()
+                
+                if report.get("valid"):
+                    print(f"[Data Validation] PASSED - {report.get('totalRecords', 0):,} records")
+                    print(f"[Data Validation] Timestamp range: {report.get('timestampRange', {})}")
+                else:
+                    print(f"[Data Validation] FAILED!")
+                    for warning in report.get("warnings", []):
+                        print(f"[Data Validation] WARNING: {warning}")
+                
+                if report.get("symbolMismatch"):
+                    print(f"[Data Validation] CRITICAL: Symbol mismatch detected!")
+                    print(f"[Data Validation] Expected: {symbol}")
+                    print(f"[Data Validation] Found: {report.get('distinctSymbols')}")
+                
+                if report.get("timeframeMismatch"):
+                    print(f"[Data Validation] CRITICAL: Timeframe mismatch detected!")
+                    print(f"[Data Validation] Expected: {timeframe}")
+                    print(f"[Data Validation] Found: {report.get('distinctTimeframes')}")
+                
+                if report.get("duplicateTimestamps", 0) > 0:
+                    print(f"[Data Validation] WARNING: {report.get('duplicateTimestamps')} duplicate timestamps")
+                
+                print(f"{'='*60}")
+                print(f"")
+                return report
+        except Exception as e:
+            print(f"[Data Validation] Error: {e}")
+        
+        return {"valid": False, "warnings": ["Validation failed - could not reach API"]}
+    
+    def verify_dataframe_integrity(self, df: pd.DataFrame, expected_symbol: str, 
+                                    expected_timeframe: str) -> Tuple[bool, List[str]]:
+        """
+        Verify that a loaded DataFrame contains only the expected symbol/timeframe.
+        This is a client-side validation to catch any data mixing issues.
+        
+        Returns (is_valid, list_of_warnings)
+        """
+        warnings = []
+        is_valid = True
+        
+        print(f"")
+        print(f"[DataFrame Validation] Verifying data for {expected_symbol} {expected_timeframe}")
+        
+        if df.empty:
+            warnings.append("DataFrame is empty")
+            return False, warnings
+        
+        # Check for symbol column if present
+        if "symbol" in df.columns:
+            unique_symbols = df["symbol"].unique().tolist()
+            if len(unique_symbols) > 1:
+                is_valid = False
+                warnings.append(f"CRITICAL: Multiple symbols in data: {unique_symbols}")
+            elif len(unique_symbols) == 1 and unique_symbols[0] != expected_symbol:
+                is_valid = False
+                warnings.append(f"CRITICAL: Symbol mismatch - expected {expected_symbol}, got {unique_symbols[0]}")
+            else:
+                print(f"[DataFrame Validation] Symbol check PASSED: {expected_symbol}")
+        
+        # Check for timeframe column if present
+        if "timeframe" in df.columns:
+            unique_tfs = df["timeframe"].unique().tolist()
+            if len(unique_tfs) > 1:
+                is_valid = False
+                warnings.append(f"CRITICAL: Multiple timeframes in data: {unique_tfs}")
+            elif len(unique_tfs) == 1 and unique_tfs[0] != expected_timeframe:
+                is_valid = False
+                warnings.append(f"CRITICAL: Timeframe mismatch - expected {expected_timeframe}, got {unique_tfs[0]}")
+            else:
+                print(f"[DataFrame Validation] Timeframe check PASSED: {expected_timeframe}")
+        
+        # Check for duplicate timestamps
+        if "timestamp" in df.columns:
+            n_total = len(df)
+            n_unique = df["timestamp"].nunique()
+            if n_unique < n_total:
+                dup_count = n_total - n_unique
+                warnings.append(f"WARNING: {dup_count} duplicate timestamps found")
+                print(f"[DataFrame Validation] WARNING: {dup_count} duplicate timestamps")
+            else:
+                print(f"[DataFrame Validation] Timestamp uniqueness PASSED: {n_unique:,} unique")
+        
+        # Check data ordering
+        if "timestamp" in df.columns:
+            is_sorted = df["timestamp"].is_monotonic_increasing
+            if not is_sorted:
+                warnings.append("WARNING: Data not sorted by timestamp")
+                print(f"[DataFrame Validation] WARNING: Data not sorted")
+            else:
+                print(f"[DataFrame Validation] Timestamp ordering PASSED")
+        
+        if is_valid and not warnings:
+            print(f"[DataFrame Validation] ALL CHECKS PASSED for {expected_symbol} {expected_timeframe}")
+        elif is_valid:
+            print(f"[DataFrame Validation] PASSED with warnings:")
+            for w in warnings:
+                print(f"  - {w}")
+        else:
+            print(f"[DataFrame Validation] FAILED:")
+            for w in warnings:
+                print(f"  - {w}")
+        
+        print(f"")
+        return is_valid, warnings
+    
+    def fetch_multi_tf_candles_validated(self, symbol: str, base_tf: str,
+                                          start_ts: int, end_ts: int,
+                                          limit: int = 100000) -> Tuple[pd.DataFrame, bool, List[str]]:
+        """
+        Fetch multi-timeframe candles with validation.
+        Returns (dataframe, is_valid, warnings).
+        This is the recommended method for fetching training data.
+        """
+        # Step 1: Validate data integrity on the server
+        integrity_report = self.validate_data_integrity_sync(symbol, base_tf, start_ts, end_ts)
+        
+        if not integrity_report.get("valid", False):
+            print(f"[Validated Fetch] Server-side validation failed!")
+            return pd.DataFrame(), False, integrity_report.get("warnings", [])
+        
+        # Step 2: Fetch the data
+        df = self.fetch_multi_tf_candles_sync(symbol, base_tf, start_ts, end_ts, limit)
+        
+        if df.empty:
+            return df, False, ["No data returned from API"]
+        
+        # Step 3: Verify the DataFrame client-side
+        is_valid, warnings = self.verify_dataframe_integrity(df, symbol, base_tf)
+        
+        if not is_valid:
+            print(f"[Validated Fetch] Client-side validation failed!")
+            return df, False, warnings
+        
+        print(f"[Validated Fetch] SUCCESS: {len(df):,} validated records for {symbol} {base_tf}")
+        return df, True, warnings
 
 
 def compute_features_from_spec(df: pd.DataFrame, feature_specs: List[Dict]) -> pd.DataFrame:
