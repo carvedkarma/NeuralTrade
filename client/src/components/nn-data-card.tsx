@@ -4,10 +4,21 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest } from "@/lib/queryClient";
-import { Database, Download, FileJson, Loader2, Clock, CheckCircle, AlertCircle, Trash2, XCircle, PlayCircle } from "lucide-react";
+import { Database, Download, FileJson, Loader2, Clock, CheckCircle, AlertCircle, Trash2, XCircle, PlayCircle, Zap, HardDrive } from "lucide-react";
 import { useState } from "react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 
 interface ResumableStatus {
   canResume: boolean;
@@ -100,18 +111,123 @@ export function NeuralNetworkDataCard() {
   };
 
   const hasAnyData = summary && summary.totalCandles > 0;
+  
+  const completedStreams = downloadProgress.filter(p => p.status === "complete").length;
+  const totalStreams = downloadProgress.length || 20;
+  const overallProgress = totalStreams > 0 ? Math.round((completedStreams / totalStreams) * 100) : 0;
+  
+  const estimatedCandles: Record<string, number> = {
+    "1": 2100000,
+    "2": 4200000,
+    "3": 6300000,
+    "5": 10500000
+  };
 
   return (
     <Card className="border-purple-500/30" data-testid="card-nn-data">
       <CardHeader className="pb-2">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-2">
             <Database className="h-5 w-5 text-purple-400" />
             <CardTitle className="text-lg">Neural Network Data</CardTitle>
+            <Badge variant="outline" className="text-purple-400 border-purple-400/30">
+              Multi-Timeframe
+            </Badge>
           </div>
-          <Badge variant="outline" className="text-purple-400 border-purple-400/30">
-            Multi-Timeframe
-          </Badge>
+          
+          {!isDownloading ? (
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button
+                  size="lg"
+                  className="bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-semibold shadow-lg"
+                  data-testid="button-download-all-prominent"
+                >
+                  <HardDrive className="h-5 w-5 mr-2" />
+                  Download All GPU Data
+                  <Zap className="h-4 w-4 ml-2 text-yellow-300" />
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle className="flex items-center gap-2">
+                    <HardDrive className="h-5 w-5 text-purple-400" />
+                    Download GPU Training Data
+                  </AlertDialogTitle>
+                  <AlertDialogDescription asChild>
+                    <div className="space-y-3">
+                      <p>This will download historical market data for GPU neural network training:</p>
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        <div className="p-2 bg-muted rounded">
+                          <div className="font-medium">Timeframes</div>
+                          <div className="text-muted-foreground">1m, 5m, 15m, 1h, 4h</div>
+                        </div>
+                        <div className="p-2 bg-muted rounded">
+                          <div className="font-medium">Assets</div>
+                          <div className="text-muted-foreground">BTC, ETH, SOL, BNB</div>
+                        </div>
+                        <div className="p-2 bg-muted rounded">
+                          <div className="font-medium">Data Streams</div>
+                          <div className="text-muted-foreground">20 parallel downloads</div>
+                        </div>
+                        <div className="p-2 bg-muted rounded">
+                          <div className="font-medium">Est. Candles</div>
+                          <div className="text-muted-foreground">~{(estimatedCandles[selectedYears] / 1000000).toFixed(1)}M ({selectedYears} years)</div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 mt-2">
+                        <span className="text-sm">Download period:</span>
+                        <Select value={selectedYears} onValueChange={setSelectedYears}>
+                          <SelectTrigger className="w-28">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="1">1 Year</SelectItem>
+                            <SelectItem value="2">2 Years</SelectItem>
+                            <SelectItem value="3">3 Years</SelectItem>
+                            <SelectItem value="5">5 Years</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={() => {
+                      downloadMutation.mutate(Number(selectedYears));
+                      toast({ 
+                        title: "Download Started", 
+                        description: `Downloading ${selectedYears} years of GPU training data...` 
+                      });
+                    }}
+                    className="bg-purple-600 hover:bg-purple-700"
+                  >
+                    <Download className="h-4 w-4 mr-2" />
+                    Start Download
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          ) : (
+            <div className="flex items-center gap-2">
+              <Badge className="bg-purple-600 animate-pulse">
+                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                Downloading...
+              </Badge>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => cancelMutation.mutate()}
+                disabled={cancelMutation.isPending}
+                className="border-red-500/50 text-red-400"
+              >
+                <XCircle className="h-4 w-4 mr-1" />
+                Cancel
+              </Button>
+            </div>
+          )}
         </div>
         <CardDescription>
           GPU training data: 1m, 5m, 15m, 1h, 4h timeframes across BTC, ETH, SOL, BNB
@@ -165,86 +281,70 @@ export function NeuralNetworkDataCard() {
               <span>Total: {summary?.totalCandles?.toLocaleString() || 0} candles across all timeframes</span>
             </div>
 
-            {isDownloading && (
-              <div className="space-y-2 p-3 bg-muted/30 rounded-lg">
-                <div className="text-sm font-medium flex items-center gap-2">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Parallel Downloads ({downloadProgress.filter(p => p.status === "downloading").length} active)
+            {(isDownloading || downloadProgress.length > 0) && (
+              <div className="space-y-3 p-4 bg-gradient-to-r from-purple-500/10 to-indigo-500/10 rounded-lg border border-purple-500/20">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-medium flex items-center gap-2">
+                    {isDownloading ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin text-purple-400" />
+                        <span>Downloading {downloadProgress.filter(p => p.status === "downloading").length} streams...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle className="h-4 w-4 text-emerald-400" />
+                        <span>Download Complete</span>
+                      </>
+                    )}
+                  </div>
+                  <Badge variant="secondary" className="text-xs">
+                    {completedStreams}/{totalStreams} streams
+                  </Badge>
                 </div>
-                {downloadProgress
-                  .filter(p => p.status === "downloading" || p.status === "pending")
-                  .sort((a, b) => {
-                    // Show downloading first, then pending
-                    if (a.status === "downloading" && b.status !== "downloading") return -1;
-                    if (a.status !== "downloading" && b.status === "downloading") return 1;
-                    return 0;
-                  })
-                  .slice(0, 12) // Show up to 12 items to avoid overwhelming UI
-                  .map(p => (
-                    <div key={`${p.symbol}_${p.timeframe}`} className="space-y-1">
-                      <div className="flex justify-between text-xs">
-                        <span className={p.status === "downloading" ? "text-emerald-400" : "text-muted-foreground"}>
-                          {p.symbol.replace("USDT", "")} {p.timeframe}
-                          {p.status === "pending" && " (queued)"}
-                        </span>
-                        <span>{p.status === "downloading" ? `${p.progress.toFixed(0)}%` : "waiting"}</span>
-                      </div>
-                      <Progress 
-                        value={p.status === "downloading" ? p.progress : 0} 
-                        className={`h-1 ${p.status === "pending" ? "opacity-40" : ""}`} 
-                      />
-                    </div>
-                  ))}
-                {downloadProgress.filter(p => p.status === "pending").length > 8 && (
-                  <div className="text-xs text-muted-foreground text-center">
-                    +{downloadProgress.filter(p => p.status === "pending").length - 8} more queued...
+                
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs text-muted-foreground">
+                    <span>Overall Progress</span>
+                    <span>{overallProgress}%</span>
+                  </div>
+                  <Progress value={overallProgress} className="h-2" />
+                </div>
+                
+                {isDownloading && (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2">
+                    {downloadProgress
+                      .filter(p => p.status === "downloading")
+                      .map(p => (
+                        <div key={`${p.symbol}_${p.timeframe}`} className="p-2 bg-background/50 rounded text-xs">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-emerald-400 font-medium">
+                              {p.symbol.replace("USDT", "")} {p.timeframe}
+                            </span>
+                            <span>{p.progress.toFixed(0)}%</span>
+                          </div>
+                          <Progress value={p.progress} className="h-1" />
+                          <div className="text-muted-foreground mt-1">
+                            {p.candlesFetched.toLocaleString()} candles
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                )}
+                
+                {downloadProgress.filter(p => p.status === "pending").length > 0 && (
+                  <div className="text-xs text-muted-foreground">
+                    {downloadProgress.filter(p => p.status === "pending").length} streams queued...
                   </div>
                 )}
               </div>
             )}
 
-            <div className="flex items-center gap-3 pt-2">
-              <Select
-                value={selectedYears}
-                onValueChange={setSelectedYears}
-                disabled={isDownloading}
-              >
-                <SelectTrigger className="w-32" data-testid="select-nn-years">
-                  <SelectValue placeholder="Years" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="1">1 Year</SelectItem>
-                  <SelectItem value="2">2 Years</SelectItem>
-                  <SelectItem value="3">3 Years</SelectItem>
-                  <SelectItem value="5">5 Years</SelectItem>
-                </SelectContent>
-              </Select>
-
-              <Button
-                onClick={() => downloadMutation.mutate(Number(selectedYears))}
-                disabled={isDownloading || downloadMutation.isPending}
-                className="bg-purple-600"
-                data-testid="button-download-nn-data"
-              >
-                {isDownloading || downloadMutation.isPending ? (
-                  <>
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    Downloading...
-                  </>
-                ) : (
-                  <>
-                    <Download className="h-4 w-4 mr-2" />
-                    Download All
-                  </>
-                )}
-              </Button>
-
+            <div className="flex items-center gap-3 pt-2 flex-wrap">
               {canResume && (
                 <Button
                   onClick={() => resumeMutation.mutate(Number(selectedYears))}
                   disabled={resumeMutation.isPending}
-                  variant="outline"
-                  className="border-emerald-500/50 text-emerald-400"
+                  className="bg-emerald-600 hover:bg-emerald-700"
                   data-testid="button-resume-nn-download"
                 >
                   {resumeMutation.isPending ? (
@@ -252,20 +352,7 @@ export function NeuralNetworkDataCard() {
                   ) : (
                     <PlayCircle className="h-4 w-4 mr-2" />
                   )}
-                  Resume
-                </Button>
-              )}
-
-              {isDownloading && (
-                <Button
-                  variant="outline"
-                  onClick={() => cancelMutation.mutate()}
-                  disabled={cancelMutation.isPending}
-                  className="border-red-500/50 text-red-400"
-                  data-testid="button-cancel-nn-download"
-                >
-                  <XCircle className="h-4 w-4 mr-2" />
-                  Cancel
+                  Resume Download
                 </Button>
               )}
 
@@ -280,20 +367,42 @@ export function NeuralNetworkDataCard() {
                     Export JSON
                   </Button>
                   
-                  <Button
-                    variant="outline"
-                    onClick={() => clearMutation.mutate()}
-                    disabled={clearMutation.isPending}
-                    className="border-red-500/50 text-red-400"
-                    data-testid="button-clear-nn-data"
-                  >
-                    {clearMutation.isPending ? (
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    ) : (
-                      <Trash2 className="h-4 w-4 mr-2" />
-                    )}
-                    Clear Data
-                  </Button>
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        variant="outline"
+                        disabled={clearMutation.isPending}
+                        className="border-red-500/50 text-red-400"
+                        data-testid="button-clear-nn-data"
+                      >
+                        {clearMutation.isPending ? (
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4 mr-2" />
+                        )}
+                        Clear Data
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Clear All GPU Training Data?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          This will permanently delete {summary?.totalCandles?.toLocaleString()} candles across all timeframes. 
+                          You will need to download the data again.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction
+                          onClick={() => clearMutation.mutate()}
+                          className="bg-red-600 hover:bg-red-700"
+                        >
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          Clear All Data
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
                 </>
               )}
             </div>
