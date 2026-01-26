@@ -98,6 +98,15 @@ Preferred communication style: Simple, everyday language.
 - **Trade Audit Enhancement**: Added `sizingMethod` tracking to audit logs for risk governance (shows Half-Kelly vs fixed sizing).
 - **Max 2 Vetoes Rule**: Gating logic allows up to 2 vetoes before blocking trades. Improves trade flow while maintaining selectivity.
 
+### Precision Audit Improvements (January 2026)
+- **Adaptive Normalization (DAIN-style)**: `AdaptiveNormalizer` class uses rolling z-score normalization (100-sample window, ±3 clipping) for 30+ features. Uses only past data to prevent leakage.
+- **Feature-Vector Embargo**: `applyFeatureVectorEmbargo()` filters patterns with >95% similarity to train/test boundary, preventing data leakage from feature-similar patterns.
+- **Sharpe Ratio Sanity Check**: Warning system when Sharpe > 3.0 (overfitting) or > 2.5 (unusually high). Requires ≥20 samples for reliable detection.
+- **Monte Carlo Simulation**: Runs 1000 simulations with shuffled trade returns to calculate 5th/50th/95th percentile final equity and max drawdown. Determines statistical significance and confidence level.
+- **Validation Logging**: Verifies win rate calculations match actual returns using same threshold criteria to detect computation bugs.
+- **Train/Test Split**: 80/20 walk-forward validation ensures win rate stats are computed on out-of-sample data only.
+- **Model Display Fix**: Strategy Learner appears as 4th model entry with weight=0 (backtest stats only), separated from live predictions to prevent double-counting.
+
 ### Key Files for ML/Learning
 - `server/feature-engine.ts`: Feature computation + shared regime classifier
 - `server/signal-engine.ts`: Signal generation and shot plans
