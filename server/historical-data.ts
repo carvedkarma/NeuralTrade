@@ -1152,7 +1152,7 @@ const MS_PER_TIMEFRAME: Record<NNTimeframe, number> = {
 };
 
 // Parallel download configuration
-const MAX_CONCURRENT_DOWNLOADS = 5; // Limit to avoid rate limits
+const MAX_CONCURRENT_DOWNLOADS = 8; // Increased for faster parallel downloads
 const BATCH_INSERT_SIZE = 500; // Insert 500 candles at once
 
 interface NNDownloadProgress {
@@ -1516,9 +1516,10 @@ export async function downloadNNData(
   const targetStartTime = now - (years * 365 * 24 * 60 * 60 * 1000);
   
   // Build list of all symbol/timeframe combinations
+  // Order by timeframe first so all assets for each TF download in parallel
   const downloadTasks: Array<{ symbol: string; tf: NNTimeframe }> = [];
-  for (const symbol of SUPPORTED_ASSETS) {
-    for (const tf of NN_TIMEFRAMES) {
+  for (const tf of NN_TIMEFRAMES) {
+    for (const symbol of SUPPORTED_ASSETS) {
       downloadTasks.push({ symbol, tf });
     }
   }

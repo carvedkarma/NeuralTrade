@@ -48,6 +48,8 @@ Preferred communication style: Simple, everyday language.
 - **GPU Neural Network Training**: Supports 6+ deep learning architectures (Transformer, TFT, LSTM, CNN, VAE, GNN) trainable on local GPU with real-time status push and multi-timeframe data.
 - **Advanced Exit Logic**: Implements dynamic take-profit targets, MFE tracking, and failure stop detection.
 - **Unified Learning Controller**: Synchronizes Strategy Learner, Pattern Memory, and GPU Trainer to process consistent historical data ranges, with enhanced training status, ETA calculation, and staged decision logic.
+- **Multi-timeframe Data Download**: Parallel download of 1m, 5m, 15m, 1h, 4h data across 4 assets (BTC, ETH, SOL, BNB) with 8 concurrent streams, ordered by timeframe for optimal parallelism.
+- **Dual Decision Display**: Separate outputs for Combined Learning (Strategy Learner + Pattern Memory) and GPU Neural Network decisions with confidence levels.
 
 ### Build System
 - **Client Build**: Vite bundles React app to `dist/public`.
