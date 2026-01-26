@@ -68,9 +68,12 @@ export interface ShotPlan {
   };
 }
 
+// STANDARDIZED TRANSACTION COSTS: 0.10% round-trip total
+// Breakdown: maker fees 0.04% + slippage 0.04% + funding risk 0.02%
 const FEES = 0.0004;
-const SLIPPAGE = 0.0002;
-const FUNDING_RISK = 0.0001;
+const SLIPPAGE = 0.0004;
+const FUNDING_RISK = 0.0002;
+const TOTAL_TRANSACTION_COST = 0.0010;  // Standardized across all systems
 const EDGE_MULTIPLE_MIN = 1.5;
 const MIN_QUALITY_SCORE = 70;  // Minimum quality score required for trades
 

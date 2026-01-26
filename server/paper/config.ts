@@ -56,9 +56,11 @@ export const defaultConfig: PaperTradingConfig = {
   maxAccountExposurePct: 500,       // AGGRESSIVE: Increased to 500% for 5x leverage futures
   minConfidence: 0.35,              // Lowered from 65% to 35% - more aggressive
   
-  takerFeePct: 0.04,
-  makerFeePct: 0.02,
-  slippageBps: 2,
+  // STANDARDIZED: 0.10% round-trip total (aligned with pattern-memory & signal-engine)
+  // Formula: (takerFeePct * 2 + slippageBps * 2 / 100) / 100 = 0.0010
+  takerFeePct: 0.04,    // 0.04% per side = 0.08% round trip
+  makerFeePct: 0.02,    // Unused in current calculations
+  slippageBps: 1,       // 0.01% per side = 0.02% round trip (adjusted from 2)
   
   minStopDistancePct: 0.15,
   atrStopMultiplier: 1.2,

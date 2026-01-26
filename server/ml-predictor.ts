@@ -403,8 +403,8 @@ export async function getEnsemblePrediction(
     ai: 0.30,
   };
   
-  // Trading costs for EV calculation
-  const tradingCosts = 0.0013;  // 0.13% round trip (fees + slippage)
+  // STANDARDIZED: 0.10% round-trip trading costs (maker fees + slippage + funding)
+  const tradingCosts = 0.0010;  // Aligned with pattern-memory and signal-engine
   const currentPrice = feature.kalmanFast || 1;
   
   // STEP 1: Aggregate weighted action probabilities from all models

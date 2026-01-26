@@ -1931,7 +1931,7 @@ export class MemStorage implements IStorage {
         };
       })(),
       featureComputation: {
-        totalFeatures: 40,
+        totalFeatures: 81,  // 57 core features + 24 embedding dimensions
         featuresComputed: this.learningStats.featureComputeCount,
         computationTime: this.learningStats.totalComputeTime > 0 ? this.learningStats.totalComputeTime / Math.max(1, this.learningStats.featureComputeCount) : 25,
         topFeatures: [
@@ -1942,12 +1942,23 @@ export class MemStorage implements IStorage {
           { name: "atr_14", importance: 0.65, currentValue: this.indicators?.atr?.value || 0 },
         ],
         featureCategories: {
-          price: 8,
-          momentum: 10,
-          volatility: 8,
-          volume: 6,
-          regime: 4,
+          // OHLCV (10): price, open, high, low, close, volume, normalizedPrice, normalizedVolume, candleBody, candleRange
+          price: 10,
+          // Momentum (12): returns1-4-8, rsi14, macd, macdSignal, macdHist, stochK, stochD, momentum, priceVelocity, priceAcceleration
+          momentum: 12,
+          // Trend (10): ema20, ema50, ema20Slope, ema50Slope, emaDistance, breakoutDistanceHigh, breakoutDistanceLow, adx, plusDi, minusDi, trendStrength, pricePosition
+          trend: 12,
+          // Volatility (5): efficiencyRatio, atr14, volatility, bollingerWidth, volatilityRegime
+          volatility: 5,
+          // Volume (3): obv, obvSlope, volumeRatio
+          volume: 3,
+          // Kalman (4): kalmanFast, kalmanSlow, kalmanSpread, kalmanRegime
           kalman: 4,
+          // Cross-Asset (10): correlations (3), relativeStrength (3), momentumDivergence (3), sectorMomentum (1)
+          crossAsset: 10,
+          // Embedding (24): 24-dimensional pattern embedding for similarity matching
+          embedding: 24,
+          // Total: 10 + 12 + 12 + 5 + 3 + 4 + 10 + 24 = 80 (plus timestamp metadata = 81)
         },
       },
       modelPerformance,
