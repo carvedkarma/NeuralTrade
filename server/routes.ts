@@ -22,7 +22,8 @@ import {
   getEnhancedLabels,
   TRADING_COSTS,
   HORIZON_CONFIG,
-  NO_TRADE_CONDITIONS
+  NO_TRADE_CONDITIONS,
+  validateDataIntegrity
 } from "./gpu-data-export";
 
 export const backfillState = {
@@ -1110,6 +1111,30 @@ export async function registerRoutes(
         decisionLogic: "15 & 60 bars are primary trading horizons, 240 is trend confirmation only"
       }
     });
+  });
+
+  // Data integrity validation endpoint - ensures no cross-contamination between symbol/timeframe combinations
+  app.get("/api/gpu-export/validate-integrity", async (req, res) => {
+    try {
+      const symbol = (req.query.symbol as string) || "BTCUSDT";
+      const timeframe = (req.query.timeframe as string) || "1m";
+      const startTs = req.query.startTs ? parseInt(req.query.startTs as string) : undefined;
+      const endTs = req.query.endTs ? parseInt(req.query.endTs as string) : undefined;
+      
+      console.log(`[GPU Export] Validating data integrity for ${symbol} ${timeframe}...`);
+      const report = await validateDataIntegrity(symbol, timeframe, startTs, endTs);
+      
+      if (!report.valid) {
+        console.error(`[GPU Export] DATA INTEGRITY FAILED for ${symbol} ${timeframe}:`, report.warnings);
+      } else {
+        console.log(`[GPU Export] Data integrity OK for ${symbol} ${timeframe}: ${report.totalRecords} records`);
+      }
+      
+      res.json(report);
+    } catch (error) {
+      console.error("[GPU Export] Error validating data integrity:", error);
+      res.status(500).json({ error: "Failed to validate data integrity" });
+    }
   });
 
   app.get("/api/gpu-export/enhanced-labels", async (req, res) => {

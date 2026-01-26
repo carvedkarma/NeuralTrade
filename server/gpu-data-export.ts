@@ -402,6 +402,150 @@ export const TRADING_COSTS = {
   totalRoundTrip: 0.0009,
 };
 
+// Data integrity validation for GPU export
+export interface DataIntegrityReport {
+  valid: boolean;
+  symbol: string;
+  timeframe: string;
+  totalRecords: number;
+  distinctSymbols: string[];
+  distinctTimeframes: string[];
+  symbolMismatch: boolean;
+  timeframeMismatch: boolean;
+  duplicateTimestamps: number;
+  gapCount: number;
+  timestampRange: { min: number; max: number };
+  warnings: string[];
+}
+
+export async function validateDataIntegrity(
+  symbol: string,
+  timeframe: string,
+  startTs?: number,
+  endTs?: number
+): Promise<DataIntegrityReport> {
+  const warnings: string[] = [];
+  
+  // Query to check for any cross-contamination
+  let query = sql`
+    SELECT 
+      symbol, 
+      timeframe, 
+      COUNT(*) as count,
+      MIN(timestamp) as min_ts,
+      MAX(timestamp) as max_ts
+    FROM candles 
+    WHERE symbol = ${symbol} AND timeframe = ${timeframe}
+  `;
+  
+  if (startTs && endTs) {
+    query = sql`
+      SELECT 
+        symbol, 
+        timeframe, 
+        COUNT(*) as count,
+        MIN(timestamp) as min_ts,
+        MAX(timestamp) as max_ts
+      FROM candles 
+      WHERE symbol = ${symbol} AND timeframe = ${timeframe}
+        AND timestamp >= ${startTs} AND timestamp <= ${endTs}
+      GROUP BY symbol, timeframe
+    `;
+  } else {
+    query = sql`
+      SELECT 
+        symbol, 
+        timeframe, 
+        COUNT(*) as count,
+        MIN(timestamp) as min_ts,
+        MAX(timestamp) as max_ts
+      FROM candles 
+      WHERE symbol = ${symbol} AND timeframe = ${timeframe}
+      GROUP BY symbol, timeframe
+    `;
+  }
+  
+  const result = await db.execute(query);
+  const rows = result as any[];
+  
+  // Check distinct symbols and timeframes in the filtered data
+  const distinctSymbols = Array.from(new Set(rows.map(r => r.symbol)));
+  const distinctTimeframes = Array.from(new Set(rows.map(r => r.timeframe)));
+  
+  const symbolMismatch = distinctSymbols.length > 1 || (distinctSymbols.length === 1 && distinctSymbols[0] !== symbol);
+  const timeframeMismatch = distinctTimeframes.length > 1 || (distinctTimeframes.length === 1 && distinctTimeframes[0] !== timeframe);
+  
+  if (symbolMismatch) {
+    warnings.push(`CRITICAL: Found symbols ${distinctSymbols.join(", ")} when expecting only ${symbol}`);
+  }
+  if (timeframeMismatch) {
+    warnings.push(`CRITICAL: Found timeframes ${distinctTimeframes.join(", ")} when expecting only ${timeframe}`);
+  }
+  
+  // Check for duplicate timestamps
+  const dupResult = await db.execute(sql`
+    SELECT COUNT(*) as dup_count FROM (
+      SELECT timestamp, COUNT(*) as cnt 
+      FROM candles 
+      WHERE symbol = ${symbol} AND timeframe = ${timeframe}
+      ${startTs && endTs ? sql`AND timestamp >= ${startTs} AND timestamp <= ${endTs}` : sql``}
+      GROUP BY timestamp 
+      HAVING COUNT(*) > 1
+    ) as dups
+  `);
+  const duplicateTimestamps = parseInt((dupResult as any[])[0]?.dup_count || "0");
+  
+  if (duplicateTimestamps > 0) {
+    warnings.push(`WARNING: Found ${duplicateTimestamps} duplicate timestamps in ${symbol} ${timeframe}`);
+  }
+  
+  // Calculate gap count (missing candles)
+  const totalRecords = rows.reduce((sum, r) => sum + parseInt(r.count || "0"), 0);
+  const minTs = Math.min(...rows.map(r => parseInt(r.min_ts || "0")).filter(t => t > 0));
+  const maxTs = Math.max(...rows.map(r => parseInt(r.max_ts || "0")).filter(t => t > 0));
+  
+  const tfMinutes = TF_MINUTES[timeframe] || 1;
+  const expectedCandles = minTs && maxTs ? Math.floor((maxTs - minTs) / (tfMinutes * 60 * 1000)) + 1 : 0;
+  const gapCount = Math.max(0, expectedCandles - totalRecords);
+  
+  if (gapCount > expectedCandles * 0.05) {
+    warnings.push(`WARNING: ${gapCount} missing candles (${(gapCount / expectedCandles * 100).toFixed(1)}% gaps)`);
+  }
+  
+  return {
+    valid: !symbolMismatch && !timeframeMismatch && duplicateTimestamps === 0,
+    symbol,
+    timeframe,
+    totalRecords,
+    distinctSymbols,
+    distinctTimeframes,
+    symbolMismatch,
+    timeframeMismatch,
+    duplicateTimestamps,
+    gapCount,
+    timestampRange: { min: minTs || 0, max: maxTs || 0 },
+    warnings,
+  };
+}
+
+// Add metadata to export responses for Python-side validation
+export interface ExportMetadata {
+  exportTimestamp: number;
+  requestedSymbol: string;
+  requestedTimeframe: string;
+  actualRecordCount: number;
+  integrityCheck: DataIntegrityReport;
+  checksum: string;
+}
+
+function computeChecksum(data: any[]): string {
+  // Simple checksum: hash of first/last timestamps + count
+  if (data.length === 0) return "empty";
+  const first = data[0]?.timestamp || 0;
+  const last = data[data.length - 1]?.timestamp || 0;
+  return `${first}-${last}-${data.length}`;
+}
+
 // Institution-grade horizon-specific configuration
 export const HORIZON_CONFIG = {
   h15: {
