@@ -1151,15 +1151,120 @@ const MS_PER_TIMEFRAME: Record<NNTimeframe, number> = {
   "4h": 4 * 60 * 60 * 1000,
 };
 
+// Parallel download configuration
+const MAX_CONCURRENT_DOWNLOADS = 5; // Limit to avoid rate limits
+const BATCH_INSERT_SIZE = 500; // Insert 500 candles at once
+
 interface NNDownloadProgress {
   symbol: string;
   timeframe: string;
-  status: "pending" | "downloading" | "complete" | "error";
+  status: "pending" | "downloading" | "complete" | "error" | "skipped";
   progress: number;
   candlesFetched: number;
+  existingCandles?: number;
+  estimatedTimeRemaining?: number; // seconds
+  currentDate?: string; // Current date being downloaded
 }
 
 const nnDownloadProgress = new Map<string, NNDownloadProgress>();
+
+// Global download stats for ETA calculation
+interface DownloadStats {
+  startTime: number;
+  totalCandlesTarget: number;
+  totalCandlesDownloaded: number;
+  candlesPerSecond: number;
+}
+let globalDownloadStats: DownloadStats | null = null;
+
+export function getDownloadETA(): { estimatedSecondsRemaining: number; candlesPerSecond: number } | null {
+  if (!globalDownloadStats) return null;
+  const remaining = globalDownloadStats.totalCandlesTarget - globalDownloadStats.totalCandlesDownloaded;
+  const eta = globalDownloadStats.candlesPerSecond > 0 
+    ? Math.ceil(remaining / globalDownloadStats.candlesPerSecond) 
+    : 0;
+  return { 
+    estimatedSecondsRemaining: eta, 
+    candlesPerSecond: globalDownloadStats.candlesPerSecond 
+  };
+}
+
+// Get existing data range for a symbol/timeframe (for smart resume)
+async function getExistingDataRange(symbol: string, tf: string): Promise<{ minTs: number | null; maxTs: number | null; count: number }> {
+  const result = await db.select({
+    minTs: sql<number>`MIN(timestamp)`,
+    maxTs: sql<number>`MAX(timestamp)`,
+    count: sql<number>`COUNT(*)`
+  })
+    .from(candles)
+    .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, tf)));
+  
+  return {
+    minTs: result[0]?.minTs ?? null,
+    maxTs: result[0]?.maxTs ?? null,
+    count: Number(result[0]?.count ?? 0)
+  };
+}
+
+// Parallel execution with concurrency limit
+async function parallelWithLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = [];
+  const executing: Promise<void>[] = [];
+  
+  for (const item of items) {
+    const p = fn(item).then(result => {
+      results.push(result);
+    });
+    executing.push(p);
+    
+    if (executing.length >= limit) {
+      await Promise.race(executing);
+      // Remove completed promises
+      for (let i = executing.length - 1; i >= 0; i--) {
+        const status = await Promise.race([executing[i], Promise.resolve('pending')]);
+        if (status !== 'pending') {
+          executing.splice(i, 1);
+        }
+      }
+    }
+  }
+  
+  await Promise.all(executing);
+  return results;
+}
+
+// Batch insert candles for better performance
+async function batchInsertCandles(candleInserts: Array<{
+  symbol: string;
+  timestamp: number;
+  timeframe: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}>): Promise<number> {
+  if (candleInserts.length === 0) return 0;
+  
+  // Insert in batches
+  let inserted = 0;
+  for (let i = 0; i < candleInserts.length; i += BATCH_INSERT_SIZE) {
+    const batch = candleInserts.slice(i, i + BATCH_INSERT_SIZE);
+    try {
+      await db.insert(candles)
+        .values(batch)
+        .onConflictDoNothing();
+      inserted += batch.length;
+    } catch (error) {
+      console.error(`[Batch Insert] Error inserting batch:`, error);
+    }
+  }
+  return inserted;
+}
 
 // Flag to cancel ongoing NN download
 let nnDownloadCancelled = false;
@@ -1237,6 +1342,169 @@ export async function getNNDataSummary(): Promise<{
   return result;
 }
 
+// Download a single symbol/timeframe with smart resume
+async function downloadSingleStream(
+  symbol: string,
+  tf: NNTimeframe,
+  targetStartTime: number,
+  now: number,
+  onProgress?: (symbol: string, timeframe: string, progress: number) => void
+): Promise<{ symbol: string; tf: string; fetched: number; skipped: boolean }> {
+  const key = `${symbol}_${tf}`;
+  const msPerCandle = MS_PER_TIMEFRAME[tf];
+  
+  // Check existing data for smart resume
+  const existing = await getExistingDataRange(symbol, tf);
+  
+  // Calculate expected candles for this timeframe
+  const totalDuration = now - targetStartTime;
+  const expectedCandles = Math.floor(totalDuration / msPerCandle);
+  
+  // Check if we have enough data (allow 5% margin for gaps)
+  const coverageRatio = existing.count / expectedCandles;
+  if (coverageRatio >= 0.95 && existing.maxTs && (now - existing.maxTs) < msPerCandle * 10) {
+    // Already have most data and it's recent - skip
+    nnDownloadProgress.set(key, {
+      symbol,
+      timeframe: tf,
+      status: "skipped",
+      progress: 100,
+      candlesFetched: 0,
+      existingCandles: existing.count,
+      currentDate: new Date(existing.maxTs).toISOString().split('T')[0]
+    });
+    console.log(`[NN Download] Skipping ${symbol} ${tf}: Already have ${existing.count} candles (${(coverageRatio * 100).toFixed(1)}% coverage)`);
+    return { symbol, tf, fetched: 0, skipped: true };
+  }
+  
+  // Smart resume: start from where we left off
+  let cursor = targetStartTime;
+  if (existing.maxTs && existing.maxTs > targetStartTime) {
+    cursor = existing.maxTs + msPerCandle;
+    console.log(`[NN Download] Resuming ${symbol} ${tf}: from ${new Date(cursor).toISOString().split('T')[0]} (have ${existing.count} candles)`);
+  } else {
+    console.log(`[NN Download] Starting ${symbol} ${tf}: full download from ${new Date(targetStartTime).toISOString().split('T')[0]}`);
+  }
+  
+  nnDownloadProgress.set(key, {
+    symbol,
+    timeframe: tf,
+    status: "downloading",
+    progress: 0,
+    candlesFetched: 0,
+    existingCandles: existing.count,
+    currentDate: new Date(cursor).toISOString().split('T')[0]
+  });
+  
+  let fetched = 0;
+  let candleBuffer: Array<{
+    symbol: string;
+    timestamp: number;
+    timeframe: string;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+  }> = [];
+  
+  const downloadStartTime = Date.now();
+  
+  while (cursor < now) {
+    if (nnDownloadCancelled) {
+      // Flush remaining buffer before exiting
+      if (candleBuffer.length > 0) {
+        await batchInsertCandles(candleBuffer);
+      }
+      return { symbol, tf, fetched, skipped: false };
+    }
+    
+    const batchEnd = Math.min(cursor + (CANDLES_PER_REQUEST * msPerCandle), now);
+    
+    try {
+      const klines = await fetchKlinesBatch(symbol, tf, cursor, batchEnd);
+      
+      if (klines.length > 0) {
+        const candleInserts = klines.map(k => ({
+          symbol,
+          timestamp: k.openTime,
+          timeframe: tf,
+          open: parseFloat(k.open),
+          high: parseFloat(k.high),
+          low: parseFloat(k.low),
+          close: parseFloat(k.close),
+          volume: parseFloat(k.volume),
+        }));
+        
+        candleBuffer.push(...candleInserts);
+        
+        // Batch insert when buffer is full
+        if (candleBuffer.length >= BATCH_INSERT_SIZE) {
+          await batchInsertCandles(candleBuffer);
+          candleBuffer = [];
+        }
+        
+        fetched += klines.length;
+        cursor = klines[klines.length - 1].openTime + msPerCandle;
+        
+        // Update global stats for ETA
+        if (globalDownloadStats) {
+          globalDownloadStats.totalCandlesDownloaded += klines.length;
+          const elapsed = (Date.now() - globalDownloadStats.startTime) / 1000;
+          globalDownloadStats.candlesPerSecond = globalDownloadStats.totalCandlesDownloaded / elapsed;
+        }
+      } else {
+        cursor = batchEnd + msPerCandle;
+      }
+      
+      const progress = Math.min(((cursor - targetStartTime) / (now - targetStartTime)) * 100, 100);
+      const elapsedSec = (Date.now() - downloadStartTime) / 1000;
+      const remainingMs = now - cursor;
+      const estimatedRemaining = fetched > 0 ? (remainingMs / msPerCandle) / (fetched / elapsedSec) : 0;
+      
+      nnDownloadProgress.set(key, {
+        symbol,
+        timeframe: tf,
+        status: "downloading",
+        progress,
+        candlesFetched: fetched,
+        existingCandles: existing.count,
+        estimatedTimeRemaining: Math.ceil(estimatedRemaining),
+        currentDate: new Date(cursor).toISOString().split('T')[0]
+      });
+      
+      if (onProgress) {
+        onProgress(symbol, tf, progress);
+      }
+      
+      // Small delay between requests
+      await new Promise(resolve => setTimeout(resolve, 30));
+    } catch (error) {
+      console.error(`[NN Download] Error fetching ${symbol} ${tf}:`, error);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      cursor = batchEnd + msPerCandle;
+    }
+  }
+  
+  // Flush remaining buffer
+  if (candleBuffer.length > 0) {
+    await batchInsertCandles(candleBuffer);
+  }
+  
+  nnDownloadProgress.set(key, {
+    symbol,
+    timeframe: tf,
+    status: "complete",
+    progress: 100,
+    candlesFetched: fetched,
+    existingCandles: existing.count,
+    currentDate: new Date(now).toISOString().split('T')[0]
+  });
+  
+  console.log(`[NN Download] Completed ${symbol} ${tf}: ${fetched} new candles`);
+  return { symbol, tf, fetched, skipped: false };
+}
+
 export async function downloadNNData(
   years: number = 3,
   onProgress?: (symbol: string, timeframe: string, progress: number) => void
@@ -1245,130 +1513,84 @@ export async function downloadNNData(
   nnDownloadCancelled = false;
   
   const now = Date.now();
-  const startTime = now - (years * 365 * 24 * 60 * 60 * 1000);
-  let totalCandles = 0;
-
-  // Initialize progress for all symbol/timeframe combinations
+  const targetStartTime = now - (years * 365 * 24 * 60 * 60 * 1000);
+  
+  // Build list of all symbol/timeframe combinations
+  const downloadTasks: Array<{ symbol: string; tf: NNTimeframe }> = [];
   for (const symbol of SUPPORTED_ASSETS) {
     for (const tf of NN_TIMEFRAMES) {
-      const key = `${symbol}_${tf}`;
-      nnDownloadProgress.set(key, {
-        symbol,
-        timeframe: tf,
-        status: "pending",
-        progress: 0,
-        candlesFetched: 0,
-      });
+      downloadTasks.push({ symbol, tf });
     }
   }
-
+  
+  console.log(`[NN Download] Starting parallel download: ${downloadTasks.length} streams, ${MAX_CONCURRENT_DOWNLOADS} concurrent`);
+  
+  // Initialize progress for all
+  for (const task of downloadTasks) {
+    const key = `${task.symbol}_${task.tf}`;
+    nnDownloadProgress.set(key, {
+      symbol: task.symbol,
+      timeframe: task.tf,
+      status: "pending",
+      progress: 0,
+      candlesFetched: 0,
+    });
+  }
+  
+  // Estimate total candles for ETA
+  let estimatedTotal = 0;
+  for (const tf of NN_TIMEFRAMES) {
+    const msPerCandle = MS_PER_TIMEFRAME[tf];
+    const candlesPerAsset = Math.floor((now - targetStartTime) / msPerCandle);
+    estimatedTotal += candlesPerAsset * SUPPORTED_ASSETS.length;
+  }
+  
+  globalDownloadStats = {
+    startTime: Date.now(),
+    totalCandlesTarget: estimatedTotal,
+    totalCandlesDownloaded: 0,
+    candlesPerSecond: 0
+  };
+  
   try {
-    for (const tf of NN_TIMEFRAMES) {
-      // Check for cancellation between timeframes
+    // Download in parallel with concurrency limit
+    const results: Array<{ symbol: string; tf: string; fetched: number; skipped: boolean }> = [];
+    const activePromises: Map<string, Promise<{ symbol: string; tf: string; fetched: number; skipped: boolean }>> = new Map();
+    
+    for (const task of downloadTasks) {
       if (nnDownloadCancelled) {
         console.log("[NN Download] Cancelled by user");
-        return { success: false, totalCandles, cancelled: true };
+        break;
       }
       
-      const msPerCandle = MS_PER_TIMEFRAME[tf];
-      
-      for (const symbol of SUPPORTED_ASSETS) {
-        // Check for cancellation between symbols
-        if (nnDownloadCancelled) {
-          console.log("[NN Download] Cancelled by user");
-          return { success: false, totalCandles, cancelled: true };
-        }
-        
-        const key = `${symbol}_${tf}`;
-        
-        nnDownloadProgress.set(key, {
-          symbol,
-          timeframe: tf,
-          status: "downloading",
-          progress: 0,
-          candlesFetched: 0,
-        });
-
-        console.log(`[NN Download] Starting ${symbol} ${tf}: ${years} years`);
-
-        let cursor = startTime;
-        let fetched = 0;
-
-        while (cursor < now) {
-          // Check for cancellation in download loop
-          if (nnDownloadCancelled) {
-            console.log("[NN Download] Cancelled by user during fetch");
-            return { success: false, totalCandles, cancelled: true };
-          }
-          
-          const batchEnd = Math.min(cursor + (CANDLES_PER_REQUEST * msPerCandle), now);
-
-          try {
-            const klines = await fetchKlinesBatch(symbol, tf, cursor, batchEnd);
-
-            if (klines.length > 0) {
-              const candleInserts = klines.map(k => ({
-                symbol,
-                timestamp: k.openTime,
-                timeframe: tf,
-                open: parseFloat(k.open),
-                high: parseFloat(k.high),
-                low: parseFloat(k.low),
-                close: parseFloat(k.close),
-                volume: parseFloat(k.volume),
-              }));
-
-              for (const candle of candleInserts) {
-                await db.insert(candles)
-                  .values(candle)
-                  .onConflictDoNothing();
-              }
-
-              fetched += klines.length;
-              cursor = klines[klines.length - 1].openTime + msPerCandle;
-            } else {
-              cursor = batchEnd + msPerCandle;
-            }
-
-            const progress = Math.min(((cursor - startTime) / (now - startTime)) * 100, 100);
-            nnDownloadProgress.set(key, {
-              symbol,
-              timeframe: tf,
-              status: "downloading",
-              progress,
-              candlesFetched: fetched,
-            });
-
-            if (onProgress) {
-              onProgress(symbol, tf, progress);
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 50));
-          } catch (error) {
-            console.error(`[NN Download] Error fetching ${symbol} ${tf}:`, error);
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            cursor = batchEnd + msPerCandle;
-          }
-        }
-
-        nnDownloadProgress.set(key, {
-          symbol,
-          timeframe: tf,
-          status: "complete",
-          progress: 100,
-          candlesFetched: fetched,
-        });
-
-        totalCandles += fetched;
-        console.log(`[NN Download] Completed ${symbol} ${tf}: ${fetched} candles`);
+      // Wait if we're at the concurrency limit
+      while (activePromises.size >= MAX_CONCURRENT_DOWNLOADS) {
+        const completed = await Promise.race(activePromises.values());
+        results.push(completed);
+        activePromises.delete(`${completed.symbol}_${completed.tf}`);
       }
+      
+      // Start new download
+      const key = `${task.symbol}_${task.tf}`;
+      const promise = downloadSingleStream(task.symbol, task.tf, targetStartTime, now, onProgress);
+      activePromises.set(key, promise);
     }
-
-    console.log(`[NN Download] All timeframes complete: ${totalCandles} total candles`);
-    return { success: true, totalCandles };
+    
+    // Wait for remaining downloads
+    const remaining = await Promise.all(activePromises.values());
+    results.push(...remaining);
+    
+    const totalCandles = results.reduce((sum, r) => sum + r.fetched, 0);
+    const skippedCount = results.filter(r => r.skipped).length;
+    
+    globalDownloadStats = null;
+    
+    console.log(`[NN Download] Complete: ${totalCandles} new candles downloaded, ${skippedCount} streams skipped (already had data)`);
+    return { success: !nnDownloadCancelled, totalCandles, cancelled: nnDownloadCancelled };
   } catch (error) {
     console.error("[NN Download] Error:", error);
-    return { success: false, totalCandles };
+    globalDownloadStats = null;
+    return { success: false, totalCandles: 0 };
   }
 }
 

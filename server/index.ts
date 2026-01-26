@@ -4,6 +4,7 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { checkIncompleteBackfillJobs, backfillHistoricalData } from "./historical-data";
 import { loadPaperState } from "./paper/config";
+import { loadCandleTimestamps } from "./unified-learning-controller";
 
 const app = express();
 const httpServer = createServer(app);
@@ -98,6 +99,8 @@ app.use((req, res, next) => {
       
       loadPaperState().then(() => {
         return hydrateBackfillStateFromDb();
+      }).then(() => {
+        return loadCandleTimestamps();
       }).then(() => {
         return initializeStrategyLearner();
       }).then(() => {

@@ -1,5 +1,7 @@
 import { db } from "./db";
 import { sql } from "drizzle-orm";
+import { candles } from "@shared/schema";
+import { eq, asc } from "drizzle-orm";
 
 export interface UnifiedLearningState {
   sharedProgressIndex: number;
@@ -16,6 +18,43 @@ export interface UnifiedLearningState {
   strategyLearnerComplete: boolean;
   patternMemoryComplete: boolean;
   gpuTrainerExported: boolean;
+  
+  strategyLearnerStartedAt: number | null;
+  patternMemoryStartedAt: number | null;
+  gpuTrainerStartedAt: number | null;
+}
+
+let candleTimestamps: number[] = [];
+
+export async function loadCandleTimestamps(): Promise<void> {
+  try {
+    const rows = await db.select({ timestamp: candles.timestamp })
+      .from(candles)
+      .where(eq(candles.symbol, "BTCUSDT"))
+      .orderBy(asc(candles.timestamp))
+      .limit(2000000);
+    
+    candleTimestamps = rows.map(r => r.timestamp);
+    console.log(`[Unified Controller] Loaded ${candleTimestamps.length} candle timestamps for date tracking`);
+  } catch (error) {
+    console.error("[Unified Controller] Failed to load candle timestamps:", error);
+  }
+}
+
+export function getIndexTimestamp(index: number): number | null {
+  if (index >= 0 && index < candleTimestamps.length) {
+    return candleTimestamps[index];
+  }
+  return null;
+}
+
+export function formatTrainingDate(timestamp: number | null): string {
+  if (!timestamp) return "Unknown";
+  return new Date(timestamp).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric"
+  });
 }
 
 const FORWARD_LOOK_WINDOW = 16;
@@ -36,6 +75,10 @@ let unifiedState: UnifiedLearningState = {
   strategyLearnerComplete: false,
   patternMemoryComplete: false,
   gpuTrainerExported: false,
+  
+  strategyLearnerStartedAt: null,
+  patternMemoryStartedAt: null,
+  gpuTrainerStartedAt: null,
 };
 
 export function getUnifiedLearningState(): UnifiedLearningState {
@@ -58,6 +101,9 @@ export function getSharedProgressIndex(): number {
 }
 
 export function updateStrategyLearnerProgress(index: number): void {
+  if (unifiedState.strategyLearnerStartedAt === null && index > START_INDEX) {
+    unifiedState.strategyLearnerStartedAt = Date.now();
+  }
   unifiedState.strategyLearnerIdx = index;
   unifiedState.strategyLearnerComplete = index >= unifiedState.maxTrainableIndex;
   unifiedState.sharedProgressIndex = getSharedProgressIndex();
@@ -66,6 +112,9 @@ export function updateStrategyLearnerProgress(index: number): void {
 }
 
 export function updatePatternMemoryProgress(index: number): void {
+  if (unifiedState.patternMemoryStartedAt === null && index > START_INDEX) {
+    unifiedState.patternMemoryStartedAt = Date.now();
+  }
   unifiedState.patternMemoryIdx = index;
   unifiedState.patternMemoryComplete = index >= unifiedState.maxTrainableIndex;
   unifiedState.sharedProgressIndex = getSharedProgressIndex();
@@ -74,6 +123,9 @@ export function updatePatternMemoryProgress(index: number): void {
 }
 
 export function updateGpuTrainerProgress(index: number, exported: boolean = false): void {
+  if (unifiedState.gpuTrainerStartedAt === null && index > START_INDEX) {
+    unifiedState.gpuTrainerStartedAt = Date.now();
+  }
   unifiedState.gpuTrainerIdx = index;
   unifiedState.gpuTrainerExported = exported;
   unifiedState.sharedProgressIndex = getSharedProgressIndex();
@@ -108,49 +160,114 @@ export function resetUnifiedLearning(): void {
     strategyLearnerComplete: false,
     patternMemoryComplete: false,
     gpuTrainerExported: false,
+    
+    strategyLearnerStartedAt: null,
+    patternMemoryStartedAt: null,
+    gpuTrainerStartedAt: null,
   };
   
   console.log(`[Unified Controller] Reset all learning progress to index ${START_INDEX}`);
 }
 
-export function getUnifiedProgressReport(): {
+function calculateETA(currentIdx: number, startedAt: number | null): { etaSeconds: number | null; etaFormatted: string } {
+  if (!startedAt || currentIdx <= START_INDEX) {
+    return { etaSeconds: null, etaFormatted: "Waiting..." };
+  }
+  
+  const elapsed = Date.now() - startedAt;
+  const processed = currentIdx - START_INDEX;
+  const remaining = unifiedState.maxTrainableIndex - currentIdx;
+  
+  if (processed <= 0 || remaining <= 0) {
+    return { etaSeconds: null, etaFormatted: remaining <= 0 ? "Complete" : "Calculating..." };
+  }
+  
+  const msPerCandle = elapsed / processed;
+  const etaMs = msPerCandle * remaining;
+  const etaSeconds = Math.round(etaMs / 1000);
+  
+  if (etaSeconds < 60) {
+    return { etaSeconds, etaFormatted: `${etaSeconds}s` };
+  } else if (etaSeconds < 3600) {
+    const mins = Math.floor(etaSeconds / 60);
+    const secs = etaSeconds % 60;
+    return { etaSeconds, etaFormatted: `${mins}m ${secs}s` };
+  } else {
+    const hours = Math.floor(etaSeconds / 3600);
+    const mins = Math.floor((etaSeconds % 3600) / 60);
+    return { etaSeconds, etaFormatted: `${hours}h ${mins}m` };
+  }
+}
+
+export interface SystemTrainingStatus {
+  name: string;
+  index: number;
+  progress: number;
+  complete: boolean;
+  currentDate: string | null;
+  currentTimestamp: number | null;
+  eta: { etaSeconds: number | null; etaFormatted: string };
+  isActive: boolean;
+}
+
+export interface EnhancedProgressReport {
   overallProgress: number;
-  systems: {
-    name: string;
-    index: number;
-    progress: number;
-    complete: boolean;
-  }[];
+  systems: SystemTrainingStatus[];
   totalCandles: number;
   trainableCandles: number;
   allAligned: boolean;
-} {
+  completedCount: number;
+  stagedDecisionReady: boolean;
+  stagedDecisionWeight: number;
+}
+
+export function getUnifiedProgressReport(): EnhancedProgressReport {
   const maxIdx = unifiedState.maxTrainableIndex - START_INDEX;
   const calcProgress = (idx: number) => maxIdx > 0 ? Math.min(100, ((idx - START_INDEX) / maxIdx) * 100) : 0;
   
-  const systems = [
+  const slTimestamp = getIndexTimestamp(unifiedState.strategyLearnerIdx);
+  const pmTimestamp = getIndexTimestamp(unifiedState.patternMemoryIdx);
+  const gpuTimestamp = getIndexTimestamp(unifiedState.gpuTrainerIdx);
+  
+  const systems: SystemTrainingStatus[] = [
     {
       name: "Strategy Learner",
       index: unifiedState.strategyLearnerIdx,
       progress: calcProgress(unifiedState.strategyLearnerIdx),
       complete: unifiedState.strategyLearnerComplete,
+      currentDate: formatTrainingDate(slTimestamp),
+      currentTimestamp: slTimestamp,
+      eta: calculateETA(unifiedState.strategyLearnerIdx, unifiedState.strategyLearnerStartedAt),
+      isActive: unifiedState.strategyLearnerStartedAt !== null && !unifiedState.strategyLearnerComplete,
     },
     {
       name: "Pattern Memory",
       index: unifiedState.patternMemoryIdx,
       progress: calcProgress(unifiedState.patternMemoryIdx),
       complete: unifiedState.patternMemoryComplete,
+      currentDate: formatTrainingDate(pmTimestamp),
+      currentTimestamp: pmTimestamp,
+      eta: calculateETA(unifiedState.patternMemoryIdx, unifiedState.patternMemoryStartedAt),
+      isActive: unifiedState.patternMemoryStartedAt !== null && !unifiedState.patternMemoryComplete,
     },
     {
       name: "GPU Trainer",
       index: unifiedState.gpuTrainerIdx,
       progress: calcProgress(unifiedState.gpuTrainerIdx),
       complete: unifiedState.gpuTrainerExported,
+      currentDate: formatTrainingDate(gpuTimestamp),
+      currentTimestamp: gpuTimestamp,
+      eta: calculateETA(unifiedState.gpuTrainerIdx, unifiedState.gpuTrainerStartedAt),
+      isActive: unifiedState.gpuTrainerStartedAt !== null && !unifiedState.gpuTrainerExported,
     },
   ];
   
   const allAligned = Math.abs(unifiedState.strategyLearnerIdx - unifiedState.patternMemoryIdx) <= 500;
   const avgProgress = systems.reduce((sum, s) => sum + s.progress, 0) / systems.length;
+  
+  const completedCount = systems.filter(s => s.complete).length;
+  const stagedDecisionReady = completedCount >= 1;
+  const stagedDecisionWeight = completedCount / 3;
   
   return {
     overallProgress: avgProgress,
@@ -158,6 +275,9 @@ export function getUnifiedProgressReport(): {
     totalCandles: unifiedState.totalCandlesAvailable,
     trainableCandles: unifiedState.maxTrainableIndex - START_INDEX,
     allAligned,
+    completedCount,
+    stagedDecisionReady,
+    stagedDecisionWeight,
   };
 }
 

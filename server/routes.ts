@@ -5,10 +5,10 @@ import paperRoutes from "./paper/routes";
 import { db } from "./db";
 import { candles } from "@shared/schema";
 import { and, eq, gte, lte, asc } from "drizzle-orm";
-import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes, clearNNData, cancelNNDownload, getResumableStatus, resumeNNDataDownload } from "./historical-data";
+import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes, clearNNData, cancelNNDownload, getResumableStatus, resumeNNDataDownload, getDownloadETA } from "./historical-data";
 import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
-import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning } from "./unified-learning-controller";
+import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning, loadCandleTimestamps } from "./unified-learning-controller";
 import { recalculatePatternLabels } from "./pattern-memory";
 import { 
   getAvailableTimeframes, 
@@ -244,7 +244,8 @@ export async function registerRoutes(
   app.get("/api/nn-data/progress", async (req, res) => {
     try {
       const progress = getNNDownloadProgress();
-      res.json({ progress });
+      const eta = getDownloadETA();
+      res.json({ progress, eta });
     } catch (error) {
       console.error("Error getting NN download progress:", error);
       res.status(500).json({ error: "Failed to get NN download progress" });

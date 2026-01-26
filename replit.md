@@ -2,27 +2,7 @@
 
 ## Overview
 
-An institutional-grade AI-driven BTCUSDT futures trading signal dashboard. The project's main purpose is to provide sophisticated, AI-driven trading signals for BTCUSDT futures, integrating machine learning, real-time market data, and sentiment analysis to generate comprehensive trade plans.
-
-Key capabilities include:
-- **ML Ensemble Predictor**: Combines rule-based, pattern-based, and OpenAI models with weighted voting for action-based predictions (P(LONG), P(SHORT), P(HOLD)).
-- **Pattern Memory System**: Stores and searches historical trade setups using cosine similarity.
-- **Comprehensive Feature Engine**: Computes 81 features total (57 core + 24 embedding), including OHLCV data, momentum, volatility, regime, and Kalman filters.
-- **Cross-Asset Learning**: Integrates ETH, SOL, BNB data with 10 cross-asset features: correlations (ethBtcCorrelation, solBtcCorrelation, bnbBtcCorrelation), relative strength (ethRelativeStrength, solRelativeStrength, bnbRelativeStrength), momentum divergence (ethMomentumDivergence, solMomentumDivergence, bnbMomentumDivergence), and cryptoSectorMomentum.
-- **Shot Plan Generation**: Provides detailed trade plans including entry/exit zones, risk-reward ratios, and estimated hold times.
-- **Gatekeeper Logic**: Ensures trades are only taken with high confidence, positive edge, and sufficient supporting reasons, promoting selective trading.
-- **Sentiment Integration**: Incorporates Fear & Greed Index, social sentiment, and news sentiment with caching.
-- **Real-time Market Data**: Utilizes Binance Vision API as primary, with CoinGecko and CryptoCompare as fallbacks, and includes a data proxy for geoblocked regions.
-- **Multi-timeframe Confluence**: Scores signals across 5m, 15m, 1h, and 4h timeframes.
-- **Automated Paper Trading**: Features an ATR-based risk management system and performance analytics for simulated trading.
-- **GPU Neural Network Training**: 6+ deep learning architectures (Transformer, TFT, LSTM, CNN, VAE, GNN) trainable on local GPU with real-time status push.
-- **Continuous Learning Loop**: The system continuously refreshes data and trains models to adapt to market changes.
-- **Advanced Exit Logic**: Implements dynamic take-profit targets, MFE tracking, and failure stop detection for optimized trade exits.
-- **Persistence System**: All learning states, including pattern clusters and social media stats, are persisted in a database to survive restarts.
-- **Multi-Asset Data Management**: GUI-based download/clear for 1-15 years of historical data (BTC, ETH, SOL, BNB). Auto-detects stored data, all 3 learning systems share the same dataset.
-- **Unified Learning Controller**: Synchronizes Strategy Learner, Pattern Memory, and GPU Trainer to process the same historical data range.
-- **Manual Training Controls**: Start Learning buttons for Strategy Learner and Deep Learning systems - training only begins when explicitly triggered after data is downloaded.
-- **Multi-Timeframe Neural Network Data**: Separate data pipeline for GPU neural networks (1m, 5m, 1h, 4h timeframes) distinct from the 15m data used by Strategy Learner and Pattern Memory.
+This project is an institutional-grade, AI-driven dashboard for generating BTCUSDT futures trading signals. Its primary goal is to deliver sophisticated, AI-powered trade plans by integrating machine learning, real-time market data, and sentiment analysis. The system features a continuous learning loop, adapting to market changes through ongoing data refreshing and model retraining. Key ambitions include providing a robust, selective trading system that leverages advanced AI techniques and comprehensive market insights to generate high-confidence trading opportunities.
 
 ## User Preferences
 
@@ -37,24 +17,37 @@ Preferred communication style: Simple, everyday language.
 - **UI Components**: shadcn/ui built on Radix UI, styled with Tailwind CSS for theming.
 - **Charts**: Recharts for data visualization.
 - **Animations**: Framer Motion.
-- **Navigation**: Tabbed interface including Overview, Signal, Paper Trading, GPU Training, Strategy Learner, Learning, AI Analysis, Indicators, Performance views.
-- **GPU Training Tab**: Dedicated tab displaying real-time GPU trainer status, loss curves, model comparison, and cross-asset analysis (correlations, relative strength, normalized price charts).
+- **Navigation**: Tabbed interface covering Overview, Signal, Paper Trading, GPU Training, Strategy Learner, Learning, AI Analysis, Indicators, and Performance views. A dedicated GPU Training tab displays real-time status, loss curves, model comparisons, and cross-asset analysis.
 
 ### Backend Architecture
 - **Runtime**: Node.js with Express.js.
 - **Language**: TypeScript with ESM modules.
 - **API Pattern**: RESTful endpoints.
 - **AI Integration**: OpenAI via Replit AI Integrations.
-- **Market Data**: Binance Vision API (primary), CoinGecko, CryptoCompare (fallbacks), with a Replit-hosted data proxy.
+- **Market Data**: Primary reliance on Binance Vision API, with CoinGecko and CryptoCompare as fallbacks, augmented by a Replit-hosted data proxy.
 - **Development**: Vite dev server with HMR.
 - **Production**: Static file serving.
-- **GPU Trainer Communication**: Bi-directional communication with a local GPU trainer via dedicated API endpoints (`/api/gpu/push-status`, `/api/gpu/pushed-status`).
+- **GPU Trainer Communication**: Bi-directional communication with a local GPU trainer via dedicated API endpoints.
 
 ### Data Layer
 - **ORM**: Drizzle ORM for PostgreSQL.
 - **Schema**: Zod for type-safe validation.
-- **Data Separation**: Critical design principle separating live sentiment data (for current signals) from historical price/volume data (for backtesting) to prevent data leakage.
-- **Key Data Models**: Candle, Signal, FuturesData, TechnicalIndicator, MultiTimeframeScore, WhaleActivity, PerformanceStats, AIAnalysis, Trade, PaperPortfolio, PaperPosition, PaperTrade, PaperEquityCurve.
+- **Data Separation**: Critical design principle ensuring separation of live sentiment data from historical price/volume data to prevent data leakage.
+- **Key Data Models**: Includes Candle, Signal, FuturesData, TechnicalIndicator, MultiTimeframeScore, WhaleActivity, PerformanceStats, AIAnalysis, Trade, PaperPortfolio, PaperPosition, PaperTrade, PaperEquityCurve.
+- **Persistence System**: All learning states, including pattern clusters and social media stats, are persisted in a database to ensure continuity across restarts.
+
+### Machine Learning and Signal Generation
+- **ML Ensemble Predictor**: Combines rule-based, pattern-based, and OpenAI models with weighted voting for action-based predictions (P(LONG), P(SHORT), P(HOLD)).
+- **Pattern Memory System**: Stores and retrieves historical trade setups using cosine similarity.
+- **Comprehensive Feature Engine**: Computes 81 features (57 core + 24 embedding) including OHLCV, momentum, volatility, regime, Kalman filters, and 10 cross-asset features (ETH, SOL, BNB correlations, relative strength, momentum divergence, crypto sector momentum).
+- **Shot Plan Generation**: Provides detailed trade plans with entry/exit zones, risk-reward ratios, and estimated hold times.
+- **Gatekeeper Logic**: Ensures trades are executed only with high confidence, positive edge, and sufficient supporting reasons, promoting selective trading. This includes horizon-specific thresholds, confidence ratio gates, multi-horizon decision logic, and 'NO-TRADE' conditions based on market state or horizon disagreement.
+- **Sentiment Integration**: Incorporates Fear & Greed Index, social sentiment, and news sentiment with caching.
+- **Multi-timeframe Confluence**: Scores signals across 5m, 15m, 1h, and 4h timeframes.
+- **Automated Paper Trading**: Features an ATR-based risk management system, Half-Kelly position sizing, and performance analytics.
+- **GPU Neural Network Training**: Supports 6+ deep learning architectures (Transformer, TFT, LSTM, CNN, VAE, GNN) trainable on local GPU with real-time status push and multi-timeframe data.
+- **Advanced Exit Logic**: Implements dynamic take-profit targets, MFE tracking, and failure stop detection.
+- **Unified Learning Controller**: Synchronizes Strategy Learner, Pattern Memory, and GPU Trainer to process consistent historical data ranges, with enhanced training status, ETA calculation, and staged decision logic.
 
 ### Build System
 - **Client Build**: Vite bundles React app to `dist/public`.
@@ -80,74 +73,3 @@ Preferred communication style: Simple, everyday language.
 ### Development Tools
 - Replit-specific plugins for dev banner and error overlay.
 - TypeScript with strict mode.
-
-## Recent Changes (January 2026)
-
-### Unified Regime Detection System
-- **Shared ATR-Percentile Classifier**: `classifyRegime(candles, idx?)` in `feature-engine.ts` provides consistent regime detection across all components.
-- **6 Market Regimes**: trend_up, trend_down, shock (75th+ ATR percentile), quiet (<25th percentile), ranging (25-50th), chop (default).
-- **Shared Risk Parameters**: `getRegimeRiskParams(regime)` provides consistent stop/TP multipliers and R:R ratios.
-- **Full Consistency**: signal-engine, paper-engine, and strategy-learner all use the shared classifier and risk params.
-
-### Research-Backed Improvements
-- **Triple Barrier Labeling**: TP/SL/Time barrier simulation with intrabar timing heuristic (20-50% accuracy improvement over fixed-horizon).
-- **Pattern Quality**: Similarity threshold increased 0.6→0.75, MIN_SAMPLES 50→100.
-- **Meta-Labeling Filter (WIRED)**: Secondary confidence filter integrated into paper trading gate logic. Requires 55%+ meta-label confidence for execution (research: improves precision 37%→56%).
-- **Half-Kelly Position Sizing (WIRED)**: Dynamic position sizing based on historical edge now active in paper trading. Captures ~75% optimal growth with ~50% less drawdown. Caps at 20% max position, 1% minimum.
-- **Feature Sanitization**: All 81 features validated with `sanitizeFeatureVector()` to prevent NaN/Infinity propagation into ML models. Safe defaults for all feature values.
-- **Trade Audit Enhancement**: Added `sizingMethod` tracking to audit logs for risk governance (shows Half-Kelly vs fixed sizing).
-- **Max 2 Vetoes Rule**: Gating logic allows up to 2 vetoes before blocking trades. Improves trade flow while maintaining selectivity.
-
-### Precision Audit Improvements (January 2026)
-- **Adaptive Normalization (DAIN-style)**: `AdaptiveNormalizer` class uses rolling z-score normalization (100-sample window, ±3 clipping) for 30+ features. Uses only past data to prevent leakage.
-- **Feature-Vector Embargo**: `applyFeatureVectorEmbargo()` filters patterns with >95% similarity to train/test boundary, preventing data leakage from feature-similar patterns.
-- **Sharpe Ratio Sanity Check**: Warning system when Sharpe > 3.0 (overfitting) or > 2.5 (unusually high). Requires ≥20 samples for reliable detection.
-- **Monte Carlo Simulation**: Runs 1000 simulations with shuffled trade returns to calculate 5th/50th/95th percentile final equity and max drawdown. Determines statistical significance and confidence level.
-- **Validation Logging**: Verifies win rate calculations match actual returns using same threshold criteria to detect computation bugs.
-- **Train/Test Split**: 80/20 walk-forward validation ensures win rate stats are computed on out-of-sample data only.
-- **Model Display Fix**: Strategy Learner appears as 4th model entry with weight=0 (backtest stats only), separated from live predictions to prevent double-counting.
-
-### GPU Export API (January 2026)
-- **Multi-Timeframe Data Export**: `/api/gpu-export/multi-tf` exports aligned candles across 1m/5m/15m/1h/4h with as-of joins.
-- **Feature Specs Endpoint**: `/api/gpu-export/feature-specs` returns 28 feature definitions (returns, volatility, EMA ratios, RSI, MACD, ATR, candle shape, volume) for Python trainer parity.
-- **Trainer Config Endpoint**: `/api/gpu-export/trainer-config` returns RTX 4070 optimized settings (Transformer 6 layers, d_model=256, Huber+directional loss).
-- **Walk-Forward Folds**: `/api/gpu-export/walk-forward-folds` implements rolling 12mo train/2mo val/2mo test windows.
-- **Prediction Ingestion**: `/api/gpu-export/predictions` receives GPU predictions, stores in ml-predictor cache with 5min TTL.
-- **Ensemble Integration**: GPU predictions integrated with weights: rule=0.25, pattern=0.25, ai=0.20, gpu=0.30 (when GPU available).
-- **Quantile Uncertainty**: Uses (q90-q10)/|q50| spread for confidence, with NaN guards and divide-by-zero protection.
-- **Python Pipeline**: `gpu_trainer/data/pipeline.py` contains `DashboardAPIFetcher` class with async/sync methods.
-- **Feature Parity**: `compute_features_from_spec()` in Python matches TypeScript FEATURE_SPECS exactly, including `volatility_regime` with quantile_bucket.
-- **Enhanced Labels API**: `/api/gpu-export/enhanced-labels` exports rawReturns, costAdjustedEdges, directions, tradeWorthy, sampleWeight for GPU trainer consumption.
-- **Cost-Adjusted Edge**: All edge calculations subtract 0.09% round-trip costs (makerFee + takerFee + slippage + spread).
-- **Sample Weighting**: sqrt(|return|/0.01) × volatility_multiplier (1.5x if vol>0.015, 0.3x if vol<0.005), clamped [0.1, 5.0].
-- **Trade-Worthy Labels**: Binary label = 1 if edge > 0.001 AND clean_move_ratio > 0.5 (favorable excursion / total excursion).
-
-### Institution-Grade Trade Decision Engine (January 2026)
-- **Horizon-Specific Thresholds**: Different min edge requirements per horizon: 15b=15bps, 60b=25bps, 240b=40bps.
-- **Confidence Ratio Gates**: μ/σ minimum thresholds: 15b≥1.25, 60b≥1.10, 240b≥0.90.
-- **Multi-Horizon Decision Logic**: 15 & 60 bars are primary trading horizons, 240 is trend confirmation only.
-- **NO-TRADE Conditions**: Dead zone (±15bps), uncertainty spike (>95th percentile), horizon disagreement, loss streak ≥3.
-- **Bounded Kelly Sizing**: size = (E/V) * risk_cap, clamped [0.05%, 0.30%] of equity.
-- **Time Stops**: Forced exit at horizon expiry (15/60/240 bars max).
-- **Trade Decision Engine**: `server/trade-decision-engine.ts` - institution-grade decision logic.
-- **Horizon Config Endpoint**: `/api/gpu-export/horizon-config` exposes all thresholds and NO-TRADE conditions.
-
-### Trade Decision Engine Integration (January 2026)
-- **Full Gating Integration**: `checkShotPlanGating()` now calls `getTradeDecision()` to use the full decision engine logic.
-- **Dynamic Horizon Selection**: `openPosition()` receives `tradeDecision` and sets `primaryHorizon` dynamically (15 or 60 bars).
-- **Horizon-Specific Time Stops**: `checkTimeStop()` uses `HORIZON_CONFIG[primaryHorizon].maxHoldBars` instead of global config.
-- **Loss Streak Persistence**: `initializeLossStreak()` loads recent loss count from database on startup. `recordTradeResult()` updates in-memory counter after each trade.
-- **Position Schema Update**: Added `primaryHorizon` field to `paperPositions` table (defaults to 15).
-- **Helper Functions**: `createHorizonPredictions()` derives h15/h60/h240 from shot plan; `createMarketContext()` builds market context with loss streak.
-
-### Key Files for ML/Learning
-- `server/feature-engine.ts`: Feature computation + shared regime classifier
-- `server/signal-engine.ts`: Signal generation and shot plans
-- `server/strategy-learner.ts`: Reinforcement learning on historical data
-- `server/pattern-memory.ts`: Pattern storage and similarity matching
-- `server/trade-decision-engine.ts`: Institution-grade trade decision logic
-- `server/gpu-data-export.ts`: GPU export API endpoints and data preparation
-- `server/paper/engine.ts`: Paper trading execution with regime-adaptive stops/TPs
-- `server/ml-predictor.ts`: ML ensemble predictor with GPU integration
-- `gpu_trainer/data/pipeline.py`: Python data fetcher for GPU trainer
-- `gpu_trainer/config.py`: GPU trainer configuration

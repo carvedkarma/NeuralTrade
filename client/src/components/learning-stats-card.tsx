@@ -955,6 +955,10 @@ interface UnifiedProgressSystem {
   index: number;
   progress: number;
   complete: boolean;
+  currentDate?: string | null;
+  currentTimestamp?: number | null;
+  eta?: { etaSeconds: number | null; etaFormatted: string };
+  isActive?: boolean;
 }
 
 interface UnifiedLearningProgressProps {
@@ -964,6 +968,9 @@ interface UnifiedLearningProgressProps {
     totalCandles: number;
     trainableCandles: number;
     allAligned: boolean;
+    completedCount?: number;
+    stagedDecisionReady?: boolean;
+    stagedDecisionWeight?: number;
   };
   onReset?: () => void;
 }
@@ -1035,11 +1042,23 @@ export function UnifiedLearningProgressCard({ progress, onReset }: UnifiedLearni
                 <div className="flex items-center gap-1.5">
                   {getSystemIcon(system.name)}
                   <span>{system.name}</span>
+                  {system.isActive && (
+                    <Badge variant="outline" className="text-blue-400 bg-blue-500/20 text-[10px] px-1 py-0">
+                      Training
+                    </Badge>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="text-muted-foreground">
-                    {system.index.toLocaleString()} / {progress.trainableCandles.toLocaleString()}
-                  </span>
+                  {system.currentDate && system.isActive && (
+                    <span className="text-muted-foreground text-[10px]">
+                      {system.currentDate}
+                    </span>
+                  )}
+                  {system.eta && system.isActive && (
+                    <span className="text-amber-400 text-[10px]">
+                      ~{system.eta.etaFormatted}
+                    </span>
+                  )}
                   {system.complete && (
                     <CheckCircle2 className="h-3 w-3 text-emerald-400" />
                   )}
@@ -1051,9 +1070,32 @@ export function UnifiedLearningProgressCard({ progress, onReset }: UnifiedLearni
                   style={{ width: `${Math.min(system.progress, 100)}%` }}
                 />
               </div>
+              <div className="flex justify-between text-[10px] text-muted-foreground">
+                <span>{system.progress.toFixed(1)}%</span>
+                <span>{system.index.toLocaleString()} / {progress.trainableCandles.toLocaleString()}</span>
+              </div>
             </div>
           ))}
         </div>
+
+        {progress.stagedDecisionReady !== undefined && (
+          <div className="pt-2 border-t">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-muted-foreground">Decision Engine</span>
+              {progress.stagedDecisionReady ? (
+                <Badge variant="outline" className="text-emerald-400 bg-emerald-500/20">
+                  <CheckCircle2 className="h-3 w-3 mr-1" />
+                  {progress.completedCount}/3 Systems Ready
+                </Badge>
+              ) : (
+                <Badge variant="outline" className="text-amber-400 bg-amber-500/20">
+                  <Clock className="h-3 w-3 mr-1" />
+                  Waiting for Training
+                </Badge>
+              )}
+            </div>
+          </div>
+        )}
 
         <div className="pt-2 border-t text-xs">
           <div className="flex justify-between">
