@@ -974,6 +974,91 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
   });
 }
 
+/**
+ * Monte Carlo Simulation for Backtest Confidence Intervals
+ * Research-backed technique to assess statistical significance of performance
+ * Shuffles trade sequence to generate distribution of possible outcomes
+ */
+function runMonteCarloSimulation(
+  returns: number[], 
+  startingEquity: number, 
+  numSimulations: number = 1000
+): {
+  medianFinalEquity: number;
+  p5FinalEquity: number;
+  p95FinalEquity: number;
+  medianMaxDrawdown: number;
+  p95MaxDrawdown: number;
+  confidenceLevel: string;
+  isStatisticallySignificant: boolean;
+} | null {
+  if (returns.length < 10) {
+    return null; // Not enough trades for meaningful simulation
+  }
+
+  const finalEquities: number[] = [];
+  const maxDrawdowns: number[] = [];
+
+  for (let sim = 0; sim < numSimulations; sim++) {
+    // Shuffle returns (Fisher-Yates shuffle)
+    const shuffled = [...returns];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+
+    // Simulate equity curve with shuffled returns
+    let equity = startingEquity;
+    let peak = equity;
+    let maxDD = 0;
+
+    for (const ret of shuffled) {
+      equity *= (1 + ret / 100);
+      if (equity > peak) peak = equity;
+      const dd = (peak - equity) / peak * 100;
+      if (dd > maxDD) maxDD = dd;
+    }
+
+    finalEquities.push(equity);
+    maxDrawdowns.push(maxDD);
+  }
+
+  // Sort for percentile calculation
+  finalEquities.sort((a, b) => a - b);
+  maxDrawdowns.sort((a, b) => a - b);
+
+  const p5Idx = Math.floor(numSimulations * 0.05);
+  const p50Idx = Math.floor(numSimulations * 0.50);
+  const p95Idx = Math.floor(numSimulations * 0.95);
+
+  const medianFinalEquity = finalEquities[p50Idx];
+  const p5FinalEquity = finalEquities[p5Idx];
+  const p95FinalEquity = finalEquities[p95Idx];
+  const medianMaxDrawdown = maxDrawdowns[p50Idx];
+  const p95MaxDrawdown = maxDrawdowns[p95Idx];
+
+  // Statistical significance: 5th percentile should still be profitable
+  const isStatisticallySignificant = p5FinalEquity > startingEquity;
+
+  // Confidence level based on percentile spread
+  const spread = (p95FinalEquity - p5FinalEquity) / medianFinalEquity;
+  let confidenceLevel: string;
+  if (spread < 0.1) confidenceLevel = "Very High (narrow distribution)";
+  else if (spread < 0.2) confidenceLevel = "High";
+  else if (spread < 0.4) confidenceLevel = "Moderate";
+  else confidenceLevel = "Low (wide distribution - needs more trades)";
+
+  return {
+    medianFinalEquity,
+    p5FinalEquity,
+    p95FinalEquity,
+    medianMaxDrawdown,
+    p95MaxDrawdown,
+    confidenceLevel,
+    isStatisticallySignificant
+  };
+}
+
 export async function getPortfolioSummary() {
   const portfolio = await storage.getOrCreatePortfolio();
   const openPosition = await storage.getOpenPosition();
@@ -1093,5 +1178,11 @@ export async function getPortfolioSummary() {
       entryTs: openPosition.entryTs,
     } : null,
     recentAuditLogs: auditLog.slice(-10),
+    // Monte Carlo confidence intervals for backtest validation
+    // Filter NaN/undefined values to ensure clean data for simulation
+    monteCarloStats: runMonteCarloSimulation(
+      returns.filter(r => typeof r === 'number' && !isNaN(r) && isFinite(r)), 
+      portfolio.startingEquityUsdt
+    ),
   };
 }

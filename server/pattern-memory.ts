@@ -939,6 +939,32 @@ export async function getStoredPatternStats(testSetOnly: boolean = false): Promi
     const matureClusters = clusterSummaries.filter(c => c.isMature);
     const immatureClusters = clusterSummaries.filter(c => !c.isMature);
     
+    // === VALIDATION LOGGING (Research-backed verification) ===
+    // Verify win rate calculations match actual returns using same criteria as forwardWin
+    // forwardWin is set when forwardReturn8 > dynamicThreshold (includes costs)
+    if (patternsForStats.length >= 20) {
+      // Compute win rate using same logic as forwardWin: return > threshold
+      const patternsWithReturns = patternsForStats.filter(p => 
+        p.forwardReturn8 !== null && p.dynamicThreshold !== undefined
+      );
+      const winsFromThreshold = patternsWithReturns.filter(p => 
+        p.forwardReturn8! > (p.dynamicThreshold || 0)
+      );
+      const computedWinRate = patternsWithReturns.length > 0 
+        ? winsFromThreshold.length / patternsWithReturns.length 
+        : 0;
+      
+      // Compare with stored win rate (should match since same criteria)
+      const storedWinRate = winRate;
+      const discrepancy = Math.abs(computedWinRate - storedWinRate);
+      
+      if (discrepancy > 0.02) {
+        console.warn(`[Pattern Validation] Win rate mismatch: stored=${(storedWinRate * 100).toFixed(1)}%, computed=${(computedWinRate * 100).toFixed(1)}% (diff: ${(discrepancy * 100).toFixed(1)}%) - check forwardWin logic`);
+      } else if (embargoedCount > 0) {
+        console.log(`[Pattern Validation] Win rates verified: ${(storedWinRate * 100).toFixed(1)}% (${patternsForStats.length} patterns, ${embargoedCount} embargoed for boundary protection)`);
+      }
+    }
+    
     return {
       totalPatterns: patternClusters.size,
       activePatterns: matureClusters.length,
