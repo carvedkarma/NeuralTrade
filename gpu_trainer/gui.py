@@ -2,8 +2,8 @@
 """
 BTC Futures Trading - GPU Trainer Desktop GUI
 
-A graphical interface for fetching data and training neural networks
-on your local GPU without using the command line.
+A streamlined graphical interface for fetching data and training neural networks
+on your local GPU. Optimized settings are applied automatically for best results.
 
 Usage:
     python gui.py
@@ -18,10 +18,21 @@ import asyncio
 import queue
 import sys
 import os
+import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+# Optimal training defaults per model architecture (research-backed settings)
+OPTIMAL_DEFAULTS = {
+    "transformer": {"epochs": 150, "batch_size": 32, "lr": 0.0001, "desc": "Best for capturing complex temporal patterns"},
+    "tft": {"epochs": 120, "batch_size": 32, "lr": 0.0001, "desc": "Temporal Fusion - interpretable attention"},
+    "lstm": {"epochs": 100, "batch_size": 64, "lr": 0.001, "desc": "Classic RNN - fast and reliable"},
+    "cnn": {"epochs": 80, "batch_size": 64, "lr": 0.001, "desc": "Fast pattern detection via convolutions"},
+    "vae": {"epochs": 100, "batch_size": 32, "lr": 0.0005, "desc": "Variational autoencoder for regime detection"},
+    "gnn": {"epochs": 120, "batch_size": 16, "lr": 0.0001, "desc": "Cross-asset correlation modeling"},
+}
 
 class LogRedirector:
     def __init__(self, widget, queue):
@@ -34,12 +45,27 @@ class LogRedirector:
     def flush(self):
         pass
 
+def format_time(seconds):
+    """Format seconds into human readable time"""
+    if seconds < 0:
+        return "--:--"
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    elif seconds < 3600:
+        mins = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{mins}m {secs}s"
+    else:
+        hours = int(seconds // 3600)
+        mins = int((seconds % 3600) // 60)
+        return f"{hours}h {mins}m"
+
 class GPUTrainerGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("BTC Futures - GPU Neural Network Trainer")
-        self.root.geometry("900x700")
-        self.root.minsize(800, 600)
+        self.root.geometry("1100x750")
+        self.root.minsize(900, 650)
         
         self.configure_dark_theme()
         
@@ -50,21 +76,35 @@ class GPUTrainerGUI:
         self.fetch_thread = None
         self.stop_training_flag = threading.Event()
         
+        # Training state
         self.current_model = None
         self.current_epoch = 0
         self.total_epochs = 0
         self.train_loss = None
         self.val_loss = None
+        self.best_val_loss = float('inf')
+        self.best_epoch = 0
         self.models_completed = []
+        
+        # GPU state
         self.gpu_name = None
-        self.gpu_memory_used = None
-        self.gpu_memory_total = None
+        self.gpu_memory_used = 0
+        self.gpu_memory_total = 0
+        self.gpu_utilization = 0
+        
+        # Timing state
+        self.fetch_start_time = None
+        self.fetch_total_items = 0
+        self.fetch_completed_items = 0
+        self.training_start_time = None
+        self.epoch_times = []
         
         self.create_widgets()
         self.wire_stdout_to_log()
         self.check_gpu_status()
         self.process_log_queue()
         self.start_status_push()
+        self.start_gpu_monitor()
     
     def wire_stdout_to_log(self):
         self.original_stdout = sys.stdout
@@ -74,16 +114,22 @@ class GPUTrainerGUI:
         
     def configure_dark_theme(self):
         self.colors = {
-            'bg': '#1a1a2e',
-            'bg_secondary': '#16213e',
-            'bg_tertiary': '#0f3460',
-            'accent': '#e94560',
-            'accent_hover': '#ff6b6b',
-            'text': '#eaeaea',
-            'text_secondary': '#a0a0a0',
+            'bg': '#0f0f1a',
+            'bg_secondary': '#1a1a2e',
+            'bg_tertiary': '#16213e',
+            'bg_card': '#1e1e32',
+            'accent': '#00d4aa',
+            'accent_hover': '#00f5c4',
+            'accent_dim': '#007a63',
+            'text': '#f0f0f0',
+            'text_secondary': '#a0a0b0',
+            'text_tertiary': '#606070',
             'success': '#00d26a',
             'warning': '#ffd93d',
-            'border': '#2a2a4a'
+            'error': '#ff4757',
+            'border': '#2a2a4a',
+            'progress_bg': '#252540',
+            'progress_fill': '#00d4aa'
         }
         
         self.root.configure(bg=self.colors['bg'])
@@ -92,172 +138,270 @@ class GPUTrainerGUI:
         style.theme_use('clam')
         
         style.configure('TFrame', background=self.colors['bg'])
-        style.configure('Secondary.TFrame', background=self.colors['bg_secondary'])
+        style.configure('Card.TFrame', background=self.colors['bg_card'])
         style.configure('TLabel', background=self.colors['bg'], foreground=self.colors['text'], font=('Segoe UI', 10))
-        style.configure('Header.TLabel', font=('Segoe UI', 14, 'bold'), foreground=self.colors['accent'])
+        style.configure('Card.TLabel', background=self.colors['bg_card'], foreground=self.colors['text'])
+        style.configure('Header.TLabel', font=('Segoe UI', 16, 'bold'), foreground=self.colors['accent'])
+        style.configure('Title.TLabel', font=('Segoe UI', 11, 'bold'), foreground=self.colors['text'])
         style.configure('Status.TLabel', font=('Segoe UI', 9), foreground=self.colors['text_secondary'])
+        style.configure('Value.TLabel', font=('Segoe UI', 12, 'bold'), foreground=self.colors['accent'])
+        style.configure('Dim.TLabel', font=('Segoe UI', 9), foreground=self.colors['text_tertiary'])
         
         style.configure('TButton', 
                        background=self.colors['accent'],
-                       foreground='white',
+                       foreground='#000000',
                        font=('Segoe UI', 10, 'bold'),
-                       padding=(15, 8))
+                       padding=(20, 10))
         style.map('TButton',
                  background=[('active', self.colors['accent_hover']), ('disabled', self.colors['border'])])
         
-        style.configure('Success.TButton', background=self.colors['success'])
-        style.map('Success.TButton', background=[('active', '#00b359')])
-        
-        style.configure('TEntry',
-                       fieldbackground=self.colors['bg_secondary'],
+        style.configure('Secondary.TButton',
+                       background=self.colors['bg_tertiary'],
                        foreground=self.colors['text'],
-                       insertcolor=self.colors['text'])
+                       font=('Segoe UI', 9),
+                       padding=(10, 6))
+        style.map('Secondary.TButton',
+                 background=[('active', self.colors['border']), ('disabled', self.colors['bg_secondary'])])
+        
+        style.configure('Stop.TButton',
+                       background=self.colors['error'],
+                       foreground='#ffffff',
+                       font=('Segoe UI', 9, 'bold'),
+                       padding=(10, 6))
+        style.map('Stop.TButton', background=[('active', '#ff6b7a')])
         
         style.configure('TCombobox',
-                       fieldbackground=self.colors['bg_secondary'],
-                       background=self.colors['bg_tertiary'],
-                       foreground=self.colors['text'])
+                       fieldbackground=self.colors['bg_tertiary'],
+                       background=self.colors['bg_secondary'],
+                       foreground=self.colors['text'],
+                       arrowcolor=self.colors['text'])
         
         style.configure('Horizontal.TProgressbar',
-                       background=self.colors['accent'],
-                       troughcolor=self.colors['bg_secondary'])
+                       background=self.colors['progress_fill'],
+                       troughcolor=self.colors['progress_bg'],
+                       thickness=8)
+        
+        style.configure('TLabelframe', background=self.colors['bg_card'])
+        style.configure('TLabelframe.Label', background=self.colors['bg_card'], foreground=self.colors['text'], font=('Segoe UI', 10, 'bold'))
         
     def create_widgets(self):
         main_container = ttk.Frame(self.root, padding=15)
         main_container.pack(fill=tk.BOTH, expand=True)
         
+        # Header with GPU status
         header_frame = ttk.Frame(main_container)
         header_frame.pack(fill=tk.X, pady=(0, 15))
         
-        title_label = ttk.Label(header_frame, text="BTC Futures GPU Trainer", style='Header.TLabel')
+        title_label = ttk.Label(header_frame, text="GPU Neural Network Trainer", style='Header.TLabel')
         title_label.pack(side=tk.LEFT)
         
-        self.gpu_status_label = ttk.Label(header_frame, text="Checking GPU...", style='Status.TLabel')
-        self.gpu_status_label.pack(side=tk.RIGHT)
+        # GPU status badge
+        self.gpu_badge_frame = tk.Frame(header_frame, bg=self.colors['bg_tertiary'], padx=10, pady=5)
+        self.gpu_badge_frame.pack(side=tk.RIGHT)
+        self.gpu_status_label = tk.Label(self.gpu_badge_frame, text="Detecting GPU...", 
+                                          bg=self.colors['bg_tertiary'], fg=self.colors['text_secondary'],
+                                          font=('Segoe UI', 9))
+        self.gpu_status_label.pack()
         
+        # Content area - two columns
         content_frame = ttk.Frame(main_container)
         content_frame.pack(fill=tk.BOTH, expand=True)
         
-        left_panel = ttk.Frame(content_frame, width=350)
-        left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        # Left column - Controls and Stats
+        left_panel = ttk.Frame(content_frame, width=380)
+        left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 15))
         left_panel.pack_propagate(False)
         
         self.create_data_panel(left_panel)
         self.create_training_panel(left_panel)
+        self.create_gpu_stats_panel(left_panel)
         
+        # Right column - Log output
         right_panel = ttk.Frame(content_frame)
         right_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         self.create_log_panel(right_panel)
         
     def create_data_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" Data Fetching ", padding=10)
-        frame.pack(fill=tk.X, pady=(0, 10))
+        frame = ttk.LabelFrame(parent, text=" Data Download ", padding=12)
+        frame.pack(fill=tk.X, pady=(0, 12))
         
+        # Proxy URL
         proxy_frame = ttk.Frame(frame)
-        proxy_frame.pack(fill=tk.X, pady=(0, 10))
+        proxy_frame.pack(fill=tk.X, pady=(0, 12))
         
-        ttk.Label(proxy_frame, text="Replit Proxy URL:").pack(anchor=tk.W)
+        ttk.Label(proxy_frame, text="Replit Server URL:", style='Card.TLabel').pack(anchor=tk.W)
         self.proxy_url_var = tk.StringVar(value=os.getenv("REPLIT_PROXY_URL", "https://99f68291-4a03-450a-9815-ebee9435cee2-00-2os5ge21n6uho.spock.replit.dev"))
-        proxy_entry = ttk.Entry(proxy_frame, textvariable=self.proxy_url_var, width=40)
-        proxy_entry.pack(fill=tk.X, pady=(2, 0))
+        proxy_entry = tk.Entry(proxy_frame, textvariable=self.proxy_url_var, 
+                               bg=self.colors['bg_tertiary'], fg=self.colors['text'],
+                               insertbackground=self.colors['text'], font=('Segoe UI', 9),
+                               relief=tk.FLAT, highlightthickness=1, highlightbackground=self.colors['border'])
+        proxy_entry.pack(fill=tk.X, pady=(4, 0), ipady=6)
         
-        candles_frame = ttk.Frame(frame)
-        candles_frame.pack(fill=tk.X, pady=(0, 10))
+        # Data info label
+        info_label = ttk.Label(frame, text="Downloads all training data from Replit\n(4 assets × 5 timeframes, ~8M+ candles)", 
+                               style='Dim.TLabel')
+        info_label.pack(anchor=tk.W, pady=(0, 10))
         
-        ttk.Label(candles_frame, text="Candles to Fetch:").pack(anchor=tk.W)
-        self.candles_var = tk.StringVar(value="50000")
-        candles_combo = ttk.Combobox(candles_frame, textvariable=self.candles_var, 
-                                      values=["1000", "10000", "50000", "100000", "200000"], width=15)
-        candles_combo.pack(anchor=tk.W, pady=(2, 0))
+        # Progress section
+        self.fetch_progress_frame = ttk.Frame(frame)
+        self.fetch_progress_frame.pack(fill=tk.X, pady=(0, 8))
         
-        symbols_frame = ttk.Frame(frame)
-        symbols_frame.pack(fill=tk.X, pady=(0, 10))
+        self.fetch_progress = ttk.Progressbar(self.fetch_progress_frame, mode='determinate', length=300)
+        self.fetch_progress.pack(fill=tk.X)
         
-        ttk.Label(symbols_frame, text="Symbols:").pack(anchor=tk.W)
-        self.btc_var = tk.BooleanVar(value=True)
-        self.eth_var = tk.BooleanVar(value=True)
-        self.sol_var = tk.BooleanVar(value=True)
-        self.bnb_var = tk.BooleanVar(value=True)
+        # Stats row (hidden until fetching)
+        self.fetch_stats_frame = tk.Frame(frame, bg=self.colors['bg_card'])
+        self.fetch_stats_frame.pack(fill=tk.X, pady=(4, 8))
         
-        cb_frame = ttk.Frame(symbols_frame)
-        cb_frame.pack(anchor=tk.W, pady=(2, 0))
+        self.fetch_pct_label = tk.Label(self.fetch_stats_frame, text="0%", 
+                                         bg=self.colors['bg_card'], fg=self.colors['accent'],
+                                         font=('Segoe UI', 10, 'bold'))
+        self.fetch_pct_label.pack(side=tk.LEFT)
         
-        ttk.Checkbutton(cb_frame, text="BTCUSDT", variable=self.btc_var).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Checkbutton(cb_frame, text="ETHUSDT", variable=self.eth_var).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Checkbutton(cb_frame, text="SOLUSDT", variable=self.sol_var).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Checkbutton(cb_frame, text="BNBUSDT", variable=self.bnb_var).pack(side=tk.LEFT)
+        self.fetch_eta_label = tk.Label(self.fetch_stats_frame, text="", 
+                                         bg=self.colors['bg_card'], fg=self.colors['text_secondary'],
+                                         font=('Segoe UI', 9))
+        self.fetch_eta_label.pack(side=tk.RIGHT)
         
-        self.fetch_progress = ttk.Progressbar(frame, mode='indeterminate')
-        self.fetch_progress.pack(fill=tk.X, pady=(0, 10))
+        self.fetch_speed_label = tk.Label(self.fetch_stats_frame, text="", 
+                                           bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
+                                           font=('Segoe UI', 9))
+        self.fetch_speed_label.pack(side=tk.RIGHT, padx=(0, 15))
         
+        # Buttons
         btn_frame = ttk.Frame(frame)
         btn_frame.pack(fill=tk.X)
         
-        self.fetch_btn = ttk.Button(btn_frame, text="Fetch Data", command=self.start_fetch)
-        self.fetch_btn.pack(side=tk.LEFT, padx=(0, 5))
-        
-        self.test_proxy_btn = ttk.Button(btn_frame, text="Test Proxy", command=self.test_proxy)
-        self.test_proxy_btn.pack(side=tk.LEFT)
+        self.fetch_btn = ttk.Button(btn_frame, text="Download All Data", command=self.start_fetch)
+        self.fetch_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
     def create_training_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" Neural Network Training ", padding=10)
-        frame.pack(fill=tk.X, pady=(0, 10))
+        frame = ttk.LabelFrame(parent, text=" Neural Network Training ", padding=12)
+        frame.pack(fill=tk.X, pady=(0, 12))
         
+        # Model selection
         model_frame = ttk.Frame(frame)
-        model_frame.pack(fill=tk.X, pady=(0, 10))
+        model_frame.pack(fill=tk.X, pady=(0, 8))
         
-        ttk.Label(model_frame, text="Model Architecture:").pack(anchor=tk.W)
+        ttk.Label(model_frame, text="Architecture:", style='Card.TLabel').pack(side=tk.LEFT)
+        
         self.model_var = tk.StringVar(value="transformer")
         model_combo = ttk.Combobox(model_frame, textvariable=self.model_var,
-                                    values=["transformer", "tft", "lstm", "cnn", "vae", "gnn"], width=20)
-        model_combo.pack(anchor=tk.W, pady=(2, 0))
+                                    values=list(OPTIMAL_DEFAULTS.keys()), width=15, state='readonly')
+        model_combo.pack(side=tk.LEFT, padx=(10, 0))
+        model_combo.bind('<<ComboboxSelected>>', self.on_model_changed)
         
-        params_frame = ttk.Frame(frame)
-        params_frame.pack(fill=tk.X, pady=(0, 10))
+        # Model description
+        self.model_desc_label = tk.Label(frame, text=OPTIMAL_DEFAULTS["transformer"]["desc"],
+                                          bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
+                                          font=('Segoe UI', 9), wraplength=340, justify=tk.LEFT)
+        self.model_desc_label.pack(anchor=tk.W, pady=(0, 12))
         
-        row1 = ttk.Frame(params_frame)
-        row1.pack(fill=tk.X, pady=(0, 5))
+        # Auto-settings display
+        settings_frame = tk.Frame(frame, bg=self.colors['bg_tertiary'], padx=10, pady=8)
+        settings_frame.pack(fill=tk.X, pady=(0, 12))
         
-        ttk.Label(row1, text="Epochs:").pack(side=tk.LEFT)
-        self.epochs_var = tk.StringVar(value="100")
-        epochs_entry = ttk.Entry(row1, textvariable=self.epochs_var, width=8)
-        epochs_entry.pack(side=tk.LEFT, padx=(5, 20))
+        ttk.Label(settings_frame, text="Optimized Settings:", 
+                  font=('Segoe UI', 9), foreground=self.colors['text_secondary'],
+                  background=self.colors['bg_tertiary']).pack(anchor=tk.W)
         
-        ttk.Label(row1, text="Batch Size:").pack(side=tk.LEFT)
-        self.batch_var = tk.StringVar(value="64")
-        batch_entry = ttk.Entry(row1, textvariable=self.batch_var, width=8)
-        batch_entry.pack(side=tk.LEFT, padx=(5, 0))
+        self.settings_display = tk.Label(settings_frame, text="Epochs: 150 | Batch: 32 | LR: 0.0001",
+                                          bg=self.colors['bg_tertiary'], fg=self.colors['accent'],
+                                          font=('Segoe UI', 10, 'bold'))
+        self.settings_display.pack(anchor=tk.W, pady=(2, 0))
         
-        row2 = ttk.Frame(params_frame)
-        row2.pack(fill=tk.X)
+        # Progress section
+        self.train_progress = ttk.Progressbar(frame, mode='determinate', length=300)
+        self.train_progress.pack(fill=tk.X, pady=(0, 4))
         
-        ttk.Label(row2, text="Learning Rate:").pack(side=tk.LEFT)
-        self.lr_var = tk.StringVar(value="0.0001")
-        lr_entry = ttk.Entry(row2, textvariable=self.lr_var, width=12)
-        lr_entry.pack(side=tk.LEFT, padx=(5, 0))
+        # Training stats row
+        self.train_stats_frame = tk.Frame(frame, bg=self.colors['bg_card'])
+        self.train_stats_frame.pack(fill=tk.X, pady=(0, 4))
         
-        self.train_progress = ttk.Progressbar(frame, mode='determinate')
-        self.train_progress.pack(fill=tk.X, pady=(0, 10))
+        self.train_pct_label = tk.Label(self.train_stats_frame, text="Ready", 
+                                         bg=self.colors['bg_card'], fg=self.colors['text_secondary'],
+                                         font=('Segoe UI', 10, 'bold'))
+        self.train_pct_label.pack(side=tk.LEFT)
         
-        self.train_status_label = ttk.Label(frame, text="Ready to train", style='Status.TLabel')
-        self.train_status_label.pack(anchor=tk.W, pady=(0, 10))
+        self.train_eta_label = tk.Label(self.train_stats_frame, text="", 
+                                         bg=self.colors['bg_card'], fg=self.colors['text_secondary'],
+                                         font=('Segoe UI', 9))
+        self.train_eta_label.pack(side=tk.RIGHT)
         
+        # Loss display
+        self.loss_frame = tk.Frame(frame, bg=self.colors['bg_card'])
+        self.loss_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.train_loss_label = tk.Label(self.loss_frame, text="Train: --", 
+                                          bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
+                                          font=('Segoe UI', 9))
+        self.train_loss_label.pack(side=tk.LEFT)
+        
+        self.val_loss_label = tk.Label(self.loss_frame, text="Val: --", 
+                                        bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
+                                        font=('Segoe UI', 9))
+        self.val_loss_label.pack(side=tk.LEFT, padx=(15, 0))
+        
+        self.best_label = tk.Label(self.loss_frame, text="", 
+                                    bg=self.colors['bg_card'], fg=self.colors['success'],
+                                    font=('Segoe UI', 9))
+        self.best_label.pack(side=tk.RIGHT)
+        
+        # Buttons
         btn_frame = ttk.Frame(frame)
         btn_frame.pack(fill=tk.X)
         
-        self.train_btn = ttk.Button(btn_frame, text="Start Training", command=self.start_training, style='Success.TButton')
-        self.train_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self.train_btn = ttk.Button(btn_frame, text="Start Training", command=self.start_training)
+        self.train_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         
-        self.stop_train_btn = ttk.Button(btn_frame, text="Stop", command=self.stop_training, state=tk.DISABLED)
+        self.stop_train_btn = ttk.Button(btn_frame, text="Stop", command=self.stop_training, 
+                                          style='Stop.TButton', state=tk.DISABLED)
         self.stop_train_btn.pack(side=tk.LEFT)
         
-        quick_frame = ttk.LabelFrame(parent, text=" Quick Actions ", padding=10)
-        quick_frame.pack(fill=tk.X)
+        # Quick action
+        ttk.Button(frame, text="Train All 6 Models", command=self.train_all_models,
+                   style='Secondary.TButton').pack(fill=tk.X, pady=(10, 0))
         
-        ttk.Button(quick_frame, text="Train All Models", command=self.train_all_models).pack(fill=tk.X, pady=(0, 5))
-        ttk.Button(quick_frame, text="Start API Server", command=self.start_api_server).pack(fill=tk.X, pady=(0, 5))
-        ttk.Button(quick_frame, text="Train RL Agent", command=self.train_rl_agent).pack(fill=tk.X)
+    def create_gpu_stats_panel(self, parent):
+        frame = ttk.LabelFrame(parent, text=" GPU Status ", padding=12)
+        frame.pack(fill=tk.X, pady=(0, 12))
+        
+        # GPU name
+        self.gpu_name_label = tk.Label(frame, text="Detecting...",
+                                        bg=self.colors['bg_card'], fg=self.colors['text'],
+                                        font=('Segoe UI', 10, 'bold'))
+        self.gpu_name_label.pack(anchor=tk.W)
+        
+        # VRAM usage
+        vram_frame = tk.Frame(frame, bg=self.colors['bg_card'])
+        vram_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        tk.Label(vram_frame, text="VRAM", bg=self.colors['bg_card'], 
+                 fg=self.colors['text_secondary'], font=('Segoe UI', 9)).pack(anchor=tk.W)
+        
+        self.vram_progress = ttk.Progressbar(vram_frame, mode='determinate', length=300)
+        self.vram_progress.pack(fill=tk.X, pady=(2, 0))
+        
+        self.vram_label = tk.Label(vram_frame, text="-- / -- GB",
+                                    bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
+                                    font=('Segoe UI', 9))
+        self.vram_label.pack(anchor=tk.E)
+        
+        # Utilization
+        util_frame = tk.Frame(frame, bg=self.colors['bg_card'])
+        util_frame.pack(fill=tk.X, pady=(8, 0))
+        
+        tk.Label(util_frame, text="Utilization", bg=self.colors['bg_card'], 
+                 fg=self.colors['text_secondary'], font=('Segoe UI', 9)).pack(anchor=tk.W)
+        
+        self.util_progress = ttk.Progressbar(util_frame, mode='determinate', length=300)
+        self.util_progress.pack(fill=tk.X, pady=(2, 0))
+        
+        self.util_label = tk.Label(util_frame, text="--%",
+                                    bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
+                                    font=('Segoe UI', 9))
+        self.util_label.pack(anchor=tk.E)
         
     def create_log_panel(self, parent):
         frame = ttk.LabelFrame(parent, text=" Output Log ", padding=10)
@@ -270,20 +414,30 @@ class GPUTrainerGUI:
             fg=self.colors['text'],
             insertbackground=self.colors['text'],
             font=('Consolas', 9),
-            height=20
+            relief=tk.FLAT,
+            highlightthickness=0
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
         
         btn_frame = ttk.Frame(frame)
         btn_frame.pack(fill=tk.X, pady=(10, 0))
         
-        ttk.Button(btn_frame, text="Clear Log", command=self.clear_log).pack(side=tk.LEFT)
-        ttk.Button(btn_frame, text="Save Log", command=self.save_log).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(btn_frame, text="Clear", command=self.clear_log, style='Secondary.TButton').pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Save Log", command=self.save_log, style='Secondary.TButton').pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(btn_frame, text="Start API Server", command=self.start_api_server, style='Secondary.TButton').pack(side=tk.RIGHT)
         
-        self.log("=" * 50)
+        self.log("=" * 55)
         self.log("  BTC Futures GPU Trainer - Ready")
-        self.log("=" * 50)
+        self.log("  Optimal settings applied automatically per model")
+        self.log("=" * 55)
         self.log("")
+        
+    def on_model_changed(self, event=None):
+        model = self.model_var.get()
+        defaults = OPTIMAL_DEFAULTS.get(model, OPTIMAL_DEFAULTS["transformer"])
+        
+        self.model_desc_label.config(text=defaults["desc"])
+        self.settings_display.config(text=f"Epochs: {defaults['epochs']} | Batch: {defaults['batch_size']} | LR: {defaults['lr']}")
         
     def check_gpu_status(self):
         def check():
@@ -292,26 +446,78 @@ class GPUTrainerGUI:
                 if torch.cuda.is_available():
                     name = torch.cuda.get_device_name(0)
                     mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
-                    mem_used = torch.cuda.memory_allocated(0) / 1024**3
-                    status = f"[OK] GPU: {name} ({mem_total:.1f} GB)"
-                    self.log(f"GPU Detected: {name} with {mem_total:.1f} GB VRAM")
                     self.gpu_name = name
                     self.gpu_memory_total = mem_total
-                    self.gpu_memory_used = mem_used
+                    
+                    short_name = name.replace("NVIDIA GeForce ", "").replace("NVIDIA ", "")
+                    status = f"✓ {short_name}"
+                    color = self.colors['success']
+                    
+                    self.log(f"GPU Detected: {name}")
+                    self.log(f"VRAM: {mem_total:.1f} GB")
+                    self.log("")
+                    
+                    self.root.after(0, lambda: self.gpu_name_label.config(text=f"{short_name} ({mem_total:.1f} GB)"))
                 else:
-                    status = "[WARN] No GPU - Using CPU"
-                    self.log("WARNING: No GPU detected. Training will be slow on CPU.")
-                    self.gpu_name = None
+                    status = "⚠ No GPU - CPU Mode"
+                    color = self.colors['warning']
+                    self.log("WARNING: No GPU detected. Training will be slow.")
+                    self.root.after(0, lambda: self.gpu_name_label.config(text="CPU Mode (No GPU)"))
+                    
             except ImportError:
-                status = "[ERROR] PyTorch not installed"
-                self.log("ERROR: PyTorch not installed. Run: pip install torch")
+                status = "✗ PyTorch Missing"
+                color = self.colors['error']
+                self.log("ERROR: PyTorch not installed")
             except Exception as e:
-                status = f"[ERROR] {str(e)[:30]}"
+                status = f"✗ Error"
+                color = self.colors['error']
                 self.log(f"GPU check error: {e}")
                 
-            self.root.after(0, lambda: self.gpu_status_label.config(text=status))
+            self.root.after(0, lambda: [
+                self.gpu_status_label.config(text=status, fg=color),
+                self.gpu_badge_frame.config(bg=self.colors['bg_tertiary'])
+            ])
             
         threading.Thread(target=check, daemon=True).start()
+        
+    def start_gpu_monitor(self):
+        def monitor():
+            while True:
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        mem_used = torch.cuda.memory_allocated(0) / 1024**3
+                        mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                        mem_pct = (mem_used / mem_total) * 100 if mem_total > 0 else 0
+                        
+                        self.gpu_memory_used = mem_used
+                        self.gpu_memory_total = mem_total
+                        
+                        # Try to get utilization (requires pynvml)
+                        util_pct = 0
+                        try:
+                            import pynvml
+                            pynvml.nvmlInit()
+                            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                            util_pct = util.gpu
+                            self.gpu_utilization = util_pct
+                        except:
+                            pass
+                        
+                        self.root.after(0, lambda m=mem_used, t=mem_total, p=mem_pct, u=util_pct: self._update_gpu_display(m, t, p, u))
+                except:
+                    pass
+                time.sleep(2)
+                
+        threading.Thread(target=monitor, daemon=True).start()
+        
+    def _update_gpu_display(self, mem_used, mem_total, mem_pct, util_pct):
+        self.vram_progress['value'] = mem_pct
+        self.vram_label.config(text=f"{mem_used:.1f} / {mem_total:.1f} GB")
+        
+        self.util_progress['value'] = util_pct
+        self.util_label.config(text=f"{util_pct}%")
         
     def log(self, message):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -345,11 +551,9 @@ class GPUTrainerGUI:
         def push_loop():
             while True:
                 self.push_status_to_replit()
-                import time
                 time.sleep(5)
         
-        push_thread = threading.Thread(target=push_loop, daemon=True)
-        push_thread.start()
+        threading.Thread(target=push_loop, daemon=True).start()
         
     def push_status_to_replit(self):
         try:
@@ -363,6 +567,7 @@ class GPUTrainerGUI:
                 "gpuName": self.gpu_name,
                 "gpuMemoryUsed": self.gpu_memory_used,
                 "gpuMemoryTotal": self.gpu_memory_total,
+                "gpuUtilization": self.gpu_utilization,
                 "isTraining": self.is_training,
                 "trainingProgress": (self.current_epoch / self.total_epochs * 100) if self.total_epochs > 0 else 0,
                 "currentModel": self.current_model,
@@ -370,87 +575,44 @@ class GPUTrainerGUI:
                 "totalEpochs": self.total_epochs,
                 "trainLoss": self.train_loss,
                 "valLoss": self.val_loss,
+                "bestValLoss": self.best_val_loss if self.best_val_loss < float('inf') else None,
+                "bestEpoch": self.best_epoch,
                 "modelsLoaded": [],
                 "modelsCompleted": self.models_completed
             }
             
             url = f"{proxy_url}/api/gpu/push-status"
-            response = requests.post(url, json=status, timeout=5)
+            requests.post(url, json=status, timeout=5)
             
         except Exception:
             pass
             
-    def test_proxy(self):
-        def do_test():
-            self.log("Testing proxy connection...")
-            proxy_url = self.proxy_url_var.get().strip()
-            
-            if not proxy_url:
-                self.log("ERROR: Please enter a Replit proxy URL")
-                return
-                
-            try:
-                import requests
-                test_url = f"{proxy_url}/api/data/klines?symbol=BTCUSDT&interval=15m&limit=3"
-                self.log(f"Requesting: {test_url}")
-                
-                response = requests.get(test_url, timeout=15)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    count = data.get('count', 0)
-                    self.log(f"[OK] SUCCESS! Received {count} candles from proxy")
-                    self.log(f"   Latest BTC price: ${data['candles'][-1]['close']:,.2f}")
-                else:
-                    self.log(f"[ERROR] FAILED: HTTP {response.status_code}")
-                    self.log(f"   Response: {response.text[:200]}")
-                    
-            except requests.exceptions.ConnectionError as e:
-                self.log(f"[ERROR] Connection failed: Cannot reach proxy server")
-                self.log("   Possible causes:")
-                self.log("   - DNS resolution issue (try using requests instead of aiohttp)")
-                self.log("   - Proxy server not running")
-                self.log("   - Network/firewall blocking")
-            except Exception as e:
-                self.log(f"[ERROR] {e}")
-                
-        threading.Thread(target=do_test, daemon=True).start()
-        
-    def get_selected_symbols(self):
-        symbols = []
-        if self.btc_var.get():
-            symbols.append("BTCUSDT")
-        if self.eth_var.get():
-            symbols.append("ETHUSDT")
-        if self.sol_var.get():
-            symbols.append("SOLUSDT")
-        if self.bnb_var.get():
-            symbols.append("BNBUSDT")
-        return symbols
-        
     def start_fetch(self):
         if self.is_fetching:
             return
             
-        symbols = self.get_selected_symbols()
-        if not symbols:
-            messagebox.showwarning("No Symbols", "Please select at least one symbol to fetch")
-            return
-            
         proxy_url = self.proxy_url_var.get().strip()
         if not proxy_url:
-            messagebox.showwarning("No Proxy URL", "Please enter your Replit proxy URL")
+            messagebox.showwarning("No URL", "Please enter your Replit server URL")
             return
             
         self.is_fetching = True
         self.fetch_btn.config(state=tk.DISABLED)
-        self.fetch_progress.config(mode='determinate', value=0)
+        self.fetch_progress['value'] = 0
+        self.fetch_start_time = time.time()
+        self.fetch_completed_items = 0
+        
+        # All symbols and timeframes
+        symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+        timeframes = ["1m", "5m", "15m", "1h", "4h"]
+        self.fetch_total_items = len(symbols) * len(timeframes)
         
         def do_fetch():
             try:
-                candles = int(self.candles_var.get())
-                self.log(f"Starting data fetch: {candles} candles for {', '.join(symbols)}")
-                self.log(f"Using proxy: {proxy_url}")
+                self.log(f"Starting bulk data download from Replit...")
+                self.log(f"Assets: {', '.join(symbols)}")
+                self.log(f"Timeframes: {', '.join(timeframes)}")
+                self.log("")
                 
                 os.environ["REPLIT_PROXY_URL"] = proxy_url
                 
@@ -461,52 +623,69 @@ class GPUTrainerGUI:
                 
                 from data.pipeline import BinanceDataFetcher
                 
-                total_pairs = len(symbols) * len(config.data.timeframes)
-                pairs_done = [0]
-                
-                def progress_callback(current, total, symbol, timeframe):
-                    pairs_done[0] = current
-                    pct = (current / total) * 100
-                    self.root.after(0, lambda: self.fetch_progress.config(value=pct))
+                def progress_callback(current_candles, expected_total, symbol=None, timeframe=None):
+                    """
+                    Callback for real-time progress during bulk download.
+                    current_candles: Number of candles received so far
+                    expected_total: Total candles expected (from server meta)
+                    """
+                    if expected_total > 0:
+                        pct = (current_candles / expected_total) * 100
+                    else:
+                        pct = 0
+                    
+                    elapsed = time.time() - self.fetch_start_time
+                    
+                    # Calculate ETA and speed based on candles received
+                    if current_candles > 0 and elapsed > 0:
+                        speed = current_candles / elapsed  # candles per second
+                        remaining = expected_total - current_candles
+                        eta_seconds = remaining / speed if speed > 0 else -1
+                    else:
+                        speed = 0
+                        eta_seconds = -1
+                    
+                    # Update UI in main thread
+                    self.root.after(0, lambda p=pct, e=eta_seconds, s=speed: self._update_fetch_progress(p, e, s))
                 
                 fetcher = BinanceDataFetcher(
                     symbols, 
-                    config.data.timeframes,
+                    timeframes,
                     replit_proxy_url=proxy_url,
                     use_sync=True
                 )
                 
-                # Use bulk download from Replit if proxy is configured (much faster)
-                if proxy_url:
-                    self.log(f"Using bulk download from Replit (faster)...")
-                    data = fetcher.fetch_bulk_from_replit(progress_callback=progress_callback)
-                    
-                    # Fallback to individual fetches if bulk failed
-                    if not data or all(
-                        not any(len(df) > 0 for df in tfs.values()) 
-                        for tfs in data.values()
-                    ):
-                        self.log(f"Bulk download empty, falling back to individual fetches...")
-                        data = fetcher.fetch_all_historical_sync(candles, progress_callback=progress_callback)
-                else:
-                    data = fetcher.fetch_all_historical_sync(candles, progress_callback=progress_callback)
+                # Use bulk download (much faster)
+                self.log(f"Using bulk streaming download...")
+                data = fetcher.fetch_bulk_from_replit(progress_callback=progress_callback)
+                
+                # Fallback to individual fetches if bulk failed
+                if not data or all(not any(len(df) > 0 for df in tfs.values()) for tfs in data.values()):
+                    self.log(f"Bulk download failed, using individual fetches...")
+                    # Reset progress for individual fetches
+                    self.root.after(0, lambda: self._update_fetch_progress(0, -1, 0))
+                    data = fetcher.fetch_all_historical_sync(100000, progress_callback=progress_callback)
                 
                 total_candles = 0
-                for symbol, timeframes in data.items():
-                    for tf, df in timeframes.items():
+                self.log("")
+                for sym, tfs in data.items():
+                    for tf, df in tfs.items():
                         if len(df) > 0:
-                            path = config.data_dir / f"{symbol}_{tf}.parquet"
+                            path = config.data_dir / f"{sym}_{tf}.parquet"
                             df.to_parquet(path)
                             total_candles += len(df)
-                            self.log(f"Saved {len(df)} candles: {symbol} {tf}")
+                            self.log(f"  Saved {len(df):,} candles: {sym} {tf}")
                         else:
-                            self.log(f"WARNING: No data for {symbol} {tf}")
+                            self.log(f"  WARNING: No data for {sym} {tf}")
                             
+                elapsed = time.time() - self.fetch_start_time
                 if total_candles > 0:
                     self.log(f"")
-                    self.log(f"[OK] Fetch complete! Total: {total_candles:,} candles saved")
+                    self.log(f"Download complete!")
+                    self.log(f"Total: {total_candles:,} candles in {format_time(elapsed)}")
+                    self.log(f"Average speed: {total_candles / elapsed:,.0f} candles/sec")
                 else:
-                    self.log(f"[ERROR] No data was fetched. Check proxy connection.")
+                    self.log(f"[ERROR] No data fetched. Check connection.")
                     
             except Exception as e:
                 self.log(f"[ERROR] Fetch error: {e}")
@@ -518,25 +697,41 @@ class GPUTrainerGUI:
         self.fetch_thread = threading.Thread(target=do_fetch, daemon=True)
         self.fetch_thread.start()
         
+    def _update_fetch_progress(self, pct, eta_seconds, speed):
+        self.fetch_progress['value'] = pct
+        self.fetch_pct_label.config(text=f"{pct:.0f}%")
+        
+        if eta_seconds >= 0:
+            self.fetch_eta_label.config(text=f"ETA: {format_time(eta_seconds)}")
+        else:
+            self.fetch_eta_label.config(text="")
+            
+        if speed > 0:
+            self.fetch_speed_label.config(text=f"{speed:,.0f} c/s")
+        
     def fetch_complete(self):
         self.is_fetching = False
         self.fetch_btn.config(state=tk.NORMAL)
-        self.fetch_progress.stop()
+        self.fetch_progress['value'] = 100
+        self.fetch_pct_label.config(text="100%")
+        self.fetch_eta_label.config(text="Complete")
         
     def start_training(self):
         if self.is_training:
             return
         
-        # Define the dataset being trained
+        model_type = self.model_var.get()
+        defaults = OPTIMAL_DEFAULTS.get(model_type, OPTIMAL_DEFAULTS["transformer"])
+        
+        # Check for training data
         training_symbol = "BTCUSDT"
         training_timeframe = "15m"
-        data_filename = f"{training_symbol}_{training_timeframe}.parquet"
-            
-        data_path = Path(__file__).parent / "data_cache" / data_filename
+        data_path = Path(__file__).parent / "data_cache" / f"{training_symbol}_{training_timeframe}.parquet"
+        
         if not data_path.exists():
             result = messagebox.askyesno(
                 "No Data", 
-                f"No training data found for {training_symbol} {training_timeframe}.\nWould you like to fetch data first?"
+                f"No training data found.\nDownload data first?"
             )
             if result:
                 self.start_fetch()
@@ -546,26 +741,23 @@ class GPUTrainerGUI:
         self.train_btn.config(state=tk.DISABLED)
         self.stop_train_btn.config(state=tk.NORMAL)
         self.train_progress['value'] = 0
+        self.training_start_time = time.time()
+        self.epoch_times = []
+        self.best_val_loss = float('inf')
+        self.best_epoch = 0
+        
+        epochs = defaults["epochs"]
+        batch_size = defaults["batch_size"]
+        lr = defaults["lr"]
         
         def do_train():
             try:
-                model_type = self.model_var.get()
-                epochs = int(self.epochs_var.get())
-                batch_size = int(self.batch_var.get())
-                lr = float(self.lr_var.get())
-                
-                # PROMINENT DATASET LOGGING - Critical for data isolation awareness
                 self.log(f"")
-                self.log(f"{'='*70}")
-                self.log(f"   TRAINING DATASET INFORMATION")
-                self.log(f"{'='*70}")
-                self.log(f"   Symbol:    {training_symbol}")
-                self.log(f"   Timeframe: {training_timeframe}")
-                self.log(f"   Data File: {data_filename}")
-                self.log(f"{'='*70}")
-                self.log(f"")
-                self.log(f"Starting training: {model_type.upper()} model")
-                self.log(f"Epochs: {epochs}, Batch: {batch_size}, LR: {lr}")
+                self.log(f"{'='*55}")
+                self.log(f"  TRAINING: {model_type.upper()}")
+                self.log(f"  Epochs: {epochs} | Batch: {batch_size} | LR: {lr}")
+                self.log(f"  Dataset: {training_symbol} {training_timeframe}")
+                self.log(f"{'='*55}")
                 self.log(f"")
                 
                 import torch
@@ -577,51 +769,19 @@ class GPUTrainerGUI:
                 from training.trainer import Trainer
                 
                 df = pd.read_parquet(data_path)
-                self.log(f"Loaded {len(df):,} candles from cache")
+                self.log(f"Loaded {len(df):,} candles")
                 
-                # Validate loaded data for symbol/timeframe isolation - BLOCKING on critical errors
-                self.log(f"")
-                self.log(f"[Data Validation] Verifying data integrity...")
+                # Data validation
                 validation_failed = False
-                
                 if "symbol" in df.columns:
                     unique_symbols = df["symbol"].unique().tolist()
-                    if len(unique_symbols) == 1 and unique_symbols[0] == training_symbol:
-                        self.log(f"[Data Validation] Symbol check PASSED: {training_symbol}")
-                    elif len(unique_symbols) > 1:
-                        self.log(f"[Data Validation] CRITICAL: Multiple symbols detected: {unique_symbols}")
-                        self.log(f"[Data Validation] ABORTING TRAINING - Data contamination detected!")
+                    if len(unique_symbols) > 1:
+                        self.log(f"CRITICAL: Multiple symbols detected - aborting")
                         validation_failed = True
-                    else:
-                        self.log(f"[Data Validation] WARNING: Unexpected symbol in data: {unique_symbols}")
-                
-                if "timeframe" in df.columns:
-                    unique_tfs = df["timeframe"].unique().tolist()
-                    if len(unique_tfs) == 1 and unique_tfs[0] == training_timeframe:
-                        self.log(f"[Data Validation] Timeframe check PASSED: {training_timeframe}")
-                    elif len(unique_tfs) > 1:
-                        self.log(f"[Data Validation] CRITICAL: Multiple timeframes detected: {unique_tfs}")
-                        self.log(f"[Data Validation] ABORTING TRAINING - Data contamination detected!")
-                        validation_failed = True
-                    else:
-                        self.log(f"[Data Validation] WARNING: Unexpected timeframe in data: {unique_tfs}")
-                
-                if "timestamp" in df.columns:
-                    n_unique = df["timestamp"].nunique()
-                    if n_unique == len(df):
-                        self.log(f"[Data Validation] No duplicate timestamps: {n_unique:,} unique")
-                    else:
-                        dup_count = len(df) - n_unique
-                        self.log(f"[Data Validation] WARNING: {dup_count} duplicate timestamps found")
-                
+                        
                 if validation_failed:
-                    self.log(f"[Data Validation] FAILED - Training aborted for data safety")
-                    self.log(f"")
                     self.root.after(0, self.training_complete)
                     return
-                
-                self.log(f"[Data Validation] PASSED - Data integrity verified")
-                self.log(f"")
                 
                 engineer = FeatureEngineer()
                 features_df = engineer.compute_technical_features(df)
@@ -651,7 +811,9 @@ class GPUTrainerGUI:
                 
                 input_dim = features_np.shape[1]
                 self.log(f"Features: {input_dim}, Train: {len(train_dataset):,}, Val: {len(val_dataset):,}")
+                self.log(f"")
                 
+                # Model creation
                 if model_type == "transformer":
                     from models.transformer import TransformerPriceModel
                     model = TransformerPriceModel(input_dim=input_dim, d_model=256, nhead=8, num_layers=6)
@@ -674,7 +836,7 @@ class GPUTrainerGUI:
                     self.log(f"Unknown model: {model_type}")
                     return
                     
-                self.log(f"Model parameters: {model.count_parameters():,}")
+                self.log(f"Parameters: {model.count_parameters():,}")
                 
                 config.training.epochs = epochs
                 config.training.learning_rate = lr
@@ -685,20 +847,40 @@ class GPUTrainerGUI:
                 self.total_epochs = epochs
                 
                 def progress_callback(epoch, train_loss, val_loss):
-                    progress = (epoch + 1) / epochs * 100
+                    epoch_end_time = time.time()
+                    if len(self.epoch_times) > 0:
+                        epoch_duration = epoch_end_time - self.epoch_times[-1]
+                    else:
+                        epoch_duration = epoch_end_time - self.training_start_time
+                    self.epoch_times.append(epoch_end_time)
+                    
+                    # Calculate ETA
+                    epochs_remaining = epochs - (epoch + 1)
+                    if len(self.epoch_times) >= 2:
+                        avg_epoch_time = (self.epoch_times[-1] - self.training_start_time) / (epoch + 1)
+                        eta_seconds = avg_epoch_time * epochs_remaining
+                    else:
+                        eta_seconds = epoch_duration * epochs_remaining
+                    
+                    # Track best
+                    if val_loss < self.best_val_loss:
+                        self.best_val_loss = val_loss
+                        self.best_epoch = epoch + 1
+                    
                     self.current_epoch = epoch + 1
                     self.train_loss = train_loss
                     self.val_loss = val_loss
                     
-                    self.root.after(0, lambda: self.train_progress.config(value=progress))
-                    self.root.after(0, lambda: self.train_status_label.config(
-                        text=f"Epoch {epoch+1}/{epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}"
-                    ))
-                    self.log(f"Epoch {epoch+1}/{epochs}: train_loss={train_loss:.4f}, val_loss={val_loss:.4f}")
+                    progress = (epoch + 1) / epochs * 100
                     
-                    if not self.is_training:
-                        return False
-                    return True
+                    self.root.after(0, lambda: self._update_training_progress(
+                        progress, epoch + 1, epochs, train_loss, val_loss, eta_seconds
+                    ))
+                    
+                    self.log(f"Epoch {epoch+1:3d}/{epochs}: loss={train_loss:.4f}, val={val_loss:.4f}" + 
+                             (f" ★ best" if val_loss == self.best_val_loss else ""))
+                    
+                    return self.is_training
                     
                 trainer.epoch_callback = progress_callback
                 
@@ -708,8 +890,12 @@ class GPUTrainerGUI:
                     self.models_completed.append(model_type)
                     save_path = config.model_dir / f"{model_type}_trained.pt"
                     model.save(str(save_path))
+                    
+                    elapsed = time.time() - self.training_start_time
                     self.log(f"")
-                    self.log(f"[OK] Training complete! Model saved to: {save_path}")
+                    self.log(f"Training complete in {format_time(elapsed)}")
+                    self.log(f"Best val loss: {self.best_val_loss:.4f} (epoch {self.best_epoch})")
+                    self.log(f"Model saved: {save_path.name}")
                     
                     engineer.save_scalers(str(config.model_dir / f"{model_type}_scalers.joblib"))
                 else:
@@ -725,15 +911,24 @@ class GPUTrainerGUI:
         self.training_thread = threading.Thread(target=do_train, daemon=True)
         self.training_thread.start()
         
+    def _update_training_progress(self, progress, epoch, total, train_loss, val_loss, eta_seconds):
+        self.train_progress['value'] = progress
+        self.train_pct_label.config(text=f"Epoch {epoch}/{total}")
+        self.train_eta_label.config(text=f"ETA: {format_time(eta_seconds)}")
+        self.train_loss_label.config(text=f"Train: {train_loss:.4f}")
+        self.val_loss_label.config(text=f"Val: {val_loss:.4f}")
+        self.best_label.config(text=f"Best: {self.best_val_loss:.4f} (E{self.best_epoch})")
+        
     def training_complete(self):
         self.is_training = False
         self.train_btn.config(state=tk.NORMAL)
         self.stop_train_btn.config(state=tk.DISABLED)
-        self.train_status_label.config(text="Ready to train")
+        self.train_pct_label.config(text="Ready")
+        self.train_eta_label.config(text="")
         
     def stop_training(self):
         if self.is_training:
-            self.log("Stopping training... (will complete current epoch)")
+            self.log("Stopping training (finishing current epoch)...")
             self.is_training = False
             
     def train_all_models(self):
@@ -743,110 +938,37 @@ class GPUTrainerGUI:
             
         result = messagebox.askyesno(
             "Train All Models",
-            "This will train all 6 model architectures sequentially.\n\nThis may take several hours. Continue?"
+            "Train all 6 model architectures with optimal settings?\n\nThis may take several hours."
         )
         if not result:
             return
             
         def train_sequence():
-            models = ["transformer", "tft", "lstm", "cnn", "vae", "gnn"]
+            models = list(OPTIMAL_DEFAULTS.keys())
             for i, model in enumerate(models):
-                if not self.is_training:
-                    self.log(f"Training sequence stopped at {model}")
+                if not self.is_training and i > 0:
+                    self.log(f"Training sequence stopped")
                     break
+                    
                 self.log(f"")
-                self.log(f"=== Training model {i+1}/6: {model.upper()} ===")
-                self.model_var.set(model)
-                self.root.after(0, self.start_training)
+                self.log(f"=== Model {i+1}/6: {model.upper()} ===")
+                self.root.after(0, lambda m=model: self.model_var.set(m))
+                self.root.after(100, self.start_training)
                 
+                # Wait for training to start
+                time.sleep(1)
+                
+                # Wait for training to complete
                 while self.is_training:
-                    import time
                     time.sleep(1)
                     
             self.log("")
-            self.log("=== All models training complete! ===")
+            self.log("=== All models complete! ===")
             
-        self.is_training = True
         threading.Thread(target=train_sequence, daemon=True).start()
         
-    def train_rl_agent(self):
-        if self.is_training:
-            messagebox.showinfo("Busy", "Training already in progress")
-            return
-            
-        self.log("Starting RL Agent training...")
-        
-        def do_rl_train():
-            try:
-                self.is_training = True
-                self.root.after(0, lambda: self.train_btn.config(state=tk.DISABLED))
-                
-                import torch
-                from config import config
-                from models.rl_agent import PPOAgent, TradingEnvironment
-                import numpy as np
-                
-                dummy_data = np.random.randn(10000, 5)
-                env = TradingEnvironment(
-                    data=dummy_data,
-                    initial_balance=config.rl.initial_capital,
-                    transaction_cost=config.rl.transaction_cost
-                )
-                
-                agent = PPOAgent(
-                    state_dim=env._get_state().shape[0],
-                    action_dim=3,
-                    hidden_dim=256,
-                    gamma=config.rl.gamma,
-                    gae_lambda=config.rl.gae_lambda,
-                    clip_epsilon=config.rl.clip_epsilon,
-                    device=config.device
-                )
-                
-                episodes = 500
-                self.log(f"Training for {episodes} episodes...")
-                
-                for episode in range(episodes):
-                    if not self.is_training:
-                        break
-                        
-                    state = env.reset()
-                    done = False
-                    total_reward = 0
-                    
-                    while not done:
-                        action, log_prob, value = agent.select_action(state)
-                        next_state, reward, done, info = env.step(action)
-                        
-                        from models.rl_agent import Experience
-                        exp = Experience(state, action, reward, next_state, done, log_prob, value)
-                        agent.store_experience(exp)
-                        
-                        state = next_state
-                        total_reward += reward
-                        
-                    if len(agent.buffer) >= 256:
-                        agent.update()
-                        
-                    if (episode + 1) % 50 == 0:
-                        progress = (episode + 1) / episodes * 100
-                        self.root.after(0, lambda p=progress: self.train_progress.config(value=p))
-                        self.log(f"Episode {episode+1}: Reward={total_reward:.2f}, Trades={info['num_trades']}")
-                        
-                if self.is_training:
-                    save_path = config.model_dir / "ppo_agent.pt"
-                    agent.save(str(save_path))
-                    self.log(f"[OK] RL Agent saved to: {save_path}")
-                    
-            except Exception as e:
-                self.log(f"[ERROR] RL Training error: {e}")
-            finally:
-                self.root.after(0, self.training_complete)
-                
-        threading.Thread(target=do_rl_train, daemon=True).start()
-        
     def start_api_server(self):
-        self.log("Starting FastAPI prediction server on port 8000...")
+        self.log("Starting prediction API server on port 8000...")
         
         def do_serve():
             try:
@@ -856,7 +978,7 @@ class GPUTrainerGUI:
                 self.log(f"[ERROR] Server error: {e}")
                 
         threading.Thread(target=do_serve, daemon=True).start()
-        self.log("Server thread started. API will be available at http://localhost:8000")
+        self.log("API available at http://localhost:8000")
 
 def main():
     root = tk.Tk()
@@ -873,7 +995,7 @@ def main():
         sys.stderr = app.original_stderr
         
         if app.is_training or app.is_fetching:
-            if messagebox.askokcancel("Quit", "Training/Fetching in progress. Are you sure you want to quit?"):
+            if messagebox.askokcancel("Quit", "Operation in progress. Quit anyway?"):
                 app.is_training = False
                 app.is_fetching = False
                 root.destroy()

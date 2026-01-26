@@ -163,6 +163,10 @@ class BinanceDataFetcher:
         """
         Bulk download all GPU training data from Replit server in one request.
         This is much faster than fetching candle-by-candle.
+        
+        progress_callback(current_candles, expected_total, current_symbol, current_timeframe)
+        - During streaming: expected_total is set once meta is received
+        - Returns real-time candle count for accurate ETA calculation
         """
         if not self.replit_proxy_url:
             print("[Bulk Download] No Replit proxy URL configured!")
@@ -183,9 +187,13 @@ class BinanceDataFetcher:
             # Parse gzipped NDJSON stream
             results: Dict[str, Dict[str, List]] = {}
             total_candles = 0
+            expected_total = 0  # Set when meta received
             meta = None
             summary = None
             parse_errors = 0
+            current_sym = ""
+            current_tf = ""
+            last_progress_time = time.time()
             
             # Decompress gzip stream
             decompressor = gzip.GzipFile(fileobj=response.raw)
@@ -202,17 +210,24 @@ class BinanceDataFetcher:
                     
                     if obj.get('type') == 'meta':
                         meta = obj
+                        expected_total = meta.get('totalCandles', 8000000)  # Estimated ~8M candles
                         print(f"[Bulk Download] Meta: {len(meta.get('timeframes', []))} timeframes, {len(meta.get('symbols', []))} symbols")
+                        print(f"[Bulk Download] Expected: ~{expected_total:,} candles")
                         
                         # Initialize results structure
                         for sym in meta.get('symbols', []):
                             results[sym] = {}
                             for tf in meta.get('timeframes', []):
                                 results[sym][tf] = []
+                        
+                        # Initial progress callback
+                        if progress_callback:
+                            progress_callback(0, expected_total, "", "")
                     
                     elif obj.get('type') == 'summary':
                         summary = obj
-                        print(f"[Bulk Download] Server reports: {obj.get('totalCandles', 0):,} candles")
+                        expected_total = obj.get('totalCandles', expected_total)
+                        print(f"[Bulk Download] Server reports: {expected_total:,} candles")
                     
                     else:
                         # This is a candle record
@@ -229,11 +244,18 @@ class BinanceDataFetcher:
                                 'volume': float(obj['v']),
                             })
                             total_candles += 1
+                            current_sym = sym
+                            current_tf = tf
+                            
+                            # Update progress every 100k candles or every second
+                            now = time.time()
+                            if total_candles % 100000 == 0 or (now - last_progress_time) >= 1.0:
+                                last_progress_time = now
+                                if progress_callback:
+                                    progress_callback(total_candles, expected_total, current_sym, current_tf)
                             
                             if total_candles % 500000 == 0:
-                                print(f"[Bulk Download] Progress: {total_candles:,} candles...")
-                                if progress_callback:
-                                    progress_callback(total_candles, -1, "", "")
+                                print(f"[Bulk Download] Progress: {total_candles:,} / {expected_total:,} candles...")
                 
                 except json.JSONDecodeError as e:
                     parse_errors += 1
