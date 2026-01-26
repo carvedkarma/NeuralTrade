@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { pgTable, text, serial, integer, bigint, real, timestamp, jsonb, boolean, index, varchar } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, bigint, real, timestamp, jsonb, boolean, index, uniqueIndex, varchar } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 
 export const signalTypeSchema = z.enum(["LONG", "SHORT", "HOLD"]);
@@ -440,7 +440,7 @@ export const candles = pgTable("candles", {
   timestampIdx: index("candles_timestamp_idx").on(table.timestamp),
   timeframeIdx: index("candles_timeframe_idx").on(table.timeframe),
   symbolIdx: index("candles_symbol_idx").on(table.symbol),
-  uniqueCandle: index("candles_unique_idx").on(table.symbol, table.timestamp, table.timeframe),
+  uniqueCandle: uniqueIndex("candles_unique_idx").on(table.symbol, table.timestamp, table.timeframe),
 }));
 
 export const features = pgTable("features", {
