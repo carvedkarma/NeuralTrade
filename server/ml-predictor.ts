@@ -24,8 +24,138 @@ export interface EnsemblePrediction {
     rulebased: MLPrediction;
     pattern: MLPrediction;
     ai: MLPrediction | null;
+    gpu: MLPrediction | null;
   };
   consensus: number;
+  gpuUncertainty?: number;
+}
+
+// GPU Model Prediction Storage - received from external GPU trainer
+export interface GPUPrediction {
+  symbol: string;
+  timestamp: number;
+  returnH1: number;      // Predicted return at horizon 1 (15m)
+  returnH2: number;      // Predicted return at horizon 2 (60m)
+  returnH3: number;      // Predicted return at horizon 3 (240m)
+  quantile10: number;    // 10th percentile (downside risk)
+  quantile50: number;    // Median prediction
+  quantile90: number;    // 90th percentile (upside potential)
+  directionalProb: number; // P(positive return)
+  modelId: string;
+  confidence: number;
+}
+
+// In-memory storage for GPU predictions (updated by /api/gpu-export/predictions endpoint)
+const gpuPredictionCache = new Map<string, GPUPrediction>();
+const GPU_PREDICTION_TTL_MS = 5 * 60 * 1000; // 5 minutes TTL
+
+export function updateGPUPrediction(prediction: GPUPrediction): void {
+  const key = `${prediction.symbol}_${prediction.modelId}`;
+  gpuPredictionCache.set(key, prediction);
+  console.log(`[GPU] Updated prediction for ${key}: H1=${(prediction.returnH1*100).toFixed(2)}%, conf=${(prediction.confidence*100).toFixed(0)}%`);
+}
+
+export function getLatestGPUPrediction(symbol: string = "BTCUSDT"): GPUPrediction | null {
+  // Find most recent prediction for this symbol
+  let latest: GPUPrediction | null = null;
+  const now = Date.now();
+  const keysToDelete: string[] = [];
+  
+  gpuPredictionCache.forEach((pred, key) => {
+    if (key.startsWith(symbol)) {
+      // Check TTL
+      if (now - pred.timestamp > GPU_PREDICTION_TTL_MS) {
+        keysToDelete.push(key);
+        return;
+      }
+      if (!latest || pred.timestamp > latest.timestamp) {
+        latest = pred;
+      }
+    }
+  });
+  
+  // Clean up expired entries
+  keysToDelete.forEach(key => gpuPredictionCache.delete(key));
+  
+  return latest;
+}
+
+// Convert GPU prediction to MLPrediction format for ensemble integration
+function gpuToMLPrediction(gpuPred: GPUPrediction, atr: number): MLPrediction {
+  // Sanitize quantile values to prevent NaN/undefined issues
+  const q10 = isFinite(gpuPred.quantile10) ? gpuPred.quantile10 : 0;
+  const q50 = isFinite(gpuPred.quantile50) ? gpuPred.quantile50 : gpuPred.returnH1 || 0;
+  const q90 = isFinite(gpuPred.quantile90) ? gpuPred.quantile90 : 0;
+  
+  // Use quantile spread to determine uncertainty (with guard against divide-by-zero)
+  const quantileSpread = q90 - q10;
+  const uncertainty = Math.abs(q50) > 0.0001 ? quantileSpread / Math.abs(q50) : 1.0;
+  
+  // Convert directional probability to action probabilities
+  const dirProb = gpuPred.directionalProb;
+  
+  // If directional prob is close to 0.5, favor HOLD
+  const edgeFromNeutral = Math.abs(dirProb - 0.5) * 2;  // 0 to 1 scale
+  
+  let pLong = 0;
+  let pShort = 0;
+  let pHold = 0;
+  
+  if (edgeFromNeutral < 0.15) {
+    // Low directional edge - favor HOLD
+    pHold = 0.6;
+    pLong = 0.2;
+    pShort = 0.2;
+  } else if (dirProb > 0.5) {
+    // Bullish signal
+    pLong = Math.min(0.7, 0.3 + dirProb * 0.5);
+    pShort = 0.1;
+    pHold = 1 - pLong - pShort;
+  } else {
+    // Bearish signal
+    pShort = Math.min(0.7, 0.3 + (1 - dirProb) * 0.5);
+    pLong = 0.1;
+    pHold = 1 - pLong - pShort;
+  }
+  
+  // Adjust for high uncertainty - increase HOLD probability
+  if (uncertainty > 1.5) {
+    const uncertaintyPenalty = Math.min(0.3, (uncertainty - 1.5) * 0.2);
+    pHold = Math.min(0.8, pHold + uncertaintyPenalty);
+    pLong *= (1 - uncertaintyPenalty);
+    pShort *= (1 - uncertaintyPenalty);
+  }
+  
+  // Normalize
+  const total = pLong + pShort + pHold;
+  pLong /= total;
+  pShort /= total;
+  pHold /= total;
+  
+  // Expected move from quantile median
+  const expectedMove = gpuPred.quantile50 * atr;
+  
+  // Determine direction based on probabilities
+  let direction: "LONG" | "SHORT" | "HOLD" = "HOLD";
+  let confidence = pHold;
+  
+  if (pLong > pShort + 0.1 && pLong > pHold && edgeFromNeutral > 0.2) {
+    direction = "LONG";
+    confidence = pLong * gpuPred.confidence;
+  } else if (pShort > pLong + 0.1 && pShort > pHold && edgeFromNeutral > 0.2) {
+    direction = "SHORT";
+    confidence = pShort * gpuPred.confidence;
+  }
+  
+  return {
+    probUp: pLong,
+    probDown: pShort,
+    probChop: pHold,
+    expectedMove,
+    confidence,
+    direction,
+    model: "gpu_neural_net",
+  };
 }
 
 // ACTION-BASED MODEL: Each model outputs P(LONG), P(SHORT), P(HOLD)
@@ -396,11 +526,23 @@ export async function getEnsemblePrediction(
   const patternPrediction = await patternBasedPredict(feature);
   const aiPrediction = includeAI ? await aiBasedPredict(candles, feature, futuresData) : null;
   
-  // Model weights - can be adjusted based on recent performance
-  const weights = {
+  // Get GPU prediction if available
+  const gpuRawPrediction = getLatestGPUPrediction("BTCUSDT");
+  const gpuPrediction = gpuRawPrediction ? gpuToMLPrediction(gpuRawPrediction, feature.atr14) : null;
+  
+  // Model weights - GPU gets significant weight when available (trained on larger dataset)
+  // If GPU available: rule=0.25, pattern=0.25, ai=0.20, gpu=0.30
+  // If GPU not available: rule=0.35, pattern=0.35, ai=0.30 (original)
+  const weights = gpuPrediction ? {
+    rulebased: 0.25,
+    pattern: 0.25,
+    ai: 0.20,
+    gpu: 0.30,
+  } : {
     rulebased: 0.35,
     pattern: 0.35,
     ai: 0.30,
+    gpu: 0,
   };
   
   // STANDARDIZED: 0.10% round-trip trading costs (maker fees + slippage + funding)
@@ -425,6 +567,15 @@ export async function getEnsemblePrediction(
     expectedMove += aiPrediction.expectedMove * weights.ai;
   }
   
+  // Add GPU prediction if available
+  if (gpuPrediction && weights.gpu > 0) {
+    totalWeight += weights.gpu;
+    pLong += gpuPrediction.probUp * weights.gpu;
+    pShort += gpuPrediction.probDown * weights.gpu;
+    pHold += gpuPrediction.probChop * weights.gpu;
+    expectedMove += gpuPrediction.expectedMove * weights.gpu;
+  }
+  
   // Normalize probabilities
   pLong /= totalWeight;
   pShort /= totalWeight;
@@ -446,6 +597,7 @@ export async function getEnsemblePrediction(
   // STEP 3: Count model votes for consensus tracking
   const votes = [rulePrediction.direction, patternPrediction.direction];
   if (aiPrediction) votes.push(aiPrediction.direction);
+  if (gpuPrediction) votes.push(gpuPrediction.direction);
   
   const longVotes = votes.filter(v => v === "LONG").length;
   const shortVotes = votes.filter(v => v === "SHORT").length;
@@ -507,10 +659,18 @@ export async function getEnsemblePrediction(
   const patternMaturity = patternPrediction.confidence > 0.5 ? Math.min(1.0, patternPrediction.confidence) : 0.3;
   const modelConfidences = [rulePrediction.confidence, patternPrediction.confidence];
   if (aiPrediction) modelConfidences.push(aiPrediction.confidence);
+  if (gpuPrediction) modelConfidences.push(gpuPrediction.confidence);
   
   const { confidence } = computeConfidence(
     pLong, pShort, pHold, expectedMove, currentPrice, tradingCosts, patternMaturity, modelConfidences, feature.adx
   );
+  
+  // Calculate GPU uncertainty from quantile spread if available
+  let gpuUncertainty: number | undefined;
+  if (gpuRawPrediction) {
+    const quantileSpread = gpuRawPrediction.quantile90 - gpuRawPrediction.quantile10;
+    gpuUncertainty = quantileSpread / (Math.abs(gpuRawPrediction.quantile50) + 0.0001);
+  }
   
   return {
     probUp: pLong,
@@ -523,7 +683,9 @@ export async function getEnsemblePrediction(
       rulebased: rulePrediction,
       pattern: patternPrediction,
       ai: aiPrediction,
+      gpu: gpuPrediction,
     },
     consensus,
+    gpuUncertainty,
   };
 }

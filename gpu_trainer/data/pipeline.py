@@ -702,3 +702,333 @@ def prepare_data_loaders(features: np.ndarray, labels: np.ndarray,
     )
     
     return train_loader, val_loader, test_loader
+
+
+class DashboardAPIFetcher:
+    """
+    Fetches multi-timeframe aligned data from the Replit dashboard's GPU Export API.
+    This is the recommended way to get training data as it provides properly aligned
+    candles with as-of joins across timeframes.
+    """
+    
+    def __init__(self, dashboard_url: str):
+        self.dashboard_url = dashboard_url.rstrip('/')
+        self.session = None
+    
+    async def _get_session(self):
+        if self.session is None:
+            import aiohttp
+            self.session = aiohttp.ClientSession()
+        return self.session
+    
+    async def close(self):
+        if self.session:
+            await self.session.close()
+            self.session = None
+    
+    async def get_timeframes(self) -> Dict[str, List[str]]:
+        """Get available timeframes and symbols from dashboard."""
+        session = await self._get_session()
+        async with session.get(f"{self.dashboard_url}/api/gpu-export/timeframes") as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data.get("timeframes", [])
+            return []
+    
+    async def get_data_range(self, symbol: str = "BTCUSDT", timeframe: str = "1m") -> Dict:
+        """Get data range for a symbol/timeframe."""
+        session = await self._get_session()
+        params = {"symbol": symbol, "timeframe": timeframe}
+        async with session.get(f"{self.dashboard_url}/api/gpu-export/data-range", params=params) as resp:
+            if resp.status == 200:
+                return await resp.json()
+            return {}
+    
+    async def get_trainer_config(self) -> Dict:
+        """Get optimal GPU trainer configuration."""
+        session = await self._get_session()
+        async with session.get(f"{self.dashboard_url}/api/gpu-export/trainer-config") as resp:
+            if resp.status == 200:
+                return await resp.json()
+            return {}
+    
+    async def get_feature_specs(self) -> List[Dict]:
+        """Get feature engineering specifications."""
+        session = await self._get_session()
+        async with session.get(f"{self.dashboard_url}/api/gpu-export/feature-specs") as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data.get("features", [])
+            return []
+    
+    async def get_walk_forward_folds(self, symbol: str = "BTCUSDT", timeframe: str = "1m",
+                                      train_months: int = 12, val_months: int = 2, 
+                                      test_months: int = 2) -> List[Dict]:
+        """Get walk-forward validation fold timestamps."""
+        session = await self._get_session()
+        params = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "trainMonths": train_months,
+            "valMonths": val_months,
+            "testMonths": test_months
+        }
+        async with session.get(f"{self.dashboard_url}/api/gpu-export/walk-forward-folds", params=params) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data.get("folds", [])
+            return []
+    
+    async def fetch_multi_tf_candles(self, symbol: str, base_tf: str, 
+                                      start_ts: int, end_ts: int, 
+                                      limit: int = 100000) -> pd.DataFrame:
+        """Fetch multi-timeframe aligned candles with as-of joins."""
+        session = await self._get_session()
+        params = {
+            "symbol": symbol,
+            "baseTF": base_tf,
+            "startTs": start_ts,
+            "endTs": end_ts,
+            "limit": limit
+        }
+        print(f"[Dashboard API] Fetching {symbol} {base_tf} from {start_ts} to {end_ts}...")
+        
+        async with session.get(f"{self.dashboard_url}/api/gpu-export/multi-tf", params=params) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                candles = data.get("candles", [])
+                if candles:
+                    df = pd.DataFrame(candles)
+                    print(f"[Dashboard API] Received {len(df)} candles with columns: {list(df.columns)}")
+                    return df
+            print(f"[Dashboard API] Error: HTTP {resp.status}")
+            return pd.DataFrame()
+    
+    async def fetch_cross_asset_candles(self, base_tf: str, start_ts: int, end_ts: int,
+                                         limit: int = 100000) -> pd.DataFrame:
+        """Fetch cross-asset aligned candles (BTC/ETH/SOL/BNB)."""
+        session = await self._get_session()
+        params = {
+            "baseTF": base_tf,
+            "startTs": start_ts,
+            "endTs": end_ts,
+            "limit": limit
+        }
+        print(f"[Dashboard API] Fetching cross-asset data for {base_tf}...")
+        
+        async with session.get(f"{self.dashboard_url}/api/gpu-export/cross-asset", params=params) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                candles = data.get("candles", [])
+                if candles:
+                    df = pd.DataFrame(candles)
+                    print(f"[Dashboard API] Received {len(df)} cross-asset rows")
+                    return df
+            return pd.DataFrame()
+    
+    async def push_predictions(self, predictions: List[Dict], model_id: str) -> bool:
+        """Push model predictions back to dashboard for ensemble integration."""
+        session = await self._get_session()
+        payload = {
+            "predictions": predictions,
+            "modelId": model_id,
+            "timestamp": int(datetime.now().timestamp() * 1000)
+        }
+        
+        async with session.post(f"{self.dashboard_url}/api/gpu-export/predictions", json=payload) as resp:
+            if resp.status == 200:
+                result = await resp.json()
+                print(f"[Dashboard API] Pushed {result.get('received', 0)} predictions")
+                return True
+            return False
+    
+    def fetch_multi_tf_candles_sync(self, symbol: str, base_tf: str,
+                                     start_ts: int, end_ts: int,
+                                     limit: int = 100000) -> pd.DataFrame:
+        """Synchronous version of fetch_multi_tf_candles."""
+        import requests
+        params = {
+            "symbol": symbol,
+            "baseTF": base_tf,
+            "startTs": start_ts,
+            "endTs": end_ts,
+            "limit": limit
+        }
+        print(f"[Dashboard API Sync] Fetching {symbol} {base_tf}...")
+        
+        try:
+            resp = requests.get(f"{self.dashboard_url}/api/gpu-export/multi-tf", params=params, timeout=120)
+            if resp.status_code == 200:
+                data = resp.json()
+                candles = data.get("candles", [])
+                if candles:
+                    df = pd.DataFrame(candles)
+                    print(f"[Dashboard API Sync] Received {len(df)} candles")
+                    return df
+        except Exception as e:
+            print(f"[Dashboard API Sync] Error: {e}")
+        return pd.DataFrame()
+    
+    def get_trainer_config_sync(self) -> Dict:
+        """Synchronous version of get_trainer_config."""
+        import requests
+        try:
+            resp = requests.get(f"{self.dashboard_url}/api/gpu-export/trainer-config", timeout=30)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            print(f"[Dashboard API Sync] Error getting config: {e}")
+        return {}
+
+
+def compute_features_from_spec(df: pd.DataFrame, feature_specs: List[Dict]) -> pd.DataFrame:
+    """
+    Compute features according to the specification from the dashboard.
+    This ensures features match exactly between dashboard and GPU trainer.
+    """
+    features = pd.DataFrame(index=df.index)
+    
+    close = df.get('1m_close', df.get('close', df.get('btc_close')))
+    if close is None:
+        raise ValueError("No close price column found")
+    
+    high = df.get('1m_high', df.get('high', df.get('btc_high')))
+    low = df.get('1m_low', df.get('low', df.get('btc_low')))
+    open_price = df.get('1m_open', df.get('open', df.get('btc_open')))
+    volume = df.get('1m_volume', df.get('volume', df.get('btc_volume')))
+    
+    for spec in feature_specs:
+        name = spec['name']
+        formula = spec['formula']
+        window = spec.get('window', 20)
+        
+        try:
+            if 'log_return' in name:
+                lookback = int(name.split('_')[-1]) if '_' in name else 1
+                features[name] = np.log(close / close.shift(lookback))
+            
+            elif name.startswith('volatility_') and name != 'volatility_regime':
+                # Rolling volatility (std of log returns)
+                log_ret = np.log(close / close.shift(1))
+                features[name] = log_ret.rolling(window).std()
+            
+            elif 'ema_ratio' in name:
+                ema = close.ewm(span=window, adjust=False).mean()
+                features[name] = close / ema - 1
+            
+            elif name == 'rsi_14':
+                delta = close.diff()
+                gain = delta.clip(lower=0).rolling(14).mean()
+                loss = (-delta.clip(upper=0)).rolling(14).mean()
+                rs = gain / loss.replace(0, np.nan)
+                features[name] = 100 - (100 / (1 + rs))
+            
+            elif 'macd' in name:
+                ema12 = close.ewm(span=12, adjust=False).mean()
+                ema26 = close.ewm(span=26, adjust=False).mean()
+                macd_line = ema12 - ema26
+                macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+                
+                if name == 'macd_line':
+                    features[name] = macd_line
+                elif name == 'macd_signal':
+                    features[name] = macd_signal
+                elif name == 'macd_hist':
+                    features[name] = macd_line - macd_signal
+            
+            elif name == 'atr_14_norm':
+                tr = pd.concat([
+                    high - low,
+                    (high - close.shift(1)).abs(),
+                    (low - close.shift(1)).abs()
+                ], axis=1).max(axis=1)
+                atr = tr.rolling(14).mean()
+                features[name] = atr / close
+            
+            elif name == 'body_ratio':
+                features[name] = (close - open_price) / open_price
+            
+            elif name == 'wick_up_ratio':
+                body_top = pd.concat([open_price, close], axis=1).max(axis=1)
+                features[name] = (high - body_top) / open_price
+            
+            elif name == 'wick_dn_ratio':
+                body_bottom = pd.concat([open_price, close], axis=1).min(axis=1)
+                features[name] = (body_bottom - low) / open_price
+            
+            elif name == 'volume_log':
+                features[name] = np.log1p(volume)
+            
+            elif name == 'volume_zscore':
+                vol_mean = volume.rolling(window).mean()
+                vol_std = volume.rolling(window).std()
+                features[name] = (volume - vol_mean) / vol_std.replace(0, 1)
+            
+            elif 'trend_slope' in name:
+                ema20 = close.ewm(span=20, adjust=False).mean()
+                features[name] = ema20.diff(window) / window
+            
+            elif '_return_1' in name and name.startswith(('eth', 'sol', 'bnb')):
+                asset = name.split('_')[0]
+                asset_close = df.get(f'{asset}_close')
+                if asset_close is not None:
+                    features[name] = np.log(asset_close / asset_close.shift(1))
+            
+            elif '_corr_' in name:
+                # Rolling correlations between BTC and other assets
+                # e.g., btc_eth_corr_20 -> rolling(20).corr() of BTC and ETH returns
+                parts = name.split('_')
+                if len(parts) >= 4:
+                    asset1 = parts[0]  # btc
+                    asset2 = parts[1]  # eth, sol, bnb
+                    corr_window = int(parts[-1])  # 20
+                    
+                    close1 = df.get(f'{asset1}_close', close)
+                    close2 = df.get(f'{asset2}_close')
+                    
+                    if close2 is not None:
+                        ret1 = np.log(close1 / close1.shift(1))
+                        ret2 = np.log(close2 / close2.shift(1))
+                        features[name] = ret1.rolling(corr_window).corr(ret2)
+                    else:
+                        features[name] = 0.0
+            
+            elif name == 'volatility_regime':
+                # Quantile-bucket volatility_20 with thresholds [0.33, 0.67]
+                # Matches FEATURE_SPECS: quantile_bucket(volatility_20, [0.33, 0.67])
+                log_ret = np.log(close / close.shift(1))
+                vol_20 = log_ret.rolling(20).std()
+                
+                # Rolling quantile thresholds
+                q33 = vol_20.rolling(100, min_periods=20).quantile(0.33)
+                q67 = vol_20.rolling(100, min_periods=20).quantile(0.67)
+                
+                # Map to bucket: 0=low, 1=medium, 2=high
+                def map_bucket(row_idx):
+                    v = vol_20.iloc[row_idx]
+                    t33 = q33.iloc[row_idx]
+                    t67 = q67.iloc[row_idx]
+                    if pd.isna(v) or pd.isna(t33) or pd.isna(t67):
+                        return 1  # medium (default)
+                    if v < t33:
+                        return 0  # low
+                    elif v < t67:
+                        return 1  # medium
+                    else:
+                        return 2  # high
+                
+                features[name] = pd.Series([map_bucket(i) for i in range(len(vol_20))], index=df.index)
+            
+            elif 'relative_strength' in name:
+                asset = name.split('_')[0]
+                asset_close = df.get(f'{asset}_close')
+                if asset_close is not None:
+                    btc_ret = np.log(close / close.shift(20))
+                    asset_ret = np.log(asset_close / asset_close.shift(20))
+                    features[name] = asset_ret - btc_ret
+            
+        except Exception as e:
+            print(f"[Feature] Error computing {name}: {e}")
+            features[name] = np.nan
+    
+    return features.fillna(0)

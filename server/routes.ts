@@ -7,6 +7,16 @@ import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
 import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning } from "./unified-learning-controller";
 import { recalculatePatternLabels } from "./pattern-memory";
+import { 
+  getAvailableTimeframes, 
+  getDataRange, 
+  exportMultiTFCandles, 
+  exportCrossAssetAligned,
+  FEATURE_SPECS,
+  getGPUTrainerConfig,
+  generateWalkForwardFolds,
+  computeRobustScalers
+} from "./gpu-data-export";
 
 export const backfillState = {
   inProgress: false,
@@ -994,6 +1004,152 @@ export async function registerRoutes(
     } catch (error) {
       console.error("[Cross-Asset] Error:", error);
       res.status(500).json({ error: "Failed to fetch cross-asset data" });
+    }
+  });
+
+  // ============ GPU TRAINER DATA EXPORT API ============
+  // These endpoints provide data for the local RTX 4070 GPU trainer
+  
+  app.get("/api/gpu-export/timeframes", async (req, res) => {
+    try {
+      const timeframes = await getAvailableTimeframes();
+      res.json({ timeframes });
+    } catch (error) {
+      console.error("[GPU Export] Error fetching timeframes:", error);
+      res.status(500).json({ error: "Failed to fetch timeframes" });
+    }
+  });
+
+  app.get("/api/gpu-export/data-range", async (req, res) => {
+    try {
+      const symbol = (req.query.symbol as string) || "BTCUSDT";
+      const timeframe = (req.query.timeframe as string) || "1m";
+      const range = await getDataRange(symbol, timeframe);
+      res.json(range);
+    } catch (error) {
+      console.error("[GPU Export] Error fetching data range:", error);
+      res.status(500).json({ error: "Failed to fetch data range" });
+    }
+  });
+
+  app.get("/api/gpu-export/multi-tf", async (req, res) => {
+    try {
+      const symbol = (req.query.symbol as string) || "BTCUSDT";
+      const baseTF = (req.query.baseTF as string) || "1m";
+      const startTs = parseInt(req.query.startTs as string) || Date.now() - 30 * 24 * 60 * 60 * 1000;
+      const endTs = parseInt(req.query.endTs as string) || Date.now();
+      const limit = parseInt(req.query.limit as string) || 100000;
+      
+      const data = await exportMultiTFCandles(symbol, baseTF, startTs, endTs, limit);
+      res.json(data);
+    } catch (error) {
+      console.error("[GPU Export] Error exporting multi-TF candles:", error);
+      res.status(500).json({ error: "Failed to export multi-TF candles" });
+    }
+  });
+
+  app.get("/api/gpu-export/cross-asset", async (req, res) => {
+    try {
+      const baseTF = (req.query.baseTF as string) || "1m";
+      const startTs = parseInt(req.query.startTs as string) || Date.now() - 30 * 24 * 60 * 60 * 1000;
+      const endTs = parseInt(req.query.endTs as string) || Date.now();
+      const limit = parseInt(req.query.limit as string) || 100000;
+      
+      const data = await exportCrossAssetAligned(baseTF, startTs, endTs, limit);
+      res.json(data);
+    } catch (error) {
+      console.error("[GPU Export] Error exporting cross-asset data:", error);
+      res.status(500).json({ error: "Failed to export cross-asset data" });
+    }
+  });
+
+  app.get("/api/gpu-export/feature-specs", (req, res) => {
+    const categorySet = new Set(FEATURE_SPECS.map(f => f.category));
+    res.json({ 
+      features: FEATURE_SPECS,
+      totalFeatures: FEATURE_SPECS.length,
+      categories: Array.from(categorySet)
+    });
+  });
+
+  app.get("/api/gpu-export/trainer-config", (req, res) => {
+    res.json(getGPUTrainerConfig());
+  });
+
+  app.get("/api/gpu-export/walk-forward-folds", async (req, res) => {
+    try {
+      const symbol = (req.query.symbol as string) || "BTCUSDT";
+      const timeframe = (req.query.timeframe as string) || "1m";
+      const trainMonths = parseInt(req.query.trainMonths as string) || 12;
+      const valMonths = parseInt(req.query.valMonths as string) || 2;
+      const testMonths = parseInt(req.query.testMonths as string) || 2;
+      
+      const range = await getDataRange(symbol, timeframe);
+      const folds = generateWalkForwardFolds(
+        range.startTs, 
+        range.endTs, 
+        trainMonths, 
+        valMonths, 
+        testMonths
+      );
+      
+      res.json({ 
+        dataRange: range,
+        folds,
+        totalFolds: folds.length
+      });
+    } catch (error) {
+      console.error("[GPU Export] Error generating walk-forward folds:", error);
+      res.status(500).json({ error: "Failed to generate walk-forward folds" });
+    }
+  });
+
+  // Endpoint for GPU trainer to push predictions back
+  app.post("/api/gpu-export/predictions", async (req, res) => {
+    try {
+      const { predictions, modelId, timestamp } = req.body;
+      
+      if (!predictions || !Array.isArray(predictions)) {
+        return res.status(400).json({ error: "predictions array required" });
+      }
+      
+      // Store predictions in memory for ensemble integration
+      console.log(`[GPU Export] Received ${predictions.length} predictions from model ${modelId}`);
+      
+      // Import and use updateGPUPrediction to store in ml-predictor cache
+      const { updateGPUPrediction } = await import("./ml-predictor");
+      
+      let stored = 0;
+      for (const pred of predictions) {
+        // Validate prediction has required fields
+        if (pred.symbol && pred.returnH1 !== undefined && pred.directionalProb !== undefined) {
+          updateGPUPrediction({
+            symbol: pred.symbol,
+            timestamp: pred.timestamp || timestamp || Date.now(),
+            returnH1: pred.returnH1,
+            returnH2: pred.returnH2 || 0,
+            returnH3: pred.returnH3 || 0,
+            quantile10: pred.quantile10 || pred.returnH1 * 0.5,
+            quantile50: pred.quantile50 || pred.returnH1,
+            quantile90: pred.quantile90 || pred.returnH1 * 1.5,
+            directionalProb: pred.directionalProb,
+            modelId: modelId || "gpu_transformer",
+            confidence: pred.confidence || 0.5,
+          });
+          stored++;
+        }
+      }
+      
+      res.json({ 
+        success: true, 
+        received: predictions.length,
+        stored,
+        modelId,
+        timestamp 
+      });
+    } catch (error) {
+      console.error("[GPU Export] Error receiving predictions:", error);
+      res.status(500).json({ error: "Failed to receive predictions" });
     }
   });
 

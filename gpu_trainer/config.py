@@ -91,6 +91,10 @@ class Config:
     # Set this to your Replit app URL, e.g., "https://your-app.replit.app"
     replit_proxy_url: str = os.getenv("REPLIT_PROXY_URL", "")
     
+    # Dashboard URL for GPU Export API (multi-timeframe aligned data)
+    # This is the preferred method - provides properly aligned data with as-of joins
+    dashboard_url: str = os.getenv("DASHBOARD_URL", "https://your-app.replit.app")
+    
     def __post_init__(self):
         self.data_dir.mkdir(exist_ok=True)
         self.model_dir.mkdir(exist_ok=True)
