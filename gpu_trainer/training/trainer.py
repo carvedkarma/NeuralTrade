@@ -9,6 +9,7 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 import json
+import time
 from tqdm import tqdm
 import logging
 from torch.utils.tensorboard import SummaryWriter
@@ -102,6 +103,9 @@ class Trainer:
                 "acc": f"{100. * correct / total:.2f}%"
             })
             
+            # Yield to UI thread every batch to prevent GUI freeze
+            time.sleep(0)
+            
         return {
             "train_loss": total_loss / len(self.train_loader),
             "train_acc": 100. * correct / total
@@ -133,6 +137,9 @@ class Trainer:
             all_preds.extend(pred.cpu().numpy())
             all_targets.extend(target.cpu().numpy())
             all_probs.extend(probs.cpu().numpy())
+            
+            # Yield to UI thread to prevent GUI freeze
+            time.sleep(0)
             
         all_preds = np.array(all_preds)
         all_targets = np.array(all_targets)
@@ -201,6 +208,9 @@ class Trainer:
                 
             if epoch % 10 == 0:
                 self.save_checkpoint(f"{self.model.name}_epoch_{epoch}.pt")
+            
+            # Yield to UI thread after each epoch to prevent GUI freeze
+            time.sleep(0)
                 
         self.writer.close()
         return history
