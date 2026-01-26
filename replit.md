@@ -107,9 +107,24 @@ Preferred communication style: Simple, everyday language.
 - **Train/Test Split**: 80/20 walk-forward validation ensures win rate stats are computed on out-of-sample data only.
 - **Model Display Fix**: Strategy Learner appears as 4th model entry with weight=0 (backtest stats only), separated from live predictions to prevent double-counting.
 
+### GPU Export API (January 2026)
+- **Multi-Timeframe Data Export**: `/api/gpu-export/multi-tf` exports aligned candles across 1m/5m/15m/1h/4h with as-of joins.
+- **Feature Specs Endpoint**: `/api/gpu-export/feature-specs` returns 28 feature definitions (returns, volatility, EMA ratios, RSI, MACD, ATR, candle shape, volume) for Python trainer parity.
+- **Trainer Config Endpoint**: `/api/gpu-export/trainer-config` returns RTX 4070 optimized settings (Transformer 6 layers, d_model=256, Huber+directional loss).
+- **Walk-Forward Folds**: `/api/gpu-export/walk-forward-folds` implements rolling 12mo train/2mo val/2mo test windows.
+- **Prediction Ingestion**: `/api/gpu-export/predictions` receives GPU predictions, stores in ml-predictor cache with 5min TTL.
+- **Ensemble Integration**: GPU predictions integrated with weights: rule=0.25, pattern=0.25, ai=0.20, gpu=0.30 (when GPU available).
+- **Quantile Uncertainty**: Uses (q90-q10)/|q50| spread for confidence, with NaN guards and divide-by-zero protection.
+- **Python Pipeline**: `gpu_trainer/data/pipeline.py` contains `DashboardAPIFetcher` class with async/sync methods.
+- **Feature Parity**: `compute_features_from_spec()` in Python matches TypeScript FEATURE_SPECS exactly, including `volatility_regime` with quantile_bucket.
+
 ### Key Files for ML/Learning
 - `server/feature-engine.ts`: Feature computation + shared regime classifier
 - `server/signal-engine.ts`: Signal generation and shot plans
 - `server/strategy-learner.ts`: Reinforcement learning on historical data
 - `server/pattern-memory.ts`: Pattern storage and similarity matching
 - `server/paper/engine.ts`: Paper trading execution with regime-adaptive stops/TPs
+- `server/gpu-data-export.ts`: GPU export API endpoints and data preparation
+- `server/ml-predictor.ts`: ML ensemble predictor with GPU integration
+- `gpu_trainer/data/pipeline.py`: Python data fetcher for GPU trainer
+- `gpu_trainer/config.py`: GPU trainer configuration
