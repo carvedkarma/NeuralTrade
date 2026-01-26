@@ -879,6 +879,79 @@ class DashboardAPIFetcher:
         except Exception as e:
             print(f"[Dashboard API Sync] Error getting config: {e}")
         return {}
+    
+    def get_trading_costs_sync(self) -> Dict:
+        """Get trading costs for cost-adjusted edge computation."""
+        import requests
+        try:
+            resp = requests.get(f"{self.dashboard_url}/api/gpu-export/trading-costs", timeout=30)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            print(f"[Dashboard API Sync] Error getting trading costs: {e}")
+        return {"costs": {"totalRoundTrip": 0.0009}}
+    
+    async def get_trading_costs(self) -> Dict:
+        """Get trading costs for cost-adjusted edge computation."""
+        session = await self._get_session()
+        async with session.get(f"{self.dashboard_url}/api/gpu-export/trading-costs") as resp:
+            if resp.status == 200:
+                return await resp.json()
+            return {"costs": {"totalRoundTrip": 0.0009}}
+    
+    async def get_enhanced_labels(self, symbol: str = "BTCUSDT", timeframe: str = "15m",
+                                   start_ts: int = None, end_ts: int = None,
+                                   limit: int = 10000) -> pd.DataFrame:
+        """Get enhanced training labels with cost-adjusted edge and trade-worthiness."""
+        session = await self._get_session()
+        params = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "limit": limit
+        }
+        if start_ts:
+            params["startTs"] = start_ts
+        if end_ts:
+            params["endTs"] = end_ts
+        
+        async with session.get(f"{self.dashboard_url}/api/gpu-export/enhanced-labels", params=params) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                labels = data.get("labels", [])
+                if labels:
+                    df = pd.DataFrame(labels)
+                    print(f"[Dashboard API] Received {len(df)} enhanced labels")
+                    return df
+            return pd.DataFrame()
+    
+    def get_enhanced_labels_sync(self, symbol: str = "BTCUSDT", timeframe: str = "15m",
+                                  start_ts: int = None, end_ts: int = None,
+                                  limit: int = 10000) -> pd.DataFrame:
+        """Synchronous version of get_enhanced_labels."""
+        import requests
+        params = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "limit": limit
+        }
+        if start_ts:
+            params["startTs"] = start_ts
+        if end_ts:
+            params["endTs"] = end_ts
+        
+        try:
+            resp = requests.get(f"{self.dashboard_url}/api/gpu-export/enhanced-labels", 
+                               params=params, timeout=120)
+            if resp.status_code == 200:
+                data = resp.json()
+                labels = data.get("labels", [])
+                if labels:
+                    df = pd.DataFrame(labels)
+                    print(f"[Dashboard API Sync] Received {len(df)} enhanced labels")
+                    return df
+        except Exception as e:
+            print(f"[Dashboard API Sync] Error getting enhanced labels: {e}")
+        return pd.DataFrame()
 
 
 def compute_features_from_spec(df: pd.DataFrame, feature_specs: List[Dict]) -> pd.DataFrame:
@@ -1032,3 +1105,147 @@ def compute_features_from_spec(df: pd.DataFrame, feature_specs: List[Dict]) -> p
             features[name] = np.nan
     
     return features.fillna(0)
+
+
+def compute_enhanced_labels(
+    df: pd.DataFrame,
+    horizons: List[int] = [15, 60, 240],
+    trading_costs: float = 0.0009
+) -> pd.DataFrame:
+    """
+    Compute enhanced training labels with:
+    1. Cost-adjusted edge (return - trading costs)
+    2. Trade-worthiness labels (positive edge + clean move)
+    3. Sample weights (prioritize high-move samples)
+    
+    Args:
+        df: DataFrame with close/high/low prices
+        horizons: List of forward horizons in candles
+        trading_costs: Round-trip trading cost (default 0.09%)
+    
+    Returns:
+        DataFrame with enhanced labels
+    """
+    close = df.get('1m_close', df.get('close', df.get('btc_close')))
+    high = df.get('1m_high', df.get('high', df.get('btc_high')))
+    low = df.get('1m_low', df.get('low', df.get('btc_low')))
+    
+    if close is None:
+        raise ValueError("No close price column found")
+    
+    labels = pd.DataFrame(index=df.index)
+    
+    for h in horizons:
+        raw_return = np.log(close.shift(-h) / close)
+        
+        labels[f'return_{h}'] = raw_return
+        
+        edge = np.abs(raw_return) - trading_costs
+        labels[f'edge_{h}'] = edge
+        
+        direction = np.where(
+            raw_return > trading_costs, 1,
+            np.where(raw_return < -trading_costs, -1, 0)
+        )
+        labels[f'direction_{h}'] = direction
+        
+        max_favorable = pd.Series(np.nan, index=df.index)
+        max_adverse = pd.Series(np.nan, index=df.index)
+        
+        for i in range(len(df) - h):
+            entry = close.iloc[i]
+            exit_dir = np.sign(raw_return.iloc[i])
+            
+            future_highs = high.iloc[i+1:i+h+1]
+            future_lows = low.iloc[i+1:i+h+1]
+            
+            if exit_dir >= 0:
+                max_favorable.iloc[i] = (future_highs.max() - entry) / entry
+                max_adverse.iloc[i] = (entry - future_lows.min()) / entry
+            else:
+                max_favorable.iloc[i] = (entry - future_lows.min()) / entry
+                max_adverse.iloc[i] = (future_highs.max() - entry) / entry
+        
+        clean_move_ratio = max_favorable / (max_favorable + max_adverse + 1e-8)
+        
+        trade_worthy = ((edge > 0.001) & (clean_move_ratio > 0.5)).astype(float)
+        labels[f'trade_worthy_{h}'] = trade_worthy
+    
+    max_abs_return = np.maximum.reduce([np.abs(labels[f'return_{h}']) for h in horizons])
+    
+    move_weight = np.power(max_abs_return / 0.01, 0.5)
+    
+    log_ret = np.log(close / close.shift(1))
+    vol_20 = log_ret.rolling(20).std()
+    
+    volatility_multiplier = np.where(
+        vol_20 > 0.015, 1.5,
+        np.where(vol_20 < 0.005, 0.3, 1.0)
+    )
+    
+    raw_weight = move_weight * volatility_multiplier
+    labels['sample_weight'] = np.clip(raw_weight, 0.1, 5.0)
+    
+    labels['sample_weight'] = labels['sample_weight'].fillna(1.0)
+    
+    return labels
+
+
+class WeightedTrainingDataset(Dataset):
+    """
+    PyTorch Dataset with sample weighting for improved training.
+    Addresses the '90% chop' problem by weighting samples by move size.
+    """
+    
+    def __init__(
+        self,
+        features: np.ndarray,
+        labels: np.ndarray,
+        weights: np.ndarray,
+        seq_len: int = 256,
+        horizons: List[str] = ['edge_15', 'edge_60', 'edge_240']
+    ):
+        self.features = features.astype(np.float32)
+        self.labels = labels.astype(np.float32)
+        self.weights = weights.astype(np.float32)
+        self.seq_len = seq_len
+        self.horizons = horizons
+        
+        self.valid_indices = np.arange(seq_len, len(features) - max(240, 1))
+    
+    def __len__(self) -> int:
+        return len(self.valid_indices)
+    
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        actual_idx = self.valid_indices[idx]
+        
+        x = self.features[actual_idx - self.seq_len:actual_idx]
+        
+        y = self.labels[actual_idx]
+        
+        w = self.weights[actual_idx]
+        
+        return (
+            torch.from_numpy(x),
+            torch.from_numpy(y),
+            torch.tensor(w, dtype=torch.float32)
+        )
+    
+    @staticmethod
+    def create_weighted_sampler(weights: np.ndarray, num_samples: Optional[int] = None):
+        """
+        Create a WeightedRandomSampler for DataLoader.
+        Higher weights = more likely to be sampled.
+        """
+        from torch.utils.data import WeightedRandomSampler
+        
+        normalized = weights / weights.sum()
+        
+        if num_samples is None:
+            num_samples = len(weights)
+        
+        return WeightedRandomSampler(
+            weights=normalized,
+            num_samples=num_samples,
+            replacement=True
+        )

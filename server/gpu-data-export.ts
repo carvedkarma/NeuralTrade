@@ -394,6 +394,14 @@ export function generateWalkForwardFolds(
   return folds;
 }
 
+export const TRADING_COSTS = {
+  makerFee: 0.0002,
+  takerFee: 0.0004,
+  slippage: 0.0001,
+  spreadEstimate: 0.0002,
+  totalRoundTrip: 0.0009,
+};
+
 export function getGPUTrainerConfig() {
   return {
     architecture: {
@@ -422,11 +430,13 @@ export function getGPUTrainerConfig() {
     },
     loss: {
       returnLoss: "huber",
-      returnWeight: 0.7,
+      returnWeight: 0.5,
       directionalLoss: "bce",
-      directionalWeight: 0.3,
+      directionalWeight: 0.2,
       quantiles: [0.1, 0.5, 0.9],
-      quantileWeight: 0.2,
+      quantileWeight: 0.15,
+      tradeWorthyLoss: "bce",
+      tradeWorthyWeight: 0.15,
     },
     horizons: {
       h1: { minutes: 15, weight: 0.5 },
@@ -438,12 +448,106 @@ export function getGPUTrainerConfig() {
       minConfidenceForTrade: 0.6,
       maxUncertaintyForTrade: 0.02,
     },
+    tradingCosts: TRADING_COSTS,
+    sampleWeighting: {
+      enabled: true,
+      moveWeightPower: 0.5,
+      volatilityBoost: 1.5,
+      chopPenalty: 0.3,
+      minWeight: 0.1,
+      maxWeight: 5.0,
+    },
+    tradeWorthyLabeling: {
+      enabled: true,
+      minEdge: 0.001,
+      cleanMoveThreshold: 0.5,
+    },
     rtx4070: {
       optimalBatchSize: 128,
       maxSeqLen: 512,
       enableTF32: true,
       cudnnBenchmark: true,
     },
+  };
+}
+
+export interface EnhancedLabels {
+  rawReturns: number[];
+  costAdjustedEdges: number[];
+  directions: number[];
+  tradeWorthy: number[];
+  sampleWeight: number;
+}
+
+export function getEnhancedLabels(
+  closes: number[],
+  highs: number[],
+  lows: number[],
+  idx: number,
+  horizons: number[],
+  volatility20: number = 0.01,
+  costs: typeof TRADING_COSTS = TRADING_COSTS
+): EnhancedLabels {
+  const rawReturns: number[] = [];
+  const costAdjustedEdges: number[] = [];
+  const directions: number[] = [];
+  const tradeWorthy: number[] = [];
+  
+  let maxAbsReturn = 0;
+  
+  for (const h of horizons) {
+    const futureIdx = idx + h;
+    if (futureIdx < closes.length) {
+      const currentClose = closes[idx];
+      const futureClose = closes[futureIdx];
+      const logReturn = Math.log(futureClose / currentClose);
+      
+      const edge = Math.abs(logReturn) - costs.totalRoundTrip;
+      
+      rawReturns.push(logReturn);
+      costAdjustedEdges.push(edge);
+      directions.push(logReturn > costs.totalRoundTrip ? 1 : logReturn < -costs.totalRoundTrip ? -1 : 0);
+      
+      let maxFavorable = 0;
+      let maxAdverse = 0;
+      const exitDir = logReturn >= 0 ? 1 : -1;
+      
+      for (let i = idx + 1; i <= futureIdx && i < highs.length; i++) {
+        if (exitDir >= 0) {
+          maxFavorable = Math.max(maxFavorable, (highs[i] - currentClose) / currentClose);
+          maxAdverse = Math.max(maxAdverse, (currentClose - lows[i]) / currentClose);
+        } else {
+          maxFavorable = Math.max(maxFavorable, (currentClose - lows[i]) / currentClose);
+          maxAdverse = Math.max(maxAdverse, (highs[i] - currentClose) / currentClose);
+        }
+      }
+      const cleanMoveRatio = (maxFavorable + maxAdverse) > 0 
+        ? maxFavorable / (maxFavorable + maxAdverse) 
+        : 0;
+      
+      const isTradeWorthy = edge > 0.001 && cleanMoveRatio > 0.5 ? 1 : 0;
+      tradeWorthy.push(isTradeWorthy);
+      
+      maxAbsReturn = Math.max(maxAbsReturn, Math.abs(logReturn));
+    } else {
+      rawReturns.push(NaN);
+      costAdjustedEdges.push(NaN);
+      directions.push(0);
+      tradeWorthy.push(0);
+    }
+  }
+  
+  const moveWeight = Math.pow(maxAbsReturn / 0.01, 0.5);
+  const volatilityMultiplier = volatility20 > 0.015 ? 1.5 : volatility20 < 0.005 ? 0.3 : 1.0;
+  const rawWeight = moveWeight * volatilityMultiplier;
+  const sampleWeight = Math.max(0.1, Math.min(5.0, rawWeight));
+  
+  return {
+    rawReturns,
+    costAdjustedEdges,
+    directions,
+    tradeWorthy,
+    sampleWeight,
   };
 }
 

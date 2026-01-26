@@ -1,0 +1,125 @@
+1) Train on tradable targets, not just returns
+
+Instead of predicting raw future return y, predict net edge after costs:
+
+edge_H = log(close[t+H]/close[t]) − (fee + slippage + spread_est)
+
+Then your decision rule is clean:
+
+trade only if edge_H > 0
+
+This alone improves “precision” because the model learns what’s actually profitable.
+
+2) Predict uncertainty (so the bot knows when NOT to trade)
+
+Add quantiles (q10/q50/q90) or predict mean+variance.
+
+Why it matters:
+
+you can filter low-quality predictions
+
+size positions based on confidence
+
+reduce overtrading (biggest bot killer)
+
+A simple implementation:
+
+output mu and log_sigma
+
+loss = Gaussian NLL (or quantile loss)
+
+3) Proper walk-forward validation + threshold tuning
+
+Most people train once and pick a threshold randomly.
+
+Better:
+
+do rolling windows (train → val → test)
+
+for each window, tune:
+
+entry threshold
+
+stop/trailing rules
+
+cooldown settings
+
+Your “precision” comes as much from decision layer tuning as from the model.
+
+4) Sample weighting (fix the “mostly noise” problem)
+
+Crypto minute data is ~90% chop.
+
+If you train uniformly, the model learns “predict 0 return” and looks good on MSE but is useless.
+
+Fix:
+
+weight samples by |future_return| or by volatility regime
+
+or oversample rare “move” buckets
+
+keep chronology (no random shuffling across time blocks)
+
+This increases signal-to-noise and improves edge detection.
+
+5) Regime-aware training (separate brains)
+
+One model trying to handle:
+
+trend
+
+range
+
+panic
+usually becomes average at all.
+
+Two good approaches:
+A) Mixture-of-experts (best)
+
+a small “gating network” predicts regime
+
+experts specialize (trend expert, range expert, high-vol expert)
+
+B) Two-model system (simpler)
+
+model1: regime classifier
+
+model2: return predictor conditioned on regime
+
+This increases precision a lot, especially for automated trading.
+
+6) Add market microstructure proxies (still from candles)
+
+Even without order book, you can add strong proxies:
+
+spread proxy: (high-low)/close
+
+liquidity proxy: volume / (high-low)
+
+volatility-of-volatility
+
+wick/body ratios (liquidation-like spikes)
+
+“impulse vs grind” features (price change per volume)
+
+These features help the model stop getting fooled by fakeouts.
+
+The biggest precision boost (and it’s not ML)
+Build the “no-trade” filter as a first-class objective
+
+Train a second head that predicts:
+
+P(trade-worthy) (binary)
+Labels:
+
+1 if abs(edge_H) > threshold AND move is “clean”
+
+0 otherwise
+
+Then your bot is:
+
+trade filter says “allowed?”
+
+direction/edge head decides long/short + size
+
+This increases live precision dramatically.

@@ -2,6 +2,9 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
+import { db } from "./db";
+import { candles } from "@shared/schema";
+import { and, eq, gte, lte, asc } from "drizzle-orm";
 import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes, clearNNData, cancelNNDownload, getResumableStatus, resumeNNDataDownload } from "./historical-data";
 import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
@@ -15,7 +18,9 @@ import {
   FEATURE_SPECS,
   getGPUTrainerConfig,
   generateWalkForwardFolds,
-  computeRobustScalers
+  computeRobustScalers,
+  getEnhancedLabels,
+  TRADING_COSTS
 } from "./gpu-data-export";
 
 export const backfillState = {
@@ -1074,6 +1079,96 @@ export async function registerRoutes(
 
   app.get("/api/gpu-export/trainer-config", (req, res) => {
     res.json(getGPUTrainerConfig());
+  });
+
+  app.get("/api/gpu-export/trading-costs", (req, res) => {
+    res.json({
+      costs: TRADING_COSTS,
+      description: {
+        makerFee: "Fee for limit orders (0.02%)",
+        takerFee: "Fee for market orders (0.04%)",
+        slippage: "Estimated slippage (0.01%)",
+        spreadEstimate: "Bid-ask spread estimate (0.02%)",
+        totalRoundTrip: "Total cost for open+close trade (0.09%)",
+      },
+      usage: "Subtract totalRoundTrip from raw returns to get tradable edge"
+    });
+  });
+
+  app.get("/api/gpu-export/enhanced-labels", async (req, res) => {
+    try {
+      const symbol = (req.query.symbol as string) || "BTCUSDT";
+      const timeframe = (req.query.timeframe as string) || "15m";
+      const startTs = parseInt(req.query.startTs as string) || Date.now() - 30 * 24 * 60 * 60 * 1000;
+      const endTs = parseInt(req.query.endTs as string) || Date.now();
+      const limit = parseInt(req.query.limit as string) || 10000;
+      
+      const candleRows = await db
+        .select()
+        .from(candles)
+        .where(
+          and(
+            eq(candles.symbol, symbol),
+            eq(candles.timeframe, timeframe),
+            gte(candles.timestamp, startTs),
+            lte(candles.timestamp, endTs)
+          )
+        )
+        .orderBy(asc(candles.timestamp))
+        .limit(limit);
+      
+      if (candleRows.length < 300) {
+        return res.status(400).json({ 
+          error: "Insufficient data", 
+          found: candleRows.length,
+          required: 300
+        });
+      }
+      
+      const closes = candleRows.map(c => c.close);
+      const highs = candleRows.map(c => c.high);
+      const lows = candleRows.map(c => c.low);
+      
+      const horizons = [15, 60, 240];
+      const labels: any[] = [];
+      
+      for (let i = 256; i < candleRows.length - 240; i++) {
+        const log_ret = Math.log(closes[i] / closes[i-1]);
+        const vol_20 = Math.sqrt(
+          Array.from({length: 20}, (_, j) => {
+            const r = Math.log(closes[i-j] / closes[i-j-1]);
+            return r * r;
+          }).reduce((a, b) => a + b, 0) / 20
+        );
+        
+        const enhanced = getEnhancedLabels(closes, highs, lows, i, horizons, vol_20);
+        
+        labels.push({
+          timestamp: candleRows[i].timestamp,
+          rawReturns: enhanced.rawReturns,
+          costAdjustedEdges: enhanced.costAdjustedEdges,
+          directions: enhanced.directions,
+          tradeWorthy: enhanced.tradeWorthy,
+          sampleWeight: enhanced.sampleWeight,
+        });
+      }
+      
+      res.json({
+        symbol,
+        timeframe,
+        horizons,
+        tradingCosts: TRADING_COSTS,
+        labels,
+        count: labels.length,
+        dateRange: {
+          start: candleRows[0]?.timestamp,
+          end: candleRows[candleRows.length - 1]?.timestamp
+        }
+      });
+    } catch (error) {
+      console.error("[GPU Export] Error computing enhanced labels:", error);
+      res.status(500).json({ error: "Failed to compute enhanced labels" });
+    }
   });
 
   app.get("/api/gpu-export/walk-forward-folds", async (req, res) => {
