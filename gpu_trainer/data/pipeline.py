@@ -257,6 +257,10 @@ class BinanceDataFetcher:
                             current_sym = sym
                             current_tf = tf
                             
+                            # Yield to main thread every 10k candles to keep UI responsive
+                            if total_candles % 10000 == 0:
+                                time.sleep(0)  # Allow other threads to run
+                            
                             # Update progress every 100k candles or every second
                             now = time.time()
                             if total_candles % 100000 == 0 or (now - last_progress_time) >= 1.0:
@@ -264,7 +268,8 @@ class BinanceDataFetcher:
                                 if progress_callback:
                                     progress_callback(total_candles, expected_total, current_sym, current_tf)
                             
-                            if total_candles % 500000 == 0:
+                            # Reduce logging frequency to every 1M candles
+                            if total_candles % 1000000 == 0:
                                 print(f"[Bulk Download] Progress: {total_candles:,} / {expected_total:,} candles...")
                 
                 except json.JSONDecodeError as e:

@@ -99,12 +99,19 @@ class GPUTrainerGUI:
         self.training_start_time = None
         self.epoch_times = []
         
+        # Saved data state
+        self.saved_data_info = {}
+        self.data_loaded = False
+        
         self.create_widgets()
         self.wire_stdout_to_log()
         self.check_gpu_status()
         self.process_log_queue()
         self.start_status_push()
         self.start_gpu_monitor()
+        
+        # Check for saved data on startup
+        self.root.after(500, self.check_saved_data)
     
     def wire_stdout_to_log(self):
         self.original_stdout = sys.stdout
@@ -243,6 +250,20 @@ class GPUTrainerGUI:
                                style='Dim.TLabel')
         info_label.pack(anchor=tk.W, pady=(0, 10))
         
+        # Saved data status panel
+        self.saved_data_frame = tk.Frame(frame, bg=self.colors['bg_tertiary'], padx=10, pady=8)
+        self.saved_data_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.saved_data_label = tk.Label(self.saved_data_frame, text="Checking for saved data...",
+                                          bg=self.colors['bg_tertiary'], fg=self.colors['text_secondary'],
+                                          font=('Segoe UI', 9), anchor=tk.W, justify=tk.LEFT)
+        self.saved_data_label.pack(fill=tk.X)
+        
+        self.saved_data_details = tk.Label(self.saved_data_frame, text="",
+                                            bg=self.colors['bg_tertiary'], fg=self.colors['text_tertiary'],
+                                            font=('Segoe UI', 8), anchor=tk.W, justify=tk.LEFT)
+        self.saved_data_details.pack(fill=tk.X, pady=(2, 0))
+        
         # Progress section
         self.fetch_progress_frame = ttk.Frame(frame)
         self.fetch_progress_frame.pack(fill=tk.X, pady=(0, 8))
@@ -272,6 +293,10 @@ class GPUTrainerGUI:
         # Buttons
         btn_frame = ttk.Frame(frame)
         btn_frame.pack(fill=tk.X)
+        
+        self.load_saved_btn = ttk.Button(btn_frame, text="Load Saved", command=self.load_saved_data, 
+                                          style='Secondary.TButton', state=tk.DISABLED)
+        self.load_saved_btn.pack(side=tk.LEFT, padx=(0, 5))
         
         self.fetch_btn = ttk.Button(btn_frame, text="Download All Data", command=self.start_fetch)
         self.fetch_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -546,6 +571,180 @@ class GPUTrainerGUI:
             with open(filename, 'w') as f:
                 f.write(self.log_text.get(1.0, tk.END))
             self.log(f"Log saved to: {filename}")
+    
+    def check_saved_data(self):
+        """Check for existing parquet files on startup"""
+        def scan():
+            try:
+                data_dir = Path(__file__).parent / "data_cache"
+                if not data_dir.exists():
+                    self.root.after(0, lambda: self._update_saved_data_ui(None))
+                    return
+                
+                parquet_files = list(data_dir.glob("*.parquet"))
+                if not parquet_files:
+                    self.root.after(0, lambda: self._update_saved_data_ui(None))
+                    return
+                
+                # Scan each file for stats
+                import pandas as pd
+                total_candles = 0
+                symbols = set()
+                timeframes = set()
+                oldest_ts = None
+                newest_ts = None
+                newest_modified = None
+                file_details = []
+                
+                for pf in parquet_files:
+                    try:
+                        # Parse filename: BTCUSDT_15m.parquet
+                        name = pf.stem
+                        parts = name.split('_')
+                        if len(parts) >= 2:
+                            sym = parts[0]
+                            tf = parts[1]
+                            symbols.add(sym)
+                            timeframes.add(tf)
+                        
+                        # Get file modification time
+                        mtime = pf.stat().st_mtime
+                        if newest_modified is None or mtime > newest_modified:
+                            newest_modified = mtime
+                        
+                        # Read parquet metadata only (fast)
+                        df = pd.read_parquet(pf)
+                        count = len(df)
+                        total_candles += count
+                        
+                        if 'timestamp' in df.columns and count > 0:
+                            min_ts = df['timestamp'].min()
+                            max_ts = df['timestamp'].max()
+                            if oldest_ts is None or min_ts < oldest_ts:
+                                oldest_ts = min_ts
+                            if newest_ts is None or max_ts > newest_ts:
+                                newest_ts = max_ts
+                        
+                        file_details.append(f"{name}: {count:,}")
+                    except Exception as e:
+                        pass
+                
+                info = {
+                    'total_candles': total_candles,
+                    'symbols': sorted(symbols),
+                    'timeframes': sorted(timeframes),
+                    'oldest_ts': oldest_ts,
+                    'newest_ts': newest_ts,
+                    'newest_modified': newest_modified,
+                    'file_count': len(parquet_files),
+                    'file_details': file_details
+                }
+                
+                self.saved_data_info = info
+                self.root.after(0, lambda: self._update_saved_data_ui(info))
+                
+            except Exception as e:
+                self.root.after(0, lambda: self._update_saved_data_ui(None))
+        
+        threading.Thread(target=scan, daemon=True).start()
+    
+    def _update_saved_data_ui(self, info):
+        """Update the saved data panel in UI"""
+        if info is None or info.get('total_candles', 0) == 0:
+            self.saved_data_label.config(
+                text="No saved data found",
+                fg=self.colors['text_tertiary']
+            )
+            self.saved_data_details.config(text="")
+            self.load_saved_btn.config(state=tk.DISABLED)
+        else:
+            # Format the info
+            candles = info['total_candles']
+            files = info['file_count']
+            symbols = ', '.join(info['symbols'][:4])
+            timeframes = ', '.join(info['timeframes'][:5])
+            
+            # Calculate data age
+            modified = info.get('newest_modified')
+            if modified:
+                age = datetime.now() - datetime.fromtimestamp(modified)
+                if age.days > 0:
+                    age_str = f"{age.days}d ago"
+                elif age.seconds > 3600:
+                    age_str = f"{age.seconds // 3600}h ago"
+                else:
+                    age_str = f"{age.seconds // 60}m ago"
+            else:
+                age_str = "Unknown"
+            
+            # Format date range
+            if info.get('oldest_ts') and info.get('newest_ts'):
+                try:
+                    start = datetime.fromtimestamp(info['oldest_ts'] / 1000).strftime('%Y-%m-%d')
+                    end = datetime.fromtimestamp(info['newest_ts'] / 1000).strftime('%Y-%m-%d')
+                    date_range = f"{start} to {end}"
+                except:
+                    date_range = "N/A"
+            else:
+                date_range = "N/A"
+            
+            self.saved_data_label.config(
+                text=f"Saved: {candles:,} candles ({files} files) - Updated {age_str}",
+                fg=self.colors['success']
+            )
+            self.saved_data_details.config(
+                text=f"{symbols} | {timeframes} | {date_range}"
+            )
+            self.load_saved_btn.config(state=tk.NORMAL)
+    
+    def load_saved_data(self):
+        """Load saved parquet files for training without re-downloading"""
+        if self.data_loaded:
+            self.log("Data already loaded!")
+            return
+        
+        def do_load():
+            try:
+                data_dir = Path(__file__).parent / "data_cache"
+                parquet_files = list(data_dir.glob("*.parquet"))
+                
+                self.log("")
+                self.log("=" * 55)
+                self.log("  LOADING SAVED DATA FROM DISK")
+                self.log("=" * 55)
+                self.log("")
+                
+                import pandas as pd
+                total_candles = 0
+                
+                for pf in parquet_files:
+                    try:
+                        df = pd.read_parquet(pf)
+                        total_candles += len(df)
+                        self.log(f"  Loaded {len(df):,} candles: {pf.name}")
+                    except Exception as e:
+                        self.log(f"  Error loading {pf.name}: {e}")
+                
+                self.log("")
+                self.log(f"Total: {total_candles:,} candles loaded from disk")
+                self.log("Ready for training!")
+                self.log("")
+                
+                self.data_loaded = True
+                self.root.after(0, lambda: self._on_data_loaded())
+                
+            except Exception as e:
+                self.log(f"Error loading saved data: {e}")
+        
+        threading.Thread(target=do_load, daemon=True).start()
+    
+    def _on_data_loaded(self):
+        """Update UI after data is loaded"""
+        self.load_saved_btn.config(text="Data Loaded", state=tk.DISABLED)
+        self.saved_data_label.config(
+            text=f"Data loaded and ready for training",
+            fg=self.colors['accent']
+        )
     
     def start_status_push(self):
         def push_loop():
