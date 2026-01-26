@@ -7,7 +7,8 @@ const MAX_PATTERNS_TOTAL = 30;
 const MIN_SAMPLES_PER_PATTERN = 100;  // Increased from 50 for statistical reliability (research-backed)
 const MIN_BACKTEST_TRADES = 500;
 const MIN_CANDLES_15M = 2000; // ~20 days of 15m data
-const EMBARGO_CANDLES = 16;
+const EMBARGO_CANDLES = 16;  // Temporal embargo (4 hours of 15m candles)
+const EMBARGO_SIMILARITY_THRESHOLD = 0.95;  // Feature-vector embargo: exclude patterns with >95% similarity to boundary patterns
 const MIN_SIMILARITY_THRESHOLD = 0.82;  // Institutional-grade: increased from 0.75 for higher precision (less false positives)
 
 let currentCandleCount = 0;
@@ -766,6 +767,80 @@ export function getActivePatternClusters(): ClusterSummary[] {
   return summaries.sort((a, b) => b.support - a.support);
 }
 
+/**
+ * Feature-vector-based embargo filter
+ * Removes patterns from train/test sets that are too similar to boundary patterns
+ * This prevents data leakage from temporally adjacent but feature-similar patterns
+ */
+function applyFeatureVectorEmbargo(
+  trainPatterns: any[], 
+  testPatterns: any[], 
+  boundaryWindow: number = EMBARGO_CANDLES
+): { filteredTrain: any[], filteredTest: any[], embargoedCount: number } {
+  if (trainPatterns.length === 0 || testPatterns.length === 0) {
+    return { filteredTrain: trainPatterns, filteredTest: testPatterns, embargoedCount: 0 };
+  }
+  
+  // Find the boundary timestamp (last train pattern or first test pattern)
+  const sortedTrain = [...trainPatterns].sort((a, b) => b.timestamp - a.timestamp);
+  const sortedTest = [...testPatterns].sort((a, b) => a.timestamp - b.timestamp);
+  
+  const boundaryTime = sortedTrain[0]?.timestamp || sortedTest[0]?.timestamp;
+  const msPerCandle = 15 * 60 * 1000; // 15 minutes
+  const temporalEmbargoMs = boundaryWindow * msPerCandle;
+  
+  // Identify boundary patterns (within temporal embargo window of boundary)
+  const boundaryTrainPatterns = sortedTrain.filter(p => 
+    Math.abs(p.timestamp - boundaryTime) <= temporalEmbargoMs
+  );
+  const boundaryTestPatterns = sortedTest.filter(p => 
+    Math.abs(p.timestamp - boundaryTime) <= temporalEmbargoMs
+  );
+  
+  // Collect boundary embeddings
+  const boundaryEmbeddings: number[][] = [];
+  for (const p of [...boundaryTrainPatterns, ...boundaryTestPatterns]) {
+    if (p.embedding && Array.isArray(p.embedding)) {
+      boundaryEmbeddings.push(normalizeEmbedding(p.embedding));
+    }
+  }
+  
+  if (boundaryEmbeddings.length === 0) {
+    return { filteredTrain: trainPatterns, filteredTest: testPatterns, embargoedCount: 0 };
+  }
+  
+  // Check each non-boundary pattern for similarity to boundary patterns
+  let embargoedCount = 0;
+  
+  const isEmbargoedBySimilarity = (pattern: any): boolean => {
+    if (!pattern.embedding || !Array.isArray(pattern.embedding)) return false;
+    
+    // Skip if already in boundary window (already excluded by temporal embargo)
+    if (Math.abs(pattern.timestamp - boundaryTime) <= temporalEmbargoMs) return false;
+    
+    const patternEmb = normalizeEmbedding(pattern.embedding);
+    
+    // Check similarity against all boundary embeddings
+    for (const boundaryEmb of boundaryEmbeddings) {
+      const similarity = cosineSimilarity(patternEmb, boundaryEmb);
+      if (similarity > EMBARGO_SIMILARITY_THRESHOLD) {
+        embargoedCount++;
+        return true;  // Too similar to boundary pattern - exclude
+      }
+    }
+    return false;
+  };
+  
+  const filteredTrain = trainPatterns.filter(p => !isEmbargoedBySimilarity(p));
+  const filteredTest = testPatterns.filter(p => !isEmbargoedBySimilarity(p));
+  
+  if (embargoedCount > 0) {
+    console.log(`[Pattern Memory] Feature-vector embargo excluded ${embargoedCount} patterns (similarity > ${EMBARGO_SIMILARITY_THRESHOLD})`);
+  }
+  
+  return { filteredTrain, filteredTest, embargoedCount };
+}
+
 // Get pattern statistics with optional test-set-only mode for unbiased metrics
 // testSetOnly=true returns out-of-sample statistics (research-backed for true accuracy)
 export async function getStoredPatternStats(testSetOnly: boolean = false): Promise<StoredPatternStats> {
@@ -803,8 +878,13 @@ export async function getStoredPatternStats(testSetOnly: boolean = false): Promi
     }
     
     // Separate train and test sets
-    const trainPatterns = allPatterns.filter(p => p.trainingWindow !== "test");
-    const testPatterns = allPatterns.filter(p => p.trainingWindow === "test");
+    const rawTrainPatterns = allPatterns.filter(p => p.trainingWindow !== "test");
+    const rawTestPatterns = allPatterns.filter(p => p.trainingWindow === "test");
+    
+    // Apply feature-vector-based embargo to prevent data leakage from similar patterns
+    // This filters out patterns that are too similar to the train/test boundary
+    const { filteredTrain: trainPatterns, filteredTest: testPatterns, embargoedCount } = 
+      applyFeatureVectorEmbargo(rawTrainPatterns, rawTestPatterns);
     
     // Use test set for metrics if requested (unbiased out-of-sample performance)
     const patternsForStats = testSetOnly && testPatterns.length > 0 ? testPatterns : allPatterns;

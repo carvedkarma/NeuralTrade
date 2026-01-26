@@ -474,8 +474,9 @@ export function LearningOverviewCard({ learningStats }: LearningStatsCardProps) 
     );
   }
 
-  const totalSignals = learningStats.modelPerformance.reduce((acc, m) => acc + m.predictionsToday, 0) / 3;
-
+  // totalSignals no longer needs /3 division - backend now properly separates
+  // live predictions from backtest stats (Strategy Learner has its own entry)
+  
   return (
     <Card data-testid="card-learning-overview">
       <CardHeader className="pb-3">

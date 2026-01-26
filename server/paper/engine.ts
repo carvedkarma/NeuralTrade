@@ -1031,11 +1031,22 @@ export async function getPortfolioSummary() {
     : 0;
 
   let sharpe = 0;
+  let sharpeWarning: string | null = null;
   if (returns.length > 1) {
     const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
     const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / (returns.length - 1);
     const std = Math.sqrt(variance);
     sharpe = std > 0 ? (mean / std) * Math.sqrt(252) : 0;
+    
+    // SHARPE RATIO SANITY CHECK (Research-backed overfitting indicator)
+    // Sharpe > 3 is extremely rare in production; signals potential overfitting
+    // Real-world institutional strategies rarely exceed Sharpe 2.0-2.5
+    if (sharpe > 3.0 && returns.length >= 20) {
+      sharpeWarning = `WARNING: Sharpe ratio ${sharpe.toFixed(2)} exceeds 3.0 - potential overfitting detected`;
+      console.warn(`[Paper Trading] ${sharpeWarning}`);
+    } else if (sharpe > 2.5 && returns.length >= 20) {
+      sharpeWarning = `CAUTION: Sharpe ratio ${sharpe.toFixed(2)} is unusually high - verify with out-of-sample testing`;
+    }
   }
 
   const equity = portfolio.currentEquityUsdt + unrealized;
@@ -1059,6 +1070,7 @@ export async function getPortfolioSummary() {
     avgWin,
     avgLoss,
     sharpe,
+    sharpeWarning,  // Overfitting indicator: null if OK, warning message if Sharpe > 2.5
     expectancy,
     bestTrade,
     worstTrade,

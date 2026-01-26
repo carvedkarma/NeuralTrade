@@ -808,6 +808,146 @@ function sanitizeFeatureVector(f: FeatureVector): FeatureVector {
 }
 
 /**
+ * DAIN-style Adaptive Normalization for Non-Stationary Market Data
+ * Uses rolling statistics to normalize features based on recent history only
+ * This prevents data leakage by never using future data for normalization
+ */
+export class AdaptiveNormalizer {
+  private rollingMean: Map<string, number[]> = new Map();
+  private rollingStd: Map<string, number[]> = new Map();
+  private readonly windowSize: number;
+  private readonly clipValue: number;
+  
+  constructor(windowSize: number = 100, clipValue: number = 3.0) {
+    this.windowSize = windowSize;
+    this.clipValue = clipValue; // Clip z-scores beyond this value
+  }
+  
+  /**
+   * Update rolling statistics with a new observation
+   * Returns normalized value using only past data
+   */
+  updateAndNormalize(feature: string, value: number): number {
+    if (!isFinite(value) || isNaN(value)) return 0;
+    
+    // Get or initialize rolling windows
+    if (!this.rollingMean.has(feature)) {
+      this.rollingMean.set(feature, []);
+      this.rollingStd.set(feature, []);
+    }
+    
+    const meanWindow = this.rollingMean.get(feature)!;
+    const stdWindow = this.rollingStd.get(feature)!;
+    
+    // Calculate current statistics BEFORE adding new value (forward-only)
+    let mean = 0;
+    let std = 1;
+    
+    if (meanWindow.length >= 10) { // Minimum samples for stable statistics
+      mean = meanWindow.reduce((a, b) => a + b, 0) / meanWindow.length;
+      const variance = meanWindow.reduce((a, b) => a + (b - mean) ** 2, 0) / meanWindow.length;
+      std = Math.sqrt(variance) || 1; // Prevent division by zero
+    }
+    
+    // Add new value to rolling window
+    meanWindow.push(value);
+    if (meanWindow.length > this.windowSize) {
+      meanWindow.shift();
+    }
+    
+    // Z-score normalization with clipping
+    let normalized = (value - mean) / std;
+    normalized = Math.max(-this.clipValue, Math.min(this.clipValue, normalized));
+    
+    return normalized;
+  }
+  
+  /**
+   * Normalize a full feature vector using adaptive statistics
+   * Each feature is normalized independently based on its own history
+   */
+  normalizeFeatureVector(features: FeatureVector): FeatureVector {
+    return {
+      ...features,
+      // Normalize momentum indicators (they can have varying scales)
+      rsi14: this.updateAndNormalize('rsi14', features.rsi14),
+      macd: this.updateAndNormalize('macd', features.macd),
+      macdSignal: this.updateAndNormalize('macdSignal', features.macdSignal),
+      macdHist: this.updateAndNormalize('macdHist', features.macdHist),
+      stochK: this.updateAndNormalize('stochK', features.stochK),
+      stochD: this.updateAndNormalize('stochD', features.stochD),
+      momentum: this.updateAndNormalize('momentum', features.momentum),
+      
+      // Normalize volatility indicators
+      atr14: this.updateAndNormalize('atr14', features.atr14),
+      volatility: this.updateAndNormalize('volatility', features.volatility),
+      bollingerWidth: this.updateAndNormalize('bollingerWidth', features.bollingerWidth),
+      
+      // Normalize trend indicators
+      adx: this.updateAndNormalize('adx', features.adx),
+      plusDi: this.updateAndNormalize('plusDi', features.plusDi),
+      minusDi: this.updateAndNormalize('minusDi', features.minusDi),
+      trendStrength: this.updateAndNormalize('trendStrength', features.trendStrength),
+      
+      // Normalize returns (already percentage-based but can have outliers)
+      returns1: this.updateAndNormalize('returns1', features.returns1),
+      returns2: this.updateAndNormalize('returns2', features.returns2),
+      returns4: this.updateAndNormalize('returns4', features.returns4),
+      returns8: this.updateAndNormalize('returns8', features.returns8),
+      
+      // Normalize cross-asset features
+      ethBtcCorrelation: this.updateAndNormalize('ethBtcCorrelation', features.ethBtcCorrelation),
+      solBtcCorrelation: this.updateAndNormalize('solBtcCorrelation', features.solBtcCorrelation),
+      bnbBtcCorrelation: this.updateAndNormalize('bnbBtcCorrelation', features.bnbBtcCorrelation),
+      ethRelativeStrength: this.updateAndNormalize('ethRelativeStrength', features.ethRelativeStrength),
+      solRelativeStrength: this.updateAndNormalize('solRelativeStrength', features.solRelativeStrength),
+      bnbRelativeStrength: this.updateAndNormalize('bnbRelativeStrength', features.bnbRelativeStrength),
+      ethMomentumDivergence: this.updateAndNormalize('ethMomentumDivergence', features.ethMomentumDivergence),
+      solMomentumDivergence: this.updateAndNormalize('solMomentumDivergence', features.solMomentumDivergence),
+      bnbMomentumDivergence: this.updateAndNormalize('bnbMomentumDivergence', features.bnbMomentumDivergence),
+      cryptoSectorMomentum: this.updateAndNormalize('cryptoSectorMomentum', features.cryptoSectorMomentum),
+      
+      // Keep price-based features as-is (already normalized by ATR or are raw prices needed for context)
+      // Embedding is not normalized (it's already in a learned latent space)
+    };
+  }
+  
+  /**
+   * Get current statistics for debugging/monitoring
+   */
+  getStats(): { feature: string; mean: number; std: number; samples: number }[] {
+    const stats: { feature: string; mean: number; std: number; samples: number }[] = [];
+    
+    for (const [feature, values] of this.rollingMean.entries()) {
+      if (values.length > 0) {
+        const mean = values.reduce((a, b) => a + b, 0) / values.length;
+        const variance = values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length;
+        stats.push({
+          feature,
+          mean: Math.round(mean * 1000) / 1000,
+          std: Math.round(Math.sqrt(variance) * 1000) / 1000,
+          samples: values.length,
+        });
+      }
+    }
+    
+    return stats;
+  }
+  
+  /**
+   * Reset all statistics (e.g., when switching to new training data)
+   */
+  reset(): void {
+    this.rollingMean.clear();
+    this.rollingStd.clear();
+    console.log('[Adaptive Normalizer] Statistics reset');
+  }
+}
+
+// Global instance for consistent normalization across components
+export const adaptiveNormalizer = new AdaptiveNormalizer(100, 3.0);
+
+/**
  * Compute rolling correlation between two price series
  */
 function computeCorrelation(series1: number[], series2: number[], period: number = 20): number {
