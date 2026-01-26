@@ -211,7 +211,7 @@ export type CombinedIntelligence = z.infer<typeof combinedIntelligenceSchema>;
 export const shotPlanSchema = z.object({
   signal: signalTypeSchema,
   confidence: z.number(),
-  regime: z.enum(["trend_up", "trend_down", "chop", "shock"]),
+  regime: z.enum(["trend_up", "trend_down", "chop", "shock", "quiet", "ranging"]),
   strategy: z.string(),
   entryZone: z.object({ low: z.number(), high: z.number() }).nullable(),
   stopLoss: z.number().nullable(),
@@ -509,6 +509,8 @@ export const patterns = pgTable("patterns", {
   label: varchar("label", { length: 20 }),
   atrAtEntry: real("atr_at_entry"),
   dynamicThreshold: real("dynamic_threshold"),
+  direction: varchar("direction", { length: 10 }),
+  actualPnl: real("actual_pnl"),
 }, (table) => ({
   timestampIdx: index("patterns_timestamp_idx").on(table.timestamp),
 }));

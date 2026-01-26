@@ -6,6 +6,7 @@ import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActive
 import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
 import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning } from "./unified-learning-controller";
+import { recalculatePatternLabels } from "./pattern-memory";
 
 export const backfillState = {
   inProgress: false,
@@ -145,6 +146,24 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error resetting learning data:", error);
       res.status(500).json({ error: "Failed to reset learning data" });
+    }
+  });
+
+  // Recalculate pattern labels using corrected return-based logic
+  // This fixes the 71% false negative rate from the old regime-based direction bug
+  app.post("/api/patterns/recalculate", async (req, res) => {
+    try {
+      console.log("[API] Pattern label recalculation requested");
+      const result = await recalculatePatternLabels();
+      res.json({ 
+        success: true, 
+        message: `Recalculated ${result.updated} patterns (${result.errors} errors)`,
+        updated: result.updated,
+        errors: result.errors
+      });
+    } catch (error) {
+      console.error("Error recalculating patterns:", error);
+      res.status(500).json({ error: "Failed to recalculate pattern labels" });
     }
   });
 

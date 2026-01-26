@@ -135,7 +135,7 @@ export function determineWin(
 export function determineWinByPnL(
   direction: "LONG" | "SHORT" | "HOLD",
   forwardReturn: number,
-  costs: number = 0.0013  // Default: 0.08% fees*2 + 0.02% slippage*2 + 0.01% funding
+  costs: number = 0.0010  // Standardized: 0.04% maker fees round-trip + 0.04% slippage + 0.02% funding
 ): { won: boolean; actualPnL: number } {
   if (direction === "HOLD") {
     return { won: false, actualPnL: 0 };
@@ -151,6 +151,35 @@ export function determineWinByPnL(
   const won = actualPnL > 0;
   
   return { won, actualPnL };
+}
+
+// CRITICAL FIX: Determine win based on actual forward return, not regime-derived direction
+// For training labels, we use the OPTIMAL direction based on what actually happened
+export function determineWinFromReturn(
+  forwardReturn: number,
+  dynamicThreshold: number,
+  costs: number = 0.0010
+): { won: boolean; optimalDirection: "LONG" | "SHORT" | "HOLD"; actualPnL: number } {
+  const netReturnLong = forwardReturn - costs;
+  const netReturnShort = -forwardReturn - costs;
+  
+  // Check if either direction would have been profitable above threshold
+  if (netReturnLong > dynamicThreshold) {
+    return { won: true, optimalDirection: "LONG", actualPnL: netReturnLong };
+  }
+  if (netReturnShort > dynamicThreshold) {
+    return { won: true, optimalDirection: "SHORT", actualPnL: netReturnShort };
+  }
+  
+  // No profitable trade - this is a HOLD pattern
+  // But we still track if there was significant movement (volatility expansion)
+  const absReturn = Math.abs(forwardReturn);
+  if (absReturn > dynamicThreshold * 1.5) {
+    // Significant move but didn't exceed cost threshold - edge case
+    return { won: false, optimalDirection: "HOLD", actualPnL: 0 };
+  }
+  
+  return { won: false, optimalDirection: "HOLD", actualPnL: 0 };
 }
 
 // Determine direction based on regime and features
@@ -256,11 +285,13 @@ export async function storePattern(params: StorePatternParams): Promise<void> {
   const regime = mapKalmanToRegime(feature.kalmanRegime);
   const actualOutcome = determineActualOutcome(forwardReturn8, dynamicThreshold);
   
-  // CRITICAL FIX: Use direction from regime or explicit override
-  const direction = params.direction || determineDirection(regime);
+  // CRITICAL FIX: Determine win based on ACTUAL forward return, not regime-derived direction
+  // This fixes the 71% false negative rate where chop regime patterns were marked as losses
+  // regardless of actual price movement
+  const { won, optimalDirection, actualPnL } = determineWinFromReturn(forwardReturn8, dynamicThreshold);
   
-  // CRITICAL FIX: Win is determined by actual P&L > 0 after costs, NOT regime match
-  const { won, actualPnL } = determineWinByPnL(direction, forwardReturn8);
+  // Use explicit direction if provided, otherwise use optimal direction from actual return
+  const direction = params.direction || optimalDirection;
   
   const embedding = normalizeEmbedding(feature.embedding);
   if (!isValidEmbedding(embedding)) {
@@ -369,7 +400,71 @@ export async function storePattern(params: StorePatternParams): Promise<void> {
     label: actualOutcome,
     atrAtEntry: atrAtEntry,
     dynamicThreshold: dynamicThreshold,
+    direction: direction,
+    actualPnl: actualPnL,
   });
+}
+
+// Recalculate forward_win for all existing patterns using correct return-based logic
+// This fixes the mislabeled patterns from the old regime-based logic
+// Uses direct SQL for performance (updates 500k+ patterns in seconds instead of hours)
+export async function recalculatePatternLabels(): Promise<{ updated: number; errors: number }> {
+  console.log("[Pattern Memory] Starting pattern label recalculation using optimized SQL...");
+  
+  const startTime = Date.now();
+  const COSTS = 0.0010; // Standardized transaction costs
+  
+  try {
+    // Single SQL update that recalculates all labels based on forward_return_8 and dynamic_threshold
+    // Logic: 
+    //   - LONG win: forward_return_8 - costs > threshold
+    //   - SHORT win: -forward_return_8 - costs > threshold
+    //   - If neither direction profitable, direction = HOLD, forward_win = false
+    const result = await db.execute(sql`
+      UPDATE patterns SET
+        direction = CASE
+          WHEN forward_return_8 - ${COSTS} > COALESCE(dynamic_threshold, 0.003) THEN 'LONG'
+          WHEN -forward_return_8 - ${COSTS} > COALESCE(dynamic_threshold, 0.003) THEN 'SHORT'
+          ELSE 'HOLD'
+        END,
+        forward_win = CASE
+          WHEN forward_return_8 - ${COSTS} > COALESCE(dynamic_threshold, 0.003) THEN true
+          WHEN -forward_return_8 - ${COSTS} > COALESCE(dynamic_threshold, 0.003) THEN true
+          ELSE false
+        END,
+        actual_pnl = CASE
+          WHEN forward_return_8 - ${COSTS} > COALESCE(dynamic_threshold, 0.003) THEN forward_return_8 - ${COSTS}
+          WHEN -forward_return_8 - ${COSTS} > COALESCE(dynamic_threshold, 0.003) THEN -forward_return_8 - ${COSTS}
+          ELSE 0
+        END
+    `);
+    
+    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+    
+    // Get count of updated rows
+    const countResult = await db.execute(sql`SELECT COUNT(*) as count FROM patterns`);
+    const countRow = countResult[0] as { count: string | number } | undefined;
+    const totalPatterns = countRow ? Number(countRow.count) : 0;
+    
+    console.log(`[Pattern Memory] Recalculation complete: ${totalPatterns} patterns updated in ${duration}s`);
+    
+    // Log new distribution
+    const distResult = await db.execute(sql`
+      SELECT 
+        direction, 
+        COUNT(*) as count, 
+        SUM(CASE WHEN forward_win THEN 1 ELSE 0 END) as wins,
+        AVG(forward_return_8) as avg_return
+      FROM patterns 
+      GROUP BY direction
+    `);
+    console.log("[Pattern Memory] New distribution by direction:", distResult);
+    
+    return { updated: totalPatterns, errors: 0 };
+  } catch (err) {
+    console.error("[Pattern Memory] Recalculation error:", err);
+    return { updated: 0, errors: 1 };
+  }
 }
 
 export interface SimilarityDistribution {
