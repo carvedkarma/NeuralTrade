@@ -511,6 +511,8 @@ export const patterns = pgTable("patterns", {
   dynamicThreshold: real("dynamic_threshold"),
   direction: varchar("direction", { length: 10 }),
   actualPnl: real("actual_pnl"),
+  createdAt: bigint("created_at", { mode: "number" }),  // Epoch ms when pattern was stored
+  trainingWindow: varchar("training_window", { length: 20 }),  // "train" or "test" split
 }, (table) => ({
   timestampIdx: index("patterns_timestamp_idx").on(table.timestamp),
 }));

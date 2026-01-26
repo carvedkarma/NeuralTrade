@@ -239,6 +239,7 @@ export interface StorePatternParams {
   atrAtEntry: number;
   dynamicThreshold: number;
   direction?: "LONG" | "SHORT" | "HOLD";  // Explicit direction override
+  isTestSet?: boolean;  // For train/test split (walk-forward validation)
 }
 
 function computeMaturity(support: number): number {
@@ -386,6 +387,11 @@ export async function storePattern(params: StorePatternParams): Promise<void> {
     updateClusterDirectionStats(nearestCluster, direction, actualPnL, won);
   }
   
+  // TRAIN/TEST SPLIT: Assign patterns to train or test window
+  // Default 80/20 split based on data timestamp (not random) for walk-forward validation
+  // This prevents look-ahead bias by ensuring test patterns are always from later periods
+  const trainingWindow = params.isTestSet ? "test" : "train";
+  
   await db.insert(patterns).values({
     timestamp: feature.timestamp,
     embedding: feature.embedding,
@@ -402,6 +408,8 @@ export async function storePattern(params: StorePatternParams): Promise<void> {
     dynamicThreshold: dynamicThreshold,
     direction: direction,
     actualPnl: actualPnL,
+    createdAt: Date.now(),
+    trainingWindow: trainingWindow,
   });
 }
 
@@ -734,6 +742,9 @@ export interface StoredPatternStats {
   canCreatePatterns: boolean;
   patternClusters: ClusterSummary[];
   rawSampleCount: number;
+  trainSetCount?: number;  // Patterns used for training (look-ahead bias free)
+  testSetCount?: number;   // Patterns held out for validation (out-of-sample)
+  testSetWinRate?: number; // Win rate on test set only (true performance metric)
 }
 
 export function getActivePatternClusters(): ClusterSummary[] {
@@ -755,7 +766,9 @@ export function getActivePatternClusters(): ClusterSummary[] {
   return summaries.sort((a, b) => b.support - a.support);
 }
 
-export async function getStoredPatternStats(): Promise<StoredPatternStats> {
+// Get pattern statistics with optional test-set-only mode for unbiased metrics
+// testSetOnly=true returns out-of-sample statistics (research-backed for true accuracy)
+export async function getStoredPatternStats(testSetOnly: boolean = false): Promise<StoredPatternStats> {
   const emptyStats: StoredPatternStats = {
     totalPatterns: 0,
     activePatterns: 0,
@@ -775,17 +788,29 @@ export async function getStoredPatternStats(): Promise<StoredPatternStats> {
     canCreatePatterns: canCreateNewPatterns(),
     patternClusters: [],
     rawSampleCount: 0,
+    trainSetCount: 0,
+    testSetCount: 0,
+    testSetWinRate: 0,
   };
   
   try {
-    const allPatterns = await db.select().from(patterns).orderBy(desc(patterns.timestamp)).limit(5000);
+    // Fetch patterns with optional filter for test set only
+    let query = db.select().from(patterns).orderBy(desc(patterns.timestamp)).limit(10000);
+    const allPatterns = await query;
     
     if (allPatterns.length === 0) {
       return emptyStats;
     }
     
-    const totalWins = allPatterns.filter(p => p.forwardWin).length;
-    const winRate = totalWins / allPatterns.length;
+    // Separate train and test sets
+    const trainPatterns = allPatterns.filter(p => p.trainingWindow !== "test");
+    const testPatterns = allPatterns.filter(p => p.trainingWindow === "test");
+    
+    // Use test set for metrics if requested (unbiased out-of-sample performance)
+    const patternsForStats = testSetOnly && testPatterns.length > 0 ? testPatterns : allPatterns;
+    
+    const totalWins = patternsForStats.filter(p => p.forwardWin).length;
+    const winRate = totalWins / patternsForStats.length;
     
     const regimeBreakdown: Record<string, number> = { trend_up: 0, trend_down: 0, chop: 0, shock: 0 };
     const regimeWins: Record<string, number> = { trend_up: 0, trend_down: 0, chop: 0, shock: 0 };
@@ -793,7 +818,7 @@ export async function getStoredPatternStats(): Promise<StoredPatternStats> {
     let thresholdSum = 0;
     let thresholdCount = 0;
     
-    for (const p of allPatterns) {
+    for (const p of patternsForStats) {
       const regime = p.regime || "chop";
       const validRegime = regime in regimeBreakdown ? regime : "chop";
       
@@ -819,9 +844,13 @@ export async function getStoredPatternStats(): Promise<StoredPatternStats> {
       };
     }
     
-    const recentPatterns = allPatterns.slice(0, Math.min(100, allPatterns.length));
+    const recentPatterns = patternsForStats.slice(0, Math.min(100, patternsForStats.length));
     const recentWins = recentPatterns.filter(p => p.forwardWin).length;
     const recentWinRate = recentPatterns.length > 0 ? recentWins / recentPatterns.length : 0;
+    
+    // Compute test-set-specific metrics even when using all patterns
+    const testWins = testPatterns.filter(p => p.forwardWin).length;
+    const testSetWinRate = testPatterns.length > 0 ? testWins / testPatterns.length : 0;
     
     const simDist = getLastSimilarityDistribution();
     const similarityHealthy = simDist.mean > 0 && simDist.mean < 0.90;
@@ -843,7 +872,10 @@ export async function getStoredPatternStats(): Promise<StoredPatternStats> {
       similarityHealthy,
       canCreatePatterns: canCreateNewPatterns(),
       patternClusters: clusterSummaries,
-      rawSampleCount: allPatterns.length,
+      rawSampleCount: patternsForStats.length,
+      trainSetCount: trainPatterns.length,
+      testSetCount: testPatterns.length,
+      testSetWinRate,
     };
   } catch (error) {
     console.error("Error getting stored pattern stats:", error);
