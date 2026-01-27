@@ -64,6 +64,7 @@ class Trainer:
         self.best_val_loss = float('inf')
         self.patience_counter = 0
         self.global_step = 0
+        self.epoch_callback = None  # Callback for GUI progress updates
         
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
@@ -263,6 +264,18 @@ class Trainer:
                 self.save_checkpoint(f"best_{self.model.name}.pt")
             else:
                 self.patience_counter += 1
+            
+            # Call epoch callback for GUI progress updates
+            if self.epoch_callback is not None:
+                # epoch_callback(epoch, train_loss, val_loss) -> returns continue_training bool
+                should_continue = self.epoch_callback(
+                    epoch - 1,  # 0-indexed for GUI compatibility
+                    train_metrics["train_loss"],
+                    val_metrics["val_loss"]
+                )
+                if not should_continue:
+                    logger.info(f"Training stopped by callback at epoch {epoch}")
+                    break
                 
             if self.patience_counter >= self.config.training.patience:
                 if not self.gui_mode:

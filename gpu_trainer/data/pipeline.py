@@ -807,15 +807,18 @@ class TradingDataset(Dataset):
     def __init__(self, features: np.ndarray, labels: np.ndarray, 
                  sequence_length: int = 100):
         self.features = torch.FloatTensor(features)
-        self.labels = torch.FloatTensor(labels)
+        # Use LongTensor for classification labels (not FloatTensor)
+        self.labels = torch.LongTensor(labels)
         self.sequence_length = sequence_length
         
     def __len__(self):
         return len(self.features) - self.sequence_length
     
     def __getitem__(self, idx):
+        # Window: features[idx:idx+seq_len], predict label at END of window (current bar)
+        # This ensures training and inference alignment: model predicts for the "current" bar
         x = self.features[idx:idx + self.sequence_length]
-        y = self.labels[idx + self.sequence_length]
+        y = self.labels[idx + self.sequence_length - 1]  # Last bar IN the window, not next bar
         return x, y
 
 

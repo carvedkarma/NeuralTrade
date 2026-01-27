@@ -288,7 +288,32 @@ def train(args):
     config.training.epochs = args.epochs
     config.training.learning_rate = args.lr
     
-    trainer = Trainer(model, train_loader, val_loader, config, device=config.device)
+    # === STEP 7: Compute class weights for imbalanced dataset ===
+    # With threshold=0.001 and costs=0.0009, HOLD class often dominates
+    # Class weights help the model learn from minority classes (LONG/SHORT)
+    unique_labels, label_counts = np.unique(train_labels, return_counts=True)
+    total_samples = len(train_labels)
+    
+    # Compute inverse frequency weights (higher weight for rare classes)
+    # Formula: weight[i] = total_samples / (num_classes * count[i])
+    num_classes = 3  # SHORT, HOLD, LONG
+    class_weights_list = []
+    for class_idx in range(num_classes):
+        if class_idx in unique_labels:
+            idx = np.where(unique_labels == class_idx)[0][0]
+            weight = total_samples / (num_classes * label_counts[idx])
+        else:
+            weight = 1.0  # Default weight if class not present
+        class_weights_list.append(weight)
+    
+    class_weights = torch.FloatTensor(class_weights_list)
+    logger.info(f"Class distribution: SHORT={label_counts[0] if 0 in unique_labels else 0}, "
+                f"HOLD={label_counts[1] if 1 in unique_labels else 0}, "
+                f"LONG={label_counts[2] if 2 in unique_labels else 0}")
+    logger.info(f"Class weights: {class_weights.numpy()}")
+    
+    trainer = Trainer(model, train_loader, val_loader, config, device=config.device, 
+                      class_weights=class_weights)
     
     if args.resume:
         trainer.load_checkpoint(args.resume)

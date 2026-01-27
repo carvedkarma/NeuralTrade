@@ -36,7 +36,8 @@ class ModelManager:
         self.model_instances = {}
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.ensemble = None
-        self.scaler = None  # For feature scaling
+        self.scaler = None  # Dict of per-column scalers (NOT a single sklearn scaler)
+        self.scaler_columns = None  # Column names for the scaler dict
         self.feature_config = None  # Feature configuration
         self.training_status = {
             "is_training": False,
@@ -52,6 +53,31 @@ class ModelManager:
         self.sequence_length = 100  # Default, updated from loaded model config
         self.input_dim = 81  # Default feature count
         self.instantiation_errors: Dict[str, str] = {}  # Track errors for /models/status
+    
+    def transform_features(self, features_df) -> np.ndarray:
+        """Transform features using the loaded scaler dict.
+        
+        The scaler is a dict of per-column sklearn scalers, NOT a single scaler.
+        This matches how FeatureEngineer.save_scalers/load_scalers works.
+        """
+        if self.scaler is None:
+            logger.warning("No scaler loaded - returning raw features")
+            return features_df.values.astype(np.float32)
+        
+        # Apply per-column scaling using the scaler dict
+        transformed = features_df.copy()
+        for col in features_df.columns:
+            if col in self.scaler:
+                valid_mask = ~features_df[col].isna()
+                if valid_mask.any():
+                    try:
+                        transformed.loc[valid_mask, col] = self.scaler[col].transform(
+                            features_df.loc[valid_mask, col].values.reshape(-1, 1)
+                        ).flatten()
+                    except Exception as e:
+                        logger.warning(f"Failed to scale column {col}: {e}")
+        
+        return transformed.values.astype(np.float32)
         
     def _create_model_instance(self, model_type: str, config: dict):
         """Create model instance with correct constructor args for each model type.
@@ -662,9 +688,9 @@ async def predict_from_candles(request: CandlePredictionRequest):
             sys.path.insert(0, str(Path(__file__).parent.parent))
             from data.pipeline import FeatureEngineer
             
-            # Compute features
+            # Compute features using the correct method name
             fe = FeatureEngineer()
-            features_df = fe.compute_features(df)
+            features_df = fe.compute_technical_features(df)
             
             # Remove NaN rows (from indicator warmup)
             features_df = features_df.dropna()
@@ -675,12 +701,8 @@ async def predict_from_candles(request: CandlePredictionRequest):
                     detail="No valid features after computation (all NaN)"
                 )
             
-            # Scale features if scaler is loaded
-            features_np = features_df.values.astype(np.float32)
-            if model_manager.scaler is not None:
-                features_np = model_manager.scaler.transform(features_np)
-            else:
-                logger.warning("No scaler loaded - using raw features (may hurt accuracy)")
+            # Scale features using the per-column scaler dict (via transform_features helper)
+            features_np = model_manager.transform_features(features_df)
             
             # Use sequence length from loaded model config
             seq_len = model_manager.sequence_length
