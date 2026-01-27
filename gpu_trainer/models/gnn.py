@@ -66,9 +66,30 @@ class CrossAssetGNN(BaseModel):
         
         self.num_assets = num_assets
         self.hidden_dim = hidden_dim
+        self.total_input_dim = input_dim
         
-        self.node_encoder = nn.Sequential(
+        self.temporal_encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        self.temporal_lstm = nn.LSTM(
+            hidden_dim, hidden_dim // 2,
+            num_layers=2,
+            batch_first=True,
+            bidirectional=True,
+            dropout=dropout
+        )
+        self.temporal_classifier = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, output_dim)
+        )
+        
+        features_per_asset = max(input_dim // num_assets, 1)
+        self.node_encoder = nn.Sequential(
+            nn.Linear(features_per_asset, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim)
@@ -119,6 +140,12 @@ class CrossAssetGNN(BaseModel):
         return adj
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 3:
+            h = self.temporal_encoder(x)
+            lstm_out, _ = self.temporal_lstm(h)
+            logits = self.temporal_classifier(lstm_out[:, -1, :])
+            return logits
+        
         batch_size, seq_len, num_assets, features = x.shape
         
         x = x.view(batch_size * seq_len, num_assets, features)
@@ -144,6 +171,10 @@ class CrossAssetGNN(BaseModel):
         return logits
     
     def get_asset_relations(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 3:
+            batch_size = x.shape[0]
+            return torch.eye(self.num_assets, device=x.device).unsqueeze(0).repeat(batch_size, 1, 1)
+        
         batch_size, seq_len, num_assets, features = x.shape
         x = x.view(batch_size * seq_len, num_assets, features)
         h = self.node_encoder(x)
@@ -168,8 +199,20 @@ class TemporalGNN(BaseModel):
         
         self.num_nodes = num_nodes
         self.temporal_window = temporal_window
+        self.total_input_dim = input_dim
         
-        self.spatial_encoder = nn.Linear(input_dim, hidden_dim)
+        self.temporal_encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        self.temporal_attention_fallback = nn.MultiheadAttention(
+            hidden_dim, num_heads, dropout=dropout, batch_first=True
+        )
+        self.temporal_output = nn.Linear(hidden_dim, output_dim)
+        
+        features_per_node = max(input_dim // num_nodes, 1)
+        self.spatial_encoder = nn.Linear(features_per_node, hidden_dim)
         
         self.spatial_attention = nn.ModuleList([
             GraphAttentionLayer(hidden_dim, hidden_dim, dropout)
@@ -188,8 +231,17 @@ class TemporalGNN(BaseModel):
         
         self.output = nn.Linear(hidden_dim, output_dim)
         
-    def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, adj: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if x.dim() == 3:
+            h = self.temporal_encoder(x)
+            attn_out, _ = self.temporal_attention_fallback(h, h, h)
+            logits = self.temporal_output(attn_out[:, -1, :])
+            return logits
+        
         batch_size, seq_len, num_nodes, features = x.shape
+        
+        if adj is None:
+            adj = torch.ones(batch_size, num_nodes, num_nodes, device=x.device)
         
         x = x.view(-1, features)
         h = self.spatial_encoder(x)
