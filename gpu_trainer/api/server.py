@@ -504,6 +504,33 @@ class HealthResponse(BaseModel):
     models_loaded: List[str]
     uptime_seconds: float
 
+class RegressionPredictionRequest(BaseModel):
+    """Request for regression-based prediction (mu, sigma)."""
+    features: List[List[float]]
+    current_price: float = 0.0
+    current_volatility: float = 0.01
+    
+class RegressionPredictionResponse(BaseModel):
+    """Response with edge-based signal format."""
+    action: str  # LONG, SHORT, NO_TRADE
+    confidence: float  # edge / sigma
+    expected_move: float  # mu
+    uncertainty: float  # sigma
+    edge: float  # mu - cost
+    cost_estimate: float
+    suggested_order_type: str  # MAKER or TAKER
+    urgency: str  # LOW, MEDIUM, HIGH
+    position_size_pct: float
+    stop_loss_pct: float
+    take_profit_pct: float
+    regime: str
+    expert_weights: Dict[str, float]
+    reasons: List[str]
+    
+    # Legacy compatibility
+    probabilities: Optional[Dict[str, float]] = None
+    model_weights: Optional[Dict[str, float]] = None
+
 start_time = datetime.now()
 
 @app.get("/health", response_model=HealthResponse)
@@ -706,6 +733,131 @@ async def predict_from_candles(request: CandlePredictionRequest):
         raise
     except Exception as e:
         logger.error(f"Candle prediction error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/predict/regression", response_model=RegressionPredictionResponse)
+async def predict_regression(request: RegressionPredictionRequest):
+    """Make edge-based regression prediction.
+    
+    Returns mu (expected return), sigma (uncertainty), and edge-based signal.
+    This is the institutional-grade signal format:
+        edge = mu - cost
+        confidence = edge / sigma
+        action = LONG/SHORT if confidence > threshold, else NO_TRADE
+    """
+    try:
+        features = np.array(request.features)
+        
+        if len(features.shape) != 2:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Expected 2D features [seq_len, n_features], got shape {features.shape}"
+            )
+        
+        # Check for MoE or regression model
+        result = model_manager.predict(features)
+        
+        # Extract mu and sigma from model output
+        # For classification models, convert probabilities to pseudo-mu/sigma
+        probs = result["probabilities"]
+        
+        # P(LONG) - P(SHORT) as directional signal
+        p_long = probs[2]
+        p_short = probs[0]
+        p_hold = probs[1]
+        
+        # Convert to mu: expected direction * magnitude
+        mu = (p_long - p_short) * 0.01  # Scale to ~1% expected move
+        
+        # Uncertainty from entropy of distribution
+        entropy = -sum(p * np.log(p + 1e-8) for p in probs)
+        max_entropy = -3 * (1/3) * np.log(1/3)  # Max entropy for 3 classes
+        sigma = 0.005 + 0.015 * (entropy / max_entropy)  # 0.5% to 2% uncertainty
+        
+        # Transaction costs
+        maker_fee = 0.0002
+        taker_fee = 0.0004
+        slippage = 0.0001 + 0.5 * request.current_volatility
+        cost = (taker_fee * 2) + (slippage * 2)
+        
+        # Calculate edge
+        edge = abs(mu) - cost
+        confidence = edge / max(sigma, 0.001) if sigma > 0 else 0
+        
+        # Determine action
+        min_confidence = 0.5
+        min_edge = 0.001
+        
+        should_trade = confidence >= min_confidence and edge >= min_edge
+        
+        if should_trade:
+            action = "LONG" if mu > 0 else "SHORT"
+        else:
+            action = "NO_TRADE"
+        
+        # Calculate position size using bounded Kelly
+        if should_trade and sigma > 0:
+            kelly = edge / (sigma ** 2)
+            half_kelly = kelly * 0.5
+            position_size_pct = min(half_kelly, 0.1)  # Max 10%
+        else:
+            position_size_pct = 0
+        
+        # Suggested order type
+        edge_maker = abs(mu) - (maker_fee * 2) - (slippage * 2)
+        suggested_order = "TAKER" if edge > edge_maker * 1.5 else "MAKER"
+        
+        # Urgency
+        if confidence > 2.0 and abs(mu) > 0.01:
+            urgency = "HIGH"
+        elif confidence > 1.0:
+            urgency = "MEDIUM"
+        else:
+            urgency = "LOW"
+        
+        # Stops
+        stop_loss_pct = sigma * 2
+        take_profit_pct = abs(mu) * 1.2 if abs(mu) > stop_loss_pct * 1.5 else stop_loss_pct * 1.5
+        
+        # Reasons
+        reasons = []
+        if should_trade:
+            reasons.append(f"Edge: {edge*100:.3f}% after costs")
+            reasons.append(f"Confidence: {confidence:.2f}σ")
+            reasons.append(f"Expected: {mu*100:.3f}%")
+        else:
+            if confidence < min_confidence:
+                reasons.append(f"Low confidence: {confidence:.2f} < {min_confidence}")
+            if edge < min_edge:
+                reasons.append(f"Low edge: {edge*100:.3f}% < {min_edge*100:.3f}%")
+        
+        return RegressionPredictionResponse(
+            action=action,
+            confidence=confidence,
+            expected_move=float(mu),
+            uncertainty=float(sigma),
+            edge=float(edge),
+            cost_estimate=float(cost),
+            suggested_order_type=suggested_order,
+            urgency=urgency,
+            position_size_pct=float(position_size_pct),
+            stop_loss_pct=float(stop_loss_pct),
+            take_profit_pct=float(take_profit_pct),
+            regime="UNKNOWN",  # Will be set by regime detector
+            expert_weights=result.get("model_weights", {}),
+            reasons=reasons,
+            probabilities={
+                "SHORT": float(probs[0]),
+                "HOLD": float(probs[1]),
+                "LONG": float(probs[2])
+            },
+            model_weights=result.get("model_weights", {})
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Regression prediction error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/training/status", response_model=TrainingStatusResponse)
