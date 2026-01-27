@@ -159,35 +159,62 @@ class Trainer:
         all_targets = np.array(all_targets)
         all_probs = np.array(all_probs)
         
-        # Class mapping: 0=SHORT, 1=NEUTRAL, 2=LONG
-        # Directional mask excludes NEUTRAL (class 1)
+        # Class mapping: 0=SHORT, 1=HOLD, 2=LONG
+        # Per-class metrics
+        metrics = {
+            "val_loss": total_loss / len(self.val_loader),
+            "val_acc": 100. * correct / total,
+        }
+        
+        # Calculate per-class precision, recall, F1
+        class_names = ["short", "hold", "long"]
+        for class_idx, class_name in enumerate(class_names):
+            # True positives, false positives, false negatives
+            tp = ((all_preds == class_idx) & (all_targets == class_idx)).sum()
+            fp = ((all_preds == class_idx) & (all_targets != class_idx)).sum()
+            fn = ((all_preds != class_idx) & (all_targets == class_idx)).sum()
+            
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+            
+            metrics[f"{class_name}_precision"] = precision * 100
+            metrics[f"{class_name}_recall"] = recall * 100
+            metrics[f"{class_name}_f1"] = f1 * 100
+        
+        # Directional accuracy (excluding HOLD predictions and targets)
         directional_mask = (all_targets != 1) & (all_preds != 1)
         if directional_mask.sum() > 0:
             directional_acc = (all_preds[directional_mask] == all_targets[directional_mask]).mean() * 100
         else:
             directional_acc = 0
+        metrics["directional_acc"] = directional_acc
         
-        # Correct class indices: SHORT=0, LONG=2
-        short_mask = all_targets == 0
-        long_mask = all_targets == 2
+        # Macro F1 (average of per-class F1)
+        macro_f1 = (metrics["short_f1"] + metrics["hold_f1"] + metrics["long_f1"]) / 3
+        metrics["macro_f1"] = macro_f1
         
-        short_precision = (all_preds[short_mask] == 0).mean() * 100 if short_mask.sum() > 0 else 0
-        long_precision = (all_preds[long_mask] == 2).mean() * 100 if long_mask.sum() > 0 else 0
+        # Class distribution (what is model predicting?)
+        pred_short_pct = (all_preds == 0).mean() * 100
+        pred_hold_pct = (all_preds == 1).mean() * 100
+        pred_long_pct = (all_preds == 2).mean() * 100
+        metrics["pred_short_pct"] = pred_short_pct
+        metrics["pred_hold_pct"] = pred_hold_pct
+        metrics["pred_long_pct"] = pred_long_pct
         
-        return {
-            "val_loss": total_loss / len(self.val_loader),
-            "val_acc": 100. * correct / total,
-            "directional_acc": directional_acc,
-            "long_precision": long_precision,
-            "short_precision": short_precision
-        }
+        # Backward compatibility
+        metrics["long_precision"] = metrics["long_precision"]
+        metrics["short_precision"] = metrics["short_precision"]
+        
+        return metrics
     
     def train(self, epochs: Optional[int] = None) -> Dict[str, List[float]]:
         epochs = epochs or self.config.training.epochs
         history = {
             "train_loss": [], "train_acc": [],
             "val_loss": [], "val_acc": [],
-            "directional_acc": []
+            "directional_acc": [], "macro_f1": [],
+            "short_f1": [], "hold_f1": [], "long_f1": []
         }
         
         for epoch in range(1, epochs + 1):
@@ -200,9 +227,14 @@ class Trainer:
                 if key in history:
                     history[key].append(value)
                     
+            # Log all metrics to tensorboard
             self.writer.add_scalar("val/loss", val_metrics["val_loss"], epoch)
             self.writer.add_scalar("val/acc", val_metrics["val_acc"], epoch)
             self.writer.add_scalar("val/directional_acc", val_metrics["directional_acc"], epoch)
+            self.writer.add_scalar("val/macro_f1", val_metrics["macro_f1"], epoch)
+            self.writer.add_scalar("val/short_f1", val_metrics["short_f1"], epoch)
+            self.writer.add_scalar("val/hold_f1", val_metrics["hold_f1"], epoch)
+            self.writer.add_scalar("val/long_f1", val_metrics["long_f1"], epoch)
             
             # Only log in non-GUI mode (GUI has its own progress callback)
             if not self.gui_mode:
@@ -211,8 +243,19 @@ class Trainer:
                     f"Train Loss: {train_metrics['train_loss']:.4f}, "
                     f"Val Loss: {val_metrics['val_loss']:.4f}, "
                     f"Val Acc: {val_metrics['val_acc']:.2f}%, "
-                    f"Dir Acc: {val_metrics['directional_acc']:.2f}%"
+                    f"Dir Acc: {val_metrics['directional_acc']:.2f}%, "
+                    f"Macro F1: {val_metrics['macro_f1']:.2f}%"
                 )
+                # Log class distribution every 10 epochs
+                if epoch % 10 == 0:
+                    logger.info(
+                        f"  Class F1: SHORT={val_metrics['short_f1']:.1f}%, "
+                        f"HOLD={val_metrics['hold_f1']:.1f}%, LONG={val_metrics['long_f1']:.1f}%"
+                    )
+                    logger.info(
+                        f"  Pred Dist: SHORT={val_metrics['pred_short_pct']:.1f}%, "
+                        f"HOLD={val_metrics['pred_hold_pct']:.1f}%, LONG={val_metrics['pred_long_pct']:.1f}%"
+                    )
             
             if val_metrics["val_loss"] < self.best_val_loss:
                 self.best_val_loss = val_metrics["val_loss"]

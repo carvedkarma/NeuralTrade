@@ -68,6 +68,14 @@ Preferred communication style: Simple, everyday language.
 - **Multi-timeframe Confluence**: Scores signals across 5m, 15m, 1h, and 4h timeframes.
 - **Automated Paper Trading**: Features an ATR-based risk management system, Half-Kelly position sizing, and performance analytics.
 
+#### Training Pipeline (Leakage-Free)
+- **Chronological Split First**: Data is split into train/val BEFORE fitting scalers to prevent distribution leakage
+- **Scaler on Train Only**: `fit_scalers()` only sees training data, val/test use transform-only
+- **Purge Gap**: Configurable gap (default: horizon + sequence_length samples) between train/val to prevent lookahead from label computation
+- **Walk-Forward Evaluation**: CLI command `python main.py backtest` runs proper hedge fund-style walk-forward with after-cost PnL metrics
+- **Per-Class Metrics**: Trainer logs precision/recall/F1 for each class (SHORT/HOLD/LONG), macro-F1, and class distribution
+- **No Synthetic Data**: Training aborts if no real data exists (prevents meaningless models)
+
 #### GPU Neural Network Training
 - **Deep Learning Architectures**: Supports 12+ architectures trainable on local GPU with real-time status push and multi-timeframe data:
   - Transformers: TransformerPriceModel, TemporalFusionTransformer (TFT)

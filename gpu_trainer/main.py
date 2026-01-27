@@ -97,7 +97,13 @@ async def fetch_data(args):
         await fetcher.close()
 
 def train(args):
-    """Train a neural network model."""
+    """Train a neural network model.
+    
+    IMPORTANT: This function implements proper train/val separation to prevent data leakage:
+    1. Chronological split FIRST (before any scaling)
+    2. Fit scalers ONLY on training data
+    3. Purge gap at train/val boundary to prevent lookahead from label computation
+    """
     import torch
     import numpy as np
     import pandas as pd
@@ -118,39 +124,114 @@ def train(args):
         df = pd.read_parquet(data_path)
         logger.info(f"Loaded {len(df)} candles from {data_path}")
     else:
-        logger.warning("No cached data found. Generating synthetic data for testing...")
-        n_samples = 10000
-        df = pd.DataFrame({
-            'open': np.cumsum(np.random.randn(n_samples) * 0.001) + 50000,
-            'high': np.cumsum(np.random.randn(n_samples) * 0.001) + 50100,
-            'low': np.cumsum(np.random.randn(n_samples) * 0.001) + 49900,
-            'close': np.cumsum(np.random.randn(n_samples) * 0.001) + 50000,
-            'volume': np.abs(np.random.randn(n_samples) * 1000000) + 500000,
-        })
+        logger.error("No cached data found. Run 'python main.py fetch' first to download data.")
+        logger.error("Training on synthetic data produces meaningless models - aborting.")
+        return
     
+    # === STEP 1: Compute features (before split, features don't leak future) ===
     engineer = FeatureEngineer()
     features_df = engineer.compute_technical_features(df)
     features_df = features_df.fillna(0)
     
-    engineer.fit_scalers(features_df)
-    scaled_features = engineer.transform(features_df)
+    # === STEP 2: Create labels with lookahead (horizon candles into future) ===
+    horizon = getattr(args, 'horizon', 5)
+    labels = create_labels(df, horizon=horizon, threshold=0.001)
+    labels = (labels + 1).astype(int)  # Convert -1/0/1 to 0/1/2
     
-    labels = create_labels(df, horizon=5, threshold=0.001)
-    labels = (labels + 1).astype(int)
+    # === STEP 3: CHRONOLOGICAL SPLIT FIRST (before scaling!) ===
+    # This prevents scaler from learning distribution info from validation/test data
+    sequence_length = config.data.sequence_length
+    valid_start = sequence_length  # Skip warmup period for indicators
     
-    features_np = scaled_features.values.astype(np.float32)
-    labels_np = labels.astype(np.int64)
+    features_np = features_df.values[valid_start:].astype(np.float32)
+    labels_np = labels[valid_start:].astype(np.int64)
     
-    valid_start = config.data.sequence_length
-    features_np = features_np[valid_start:]
-    labels_np = labels_np[valid_start:]
+    # === STEP 4: PURGE GAP and EXPLICIT SPLIT SIZING ===
+    # Labels near train end look `horizon` candles ahead, which may be in val
+    # Purge gap must be at least horizon + sequence_length to prevent lookahead
+    purge_gap = horizon + sequence_length
     
-    n_train = int(len(features_np) * 0.8)
-    n_val = int(len(features_np) * 0.1)
+    n_total = len(features_np)
     
-    train_dataset = TradingDataset(features_np[:n_train], labels_np[:n_train], config.data.sequence_length)
-    val_dataset = TradingDataset(features_np[n_train:n_train+n_val], labels_np[n_train:n_train+n_val], config.data.sequence_length)
+    # EXPLICIT SIZING (not implicit remainder)
+    # Validation must have at least horizon + sequence_length samples to be meaningful
+    min_val_samples = horizon + sequence_length
+    min_train_samples = sequence_length * 3  # At least 3x sequence for meaningful training
     
+    # Reserve explicit validation window: ~10% of total but at least min_val_samples
+    val_samples = max(int(n_total * 0.1), min_val_samples)
+    
+    # Train gets the rest after subtracting purge gap and validation
+    train_samples = n_total - purge_gap - val_samples
+    
+    # Validate we have enough data
+    if train_samples < min_train_samples:
+        logger.error(f"Insufficient training data: {train_samples} < {min_train_samples}")
+        logger.error(f"  Total: {n_total}, purge_gap: {purge_gap}, val_samples: {val_samples}")
+        logger.error(f"  Need at least {min_train_samples + purge_gap + min_val_samples} total samples")
+        return
+    
+    # Compute actual indices
+    train_end = train_samples
+    val_start = train_end + purge_gap  # Val starts AFTER purge gap
+    val_end = val_start + val_samples
+    
+    # Final bounds check - fail rather than clamp to preserve validation integrity
+    if val_end > n_total:
+        logger.error(f"Val window exceeds data bounds: val_end={val_end} > n_total={n_total}")
+        logger.error(f"  Reduce val_samples or provide more data")
+        return
+    
+    # Log explicit split sizes
+    logger.info(f"Data splits (total={n_total}):")
+    logger.info(f"  Train: [0, {train_end}) = {train_samples} samples")
+    logger.info(f"  Purge: [{train_end}, {val_start}) = {purge_gap} samples (discarded)")
+    logger.info(f"  Val:   [{val_start}, {val_end}) = {val_samples} samples")
+    tail_discarded = n_total - val_end
+    if tail_discarded > 0:
+        logger.info(f"  Tail:  [{val_end}, {n_total}) = {tail_discarded} samples (unused)")
+    
+    # Assert correct layout
+    assert train_end + purge_gap == val_start, "Purge gap must be exactly between train and val"
+    assert val_end <= n_total, "Val must not exceed data"
+    assert val_samples >= min_val_samples, f"Val samples {val_samples} < minimum {min_val_samples}"
+    
+    # CRITICAL: Verify labels' lookahead never crosses into validation
+    # Labels at index i look ahead `horizon` candles to compute target
+    # Train labels at train_end-1 look at index train_end-1+horizon
+    # This must be strictly less than val_start
+    max_label_lookahead = train_end - 1 + horizon
+    if max_label_lookahead >= val_start:
+        logger.error(f"LEAKAGE DETECTED: Train labels look into validation!")
+        logger.error(f"  Train ends at {train_end-1}, label lookahead={horizon}")
+        logger.error(f"  Max lookahead index: {max_label_lookahead} >= val_start {val_start}")
+        return
+    
+    logger.info(f"Leakage check PASSED: max_label_lookahead={max_label_lookahead} < val_start={val_start}")
+    
+    # Split the raw (unscaled) features
+    train_features_raw = features_np[:train_end]
+    train_labels = labels_np[:train_end]
+    val_features_raw = features_np[val_start:val_end]
+    val_labels = labels_np[val_start:val_end]
+    
+    # === STEP 5: FIT SCALER ON TRAINING DATA ONLY ===
+    # This is critical - scaler must not see validation/test distribution
+    train_features_df = pd.DataFrame(train_features_raw, columns=features_df.columns)
+    engineer.fit_scalers(train_features_df)
+    logger.info("Scaler fitted on TRAINING data only (no leakage)")
+    
+    # Transform both train and val with the train-fitted scaler
+    train_features_scaled = engineer.transform(train_features_df).values.astype(np.float32)
+    val_features_df = pd.DataFrame(val_features_raw, columns=features_df.columns)
+    val_features_scaled = engineer.transform(val_features_df).values.astype(np.float32)
+    
+    # === STEP 6: Create datasets ===
+    train_dataset = TradingDataset(train_features_scaled, train_labels, sequence_length)
+    val_dataset = TradingDataset(val_features_scaled, val_labels, sequence_length)
+    
+    # Note: shuffle=True is OK for training since we've already done chronological split
+    # and purged the boundary. Shuffling within train set is fine.
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
     
@@ -287,10 +368,233 @@ def serve(args):
     start_server(host="0.0.0.0", port=args.port)
 
 def backtest(args):
-    """Run backtest on historical data."""
-    logger.info(f"Running backtest from {args.start} to {args.end}")
+    """Run backtest on historical data using walk-forward evaluation.
     
-    logger.info("Backtest functionality would run here with loaded models...")
+    This implements proper hedge fund-style backtesting:
+    - Purged time splits (gap between train/test)
+    - Walk-forward: train on window A, test on B, roll forward
+    - After-cost PnL with realistic fills
+    - Per-regime performance reporting
+    """
+    import torch
+    import numpy as np
+    import pandas as pd
+    from datetime import datetime as dt
+    from config import config
+    from data.pipeline import FeatureEngineer, create_labels
+    from training.walk_forward import WalkForwardEvaluator, WalkForwardSplitter
+    
+    logger.info(f"Running walk-forward backtest from {args.start} to {args.end}")
+    
+    check_gpu()
+    
+    # Load data
+    data_path = config.data_dir / "BTCUSDT_15m.parquet"
+    if not data_path.exists():
+        logger.error("No data found. Run 'python main.py fetch' first.")
+        return
+    
+    df = pd.read_parquet(data_path)
+    logger.info(f"Loaded {len(df)} candles")
+    
+    # Filter by date range if timestamps are available
+    if 'timestamp' in df.columns:
+        start_ts = pd.Timestamp(args.start).timestamp() * 1000
+        end_ts = pd.Timestamp(args.end).timestamp() * 1000
+        df = df[(df['timestamp'] >= start_ts) & (df['timestamp'] <= end_ts)]
+        logger.info(f"Filtered to {len(df)} candles in date range")
+    
+    if len(df) < 1000:
+        logger.error(f"Not enough data for backtest: {len(df)} candles")
+        return
+    
+    # Compute features
+    engineer = FeatureEngineer()
+    features_df = engineer.compute_technical_features(df)
+    features_df = features_df.fillna(0)
+    features_np = features_df.values.astype(np.float32)
+    
+    # Load model
+    model_name = args.model or "transformer"
+    model_path = config.model_dir / f"{model_name}_trained.pt"
+    
+    if not model_path.exists():
+        logger.error(f"Model not found: {model_path}")
+        logger.error(f"Run 'python main.py train --model {model_name}' first")
+        return
+    
+    # Load model based on type
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    input_dim = features_np.shape[1]
+    
+    if model_name == "transformer":
+        from models.transformer import TransformerPriceModel
+        model = TransformerPriceModel(input_dim=input_dim)
+    elif model_name == "tft":
+        from models.transformer import TemporalFusionTransformer
+        model = TemporalFusionTransformer(input_dim=input_dim)
+    elif model_name == "lstm":
+        from models.lstm import BidirectionalLSTM
+        model = BidirectionalLSTM(input_dim=input_dim)
+    elif model_name == "cnn":
+        from models.cnn import ResNetPrice
+        model = ResNetPrice(input_dim=input_dim)
+    else:
+        logger.error(f"Unknown model type: {model_name}")
+        return
+    
+    # Load weights
+    state_dict = torch.load(model_path, map_location=device)
+    if 'model_state_dict' in state_dict:
+        model.load_state_dict(state_dict['model_state_dict'])
+    else:
+        model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+    
+    logger.info(f"Loaded model: {model_name}")
+    
+    # Configure walk-forward evaluation
+    n_folds = args.folds
+    purge_gap = args.purge
+    n_samples = len(features_np)
+    
+    # Convert days to 15m samples: 1 day = 24 hours * 4 samples/hour = 96 samples
+    samples_per_day = 96
+    train_days = getattr(args, 'train_days', 30)
+    test_days = getattr(args, 'test_days', 7)
+    
+    train_periods = train_days * samples_per_day
+    test_periods = test_days * samples_per_day
+    embargo_periods = 48  # 12 hours at 15m
+    
+    logger.info(f"Window config: train={train_days}d ({train_periods} samples), test={test_days}d ({test_periods} samples)")
+    
+    # Validate we have enough data for at least one fold
+    total_fold_size = train_periods + purge_gap + test_periods + embargo_periods
+    if n_samples < total_fold_size:
+        logger.error(f"Not enough data for walk-forward: need {total_fold_size}, have {n_samples}")
+        logger.error(f"  Required: train={train_periods} (~30 days), purge={purge_gap}, test={test_periods} (~7 days), embargo={embargo_periods}")
+        logger.error(f"  Try a longer date range or fetch more data first")
+        return
+    
+    # Calculate step size between folds
+    step_size = (n_samples - total_fold_size) // max(n_folds - 1, 1)
+    if step_size <= 0:
+        logger.warning(f"Data only supports 1 fold (step_size={step_size}), reducing n_folds to 1")
+        n_folds = 1
+    
+    splitter = WalkForwardSplitter(
+        n_splits=n_folds,
+        train_periods=train_periods,
+        test_periods=test_periods,
+        purge_periods=purge_gap,
+        embargo_periods=embargo_periods
+    )
+    
+    evaluator = WalkForwardEvaluator(
+        splitter=splitter,
+        holding_periods=48  # 12 hours at 15m intervals
+    )
+    
+    logger.info(f"Walk-forward config: {n_folds} folds, train={train_periods} (~30d), test={test_periods} (~7d), purge={purge_gap}")
+    
+    # Generate and validate ALL splits before running any evaluation
+    splits = list(splitter.split(n_samples))
+    
+    if len(splits) == 0:
+        logger.error("No valid walk-forward splits could be generated")
+        return
+    
+    # Validate ALL folds have valid boundaries before execution - FAIL FAST on any invalid fold
+    valid_splits = []
+    invalid_folds = []
+    
+    for i, (train_idx, test_idx) in enumerate(splits):
+        errors = []
+        
+        # Check non-empty
+        if len(train_idx) == 0 or len(test_idx) == 0:
+            errors.append(f"empty indices (train={len(train_idx)}, test={len(test_idx)})")
+        
+        # Check non-overlapping (with purge gap)
+        if len(train_idx) > 0 and len(test_idx) > 0 and test_idx[0] <= train_idx[-1]:
+            errors.append(f"overlapping train/test")
+        
+        # Check purge gap is maintained
+        if len(train_idx) > 0 and len(test_idx) > 0:
+            actual_gap = test_idx[0] - train_idx[-1] - 1
+            if actual_gap < purge_gap:
+                errors.append(f"purge gap {actual_gap} < required {purge_gap}")
+        
+        # Check test end doesn't exceed data
+        if len(test_idx) > 0 and test_idx[-1] >= n_samples:
+            errors.append(f"test exceeds data bounds")
+        
+        # Check expected train/test lengths (institutional requirement)
+        if len(train_idx) != train_periods:
+            errors.append(f"train length {len(train_idx)} != expected {train_periods}")
+        if len(test_idx) != test_periods:
+            errors.append(f"test length {len(test_idx)} != expected {test_periods}")
+        
+        if errors:
+            invalid_folds.append((i, errors))
+        else:
+            valid_splits.append((i, train_idx, test_idx))
+    
+    # FAIL FAST: If any fold is invalid, abort entirely
+    if invalid_folds:
+        logger.error(f"{len(invalid_folds)}/{len(splits)} folds failed validation:")
+        for fold_id, errors in invalid_folds:
+            logger.error(f"  Fold {fold_id}: {', '.join(errors)}")
+        logger.error("Aborting backtest - reduce --folds or provide more data")
+        return
+    
+    logger.info(f"All {len(valid_splits)} folds validated successfully")
+    results = []
+    
+    for orig_fold_id, train_idx, test_idx in valid_splits:
+        logger.info(f"Fold {orig_fold_id + 1}: train[{train_idx[0]}:{train_idx[-1]}] test[{test_idx[0]}:{test_idx[-1]}]")
+        
+        result = evaluator.evaluate_fold(
+            model=model,
+            candles=df.reset_index(drop=True),
+            features=features_np,
+            train_idx=train_idx,
+            test_idx=test_idx,
+            fold_id=orig_fold_id,
+            device=device
+        )
+        
+        results.append(result)
+        
+        logger.info(f"  Trades: {result.n_trades}, Win Rate: {result.win_rate:.1%}, "
+                   f"Sharpe: {result.sharpe_ratio:.2f}, Max DD: {result.max_drawdown:.1%}")
+    
+    # Aggregate results
+    total_trades = sum(r.n_trades for r in results)
+    avg_win_rate = np.mean([r.win_rate for r in results if r.n_trades > 0])
+    avg_sharpe = np.mean([r.sharpe_ratio for r in results if r.n_trades > 0])
+    avg_expectancy = np.mean([r.expectancy for r in results if r.n_trades > 0])
+    max_drawdown = max(r.max_drawdown for r in results) if results else 0
+    
+    logger.info("\n" + "="*60)
+    logger.info("WALK-FORWARD BACKTEST RESULTS")
+    logger.info("="*60)
+    logger.info(f"Total Trades:    {total_trades}")
+    logger.info(f"Avg Win Rate:    {avg_win_rate:.1%}")
+    logger.info(f"Avg Sharpe:      {avg_sharpe:.2f}")
+    logger.info(f"Avg Expectancy:  {avg_expectancy:.4f}")
+    logger.info(f"Max Drawdown:    {max_drawdown:.1%}")
+    logger.info("="*60)
+    
+    # Decision: is model worth deploying?
+    if avg_sharpe > 0.5 and avg_expectancy > 0:
+        logger.info("✓ Model shows positive edge after costs - consider deploying")
+    elif avg_sharpe > 0:
+        logger.info("⚠ Model shows marginal edge - needs improvement")
+    else:
+        logger.info("✗ Model does NOT beat costs - do not deploy")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -312,6 +616,7 @@ def main():
     train_parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
     train_parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
     train_parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    train_parser.add_argument("--horizon", type=int, default=5, help="Label lookahead horizon (candles)")
     train_parser.add_argument("--resume", type=str, help="Resume from checkpoint")
     
     rl_parser = subparsers.add_parser("train-rl", help="Train reinforcement learning agent")
@@ -320,10 +625,14 @@ def main():
     serve_parser = subparsers.add_parser("serve", help="Start prediction API server")
     serve_parser.add_argument("--port", type=int, default=8000, help="Server port")
     
-    backtest_parser = subparsers.add_parser("backtest", help="Run backtest")
+    backtest_parser = subparsers.add_parser("backtest", help="Run walk-forward backtest")
     backtest_parser.add_argument("--start", type=str, required=True, help="Start date (YYYY-MM-DD)")
     backtest_parser.add_argument("--end", type=str, required=True, help="End date (YYYY-MM-DD)")
-    backtest_parser.add_argument("--model", type=str, help="Model to use")
+    backtest_parser.add_argument("--model", type=str, default="transformer", help="Model to use")
+    backtest_parser.add_argument("--folds", type=int, default=5, help="Number of walk-forward folds")
+    backtest_parser.add_argument("--purge", type=int, default=100, help="Purge gap (samples) between train/test")
+    backtest_parser.add_argument("--train-days", type=int, default=30, dest="train_days", help="Training window in days (default: 30)")
+    backtest_parser.add_argument("--test-days", type=int, default=7, dest="test_days", help="Test window in days (default: 7)")
     
     args = parser.parse_args()
     
