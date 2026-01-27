@@ -45,7 +45,20 @@ Preferred communication style: Simple, everyday language.
 - **Sentiment Integration**: Incorporates Fear & Greed Index, social sentiment, and news sentiment with caching.
 - **Multi-timeframe Confluence**: Scores signals across 5m, 15m, 1h, and 4h timeframes.
 - **Automated Paper Trading**: Features an ATR-based risk management system, Half-Kelly position sizing, and performance analytics.
-- **GPU Neural Network Training**: Supports 6+ deep learning architectures (Transformer, TFT, LSTM, CNN, VAE, GNN) trainable on local GPU with real-time status push and multi-timeframe data.
+- **GPU Neural Network Training**: Supports 12 deep learning architectures trainable on local GPU with real-time status push and multi-timeframe data:
+  - Transformers: TransformerPriceModel, TemporalFusionTransformer (TFT)
+  - LSTMs: BidirectionalLSTM, StackedLSTM, ConvLSTM
+  - CNNs: ResNetPrice, InceptionNet, WaveNet
+  - VAEs: MarketVAE, ConditionalVAE
+  - GNNs: CrossAssetGNN, TemporalGNN
+  - Ensembles: MetaLearner, AttentionEnsemble, MasterEnsemble
+- **GPU Trainer API**: FastAPI server at port 8000 with:
+  - `/predict` and `/predict/candles` endpoints for model inference
+  - `/models/load` and `/models/status` for model management
+  - Automatic model loading at startup from checkpoints
+  - Architecture-specific factory method handling each model's unique constructor signature
+  - Label mapping: 0=SHORT, 1=HOLD/NEUTRAL, 2=LONG (matches training labels)
+  - Instantiation error tracking with detailed status reporting
 - **Advanced Exit Logic**: Implements dynamic take-profit targets, MFE tracking, and failure stop detection.
 - **Unified Learning Controller**: Synchronizes Strategy Learner, Pattern Memory, and GPU Trainer to process consistent historical data ranges, with enhanced training status, ETA calculation, and staged decision logic.
 - **Multi-timeframe Data Download**: Parallel download of 1m, 5m, 15m, 1h, 4h data across 4 assets (BTC, ETH, SOL, BNB) with 8 concurrent streams, ordered by timeframe for optimal parallelism.
