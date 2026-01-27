@@ -37,6 +37,28 @@ Preferred communication style: Simple, everyday language.
 - **Persistence System**: All learning states, including pattern clusters and social media stats, are persisted in a database to ensure continuity across restarts.
 
 ### Machine Learning and Signal Generation
+
+#### Regression-Based Signal System (Institutional Upgrade)
+- **Edge Calculation**: `edge = (μ - cost) / σ` where μ = expected return, σ = uncertainty
+- **Signal Output Format**: action, confidence, expected_move, uncertainty, edge, cost_estimate, suggested_order_type, urgency, position_size_pct, stop_loss_pct, take_profit_pct, regime, expert_weights
+- **Regression Targets**: Compute μ (4h forward return), σ (uncertainty), P(move>cost), quantiles (p10/p50/p90), MFE/MAE
+- **Market Microstructure Data**: Funding rates, open interest, liquidations, order book depth, taker buy/sell volume from Binance Futures API
+- **Walk-Forward Evaluation**: Purged time-series splits with gap between train/test, after-cost PnL metrics, Sharpe ratio, maximum drawdown
+
+#### Regime Detection & Mixture-of-Experts
+- **Regime Types**: TRENDING, MEAN_REVERTING, HIGH_VOLATILITY, LOW_VOLATILITY, TRANSITION, UNKNOWN
+- **Expert Models**: 4 specialists (trend, mean-reversion, volatility, chaos) + gating network
+- **MoE Architecture**: GatingNetwork outputs soft weights, RegimeAwareExpert adapts to detected regime
+- **Expert Outputs**: Each expert produces (μ, σ), combined via uncertainty-weighted averaging
+
+#### Self-Supervised Pretraining
+- **Masked Time-Series**: Mask segments of input, predict masked values (BERT-style for time-series)
+- **Next-Step Distribution**: Predict quantiles of future returns (teaches uncertainty)
+- **Contrastive Learning**: Learn regime-invariant representations across assets
+- **Regime Clustering**: Deep clustering to discover market conditions without labels
+- **Pretraining Flow**: Self-supervised on billions of timesteps → fine-tune on trading objective
+
+#### Classification System (Legacy)
 - **ML Ensemble Predictor**: Combines rule-based, pattern-based, and OpenAI models with weighted voting for action-based predictions (P(LONG), P(SHORT), P(HOLD)).
 - **Pattern Memory System**: Stores and retrieves historical trade setups using cosine similarity.
 - **Comprehensive Feature Engine**: Computes 81 features (57 core + 24 embedding) including OHLCV, momentum, volatility, regime, Kalman filters, and 10 cross-asset features (ETH, SOL, BNB correlations, relative strength, momentum divergence, crypto sector momentum).
@@ -45,7 +67,9 @@ Preferred communication style: Simple, everyday language.
 - **Sentiment Integration**: Incorporates Fear & Greed Index, social sentiment, and news sentiment with caching.
 - **Multi-timeframe Confluence**: Scores signals across 5m, 15m, 1h, and 4h timeframes.
 - **Automated Paper Trading**: Features an ATR-based risk management system, Half-Kelly position sizing, and performance analytics.
-- **GPU Neural Network Training**: Supports 12 deep learning architectures trainable on local GPU with real-time status push and multi-timeframe data:
+
+#### GPU Neural Network Training
+- **Deep Learning Architectures**: Supports 12+ architectures trainable on local GPU with real-time status push and multi-timeframe data:
   - Transformers: TransformerPriceModel, TemporalFusionTransformer (TFT)
   - LSTMs: BidirectionalLSTM, StackedLSTM, ConvLSTM
   - CNNs: ResNetPrice, InceptionNet, WaveNet
@@ -54,6 +78,7 @@ Preferred communication style: Simple, everyday language.
   - Ensembles: MetaLearner, AttentionEnsemble, MasterEnsemble
 - **GPU Trainer API**: FastAPI server at port 8000 with:
   - `/predict` and `/predict/candles` endpoints for model inference
+  - `/predict/regression` endpoint returning institutional-grade signal format (μ, σ, edge, confidence, position sizing, stops)
   - `/models/load` and `/models/status` for model management
   - Automatic model loading at startup from checkpoints
   - Architecture-specific factory method handling each model's unique constructor signature

@@ -780,15 +780,19 @@ async def predict_regression(request: RegressionPredictionRequest):
         slippage = 0.0001 + 0.5 * request.current_volatility
         cost = (taker_fee * 2) + (slippage * 2)
         
-        # Calculate edge
-        edge = abs(mu) - cost
-        confidence = edge / max(sigma, 0.001) if sigma > 0 else 0
+        # Calculate edge per institutional spec: edge = (μ - cost) / σ
+        # This is the risk-adjusted expected profit
+        sigma_safe = max(sigma, 0.001)
+        edge = (abs(mu) - cost) / sigma_safe
         
-        # Determine action
-        min_confidence = 0.5
-        min_edge = 0.001
+        # Edge IS the confidence in this formulation
+        confidence = edge
         
-        should_trade = confidence >= min_confidence and edge >= min_edge
+        # Determine action based on edge threshold
+        # Edge > 0.5 means expected profit is 0.5 standard deviations above costs
+        min_edge_threshold = 0.5
+        
+        should_trade = edge >= min_edge_threshold
         
         if should_trade:
             action = "LONG" if mu > 0 else "SHORT"
@@ -796,15 +800,19 @@ async def predict_regression(request: RegressionPredictionRequest):
             action = "NO_TRADE"
         
         # Calculate position size using bounded Kelly
+        # Since edge = (mu - cost) / sigma, we use edge * sigma for original profit
         if should_trade and sigma > 0:
-            kelly = edge / (sigma ** 2)
+            expected_profit = edge * sigma  # Recover (mu - cost)
+            kelly = expected_profit / (sigma ** 2)  # Kelly = (mu - cost) / sigma^2
             half_kelly = kelly * 0.5
-            position_size_pct = min(half_kelly, 0.1)  # Max 10%
+            position_size_pct = max(0, min(half_kelly, 0.1))  # Max 10%
         else:
             position_size_pct = 0
         
         # Suggested order type
-        edge_maker = abs(mu) - (maker_fee * 2) - (slippage * 2)
+        # Calculate edge with maker fees to compare
+        cost_maker = (maker_fee * 2) + (slippage * 2)
+        edge_maker = (abs(mu) - cost_maker) / sigma_safe
         suggested_order = "TAKER" if edge > edge_maker * 1.5 else "MAKER"
         
         # Urgency
@@ -822,14 +830,11 @@ async def predict_regression(request: RegressionPredictionRequest):
         # Reasons
         reasons = []
         if should_trade:
-            reasons.append(f"Edge: {edge*100:.3f}% after costs")
-            reasons.append(f"Confidence: {confidence:.2f}σ")
-            reasons.append(f"Expected: {mu*100:.3f}%")
+            reasons.append(f"Edge: {edge:.2f}σ (risk-adjusted)")
+            reasons.append(f"Expected move: {mu*100:.3f}%")
+            reasons.append(f"Uncertainty: {sigma*100:.3f}%")
         else:
-            if confidence < min_confidence:
-                reasons.append(f"Low confidence: {confidence:.2f} < {min_confidence}")
-            if edge < min_edge:
-                reasons.append(f"Low edge: {edge*100:.3f}% < {min_edge*100:.3f}%")
+            reasons.append(f"Edge too low: {edge:.2f}σ < {min_edge_threshold}σ required")
         
         return RegressionPredictionResponse(
             action=action,

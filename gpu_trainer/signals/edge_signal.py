@@ -99,12 +99,19 @@ class EdgeSignalGenerator:
     """
     
     def __init__(self,
-                 min_confidence: float = 0.5,
-                 min_edge_pct: float = 0.001,
+                 min_edge_threshold: float = 0.5,
                  max_position_pct: float = 0.1,
                  costs: Optional[TradingCosts] = None):
-        self.min_confidence = min_confidence
-        self.min_edge_pct = min_edge_pct
+        """
+        Args:
+            min_edge_threshold: Minimum edge in σ units to trigger a trade.
+                               Edge = (μ - cost) / σ, so 0.5 means expected profit
+                               is at least 0.5 standard deviations above costs.
+            max_position_pct: Maximum position size as fraction of capital
+            costs: Transaction cost configuration
+        """
+        self.min_confidence = min_edge_threshold  # Kept for backward compatibility
+        self.min_edge_threshold = min_edge_threshold
         self.max_position_pct = max_position_pct
         self.costs = costs or TradingCosts()
         
@@ -113,19 +120,28 @@ class EdgeSignalGenerator:
                                 sigma: float,
                                 current_volatility: float) -> Tuple[float, float, float, bool]:
         """
-        Calculate edge metrics.
+        Calculate edge metrics using the institutional formula:
+            edge = (μ - cost) / σ
+        
+        This is the risk-adjusted expected profit that accounts for:
+        - Direction and magnitude of expected move (μ)
+        - Transaction costs (cost)
+        - Uncertainty/volatility (σ)
         
         Returns:
-            edge: Expected profit after costs
-            confidence: Risk-adjusted edge
+            edge: Risk-adjusted edge = (|μ| - cost) / σ
+            confidence: Edge value (same as edge in this formulation)
             cost: Transaction cost
             is_taker: Whether to use taker order
         """
         cost_maker = self.costs.round_trip_cost(current_volatility, is_taker=False)
         cost_taker = self.costs.round_trip_cost(current_volatility, is_taker=True)
         
-        edge_maker = abs(mu) - cost_maker
-        edge_taker = abs(mu) - cost_taker
+        # Edge calculation per institutional spec: edge = (μ - cost) / σ
+        # We use |μ| since direction is handled separately
+        sigma_safe = max(sigma, 0.001)
+        edge_maker = (abs(mu) - cost_maker) / sigma_safe
+        edge_taker = (abs(mu) - cost_taker) / sigma_safe
         
         urgency_threshold = 1.5  # Edge ratio threshold for taker
         
@@ -138,7 +154,8 @@ class EdgeSignalGenerator:
             cost = cost_maker
             edge = edge_maker
         
-        confidence = edge / max(sigma, 0.001) if sigma > 0 else 0
+        # In this formulation, edge IS the confidence (risk-adjusted score)
+        confidence = edge
         
         return edge, confidence, cost, is_taker
     
@@ -149,13 +166,16 @@ class EdgeSignalGenerator:
         """
         Calculate position size using bounded Kelly criterion.
         
-        Kelly fraction = edge / σ²
-        Bounded to prevent over-betting
+        Since edge = (μ - cost) / σ, we need:
+            Kelly = (μ - cost) / σ² = edge / σ
+        
+        Bounded to prevent over-betting.
         """
         if sigma <= 0 or edge <= 0:
             return 0
         
-        kelly = edge / (sigma ** 2)
+        # Edge is already (μ - cost) / σ, so Kelly = edge / σ
+        kelly = edge / sigma
         
         half_kelly = kelly * 0.5
         
@@ -231,10 +251,8 @@ class EdgeSignalGenerator:
             mu, sigma, current_volatility
         )
         
-        should_trade = (
-            confidence >= self.min_confidence and
-            edge >= self.min_edge_pct
-        )
+        # Edge is now in σ units: edge >= threshold means trade
+        should_trade = edge >= self.min_edge_threshold
         
         if should_trade:
             action = "LONG" if mu > 0 else "SHORT"
@@ -254,16 +272,14 @@ class EdgeSignalGenerator:
         
         reasons = []
         if should_trade:
-            reasons.append(f"Edge: {edge*100:.3f}% after costs")
-            reasons.append(f"Confidence: {confidence:.2f}σ")
+            reasons.append(f"Edge: {edge:.2f}σ (risk-adjusted)")
             reasons.append(f"Expected move: {mu*100:.3f}%")
+            reasons.append(f"Uncertainty: {sigma*100:.3f}%")
             if regime != "UNKNOWN":
                 reasons.append(f"Regime: {regime}")
         else:
-            if confidence < self.min_confidence:
-                reasons.append(f"Low confidence: {confidence:.2f} < {self.min_confidence}")
-            if edge < self.min_edge_pct:
-                reasons.append(f"Insufficient edge: {edge*100:.3f}% < {self.min_edge_pct*100:.3f}%")
+            if edge < self.min_confidence:
+                reasons.append(f"Edge too low: {edge:.2f}σ < {self.min_confidence}σ threshold")
         
         signal = EdgeSignal(
             timestamp=timestamp,
@@ -407,11 +423,18 @@ class ModelSignalInterface:
 
 
 def create_signal_generator(
-    min_confidence: float = 0.5,
-    min_edge_pct: float = 0.001,
+    min_edge_threshold: float = 0.5,
     max_position_pct: float = 0.1
 ) -> EdgeSignalGenerator:
-    """Factory function to create signal generator."""
+    """
+    Factory function to create signal generator.
+    
+    Args:
+        min_edge_threshold: Minimum edge in σ units to trigger a trade.
+                           Default 0.5 means expected profit must be at least
+                           0.5 standard deviations above transaction costs.
+        max_position_pct: Maximum position size as fraction of capital
+    """
     costs = TradingCosts(
         maker_fee=0.0002,
         taker_fee=0.0004,
@@ -421,8 +444,7 @@ def create_signal_generator(
     )
     
     return EdgeSignalGenerator(
-        min_confidence=min_confidence,
-        min_edge_pct=min_edge_pct,
+        min_edge_threshold=min_edge_threshold,
         max_position_pct=max_position_pct,
         costs=costs
     )
