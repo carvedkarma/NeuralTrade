@@ -33,6 +33,7 @@ import { computeFeatures, getLatestFeatures, detectCandlestickPatterns, analyzeV
 import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-engine";
 import { getSentimentData, interpretFearGreed, getNewsStats } from "./sentiment-api";
 import { storePattern, findSimilarPatterns, getStoredPatternStats, mapKalmanToRegime, getLastSimilarityDistribution, initializePatternClusters, getPatternClusterStats, updateDataCounts, canCreateNewPatterns, canCreateNewPatternsWithCounts, getPatternRequirements, patternClusters, loadPatternClustersFromDb, savePatternClustersToDb } from "./pattern-memory";
+import { getLatestGPUPrediction } from "./ml-predictor";
 import { processCandle as processPaperTrade } from "./paper/engine";
 import { initializeUnifiedLearning, updatePatternMemoryProgress, getUnifiedProgressReport, refreshGpuTrainerStats } from "./unified-learning-controller";
 import { isAutoTradingEnabled, isPaperTradingEnabled, getConfig as getPaperConfig } from "./paper/config";
@@ -1773,6 +1774,73 @@ export class MemStorage implements IStorage {
       );
     }
     
+    // Get GPU regression prediction for institutional-grade metrics
+    const gpuPrediction = getLatestGPUPrediction("BTCUSDT");
+    
+    // Calculate regression-based edge: edge = (μ - cost) / σ
+    let mu: number | undefined;
+    let sigma: number | undefined;
+    let regressionEdge: number | undefined;
+    let positionSizePct: number | undefined;
+    let stopLossPct: number | undefined;
+    let takeProfitPct: number | undefined;
+    let urgency: "low" | "medium" | "high" | undefined;
+    let suggestedOrderType: "limit" | "market" | undefined;
+    
+    if (gpuPrediction) {
+      // GPU quantiles are already in ATR-scaled return units (no extra scaling needed)
+      const q10 = gpuPrediction.quantile10 ?? 0;
+      const q50 = gpuPrediction.quantile50 ?? 0;
+      const q90 = gpuPrediction.quantile90 ?? 0;
+      
+      // mu = median expected return (already in return units from GPU)
+      // sigma = uncertainty from quantile spread (already in return units)
+      mu = q50;
+      sigma = (q90 - q10) / 2;
+      
+      // Edge = (μ - cost) / σ (in standard deviation units)
+      // Both mu and costs are in return units (fractional)
+      // Note: We use signed mu (not abs) to preserve directional information
+      if (sigma > 0.0001) {
+        // For directional trades, mu is signed (positive for long, negative for short)
+        // Edge reflects how many σ above costs the expected return is
+        regressionEdge = (mu - costs) / sigma;
+      }
+      
+      // Position sizing using half-Kelly with 10% max
+      // Kelly formula: f* = edge/σ², but edge already in σ units so f* = edge/σ
+      // We use half-Kelly for conservatism, capped at 10%
+      if (regressionEdge !== undefined && regressionEdge > 0) {
+        const kellyFraction = regressionEdge; // edge is already in σ units
+        const halfKelly = kellyFraction / 2;
+        positionSizePct = Math.max(0, Math.min(0.10, halfKelly));
+      }
+      
+      // Stop loss and take profit based on ATR
+      const atr = calculateATR(candles, 14);
+      const atrPercent = atr / lastCandle.close;
+      stopLossPct = atrPercent * 1.5; // 1.5 ATR stop
+      takeProfitPct = atrPercent * 2.5; // 2.5 ATR target (1.67 R:R)
+      
+      // Urgency based on edge strength (in σ units)
+      if (regressionEdge !== undefined) {
+        if (regressionEdge >= 1.0) {
+          urgency = "high";
+        } else if (regressionEdge >= 0.5) {
+          urgency = "medium";
+        } else {
+          urgency = "low";
+        }
+      }
+      
+      // Order type based on urgency
+      suggestedOrderType = urgency === "high" ? "market" : "limit";
+    }
+    
+    // Keep edge in different formats: regression edge in σ units, or simple edge as return difference
+    // Frontend will display appropriately based on which is available
+    const finalEdge = regressionEdge ?? edge;
+    
     return {
       timestamp: lastCandle.timestamp,
       signal,
@@ -1782,10 +1850,17 @@ export class MemStorage implements IStorage {
       probChop,
       expectedMove,
       costs,
-      edge,
+      edge: finalEdge,
       regime,
       riskMode,
       topFeatures: features,
+      mu,
+      sigma,
+      positionSizePct,
+      stopLossPct,
+      takeProfitPct,
+      urgency,
+      suggestedOrderType,
     };
   }
 

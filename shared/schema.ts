@@ -57,6 +57,14 @@ export const signalSchema = z.object({
   regime: regimeTypeSchema,
   riskMode: riskModeSchema,
   topFeatures: z.array(featureSchema),
+  mu: z.number().optional(),
+  sigma: z.number().optional(),
+  positionSizePct: z.number().optional(),
+  stopLossPct: z.number().optional(),
+  takeProfitPct: z.number().optional(),
+  urgency: z.enum(["low", "medium", "high"]).optional(),
+  suggestedOrderType: z.enum(["limit", "market"]).optional(),
+  expertWeights: z.record(z.number()).optional(),
 });
 export type Signal = z.infer<typeof signalSchema>;
 

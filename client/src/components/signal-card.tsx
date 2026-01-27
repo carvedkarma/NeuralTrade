@@ -1,6 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import type { Signal, SignalType } from "@shared/schema";
-import { TrendingUp, TrendingDown, Minus, ArrowUp, ArrowDown } from "lucide-react";
+import { TrendingUp, TrendingDown, Minus, ArrowUp, ArrowDown, Target, AlertTriangle, Zap } from "lucide-react";
 import { motion } from "framer-motion";
 
 interface SignalCardProps {
@@ -13,14 +14,31 @@ const signalConfig: Record<SignalType, { icon: typeof TrendingUp; color: string;
   HOLD: { icon: Minus, color: "text-amber-400", bg: "bg-amber-500/10", border: "border-amber-500/30" },
 };
 
+const urgencyConfig: Record<string, { color: string; bg: string }> = {
+  low: { color: "text-slate-400", bg: "bg-slate-500/20" },
+  medium: { color: "text-amber-400", bg: "bg-amber-500/20" },
+  high: { color: "text-red-400", bg: "bg-red-500/20" },
+};
+
 export function SignalCard({ signal }: SignalCardProps) {
   const config = signalConfig[signal.signal];
   const Icon = config.icon;
+  const hasRegressionData = signal.mu !== undefined && signal.sigma !== undefined;
+  const urgency = signal.urgency || "low";
+  const urgencyStyle = urgencyConfig[urgency];
 
   return (
     <Card className="overflow-visible" data-testid="card-signal">
       <CardHeader className="pb-3">
-        <CardTitle className="text-sm font-medium text-muted-foreground" data-testid="text-signal-title">Current Signal</CardTitle>
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <CardTitle className="text-sm font-medium text-muted-foreground" data-testid="text-signal-title">Current Signal</CardTitle>
+          {signal.urgency && (
+            <Badge className={`${urgencyStyle.bg} ${urgencyStyle.color} border-0`} data-testid="badge-urgency">
+              <Zap className="h-3 w-3 mr-1" />
+              {urgency.toUpperCase()}
+            </Badge>
+          )}
+        </div>
       </CardHeader>
       <CardContent className="space-y-4">
         <motion.div
@@ -55,7 +73,9 @@ export function SignalCard({ signal }: SignalCardProps) {
           </div>
 
           <div className="space-y-1">
-            <p className="text-xs text-muted-foreground">Edge</p>
+            <p className="text-xs text-muted-foreground">
+              {hasRegressionData ? "Edge (risk-adjusted)" : "Edge"}
+            </p>
             <div className="flex items-center gap-1">
               {signal.edge > 0 ? (
                 <ArrowUp className="h-4 w-4 text-emerald-400" />
@@ -63,11 +83,37 @@ export function SignalCard({ signal }: SignalCardProps) {
                 <ArrowDown className="h-4 w-4 text-red-400" />
               )}
               <span className={`text-sm font-mono font-medium ${signal.edge > 0 ? "text-emerald-400" : "text-red-400"}`} data-testid="text-edge">
-                {signal.edge > 0 ? "+" : ""}{(signal.edge * 100).toFixed(2)}%
+                {hasRegressionData 
+                  ? `${signal.edge > 0 ? "+" : ""}${signal.edge.toFixed(2)}σ`
+                  : `${signal.edge > 0 ? "+" : ""}${(signal.edge * 100).toFixed(2)}%`
+                }
               </span>
             </div>
           </div>
         </div>
+
+        {hasRegressionData && (
+          <div className="grid grid-cols-2 gap-3 pt-2 border-t border-border">
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground flex items-center gap-1">
+                <Target className="h-3 w-3" />
+                Expected Return (μ)
+              </p>
+              <span className={`text-sm font-mono font-medium ${(signal.mu ?? 0) > 0 ? "text-emerald-400" : (signal.mu ?? 0) < 0 ? "text-red-400" : ""}`} data-testid="text-mu">
+                {(signal.mu ?? 0) > 0 ? "+" : ""}{((signal.mu ?? 0) * 100).toFixed(3)}%
+              </span>
+            </div>
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground flex items-center gap-1">
+                <AlertTriangle className="h-3 w-3" />
+                Uncertainty (σ)
+              </p>
+              <span className="text-sm font-mono font-medium" data-testid="text-sigma">
+                {((signal.sigma ?? 0) * 100).toFixed(3)}%
+              </span>
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-3 pt-2 border-t border-border">
           <div className="space-y-1">
@@ -79,6 +125,44 @@ export function SignalCard({ signal }: SignalCardProps) {
             <span className="text-sm font-mono text-muted-foreground" data-testid="text-costs">{(signal.costs * 100).toFixed(3)}%</span>
           </div>
         </div>
+
+        {signal.positionSizePct !== undefined && (
+          <div className="grid grid-cols-3 gap-3 pt-2 border-t border-border">
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">Position Size</p>
+              <span className="text-sm font-mono font-medium text-primary" data-testid="text-position-size">
+                {(signal.positionSizePct * 100).toFixed(1)}%
+              </span>
+            </div>
+            {signal.stopLossPct !== undefined && (
+              <div className="space-y-1">
+                <p className="text-xs text-muted-foreground">Stop Loss</p>
+                <span className="text-sm font-mono text-red-400" data-testid="text-stop-loss">
+                  -{(signal.stopLossPct * 100).toFixed(2)}%
+                </span>
+              </div>
+            )}
+            {signal.takeProfitPct !== undefined && (
+              <div className="space-y-1">
+                <p className="text-xs text-muted-foreground">Take Profit</p>
+                <span className="text-sm font-mono text-emerald-400" data-testid="text-take-profit">
+                  +{(signal.takeProfitPct * 100).toFixed(2)}%
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {signal.suggestedOrderType && (
+          <div className="pt-2 border-t border-border">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-muted-foreground">Order Type</p>
+              <Badge variant="outline" className="text-xs" data-testid="badge-order-type">
+                {signal.suggestedOrderType.toUpperCase()}
+              </Badge>
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
