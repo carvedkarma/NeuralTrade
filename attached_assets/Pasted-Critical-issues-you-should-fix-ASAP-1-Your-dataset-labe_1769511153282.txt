@@ -1,0 +1,118 @@
+Critical issues you should fix ASAP 🚨
+1) Your dataset label alignment is likely off by 1 bar (training vs inference mismatch)
+
+In data/pipeline.py:
+
+# TradingDataset.__getitem__
+x = self.features[idx:idx + self.sequence_length]
+y = self.labels[idx + self.sequence_length]
+
+
+This trains the model to predict the label at t = end_of_window + 1 bar, not the label at the last bar inside the window.
+
+But your inference (/predict and /predict/candles) feeds the latest seq_len features and expects the prediction to correspond to the “current moment”. That mismatch can seriously wreck real performance.
+
+✅ Fix (most common for trading):
+
+y = self.labels[idx + self.sequence_length - 1]
+
+
+If you intentionally want “next bar decision”, then inference must also shift accordingly (and your trading engine must execute knowing it’s predicting the next bar, not the current one). Right now it’s inconsistent.
+
+2) /predict/candles is broken: it calls a method that doesn’t exist
+
+In api/server.py you do:
+
+fe = FeatureEngineer()
+features_df = fe.compute_features(df)
+
+
+But in data/pipeline.py, FeatureEngineer has compute_technical_features(), not compute_features().
+
+So this endpoint will crash with AttributeError (not caught by your ImportError handling).
+
+✅ Fix:
+Use:
+
+features_df = fe.compute_technical_features(df)
+
+
+(or if you intended the dashboard spec pipeline, call the correct function like compute_features_from_spec(...) — but right now your code isn’t wired that way.)
+
+3) Your saved scaler format doesn’t match how the API uses it
+
+Training saves scalers like this:
+
+engineer.save_scalers(...joblib)   # saves a dict of per-column scalers
+
+
+So joblib.load() gives a dict, not a single sklearn scaler.
+
+But in api/server.py, you later do:
+
+features_np = model_manager.scaler.transform(features_np)
+
+
+That will fail (dict has no .transform), or silently be “None path” and you’ll run on raw features, which makes live accuracy collapse.
+
+✅ Fix options (pick one):
+
+Option A (minimal change, matches your current training):
+
+In server, reconstruct a DataFrame with the same columns and apply your FeatureEngineer’s .transform() using the loaded dict scalers.
+
+Example approach:
+
+fe.scalers = loaded_scalers_dict
+
+features_scaled_df = fe.transform(features_df)
+
+then take .values
+
+Option B (cleaner long-term):
+
+Save one sklearn transformer (like StandardScaler on the full matrix, or a ColumnTransformer)
+
+Then API can safely call .transform() on the full matrix.
+
+Right now training and serving are speaking different “scaler languages”.
+
+Important quality issues (not fatal, but will improve results) ⚠️
+4) Labels are stored as FloatTensor in the Dataset
+
+TradingDataset uses:
+
+self.labels = torch.FloatTensor(labels)
+
+
+You do cast to target.long() inside the trainer (so it “works”), but it’s sloppy and can create subtle issues in metrics / numpy arrays.
+
+✅ Better:
+
+self.labels = torch.LongTensor(labels)
+
+5) You’re probably getting extreme class imbalance
+
+Your label threshold is:
+
+threshold=0.001
+
+trading_cost=0.0009
+
+net threshold ≈ 0.0019 (0.19%)
+
+On 15m BTC this can produce lots of HOLD and fewer LONG/SHORT.
+
+✅ Add class weights (you already support it in Trainer):
+
+compute class distribution from training labels
+
+pass class_weights into Trainer(...)
+
+6) Validation design
+
+You made a good single split, but for trading you’ll get more truthful results with:
+
+walk-forward validation (you already have training/walk_forward.py)
+
+plus purging/embargo per fold
