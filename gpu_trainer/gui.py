@@ -972,16 +972,18 @@ class GPUTrainerGUI:
         model_type = self.model_var.get()
         defaults = OPTIMAL_DEFAULTS.get(model_type, OPTIMAL_DEFAULTS["transformer"])
         
-        # Multi-asset training configuration
+        # Multi-asset, multi-timeframe training configuration
         training_assets = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
-        training_timeframe = "15m"
-        horizon = 16  # 4 hours on 15m candles
+        training_timeframes = ["1m", "5m", "15m", "1h", "4h"]  # ALL timeframes
         
-        # Check for training data - need at least BTC
+        # Horizon varies by timeframe (all ~4 hours of price movement)
+        horizon_by_tf = {"1m": 240, "5m": 48, "15m": 16, "1h": 4, "4h": 1}
+        
+        # Check for training data - need at least BTC for some timeframe
         data_dir = Path(__file__).parent / "data_cache"
-        btc_path = data_dir / f"BTCUSDT_{training_timeframe}.parquet"
+        has_data = any((data_dir / f"BTCUSDT_{tf}.parquet").exists() for tf in training_timeframes)
         
-        if not btc_path.exists():
+        if not has_data:
             result = messagebox.askyesno(
                 "No Data", 
                 f"No training data found.\nDownload data first?"
@@ -1009,9 +1011,10 @@ class GPUTrainerGUI:
             try:
                 self.log(f"")
                 self.log(f"{'='*55}")
-                self.log(f"  MULTI-ASSET TRAINING: {model_type.upper()}")
+                self.log(f"  MULTI-ASSET MULTI-TIMEFRAME TRAINING: {model_type.upper()}")
                 self.log(f"  Epochs: {epochs} | Batch: {batch_size} | LR: {lr}")
-                self.log(f"  Horizon: {horizon} bars (~4h) | Cost: {cost_mode} ({trading_cost*100:.2f}%)")
+                self.log(f"  Timeframes: {', '.join(training_timeframes)}")
+                self.log(f"  Cost: {cost_mode} ({trading_cost*100:.2f}%)")
                 self.log(f"  Assets: {', '.join(training_assets)}")
                 self.log(f"{'='*55}")
                 self.log(f"")
@@ -1024,37 +1027,38 @@ class GPUTrainerGUI:
                 from torch.utils.data import DataLoader
                 from training.trainer import Trainer
                 
-                # === MULTI-ASSET DATA LOADING ===
+                # === MULTI-ASSET MULTI-TIMEFRAME DATA LOADING ===
+                # Load data from ALL timeframes for each asset
                 all_dfs = []
+                all_horizons = []  # Track horizon for each df
+                total_candles = 0
+                
                 for asset in training_assets:
-                    asset_path = data_dir / f"{asset}_{training_timeframe}.parquet"
-                    if asset_path.exists():
-                        df = pd.read_parquet(asset_path)
-                        df['symbol'] = asset
-                        all_dfs.append(df)
-                        self.log(f"  {asset}: {len(df):,} candles")
-                    else:
-                        self.log(f"  {asset}: NOT FOUND (skipped)")
-                    time.sleep(0)  # UI yield
+                    asset_candles = 0
+                    for tf in training_timeframes:
+                        asset_path = data_dir / f"{asset}_{tf}.parquet"
+                        if asset_path.exists():
+                            df = pd.read_parquet(asset_path)
+                            df['symbol'] = asset
+                            df['timeframe'] = tf
+                            all_dfs.append(df)
+                            all_horizons.append(horizon_by_tf.get(tf, 16))
+                            asset_candles += len(df)
+                            self.log(f"  {asset} {tf}: {len(df):,} candles")
+                        time.sleep(0)  # UI yield
+                    if asset_candles > 0:
+                        total_candles += asset_candles
+                
+                self.log(f"")
+                self.log(f"Total: {total_candles:,} candles across {len(all_dfs)} asset-timeframe pairs")
                 
                 if not all_dfs:
                     self.log("ERROR: No data files found!")
                     self.root.after(0, self.training_complete)
                     return
                 
-                # Load 1h and 4h data for higher timeframe features (if available)
-                htf_features = {}
-                for asset in training_assets:
-                    for htf in ["1h", "4h"]:
-                        htf_path = data_dir / f"{asset}_{htf}.parquet"
-                        if htf_path.exists():
-                            htf_df = pd.read_parquet(htf_path)
-                            htf_features[f"{asset}_{htf}"] = htf_df
-                            self.log(f"  {asset} {htf}: {len(htf_df):,} (context)")
-                        time.sleep(0)
-                
                 self.log(f"")
-                self.log(f"Processing features per-asset with time-based splits...")
+                self.log(f"Processing features per-asset-timeframe with time-based splits...")
                 
                 # === CRITICAL FIX: SPLIT PER-ASSET BY TIME FIRST ===
                 # This prevents label leakage at train/val boundaries
@@ -1068,10 +1072,14 @@ class GPUTrainerGUI:
                 engineer = FeatureEngineer()
                 
                 for i, df in enumerate(all_dfs):
-                    asset = training_assets[i] if i < len(training_assets) else f"asset_{i}"
+                    # Get asset and timeframe from df metadata
+                    asset = df['symbol'].iloc[0] if 'symbol' in df.columns else f"asset_{i}"
+                    tf = df['timeframe'].iloc[0] if 'timeframe' in df.columns else "15m"
+                    horizon = all_horizons[i]  # Use timeframe-specific horizon
+                    
                     n = len(df)
                     
-                    # Time-based split for this asset
+                    # Time-based split for this asset-timeframe
                     n_train = int(n * train_ratio)
                     n_val = int(n * val_ratio)
                     
@@ -1084,6 +1092,7 @@ class GPUTrainerGUI:
                     val_features = engineer.compute_technical_features(val_df).fillna(0)
                     
                     # Create labels on each split (no cross-boundary leakage)
+                    # Use timeframe-specific horizon (1m: 240 bars, 5m: 48 bars, 15m: 16 bars, etc.)
                     train_labels = create_labels(train_df, horizon=horizon, threshold=0.001, trading_cost=trading_cost)
                     val_labels = create_labels(val_df, horizon=horizon, threshold=0.001, trading_cost=trading_cost)
                     
@@ -1102,7 +1111,7 @@ class GPUTrainerGUI:
                     val_features_list.append(val_features)
                     val_labels_list.append(val_labels)
                     
-                    self.log(f"  {asset}: train={len(train_features):,}, val={len(val_features):,}")
+                    self.log(f"  {asset} {tf} (h={horizon}): train={len(train_features):,}, val={len(val_features):,}")
                     time.sleep(0)  # UI yield
                 
                 # Concatenate all assets (now properly split per-asset)
@@ -1295,6 +1304,9 @@ class GPUTrainerGUI:
         if self.is_training:
             self.log("Stopping training (finishing current epoch)...")
             self.is_training = False
+            # Also stop the train-all sequence if running
+            if hasattr(self, '_train_all_stopped'):
+                self._train_all_stopped = True
             
     def train_all_models(self):
         if self.is_training:
@@ -1310,22 +1322,35 @@ class GPUTrainerGUI:
             
         def train_sequence():
             models = list(OPTIMAL_DEFAULTS.keys())
+            self._train_all_stopped = False  # Flag to allow manual stop
+            
             for i, model in enumerate(models):
-                if not self.is_training and i > 0:
-                    self.log(f"Training sequence stopped")
+                # Check if user manually stopped the sequence
+                if self._train_all_stopped:
+                    self.log(f"Training sequence stopped by user")
                     break
                     
                 self.log(f"")
-                self.log(f"=== Model {i+1}/6: {model.upper()} ===")
+                self.log(f"=== Model {i+1}/{len(models)}: {model.upper()} ===")
                 self.root.after(0, lambda m=model: self.model_var.set(m))
                 self.root.after(100, self.start_training)
                 
-                # Wait for training to start
-                time.sleep(1)
+                # Wait for training to start (with timeout)
+                start_wait = 0
+                while not self.is_training and start_wait < 10:
+                    time.sleep(0.5)
+                    start_wait += 1
+                    
+                if not self.is_training:
+                    self.log(f"WARNING: Training failed to start for {model}, skipping...")
+                    continue
                 
-                # Wait for training to complete
+                # Wait for training to complete (is_training becomes False when done)
                 while self.is_training:
                     time.sleep(1)
+                    
+                # Small delay between models
+                time.sleep(1)
                     
             self.log("")
             self.log("=== All models complete! ===")

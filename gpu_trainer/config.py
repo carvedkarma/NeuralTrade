@@ -41,7 +41,7 @@ class TrainingConfig:
     learning_rate: float = 1e-4
     weight_decay: float = 1e-5
     epochs: int = 100
-    patience: int = 10
+    patience: int = 25  # Increased from 10 to allow model recovery from temporary val_loss spikes
     gradient_clip: float = 1.0  # Standard gradient clipping
     warmup_steps: int = 1000
     
