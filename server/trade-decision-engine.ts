@@ -377,3 +377,158 @@ export function checkTimeStop(
   
   return { shouldClose: false, reason: "" };
 }
+
+// ===============================================
+// SIGNAL THRESHOLD TUNING FOR CLASSIFICATION MODELS
+// ===============================================
+
+export interface ClassificationProbabilities {
+  pShort: number;   // P(SHORT) - class 0
+  pNeutral: number; // P(NEUTRAL) - class 1  
+  pLong: number;    // P(LONG) - class 2
+}
+
+export interface SignalThresholdConfig {
+  // Score threshold for emitting signals (default 0.15 for ~2-3 signals/day)
+  scoreThreshold: number;
+  // Minimum confidence (max prob) to consider signal valid
+  minConfidence: number;
+  // Margin between top 2 probabilities
+  minMargin: number;
+}
+
+export const DEFAULT_SIGNAL_THRESHOLD: SignalThresholdConfig = {
+  scoreThreshold: 0.15,   // |pLong - pShort| must exceed this
+  minConfidence: 0.45,    // max(pLong, pShort, pNeutral) must exceed this
+  minMargin: 0.10         // Difference between 1st and 2nd highest prob
+};
+
+/**
+ * Compute directional score from classification probabilities
+ * 
+ * Score = pLong - pShort
+ * - Positive = bullish bias
+ * - Negative = bearish bias
+ * - Near zero = no clear direction
+ */
+export function computeDirectionalScore(probs: ClassificationProbabilities): number {
+  return probs.pLong - probs.pShort;
+}
+
+/**
+ * Compute confidence from probabilities (max probability)
+ */
+export function computeProbConfidence(probs: ClassificationProbabilities): number {
+  return Math.max(probs.pShort, probs.pNeutral, probs.pLong);
+}
+
+/**
+ * Compute margin between top 2 probabilities
+ * Higher margin = more decisive prediction
+ */
+export function computeProbMargin(probs: ClassificationProbabilities): number {
+  const sorted = [probs.pShort, probs.pNeutral, probs.pLong].sort((a, b) => b - a);
+  return sorted[0] - sorted[1];
+}
+
+/**
+ * Apply signal threshold to classification probabilities
+ * 
+ * This is the key function for tuning signal frequency:
+ * - Higher scoreThreshold = fewer, higher-conviction signals
+ * - Lower scoreThreshold = more signals, lower average quality
+ * 
+ * Recommended tuning: Adjust scoreThreshold to hit ~2-3 signals/day
+ */
+export function applySignalThreshold(
+  probs: ClassificationProbabilities,
+  config: SignalThresholdConfig = DEFAULT_SIGNAL_THRESHOLD
+): { 
+  action: "LONG" | "SHORT" | "HOLD";
+  score: number;
+  confidence: number;
+  margin: number;
+  meetsThreshold: boolean;
+  reasons: string[];
+} {
+  const score = computeDirectionalScore(probs);
+  const confidence = computeProbConfidence(probs);
+  const margin = computeProbMargin(probs);
+  
+  const reasons: string[] = [];
+  
+  // Check if score exceeds threshold
+  const scoreExceedsThreshold = Math.abs(score) >= config.scoreThreshold;
+  const confidenceOk = confidence >= config.minConfidence;
+  const marginOk = margin >= config.minMargin;
+  
+  if (!scoreExceedsThreshold) {
+    reasons.push(`Score ${score.toFixed(3)} below threshold ${config.scoreThreshold}`);
+  }
+  if (!confidenceOk) {
+    reasons.push(`Confidence ${confidence.toFixed(3)} below min ${config.minConfidence}`);
+  }
+  if (!marginOk) {
+    reasons.push(`Margin ${margin.toFixed(3)} below min ${config.minMargin}`);
+  }
+  
+  const meetsThreshold = scoreExceedsThreshold && confidenceOk && marginOk;
+  
+  if (!meetsThreshold) {
+    return {
+      action: "HOLD",
+      score,
+      confidence,
+      margin,
+      meetsThreshold: false,
+      reasons
+    };
+  }
+  
+  // Determine direction from score sign
+  const action = score > 0 ? "LONG" : "SHORT";
+  reasons.push(`Score ${score.toFixed(3)} meets threshold ${config.scoreThreshold}`);
+  reasons.push(`Confidence ${confidence.toFixed(3)} >= ${config.minConfidence}`);
+  reasons.push(`Margin ${margin.toFixed(3)} >= ${config.minMargin}`);
+  
+  return {
+    action,
+    score,
+    confidence,
+    margin,
+    meetsThreshold: true,
+    reasons
+  };
+}
+
+/**
+ * Compute optimal threshold for target signal frequency
+ * 
+ * Given historical probability data and target signals per day,
+ * returns the threshold that would achieve that frequency.
+ * 
+ * @param historicalScores Array of |pLong - pShort| values from backtest
+ * @param targetSignalsPerDay Desired number of signals per day
+ * @param barsPerDay Number of bars per day (e.g., 96 for 15m candles)
+ */
+export function computeOptimalThreshold(
+  historicalScores: number[],
+  targetSignalsPerDay: number,
+  barsPerDay: number
+): number {
+  if (historicalScores.length === 0) return 0.15;
+  
+  // Sort scores in descending order
+  const sorted = [...historicalScores].sort((a, b) => b - a);
+  
+  // Calculate total days of data
+  const totalDays = historicalScores.length / barsPerDay;
+  
+  // Number of signals needed for target frequency
+  const totalSignalsNeeded = targetSignalsPerDay * totalDays;
+  
+  // Find the threshold that would give us this many signals
+  const index = Math.min(Math.floor(totalSignalsNeeded), sorted.length - 1);
+  
+  return sorted[index] || 0.15;
+}

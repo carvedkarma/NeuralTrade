@@ -91,6 +91,25 @@ class NoTradeConfig:
     funding_flip_threshold: float = 0.001
 
 @dataclass
+class CostModeConfig:
+    """Trading cost modes for label creation"""
+    # Cost modes: defines round-trip trading costs for different execution strategies
+    TAKER_TAKER = 0.0009   # Conservative: taker entry + taker exit (0.09%)
+    MAKER_TAKER = 0.0006   # Optimistic: maker entry + taker exit (0.06%)
+    MAKER_MAKER = 0.0004   # Aggressive: maker entry + maker exit (0.04%)
+    
+    current_mode: str = "taker_taker"  # Default to conservative
+    
+    def get_cost(self) -> float:
+        """Get round-trip cost for current mode"""
+        costs = {
+            "taker_taker": self.TAKER_TAKER,
+            "maker_taker": self.MAKER_TAKER,
+            "maker_maker": self.MAKER_MAKER
+        }
+        return costs.get(self.current_mode, self.TAKER_TAKER)
+
+@dataclass
 class InstitutionConfig:
     """Institution-grade trading configuration"""
     # Horizon-specific configs
@@ -105,13 +124,14 @@ class InstitutionConfig:
     ))
     
     no_trade: NoTradeConfig = field(default_factory=NoTradeConfig)
+    cost_mode: CostModeConfig = field(default_factory=CostModeConfig)
     
-    # Trading costs (futures)
+    # Trading costs (futures) - base values
     maker_fee: float = 0.0002
     taker_fee: float = 0.0004
     slippage: float = 0.0001
     spread_estimate: float = 0.0002
-    total_round_trip: float = 0.0009
+    total_round_trip: float = 0.0009  # Default taker/taker
     
     # Position sizing
     risk_cap_per_trade: float = 0.0025   # 0.25% equity per trade

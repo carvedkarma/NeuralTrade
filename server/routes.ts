@@ -11,6 +11,7 @@ import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
 import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning, loadCandleTimestamps } from "./unified-learning-controller";
 import { recalculatePatternLabels } from "./pattern-memory";
+import { edgeTracker } from "./edge-tracker";
 import { 
   getAvailableTimeframes, 
   getDataRange, 
@@ -229,6 +230,31 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error getting training status:", error);
       res.status(500).json({ error: "Failed to get training status" });
+    }
+  });
+
+  // Edge Tracking Metrics - Track signal performance
+  app.get("/api/edge-metrics", async (req, res) => {
+    try {
+      const metrics = edgeTracker.computeMetrics();
+      res.json({
+        success: true,
+        metrics,
+        report: edgeTracker.getEdgeReport()
+      });
+    } catch (error) {
+      console.error("Error getting edge metrics:", error);
+      res.status(500).json({ error: "Failed to get edge metrics" });
+    }
+  });
+
+  app.post("/api/edge-metrics/clear", async (req, res) => {
+    try {
+      edgeTracker.clearResults();
+      res.json({ success: true, message: "Edge tracking results cleared" });
+    } catch (error) {
+      console.error("Error clearing edge metrics:", error);
+      res.status(500).json({ error: "Failed to clear edge metrics" });
     }
   });
 

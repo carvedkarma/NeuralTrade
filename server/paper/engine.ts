@@ -14,6 +14,7 @@ import {
   type TradeDecision
 } from "../trade-decision-engine";
 import { HORIZON_CONFIG, NO_TRADE_CONDITIONS } from "../gpu-data-export";
+import { edgeTracker } from "../edge-tracker";
 
 export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK";
 
@@ -980,6 +981,15 @@ export async function closePosition(
     
     // INSTITUTION-GRADE: Track loss streak for NO-TRADE conditions
     recordTradeResult(totalRealizedPnl > 0);
+    
+    // EDGE TRACKING: Record signal result for edge metrics
+    edgeTracker.recordSignal(
+      position.side as "LONG" | "SHORT",
+      position.entryPrice,
+      slippedExitPrice,
+      16,  // Default horizon (can be enhanced to store actual horizon per position)
+      (position as any).signalConfidence || 0.5
+    );
   }
 
   return { pnl: netPnl, isPartial };

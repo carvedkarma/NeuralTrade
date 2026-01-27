@@ -321,7 +321,26 @@ class GPUTrainerGUI:
         self.model_desc_label = tk.Label(frame, text=OPTIMAL_DEFAULTS["transformer"]["desc"],
                                           bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
                                           font=('Segoe UI', 9), wraplength=340, justify=tk.LEFT)
-        self.model_desc_label.pack(anchor=tk.W, pady=(0, 12))
+        self.model_desc_label.pack(anchor=tk.W, pady=(0, 8))
+        
+        # Cost mode selection
+        cost_frame = ttk.Frame(frame)
+        cost_frame.pack(fill=tk.X, pady=(0, 12))
+        
+        ttk.Label(cost_frame, text="Cost Mode:", style='Card.TLabel').pack(side=tk.LEFT)
+        
+        self.cost_mode_var = tk.StringVar(value="taker_taker")
+        cost_combo = ttk.Combobox(cost_frame, textvariable=self.cost_mode_var,
+                                   values=["taker_taker", "maker_taker", "maker_maker"], 
+                                   width=12, state='readonly')
+        cost_combo.pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Cost display label
+        self.cost_display = tk.Label(cost_frame, text="(0.09% round-trip)",
+                                      bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
+                                      font=('Segoe UI', 9))
+        self.cost_display.pack(side=tk.LEFT, padx=(8, 0))
+        cost_combo.bind('<<ComboboxSelected>>', self.on_cost_mode_changed)
         
         # Auto-settings display
         settings_frame = tk.Frame(frame, bg=self.colors['bg_tertiary'], padx=10, pady=8)
@@ -463,6 +482,26 @@ class GPUTrainerGUI:
         
         self.model_desc_label.config(text=defaults["desc"])
         self.settings_display.config(text=f"Epochs: {defaults['epochs']} | Batch: {defaults['batch_size']} | LR: {defaults['lr']}")
+    
+    def on_cost_mode_changed(self, event=None):
+        mode = self.cost_mode_var.get()
+        cost_map = {
+            "taker_taker": ("0.09%", 0.0009),
+            "maker_taker": ("0.06%", 0.0006),
+            "maker_maker": ("0.04%", 0.0004)
+        }
+        display, _ = cost_map.get(mode, ("0.09%", 0.0009))
+        self.cost_display.config(text=f"({display} round-trip)")
+        
+    def get_trading_cost(self) -> float:
+        """Get the selected trading cost for label creation"""
+        mode = self.cost_mode_var.get()
+        cost_map = {
+            "taker_taker": 0.0009,
+            "maker_taker": 0.0006,
+            "maker_maker": 0.0004
+        }
+        return cost_map.get(mode, 0.0009)
         
     def check_gpu_status(self):
         def check():
@@ -963,6 +1002,8 @@ class GPUTrainerGUI:
         epochs = defaults["epochs"]
         batch_size = defaults["batch_size"]
         lr = defaults["lr"]
+        trading_cost = self.get_trading_cost()  # Capture selected cost mode
+        cost_mode = self.cost_mode_var.get()
         
         def do_train():
             try:
@@ -970,7 +1011,7 @@ class GPUTrainerGUI:
                 self.log(f"{'='*55}")
                 self.log(f"  MULTI-ASSET TRAINING: {model_type.upper()}")
                 self.log(f"  Epochs: {epochs} | Batch: {batch_size} | LR: {lr}")
-                self.log(f"  Horizon: {horizon} bars (~4h) | Cost-aware labels")
+                self.log(f"  Horizon: {horizon} bars (~4h) | Cost: {cost_mode} ({trading_cost*100:.2f}%)")
                 self.log(f"  Assets: {', '.join(training_assets)}")
                 self.log(f"{'='*55}")
                 self.log(f"")
@@ -1043,8 +1084,8 @@ class GPUTrainerGUI:
                     val_features = engineer.compute_technical_features(val_df).fillna(0)
                     
                     # Create labels on each split (no cross-boundary leakage)
-                    train_labels = create_labels(train_df, horizon=horizon, threshold=0.001, trading_cost=0.0009)
-                    val_labels = create_labels(val_df, horizon=horizon, threshold=0.001, trading_cost=0.0009)
+                    train_labels = create_labels(train_df, horizon=horizon, threshold=0.001, trading_cost=trading_cost)
+                    val_labels = create_labels(val_df, horizon=horizon, threshold=0.001, trading_cost=trading_cost)
                     
                     # Convert labels: -1/0/1 -> 0/1/2 (SHORT/NEUTRAL/LONG)
                     train_labels = (train_labels + 1).astype(int)
@@ -1065,6 +1106,8 @@ class GPUTrainerGUI:
                     time.sleep(0)  # UI yield
                 
                 # Concatenate all assets (now properly split per-asset)
+                # NOTE: Sequence boundaries at asset junctions are intentional for multi-asset learning
+                # Each asset has been time-split independently, so train/val separation is preserved
                 train_features_raw = pd.concat(train_features_list, ignore_index=True)
                 val_features_raw = pd.concat(val_features_list, ignore_index=True)
                 train_labels = np.concatenate(train_labels_list)

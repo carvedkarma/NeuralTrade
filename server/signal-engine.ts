@@ -5,6 +5,12 @@ import { getEnsemblePrediction, type EnsemblePrediction } from "./ml-predictor";
 import { findSimilarPatterns, computePatternStats, type PatternMatch } from "./pattern-memory";
 import { getSentimentData, interpretFearGreed } from "./sentiment-api";
 import { strategyLearner, type CombinedIntelligence } from "./strategy-learner";
+import { 
+  applySignalThreshold, 
+  computeDirectionalScore,
+  type ClassificationProbabilities,
+  type SignalThresholdConfig
+} from "./trade-decision-engine";
 
 function checkNewsFilter(newsScore: number, fearGreedValue: number): { shouldVeto: boolean; reason: string | null } {
   if (fearGreedValue >= 85 || fearGreedValue <= 10) {
@@ -421,11 +427,53 @@ export async function generateShotPlan(
     vetoReasons.push(`Quality score ${qualityResult.qualityScore.toFixed(2)} < ${MIN_QUALITY_SCORE} minimum`);
   }
   
-  // SELECTIVE MODE: Adjust confidence based on quality
-  const displayConfidence = shouldTrade ? ensemble.confidence : Math.min(ensemble.confidence, 0.4);
+  // SIGNAL THRESHOLD TUNING: Apply classification probability threshold
+  // This limits signal frequency to only high-conviction trades (~2-3/day target)
+  const probs: ClassificationProbabilities = {
+    pShort: ensemble.probDown,
+    pNeutral: ensemble.probChop,
+    pLong: ensemble.probUp
+  };
+  const thresholdResult = applySignalThreshold(probs);
+  
+  // Log directional score for monitoring signal frequency
+  const directionalScore = computeDirectionalScore(probs);
+  if (Math.abs(directionalScore) > 0.1) {
+    reasons.push(`Directional score: ${directionalScore.toFixed(3)}`);
+  }
+  
+  // Determine final signal using threshold-based decision
+  let finalDirection: "LONG" | "SHORT" | "HOLD" = ensemble.direction;
+  
+  if (shouldTrade) {
+    // Check threshold gate
+    if (!thresholdResult.meetsThreshold) {
+      shouldTrade = false;
+      finalDirection = "HOLD";
+      thresholdResult.reasons.forEach(r => vetoReasons.push(`THRESHOLD: ${r}`));
+    } else {
+      // Use threshold's action as the authoritative direction
+      // This ensures consistency between probability-based threshold and ensemble
+      finalDirection = thresholdResult.action;
+      
+      // Verify threshold and ensemble agree on direction
+      if (thresholdResult.action !== ensemble.direction && ensemble.direction !== "HOLD") {
+        // Direction mismatch - threshold says different than ensemble
+        // Trust threshold since it's based on direct probability comparison
+        reasons.push(`Threshold direction (${thresholdResult.action}) matches probability bias`);
+      }
+      
+      reasons.push(`Threshold passed: score=${thresholdResult.score.toFixed(3)}, conf=${thresholdResult.confidence.toFixed(3)}`);
+    }
+  }
+  
+  // SELECTIVE MODE: Adjust confidence based on quality and threshold
+  const displayConfidence = shouldTrade 
+    ? Math.max(ensemble.confidence, thresholdResult.confidence) 
+    : Math.min(ensemble.confidence, 0.4);
   
   // SELECTIVE MODE: Respect shouldTrade flag - output HOLD when gates block
-  const finalSignal = shouldTrade ? ensemble.direction : "HOLD";
+  const finalSignal = shouldTrade ? finalDirection : "HOLD";
   
   return {
     signal: finalSignal,

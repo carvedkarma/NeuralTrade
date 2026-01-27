@@ -50,6 +50,8 @@ Preferred communication style: Simple, everyday language.
 - **Unified Learning Controller**: Synchronizes Strategy Learner, Pattern Memory, and GPU Trainer to process consistent historical data ranges, with enhanced training status, ETA calculation, and staged decision logic.
 - **Multi-timeframe Data Download**: Parallel download of 1m, 5m, 15m, 1h, 4h data across 4 assets (BTC, ETH, SOL, BNB) with 8 concurrent streams, ordered by timeframe for optimal parallelism.
 - **Dual Decision Display**: Separate outputs for Combined Learning (Strategy Learner + Pattern Memory) and GPU Neural Network decisions with confidence levels.
+- **Signal Threshold Tuning**: Classification probability-based threshold (scoreThreshold=0.15, minConfidence=0.45, minMargin=0.10) that controls signal frequency to target 2-3 trades/day using directional score (pLong - pShort).
+- **Edge Tracker**: File-based persistence system (edge_tracker_state.json) that monitors actual signal performance including avg net return, hit rate, expectancy, Sharpe ratio, and monthly stability scores. API endpoints at /api/edge-metrics and /api/edge-metrics/clear.
 
 ### Build System
 - **Client Build**: Vite bundles React app to `dist/public`.
