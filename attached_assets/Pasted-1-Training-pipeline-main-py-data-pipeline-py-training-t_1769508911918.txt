@@ -1,0 +1,156 @@
+1) Training pipeline (main.py + data/pipeline.py + training/trainer.py)
+✅ What’s good
+
+Clean model selection (transformer/tft/lstm/cnn/vae/gnn) with a shared Trainer.
+
+Uses AdamW + OneCycleLR + AMP (mixed precision) + grad clipping — good defaults for GPU training.
+
+Labels are cost-aware in create_labels() (threshold + trading_cost) which is the right direction.
+
+⚠️ Biggest problems (these will inflate results)
+
+Scaler leakage (major)
+In main.py you do:
+
+engineer.fit_scalers(features_df) before the train/val split
+That means your scaler “learns” distribution info from validation/future candles.
+
+Fix: split chronologically first → fit scaler on train only → transform train/val separately.
+
+Lookahead leakage across the train/val boundary (major)
+Your labels use pct_change(horizon).shift(-horizon).
+When you split the series, some train labels near the end of the train slice depend on future candles that live in val.
+
+Fix options:
+
+Purge a gap: drop the last horizon (or bigger) samples from train, and the first sequence_length + horizon from val.
+
+Or use your walk_forward.py approach (best).
+
+Val metrics are too thin
+Trainer mostly logs loss, but you really need:
+
+accuracy / macro-F1
+
+per-class precision/recall (SHORT/HOLD/LONG imbalance is common)
+
+and most importantly trading metrics (after-cost expectancy, drawdown, hit rate, Sharpe) on a chronological test.
+
+Backtest command is a placeholder
+main.py backtest logs a message but doesn’t actually backtest.
+The best part of the repo (your walk_forward.py philosophy) isn’t wired into the CLI yet.
+
+Smaller training notes
+
+DataLoader(shuffle=True) is OK only if your splits are strictly chronological and you’ve purged gaps. Otherwise it can hide leakage issues.
+
+The synthetic-data fallback is useful for debugging, but in real use I’d fail fast if no parquet exists (otherwise you may think a model “works” when it learned noise).
+
+2) Models (models/*)
+✅ What’s good
+
+You’ve got a good variety of architectures and a shared BaseModel.save() approach.
+
+Output is consistently 3-class classification, and the API clarifies mapping.
+
+⚠️ Practical concerns
+
+Your README mentions “100M+ params” transformers, but config defaults (d_model=256, layers=6, heads=8) likely won’t be that huge unless you add big FFNs / embeddings. Not a problem, just don’t expect “giant model” behavior by default.
+
+The GNN / cross-asset idea is solid, but it needs aligned timestamps across assets/timeframes and careful leakage control.
+
+3) Predictions / API (api/server.py)
+✅ What’s good
+
+You are very explicit about label mapping:
+
+0=SHORT, 1=HOLD, 2=LONG
+
+ModelManager can load multiple models and averages probabilities.
+
+Provides “confidence/uncertainty” via probability spread (basic but useful).
+
+⚠️ Biggest prediction mismatch
+
+Right now the API /predict expects:
+
+features: [[...], [...]] already engineered, scaled, and ordered exactly like training.
+
+But your training flow:
+
+computes technical features
+
+fits + applies scalers
+
+builds sequences
+
+The API does not (currently) apply saved scalers or feature engineering inside predict.
+So unless your caller recreates the exact same pipeline, your live predictions will be inconsistent.
+
+Fix (recommended):
+
+Add an endpoint like /predict_ohlcv that accepts recent OHLCV candles and internally:
+
+computes features (FeatureEngineer)
+
+loads and applies the saved scaler
+
+enforces exact sequence_length and feature ordering
+
+runs prediction
+
+Also fix this:
+
+API only checks seq_len >= 10.
+If your model was trained on sequence_length=100, you should enforce exactly 100 (or support variable length explicitly).
+
+4) GUI (gui.py)
+✅ What’s good
+
+Tkinter GUI is actually well-structured:
+
+background threads
+
+log redirection to avoid UI freezing
+
+“train all models” convenience
+
+GPU stats panel (nice touch)
+
+⚠️ What’s missing for real workflow
+
+No built-in “truth” view: you need a panel that shows
+
+last N predictions vs actual outcomes
+
+rolling after-cost PnL simulation
+
+per-regime performance (you already started this concept in walk_forward)
+
+5) What I would change first (highest ROI)
+
+Wire walk_forward.py into CLI + GUI
+
+Make it the default evaluation.
+
+Report after-cost PnL metrics (expectancy/drawdown).
+
+Fix leakage
+
+Split first
+
+Fit scaler only on train
+
+Purge horizon/sequence_length boundary contamination
+
+Make prediction pipeline consistent
+
+Save feature_list + scaler + sequence_length in the model artifact
+
+API endpoint takes OHLCV, produces features internally
+
+Add a simple “baseline”
+
+logistic regression / xgboost / even moving-average rule
+
+If your deep model doesn’t beat baseline after costs in walk-forward, don’t scale complexity.
