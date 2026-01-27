@@ -41,6 +41,14 @@ interface GPUTrainingStatus {
   metrics: Record<string, number>;
 }
 
+interface ModelStatusEntry {
+  status: "pending" | "training" | "complete" | "stopped";
+  accuracy: number | null;
+  loss: number | null;
+  epochs: number;
+  best_epoch: number;
+}
+
 interface PushedGPUStatus {
   connected: boolean;
   lastPush: number | null;
@@ -57,6 +65,7 @@ interface PushedGPUStatus {
   valLoss: number | null;
   modelsLoaded: string[];
   modelsCompleted: string[];
+  modelStatus?: Record<string, ModelStatusEntry>;
 }
 
 class GPUTrainerBridge {

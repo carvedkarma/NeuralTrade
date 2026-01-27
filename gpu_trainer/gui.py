@@ -86,6 +86,16 @@ class GPUTrainerGUI:
         self.best_epoch = 0
         self.models_completed = []
         
+        # Per-model training status for dashboard sync
+        self.model_status = {
+            "transformer": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0},
+            "tft": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0},
+            "lstm": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0},
+            "cnn": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0},
+            "vae": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0},
+            "gnn": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0},
+        }
+        
         # GPU state
         self.gpu_name = None
         self.gpu_memory_used = 0
@@ -816,7 +826,8 @@ class GPUTrainerGUI:
                 "bestValLoss": self.best_val_loss if self.best_val_loss < float('inf') else None,
                 "bestEpoch": self.best_epoch,
                 "modelsLoaded": [],
-                "modelsCompleted": self.models_completed
+                "modelsCompleted": self.models_completed,
+                "modelStatus": self.model_status  # Per-model training status
             }
             
             url = f"{proxy_url}/api/gpu/push-status"
@@ -824,6 +835,21 @@ class GPUTrainerGUI:
             
         except Exception:
             pass
+    
+    def update_model_status(self, model_name: str, status: str, accuracy: float = None, 
+                            loss: float = None, epochs: int = None, best_epoch: int = None):
+        """Update status for a specific model."""
+        if model_name.lower() in self.model_status:
+            ms = self.model_status[model_name.lower()]
+            ms["status"] = status
+            if accuracy is not None:
+                ms["accuracy"] = accuracy
+            if loss is not None:
+                ms["loss"] = loss
+            if epochs is not None:
+                ms["epochs"] = epochs
+            if best_epoch is not None:
+                ms["best_epoch"] = best_epoch
             
     def start_fetch(self):
         if self.is_fetching:
@@ -974,9 +1000,17 @@ class GPUTrainerGUI:
         
         # Multi-asset, multi-timeframe training configuration
         training_assets = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
-        training_timeframes = ["1m", "5m", "15m", "1h", "4h"]  # ALL timeframes
         
-        # Horizon varies by timeframe (all ~4 hours of price movement)
+        # MTF Fusion Mode: Base timeframe is 15m, with 5m/1h/4h as context
+        # All predictions are for 15m timeframe with 2-3 hour horizon (10 bars)
+        use_mtf_fusion = True  # Use proper multi-timeframe feature fusion
+        mtf_base_tf = "15m"
+        mtf_context_tfs = ["5m", "1h", "4h"]
+        mtf_all_tfs = ["5m", "15m", "1h", "4h"]  # For data loading
+        prediction_horizon_bars = 10  # 10 x 15m = 2.5 hours forward
+        
+        # Legacy mode: treat each timeframe as separate samples
+        training_timeframes = mtf_all_tfs if use_mtf_fusion else ["1m", "5m", "15m", "1h", "4h"]
         horizon_by_tf = {"1m": 240, "5m": 48, "15m": 16, "1h": 4, "4h": 1}
         
         # Check for training data - need at least BTC for some timeframe
@@ -1011,9 +1045,13 @@ class GPUTrainerGUI:
             try:
                 self.log(f"")
                 self.log(f"{'='*55}")
-                self.log(f"  MULTI-ASSET MULTI-TIMEFRAME TRAINING: {model_type.upper()}")
+                if use_mtf_fusion:
+                    self.log(f"  MTF FUSION TRAINING: {model_type.upper()}")
+                    self.log(f"  Base: 15m | Context: 5m, 1h, 4h | Horizon: {prediction_horizon_bars} bars (2.5h)")
+                else:
+                    self.log(f"  MULTI-ASSET MULTI-TIMEFRAME TRAINING: {model_type.upper()}")
+                    self.log(f"  Timeframes: {', '.join(training_timeframes)}")
                 self.log(f"  Epochs: {epochs} | Batch: {batch_size} | LR: {lr}")
-                self.log(f"  Timeframes: {', '.join(training_timeframes)}")
                 self.log(f"  Cost: {cost_mode} ({trading_cost*100:.2f}%)")
                 self.log(f"  Assets: {', '.join(training_assets)}")
                 self.log(f"{'='*55}")
@@ -1027,100 +1065,201 @@ class GPUTrainerGUI:
                 from torch.utils.data import DataLoader
                 from training.trainer import Trainer
                 
-                # === MULTI-ASSET MULTI-TIMEFRAME DATA LOADING ===
-                # Load data from ALL timeframes for each asset
-                all_dfs = []
-                all_horizons = []  # Track horizon for each df
-                total_candles = 0
-                
-                for asset in training_assets:
-                    asset_candles = 0
-                    for tf in training_timeframes:
-                        asset_path = data_dir / f"{asset}_{tf}.parquet"
-                        if asset_path.exists():
-                            df = pd.read_parquet(asset_path)
-                            df['symbol'] = asset
-                            df['timeframe'] = tf
-                            all_dfs.append(df)
-                            all_horizons.append(horizon_by_tf.get(tf, 16))
-                            asset_candles += len(df)
-                            self.log(f"  {asset} {tf}: {len(df):,} candles")
-                        time.sleep(0)  # UI yield
-                    if asset_candles > 0:
-                        total_candles += asset_candles
-                
-                self.log(f"")
-                self.log(f"Total: {total_candles:,} candles across {len(all_dfs)} asset-timeframe pairs")
-                
-                if not all_dfs:
-                    self.log("ERROR: No data files found!")
-                    self.root.after(0, self.training_complete)
-                    return
-                
-                self.log(f"")
-                self.log(f"Processing features per-asset-timeframe with time-based splits...")
-                
-                # === CRITICAL FIX: SPLIT PER-ASSET BY TIME FIRST ===
-                # This prevents label leakage at train/val boundaries
-                train_ratio = 0.70
-                val_ratio = 0.15
-                
-                train_features_list = []
-                train_labels_list = []
-                val_features_list = []
-                val_labels_list = []
-                engineer = FeatureEngineer()
-                
-                for i, df in enumerate(all_dfs):
-                    # Get asset and timeframe from df metadata
-                    asset = df['symbol'].iloc[0] if 'symbol' in df.columns else f"asset_{i}"
-                    tf = df['timeframe'].iloc[0] if 'timeframe' in df.columns else "15m"
-                    horizon = all_horizons[i]  # Use timeframe-specific horizon
+                if use_mtf_fusion:
+                    # === MTF FUSION MODE ===
+                    # Load all timeframes for each asset and fuse to 15m base
+                    from data.mtf_fusion import MTFFeatureFusion, add_cross_asset_features
                     
-                    n = len(df)
+                    self.log(f"Loading multi-timeframe data for MTF fusion...")
                     
-                    # Time-based split for this asset-timeframe
-                    n_train = int(n * train_ratio)
-                    n_val = int(n * val_ratio)
+                    asset_data = {}  # {symbol: {tf: df}}
+                    total_candles = 0
                     
-                    # Split raw data FIRST
-                    train_df = df.iloc[:n_train].copy()
-                    val_df = df.iloc[n_train:n_train + n_val].copy()
+                    for asset in training_assets:
+                        tf_data = {}
+                        for tf in mtf_all_tfs:
+                            asset_path = data_dir / f"{asset}_{tf}.parquet"
+                            if asset_path.exists():
+                                df = pd.read_parquet(asset_path)
+                                tf_data[tf] = df
+                                total_candles += len(df)
+                                self.log(f"  {asset} {tf}: {len(df):,} candles")
+                            time.sleep(0)
+                        if tf_data:
+                            asset_data[asset] = tf_data
                     
-                    # Compute features on each split separately
-                    train_features = engineer.compute_technical_features(train_df).fillna(0)
-                    val_features = engineer.compute_technical_features(val_df).fillna(0)
+                    if not asset_data:
+                        self.log("ERROR: No data files found!")
+                        self.root.after(0, self.training_complete)
+                        return
                     
-                    # Create labels on each split (no cross-boundary leakage)
-                    # Use timeframe-specific horizon (1m: 240 bars, 5m: 48 bars, 15m: 16 bars, etc.)
-                    train_labels = create_labels(train_df, horizon=horizon, threshold=0.001, trading_cost=trading_cost)
-                    val_labels = create_labels(val_df, horizon=horizon, threshold=0.001, trading_cost=trading_cost)
+                    self.log(f"")
+                    self.log(f"Total: {total_candles:,} raw candles")
+                    self.log(f"")
+                    self.log(f"Fusing timeframes to 15m base (leakage-proof alignment)...")
                     
-                    # Convert labels: -1/0/1 -> 0/1/2 (SHORT/NEUTRAL/LONG)
-                    train_labels = (train_labels + 1).astype(int)
-                    val_labels = (val_labels + 1).astype(int)
+                    # Fuse all timeframes for each asset
+                    fusioner = MTFFeatureFusion(prediction_horizon_bars)
+                    all_fused = []
                     
-                    # Drop last 'horizon' samples from training to prevent label leakage
-                    # (those labels use future prices that approach the validation boundary)
-                    if len(train_features) > horizon:
-                        train_features = train_features.iloc[:-horizon]
-                        train_labels = train_labels[:-horizon]
+                    for symbol, tf_data in asset_data.items():
+                        if mtf_base_tf not in tf_data:
+                            self.log(f"  {symbol}: Skipping - no 15m data")
+                            continue
+                        fused = fusioner.align_timeframes(tf_data, symbol)
+                        fused["symbol"] = symbol
+                        all_fused.append(fused)
+                        self.log(f"  {symbol}: {len(fused):,} fused samples, {len(fused.columns)} features")
+                        time.sleep(0)
                     
-                    train_features_list.append(train_features)
-                    train_labels_list.append(train_labels)
-                    val_features_list.append(val_features)
-                    val_labels_list.append(val_labels)
+                    if not all_fused:
+                        self.log("ERROR: No fused data!")
+                        self.root.after(0, self.training_complete)
+                        return
                     
-                    self.log(f"  {asset} {tf} (h={horizon}): train={len(train_features):,}, val={len(val_features):,}")
-                    time.sleep(0)  # UI yield
-                
-                # Concatenate all assets (now properly split per-asset)
-                # NOTE: Sequence boundaries at asset junctions are intentional for multi-asset learning
-                # Each asset has been time-split independently, so train/val separation is preserved
-                train_features_raw = pd.concat(train_features_list, ignore_index=True)
-                val_features_raw = pd.concat(val_features_list, ignore_index=True)
-                train_labels = np.concatenate(train_labels_list)
-                val_labels = np.concatenate(val_labels_list)
+                    # Combine all assets
+                    combined = pd.concat(all_fused, ignore_index=True)
+                    self.log(f"")
+                    self.log(f"Combined: {len(combined):,} samples")
+                    
+                    # Add cross-asset features
+                    self.log(f"Adding cross-asset features...")
+                    combined = add_cross_asset_features(combined, reference_symbol="BTCUSDT")
+                    
+                    # Time-based train/val split per asset
+                    self.log(f"Splitting by time per asset...")
+                    train_ratio = 0.70
+                    val_ratio = 0.15
+                    
+                    train_dfs = []
+                    val_dfs = []
+                    
+                    for symbol in combined["symbol"].unique():
+                        asset_df = combined[combined["symbol"] == symbol].copy()
+                        asset_df = asset_df.sort_values("datetime").reset_index(drop=True)
+                        n = len(asset_df)
+                        n_train = int(n * train_ratio)
+                        n_val = int(n * val_ratio)
+                        
+                        # Split and add purge gap (prediction_horizon_bars)
+                        train_df = asset_df.iloc[:n_train - prediction_horizon_bars].copy()
+                        val_df = asset_df.iloc[n_train:n_train + n_val].copy()
+                        
+                        train_dfs.append(train_df)
+                        val_dfs.append(val_df)
+                        self.log(f"  {symbol}: train={len(train_df):,}, val={len(val_df):,}")
+                    
+                    train_combined = pd.concat(train_dfs, ignore_index=True)
+                    val_combined = pd.concat(val_dfs, ignore_index=True)
+                    
+                    # Create labels
+                    self.log(f"Creating labels (horizon={prediction_horizon_bars} bars, ~2.5h)...")
+                    train_labels = fusioner.create_labels(train_combined)
+                    val_labels = fusioner.create_labels(val_combined)
+                    
+                    # Drop rows with NaN labels (end of each asset's data)
+                    train_valid = train_labels.notna()
+                    val_valid = val_labels.notna()
+                    train_combined = train_combined[train_valid].reset_index(drop=True)
+                    train_labels = train_labels[train_valid].reset_index(drop=True)
+                    val_combined = val_combined[val_valid].reset_index(drop=True)
+                    val_labels = val_labels[val_valid].reset_index(drop=True)
+                    
+                    # Select numeric feature columns only
+                    exclude_cols = ["datetime", "symbol", "timestamp", "open", "high", "low", "close", "volume"]
+                    feature_cols = [c for c in train_combined.columns if c not in exclude_cols and train_combined[c].dtype in [np.float64, np.float32, np.int64, np.int32, float, int]]
+                    
+                    train_features_raw = train_combined[feature_cols].copy()
+                    val_features_raw = val_combined[feature_cols].copy()
+                    train_labels = train_labels.values.astype(np.int64)
+                    val_labels = val_labels.values.astype(np.int64)
+                    
+                    self.log(f"")
+                    self.log(f"MTF features: {len(feature_cols)} columns")
+                    self.log(f"Train: {len(train_features_raw):,}, Val: {len(val_features_raw):,}")
+                    
+                    # Fit scalers on training data only
+                    engineer = FeatureEngineer()
+                    
+                else:
+                    # === LEGACY MODE: Each timeframe as separate samples ===
+                    all_dfs = []
+                    all_horizons = []
+                    total_candles = 0
+                    
+                    for asset in training_assets:
+                        asset_candles = 0
+                        for tf in training_timeframes:
+                            asset_path = data_dir / f"{asset}_{tf}.parquet"
+                            if asset_path.exists():
+                                df = pd.read_parquet(asset_path)
+                                df['symbol'] = asset
+                                df['timeframe'] = tf
+                                all_dfs.append(df)
+                                all_horizons.append(horizon_by_tf.get(tf, 16))
+                                asset_candles += len(df)
+                                self.log(f"  {asset} {tf}: {len(df):,} candles")
+                            time.sleep(0)
+                        if asset_candles > 0:
+                            total_candles += asset_candles
+                    
+                    self.log(f"")
+                    self.log(f"Total: {total_candles:,} candles across {len(all_dfs)} asset-timeframe pairs")
+                    
+                    if not all_dfs:
+                        self.log("ERROR: No data files found!")
+                        self.root.after(0, self.training_complete)
+                        return
+                    
+                    self.log(f"")
+                    self.log(f"Processing features per-asset-timeframe with time-based splits...")
+                    
+                    train_ratio = 0.70
+                    val_ratio = 0.15
+                    
+                    train_features_list = []
+                    train_labels_list = []
+                    val_features_list = []
+                    val_labels_list = []
+                    engineer = FeatureEngineer()
+                    
+                    for i, df in enumerate(all_dfs):
+                        asset = df['symbol'].iloc[0] if 'symbol' in df.columns else f"asset_{i}"
+                        tf = df['timeframe'].iloc[0] if 'timeframe' in df.columns else "15m"
+                        horizon = all_horizons[i]
+                        
+                        n = len(df)
+                        n_train = int(n * train_ratio)
+                        n_val = int(n * val_ratio)
+                        
+                        train_df = df.iloc[:n_train].copy()
+                        val_df = df.iloc[n_train:n_train + n_val].copy()
+                        
+                        train_features = engineer.compute_technical_features(train_df).fillna(0)
+                        val_features = engineer.compute_technical_features(val_df).fillna(0)
+                        
+                        train_labels_arr = create_labels(train_df, horizon=horizon, threshold=0.001, trading_cost=trading_cost)
+                        val_labels_arr = create_labels(val_df, horizon=horizon, threshold=0.001, trading_cost=trading_cost)
+                        
+                        train_labels_arr = (train_labels_arr + 1).astype(int)
+                        val_labels_arr = (val_labels_arr + 1).astype(int)
+                        
+                        if len(train_features) > horizon:
+                            train_features = train_features.iloc[:-horizon]
+                            train_labels_arr = train_labels_arr[:-horizon]
+                        
+                        train_features_list.append(train_features)
+                        train_labels_list.append(train_labels_arr)
+                        val_features_list.append(val_features)
+                        val_labels_list.append(val_labels_arr)
+                        
+                        self.log(f"  {asset} {tf} (h={horizon}): train={len(train_features):,}, val={len(val_features):,}")
+                        time.sleep(0)
+                    
+                    train_features_raw = pd.concat(train_features_list, ignore_index=True)
+                    val_features_raw = pd.concat(val_features_list, ignore_index=True)
+                    train_labels = np.concatenate(train_labels_list)
+                    val_labels = np.concatenate(val_labels_list)
                 
                 self.log(f"")
                 self.log(f"Combined: train={len(train_features_raw):,}, val={len(val_features_raw):,}")
@@ -1258,6 +1397,9 @@ class GPUTrainerGUI:
                     
                 trainer.epoch_callback = progress_callback
                 
+                # Mark model as training
+                self.update_model_status(model_type, "training")
+                
                 history = trainer.train(epochs=epochs)
                 
                 if self.is_training:
@@ -1272,8 +1414,17 @@ class GPUTrainerGUI:
                     self.log(f"Model saved: {save_path.name}")
                     
                     engineer.save_scalers(str(config.model_dir / f"{model_type}_scalers.joblib"))
+                    
+                    # Update model status as complete
+                    self.update_model_status(
+                        model_type, "complete",
+                        loss=self.best_val_loss,
+                        epochs=self.current_epoch,
+                        best_epoch=self.best_epoch
+                    )
                 else:
                     self.log("Training stopped by user")
+                    self.update_model_status(model_type, "stopped")
                     
             except Exception as e:
                 self.log(f"[ERROR] Training error: {e}")

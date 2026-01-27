@@ -111,6 +111,13 @@ export default function Dashboard() {
     trainLoss: number | null;
     valLoss: number | null;
     modelsCompleted: string[];
+    modelStatus?: Record<string, {
+      status: string;
+      accuracy: number | null;
+      loss: number | null;
+      epochs: number;
+      best_epoch: number;
+    }>;
   }>({
     queryKey: ["/api/gpu/pushed-status"],
     refetchInterval: 5000,
@@ -439,6 +446,16 @@ export default function Dashboard() {
                     valLoss: gpuStatus.valLoss || 0
                   }
                 } : null}
+                modelPerformance={gpuStatus?.modelStatus ? 
+                  Object.entries(gpuStatus.modelStatus).map(([name, data]) => ({
+                    name: name.charAt(0).toUpperCase() + name.slice(1),
+                    accuracy: data.accuracy || 0,
+                    loss: data.loss || 0,
+                    epochs: data.epochs || 0,
+                    status: data.status === "complete" ? "ready" as const : 
+                            data.status === "training" ? "training" as const : "pending" as const
+                  })) : undefined
+                }
                 onStartTraining={(modelType) => trainModelMutation.mutate(modelType)}
               />
               

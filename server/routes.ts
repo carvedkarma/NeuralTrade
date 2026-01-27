@@ -781,7 +781,8 @@ export async function registerRoutes(
         trainLoss: status.trainLoss ?? null,
         valLoss: status.valLoss ?? null,
         modelsLoaded: status.modelsLoaded ?? [],
-        modelsCompleted: status.modelsCompleted ?? []
+        modelsCompleted: status.modelsCompleted ?? [],
+        modelStatus: status.modelStatus ?? undefined
       });
       console.log(`[GPU Push] Received status update - GPU: ${status.gpuName}, Training: ${status.isTraining}`);
       res.json({ success: true, received: Date.now() });
