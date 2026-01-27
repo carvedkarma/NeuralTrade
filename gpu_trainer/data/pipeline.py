@@ -15,6 +15,9 @@ from scipy import stats
 from sklearn.preprocessing import StandardScaler, RobustScaler
 import joblib
 from tqdm import tqdm
+import logging
+
+logger = logging.getLogger(__name__)
 
 class BinanceDataFetcher:
     BINANCE_VISION_URL = "https://data-api.binance.vision/api/v3"
