@@ -1,0 +1,168 @@
+Absolutely — here is a clear, clean recap of the fixes, grouped by priority, so you can see exactly what mattered and why.
+
+I’ll keep it concrete and tied to your actual code.
+
+⸻
+
+🔴 CRITICAL FIXES (must-have)
+
+These directly determine whether your signals are real or fake.
+
+1️⃣ Fix data leakage (MOST IMPORTANT)
+
+Problem (in your code):
+	•	You fit scalers on the entire dataset
+	•	Then split into train/val
+
+This lets future information leak into training → fake accuracy.
+
+Fix:
+	1.	Split data by time first
+	2.	Fit scalers only on training data
+	3.	Apply the same scalers to validation/test
+
+Impact:
+	•	Accuracy may drop initially
+	•	Signals become realistic and trustworthy
+
+⸻
+
+2️⃣ Fix horizon mismatch (75 min → 3–4 hours)
+
+Problem:
+
+horizon = 5  # ~75 minutes on 15m
+
+But your goal is 3–4 hours.
+
+Fix:
+
+horizon = 12–16  # 3–4 hours on 15m
+
+Impact:
+	•	Labels align with your trading goal
+	•	Model stops learning short-term noise
+
+⸻
+
+3️⃣ Make labels cost-aware
+
+Problem:
+	•	Labels don’t include:
+	•	fees
+	•	slippage
+	•	spread
+
+So the model learns to trade tiny, unprofitable moves.
+
+Fix:
+
+net_return = future_return − 0.09%  # your round-trip cost
+
+Label LONG/SHORT only if net_return exceeds threshold.
+
+Impact:
+	•	Fewer signals
+	•	Much higher quality
+	•	Better real PnL alignment
+
+⸻
+
+4️⃣ Fix neutral / NO-TRADE class index bug
+
+Problem:
+	•	Your labels map neutral → class 1
+	•	Trainer treats class 2 as neutral
+
+This breaks metrics and learning.
+
+Fix:
+	•	Make neutral consistently class 1 everywhere
+	•	Update validation masks accordingly
+
+Impact:
+	•	Correct accuracy reporting
+	•	Model stops “looking confused”
+
+⸻
+
+🟡 IMPORTANT FIXES (quality boosters)
+
+5️⃣ Balance class weights
+
+Problem:
+	•	Neutral class dominates
+	•	Model learns to always predict neutral
+
+Fix:
+Use weighted loss:
+
+CrossEntropyLoss(weight=[w_short, w_neutral, w_long])
+
+Impact:
+	•	Model actually learns LONG/SHORT
+	•	Prevents “always no-trade” behavior
+
+⸻
+
+6️⃣ Train on multiple assets (not BTC only)
+
+Problem:
+	•	Training only BTC → overfitting to one regime
+
+Fix:
+	•	Combine BTC + ETH + SOL + BNB
+	•	Same timeframe, same horizon
+
+Impact:
+	•	Better generalization
+	•	More stable signals
+
+⸻
+
+7️⃣ Remove hardcoded 15m-only training
+
+Problem:
+	•	GUI hardcodes BTCUSDT 15m
+
+Fix:
+	•	Allow multi-timeframe training
+	•	Or at least configurable timeframe
+
+Impact:
+	•	System becomes extensible
+	•	Better future performance
+
+⸻
+
+🟢 STRATEGIC FIXES (to make it strong)
+
+8️⃣ Add confidence gating (μ/σ or score-based)
+
+Problem:
+	•	All predictions treated equally
+
+Fix:
+	•	Compute a confidence score
+	•	Only trade top 3–5% signals
+
+Impact:
+	•	2–3 strong trades/day
+	•	Much higher precision
+⸻
+
+🔵 OPTIONAL (next-level improvements)
+
+10️⃣ Switch to regression (future returns)
+
+Instead of:
+	•	LONG / SHORT / NEUTRAL
+
+Predict:
+	•	expected return (μ)
+	•	uncertainty (σ)
+
+This unlocks:
+	•	dynamic sizing
+	•	controlled aggressiveness
+	•	better filtering
