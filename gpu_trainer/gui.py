@@ -1136,6 +1136,23 @@ class GPUTrainerGUI:
                 val_features_np = val_features_np[valid_start:]
                 val_labels_np = val_labels_np[valid_start:]
                 
+                # === HARD DATA CLEANSING - Drop NaN/Inf rows ===
+                def clean_data_gui(features, labels, name):
+                    features = np.where(np.isinf(features), np.nan, features)
+                    nan_mask = np.isnan(features).any(axis=1)
+                    nan_count = nan_mask.sum()
+                    if nan_count > 0:
+                        self.log(f"{name}: Dropping {nan_count} rows with NaN/Inf ({nan_count/len(features)*100:.1f}%)")
+                        valid_mask = ~nan_mask
+                        features = features[valid_mask]
+                        labels = labels[valid_mask]
+                    assert np.isfinite(features).all(), f"{name}: Non-finite values remain!"
+                    self.log(f"{name}: {len(features)} clean samples")
+                    return features, labels
+                
+                train_features_np, train_labels_np = clean_data_gui(train_features_np, train_labels_np, "Train")
+                val_features_np, val_labels_np = clean_data_gui(val_features_np, val_labels_np, "Val")
+                
                 # === CLASS WEIGHT BALANCING ===
                 # Cap weights to prevent gradient explosion (max 10x)
                 MAX_CLASS_WEIGHT = 10.0
@@ -1148,9 +1165,9 @@ class GPUTrainerGUI:
                 self.log(f"Class distribution: SHORT={class_counts[0]:,}, NEUTRAL={class_counts[1]:,}, LONG={class_counts[2]:,}")
                 self.log(f"Class weights (capped at {MAX_CLASS_WEIGHT}x): [{class_weights[0]:.2f}, {class_weights[1]:.2f}, {class_weights[2]:.2f}]")
                 
-                # Create datasets
-                train_dataset = TradingDataset(train_features_np, train_labels_np, config.data.sequence_length)
-                val_dataset = TradingDataset(val_features_np, val_labels_np, config.data.sequence_length)
+                # Create datasets (with data validation)
+                train_dataset = TradingDataset(train_features_np, train_labels_np, config.data.sequence_length, validate_data=True)
+                val_dataset = TradingDataset(val_features_np, val_labels_np, config.data.sequence_length, validate_data=True)
                 
                 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
                 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)

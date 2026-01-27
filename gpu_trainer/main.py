@@ -226,9 +226,35 @@ def train(args):
     val_features_df = pd.DataFrame(val_features_raw, columns=features_df.columns)
     val_features_scaled = engineer.transform(val_features_df).values.astype(np.float32)
     
+    # === STEP 5.5: HARD DATA CLEANSING - Drop NaN/Inf rows ===
+    # This is critical: NaN/Inf in features will cause NaN loss and corrupt training
+    def clean_data(features: np.ndarray, labels: np.ndarray, name: str):
+        """Replace Inf->NaN, drop rows with any NaN, align labels."""
+        # Replace Inf with NaN
+        features = np.where(np.isinf(features), np.nan, features)
+        
+        # Find rows with any NaN
+        nan_mask = np.isnan(features).any(axis=1)
+        nan_count = nan_mask.sum()
+        
+        if nan_count > 0:
+            logger.warning(f"{name}: Dropping {nan_count} rows with NaN/Inf ({nan_count/len(features)*100:.1f}%)")
+            valid_mask = ~nan_mask
+            features = features[valid_mask]
+            labels = labels[valid_mask]
+        
+        # Final assertion - must be all finite
+        assert np.isfinite(features).all(), f"{name}: Still has non-finite values after cleaning!"
+        logger.info(f"{name}: {len(features)} clean samples, all finite")
+        
+        return features, labels
+    
+    train_features_scaled, train_labels = clean_data(train_features_scaled, train_labels, "Train")
+    val_features_scaled, val_labels = clean_data(val_features_scaled, val_labels, "Val")
+    
     # === STEP 6: Create datasets ===
-    train_dataset = TradingDataset(train_features_scaled, train_labels, sequence_length)
-    val_dataset = TradingDataset(val_features_scaled, val_labels, sequence_length)
+    train_dataset = TradingDataset(train_features_scaled, train_labels, sequence_length, validate_data=True)
+    val_dataset = TradingDataset(val_features_scaled, val_labels, sequence_length, validate_data=True)
     
     # Note: shuffle=True is OK for training since we've already done chronological split
     # and purged the boundary. Shuffling within train set is fine.

@@ -785,7 +785,14 @@ class FeatureEngineer:
                 scaler.fit(valid_data)
                 self.scalers[col] = scaler
                 
-    def transform(self, features: pd.DataFrame) -> pd.DataFrame:
+    def transform(self, features: pd.DataFrame, drop_invalid: bool = False) -> pd.DataFrame:
+        """Transform features using fitted scalers.
+        
+        Args:
+            features: DataFrame with feature columns
+            drop_invalid: If True, drop rows with NaN/Inf (returns shorter DataFrame).
+                         If False (default), only replace Inf->NaN for compatibility.
+        """
         transformed = features.copy()
         for col in features.columns:
             if col in self.scalers:
@@ -794,6 +801,18 @@ class FeatureEngineer:
                     transformed.loc[valid_mask, col] = self.scalers[col].transform(
                         features.loc[valid_mask, col].values.reshape(-1, 1)
                     ).flatten()
+        
+        # === CRITICAL: Data validation after scaling ===
+        # Replace ±Inf with NaN
+        inf_count = np.isinf(transformed.values).sum()
+        if inf_count > 0:
+            logger.warning(f"Found {inf_count} Inf values after scaling, replacing with NaN")
+            transformed = transformed.replace([np.inf, -np.inf], np.nan)
+        
+        nan_count = transformed.isna().sum().sum()
+        if nan_count > 0:
+            logger.warning(f"Found {nan_count} NaN values after scaling")
+            
         return transformed
     
     def save_scalers(self, path: str):
@@ -805,7 +824,42 @@ class FeatureEngineer:
 
 class TradingDataset(Dataset):
     def __init__(self, features: np.ndarray, labels: np.ndarray, 
-                 sequence_length: int = 100):
+                 sequence_length: int = 100, validate_data: bool = True,
+                 strict_finite: bool = True):
+        """
+        Create a trading dataset for sequence modeling.
+        
+        Args:
+            features: Input features array (N, D)
+            labels: Target labels array (N,)
+            sequence_length: Length of each sequence window
+            validate_data: If True, check for NaN/Inf at initialization
+            strict_finite: If True, FAIL if any NaN/Inf found (recommended)
+        """
+        # === CRITICAL: Validate input data before creating tensors ===
+        if validate_data:
+            # Check for NaN/Inf in features
+            nan_count = np.isnan(features).sum()
+            inf_count = np.isinf(features).sum()
+            
+            if nan_count > 0 or inf_count > 0:
+                msg = f"TradingDataset: Found {nan_count} NaN and {inf_count} Inf in features"
+                if strict_finite:
+                    raise ValueError(msg + " - data must be cleaned before dataset creation!")
+                else:
+                    logger.warning(msg)
+                    # Replace Inf with NaN, then fill with 0 (NOT RECOMMENDED)
+                    features = np.where(np.isinf(features), np.nan, features)
+                    features = np.nan_to_num(features, nan=0.0)
+                
+            # Check for invalid labels
+            invalid_labels = ~np.isin(labels, [0, 1, 2])
+            if invalid_labels.sum() > 0:
+                logger.warning(f"TradingDataset: Found {invalid_labels.sum()} invalid labels")
+        
+        # Final assertion - all data must be finite
+        assert np.isfinite(features).all(), "Features contain non-finite values!"
+        
         self.features = torch.FloatTensor(features)
         # Use LongTensor for classification labels (not FloatTensor)
         self.labels = torch.LongTensor(labels)

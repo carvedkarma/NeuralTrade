@@ -25,7 +25,7 @@ class Trainer:
         val_loader: DataLoader,
         config,
         device: str = "cuda",
-        mixed_precision: bool = True,
+        mixed_precision: bool = False,  # Disabled by default - FP16 can cause NaN with class weights
         gui_mode: bool = False,
         class_weights: Optional[torch.Tensor] = None
     ):
@@ -89,9 +89,18 @@ class Trainer:
                     output = self.model(data)
                     loss = self.criterion(output, target.long())
                 
-                # NaN detection - skip batch if loss is NaN
+                # NaN detection with diagnostic logging
                 if torch.isnan(loss) or torch.isinf(loss):
                     nan_batch_count += 1
+                    # Diagnostic: identify WHERE NaN originates
+                    x_nan = torch.isnan(data).any().item()
+                    x_inf = torch.isinf(data).any().item()
+                    out_nan = torch.isnan(output).any().item()
+                    out_inf = torch.isinf(output).any().item()
+                    if nan_batch_count <= 3:  # Only log first 3
+                        logger.warning(f"NaN batch {nan_batch_count}: x_nan={x_nan}, x_inf={x_inf}, "
+                                     f"logits_nan={out_nan}, logits_inf={out_inf}, "
+                                     f"x_range=[{data.min().item():.4f}, {data.max().item():.4f}]")
                     if nan_batch_count > 10:
                         logger.warning(f"Too many NaN batches ({nan_batch_count}), stopping epoch")
                         break
@@ -106,9 +115,18 @@ class Trainer:
                 output = self.model(data)
                 loss = self.criterion(output, target.long())
                 
-                # NaN detection - skip batch if loss is NaN
+                # NaN detection with diagnostic logging
                 if torch.isnan(loss) or torch.isinf(loss):
                     nan_batch_count += 1
+                    # Diagnostic: identify WHERE NaN originates
+                    x_nan = torch.isnan(data).any().item()
+                    x_inf = torch.isinf(data).any().item()
+                    out_nan = torch.isnan(output).any().item()
+                    out_inf = torch.isinf(output).any().item()
+                    if nan_batch_count <= 3:  # Only log first 3
+                        logger.warning(f"NaN batch {nan_batch_count}: x_nan={x_nan}, x_inf={x_inf}, "
+                                     f"logits_nan={out_nan}, logits_inf={out_inf}, "
+                                     f"x_range=[{data.min().item():.4f}, {data.max().item():.4f}]")
                     if nan_batch_count > 10:
                         logger.warning(f"Too many NaN batches ({nan_batch_count}), stopping epoch")
                         break
