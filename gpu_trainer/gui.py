@@ -933,12 +933,16 @@ class GPUTrainerGUI:
         model_type = self.model_var.get()
         defaults = OPTIMAL_DEFAULTS.get(model_type, OPTIMAL_DEFAULTS["transformer"])
         
-        # Check for training data
-        training_symbol = "BTCUSDT"
+        # Multi-asset training configuration
+        training_assets = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
         training_timeframe = "15m"
-        data_path = Path(__file__).parent / "data_cache" / f"{training_symbol}_{training_timeframe}.parquet"
+        horizon = 16  # 4 hours on 15m candles
         
-        if not data_path.exists():
+        # Check for training data - need at least BTC
+        data_dir = Path(__file__).parent / "data_cache"
+        btc_path = data_dir / f"BTCUSDT_{training_timeframe}.parquet"
+        
+        if not btc_path.exists():
             result = messagebox.askyesno(
                 "No Data", 
                 f"No training data found.\nDownload data first?"
@@ -964,9 +968,10 @@ class GPUTrainerGUI:
             try:
                 self.log(f"")
                 self.log(f"{'='*55}")
-                self.log(f"  TRAINING: {model_type.upper()}")
+                self.log(f"  MULTI-ASSET TRAINING: {model_type.upper()}")
                 self.log(f"  Epochs: {epochs} | Batch: {batch_size} | LR: {lr}")
-                self.log(f"  Dataset: {training_symbol} {training_timeframe}")
+                self.log(f"  Horizon: {horizon} bars (~4h) | Cost-aware labels")
+                self.log(f"  Assets: {', '.join(training_assets)}")
                 self.log(f"{'='*55}")
                 self.log(f"")
                 
@@ -978,48 +983,135 @@ class GPUTrainerGUI:
                 from torch.utils.data import DataLoader
                 from training.trainer import Trainer
                 
-                df = pd.read_parquet(data_path)
-                self.log(f"Loaded {len(df):,} candles")
+                # === MULTI-ASSET DATA LOADING ===
+                all_dfs = []
+                for asset in training_assets:
+                    asset_path = data_dir / f"{asset}_{training_timeframe}.parquet"
+                    if asset_path.exists():
+                        df = pd.read_parquet(asset_path)
+                        df['symbol'] = asset
+                        all_dfs.append(df)
+                        self.log(f"  {asset}: {len(df):,} candles")
+                    else:
+                        self.log(f"  {asset}: NOT FOUND (skipped)")
+                    time.sleep(0)  # UI yield
                 
-                # Data validation
-                validation_failed = False
-                if "symbol" in df.columns:
-                    unique_symbols = df["symbol"].unique().tolist()
-                    if len(unique_symbols) > 1:
-                        self.log(f"CRITICAL: Multiple symbols detected - aborting")
-                        validation_failed = True
-                        
-                if validation_failed:
+                if not all_dfs:
+                    self.log("ERROR: No data files found!")
                     self.root.after(0, self.training_complete)
                     return
                 
+                # Load 1h and 4h data for higher timeframe features (if available)
+                htf_features = {}
+                for asset in training_assets:
+                    for htf in ["1h", "4h"]:
+                        htf_path = data_dir / f"{asset}_{htf}.parquet"
+                        if htf_path.exists():
+                            htf_df = pd.read_parquet(htf_path)
+                            htf_features[f"{asset}_{htf}"] = htf_df
+                            self.log(f"  {asset} {htf}: {len(htf_df):,} (context)")
+                        time.sleep(0)
+                
+                self.log(f"")
+                self.log(f"Processing features per-asset with time-based splits...")
+                
+                # === CRITICAL FIX: SPLIT PER-ASSET BY TIME FIRST ===
+                # This prevents label leakage at train/val boundaries
+                train_ratio = 0.70
+                val_ratio = 0.15
+                
+                train_features_list = []
+                train_labels_list = []
+                val_features_list = []
+                val_labels_list = []
                 engineer = FeatureEngineer()
-                features_df = engineer.compute_technical_features(df)
-                features_df = features_df.fillna(0)
                 
-                engineer.fit_scalers(features_df)
-                scaled_features = engineer.transform(features_df)
+                for i, df in enumerate(all_dfs):
+                    asset = training_assets[i] if i < len(training_assets) else f"asset_{i}"
+                    n = len(df)
+                    
+                    # Time-based split for this asset
+                    n_train = int(n * train_ratio)
+                    n_val = int(n * val_ratio)
+                    
+                    # Split raw data FIRST
+                    train_df = df.iloc[:n_train].copy()
+                    val_df = df.iloc[n_train:n_train + n_val].copy()
+                    
+                    # Compute features on each split separately
+                    train_features = engineer.compute_technical_features(train_df).fillna(0)
+                    val_features = engineer.compute_technical_features(val_df).fillna(0)
+                    
+                    # Create labels on each split (no cross-boundary leakage)
+                    train_labels = create_labels(train_df, horizon=horizon, threshold=0.001, trading_cost=0.0009)
+                    val_labels = create_labels(val_df, horizon=horizon, threshold=0.001, trading_cost=0.0009)
+                    
+                    # Convert labels: -1/0/1 -> 0/1/2 (SHORT/NEUTRAL/LONG)
+                    train_labels = (train_labels + 1).astype(int)
+                    val_labels = (val_labels + 1).astype(int)
+                    
+                    # Drop last 'horizon' samples from training to prevent label leakage
+                    # (those labels use future prices that approach the validation boundary)
+                    if len(train_features) > horizon:
+                        train_features = train_features.iloc[:-horizon]
+                        train_labels = train_labels[:-horizon]
+                    
+                    train_features_list.append(train_features)
+                    train_labels_list.append(train_labels)
+                    val_features_list.append(val_features)
+                    val_labels_list.append(val_labels)
+                    
+                    self.log(f"  {asset}: train={len(train_features):,}, val={len(val_features):,}")
+                    time.sleep(0)  # UI yield
                 
-                labels = create_labels(df, horizon=5, threshold=0.001)
-                labels = (labels + 1).astype(int)
+                # Concatenate all assets (now properly split per-asset)
+                train_features_raw = pd.concat(train_features_list, ignore_index=True)
+                val_features_raw = pd.concat(val_features_list, ignore_index=True)
+                train_labels = np.concatenate(train_labels_list)
+                val_labels = np.concatenate(val_labels_list)
                 
-                features_np = scaled_features.values.astype(np.float32)
-                labels_np = labels.astype(np.int64)
+                self.log(f"")
+                self.log(f"Combined: train={len(train_features_raw):,}, val={len(val_features_raw):,}")
                 
+                # === FIT SCALERS ON TRAINING DATA ONLY ===
+                self.log(f"Fitting scalers on training data only (no leakage)")
+                engineer.fit_scalers(train_features_raw)
+                
+                # Transform both sets using training-fitted scalers
+                train_features_scaled = engineer.transform(train_features_raw)
+                val_features_scaled = engineer.transform(val_features_raw)
+                
+                train_features_np = train_features_scaled.values.astype(np.float32)
+                val_features_np = val_features_scaled.values.astype(np.float32)
+                train_labels_np = train_labels.astype(np.int64)
+                val_labels_np = val_labels.astype(np.int64)
+                
+                # Skip initial sequence_length samples
                 valid_start = config.data.sequence_length
-                features_np = features_np[valid_start:]
-                labels_np = labels_np[valid_start:]
+                train_features_np = train_features_np[valid_start:]
+                train_labels_np = train_labels_np[valid_start:]
+                val_features_np = val_features_np[valid_start:]
+                val_labels_np = val_labels_np[valid_start:]
                 
-                n_train = int(len(features_np) * 0.8)
-                n_val = int(len(features_np) * 0.1)
+                # === CLASS WEIGHT BALANCING ===
+                class_counts = np.bincount(train_labels_np, minlength=3)
+                total_samples = len(train_labels_np)
+                class_weights = total_samples / (3 * class_counts + 1e-6)
+                class_weights = class_weights / class_weights.sum() * 3  # Normalize
+                class_weights_tensor = torch.FloatTensor(class_weights)
                 
-                train_dataset = TradingDataset(features_np[:n_train], labels_np[:n_train], config.data.sequence_length)
-                val_dataset = TradingDataset(features_np[n_train:n_train+n_val], labels_np[n_train:n_train+n_val], config.data.sequence_length)
+                self.log(f"Class distribution: SHORT={class_counts[0]:,}, NEUTRAL={class_counts[1]:,}, LONG={class_counts[2]:,}")
+                self.log(f"Class weights: [{class_weights[0]:.2f}, {class_weights[1]:.2f}, {class_weights[2]:.2f}]")
+                
+                # Create datasets
+                train_dataset = TradingDataset(train_features_np, train_labels_np, config.data.sequence_length)
+                val_dataset = TradingDataset(val_features_np, val_labels_np, config.data.sequence_length)
                 
                 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
                 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
                 
-                input_dim = features_np.shape[1]
+                input_dim = train_features_np.shape[1]
+                self.log(f"")
                 self.log(f"Features: {input_dim}, Train: {len(train_dataset):,}, Val: {len(val_dataset):,}")
                 self.log(f"")
                 
@@ -1051,7 +1143,8 @@ class GPUTrainerGUI:
                 config.training.epochs = epochs
                 config.training.learning_rate = lr
                 
-                trainer = Trainer(model, train_loader, val_loader, config, device=config.device, gui_mode=True)
+                trainer = Trainer(model, train_loader, val_loader, config, device=config.device, 
+                                  gui_mode=True, class_weights=class_weights_tensor)
                 
                 self.current_model = model_type
                 self.total_epochs = epochs

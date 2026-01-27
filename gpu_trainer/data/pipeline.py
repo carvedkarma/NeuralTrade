@@ -835,13 +835,32 @@ class MultiTimeframeDataset(Dataset):
         return x, y
 
 
-def create_labels(df: pd.DataFrame, horizon: int = 5, 
-                  threshold: float = 0.001) -> np.ndarray:
+def create_labels(df: pd.DataFrame, horizon: int = 16, 
+                  threshold: float = 0.001,
+                  trading_cost: float = 0.0009) -> np.ndarray:
+    """
+    Create cost-aware labels for trading signals.
+    
+    Args:
+        df: DataFrame with 'close' column
+        horizon: Number of bars to look ahead (16 = ~4 hours on 15m)
+        threshold: Minimum return threshold before costs
+        trading_cost: Round-trip trading cost (default 0.09% = 0.0009)
+    
+    Returns:
+        labels: -1 (SHORT), 0 (NEUTRAL), 1 (LONG)
+        
+    Class mapping after (labels + 1):
+        0 = SHORT, 1 = NEUTRAL, 2 = LONG
+    """
     future_returns = df["close"].pct_change(horizon).shift(-horizon)
     
+    # Cost-aware threshold: only signal if net return exceeds costs
+    net_threshold = threshold + trading_cost
+    
     labels = np.zeros(len(df))
-    labels[future_returns > threshold] = 1
-    labels[future_returns < -threshold] = -1
+    labels[future_returns > net_threshold] = 1   # LONG only if profit > costs
+    labels[future_returns < -net_threshold] = -1  # SHORT only if profit > costs
     
     return labels
 

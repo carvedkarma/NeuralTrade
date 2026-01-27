@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, OneCycleLR
 from typing import Dict, List, Tuple, Optional, Callable
 import numpy as np
@@ -26,7 +26,8 @@ class Trainer:
         config,
         device: str = "cuda",
         mixed_precision: bool = True,
-        gui_mode: bool = False
+        gui_mode: bool = False,
+        class_weights: Optional[torch.Tensor] = None
     ):
         self.gui_mode = gui_mode  # Disable tqdm in GUI mode to prevent UI freeze
         self.model = model.to(device)
@@ -49,9 +50,14 @@ class Trainer:
             steps_per_epoch=len(train_loader)
         )
         
-        self.scaler = GradScaler() if mixed_precision else None
+        # Fixed: Use device-specific GradScaler to avoid deprecation warning
+        self.scaler = GradScaler('cuda') if mixed_precision else None
         
-        self.criterion = nn.CrossEntropyLoss()
+        # Use class weights if provided to handle imbalanced classes
+        if class_weights is not None:
+            self.criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
+        else:
+            self.criterion = nn.CrossEntropyLoss()
         
         self.writer = SummaryWriter(config.training.log_dir)
         
@@ -77,7 +83,7 @@ class Trainer:
             self.optimizer.zero_grad()
             
             if self.mixed_precision:
-                with autocast():
+                with autocast('cuda'):
                     output = self.model(data)
                     loss = self.criterion(output, target.long())
                     
@@ -153,17 +159,20 @@ class Trainer:
         all_targets = np.array(all_targets)
         all_probs = np.array(all_probs)
         
-        directional_mask = (all_targets != 2) & (all_preds != 2)
+        # Class mapping: 0=SHORT, 1=NEUTRAL, 2=LONG
+        # Directional mask excludes NEUTRAL (class 1)
+        directional_mask = (all_targets != 1) & (all_preds != 1)
         if directional_mask.sum() > 0:
             directional_acc = (all_preds[directional_mask] == all_targets[directional_mask]).mean() * 100
         else:
             directional_acc = 0
-            
-        long_mask = all_targets == 0
-        short_mask = all_targets == 1
         
-        long_precision = (all_preds[long_mask] == 0).mean() * 100 if long_mask.sum() > 0 else 0
-        short_precision = (all_preds[short_mask] == 1).mean() * 100 if short_mask.sum() > 0 else 0
+        # Correct class indices: SHORT=0, LONG=2
+        short_mask = all_targets == 0
+        long_mask = all_targets == 2
+        
+        short_precision = (all_preds[short_mask] == 0).mean() * 100 if short_mask.sum() > 0 else 0
+        long_precision = (all_preds[long_mask] == 2).mean() * 100 if long_mask.sum() > 0 else 0
         
         return {
             "val_loss": total_loss / len(self.val_loader),
