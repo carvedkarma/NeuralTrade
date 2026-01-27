@@ -1137,14 +1137,16 @@ class GPUTrainerGUI:
                 val_labels_np = val_labels_np[valid_start:]
                 
                 # === CLASS WEIGHT BALANCING ===
+                # Cap weights to prevent gradient explosion (max 10x)
+                MAX_CLASS_WEIGHT = 10.0
                 class_counts = np.bincount(train_labels_np, minlength=3)
                 total_samples = len(train_labels_np)
                 class_weights = total_samples / (3 * class_counts + 1e-6)
-                class_weights = class_weights / class_weights.sum() * 3  # Normalize
+                class_weights = np.clip(class_weights, 1.0, MAX_CLASS_WEIGHT)  # Cap to prevent NaN
                 class_weights_tensor = torch.FloatTensor(class_weights)
                 
                 self.log(f"Class distribution: SHORT={class_counts[0]:,}, NEUTRAL={class_counts[1]:,}, LONG={class_counts[2]:,}")
-                self.log(f"Class weights: [{class_weights[0]:.2f}, {class_weights[1]:.2f}, {class_weights[2]:.2f}]")
+                self.log(f"Class weights (capped at {MAX_CLASS_WEIGHT}x): [{class_weights[0]:.2f}, {class_weights[1]:.2f}, {class_weights[2]:.2f}]")
                 
                 # Create datasets
                 train_dataset = TradingDataset(train_features_np, train_labels_np, config.data.sequence_length)

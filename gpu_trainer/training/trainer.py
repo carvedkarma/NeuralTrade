@@ -78,6 +78,7 @@ class Trainer:
         else:
             loader = tqdm(self.train_loader, desc=f"Epoch {epoch}")
         
+        nan_batch_count = 0
         for batch_idx, (data, target) in enumerate(loader):
             data, target = data.to(self.device), target.to(self.device)
             
@@ -87,6 +88,14 @@ class Trainer:
                 with autocast('cuda'):
                     output = self.model(data)
                     loss = self.criterion(output, target.long())
+                
+                # NaN detection - skip batch if loss is NaN
+                if torch.isnan(loss) or torch.isinf(loss):
+                    nan_batch_count += 1
+                    if nan_batch_count > 10:
+                        logger.warning(f"Too many NaN batches ({nan_batch_count}), stopping epoch")
+                        break
+                    continue
                     
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
@@ -96,6 +105,15 @@ class Trainer:
             else:
                 output = self.model(data)
                 loss = self.criterion(output, target.long())
+                
+                # NaN detection - skip batch if loss is NaN
+                if torch.isnan(loss) or torch.isinf(loss):
+                    nan_batch_count += 1
+                    if nan_batch_count > 10:
+                        logger.warning(f"Too many NaN batches ({nan_batch_count}), stopping epoch")
+                        break
+                    continue
+                    
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.training.gradient_clip)
                 self.optimizer.step()

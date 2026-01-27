@@ -42,7 +42,7 @@ class TrainingConfig:
     weight_decay: float = 1e-5
     epochs: int = 100
     patience: int = 10
-    gradient_clip: float = 1.0
+    gradient_clip: float = 0.5  # Reduced from 1.0 to prevent gradient explosion with class weights
     warmup_steps: int = 1000
     
     use_curriculum: bool = True

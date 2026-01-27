@@ -296,12 +296,15 @@ def train(args):
     
     # Compute inverse frequency weights (higher weight for rare classes)
     # Formula: weight[i] = total_samples / (num_classes * count[i])
+    # CRITICAL: Cap weights to prevent gradient explosion (max 10x)
     num_classes = 3  # SHORT, HOLD, LONG
+    MAX_CLASS_WEIGHT = 10.0  # Prevent extreme weights causing NaN gradients
     class_weights_list = []
     for class_idx in range(num_classes):
         if class_idx in unique_labels:
             idx = np.where(unique_labels == class_idx)[0][0]
             weight = total_samples / (num_classes * label_counts[idx])
+            weight = min(weight, MAX_CLASS_WEIGHT)  # Cap to prevent explosion
         else:
             weight = 1.0  # Default weight if class not present
         class_weights_list.append(weight)
@@ -310,7 +313,7 @@ def train(args):
     logger.info(f"Class distribution: SHORT={label_counts[0] if 0 in unique_labels else 0}, "
                 f"HOLD={label_counts[1] if 1 in unique_labels else 0}, "
                 f"LONG={label_counts[2] if 2 in unique_labels else 0}")
-    logger.info(f"Class weights: {class_weights.numpy()}")
+    logger.info(f"Class weights (capped at {MAX_CLASS_WEIGHT}x): {class_weights.numpy()}")
     
     trainer = Trainer(model, train_loader, val_loader, config, device=config.device, 
                       class_weights=class_weights)
