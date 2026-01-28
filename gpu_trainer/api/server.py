@@ -369,6 +369,115 @@ class ModelManager:
             self.instantiation_errors[model_type] = error_msg
             return None
     
+    def _infer_dims_from_state_dict(self, state_dict: dict, model_type: str) -> dict:
+        """Infer model dimensions from state_dict weight shapes.
+        
+        This is critical for loading models when input_dim/hidden_dim weren't
+        saved in the checkpoint config (which is the common case since they're
+        computed at training time from data shape).
+        
+        Matches actual parameter names from gpu_trainer/models/*.py implementations.
+        """
+        inferred = {}
+        model_type_lower = model_type.lower()
+        
+        def get_param_shape(key):
+            """Get shape from state_dict, handling both Tensor and array-like objects."""
+            if key in state_dict:
+                param = state_dict[key]
+                return tuple(param.shape) if hasattr(param, 'shape') else None
+            return None
+        
+        try:
+            # === LSTM MODELS ===
+            # BidirectionalLSTM: input_bn.weight [input_dim], lstm.weight_ih_l0 [4*hidden_dim, input_dim]
+            if "lstm" in model_type_lower or "bidirectional" in model_type_lower:
+                shape = get_param_shape("input_bn.weight")
+                if shape:
+                    inferred["input_dim"] = shape[0]
+                    
+                shape = get_param_shape("lstm.weight_ih_l0")
+                if shape:
+                    inferred["hidden_dim"] = shape[0] // 4  # LSTM has 4 gates
+                    if "input_dim" not in inferred:
+                        inferred["input_dim"] = shape[1]
+                        
+            # === TRANSFORMER MODELS ===
+            # TransformerPriceModel: input_projection.weight [d_model, input_dim]
+            elif "transformer" in model_type_lower and "tft" not in model_type_lower and "temporal_fusion" not in model_type_lower:
+                shape = get_param_shape("input_projection.weight")
+                if shape:
+                    inferred["d_model"] = shape[0]
+                    inferred["input_dim"] = shape[1]
+                    
+            # TemporalFusionTransformer: temporal_encoder.weight_ih_l0 [4*hidden, input_dim]
+            elif "tft" in model_type_lower or "temporal_fusion" in model_type_lower:
+                shape = get_param_shape("temporal_encoder.weight_ih_l0")
+                if shape:
+                    inferred["input_dim"] = shape[1]
+                    inferred["d_model"] = shape[0] // 4  # LSTM has 4 gates
+                    
+            # === CNN MODELS ===
+            # ResNetPrice/InceptionNet: input_conv.0.weight [out_channels, in_channels, kernel_size]
+            elif "resnet" in model_type_lower or "cnn" in model_type_lower or "inception" in model_type_lower:
+                shape = get_param_shape("input_conv.0.weight")
+                if shape:
+                    inferred["input_dim"] = shape[1]  # Conv1d: [out_channels, in_channels, kernel]
+                    inferred["base_channels"] = shape[0]
+                    
+            # WaveNet: input_conv.weight [residual_channels, input_dim, 1]
+            elif "wavenet" in model_type_lower:
+                shape = get_param_shape("input_conv.weight")
+                if shape:
+                    inferred["input_dim"] = shape[1]
+                    inferred["residual_channels"] = shape[0]
+                    
+            # === VAE MODELS ===
+            # MarketVAE/ConditionalVAE: encoder.0.weight [hidden_dim, input_dim * sequence_length]
+            elif "vae" in model_type_lower:
+                shape = get_param_shape("encoder.0.weight")
+                if shape:
+                    # encoder.0 is Linear(input_dim * sequence_length, hidden_dims[0])
+                    # We need to extract input_dim by dividing by sequence_length
+                    # But we don't know sequence_length, so we'll try common values
+                    total_input = shape[1]
+                    for seq_len in [100, 50, 60, 120]:
+                        if total_input % seq_len == 0:
+                            inferred["input_dim"] = total_input // seq_len
+                            inferred["sequence_length"] = seq_len
+                            break
+                    inferred["hidden_dims"] = [shape[0]]  # First hidden dim
+                    
+            # === GNN MODELS ===
+            # CrossAssetGNN: node_encoder.0.weight [hidden_dim, input_dim]
+            elif "cross_asset" in model_type_lower or "crossasset" in model_type_lower:
+                shape = get_param_shape("node_encoder.0.weight")
+                if shape:
+                    inferred["hidden_dim"] = shape[0]
+                    inferred["input_dim"] = shape[1]
+                    
+            # TemporalGNN: spatial_encoder.weight [hidden_dim, features_per_node]
+            elif "gnn" in model_type_lower or "temporal_gnn" in model_type_lower:
+                shape = get_param_shape("spatial_encoder.weight")
+                if shape:
+                    inferred["hidden_dim"] = shape[0]
+                    # features_per_node = input_dim // num_nodes, but we'll store what we find
+                    inferred["input_dim"] = shape[1]
+                    
+            if inferred:
+                logger.info(f"Inferred dimensions for {model_type}: {inferred}")
+            else:
+                # Log available keys for debugging
+                sample_keys = list(state_dict.keys())[:10]
+                logger.warning(f"Could not infer dims for {model_type}. Sample keys: {sample_keys}")
+                
+        except Exception as e:
+            logger.warning(f"Failed to infer dims from state_dict for {model_type}: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            
+        return inferred
+    
     def _instantiate_model(self, checkpoint: dict, model_name: str):
         """Instantiate a model from checkpoint config and state_dict."""
         raw_config = checkpoint.get("config", {})
@@ -386,10 +495,23 @@ class ModelManager:
             # Try to infer from checkpoint name
             model_type = model_name
         
+        # Infer dimensions from state_dict (since training doesn't save input_dim/hidden_dim in config)
+        inferred_dims = self._infer_dims_from_state_dict(state_dict, model_type)
+        
+        # Merge inferred dims into config - inferred ALWAYS takes precedence
+        # since they come from actual weights and reflect the true model architecture
+        for key, value in inferred_dims.items():
+            if value is not None:
+                config[key] = value
+        
         try:
-            # Get config values with defaults
+            # Get config values with defaults (now possibly updated by inferred dims)
             input_dim = config.get("input_dim", 81)
+            hidden_dim = config.get("hidden_dim", 128)
+            d_model = config.get("d_model", 256)
             sequence_length = config.get("sequence_length", 100)
+            
+            logger.info(f"Creating model {model_type} with: input_dim={input_dim}, hidden_dim={hidden_dim}, d_model={d_model}")
             
             # Create model with proper constructor
             model = self._create_model_instance(model_type, config)
