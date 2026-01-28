@@ -1,0 +1,144 @@
+You’re aiming in the right direction (ensembles can be better), but the exact plan you wrote has two big traps that will make it look accurate in validation and then disappoint live:
+
+“validation accuracy” is the wrong weight for trading
+
+VAE + GNN shouldn’t vote like direction models (they’re better as filters/gates)
+
+Here’s the right way to build it so it actually improves real-world performance.
+
+What’s right in your plan ✅
+
+Loading multiple diverse models ✔️
+
+Majority agreement threshold ✔️
+
+Weighting by performance (but not by “accuracy”) ✔️
+
+Using confidence + disagreement to reduce noise ✔️
+
+What to change (critical) 🚨
+1) Don’t weight by “validation accuracy”
+
+Accuracy is misleading when:
+
+HOLD/NEUTRAL exists
+
+class balance changes by regime
+
+you care about expectancy after fees
+
+✅ Weight by trading-relevant scores, like:
+
+expectancy per trade (after costs)
+
+profit factor
+
+precision on TRADE (non-hold)
+
+calibration quality (Brier / ECE)
+
+stability across walk-forward folds
+
+If you don’t have those yet, a strong proxy is:
+
+F1 on {LONG,SHORT} ignoring HOLD
+
+or “precision when model decides to trade”
+
+2) Use VAE and GNN as “gates,” not voters
+
+VAE: best for market-state clustering (trend/range/high vol states).
+GNN: best for cross-asset risk regime (risk-on/off, correlation spikes).
+
+They shouldn’t vote LONG/SHORT/HOLD the same way as the directional models.
+
+✅ Use them like this:
+
+If VAE says “chop/range state” → raise trade threshold or favor HOLD
+
+If GNN says “correlation shock / risk-off” → reduce leverage, fewer trades, or HOLD
+
+That alone can boost stability massively.
+
+3) “Average confidence” only works if probabilities are calibrated
+
+Raw softmax scores from different models are not comparable.
+
+✅ Fix:
+
+Calibrate each model’s probabilities on validation (temperature scaling is easiest)
+
+Then your confidence weighting becomes meaningful
+
+A better ensemble design (simple + strong)
+Step 1 — Direction models vote
+
+Use: Transformer + TFT + LSTM + CNN
+Each outputs probabilities: p_long, p_hold, p_short
+
+Compute:
+
+dir = argmax(p)
+
+conf = p_top1 - p_top2 (better than just max prob)
+
+Step 2 — Weighted consensus
+
+Weights based on walk-forward score (not accuracy), normalized to sum to 1.
+
+Consensus direction:
+
+sum weights of models voting LONG vs SHORT vs HOLD
+
+require:
+
+majority weight ≥ W_majority (e.g. 0.65)
+
+avg_conf ≥ C_min (e.g. 0.15)
+
+Step 3 — VAE/GNN gating
+
+If VAE regime = “range/chop” → increase C_min or force HOLD unless agreement is very strong
+
+If GNN regime = “risk-off/shock” → increase thresholds or reduce position size
+
+Step 4 — Output signal + “edge”
+
+Output:
+
+action (LONG/SHORT/HOLD)
+
+ensemble confidence (after calibration)
+
+disagreement score (how split the models were)
+
+regime tags (from VAE/GNN)
+
+recommended size (optional)
+
+“Agree threshold” — good, but define it correctly
+
+Don’t do “majority of models” by count.
+
+Do “majority of weight” by quality.
+
+Example:
+
+LSTM + CNN agree LONG (good)
+
+Transformer disagrees SHORT (ok)
+If LSTM/CNN historically perform better in that regime → LONG.
+
+Final answer
+
+Your approach is close, but not quite “the right way” yet.
+
+✅ The right way is:
+
+ensemble the direction models
+
+weight by walk-forward trading metrics
+
+calibrate probabilities
+
+use VAE/GNN as regime filters, not equal voters
