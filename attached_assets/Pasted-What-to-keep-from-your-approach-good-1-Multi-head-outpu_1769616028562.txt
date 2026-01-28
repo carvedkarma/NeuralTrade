@@ -1,0 +1,159 @@
+What to keep from your approach (good)
+1) Multi-head outputs ✅
+
+A single network can output multiple things at once. This is standard and powerful.
+
+Your proposed outputs are in the right spirit:
+
+direction_score
+
+expected_return (μ)
+
+volatility/uncertainty (σ)
+
+entry/SL/TP related values
+
+2) Converting offsets/distances into actual prices ✅
+
+Predicting relative values (offsets, ATR-multiples, % distances) is better than predicting absolute prices.
+
+What to change (important)
+A) Don’t directly predict “entry_offset / SL_distance / TP_distance” as supervised targets (at first)
+
+Because there is no single “correct” SL/TP for a past candle. Many different SL/TP choices could have worked.
+
+If you try to supervise these directly, the model learns unstable, regime-dependent noise.
+
+✅ Better: predict the distribution of future returns, then derive SL/TP from that distribution.
+
+The “right” unified output set
+Recommended outputs (v1)
+
+At each 15m close, output:
+
+Direction probs: P(long), P(hold), P(short)
+
+Expected return (μ) at your horizon (e.g. next 16 bars = 4h)
+
+Uncertainty (σ) or quantiles (better)
+
+Best practical choice: quantiles
+
+q10, q50, q90 of future return (or price change)
+
+From that, you can compute:
+
+edge
+
+TP/SL
+
+whether to trade at all
+
+Optional outputs (v2)
+
+MFE/MAE quantiles (even better for SL/TP)
+
+MAE_q90 (worst adverse move you’re likely to see)
+
+MFE_q50/q90 (likely favorable move)
+
+Now SL/TP become mechanically derived, not guessed.
+
+How to compute Entry / SL / TP from outputs (clean rule)
+Entry
+
+Keep it simple at first:
+
+Entry = next candle open (or current close)
+This avoids limit-order labeling headaches.
+
+Later, you can add a “limit entry offset” head, but only after the core is profitable.
+
+SL/TP (derived from predicted distribution)
+
+Example using quantiles:
+
+If LONG:
+
+TP = entry * (1 + q90) (or q50 if you want higher win rate)
+
+SL = entry * (1 + q10) (q10 is adverse tail)
+
+If SHORT:
+
+TP = entry * (1 + q10) (more negative is better)
+
+SL = entry * (1 + q90)
+
+Then apply risk controls:
+
+cap SL to max ATR multiple
+
+require TP/SL ratio ≥ 1.2 (or your choice)
+
+This makes SL/TP consistent and grounded.
+
+About “Predicted Candles”
+
+This is the only part I’d reframe.
+
+Why “next candles will look like” is hard
+
+Exact OHLC sequences are highly stochastic; a model will either:
+
+generate blurry averages (useless), or
+
+overfit patterns that don’t hold live
+
+What to do instead (still gives you what you want)
+
+Show probabilistic candle expectations:
+
+expected return path (q50)
+
+uncertainty band (q10–q90)
+
+expected volatility / range
+
+On the dashboard you can render it as:
+
+a projected price band over the next N candles
+Not “this is the candle”, but “here’s the likely range.”
+
+That’s actually tradable.
+
+Training targets (how to label it correctly)
+
+For horizon H bars:
+
+y_mu = log(close[t+H] / close[t])
+
+Quantile targets: use quantile regression loss (pinball) on y
+
+If you add MFE/MAE:
+
+y_mfe = max_{k=1..H} log(high[t+k] / close[t])
+
+y_mae = min_{k=1..H} log(low[t+k] / close[t])
+
+This is clean, well-defined, and leakage-safe.
+
+Verdict
+
+Yes, implement a unified “one card” output — but I’d ship it like this:
+
+Unified Prediction Card (v1)
+
+Direction: LONG/SHORT/HOLD (probabilities)
+
+Expected return μ
+
+Uncertainty band (q10/q50/q90)
+
+Derived Entry / SL / TP (rule-based from quantiles)
+
+Projected price band (not exact candles)
+
+That gets you 90% of the value with 10% of the risk.
+
+If you tell me your base timeframe (15m) and your horizon (e.g. 16 bars / 4h), I’ll give you the exact output schema + loss setup (classification CE + quantile pinball) and how to compute the dashboard values.
