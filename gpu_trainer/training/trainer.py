@@ -331,13 +331,39 @@ class Trainer:
         path = Path(self.config.training.checkpoint_dir) / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         
+        # Include model-specific config with input_dim for proper loading
+        model_config = {
+            "name": self.model.name,
+            "input_dim": self.model.input_dim,
+            "output_dim": self.model.output_dim,
+        }
+        
+        # Try to capture model-specific attributes
+        if hasattr(self.model, 'hidden_dim'):
+            model_config["hidden_dim"] = self.model.hidden_dim
+        if hasattr(self.model, 'd_model'):
+            model_config["d_model"] = self.model.d_model
+        if hasattr(self.model, 'sequence_length'):
+            model_config["sequence_length"] = self.model.sequence_length
+        if hasattr(self.model, 'channels'):
+            model_config["channels"] = self.model.channels
+        if hasattr(self.model, 'latent_dim'):
+            model_config["latent_dim"] = self.model.latent_dim
+        if hasattr(self.model, 'hidden_dims'):
+            model_config["hidden_dims"] = self.model.hidden_dims
+        if hasattr(self.model, 'num_assets'):
+            model_config["num_assets"] = self.model.num_assets
+        if hasattr(self.model, 'num_layers'):
+            model_config["num_layers"] = self.model.num_layers
+        
         checkpoint = {
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
             "best_val_loss": self.best_val_loss,
             "global_step": self.global_step,
-            "config": self.config
+            "config": self.config,
+            "model_config": model_config  # Model-specific config with input_dim
         }
         torch.save(checkpoint, path)
         if not self.gui_mode:

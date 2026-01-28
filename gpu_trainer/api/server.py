@@ -537,6 +537,16 @@ class ModelManager:
         raw_config = checkpoint.get("config", {})
         # Convert Config object to dict if needed
         config = self._config_to_dict(raw_config)
+        
+        # Check for model_config first (saved by updated trainer with input_dim)
+        model_config = checkpoint.get("model_config", {})
+        if model_config:
+            logger.info(f"Found model_config in checkpoint: {model_config}")
+            # Model config takes precedence for model-specific params
+            for key, value in model_config.items():
+                if value is not None:
+                    config[key] = value
+        
         state_dict = checkpoint.get("model_state_dict")
         
         if not state_dict:
@@ -544,7 +554,7 @@ class ModelManager:
             return None
         
         # Try to determine model type from name, config, or infer from state_dict keys
-        model_type = config.get("model_type", "")
+        model_type = config.get("model_type", "") or config.get("name", "")
         if not model_type:
             # Try to infer from checkpoint name
             model_type = model_name
