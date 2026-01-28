@@ -86,6 +86,59 @@ class ModelManager:
         # If no pattern matched, return the filename as-is
         return filename
     
+    def _config_to_dict(self, config) -> dict:
+        """Convert a Config object (dataclass/object) to a dictionary.
+        
+        Handles both dict and object-style configs from checkpoints.
+        Some checkpoints save config as a dataclass/object, others as dict.
+        """
+        if config is None:
+            return {}
+        
+        # Already a dict
+        if isinstance(config, dict):
+            return config
+        
+        # Try to convert object to dict
+        try:
+            # Try vars() for regular objects
+            return vars(config)
+        except TypeError:
+            pass
+        
+        try:
+            # Try __dict__ directly
+            if hasattr(config, '__dict__'):
+                return config.__dict__
+        except Exception:
+            pass
+        
+        try:
+            # Try dataclass asdict
+            from dataclasses import asdict, is_dataclass
+            if is_dataclass(config):
+                return asdict(config)
+        except Exception:
+            pass
+        
+        try:
+            # Try accessing common attributes manually
+            result = {}
+            common_attrs = ['input_dim', 'output_dim', 'hidden_dim', 'sequence_length', 
+                           'dropout', 'd_model', 'nhead', 'num_layers', 'num_encoder_layers',
+                           'model_type', 'latent_dim', 'hidden_dims', 'num_assets', 
+                           'base_channels', 'num_blocks', 'kernel_size', 'use_attention']
+            for attr in common_attrs:
+                if hasattr(config, attr):
+                    result[attr] = getattr(config, attr)
+            return result
+        except Exception:
+            pass
+        
+        # Fallback: return empty dict
+        logger.warning(f"Could not convert config of type {type(config)} to dict")
+        return {}
+    
     def transform_features(self, features_df) -> np.ndarray:
         """Transform features using the loaded scaler dict.
         
@@ -318,7 +371,9 @@ class ModelManager:
     
     def _instantiate_model(self, checkpoint: dict, model_name: str):
         """Instantiate a model from checkpoint config and state_dict."""
-        config = checkpoint.get("config", {})
+        raw_config = checkpoint.get("config", {})
+        # Convert Config object to dict if needed
+        config = self._config_to_dict(raw_config)
         state_dict = checkpoint.get("model_state_dict")
         
         if not state_dict:
@@ -402,12 +457,16 @@ class ModelManager:
                 model_type = self._map_filename_to_model_type(model_name)
                 self.model_type_map[model_name] = model_type
                 
+                # Convert Config object to dict if needed
+                raw_config = checkpoint.get("config", {})
+                config_dict = self._config_to_dict(raw_config)
+                
                 # Store checkpoint metadata
                 self.models[model_name] = {
                     "path": str(ckpt_path),
                     "accuracy": checkpoint.get("val_accuracy", 0),
                     "epoch": checkpoint.get("epoch", 0),
-                    "config": checkpoint.get("config", {}),
+                    "config": config_dict,
                     "parameters": checkpoint.get("parameters", 0),
                     "model_type": model_type  # Standardized type for dashboard
                 }
@@ -1304,12 +1363,16 @@ async def load_model_endpoint(model_path: str):
         checkpoint = torch.load(str(path), map_location=model_manager.device, weights_only=False)
         model_name = path.stem
         
+        # Convert Config object to dict if needed
+        raw_config = checkpoint.get("config", {})
+        config_dict = model_manager._config_to_dict(raw_config)
+        
         # Store metadata
         model_manager.models[model_name] = {
             "path": str(path),
             "accuracy": checkpoint.get("val_accuracy", 0),
             "epoch": checkpoint.get("epoch", 0),
-            "config": checkpoint.get("config", {}),
+            "config": config_dict,
             "parameters": checkpoint.get("parameters", 0)
         }
         
