@@ -51,7 +51,7 @@ import { StrategyLearnerTab } from "@/components/strategy-learner-card";
 import { DataManagementCard } from "@/components/data-management-card";
 import { NeuralNetworkDataCard } from "@/components/nn-data-card";
 import { NeuralNetworkPredictionCard, TrainingModeBadge, type QuantilePrediction } from "@/components/neural-network-prediction";
-import { PredictedCandlesChart } from "@/components/predicted-candles-chart";
+import { QuantileFanChart, DerivedTradeLevels } from "@/components/quantile-fan-chart";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff, Brain, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -488,13 +488,23 @@ export default function Dashboard() {
 
           <TabsContent value="neural-network" className="mt-0">
             <div className="space-y-4">
-              {/* Predicted Candles Chart */}
-              <PredictedCandlesChart 
-                historicalCandles={data.candles}
-                predictedCandles={nnPrediction?.predictedCandles || []}
-                currentPrice={data.candles[data.candles.length - 1]?.close || 0}
-                horizon={10}
-              />
+              {/* Probabilistic Return Path Visualization */}
+              {nnPrediction?.prediction && (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <QuantileFanChart 
+                    currentPrice={data.candles[data.candles.length - 1]?.close || 0}
+                    quantiles={nnPrediction.prediction.quantiles}
+                    action={nnPrediction.prediction.action}
+                    horizonBars={10}
+                    timeframeMinutes={15}
+                  />
+                  <DerivedTradeLevels
+                    currentPrice={data.candles[data.candles.length - 1]?.close || 0}
+                    quantiles={nnPrediction.prediction.quantiles}
+                    action={nnPrediction.prediction.action}
+                  />
+                </div>
+              )}
               
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
                 {/* Neural Network Prediction */}

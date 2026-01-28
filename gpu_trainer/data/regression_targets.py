@@ -169,12 +169,13 @@ class RegressionTargetGenerator:
         return mae
     
     def compute_return_quantiles(self, prices: pd.Series,
-                                  quantiles: List[float] = [0.1, 0.5, 0.9]
+                                  quantiles: List[float] = [0.1, 0.25, 0.5, 0.75, 0.9]
                                   ) -> pd.DataFrame:
         """
         Compute rolling quantiles of forward returns.
         
         Uses expanding window to compute quantiles at each point.
+        Now includes q10, q25, q50, q75, q90 for full distribution.
         """
         forward_returns = self.compute_forward_returns(prices)
         
@@ -185,6 +186,64 @@ class RegressionTargetGenerator:
             result[col_name] = forward_returns.expanding(min_periods=100).quantile(q)
         
         return result
+    
+    def generate_multihead_targets(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Generate targets specifically for multi-head model training.
+        
+        Returns:
+            DataFrame with:
+            - mu: Actual forward return (regression target)
+            - sigma: Forward volatility (for uncertainty calibration)
+            - class_label: 0=SHORT, 1=HOLD, 2=LONG (for classification head)
+            - forward_return: The actual return to predict (same as mu, for quantile loss)
+        
+        Note: The model predicts quantiles of the return distribution.
+        The target for quantile loss is the actual realized return.
+        Pinball loss naturally learns the correct quantiles from individual returns.
+        """
+        prices = df["close"]
+        
+        # Actual forward return (the target we're predicting)
+        mu = self.compute_forward_returns(prices)
+        
+        # Forward volatility (uncertainty target)
+        current_vol = self.compute_realized_volatility(prices)
+        sigma = self.compute_forward_volatility(prices)
+        sigma = sigma.fillna(current_vol)
+        
+        # Classification labels derived from return direction and magnitude
+        edge = self.compute_directional_edge(mu, sigma.clip(lower=0.001))
+        
+        # Generate class labels
+        class_label = pd.Series(1, index=df.index)  # Default HOLD
+        
+        # Edge threshold for directional trades
+        edge_threshold = 0.3  # Lower threshold for more training signal
+        min_return = 0.002   # Minimum 0.2% move to be directional
+        
+        # LONG: positive return with sufficient edge
+        long_mask = (mu > min_return) & (edge > edge_threshold)
+        class_label[long_mask] = 2  # LONG
+        
+        # SHORT: negative return with sufficient edge
+        short_mask = (mu < -min_return) & (edge > edge_threshold)
+        class_label[short_mask] = 0  # SHORT
+        
+        targets = pd.DataFrame({
+            "mu": mu,
+            "sigma": sigma,
+            "class_label": class_label,
+            "forward_return": mu,  # Same as mu, explicit for quantile loss
+            "edge": edge,
+            "current_volatility": current_vol
+        })
+        
+        logger.info(f"Generated multihead targets: "
+                   f"LONG={long_mask.sum()}, SHORT={short_mask.sum()}, "
+                   f"HOLD={(class_label == 1).sum()}")
+        
+        return targets
     
     def compute_probability_profitable(self, 
                                         prices: pd.Series,

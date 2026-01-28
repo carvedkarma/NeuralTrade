@@ -816,6 +816,131 @@ class ModelManager:
             "reasoning": ["No models loaded - defaulting to HOLD"]
         }
     
+    def predict_multihead(self, features: np.ndarray) -> Optional[Dict]:
+        """Make prediction using multi-head model with learned quantiles.
+        
+        Returns None if no multi-head model is available.
+        
+        Multi-head models output:
+        - Classification: direction probabilities
+        - Regression: expected return (mu) and uncertainty (sigma)
+        - Quantiles: q10, q25, q50, q75, q90 for SL/TP derivation
+        
+        Accepts inputs of shape:
+        - [seq_len, features] -> single sample
+        - [batch, seq_len, features] -> batch of samples
+        
+        Feature version locking:
+        - Validates feature dimension, sequence length, and horizon
+        - Returns HOLD with confidence=0 on any mismatch (safety behavior)
+        """
+        # Check for multi-head model instances
+        multihead_model = None
+        for name, model in self.model_instances.items():
+            if hasattr(model, 'forward_multihead'):
+                multihead_model = model
+                break
+        
+        if multihead_model is None:
+            return None
+        
+        # Safe HOLD response for validation failures
+        safe_hold_response = lambda reason: {
+            "action": 1,
+            "action_name": "HOLD",
+            "direction_probs": {"LONG": 0.33, "SHORT": 0.33, "HOLD": 0.34},
+            "confidence": 0.0,
+            "mu": 0.0,
+            "sigma": 0.01,
+            "quantiles": {"q10": -0.01, "q25": -0.005, "q50": 0.0, "q75": 0.005, "q90": 0.01},
+            "model_name": "HOLD (validation failed)",
+            "is_learned": False,
+            "error": reason,
+            "feature_dim_validated": False
+        }
+        
+        # Feature dimension validation (critical)
+        input_features = features.shape[-1] if len(features.shape) >= 2 else features.shape[0]
+        expected_dim = getattr(multihead_model, 'input_dim', self.input_dim)
+        
+        if input_features != expected_dim:
+            logger.warning(f"[BLOCK] Feature mismatch: expected {expected_dim}, got {input_features}")
+            return safe_hold_response(f"Feature dimension mismatch: expected {expected_dim}, got {input_features}")
+        
+        # Sequence length validation (critical - hard failure)
+        if len(features.shape) == 2:
+            actual_seq = features.shape[0]
+        else:
+            actual_seq = features.shape[1]
+        
+        expected_seq = getattr(self, 'sequence_length', 100)
+        if actual_seq != expected_seq:
+            logger.warning(f"[BLOCK] Sequence length mismatch: expected {expected_seq}, got {actual_seq}")
+            return safe_hold_response(f"Sequence length mismatch: expected {expected_seq}, got {actual_seq}")
+        
+        try:
+            multihead_model.eval()
+            with torch.no_grad():
+                # Handle both 2D [seq_len, features] and 3D [batch, seq_len, features] inputs
+                if len(features.shape) == 2:
+                    x = torch.FloatTensor(features).unsqueeze(0).to(self.device)
+                else:
+                    x = torch.FloatTensor(features).to(self.device)
+                    if len(x.shape) == 2:
+                        x = x.unsqueeze(0)
+                
+                output = multihead_model.forward_multihead(x)
+                
+                # Extract probabilities (handle both single and batch)
+                probs = torch.softmax(output.class_logits, dim=-1).cpu().numpy()
+                if len(probs.shape) == 2 and probs.shape[0] == 1:
+                    probs = probs[0]
+                elif len(probs.shape) == 2:
+                    probs = probs.mean(axis=0)  # Average across batch
+                
+                action_idx = int(np.argmax(probs))
+                confidence = float(probs[action_idx])
+                
+                # Extract regression outputs
+                mu_arr = output.mu.cpu().numpy()
+                sigma_arr = output.sigma.cpu().numpy() if output.sigma is not None else np.array([[0.01]])
+                
+                mu = float(mu_arr.mean())
+                sigma = float(sigma_arr.mean())
+                
+                # Extract learned quantiles
+                quantiles_arr = output.quantiles.cpu().numpy()
+                if len(quantiles_arr.shape) == 2 and quantiles_arr.shape[0] == 1:
+                    quantiles = quantiles_arr[0]
+                else:
+                    quantiles = quantiles_arr.mean(axis=0)
+                
+                return {
+                    "action": action_idx,
+                    "action_name": ACTION_NAMES[action_idx],
+                    "direction_probs": {
+                        "LONG": float(probs[2]),
+                        "SHORT": float(probs[0]),
+                        "HOLD": float(probs[1])
+                    },
+                    "confidence": confidence,
+                    "mu": mu,
+                    "sigma": sigma,
+                    "quantiles": {
+                        "q10": float(quantiles[0]),
+                        "q25": float(quantiles[1]),
+                        "q50": float(quantiles[2]),
+                        "q75": float(quantiles[3]),
+                        "q90": float(quantiles[4])
+                    },
+                    "model_name": multihead_model.name,
+                    "is_learned": True,
+                    "feature_dim_validated": True
+                }
+        except Exception as e:
+            logger.error(f"Multi-head prediction error: {e}")
+            return None
+    
     def update_training_status(self, **kwargs):
         self.training_status.update(kwargs)
         
@@ -1305,12 +1430,14 @@ async def predict_quantile(request: QuantilePredictionRequest):
     - Entry = current price
     - For LONG: SL = price * (1 + q10), TP = price * (1 + q90)
     - For SHORT: SL = price * (1 + q90), TP = price * (1 + q10)
+    
+    NOTE: This endpoint uses learned quantiles if a multi-head model is loaded,
+    otherwise falls back to heuristic synthesis from classification probabilities.
     """
     try:
         features = np.array(request.features)
         
         if len(features.shape) == 2 and features.shape[0] == 1:
-            # Single sample, need to add sequence dimension
             features = features.reshape(1, features.shape[0], features.shape[1])
         elif len(features.shape) != 3:
             raise HTTPException(
@@ -1318,10 +1445,43 @@ async def predict_quantile(request: QuantilePredictionRequest):
                 detail=f"Expected features shape [batch, seq_len, features], got {features.shape}"
             )
         
-        # Get prediction from model
+        # Check if we have a multi-head model with learned quantiles
+        multihead_result = model_manager.predict_multihead(
+            features[0] if features.shape[0] == 1 else features
+        )
+        
+        if multihead_result is not None:
+            # Use learned quantiles from multi-head model
+            direction_probs = multihead_result["direction_probs"]
+            quantiles = multihead_result["quantiles"]
+            confidence = multihead_result["confidence"]
+            
+            # MFE/MAE estimates from quantile spread
+            q90 = quantiles["q90"]
+            q10 = quantiles["q10"]
+            mfe_quantiles = {
+                "q10": float(max(quantiles["q75"], 0) * 0.8),
+                "q50": float(max(q90, 0) * 0.9),
+                "q90": float(max(q90, 0) * 1.2)
+            }
+            mae_quantiles = {
+                "q10": float(min(q10, 0) * 0.8),
+                "q50": float(min(q10, 0) * 1.0),
+                "q90": float(min(q10, 0) * 1.3)
+            }
+            
+            return QuantilePredictionResponse(
+                direction_probs=direction_probs,
+                quantiles=quantiles,
+                mfe_quantiles=mfe_quantiles,
+                mae_quantiles=mae_quantiles,
+                model_name=multihead_result.get("model_name", "MultiHead"),
+                confidence=confidence
+            )
+        
+        # Fallback to heuristic synthesis from classification probabilities
         result = model_manager.predict(features[0] if features.shape[0] == 1 else features)
         
-        # Extract direction probabilities
         probs = result.get("probabilities", [0.33, 0.34, 0.33])
         direction_probs = {
             "LONG": float(probs[2]),
@@ -1331,27 +1491,19 @@ async def predict_quantile(request: QuantilePredictionRequest):
         
         confidence = float(result.get("confidence", max(probs)))
         
-        # Convert direction probabilities to quantiles
-        # Higher P(LONG) -> more positive expected return
-        # Higher P(SHORT) -> more negative expected return
         p_long = probs[2]
         p_short = probs[0]
         directional_bias = p_long - p_short
         
-        # Base volatility scale (can be refined with actual vol estimates)
-        base_vol = 0.015  # 1.5% typical 15m volatility
-        
-        # Generate quantile predictions
-        # The median (q50) reflects directional bias
-        # The spread reflects uncertainty
+        base_vol = 0.015
         uncertainty = float(result.get("uncertainty", 0.3))
         spread = base_vol * (1 + uncertainty)
         
-        q50 = directional_bias * base_vol * 2  # Median expected return
-        q25 = q50 - spread * 0.67  # ~0.67 sigma below median
-        q75 = q50 + spread * 0.67  # ~0.67 sigma above median
-        q10 = q50 - spread * 1.28  # ~1.28 sigma below median (10th percentile)
-        q90 = q50 + spread * 1.28  # ~1.28 sigma above median (90th percentile)
+        q50 = directional_bias * base_vol * 2
+        q25 = q50 - spread * 0.67
+        q75 = q50 + spread * 0.67
+        q10 = q50 - spread * 1.28
+        q90 = q50 + spread * 1.28
         
         quantiles = {
             "q10": float(q10),
@@ -1361,7 +1513,6 @@ async def predict_quantile(request: QuantilePredictionRequest):
             "q90": float(q90)
         }
         
-        # MFE/MAE estimates based on quantiles
         mfe_quantiles = {
             "q10": float(max(q75, 0) * 0.8),
             "q50": float(max(q90, 0) * 0.9),
@@ -1379,7 +1530,7 @@ async def predict_quantile(request: QuantilePredictionRequest):
             quantiles=quantiles,
             mfe_quantiles=mfe_quantiles,
             mae_quantiles=mae_quantiles,
-            model_name=result.get("model_name", "Unknown"),
+            model_name=result.get("model_name", "Classification (Heuristic)"),
             confidence=confidence
         )
         

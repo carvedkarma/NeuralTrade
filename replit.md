@@ -99,16 +99,36 @@ Preferred communication style: Simple, everyday language.
 - **Signal Threshold Tuning**: Classification probability-based threshold (scoreThreshold=0.15, minConfidence=0.45, minMargin=0.10) that controls signal frequency to target 2-3 trades/day using directional score (pLong - pShort).
 - **Edge Tracker**: File-based persistence system (edge_tracker_state.json) that monitors actual signal performance including avg net return, hit rate, expectancy, Sharpe ratio, and monthly stability scores. API endpoints at /api/edge-metrics and /api/edge-metrics/clear.
 
-#### Quantile-Based Neural Network Predictions
-- **Quantile Regression Approach**: Predicts return distribution quantiles (q10/q25/q50/q75/q90) instead of exact prices
-- **Entry/SL/TP Derivation**: 
+#### Multi-Head Model Architecture (Institutional Upgrade)
+- **Three Output Heads**: Each model produces:
+  1. Classification head: Direction probabilities (LONG/HOLD/SHORT)
+  2. Regression head: Expected return μ and uncertainty σ
+  3. Quantile head: q10, q25, q50, q75, q90 with monotonic ordering constraint
+- **Combined Loss Function**: L = L_class + λ₁·L_μ + λ₂·L_σ + λ₃·L_quantile
+  - L_class: CrossEntropyLoss with label smoothing
+  - L_μ: HuberLoss for robust regression
+  - L_σ: GaussianNLLLoss for uncertainty calibration
+  - L_quantile: Pinball loss for quantile regression
+- **Multi-Head Models**: MultiHeadTransformer, MultiHeadLSTM, MultiHeadCNN share encoder, diverge at heads
+- **Files**: `gpu_trainer/models/multihead.py`, `gpu_trainer/training/multihead_loss.py`, `gpu_trainer/training/multihead_trainer.py`
+
+#### Feature Version Locking (Safety Critical)
+- **Mandatory for Live Trading**: Every trained model saves feature configuration
+- **FeatureConfig**: Stores feature_columns (ordered), version_hash, sequence_length, horizon
+- **FeatureValidator**: Validates/aligns incoming features at inference time
+- **Safe Prediction**: Returns HOLD with confidence=0 if feature mismatch detected
+- **File**: `gpu_trainer/training/feature_registry.py`
+
+#### Quantile-Based Predictions & SL/TP Derivation
+- **Learned Quantiles**: Multi-head models output true learned quantiles (not heuristic synthesis)
+- **Entry/SL/TP Derivation (Mathematical, NOT Learned)**:
   - Entry = current price
   - For LONG: SL = price × (1 + q10), TP = price × (1 + q90)
   - For SHORT: SL = price × (1 + q90), TP = price × (1 + q10)
-- **Predicted Candles Visualization**: Shows probability bands (q25-q75 as body, q10-q90 as wicks)
+- **Probabilistic Fan Chart**: Visualizes return path quantiles (q10-q90 outer band, q25-q75 inner band, q50 median line)
 - **Training Modes**: Quick (15m only, ~57 features) vs Full MTF (5m/15m/1h/4h, ~81 features)
-- **API Endpoint**: `/api/gpu/nn-prediction` returns direction probs, quantiles, derived levels, and predicted candle data
-- **GPU Trainer Endpoint**: `/predict/quantile` converts model output to quantile format
+- **API Endpoint**: `/predict/quantile` uses learned quantiles if multi-head model loaded, else falls back to heuristic
+- **Frontend Components**: `QuantileFanChart`, `DerivedTradeLevels` in `client/src/components/quantile-fan-chart.tsx`
 
 #### Professional Ensemble Predictor
 - **Direction Model Voting**: Transformer, TFT, LSTM, CNN models vote on direction with confidence margin (p_top1 - p_top2)
