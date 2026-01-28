@@ -877,6 +877,22 @@ class GPUTrainerGUI:
             if not proxy_url:
                 return
             
+            # Try to get training mode from local API server
+            training_mode = None
+            training_mode_description = None
+            input_dim = None
+            
+            try:
+                # Query local FastAPI server for models status (includes training mode)
+                local_status = requests.get("http://localhost:8000/models/status", timeout=2).json()
+                training_mode = local_status.get("training_mode")
+                training_mode_description = local_status.get("training_mode_description")
+                input_dim = local_status.get("config", {}).get("input_dim")
+            except Exception:
+                # Don't default to any value - let the server fetch from GPU trainer
+                # or display as Unknown to avoid mislabeling training mode
+                pass
+            
             status = {
                 "gpuAvailable": self.gpu_name is not None,
                 "gpuName": self.gpu_name,
@@ -894,7 +910,11 @@ class GPUTrainerGUI:
                 "bestEpoch": self.best_epoch,
                 "modelsLoaded": self.models_completed,  # Models with loaded checkpoints
                 "modelsCompleted": self.models_completed,
-                "modelStatus": self.model_status  # Per-model training status
+                "modelStatus": self.model_status,  # Per-model training status
+                # Training mode detection based on feature dimensions
+                "training_mode": training_mode,
+                "training_mode_description": training_mode_description,
+                "input_dim": input_dim
             }
             
             url = f"{proxy_url}/api/gpu/push-status"

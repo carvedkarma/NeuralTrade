@@ -783,9 +783,13 @@ export async function registerRoutes(
         valLoss: status.valLoss ?? null,
         modelsLoaded: status.modelsLoaded ?? [],
         modelsCompleted: status.modelsCompleted ?? [],
-        modelStatus: status.modelStatus ?? undefined
+        modelStatus: status.modelStatus ?? undefined,
+        // Training mode detection from GPU trainer (snake_case from Python API)
+        trainingMode: status.training_mode ?? status.trainingMode ?? null,
+        trainingModeDescription: status.training_mode_description ?? status.trainingModeDescription ?? null,
+        inputDim: status.input_dim ?? status.inputDim ?? null
       });
-      console.log(`[GPU Push] Received status update - GPU: ${status.gpuName}, Training: ${status.isTraining}`);
+      console.log(`[GPU Push] Received status update - GPU: ${status.gpuName}, Training: ${status.isTraining}, Mode: ${status.training_mode ?? status.trainingMode ?? 'unknown'}`);
       res.json({ success: true, received: Date.now() });
     } catch (error) {
       console.error("[GPU Push] Error:", error);
@@ -794,13 +798,37 @@ export async function registerRoutes(
   });
 
   // Get pushed GPU status (for dashboard to poll)
-  app.get("/api/gpu/pushed-status", (req, res) => {
+  // Enriches with training mode from GPU trainer's /models/status if available
+  app.get("/api/gpu/pushed-status", async (req, res) => {
     const status = gpuBridge.getPushedStatus();
     const isStale = status.lastPush ? Date.now() - status.lastPush > 30000 : true;
+    const isConnected = status.connected && !isStale;
+    
+    // If connected but missing training mode, try to fetch from GPU trainer
+    let trainingMode = status.trainingMode;
+    let trainingModeDescription = status.trainingModeDescription;
+    let inputDim = status.inputDim;
+    
+    if (isConnected && !trainingMode) {
+      try {
+        const modelsStatus = await gpuBridge.fetchModelsStatus();
+        if (modelsStatus) {
+          trainingMode = modelsStatus.training_mode;
+          trainingModeDescription = modelsStatus.training_mode_description;
+          inputDim = modelsStatus.config?.input_dim ?? null;
+        }
+      } catch (e) {
+        // Ignore errors, use what we have
+      }
+    }
+    
     res.json({
       ...status,
-      connected: status.connected && !isStale,
-      isStale
+      connected: isConnected,
+      isStale,
+      trainingMode,
+      trainingModeDescription,
+      inputDim
     });
   });
 

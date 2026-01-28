@@ -1769,6 +1769,17 @@ async def get_models_status():
     successful_instances = len(model_manager.model_instances)
     failed_instances = len(model_manager.instantiation_errors)
     
+    # Determine training mode from input_dim
+    # Quick training: 15m only with ~57 features
+    # Full MTF: 5m/15m/1h/4h with ~81 features (includes cross-asset + embedding)
+    input_dim = model_manager.input_dim
+    if input_dim <= 60:
+        training_mode = "quick"
+        training_mode_description = "Quick (15m only, ~57 features)"
+    else:
+        training_mode = "full"
+        training_mode_description = "Full MTF (5m/15m/1h/4h, ~81 features)"
+    
     return {
         "summary": {
             "checkpoints_found": total_checkpoints,
@@ -1781,6 +1792,8 @@ async def get_models_status():
         "models_detail": models_detail,
         "model_type_map": model_manager.model_type_map,  # Checkpoint name -> type mapping
         "model_status_by_type": model_manager.get_model_status_by_type(),  # Dashboard-ready status
+        "training_mode": training_mode,  # "quick" or "full" based on input_dim
+        "training_mode_description": training_mode_description,
         "config": {
             "sequence_length": model_manager.sequence_length,
             "input_dim": model_manager.input_dim,

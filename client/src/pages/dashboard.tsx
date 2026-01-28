@@ -50,7 +50,7 @@ import {
 import { StrategyLearnerTab } from "@/components/strategy-learner-card";
 import { DataManagementCard } from "@/components/data-management-card";
 import { NeuralNetworkDataCard } from "@/components/nn-data-card";
-import { NeuralNetworkPredictionCard, TrainingModeSelect, type QuantilePrediction } from "@/components/neural-network-prediction";
+import { NeuralNetworkPredictionCard, TrainingModeBadge, type QuantilePrediction } from "@/components/neural-network-prediction";
 import { PredictedCandlesChart } from "@/components/predicted-candles-chart";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff, Brain, Play } from "lucide-react";
@@ -84,7 +84,6 @@ interface IntegrityReport {
 export default function Dashboard() {
   const [backfillInProgress, setBackfillInProgress] = useState(false);
   const [backfillProgress, setBackfillProgress] = useState(0);
-  const [trainingMode, setTrainingMode] = useState<"quick" | "full">("full");
 
   const { data, isLoading, error, refetch, isFetching } = useQuery<DashboardData>({
     queryKey: ["/api/dashboard"],
@@ -123,6 +122,9 @@ export default function Dashboard() {
       epochs: number;
       best_epoch: number;
     }>;
+    trainingMode?: "quick" | "full" | null;
+    trainingModeDescription?: string | null;
+    inputDim?: number | null;
   }>({
     queryKey: ["/api/gpu/pushed-status"],
     refetchInterval: 5000,
@@ -506,10 +508,11 @@ export default function Dashboard() {
                 
                 {/* Training Controls */}
                 <div className="lg:col-span-4 space-y-4">
-                  <TrainingModeSelect 
-                    mode={trainingMode}
-                    onModeChange={setTrainingMode}
-                    disabled={gpuStatus?.isTraining}
+                  <TrainingModeBadge 
+                    mode={gpuStatus?.trainingMode ?? null}
+                    description={gpuStatus?.trainingModeDescription ?? null}
+                    inputDim={gpuStatus?.inputDim ?? null}
+                    connected={gpuStatus?.connected ?? false}
                   />
                   <EnsembleSignalCard 
                     prediction={ensemblePrediction?.prediction ?? null}

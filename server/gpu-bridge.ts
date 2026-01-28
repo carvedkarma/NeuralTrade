@@ -161,6 +161,9 @@ interface PushedGPUStatus {
   modelsLoaded: string[];
   modelsCompleted: string[];
   modelStatus?: Record<string, ModelStatusEntry>;
+  trainingMode?: "quick" | "full" | null;
+  trainingModeDescription?: string | null;
+  inputDim?: number | null;
 }
 
 class GPUTrainerBridge {
@@ -185,7 +188,10 @@ class GPUTrainerBridge {
     trainLoss: null,
     valLoss: null,
     modelsLoaded: [],
-    modelsCompleted: []
+    modelsCompleted: [],
+    trainingMode: null,
+    trainingModeDescription: null,
+    inputDim: null
   };
   
   constructor(baseUrl: string = "http://localhost:8000") {
@@ -227,6 +233,26 @@ class GPUTrainerBridge {
    */
   getPushedStatus(): PushedGPUStatus {
     return this.pushedStatus;
+  }
+  
+  /**
+   * Fetch models status from GPU trainer (includes training mode)
+   */
+  async fetchModelsStatus(): Promise<any | null> {
+    try {
+      const response = await fetch(`${this.baseUrl}/models/status`, {
+        method: "GET",
+        headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(3000) // 3 second timeout
+      });
+      
+      if (response.ok) {
+        return await response.json();
+      }
+      return null;
+    } catch (error) {
+      return null;
+    }
   }
   
   /**

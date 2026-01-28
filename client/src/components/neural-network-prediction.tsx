@@ -1,7 +1,6 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Brain, TrendingUp, TrendingDown, Minus, Target, Shield, Crosshair, AlertTriangle, Loader2 } from "lucide-react";
 
 export interface QuantilePrediction {
@@ -226,44 +225,79 @@ export function NeuralNetworkPredictionCard({
   );
 }
 
-interface TrainingModeSelectProps {
-  mode: "quick" | "full";
-  onModeChange: (mode: "quick" | "full") => void;
-  disabled?: boolean;
+interface TrainingModeBadgeProps {
+  mode: "quick" | "full" | null;
+  description: string | null;
+  inputDim: number | null;
+  connected: boolean;
 }
 
-export function TrainingModeSelect({ mode, onModeChange, disabled }: TrainingModeSelectProps) {
+export function TrainingModeBadge({ mode, description, inputDim, connected }: TrainingModeBadgeProps) {
+  const isQuick = mode === "quick";
+  const isFull = mode === "full";
+  
   return (
     <Card data-testid="card-training-mode">
       <CardHeader className="pb-3">
-        <CardTitle className="text-sm font-medium">Training Mode</CardTitle>
+        <CardTitle className="text-sm font-medium flex items-center gap-2">
+          <Brain className="h-4 w-4" />
+          Training Mode
+          <Badge 
+            variant={connected ? "default" : "outline"} 
+            className={`ml-auto ${connected ? "bg-emerald-500/20 text-emerald-400" : ""}`}
+          >
+            {connected ? "GPU Connected" : "Not Connected"}
+          </Badge>
+        </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        <Select value={mode} onValueChange={(v) => onModeChange(v as "quick" | "full")} disabled={disabled}>
-          <SelectTrigger data-testid="select-training-mode">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="quick">Quick (15m only) - Fast testing</SelectItem>
-            <SelectItem value="full">Full MTF (5m,15m,1h,4h) - Best results</SelectItem>
-          </SelectContent>
-        </Select>
-        
-        <div className="text-xs text-muted-foreground space-y-1">
-          {mode === "quick" ? (
-            <>
-              <p>Uses only 15-minute timeframe data</p>
-              <p>~57 features, faster training</p>
-              <p>Good for testing model configurations</p>
-            </>
-          ) : (
-            <>
-              <p>Multi-timeframe fusion (5m, 15m, 1h, 4h)</p>
-              <p>~81 features, better predictions</p>
-              <p>Recommended for production use</p>
-            </>
-          )}
-        </div>
+        {!connected ? (
+          <div className="text-center py-4">
+            <AlertTriangle className="h-6 w-6 mx-auto text-amber-400 mb-2" />
+            <p className="text-sm text-muted-foreground">GPU trainer not connected</p>
+            <p className="text-xs text-muted-foreground mt-1">Training mode is set on your local GPU machine</p>
+          </div>
+        ) : (
+          <>
+            <div className="flex items-center justify-center">
+              <Badge 
+                variant="outline" 
+                className={`text-base px-4 py-2 ${
+                  isQuick ? "bg-amber-500/10 text-amber-400 border-amber-500/30" :
+                  isFull ? "bg-blue-500/10 text-blue-400 border-blue-500/30" :
+                  ""
+                }`}
+                data-testid="badge-training-mode"
+              >
+                {isQuick ? "Quick (15m Only)" : isFull ? "Full MTF" : "Unknown"}
+              </Badge>
+            </div>
+            
+            <div className="text-xs text-muted-foreground space-y-1 text-center">
+              {isQuick ? (
+                <>
+                  <p>Using 15-minute timeframe only</p>
+                  <p>~{inputDim ?? 57} features</p>
+                  <p className="text-amber-400/80">Good for quick testing</p>
+                </>
+              ) : isFull ? (
+                <>
+                  <p>Multi-timeframe fusion (5m, 15m, 1h, 4h)</p>
+                  <p>~{inputDim ?? 81} features</p>
+                  <p className="text-blue-400/80">Best for production signals</p>
+                </>
+              ) : (
+                <p>Mode will be detected from GPU trainer</p>
+              )}
+            </div>
+            
+            {description && (
+              <p className="text-xs text-center text-muted-foreground border-t border-border/50 pt-2 mt-2">
+                {description}
+              </p>
+            )}
+          </>
+        )}
       </CardContent>
     </Card>
   );
