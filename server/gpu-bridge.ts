@@ -166,6 +166,23 @@ class GPUTrainerBridge {
   }
   
   /**
+   * Get the current GPU trainer URL
+   */
+  getUrl(): string {
+    return this.baseUrl;
+  }
+  
+  /**
+   * Update the GPU trainer URL dynamically
+   */
+  setUrl(newUrl: string): void {
+    this.baseUrl = newUrl;
+    this.isAvailable = false;
+    this.lastHealthCheck = 0;
+    console.log(`[GPU Bridge] URL updated to: ${newUrl}`);
+  }
+  
+  /**
    * Update pushed status from remote GPU trainer
    */
   updatePushedStatus(status: PushedGPUStatus): void {

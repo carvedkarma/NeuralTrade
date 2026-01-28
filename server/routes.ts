@@ -804,6 +804,90 @@ export async function registerRoutes(
     });
   });
 
+  // Get GPU trainer connection settings
+  app.get("/api/gpu/settings", (req, res) => {
+    res.json({
+      url: gpuBridge.getUrl(),
+      defaultUrl: "http://localhost:8000"
+    });
+  });
+
+  // Update GPU trainer URL
+  app.post("/api/gpu/settings", async (req, res) => {
+    try {
+      const { url } = req.body;
+      
+      if (!url || typeof url !== "string") {
+        return res.status(400).json({ error: "URL is required" });
+      }
+      
+      // Validate URL format
+      try {
+        new URL(url);
+      } catch {
+        return res.status(400).json({ error: "Invalid URL format" });
+      }
+      
+      // Update the GPU bridge URL
+      gpuBridge.setUrl(url);
+      
+      // Test connection to the new URL
+      const health = await gpuBridge.checkHealth();
+      
+      res.json({
+        success: true,
+        url,
+        connected: health !== null,
+        health
+      });
+    } catch (error) {
+      console.error("[GPU Settings] Update error:", error);
+      res.status(500).json({ error: "Failed to update GPU trainer URL" });
+    }
+  });
+
+  // Test GPU trainer connection
+  app.post("/api/gpu/test-connection", async (req, res) => {
+    try {
+      const { url } = req.body;
+      
+      if (!url || typeof url !== "string") {
+        return res.status(400).json({ error: "URL is required" });
+      }
+      
+      // Test connection without changing the current URL
+      try {
+        const response = await fetch(`${url}/health`, {
+          method: "GET",
+          headers: { "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(5000)
+        });
+        
+        if (response.ok) {
+          const health = await response.json();
+          res.json({
+            connected: true,
+            health,
+            message: "Connection successful"
+          });
+        } else {
+          res.json({
+            connected: false,
+            message: `Server responded with status ${response.status}`
+          });
+        }
+      } catch (error) {
+        res.json({
+          connected: false,
+          message: error instanceof Error ? error.message : "Connection failed"
+        });
+      }
+    } catch (error) {
+      console.error("[GPU Test] Connection test error:", error);
+      res.status(500).json({ error: "Connection test failed" });
+    }
+  });
+
   // Get ensemble prediction status
   app.get("/api/gpu/ensemble/status", async (req, res) => {
     try {
