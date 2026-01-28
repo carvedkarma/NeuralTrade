@@ -261,10 +261,11 @@ class ModelManager:
                 )
             elif "resnet" in model_type_lower or "cnn" in model_type_lower:
                 from models.cnn import ResNetPrice
+                # ResNetPrice uses channels: List[int], not base_channels
+                channels = config.get("channels", [64, 128, 256, 512])
                 return ResNetPrice(
                     input_dim=input_dim,
-                    base_channels=config.get("base_channels", 64),
-                    num_blocks=config.get("num_blocks", [2, 2, 2, 2]),
+                    channels=channels,
                     dropout=dropout,
                     output_dim=output_dim
                 )
@@ -410,20 +411,36 @@ class ModelManager:
                     inferred["d_model"] = shape[0]
                     inferred["input_dim"] = shape[1]
                     
-            # TemporalFusionTransformer: temporal_encoder.weight_ih_l0 [4*hidden, input_dim]
+            # TemporalFusionTransformer: 
+            #   static_encoder.0.weight [d_model, input_dim] - use this for d_model
+            #   temporal_encoder is LSTM which uses d_model/2 per direction
             elif "tft" in model_type_lower or "temporal_fusion" in model_type_lower:
-                shape = get_param_shape("temporal_encoder.weight_ih_l0")
-                if shape:
-                    inferred["input_dim"] = shape[1]
-                    inferred["d_model"] = shape[0] // 4  # LSTM has 4 gates
+                # Use static_encoder for d_model (more reliable than LSTM)
+                static_shape = get_param_shape("static_encoder.0.weight")
+                if static_shape:
+                    inferred["d_model"] = static_shape[0]
+                    inferred["input_dim"] = static_shape[1]
+                else:
+                    # Fallback to temporal_encoder if static_encoder not found
+                    shape = get_param_shape("temporal_encoder.weight_ih_l0")
+                    if shape:
+                        inferred["input_dim"] = shape[1]
+                        # LSTM hidden is d_model/2 per direction (bidirectional), so hidden*2 = d_model
+                        # But weight_ih has shape [4*hidden, input_dim], so d_model = shape[0] // 4 * 2 = shape[0] // 2
+                        inferred["d_model"] = shape[0] // 2
                     
             # === CNN MODELS ===
-            # ResNetPrice/InceptionNet: input_conv.0.weight [out_channels, in_channels, kernel_size]
+            # ResNetPrice: input_conv.0.weight [channels[0], input_dim, kernel_size]
+            # ResNetPrice uses channels: List[int] = [64, 128, 256, 512]
             elif "resnet" in model_type_lower or "cnn" in model_type_lower or "inception" in model_type_lower:
                 shape = get_param_shape("input_conv.0.weight")
                 if shape:
                     inferred["input_dim"] = shape[1]  # Conv1d: [out_channels, in_channels, kernel]
-                    inferred["base_channels"] = shape[0]
+                    first_channels = shape[0]
+                    # For ResNetPrice, infer the full channels list from the residual blocks
+                    # Default pattern is [64, 128, 256, 512] but could be different
+                    # For now, use the first channel and assume standard progression
+                    inferred["channels"] = [first_channels, first_channels*2, first_channels*4, first_channels*8]
                     
             # WaveNet: input_conv.weight [residual_channels, input_dim, 1]
             elif "wavenet" in model_type_lower:
