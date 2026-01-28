@@ -1,6 +1,7 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { SignalCard } from "@/components/signal-card";
+import { EnsembleSignalCard } from "@/components/ensemble-signal-card";
 import { RegimeCard } from "@/components/regime-card";
 import { FeaturesCard } from "@/components/features-card";
 import { FuturesMetricsCard } from "@/components/futures-metrics-card";
@@ -160,6 +161,53 @@ export default function Dashboard() {
   }>({
     queryKey: ["/api/training/status"],
     refetchInterval: 5000,
+  });
+
+  const { data: ensembleStatus, isLoading: ensembleLoading } = useQuery<{
+    available: boolean;
+    status: {
+      initialized: boolean;
+      direction_models: string[];
+      regime_models: string[];
+      risk_models: string[];
+    } | null;
+  }>({
+    queryKey: ["/api/gpu/ensemble/status"],
+    refetchInterval: 10000,
+  });
+
+  const { data: ensemblePrediction } = useQuery<{
+    available: boolean;
+    prediction: {
+      action: "LONG" | "SHORT" | "HOLD" | "NO_TRADE";
+      confidence: number;
+      confidence_margin: number;
+      edge: number;
+      market_regime: string;
+      risk_regime: string;
+      regime_confidence: number;
+      agreement_pct: number;
+      weighted_agreement: number;
+      disagreement_score: number;
+      position_size_pct: number;
+      regime_adjusted_size: number;
+      confidence_threshold_used: number;
+      regime_adjustment: string;
+      model_votes: Record<string, {
+        action: string;
+        confidence: number;
+        confidence_margin: number;
+        weight: number;
+        probs: { SHORT: number; HOLD: number; LONG: number };
+      }>;
+      ensemble_probs: { SHORT: number; HOLD: number; LONG: number };
+      reasons: string[];
+    } | null;
+    message?: string;
+  }>({
+    queryKey: ["/api/gpu/ensemble/current"],
+    refetchInterval: 15000,
+    enabled: ensembleStatus?.available === true,
   });
 
   // Check if historical data has been downloaded (minimum 1000 candles)
@@ -356,6 +404,11 @@ export default function Dashboard() {
                     currentPrice={data.candles[data.candles.length - 1]?.close ?? 0}
                   />
                 )}
+                <EnsembleSignalCard 
+                  prediction={ensemblePrediction?.prediction ?? null}
+                  status={ensembleStatus?.status}
+                  isLoading={ensembleLoading}
+                />
                 <SignalCard signal={data.currentSignal} />
                 <RegimeCard signal={data.currentSignal} />
                 <StatsCard
@@ -395,6 +448,11 @@ export default function Dashboard() {
               <div className="lg:col-span-4 space-y-4">
                 <ShotPlanCard shotPlan={data.shotPlan} />
                 <SentimentCard sentiment={data.sentiment} />
+                <EnsembleSignalCard 
+                  prediction={ensemblePrediction?.prediction ?? null}
+                  status={ensembleStatus?.status}
+                  isLoading={ensembleLoading}
+                />
                 <SignalCard signal={data.currentSignal} />
                 <RegimeCard signal={data.currentSignal} />
               </div>

@@ -10,6 +10,7 @@ import zlib from "zlib";
 import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
 import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning, loadCandleTimestamps } from "./unified-learning-controller";
+import { getLatestFeatures } from "./feature-engine";
 import { recalculatePatternLabels } from "./pattern-memory";
 import { edgeTracker } from "./edge-tracker";
 import { 
@@ -801,6 +802,109 @@ export async function registerRoutes(
       connected: status.connected && !isStale,
       isStale
     });
+  });
+
+  // Get ensemble prediction status
+  app.get("/api/gpu/ensemble/status", async (req, res) => {
+    try {
+      const status = await gpuBridge.getEnsembleStatus();
+      res.json({ available: status !== null, status });
+    } catch (error) {
+      res.json({ available: false, status: null });
+    }
+  });
+
+  // Get ensemble prediction from GPU neural networks
+  app.post("/api/gpu/ensemble/predict", async (req, res) => {
+    try {
+      const { features } = req.body;
+      
+      if (!features || !Array.isArray(features)) {
+        return res.status(400).json({ error: "features array required" });
+      }
+      
+      const prediction = await gpuBridge.predictEnsemble(features);
+      
+      if (!prediction) {
+        return res.json({ 
+          available: false, 
+          prediction: null,
+          message: "GPU ensemble predictor not available"
+        });
+      }
+      
+      res.json({ available: true, prediction });
+    } catch (error) {
+      console.error("[GPU Ensemble] Prediction error:", error);
+      res.status(500).json({ error: "Ensemble prediction failed" });
+    }
+  });
+
+  // Get current ensemble prediction using latest market data
+  app.get("/api/gpu/ensemble/current", async (req, res) => {
+    try {
+      // Check if GPU is available
+      const health = await gpuBridge.checkHealth();
+      if (!health) {
+        return res.json({ 
+          available: false, 
+          prediction: null,
+          message: "GPU trainer not connected"
+        });
+      }
+      
+      // Get current candles and compute features
+      const candles = storage.getCandles();
+      
+      if (!candles || candles.length < 150) {
+        return res.json({ 
+          available: false, 
+          prediction: null,
+          message: "Not enough candle data available"
+        });
+      }
+      
+      // Get the last 150 candles for prediction
+      const recentCandles = candles.slice(-150);
+      
+      // Compute features for each candle window
+      const featureArrays: number[][] = [];
+      for (let i = 100; i < recentCandles.length; i++) {
+        const windowCandles = recentCandles.slice(i - 100, i + 1);
+        const feature = getLatestFeatures(windowCandles);
+        if (feature) {
+          featureArrays.push(gpuBridge.featureVectorToArray(feature));
+        }
+      }
+      
+      if (featureArrays.length < 10) {
+        return res.json({ 
+          available: false, 
+          prediction: null,
+          message: "Could not compute enough features"
+        });
+      }
+      
+      const prediction = await gpuBridge.predictEnsemble(featureArrays);
+      
+      if (!prediction) {
+        return res.json({ 
+          available: false, 
+          prediction: null,
+          message: "Ensemble prediction failed"
+        });
+      }
+      
+      // Pass through GPU response directly - matches EnsemblePrediction interface
+      res.json({ available: true, prediction });
+    } catch (error) {
+      console.error("[GPU Ensemble] Current prediction error:", error);
+      res.json({ 
+        available: false, 
+        prediction: null, 
+        message: error instanceof Error ? error.message : "Unknown error"
+      });
+    }
   });
 
   // Data Proxy Endpoints - Allow local GPU trainer to fetch Binance data through Replit

@@ -22,6 +22,74 @@ interface GPUPredictionResponse {
   reasoning: string[];
 }
 
+interface EnsemblePredictionResponse {
+  action: "LONG" | "SHORT" | "HOLD" | "NO_TRADE";
+  confidence: number;
+  confidence_margin: number;
+  edge: number;
+  
+  // Regime information
+  market_regime: string;
+  risk_regime: string;
+  regime_confidence: number;
+  
+  // Model agreement
+  agreement_pct: number;
+  weighted_agreement: number;
+  disagreement_score: number;
+  
+  // Position sizing
+  position_size_pct: number;
+  regime_adjusted_size: number;
+  
+  // Thresholds
+  confidence_threshold_used: number;
+  regime_adjustment: string;
+  
+  // Per-model breakdown
+  model_votes: Record<string, {
+    action: string;
+    confidence: number;
+    confidence_margin: number;
+    weight: number;
+    probs: {
+      SHORT: number;
+      HOLD: number;
+      LONG: number;
+    };
+  }>;
+  
+  // Ensemble probabilities
+  ensemble_probs: {
+    SHORT: number;
+    HOLD: number;
+    LONG: number;
+  };
+  
+  // Reasons
+  reasons: string[];
+}
+
+interface EnsembleStatus {
+  initialized: boolean;
+  direction_models: string[];
+  regime_models: string[];
+  risk_models: string[];
+  model_weights?: Record<string, {
+    expectancy: number;
+    precision_on_trade: number;
+    profit_factor: number;
+    f1_directional: number;
+    sharpe: number;
+    composite_weight: number;
+  }>;
+  thresholds?: {
+    base_confidence: number;
+    base_margin: number;
+    majority_weight: number;
+  };
+}
+
 interface GPUHealthResponse {
   status: string;
   gpu_available: boolean;
@@ -338,6 +406,68 @@ class GPUTrainerBridge {
   }
   
   /**
+   * Get professional ensemble prediction with regime gating
+   * 
+   * This uses:
+   * - Direction models (Transformer, TFT, LSTM, CNN) for voting
+   * - VAE for market regime detection (trend/range/chop)
+   * - GNN for risk regime detection (risk-on/off)
+   * - Walk-forward metric weighting
+   */
+  async predictEnsemble(features: number[][]): Promise<EnsemblePredictionResponse | null> {
+    if (!await this.isGPUAvailable()) {
+      return null;
+    }
+    
+    try {
+      const response = await fetch(`${this.baseUrl}/predict/ensemble`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          features: features
+        }),
+        signal: AbortSignal.timeout(15000) // 15 second timeout (ensemble is slower)
+      });
+      
+      if (response.ok) {
+        return await response.json() as EnsemblePredictionResponse;
+      }
+      
+      console.error("Ensemble prediction failed:", await response.text());
+      return null;
+    } catch (error) {
+      console.error("Ensemble prediction error:", error);
+      return null;
+    }
+  }
+  
+  /**
+   * Get ensemble predictor status
+   */
+  async getEnsembleStatus(): Promise<EnsembleStatus | null> {
+    if (!await this.isGPUAvailable()) {
+      return null;
+    }
+    
+    try {
+      const response = await fetch(`${this.baseUrl}/ensemble/status`, {
+        method: "GET",
+        headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(5000)
+      });
+      
+      if (response.ok) {
+        return await response.json() as EnsembleStatus;
+      }
+      
+      return null;
+    } catch (error) {
+      console.error("Failed to get ensemble status:", error);
+      return null;
+    }
+  }
+  
+  /**
    * Get GPU metrics for dashboard
    */
   async getGPUMetrics(): Promise<Record<string, any> | null> {
@@ -347,6 +477,7 @@ class GPUTrainerBridge {
     }
     
     const training = await this.getTrainingStatus();
+    const ensembleStatus = await this.getEnsembleStatus();
     
     return {
       gpuAvailable: health.gpu_available,
@@ -361,7 +492,8 @@ class GPUTrainerBridge {
       isTraining: training?.is_training || false,
       trainingProgress: training?.progress || 0,
       currentModel: training?.current_model,
-      trainingMetrics: training?.metrics || {}
+      trainingMetrics: training?.metrics || {},
+      ensemble: ensembleStatus
     };
   }
 }
@@ -371,4 +503,4 @@ export const gpuBridge = new GPUTrainerBridge(
   process.env.GPU_TRAINER_URL || "http://localhost:8000"
 );
 
-export type { GPUPredictionResponse, GPUHealthResponse, GPUTrainingStatus };
+export type { GPUPredictionResponse, GPUHealthResponse, GPUTrainingStatus, EnsemblePredictionResponse, EnsembleStatus };

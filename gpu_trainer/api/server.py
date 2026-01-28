@@ -557,6 +557,44 @@ class RegressionPredictionResponse(BaseModel):
     probabilities: Optional[Dict[str, float]] = None
     model_weights: Optional[Dict[str, float]] = None
 
+class EnsemblePredictionRequest(BaseModel):
+    """Request for professional ensemble prediction."""
+    features: List[List[float]]
+
+class EnsemblePredictionResponse(BaseModel):
+    """Response with regime-gated ensemble signal."""
+    action: str  # LONG, SHORT, HOLD, NO_TRADE
+    confidence: float
+    confidence_margin: float  # p_top1 - p_top2
+    edge: float
+    
+    # Regime information
+    market_regime: str
+    risk_regime: str
+    regime_confidence: float
+    
+    # Model agreement
+    agreement_pct: float
+    weighted_agreement: float
+    disagreement_score: float
+    
+    # Position sizing
+    position_size_pct: float
+    regime_adjusted_size: float
+    
+    # Thresholds
+    confidence_threshold_used: float
+    regime_adjustment: str
+    
+    # Per-model breakdown
+    model_votes: Dict[str, Any]
+    
+    # Ensemble probabilities
+    ensemble_probs: Dict[str, float]
+    
+    # Reasons
+    reasons: List[str]
+
 start_time = datetime.now()
 
 @app.get("/health", response_model=HealthResponse)
@@ -886,6 +924,172 @@ async def predict_regression(request: RegressionPredictionRequest):
     except Exception as e:
         logger.error(f"Regression prediction error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Global ensemble predictor instance
+_ensemble_predictor = None
+
+def get_ensemble_predictor():
+    """Get or create ensemble predictor instance."""
+    global _ensemble_predictor
+    if _ensemble_predictor is None and model_manager.model_instances:
+        try:
+            from .ensemble_predictor import EnsemblePredictor
+            _ensemble_predictor = EnsemblePredictor(
+                model_instances=model_manager.model_instances,
+                device=model_manager.device
+            )
+            logger.info("Initialized ensemble predictor")
+        except Exception as e:
+            logger.error(f"Failed to initialize ensemble predictor: {e}")
+    return _ensemble_predictor
+
+@app.post("/predict/ensemble", response_model=EnsemblePredictionResponse)
+async def predict_ensemble(request: EnsemblePredictionRequest):
+    """
+    Professional ensemble prediction with regime gating.
+    
+    This endpoint:
+    1. Uses direction models (Transformer, TFT, LSTM, CNN) for voting
+    2. Uses VAE for market regime detection (trend/range/chop)
+    3. Uses GNN for risk regime detection (risk-on/off)
+    4. Weights by walk-forward trading metrics (not accuracy)
+    5. Applies confidence margin (p_top1 - p_top2) thresholds
+    6. Adjusts position sizing based on regime
+    """
+    try:
+        features = np.array(request.features)
+        
+        if len(features.shape) != 2:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Expected 2D features [seq_len, n_features], got shape {features.shape}"
+            )
+        
+        predictor = get_ensemble_predictor()
+        
+        if predictor is None:
+            # Fallback to basic prediction if ensemble not available
+            result = model_manager.predict(features)
+            return EnsemblePredictionResponse(
+                action=result.get("action_name", "HOLD"),
+                confidence=result["confidence"],
+                confidence_margin=0.0,
+                edge=0.0,
+                market_regime="UNKNOWN",
+                risk_regime="UNKNOWN",
+                regime_confidence=0.0,
+                agreement_pct=1.0,
+                weighted_agreement=1.0,
+                disagreement_score=0.0,
+                position_size_pct=0.0,
+                regime_adjusted_size=0.0,
+                confidence_threshold_used=0.15,
+                regime_adjustment="NONE",
+                model_votes={},
+                ensemble_probs={
+                    "SHORT": result["probabilities"][0],
+                    "HOLD": result["probabilities"][1],
+                    "LONG": result["probabilities"][2]
+                },
+                reasons=["Ensemble predictor not initialized - using basic prediction"]
+            )
+        
+        signal = predictor.predict(features)
+        
+        return EnsemblePredictionResponse(
+            action=signal.action,
+            confidence=signal.confidence,
+            confidence_margin=signal.confidence_margin,
+            edge=signal.edge,
+            market_regime=signal.market_regime,
+            risk_regime=signal.risk_regime,
+            regime_confidence=signal.regime_confidence,
+            agreement_pct=signal.agreement_pct,
+            weighted_agreement=signal.weighted_agreement,
+            disagreement_score=signal.disagreement_score,
+            position_size_pct=signal.position_size_pct,
+            regime_adjusted_size=signal.regime_adjusted_size,
+            confidence_threshold_used=signal.confidence_threshold_used,
+            regime_adjustment=signal.regime_adjustment,
+            model_votes=signal.model_votes,
+            ensemble_probs=signal.ensemble_probs,
+            reasons=signal.reasons
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ensemble prediction error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ensemble/update-weights")
+async def update_ensemble_weights(weights: Dict[str, Dict[str, float]]):
+    """Update model weights from walk-forward evaluation results."""
+    try:
+        predictor = get_ensemble_predictor()
+        if predictor is None:
+            raise HTTPException(status_code=503, detail="Ensemble predictor not initialized")
+        
+        from .ensemble_predictor import ModelWeight
+        new_weights = {}
+        for name, metrics in weights.items():
+            new_weights[name] = ModelWeight(
+                model_name=name,
+                expectancy=metrics.get("expectancy", 0.001),
+                precision_on_trade=metrics.get("precision_on_trade", 0.55),
+                profit_factor=metrics.get("profit_factor", 1.2),
+                f1_directional=metrics.get("f1_directional", 0.45),
+                sharpe=metrics.get("sharpe", 0.5),
+                calibration_temp=metrics.get("calibration_temp", 1.0)
+            )
+        
+        predictor.save_weights(new_weights)
+        return {"message": "Weights updated", "models": list(new_weights.keys())}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update weights: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/ensemble/status")
+async def get_ensemble_status():
+    """Get ensemble predictor status and model classification."""
+    predictor = get_ensemble_predictor()
+    
+    if predictor is None:
+        return {
+            "initialized": False,
+            "reason": "No model instances loaded",
+            "direction_models": [],
+            "regime_models": [],
+            "risk_models": []
+        }
+    
+    return {
+        "initialized": True,
+        "direction_models": list(predictor.direction_models.keys()),
+        "regime_models": list(predictor.regime_models.keys()),
+        "risk_models": list(predictor.risk_models.keys()),
+        "model_weights": {
+            name: {
+                "expectancy": w.expectancy,
+                "precision_on_trade": w.precision_on_trade,
+                "profit_factor": w.profit_factor,
+                "f1_directional": w.f1_directional,
+                "sharpe": w.sharpe,
+                "composite_weight": w.composite_weight
+            }
+            for name, w in predictor.model_weights.items()
+        },
+        "thresholds": {
+            "base_confidence": predictor.base_confidence_threshold,
+            "base_margin": predictor.base_margin_threshold,
+            "majority_weight": predictor.majority_weight_threshold
+        }
+    }
 
 @app.get("/training/status", response_model=TrainingStatusResponse)
 async def get_training_status():

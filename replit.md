@@ -99,6 +99,17 @@ Preferred communication style: Simple, everyday language.
 - **Signal Threshold Tuning**: Classification probability-based threshold (scoreThreshold=0.15, minConfidence=0.45, minMargin=0.10) that controls signal frequency to target 2-3 trades/day using directional score (pLong - pShort).
 - **Edge Tracker**: File-based persistence system (edge_tracker_state.json) that monitors actual signal performance including avg net return, hit rate, expectancy, Sharpe ratio, and monthly stability scores. API endpoints at /api/edge-metrics and /api/edge-metrics/clear.
 
+#### Professional Ensemble Predictor
+- **Direction Model Voting**: Transformer, TFT, LSTM, CNN models vote on direction with confidence margin (p_top1 - p_top2)
+- **VAE Regime Gating**: MarketVAE detects market regime (TRENDING, RANGING, CHOPPY, HIGH_VOLATILITY) to adjust thresholds
+- **GNN Risk Filtering**: CrossAssetGNN/TemporalGNN detect risk regime (RISK_ON, RISK_OFF, CORRELATION_SHOCK) to adjust position sizing
+- **Walk-Forward Metric Weighting**: Models weighted by trading metrics (expectancy, precision on trades, profit factor, F1 directional, Sharpe) not accuracy
+- **Temperature Scaling**: Probability calibration for comparable confidence scores across models
+- **Weighted Consensus**: Requires majority weight ≥ 55% and confidence margin ≥ threshold (adjusted by regime)
+- **Position Sizing Adjustment**: Regime-aware position sizing (reduced in choppy/high-vol/risk-off, increased in trending/risk-on)
+- **API Endpoints**: `/predict/ensemble` for ensemble prediction, `/ensemble/status` for model classification, `/ensemble/update-weights` for weight updates
+- **Dashboard Integration**: EnsembleSignalCard displays action, regime tags, model agreement, position sizing, and per-model votes
+
 ### Build System
 - **Client Build**: Vite bundles React app to `dist/public`.
 - **Server Build**: esbuild bundles server to `dist/index.cjs`.
