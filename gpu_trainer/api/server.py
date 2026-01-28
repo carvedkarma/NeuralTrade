@@ -621,6 +621,22 @@ class ModelManager:
             except Exception as e:
                 logger.error(f"Failed to load scaler: {e}")
         
+        # Load expected feature list if exists (for alignment verification)
+        feature_list_path = self.checkpoint_dir / "feature_columns.txt"
+        if feature_list_path.exists():
+            try:
+                with open(feature_list_path, 'r') as f:
+                    self.expected_features = [line.strip() for line in f if line.strip()]
+                logger.info(f"Loaded expected feature list: {len(self.expected_features)} columns")
+                # Update input_dim to match expected features
+                self.input_dim = len(self.expected_features)
+                logger.info(f"Updated input_dim to {self.input_dim} based on feature list")
+            except Exception as e:
+                logger.warning(f"Failed to load feature list: {e}")
+                self.expected_features = None
+        else:
+            self.expected_features = None
+        
         # Find and load best checkpoint for each model type
         checkpoint_files = list(self.checkpoint_dir.glob("*.pt"))
         if not checkpoint_files:
@@ -734,6 +750,23 @@ class ModelManager:
         """
         if not self.model_instances:
             return self._default_prediction()
+        
+        # Feature count validation - strict mode fails on mismatch
+        input_features = features.shape[-1] if len(features.shape) >= 2 else features.shape[0]
+        if hasattr(self, 'expected_features') and self.expected_features:
+            expected_count = len(self.expected_features)
+            if input_features != expected_count:
+                error_msg = f"Feature count mismatch: received {input_features}, expected {expected_count}"
+                logger.error(error_msg)
+                # Return error prediction instead of potentially wrong prediction
+                return {
+                    "action": "HOLD",
+                    "confidence": 0.0,
+                    "probabilities": {"LONG": 0.33, "SHORT": 0.33, "HOLD": 0.34},
+                    "error": error_msg,
+                    "expected_features": expected_count,
+                    "received_features": input_features
+                }
             
         predictions = []
         for name, model in self.model_instances.items():
@@ -1589,6 +1622,22 @@ async def load_model_endpoint(model_path: str):
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/features/expected")
+async def get_expected_features():
+    """Get the expected feature list for prediction alignment verification."""
+    if hasattr(model_manager, 'expected_features') and model_manager.expected_features:
+        return {
+            "count": len(model_manager.expected_features),
+            "features": model_manager.expected_features,
+            "input_dim": model_manager.input_dim
+        }
+    return {
+        "count": model_manager.input_dim,
+        "features": None,
+        "input_dim": model_manager.input_dim,
+        "warning": "No feature list loaded - using default input_dim"
+    }
 
 @app.get("/models/status")
 async def get_models_status():

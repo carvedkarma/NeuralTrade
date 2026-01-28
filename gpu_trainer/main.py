@@ -650,6 +650,348 @@ def backtest(args):
     else:
         logger.info("✗ Model does NOT beat costs - do not deploy")
 
+def train_all_mtf(args):
+    """Train ALL models with MTF fusion (81-feature pipeline).
+    
+    This retrains all model architectures using the same MTF fusion feature
+    pipeline that the dashboard uses, ensuring consistent input dimensions.
+    """
+    import torch
+    import numpy as np
+    import pandas as pd
+    from pathlib import Path
+    from config import config
+    from data.pipeline import FeatureEngineer, TradingDataset, create_labels
+    from data.mtf_fusion import MTFFeatureFusion, add_cross_asset_features
+    from torch.utils.data import DataLoader
+    from training.trainer import Trainer
+    
+    logger.info("="*60)
+    logger.info("  RETRAINING ALL MODELS WITH MTF FUSION (81 FEATURES)")
+    logger.info("="*60)
+    
+    check_gpu()
+    
+    # Model types to train
+    model_types = args.models.split(",") if args.models else ["transformer", "tft", "lstm", "cnn", "vae", "gnn"]
+    
+    # Use config values for consistency
+    assets = config.data.symbols  # ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+    mtf_all_tfs = ["5m", "15m", "1h", "4h"]
+    mtf_base_tf = "15m"
+    prediction_horizon_bars = args.horizon  # Default 10 bars (~2.5 hours), configurable via CLI
+    sequence_length = config.data.sequence_length
+    
+    logger.info(f"Config: assets={len(assets)}, horizon={prediction_horizon_bars} bars, seq_len={sequence_length}")
+    
+    # Define checkpoint directory early for feature list saving
+    checkpoint_dir = Path(config.training.checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Load data
+    logger.info(f"Loading MTF data for assets: {assets}")
+    data_dir = config.data_dir
+    asset_data = {}
+    total_candles = 0
+    
+    for asset in assets:
+        tf_data = {}
+        for tf in mtf_all_tfs:
+            asset_path = data_dir / f"{asset}_{tf}.parquet"
+            if asset_path.exists():
+                df = pd.read_parquet(asset_path)
+                tf_data[tf] = df
+                total_candles += len(df)
+                logger.info(f"  {asset} {tf}: {len(df):,} candles")
+        if tf_data:
+            asset_data[asset] = tf_data
+    
+    if not asset_data:
+        logger.error("No data files found! Run 'python main.py fetch' first.")
+        return
+    
+    logger.info(f"Total: {total_candles:,} raw candles")
+    
+    # Fuse timeframes using MTF fusion
+    logger.info("Fusing timeframes to 15m base (leakage-proof alignment)...")
+    fusioner = MTFFeatureFusion(prediction_horizon_bars)
+    all_fused = []
+    
+    for symbol, tf_data in asset_data.items():
+        if mtf_base_tf not in tf_data:
+            logger.warning(f"  {symbol}: Skipping - no 15m data")
+            continue
+        fused = fusioner.align_timeframes(tf_data, symbol)
+        fused["symbol"] = symbol
+        all_fused.append(fused)
+        logger.info(f"  {symbol}: {len(fused):,} fused samples, {len(fused.columns)} features")
+    
+    if not all_fused:
+        logger.error("No fused data!")
+        return
+    
+    # Combine all assets
+    combined = pd.concat(all_fused, ignore_index=True)
+    logger.info(f"Combined: {len(combined):,} samples")
+    
+    # Add cross-asset features
+    logger.info("Adding cross-asset features...")
+    combined = add_cross_asset_features(combined, reference_symbol="BTCUSDT")
+    
+    # Time-based train/val split per asset with proper purge gap
+    logger.info("Splitting by time per asset with leakage-safe purge gap...")
+    train_ratio = 0.70
+    val_ratio = 0.15
+    
+    # Purge gap must be at least prediction_horizon + sequence_length to prevent lookahead
+    purge_gap = prediction_horizon_bars + sequence_length
+    
+    train_dfs = []
+    val_dfs = []
+    
+    for symbol in combined["symbol"].unique():
+        asset_df = combined[combined["symbol"] == symbol].copy()
+        asset_df = asset_df.sort_values("datetime").reset_index(drop=True)
+        n = len(asset_df)
+        n_train = int(n * train_ratio)
+        n_val = int(n * val_ratio)
+        
+        # Split with explicit purge gap between train and val
+        train_end = n_train - purge_gap  # Train ends before purge gap
+        val_start = n_train  # Val starts after purge gap
+        val_end = min(val_start + n_val, n)  # Ensure val_end doesn't exceed data
+        
+        # Bounds validation
+        min_train_samples = sequence_length * 2
+        min_val_samples = sequence_length
+        
+        if train_end <= 0:
+            logger.warning(f"  {symbol}: Skipping - insufficient data for training (train_end={train_end})")
+            continue
+        if train_end < min_train_samples:
+            logger.warning(f"  {symbol}: Skipping - train samples {train_end} < min {min_train_samples}")
+            continue
+        if val_end - val_start < min_val_samples:
+            logger.warning(f"  {symbol}: Skipping - val samples {val_end - val_start} < min {min_val_samples}")
+            continue
+        
+        # Leakage validation: train labels at train_end-1 look ahead horizon bars
+        # This lookahead must not cross into validation (val_start)
+        max_label_lookahead = train_end - 1 + prediction_horizon_bars
+        if max_label_lookahead >= val_start:
+            logger.error(f"  {symbol}: LEAKAGE - train labels ({max_label_lookahead}) would cross into val ({val_start})")
+            logger.error(f"    Increase purge_gap or provide more data")
+            continue
+        
+        train_df = asset_df.iloc[:train_end].copy()
+        val_df = asset_df.iloc[val_start:val_end].copy()
+        
+        train_dfs.append(train_df)
+        val_dfs.append(val_df)
+        logger.info(f"  {symbol}: train={len(train_df):,}, purge={purge_gap}, val={len(val_df):,} (leakage check: PASSED)")
+    
+    train_combined = pd.concat(train_dfs, ignore_index=True)
+    val_combined = pd.concat(val_dfs, ignore_index=True)
+    
+    # Create labels
+    logger.info(f"Creating labels (horizon={prediction_horizon_bars} bars, ~2.5h)...")
+    train_labels = fusioner.create_labels(train_combined)
+    val_labels = fusioner.create_labels(val_combined)
+    
+    # Drop rows with NaN labels
+    train_valid = train_labels.notna()
+    val_valid = val_labels.notna()
+    train_combined = train_combined[train_valid].reset_index(drop=True)
+    train_labels = train_labels[train_valid].reset_index(drop=True)
+    val_combined = val_combined[val_valid].reset_index(drop=True)
+    val_labels = val_labels[val_valid].reset_index(drop=True)
+    
+    # Select numeric feature columns only - SORTED for deterministic ordering
+    exclude_cols = {"datetime", "symbol", "timestamp", "open", "high", "low", "close", "volume"}
+    feature_cols = sorted([c for c in train_combined.columns 
+                          if c not in exclude_cols and train_combined[c].dtype in [np.float64, np.float32, np.int64, np.int32, float, int]])
+    
+    # Explicit feature count validation
+    n_features = len(feature_cols)
+    logger.info(f"MTF features: {n_features} columns (sorted, deterministic order)")
+    
+    # Assert expected feature count range (should be ~80-85 for MTF fusion with cross-asset)
+    # This catches schema drift or unexpected column additions
+    MIN_EXPECTED_FEATURES = 70
+    MAX_EXPECTED_FEATURES = 100
+    if n_features < MIN_EXPECTED_FEATURES or n_features > MAX_EXPECTED_FEATURES:
+        logger.error(f"Feature count {n_features} outside expected range [{MIN_EXPECTED_FEATURES}, {MAX_EXPECTED_FEATURES}]")
+        logger.error(f"This indicates schema drift or pipeline mismatch - aborting")
+        return
+    
+    # Save feature list for prediction pipeline consistency
+    feature_list_path = checkpoint_dir / "feature_columns.txt"
+    with open(feature_list_path, 'w') as f:
+        for col in feature_cols:
+            f.write(f"{col}\n")
+    logger.info(f"Saved feature list ({n_features} columns) to {feature_list_path}")
+    
+    # Log first/last few features for verification
+    if n_features > 6:
+        logger.info(f"  First 3: {feature_cols[:3]}")
+        logger.info(f"  Last 3: {feature_cols[-3:]}")
+    
+    train_features_raw = train_combined[feature_cols].copy()
+    val_features_raw = val_combined[feature_cols].copy()
+    train_labels_np = train_labels.values.astype(np.int64)
+    val_labels_np = val_labels.values.astype(np.int64)
+    logger.info(f"Train: {len(train_features_raw):,}, Val: {len(val_features_raw):,}")
+    
+    # Fit scalers on training data only
+    engineer = FeatureEngineer()
+    logger.info("Fitting scalers on training data only (no leakage)")
+    engineer.fit_scalers(train_features_raw)
+    
+    # Transform both sets
+    train_features_scaled = engineer.transform(train_features_raw)
+    val_features_scaled = engineer.transform(val_features_raw)
+    
+    train_features_np = train_features_scaled.values.astype(np.float32)
+    val_features_np = val_features_scaled.values.astype(np.float32)
+    
+    # Skip initial sequence_length samples (sequence_length already defined at top)
+    valid_start = sequence_length
+    train_features_np = train_features_np[valid_start:]
+    train_labels_np = train_labels_np[valid_start:]
+    val_features_np = val_features_np[valid_start:]
+    val_labels_np = val_labels_np[valid_start:]
+    
+    # Clean data - drop NaN/Inf rows
+    def clean_data(features, labels, name):
+        features = np.where(np.isinf(features), np.nan, features)
+        nan_mask = np.isnan(features).any(axis=1)
+        nan_count = nan_mask.sum()
+        if nan_count > 0:
+            logger.warning(f"{name}: Dropping {nan_count} rows with NaN/Inf ({nan_count/len(features)*100:.1f}%)")
+            valid_mask = ~nan_mask
+            features = features[valid_mask]
+            labels = labels[valid_mask]
+        assert np.isfinite(features).all(), f"{name}: Non-finite values remain!"
+        logger.info(f"{name}: {len(features)} clean samples")
+        return features, labels
+    
+    train_features_np, train_labels_np = clean_data(train_features_np, train_labels_np, "Train")
+    val_features_np, val_labels_np = clean_data(val_features_np, val_labels_np, "Val")
+    
+    # Class weights
+    MAX_CLASS_WEIGHT = 10.0
+    class_counts = np.bincount(train_labels_np, minlength=3)
+    total_samples = len(train_labels_np)
+    class_weights = total_samples / (3 * class_counts + 1e-6)
+    class_weights = np.clip(class_weights, 1.0, MAX_CLASS_WEIGHT)
+    class_weights_tensor = torch.FloatTensor(class_weights)
+    
+    logger.info(f"Class distribution: SHORT={class_counts[0]:,}, NEUTRAL={class_counts[1]:,}, LONG={class_counts[2]:,}")
+    logger.info(f"Class weights (capped at {MAX_CLASS_WEIGHT}x): [{class_weights[0]:.2f}, {class_weights[1]:.2f}, {class_weights[2]:.2f}]")
+    
+    # Create datasets
+    train_dataset = TradingDataset(train_features_np, train_labels_np, sequence_length, validate_data=True)
+    val_dataset = TradingDataset(val_features_np, val_labels_np, sequence_length, validate_data=True)
+    
+    batch_size = args.batch_size
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    
+    input_dim = train_features_np.shape[1]
+    logger.info(f"")
+    logger.info(f"Input dimension: {input_dim} features")
+    logger.info(f"Train samples: {len(train_dataset):,}, Val samples: {len(val_dataset):,}")
+    logger.info(f"")
+    
+    # Save the scaler for prediction use - must match server's expected path
+    # Server loads from: checkpoints/scaler.joblib (checkpoint_dir already defined at top)
+    scaler_path = checkpoint_dir / "scaler.joblib"
+    engineer.save_scalers(str(scaler_path))
+    logger.info(f"Saved scalers to {scaler_path}")
+    
+    # Train each model type
+    for model_type in model_types:
+        logger.info(f"")
+        logger.info("="*60)
+        logger.info(f"  TRAINING: {model_type.upper()}")
+        logger.info("="*60)
+        
+        try:
+            # Use config values for hyperparameters to ensure consistency
+            if model_type == "transformer":
+                from models.transformer import TransformerPriceModel
+                model = TransformerPriceModel(
+                    input_dim=input_dim,
+                    d_model=config.model.transformer_dim,
+                    nhead=config.model.transformer_heads,
+                    num_layers=config.model.transformer_layers
+                )
+            elif model_type == "tft":
+                from models.transformer import TemporalFusionTransformer
+                model = TemporalFusionTransformer(
+                    input_dim=input_dim,
+                    d_model=config.model.transformer_dim,
+                    nhead=config.model.transformer_heads
+                )
+            elif model_type == "lstm":
+                from models.lstm import BidirectionalLSTM
+                model = BidirectionalLSTM(
+                    input_dim=input_dim,
+                    hidden_dim=config.model.lstm_hidden,
+                    num_layers=config.model.lstm_layers
+                )
+            elif model_type == "cnn":
+                from models.cnn import ResNetPrice
+                model = ResNetPrice(
+                    input_dim=input_dim,
+                    channels=config.model.cnn_channels
+                )
+            elif model_type == "vae":
+                from models.vae import MarketVAE
+                model = MarketVAE(
+                    input_dim=input_dim,
+                    sequence_length=sequence_length,
+                    latent_dim=config.model.vae_latent_dim
+                )
+            elif model_type == "gnn":
+                from models.gnn import CrossAssetGNN
+                model = CrossAssetGNN(
+                    input_dim=input_dim,
+                    num_assets=len(assets)
+                )
+            else:
+                logger.warning(f"Unknown model type: {model_type}, skipping")
+                continue
+            
+            logger.info(f"Parameters: {model.count_parameters():,}")
+            
+            config.training.epochs = args.epochs
+            config.training.learning_rate = args.lr
+            
+            trainer = Trainer(model, train_loader, val_loader, config, device=config.device,
+                              class_weights=class_weights_tensor)
+            
+            history = trainer.train(epochs=args.epochs)
+            
+            # Save model
+            save_path = config.model_dir / f"{model_type}_mtf_trained.pt"
+            model.save(str(save_path))
+            logger.info(f"Saved: {save_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to train {model_type}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    logger.info("")
+    logger.info("="*60)
+    logger.info("  RETRAINING COMPLETE")
+    logger.info("="*60)
+    logger.info(f"Models trained with {input_dim} features (MTF fusion pipeline)")
+    logger.info(f"Checkpoints saved to: {config.training.checkpoint_dir}")
+    logger.info(f"Now restart GPU trainer API: python main.py serve")
+
 def main():
     parser = argparse.ArgumentParser(
         description="BTC Futures Trading - GPU Neural Network Trainer",
@@ -672,6 +1014,14 @@ def main():
     train_parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     train_parser.add_argument("--horizon", type=int, default=5, help="Label lookahead horizon (candles)")
     train_parser.add_argument("--resume", type=str, help="Resume from checkpoint")
+    
+    train_all_parser = subparsers.add_parser("train-all", help="Retrain ALL models with MTF fusion (81 features)")
+    train_all_parser.add_argument("--models", type=str, default="transformer,tft,lstm,cnn,vae,gnn",
+                                  help="Comma-separated list of models to train (default: all)")
+    train_all_parser.add_argument("--epochs", type=int, default=100, help="Number of epochs per model")
+    train_all_parser.add_argument("--batch-size", dest="batch_size", type=int, default=64, help="Batch size")
+    train_all_parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    train_all_parser.add_argument("--horizon", type=int, default=10, help="Prediction horizon in 15m bars (default: 10 = 2.5h)")
     
     rl_parser = subparsers.add_parser("train-rl", help="Train reinforcement learning agent")
     rl_parser.add_argument("--episodes", type=int, default=1000, help="Number of episodes")
@@ -698,6 +1048,8 @@ def main():
         asyncio.run(fetch_data(args))
     elif args.command == "train":
         train(args)
+    elif args.command == "train-all":
+        train_all_mtf(args)
     elif args.command == "train-rl":
         train_rl(args)
     elif args.command == "serve":
