@@ -31,9 +31,20 @@ app.add_middleware(
 )
 
 class ModelManager:
+    # Mapping from checkpoint filename patterns to standardized model types
+    MODEL_TYPE_PATTERNS = {
+        "transformer": ["transformer_price", "transformer", "best_transformer"],
+        "tft": ["temporal_fusion_transformer", "tft", "best_temporal_fusion", "best_tft"],
+        "lstm": ["bidirectional_lstm", "lstm", "stacked_lstm", "conv_lstm", "best_lstm", "best_bidirectional"],
+        "cnn": ["resnet_price", "resnet", "cnn", "inception", "wavenet", "best_resnet", "best_cnn"],
+        "vae": ["market_vae", "vae", "conditional_vae", "best_vae", "best_market_vae"],
+        "gnn": ["cross_asset_gnn", "temporal_gnn", "gnn", "best_gnn", "best_cross_asset"],
+    }
+    
     def __init__(self):
         self.models = {}
         self.model_instances = {}
+        self.model_type_map = {}  # Maps checkpoint name -> standardized type (transformer, tft, etc.)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.ensemble = None
         self.scaler = None  # Dict of per-column scalers (NOT a single sklearn scaler)
@@ -53,6 +64,27 @@ class ModelManager:
         self.sequence_length = 100  # Default, updated from loaded model config
         self.input_dim = 81  # Default feature count
         self.instantiation_errors: Dict[str, str] = {}  # Track errors for /models/status
+    
+    def _map_filename_to_model_type(self, filename: str) -> str:
+        """Map checkpoint filename to standardized model type.
+        
+        Examples:
+            best_transformer_price -> transformer
+            best_temporal_fusion_transformer -> tft
+            best_bidirectional_lstm -> lstm
+            best_resnet_price -> cnn
+            best_market_vae -> vae
+            best_cross_asset_gnn -> gnn
+        """
+        filename_lower = filename.lower()
+        
+        for model_type, patterns in self.MODEL_TYPE_PATTERNS.items():
+            for pattern in patterns:
+                if pattern in filename_lower:
+                    return model_type
+        
+        # If no pattern matched, return the filename as-is
+        return filename
     
     def transform_features(self, features_df) -> np.ndarray:
         """Transform features using the loaded scaler dict.
@@ -353,11 +385,22 @@ class ModelManager:
         if not checkpoint_files:
             logger.warning("No checkpoint files found")
             return
+        
+        # Only load "best_*" checkpoints to avoid loading epoch checkpoints
+        best_checkpoints = [f for f in checkpoint_files if f.stem.startswith("best_")]
+        if not best_checkpoints:
+            # Fallback: if no best_* files, use all checkpoints
+            best_checkpoints = checkpoint_files
+            logger.info("No best_* checkpoints found, loading all .pt files")
             
-        for ckpt_path in checkpoint_files:
+        for ckpt_path in best_checkpoints:
             try:
                 checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
                 model_name = ckpt_path.stem
+                
+                # Map filename to standardized model type
+                model_type = self._map_filename_to_model_type(model_name)
+                self.model_type_map[model_name] = model_type
                 
                 # Store checkpoint metadata
                 self.models[model_name] = {
@@ -365,7 +408,8 @@ class ModelManager:
                     "accuracy": checkpoint.get("val_accuracy", 0),
                     "epoch": checkpoint.get("epoch", 0),
                     "config": checkpoint.get("config", {}),
-                    "parameters": checkpoint.get("parameters", 0)
+                    "parameters": checkpoint.get("parameters", 0),
+                    "model_type": model_type  # Standardized type for dashboard
                 }
                 
                 # Try to instantiate model if state_dict present
@@ -374,16 +418,48 @@ class ModelManager:
                     if model_instance is not None:
                         self.model_instances[model_name] = model_instance
                         self.models[model_name]["loaded"] = True
-                        logger.info(f"Loaded & instantiated: {model_name} (acc={checkpoint.get('val_accuracy', 0):.2f}%)")
+                        logger.info(f"Loaded & instantiated: {model_name} -> {model_type} (acc={checkpoint.get('val_accuracy', 0):.2f}%)")
                     else:
                         self.models[model_name]["state_dict"] = checkpoint["model_state_dict"]
                         self.models[model_name]["loaded"] = False
-                        logger.warning(f"Loaded checkpoint but failed to instantiate: {model_name}")
+                        logger.warning(f"Loaded checkpoint but failed to instantiate: {model_name} -> {model_type}")
                     
             except Exception as e:
                 logger.error(f"Failed to load checkpoint {ckpt_path}: {e}")
                 
         logger.info(f"Loaded {len(self.models)} checkpoints, {len(self.model_instances)} instantiated")
+        logger.info(f"Model type mapping: {self.model_type_map}")
+    
+    def get_model_status_by_type(self) -> Dict[str, Dict]:
+        """Get model status organized by standardized model type for dashboard display."""
+        status = {}
+        
+        # Initialize all 6 model types as pending
+        for model_type in ["transformer", "tft", "lstm", "cnn", "vae", "gnn"]:
+            status[model_type] = {
+                "status": "pending",
+                "accuracy": None,
+                "loss": None,
+                "epochs": 0,
+                "best_epoch": 0,
+                "checkpoint_name": None
+            }
+        
+        # Update status from loaded models
+        for model_name, model_info in self.models.items():
+            model_type = model_info.get("model_type", self._map_filename_to_model_type(model_name))
+            if model_type in status:
+                is_instantiated = model_name in self.model_instances
+                status[model_type] = {
+                    "status": "complete" if is_instantiated else "loaded",
+                    "accuracy": model_info.get("accuracy", 0),
+                    "loss": model_info.get("config", {}).get("val_loss", None),
+                    "epochs": model_info.get("epoch", 0),
+                    "best_epoch": model_info.get("epoch", 0),
+                    "checkpoint_name": model_name
+                }
+        
+        return status
         
     def load_model(self, model_name: str, path: str, model_class=None):
         try:
@@ -1276,7 +1352,8 @@ async def get_models_status():
             "error": model_manager.instantiation_errors.get(name),
             "accuracy": model_info.get("accuracy", 0),
             "epoch": model_info.get("epoch", 0),
-            "config": model_info.get("config", {})
+            "config": model_info.get("config", {}),
+            "model_type": model_info.get("model_type", name)  # Standardized type
         }
     
     # Count successful vs failed instantiations
@@ -1294,6 +1371,8 @@ async def get_models_status():
         "models_instantiated": list(model_manager.model_instances.keys()),
         "instantiation_errors": model_manager.instantiation_errors,
         "models_detail": models_detail,
+        "model_type_map": model_manager.model_type_map,  # Checkpoint name -> type mapping
+        "model_status_by_type": model_manager.get_model_status_by_type(),  # Dashboard-ready status
         "config": {
             "sequence_length": model_manager.sequence_length,
             "input_dim": model_manager.input_dim,

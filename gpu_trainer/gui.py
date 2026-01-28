@@ -96,6 +96,19 @@ class GPUTrainerGUI:
             "gnn": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0},
         }
         
+        # Mapping from checkpoint filename patterns to standardized model types
+        self.model_type_patterns = {
+            "transformer": ["transformer_price", "transformer", "best_transformer"],
+            "tft": ["temporal_fusion_transformer", "tft", "best_temporal_fusion", "best_tft"],
+            "lstm": ["bidirectional_lstm", "lstm", "stacked_lstm", "conv_lstm", "best_lstm", "best_bidirectional"],
+            "cnn": ["resnet_price", "resnet", "cnn", "inception", "wavenet", "best_resnet", "best_cnn"],
+            "vae": ["market_vae", "vae", "conditional_vae", "best_vae", "best_market_vae"],
+            "gnn": ["cross_asset_gnn", "temporal_gnn", "gnn", "best_gnn", "best_cross_asset"],
+        }
+        
+        # Scan for existing checkpoints on startup
+        self.scan_existing_checkpoints()
+        
         # GPU state
         self.gpu_name = None
         self.gpu_memory_used = 0
@@ -621,6 +634,60 @@ class GPUTrainerGUI:
                 f.write(self.log_text.get(1.0, tk.END))
             self.log(f"Log saved to: {filename}")
     
+    def scan_existing_checkpoints(self):
+        """Scan checkpoints directory for trained models and update model_status."""
+        try:
+            checkpoint_dir = Path(__file__).parent / "checkpoints"
+            if not checkpoint_dir.exists():
+                return
+            
+            # Find best_* checkpoint files
+            best_checkpoints = list(checkpoint_dir.glob("best_*.pt"))
+            if not best_checkpoints:
+                return
+            
+            for ckpt_path in best_checkpoints:
+                try:
+                    filename = ckpt_path.stem.lower()
+                    
+                    # Map filename to model type
+                    model_type = None
+                    for mtype, patterns in self.model_type_patterns.items():
+                        for pattern in patterns:
+                            if pattern in filename:
+                                model_type = mtype
+                                break
+                        if model_type:
+                            break
+                    
+                    if model_type and model_type in self.model_status:
+                        # Try to load checkpoint metadata
+                        import torch
+                        checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+                        
+                        accuracy = checkpoint.get('val_accuracy', 0)
+                        epoch = checkpoint.get('epoch', 0)
+                        loss = checkpoint.get('val_loss', None)
+                        
+                        self.model_status[model_type] = {
+                            "status": "complete",
+                            "accuracy": accuracy,
+                            "loss": loss,
+                            "epochs": epoch,
+                            "best_epoch": epoch
+                        }
+                        
+                        if model_type not in self.models_completed:
+                            self.models_completed.append(model_type)
+                        
+                        print(f"[Checkpoint] Found trained model: {ckpt_path.name} -> {model_type} (acc={accuracy:.1f}%)")
+                        
+                except Exception as e:
+                    print(f"[Checkpoint] Error loading {ckpt_path.name}: {e}")
+                    
+        except Exception as e:
+            print(f"[Checkpoint] Error scanning checkpoints: {e}")
+    
     def check_saved_data(self):
         """Check for existing parquet files on startup"""
         def scan():
@@ -825,7 +892,7 @@ class GPUTrainerGUI:
                 "valLoss": self.val_loss,
                 "bestValLoss": self.best_val_loss if self.best_val_loss < float('inf') else None,
                 "bestEpoch": self.best_epoch,
-                "modelsLoaded": [],
+                "modelsLoaded": self.models_completed,  # Models with loaded checkpoints
                 "modelsCompleted": self.models_completed,
                 "modelStatus": self.model_status  # Per-model training status
             }
