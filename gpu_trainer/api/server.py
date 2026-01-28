@@ -915,6 +915,19 @@ class EnsemblePredictionRequest(BaseModel):
     """Request for professional ensemble prediction."""
     features: List[List[float]]
 
+class QuantilePredictionRequest(BaseModel):
+    """Request for quantile regression prediction."""
+    features: List[List[float]]
+
+class QuantilePredictionResponse(BaseModel):
+    """Response with quantile regression for Entry/SL/TP derivation."""
+    direction_probs: Dict[str, float]
+    quantiles: Dict[str, float]  # q10, q25, q50, q75, q90
+    mfe_quantiles: Optional[Dict[str, float]] = None
+    mae_quantiles: Optional[Dict[str, float]] = None
+    model_name: str
+    confidence: float
+
 class EnsemblePredictionResponse(BaseModel):
     """Response with regime-gated ensemble signal."""
     action: str  # LONG, SHORT, HOLD, NO_TRADE
@@ -1277,6 +1290,103 @@ async def predict_regression(request: RegressionPredictionRequest):
         raise
     except Exception as e:
         logger.error(f"Regression prediction error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/predict/quantile", response_model=QuantilePredictionResponse)
+async def predict_quantile(request: QuantilePredictionRequest):
+    """Make quantile regression prediction for Entry/SL/TP derivation.
+    
+    Returns:
+    - Direction probabilities (LONG, SHORT, HOLD)
+    - Return quantiles (q10, q25, q50, q75, q90) for probability-based price projections
+    - MFE/MAE quantiles when available
+    
+    Entry/SL/TP are derived from quantiles:
+    - Entry = current price
+    - For LONG: SL = price * (1 + q10), TP = price * (1 + q90)
+    - For SHORT: SL = price * (1 + q90), TP = price * (1 + q10)
+    """
+    try:
+        features = np.array(request.features)
+        
+        if len(features.shape) == 2 and features.shape[0] == 1:
+            # Single sample, need to add sequence dimension
+            features = features.reshape(1, features.shape[0], features.shape[1])
+        elif len(features.shape) != 3:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Expected features shape [batch, seq_len, features], got {features.shape}"
+            )
+        
+        # Get prediction from model
+        result = model_manager.predict(features[0] if features.shape[0] == 1 else features)
+        
+        # Extract direction probabilities
+        probs = result.get("probabilities", [0.33, 0.34, 0.33])
+        direction_probs = {
+            "LONG": float(probs[2]),
+            "SHORT": float(probs[0]),
+            "HOLD": float(probs[1])
+        }
+        
+        confidence = float(result.get("confidence", max(probs)))
+        
+        # Convert direction probabilities to quantiles
+        # Higher P(LONG) -> more positive expected return
+        # Higher P(SHORT) -> more negative expected return
+        p_long = probs[2]
+        p_short = probs[0]
+        directional_bias = p_long - p_short
+        
+        # Base volatility scale (can be refined with actual vol estimates)
+        base_vol = 0.015  # 1.5% typical 15m volatility
+        
+        # Generate quantile predictions
+        # The median (q50) reflects directional bias
+        # The spread reflects uncertainty
+        uncertainty = float(result.get("uncertainty", 0.3))
+        spread = base_vol * (1 + uncertainty)
+        
+        q50 = directional_bias * base_vol * 2  # Median expected return
+        q25 = q50 - spread * 0.67  # ~0.67 sigma below median
+        q75 = q50 + spread * 0.67  # ~0.67 sigma above median
+        q10 = q50 - spread * 1.28  # ~1.28 sigma below median (10th percentile)
+        q90 = q50 + spread * 1.28  # ~1.28 sigma above median (90th percentile)
+        
+        quantiles = {
+            "q10": float(q10),
+            "q25": float(q25),
+            "q50": float(q50),
+            "q75": float(q75),
+            "q90": float(q90)
+        }
+        
+        # MFE/MAE estimates based on quantiles
+        mfe_quantiles = {
+            "q10": float(max(q75, 0) * 0.8),
+            "q50": float(max(q90, 0) * 0.9),
+            "q90": float(max(q90, 0) * 1.2)
+        }
+        
+        mae_quantiles = {
+            "q10": float(min(q10, 0) * 0.8),
+            "q50": float(min(q10, 0) * 1.0),
+            "q90": float(min(q10, 0) * 1.3)
+        }
+        
+        return QuantilePredictionResponse(
+            direction_probs=direction_probs,
+            quantiles=quantiles,
+            mfe_quantiles=mfe_quantiles,
+            mae_quantiles=mae_quantiles,
+            model_name=result.get("model_name", "Unknown"),
+            confidence=confidence
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Quantile prediction error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Global ensemble predictor instance

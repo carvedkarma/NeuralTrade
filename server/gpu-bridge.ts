@@ -22,6 +22,33 @@ interface GPUPredictionResponse {
   reasoning: string[];
 }
 
+interface QuantilePredictionResponse {
+  direction_probs: {
+    LONG: number;
+    SHORT: number;
+    HOLD: number;
+  };
+  quantiles: {
+    q10: number;
+    q25: number;
+    q50: number;
+    q75: number;
+    q90: number;
+  };
+  mfe_quantiles?: {
+    q10: number;
+    q50: number;
+    q90: number;
+  };
+  mae_quantiles?: {
+    q10: number;
+    q50: number;
+    q90: number;
+  };
+  model_name: string;
+  confidence: number;
+}
+
 interface EnsemblePredictionResponse {
   action: "LONG" | "SHORT" | "HOLD" | "NO_TRADE";
   confidence: number;
@@ -454,6 +481,36 @@ class GPUTrainerBridge {
       return null;
     } catch (error) {
       console.error("Ensemble prediction error:", error);
+      return null;
+    }
+  }
+  
+  /**
+   * Quantile regression prediction for Entry/SL/TP derivation
+   */
+  async predictQuantile(features: number[]): Promise<QuantilePredictionResponse | null> {
+    if (!await this.isGPUAvailable()) {
+      return null;
+    }
+    
+    try {
+      const response = await fetch(`${this.baseUrl}/predict/quantile`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          features: [features]  // Wrap in array for batch format
+        }),
+        signal: AbortSignal.timeout(10000)
+      });
+      
+      if (response.ok) {
+        return await response.json() as QuantilePredictionResponse;
+      }
+      
+      console.error("Quantile prediction failed:", await response.text());
+      return null;
+    } catch (error) {
+      console.error("Quantile prediction error:", error);
       return null;
     }
   }

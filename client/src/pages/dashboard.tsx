@@ -50,6 +50,8 @@ import {
 import { StrategyLearnerTab } from "@/components/strategy-learner-card";
 import { DataManagementCard } from "@/components/data-management-card";
 import { NeuralNetworkDataCard } from "@/components/nn-data-card";
+import { NeuralNetworkPredictionCard, TrainingModeSelect, type QuantilePrediction } from "@/components/neural-network-prediction";
+import { PredictedCandlesChart } from "@/components/predicted-candles-chart";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff, Brain, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -82,6 +84,7 @@ interface IntegrityReport {
 export default function Dashboard() {
   const [backfillInProgress, setBackfillInProgress] = useState(false);
   const [backfillProgress, setBackfillProgress] = useState(0);
+  const [trainingMode, setTrainingMode] = useState<"quick" | "full">("full");
 
   const { data, isLoading, error, refetch, isFetching } = useQuery<DashboardData>({
     queryKey: ["/api/dashboard"],
@@ -209,6 +212,26 @@ export default function Dashboard() {
     queryKey: ["/api/gpu/ensemble/current"],
     refetchInterval: 15000,
     enabled: ensembleStatus?.available === true,
+  });
+
+  // Neural Network Quantile Predictions
+  const { data: nnPrediction, isLoading: nnPredictionLoading, refetch: refetchNnPrediction } = useQuery<{
+    available: boolean;
+    prediction: QuantilePrediction | null;
+    predictedCandles: Array<{
+      timestamp: number;
+      q10: number;
+      q25: number;
+      q50: number;
+      q75: number;
+      q90: number;
+      direction: "up" | "down";
+    }>;
+    error?: string;
+  }>({
+    queryKey: ["/api/gpu/nn-prediction"],
+    refetchInterval: 30000,
+    enabled: gpuStatus?.connected === true,
   });
 
   // Check if historical data has been downloaded (minimum 1000 candles)
@@ -366,6 +389,7 @@ export default function Dashboard() {
           <TabsList className="mb-4 flex-wrap" data-testid="tabs-list">
             <TabsTrigger value="overview" data-testid="tab-overview">Overview</TabsTrigger>
             <TabsTrigger value="signal" data-testid="tab-signal">Signal</TabsTrigger>
+            <TabsTrigger value="neural-network" data-testid="tab-neural-network">Neural Network</TabsTrigger>
             <TabsTrigger value="paper" data-testid="tab-paper">Paper Trading</TabsTrigger>
             <TabsTrigger value="gpu-training" data-testid="tab-gpu-training">GPU Training</TabsTrigger>
             <TabsTrigger value="strategy-learner" data-testid="tab-strategy-learner">Strategy Learner</TabsTrigger>
@@ -456,6 +480,49 @@ export default function Dashboard() {
                 />
                 <SignalCard signal={data.currentSignal} />
                 <RegimeCard signal={data.currentSignal} />
+              </div>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="neural-network" className="mt-0">
+            <div className="space-y-4">
+              {/* Predicted Candles Chart */}
+              <PredictedCandlesChart 
+                historicalCandles={data.candles}
+                predictedCandles={nnPrediction?.predictedCandles || []}
+                currentPrice={data.candles[data.candles.length - 1]?.close || 0}
+                horizon={10}
+              />
+              
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                {/* Neural Network Prediction */}
+                <div className="lg:col-span-4 space-y-4">
+                  <NeuralNetworkPredictionCard 
+                    prediction={nnPrediction?.prediction || null}
+                    isLoading={nnPredictionLoading}
+                    onRefresh={() => refetchNnPrediction()}
+                  />
+                </div>
+                
+                {/* Training Controls */}
+                <div className="lg:col-span-4 space-y-4">
+                  <TrainingModeSelect 
+                    mode={trainingMode}
+                    onModeChange={setTrainingMode}
+                    disabled={gpuStatus?.isTraining}
+                  />
+                  <EnsembleSignalCard 
+                    prediction={ensemblePrediction?.prediction ?? null}
+                    status={ensembleStatus?.status}
+                    isLoading={ensembleLoading}
+                  />
+                </div>
+                
+                {/* Signal and Regime */}
+                <div className="lg:col-span-4 space-y-4">
+                  <SignalCard signal={data.currentSignal} />
+                  <RegimeCard signal={data.currentSignal} />
+                </div>
               </div>
             </div>
           </TabsContent>

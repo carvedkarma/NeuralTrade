@@ -991,6 +991,168 @@ export async function registerRoutes(
     }
   });
 
+  // Neural Network Quantile Prediction endpoint - returns Entry/SL/TP derived from quantiles
+  app.get("/api/gpu/nn-prediction", async (req, res) => {
+    try {
+      // Check if GPU is available
+      const health = await gpuBridge.checkHealth();
+      if (!health) {
+        return res.json({ 
+          available: false, 
+          prediction: null,
+          predictedCandles: [],
+          error: "GPU trainer not connected"
+        });
+      }
+      
+      // Get current candles and compute features
+      const candles = storage.getCandles();
+      
+      if (!candles || candles.length < 150) {
+        return res.json({ 
+          available: false, 
+          prediction: null,
+          predictedCandles: [],
+          error: "Not enough candle data available"
+        });
+      }
+      
+      // Get the last 150 candles for prediction
+      const recentCandles = candles.slice(-150);
+      
+      // Compute features for the most recent window
+      const windowCandles = recentCandles.slice(-101);
+      const feature = getLatestFeatures(windowCandles);
+      
+      if (!feature) {
+        return res.json({ 
+          available: false, 
+          prediction: null,
+          predictedCandles: [],
+          error: "Could not compute features"
+        });
+      }
+      
+      const featureArray = gpuBridge.featureVectorToArray(feature);
+      
+      // Call GPU trainer for quantile prediction
+      const nnResult = await gpuBridge.predictQuantile(featureArray);
+      
+      if (!nnResult) {
+        return res.json({ 
+          available: false, 
+          prediction: null,
+          predictedCandles: [],
+          error: "Neural network prediction failed"
+        });
+      }
+      
+      const currentPrice = recentCandles[recentCandles.length - 1].close;
+      const lastTimestamp = recentCandles[recentCandles.length - 1].timestamp;
+      
+      // Derive Entry/SL/TP from quantiles
+      // Entry = current price
+      // For LONG: SL = price * (1 + q10), TP = price * (1 + q90)
+      // For SHORT: SL = price * (1 + q90), TP = price * (1 + q10)
+      // For HOLD: No trade
+      const probs = nnResult.direction_probs;
+      const maxProb = Math.max(probs.LONG, probs.SHORT, probs.HOLD);
+      
+      // Determine direction - respect HOLD if it's the highest
+      let direction: "LONG" | "SHORT" | "HOLD";
+      if (probs.HOLD === maxProb && probs.HOLD > 0.4) {
+        direction = "HOLD";
+      } else {
+        direction = probs.LONG > probs.SHORT ? "LONG" : "SHORT";
+      }
+      
+      const isLong = direction === "LONG";
+      const isHold = direction === "HOLD";
+      
+      const entry = currentPrice;
+      
+      // For HOLD, set neutral SL/TP based on uncertainty range
+      let stopLoss: number;
+      let takeProfit: number;
+      
+      if (isHold) {
+        // For HOLD signals, use symmetric uncertainty bands
+        stopLoss = currentPrice * (1 + nnResult.quantiles.q10);
+        takeProfit = currentPrice * (1 + nnResult.quantiles.q90);
+      } else if (isLong) {
+        stopLoss = currentPrice * (1 + nnResult.quantiles.q10);  // q10 is negative for down move
+        takeProfit = currentPrice * (1 + nnResult.quantiles.q90); // q90 is positive for up move
+      } else {
+        stopLoss = currentPrice * (1 + nnResult.quantiles.q90); // q90 is positive for up move
+        takeProfit = currentPrice * (1 + nnResult.quantiles.q10); // q10 is negative for down move
+      }
+      
+      // Risk/Reward ratio
+      const risk = Math.abs(entry - stopLoss);
+      const reward = Math.abs(takeProfit - entry);
+      const riskReward = risk > 0 ? reward / risk : 0;
+      
+      // Confidence from direction probabilities
+      const confidence = isHold ? probs.HOLD : Math.max(probs.LONG, probs.SHORT);
+      
+      // Generate predicted candles for visualization (10 bars horizon)
+      const predictedCandles = [];
+      const intervalMs = 15 * 60 * 1000; // 15 minutes
+      
+      for (let i = 1; i <= 10; i++) {
+        const t = i / 10; // Progress through horizon
+        
+        // Interpolate quantiles for each future candle
+        const q10 = currentPrice * (1 + nnResult.quantiles.q10 * t);
+        const q25 = currentPrice * (1 + nnResult.quantiles.q25 * t);
+        const q50 = currentPrice * (1 + nnResult.quantiles.q50 * t);
+        const q75 = currentPrice * (1 + nnResult.quantiles.q75 * t);
+        const q90 = currentPrice * (1 + nnResult.quantiles.q90 * t);
+        
+        predictedCandles.push({
+          timestamp: lastTimestamp + (i * intervalMs),
+          q10,
+          q25,
+          q50,
+          q75,
+          q90,
+          direction: q50 >= currentPrice ? "up" : "down"
+        });
+      }
+      
+      const prediction = {
+        action: direction as "LONG" | "SHORT",
+        confidence,
+        entry,
+        stopLoss,
+        takeProfit,
+        riskReward,
+        expectedMove: nnResult.quantiles.q50 * 100, // As percentage
+        uncertainty: (nnResult.quantiles.q90 - nnResult.quantiles.q10) * 100, // Spread as percentage
+        quantiles: {
+          q10: nnResult.quantiles.q10 * 100,
+          q25: nnResult.quantiles.q25 * 100,
+          q50: nnResult.quantiles.q50 * 100,
+          q75: nnResult.quantiles.q75 * 100,
+          q90: nnResult.quantiles.q90 * 100,
+        },
+        directionProbs: nnResult.direction_probs,
+        horizon: "2-3 hours (10 x 15m bars)",
+        timestamp: Date.now(),
+      };
+      
+      res.json({ available: true, prediction, predictedCandles });
+    } catch (error) {
+      console.error("[GPU NN] Prediction error:", error);
+      res.json({ 
+        available: false, 
+        prediction: null,
+        predictedCandles: [],
+        error: error instanceof Error ? error.message : "Unknown error"
+      });
+    }
+  });
+
   // Data Proxy Endpoints - Allow local GPU trainer to fetch Binance data through Replit
   const BINANCE_VISION_URL = "https://data-api.binance.vision/api/v3";
   

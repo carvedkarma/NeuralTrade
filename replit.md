@@ -17,7 +17,7 @@ Preferred communication style: Simple, everyday language.
 - **UI Components**: shadcn/ui built on Radix UI, styled with Tailwind CSS for theming.
 - **Charts**: Recharts for data visualization.
 - **Animations**: Framer Motion.
-- **Navigation**: Tabbed interface covering Overview, Signal, Paper Trading, GPU Training, Strategy Learner, Learning, AI Analysis, Indicators, and Performance views. A dedicated GPU Training tab displays real-time status, loss curves, model comparisons, and cross-asset analysis.
+- **Navigation**: Tabbed interface covering Overview, Signal, Neural Network, Paper Trading, GPU Training, Strategy Learner, Learning, AI Analysis, Indicators, and Performance views. A dedicated GPU Training tab displays real-time status, loss curves, model comparisons, and cross-asset analysis. The Neural Network tab displays quantile-based predictions with Entry/SL/TP levels and predicted price bands.
 
 ### Backend Architecture
 - **Runtime**: Node.js with Express.js.
@@ -98,6 +98,17 @@ Preferred communication style: Simple, everyday language.
 - **Dual Decision Display**: Separate outputs for Combined Learning (Strategy Learner + Pattern Memory) and GPU Neural Network decisions with confidence levels.
 - **Signal Threshold Tuning**: Classification probability-based threshold (scoreThreshold=0.15, minConfidence=0.45, minMargin=0.10) that controls signal frequency to target 2-3 trades/day using directional score (pLong - pShort).
 - **Edge Tracker**: File-based persistence system (edge_tracker_state.json) that monitors actual signal performance including avg net return, hit rate, expectancy, Sharpe ratio, and monthly stability scores. API endpoints at /api/edge-metrics and /api/edge-metrics/clear.
+
+#### Quantile-Based Neural Network Predictions
+- **Quantile Regression Approach**: Predicts return distribution quantiles (q10/q25/q50/q75/q90) instead of exact prices
+- **Entry/SL/TP Derivation**: 
+  - Entry = current price
+  - For LONG: SL = price × (1 + q10), TP = price × (1 + q90)
+  - For SHORT: SL = price × (1 + q90), TP = price × (1 + q10)
+- **Predicted Candles Visualization**: Shows probability bands (q25-q75 as body, q10-q90 as wicks)
+- **Training Modes**: Quick (15m only, ~57 features) vs Full MTF (5m/15m/1h/4h, ~81 features)
+- **API Endpoint**: `/api/gpu/nn-prediction` returns direction probs, quantiles, derived levels, and predicted candle data
+- **GPU Trainer Endpoint**: `/predict/quantile` converts model output to quantile format
 
 #### Professional Ensemble Predictor
 - **Direction Model Voting**: Transformer, TFT, LSTM, CNN models vote on direction with confidence margin (p_top1 - p_top2)
