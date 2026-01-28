@@ -433,28 +433,65 @@ class ModelManager:
                     inferred["residual_channels"] = shape[0]
                     
             # === VAE MODELS ===
-            # MarketVAE/ConditionalVAE: encoder.0.weight [hidden_dim, input_dim * sequence_length]
+            # MarketVAE: encoder has structure [Linear, BatchNorm, LeakyReLU, Dropout] x N
+            # encoder.0.weight [hidden_dims[0], input_dim * sequence_length]
+            # encoder.4.weight [hidden_dims[1], hidden_dims[0]]
+            # encoder.8.weight [hidden_dims[2], hidden_dims[1]]
+            # fc_mu.weight [latent_dim, hidden_dims[-1]]
             elif "vae" in model_type_lower:
+                # Find input_dim and sequence_length from first encoder layer
                 shape = get_param_shape("encoder.0.weight")
                 if shape:
-                    # encoder.0 is Linear(input_dim * sequence_length, hidden_dims[0])
-                    # We need to extract input_dim by dividing by sequence_length
-                    # But we don't know sequence_length, so we'll try common values
                     total_input = shape[1]
-                    for seq_len in [100, 50, 60, 120]:
+                    first_hidden = shape[0]
+                    for seq_len in [100, 50, 60, 120, 80]:
                         if total_input % seq_len == 0:
                             inferred["input_dim"] = total_input // seq_len
                             inferred["sequence_length"] = seq_len
                             break
-                    inferred["hidden_dims"] = [shape[0]]  # First hidden dim
+                    
+                    # Scan all encoder layers to build hidden_dims list
+                    # Each block is 4 layers (Linear, BatchNorm, LeakyReLU, Dropout)
+                    hidden_dims = [first_hidden]
+                    layer_idx = 4  # Start at second block
+                    while True:
+                        layer_shape = get_param_shape(f"encoder.{layer_idx}.weight")
+                        if layer_shape and len(layer_shape) == 2:  # Linear layer
+                            hidden_dims.append(layer_shape[0])
+                            layer_idx += 4
+                        else:
+                            break
+                    inferred["hidden_dims"] = hidden_dims
+                    
+                # Get latent_dim from fc_mu
+                fc_mu_shape = get_param_shape("fc_mu.weight")
+                if fc_mu_shape:
+                    inferred["latent_dim"] = fc_mu_shape[0]
                     
             # === GNN MODELS ===
-            # CrossAssetGNN: node_encoder.0.weight [hidden_dim, input_dim]
+            # CrossAssetGNN: 
+            #   temporal_encoder.0.weight [hidden_dim, input_dim] - uses full input
+            #   node_encoder.0.weight [hidden_dim, input_dim // num_assets] - per-asset features
             elif "cross_asset" in model_type_lower or "crossasset" in model_type_lower:
-                shape = get_param_shape("node_encoder.0.weight")
-                if shape:
-                    inferred["hidden_dim"] = shape[0]
-                    inferred["input_dim"] = shape[1]
+                # Use temporal_encoder for full input_dim (not node_encoder which uses per-asset)
+                temporal_shape = get_param_shape("temporal_encoder.0.weight")
+                node_shape = get_param_shape("node_encoder.0.weight")
+                
+                if temporal_shape:
+                    inferred["hidden_dim"] = temporal_shape[0]
+                    inferred["input_dim"] = temporal_shape[1]
+                    
+                    # Calculate num_assets from the ratio
+                    if node_shape:
+                        features_per_asset = node_shape[1]
+                        if features_per_asset > 0:
+                            num_assets = inferred["input_dim"] // features_per_asset
+                            if num_assets >= 1:
+                                inferred["num_assets"] = num_assets
+                elif node_shape:
+                    # Fallback if temporal_encoder not found
+                    inferred["hidden_dim"] = node_shape[0]
+                    inferred["input_dim"] = node_shape[1]
                     
             # TemporalGNN: spatial_encoder.weight [hidden_dim, features_per_node]
             elif "gnn" in model_type_lower or "temporal_gnn" in model_type_lower:
