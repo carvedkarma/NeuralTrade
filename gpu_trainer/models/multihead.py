@@ -612,6 +612,271 @@ class MultiHeadCNN(BaseModel):
         )
 
 
+class MultiHeadGNN(BaseModel):
+    """
+    Graph Neural Network with multi-head output for cross-asset trading.
+    Based on CrossAssetGNN architecture with temporal encoding + graph attention.
+    Handles 3D input (batch, seq, features) for training compatibility.
+    """
+    
+    def __init__(
+        self,
+        input_dim: int,
+        num_assets: int = 4,
+        hidden_dim: int = 128,
+        num_layers: int = 3,
+        num_heads: int = 4,
+        dropout: float = 0.2,
+        num_classes: int = 3,
+        num_quantiles: int = 5,
+        n_future_candles: int = 5
+    ):
+        super().__init__("multihead_gnn", input_dim, num_classes)
+        
+        self.num_assets = num_assets
+        self.hidden_dim = hidden_dim
+        self.num_quantiles = num_quantiles
+        self.n_future_candles = n_future_candles
+        
+        # Temporal encoder (from CrossAssetGNN)
+        self.temporal_encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        self.temporal_lstm = nn.LSTM(
+            hidden_dim, hidden_dim // 2,
+            num_layers=2,
+            batch_first=True,
+            bidirectional=True,
+            dropout=dropout
+        )
+        
+        # Node encoder for graph structure (from CrossAssetGNN)
+        features_per_asset = max(input_dim // num_assets, 1)
+        self.node_encoder = nn.Sequential(
+            nn.Linear(features_per_asset, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        # Graph attention layers (simplified for 3D input)
+        self.graph_attention_layers = nn.ModuleList()
+        for _ in range(num_layers):
+            self.graph_attention_layers.append(
+                nn.MultiheadAttention(hidden_dim, num_heads, dropout=dropout, batch_first=True)
+            )
+            
+        # Edge predictor for adjacency (from CrossAssetGNN)
+        self.edge_predictor = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
+        )
+        
+        # Multi-head outputs
+        self.class_head = ClassificationHead(hidden_dim, num_classes)
+        self.regression_head = RegressionHead(hidden_dim)
+        self.quantile_head = QuantileHead(hidden_dim, num_quantiles)
+        self.trading_head = TradingParamsHead(hidden_dim)
+        self.candle_head = FutureCandleHead(hidden_dim, n_future_candles)
+    
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract features using temporal + attention encoding."""
+        # x: (batch, seq, features)
+        batch_size, seq_len, _ = x.shape
+        
+        # Temporal encoding
+        h = self.temporal_encoder(x)
+        h, _ = self.temporal_lstm(h)
+        
+        # Apply graph attention layers (self-attention across sequence)
+        for attn_layer in self.graph_attention_layers:
+            h_attn, _ = attn_layer(h, h, h)
+            h = h + h_attn  # Residual connection
+        
+        # Take last hidden state
+        h = h[:, -1, :]  # (batch, hidden)
+        
+        return h
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Returns class logits for backward compatibility."""
+        features = self.encode(x)
+        return self.class_head(features)
+    
+    def forward_multihead(self, x: torch.Tensor) -> MultiHeadOutput:
+        """Full multi-head forward pass with all trading outputs."""
+        features = self.encode(x)
+        
+        class_logits = self.class_head(features)
+        mu, sigma = self.regression_head(features)
+        quantiles = self.quantile_head(features)
+        entry_offset, sl_distance, tp_distance = self.trading_head(features)
+        candle_deltas = self.candle_head(features)
+        
+        return MultiHeadOutput(
+            class_logits=class_logits,
+            mu=mu,
+            quantiles=quantiles,
+            sigma=sigma,
+            entry_offset=entry_offset,
+            sl_distance=sl_distance,
+            tp_distance=tp_distance,
+            candle_deltas=candle_deltas
+        )
+
+
+class MultiHeadVAE(BaseModel):
+    """
+    Variational Autoencoder with multi-head output for regime detection.
+    Based on MarketVAE architecture with encoder/decoder + latent space.
+    Uses latent representations for multi-head predictions.
+    """
+    
+    def __init__(
+        self,
+        input_dim: int,
+        sequence_length: int = 25,
+        latent_dim: int = 64,
+        hidden_dims: list = None,
+        dropout: float = 0.2,
+        num_classes: int = 3,
+        num_quantiles: int = 5,
+        n_future_candles: int = 5
+    ):
+        super().__init__("multihead_vae", input_dim, num_classes)
+        
+        if hidden_dims is None:
+            hidden_dims = [128, 256, 512]
+        
+        self.input_dim = input_dim
+        self.sequence_length = sequence_length
+        self.latent_dim = latent_dim
+        self.hidden_dims = hidden_dims
+        self.num_quantiles = num_quantiles
+        self.n_future_candles = n_future_candles
+        
+        # Encoder (from MarketVAE)
+        encoder_layers = []
+        in_features = input_dim * sequence_length
+        for hidden_dim in hidden_dims:
+            encoder_layers.extend([
+                nn.Linear(in_features, hidden_dim),
+                nn.BatchNorm1d(hidden_dim),
+                nn.LeakyReLU(0.2),
+                nn.Dropout(dropout)
+            ])
+            in_features = hidden_dim
+        self.encoder = nn.Sequential(*encoder_layers)
+        
+        # Latent space (from MarketVAE)
+        self.fc_mu = nn.Linear(hidden_dims[-1], latent_dim)
+        self.fc_var = nn.Linear(hidden_dims[-1], latent_dim)
+        
+        # Decoder (from MarketVAE) - for reconstruction loss if needed
+        decoder_layers = []
+        in_features = latent_dim
+        for hidden_dim in reversed(hidden_dims):
+            decoder_layers.extend([
+                nn.Linear(in_features, hidden_dim),
+                nn.BatchNorm1d(hidden_dim),
+                nn.LeakyReLU(0.2),
+                nn.Dropout(dropout)
+            ])
+            in_features = hidden_dim
+        decoder_layers.append(nn.Linear(hidden_dims[0], input_dim * sequence_length))
+        self.decoder = nn.Sequential(*decoder_layers)
+        
+        # Multi-head outputs (from latent space)
+        self.class_head = ClassificationHead(latent_dim, num_classes)
+        self.regression_head = RegressionHead(latent_dim)
+        self.quantile_head = QuantileHead(latent_dim, num_quantiles)
+        self.trading_head = TradingParamsHead(latent_dim)
+        self.candle_head = FutureCandleHead(latent_dim, n_future_candles)
+    
+    def encode_to_latent(self, x: torch.Tensor) -> tuple:
+        """Encode input to latent distribution parameters (mu, log_var)."""
+        batch_size = x.size(0)
+        x = x.view(batch_size, -1)
+        h = self.encoder(x)
+        mu = self.fc_mu(h)
+        log_var = self.fc_var(h)
+        return mu, log_var
+    
+    def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
+        """Reparameterization trick for sampling from latent distribution."""
+        std = torch.exp(0.5 * log_var)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+    
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """Decode latent vector to reconstruction."""
+        x_recon = self.decoder(z)
+        x_recon = x_recon.view(-1, self.sequence_length, self.input_dim)
+        return x_recon
+    
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract latent features from input using reparameterization."""
+        mu, log_var = self.encode_to_latent(x)
+        z = self.reparameterize(mu, log_var)
+        return z
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Returns class logits for backward compatibility."""
+        features = self.encode(x)
+        return self.class_head(features)
+    
+    def forward_multihead(self, x: torch.Tensor) -> MultiHeadOutput:
+        """Full multi-head forward pass with all trading outputs."""
+        features = self.encode(x)
+        
+        class_logits = self.class_head(features)
+        mu, sigma = self.regression_head(features)
+        quantiles = self.quantile_head(features)
+        entry_offset, sl_distance, tp_distance = self.trading_head(features)
+        candle_deltas = self.candle_head(features)
+        
+        return MultiHeadOutput(
+            class_logits=class_logits,
+            mu=mu,
+            quantiles=quantiles,
+            sigma=sigma,
+            entry_offset=entry_offset,
+            sl_distance=sl_distance,
+            tp_distance=tp_distance,
+            candle_deltas=candle_deltas
+        )
+    
+    def forward_with_reconstruction(self, x: torch.Tensor) -> tuple:
+        """Forward pass returning both multi-head outputs and reconstruction for VAE loss."""
+        mu_latent, log_var = self.encode_to_latent(x)
+        z = self.reparameterize(mu_latent, log_var)
+        x_recon = self.decode(z)
+        
+        # Multi-head outputs from latent
+        class_logits = self.class_head(z)
+        mu, sigma = self.regression_head(z)
+        quantiles = self.quantile_head(z)
+        entry_offset, sl_distance, tp_distance = self.trading_head(z)
+        candle_deltas = self.candle_head(z)
+        
+        multihead_output = MultiHeadOutput(
+            class_logits=class_logits,
+            mu=mu,
+            quantiles=quantiles,
+            sigma=sigma,
+            entry_offset=entry_offset,
+            sl_distance=sl_distance,
+            tp_distance=tp_distance,
+            candle_deltas=candle_deltas
+        )
+        
+        return multihead_output, x_recon, mu_latent, log_var
+
+
 # Factory function to get multi-head model
 def get_multihead_model(
     architecture: str,
@@ -622,7 +887,7 @@ def get_multihead_model(
     Factory function to create multi-head models.
     
     Args:
-        architecture: One of 'transformer', 'lstm', 'cnn'
+        architecture: One of 'transformer', 'lstm', 'cnn', 'gnn', 'vae'
         input_dim: Number of input features
         **kwargs: Architecture-specific arguments
         
@@ -633,6 +898,8 @@ def get_multihead_model(
         'transformer': MultiHeadTransformer,
         'lstm': MultiHeadLSTM,
         'cnn': MultiHeadCNN,
+        'gnn': MultiHeadGNN,
+        'vae': MultiHeadVAE,
     }
     
     if architecture not in models:
