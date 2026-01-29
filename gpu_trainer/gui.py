@@ -1535,6 +1535,11 @@ class GPUTrainerGUI:
                 val_features_np = val_features_np[valid_start:]
                 val_labels_np = val_labels_np[valid_start:]
                 
+                # CRITICAL: Also skip valid_start from returns to keep arrays aligned
+                if use_multihead and train_returns is not None:
+                    train_returns = train_returns[valid_start:]
+                    val_returns = val_returns[valid_start:]
+                
                 # === HARD DATA CLEANSING - Drop NaN/Inf rows ===
                 def clean_data_gui(features, labels, returns=None, name="Data"):
                     features = np.where(np.isinf(features), np.nan, features)
