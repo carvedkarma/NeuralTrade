@@ -23,8 +23,13 @@ import time
 import logging
 from torch.utils.tensorboard import SummaryWriter
 
-from .multihead_loss import MultiHeadLoss, MultiHeadLossConfig
-from ..models.multihead import MultiHeadOutput
+try:
+    from .multihead_loss import MultiHeadLoss, MultiHeadLossConfig
+    from ..models.multihead import MultiHeadOutput
+except ImportError:
+    # Fallback for direct script execution
+    from training.multihead_loss import MultiHeadLoss, MultiHeadLossConfig
+    from models.multihead import MultiHeadOutput
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

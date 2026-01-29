@@ -346,6 +346,42 @@ class GPUTrainerGUI:
                                           font=('Segoe UI', 9), wraplength=340, justify=tk.LEFT)
         self.model_desc_label.pack(anchor=tk.W, pady=(0, 8))
         
+        # Timeframe mode selection
+        tf_frame = ttk.Frame(frame)
+        tf_frame.pack(fill=tk.X, pady=(0, 8))
+        
+        ttk.Label(tf_frame, text="Timeframe:", style='Card.TLabel').pack(side=tk.LEFT)
+        
+        self.timeframe_var = tk.StringVar(value="15m")  # Default to quick 15m mode for faster results
+        tf_combo = ttk.Combobox(tf_frame, textvariable=self.timeframe_var,
+                                 values=["15m", "Full MTF (5m/15m/1h/4h)"], 
+                                 width=20, state='readonly')
+        tf_combo.pack(side=tk.LEFT, padx=(10, 0))
+        tf_combo.bind('<<ComboboxSelected>>', self.on_timeframe_changed)
+        
+        # Timeframe description
+        self.tf_desc_label = tk.Label(frame, text="15m only: ~57 features, faster training",
+                                       bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
+                                       font=('Segoe UI', 9), wraplength=340, justify=tk.LEFT)
+        self.tf_desc_label.pack(anchor=tk.W, pady=(0, 8))
+        
+        # Asset selection
+        asset_frame = ttk.Frame(frame)
+        asset_frame.pack(fill=tk.X, pady=(0, 8))
+        
+        ttk.Label(asset_frame, text="Assets:", style='Card.TLabel').pack(side=tk.LEFT)
+        
+        self.asset_vars = {}
+        for asset in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]:
+            var = tk.BooleanVar(value=(asset == "BTCUSDT"))  # Default BTC selected
+            self.asset_vars[asset] = var
+            cb = ttk.Checkbutton(asset_frame, text=asset[:3], variable=var)
+            cb.pack(side=tk.LEFT, padx=(6, 0))
+        
+        # Select all assets button
+        ttk.Button(asset_frame, text="All", command=self.select_all_assets,
+                   style='Secondary.TButton', width=4).pack(side=tk.LEFT, padx=(10, 0))
+        
         # Cost mode selection
         cost_frame = ttk.Frame(frame)
         cost_frame.pack(fill=tk.X, pady=(0, 12))
@@ -532,6 +568,26 @@ class GPUTrainerGUI:
         }
         display, _ = cost_map.get(mode, ("0.09%", 0.0009))
         self.cost_display.config(text=f"({display} round-trip)")
+    
+    def on_timeframe_changed(self, event=None):
+        tf = self.timeframe_var.get()
+        if tf == "15m":
+            self.tf_desc_label.config(text="15m only: ~57 features, faster training")
+        else:
+            self.tf_desc_label.config(text="Full MTF: 5m/15m/1h/4h context, ~81 features")
+    
+    def select_all_assets(self):
+        for var in self.asset_vars.values():
+            var.set(True)
+    
+    def get_selected_assets(self):
+        """Get list of selected asset symbols"""
+        return [asset for asset, var in self.asset_vars.items() if var.get()]
+    
+    def get_timeframe_mode(self):
+        """Get timeframe mode: '15m' or 'mtf'"""
+        tf = self.timeframe_var.get()
+        return "15m" if tf == "15m" else "mtf"
         
     def get_trading_cost(self) -> float:
         """Get the selected trading cost for label creation"""
@@ -1102,19 +1158,35 @@ class GPUTrainerGUI:
         model_type = self.model_var.get()
         defaults = OPTIMAL_DEFAULTS.get(model_type, OPTIMAL_DEFAULTS["transformer"])
         
-        # Multi-asset, multi-timeframe training configuration
-        training_assets = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+        # Get selected assets from GUI
+        training_assets = self.get_selected_assets()
+        if not training_assets:
+            messagebox.showwarning("No Assets", "Please select at least one asset to train on.")
+            return
+        
+        # Get timeframe mode from GUI
+        tf_mode = self.get_timeframe_mode()
         
         # MTF Fusion Mode: Base timeframe is 15m, with 5m/1h/4h as context
         # All predictions are for 15m timeframe with 2-3 hour horizon (10 bars)
-        use_mtf_fusion = True  # Use proper multi-timeframe feature fusion
-        mtf_base_tf = "15m"
-        mtf_context_tfs = ["5m", "1h", "4h"]
-        mtf_all_tfs = ["5m", "15m", "1h", "4h"]  # For data loading
+        if tf_mode == "15m":
+            # Quick 15m mode - uses only 15m timeframe data
+            use_mtf_fusion = False
+            mtf_base_tf = "15m"
+            mtf_context_tfs = []
+            mtf_all_tfs = ["15m"]  # Only 15m data
+            training_timeframes = ["15m"]
+        else:
+            # Full MTF mode - uses 5m, 15m, 1h, 4h with feature fusion
+            use_mtf_fusion = True
+            mtf_base_tf = "15m"
+            mtf_context_tfs = ["5m", "1h", "4h"]
+            mtf_all_tfs = ["5m", "15m", "1h", "4h"]
+            training_timeframes = mtf_all_tfs
+        
         prediction_horizon_bars = 10  # 10 x 15m = 2.5 hours forward
         
         # Legacy mode: treat each timeframe as separate samples
-        training_timeframes = mtf_all_tfs if use_mtf_fusion else ["1m", "5m", "15m", "1h", "4h"]
         horizon_by_tf = {"1m": 240, "5m": 48, "15m": 16, "1h": 4, "4h": 1}
         
         # Check for training data - need at least BTC for some timeframe
@@ -1154,8 +1226,9 @@ class GPUTrainerGUI:
                     self.log(f"  MTF FUSION TRAINING: {model_type.upper()}")
                     self.log(f"  Base: 15m | Context: 5m, 1h, 4h | Horizon: {prediction_horizon_bars} bars (2.5h)")
                 else:
-                    self.log(f"  MULTI-ASSET MULTI-TIMEFRAME TRAINING: {model_type.upper()}")
-                    self.log(f"  Timeframes: {', '.join(training_timeframes)}")
+                    self.log(f"  QUICK 15M TRAINING: {model_type.upper()}")
+                    self.log(f"  Timeframe: 15m only | Horizon: {prediction_horizon_bars} bars (2.5h)")
+                    self.log(f"  Mode: Fast training with ~57 features")
                 self.log(f"  Epochs: {epochs} | Batch: {batch_size} | LR: {lr}")
                 self.log(f"  Cost: {cost_mode} ({trading_cost*100:.2f}%)")
                 self.log(f"  Assets: {', '.join(training_assets)}")
