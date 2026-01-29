@@ -1677,11 +1677,11 @@ class GPUTrainerGUI:
                 def progress_callback(epoch, total_epochs, train_metrics, val_metrics):
                     # Extract losses from metrics dictionaries (MultiHeadTrainer format)
                     if isinstance(train_metrics, dict):
-                        train_loss = train_metrics.get('total_loss', train_metrics.get('loss', 0.0))
+                        train_loss = train_metrics.get('total', train_metrics.get('total_loss', train_metrics.get('loss', 0.0)))
                     else:
                         train_loss = float(train_metrics)
                     if isinstance(val_metrics, dict):
-                        val_loss = val_metrics.get('total_loss', val_metrics.get('loss', 0.0))
+                        val_loss = val_metrics.get('total', val_metrics.get('total_loss', val_metrics.get('loss', 0.0)))
                     else:
                         val_loss = float(val_metrics)
                     

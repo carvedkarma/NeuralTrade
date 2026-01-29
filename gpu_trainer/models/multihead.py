@@ -680,8 +680,8 @@ class MultiHeadGNN(BaseModel):
         self.class_head = ClassificationHead(hidden_dim, num_classes)
         self.regression_head = RegressionHead(hidden_dim)
         self.quantile_head = QuantileHead(hidden_dim, num_quantiles)
-        self.trading_head = TradingParamsHead(hidden_dim)
-        self.candle_head = FutureCandleHead(hidden_dim, n_future_candles)
+        self.trading_head = TradingHead(hidden_dim)
+        self.candle_head = CandlePredictionHead(hidden_dim, n_future_steps=n_future_candles)
     
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Extract features using temporal + attention encoding."""
@@ -794,8 +794,8 @@ class MultiHeadVAE(BaseModel):
         self.class_head = ClassificationHead(latent_dim, num_classes)
         self.regression_head = RegressionHead(latent_dim)
         self.quantile_head = QuantileHead(latent_dim, num_quantiles)
-        self.trading_head = TradingParamsHead(latent_dim)
-        self.candle_head = FutureCandleHead(latent_dim, n_future_candles)
+        self.trading_head = TradingHead(latent_dim)
+        self.candle_head = CandlePredictionHead(latent_dim, n_future_steps=n_future_candles)
     
     def encode_to_latent(self, x: torch.Tensor) -> tuple:
         """Encode input to latent distribution parameters (mu, log_var)."""
