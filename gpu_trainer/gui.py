@@ -1711,7 +1711,7 @@ class GPUTrainerGUI:
                 # Mark model as training
                 self.update_model_status(model_type, "training")
                 
-                history = trainer.train(epochs=epochs)
+                history = trainer.train(num_epochs=epochs)
                 
                 if self.is_training:
                     self.models_completed.append(model_type)
