@@ -200,7 +200,33 @@ class ModelManager:
             dropout = config.get("dropout", 0.2)
             
             # === MULTI-HEAD MODELS (check first - has forward_multihead for quantile predictions) ===
-            if "multihead_transformer" in model_type_lower:
+            # Check for multi-head model indicators from state_dict
+            is_multihead = config.get("is_multihead", False)
+            
+            # If multihead detected from state_dict but not in name, force multihead model selection
+            if is_multihead and "multihead" not in model_type_lower:
+                # Determine base model type and redirect to multi-head variant
+                if "transformer" in model_type_lower:
+                    logger.info(f"Redirecting {model_type} to MultiHeadTransformer (detected from state_dict)")
+                    model_type_lower = "multihead_transformer"
+                elif "lstm" in model_type_lower:
+                    logger.info(f"Redirecting {model_type} to MultiHeadLSTM (detected from state_dict)")
+                    model_type_lower = "multihead_lstm"
+                elif "cnn" in model_type_lower or "resnet" in model_type_lower:
+                    logger.info(f"Redirecting {model_type} to MultiHeadCNN (detected from state_dict)")
+                    model_type_lower = "multihead_cnn"
+                elif "gnn" in model_type_lower:
+                    logger.info(f"Redirecting {model_type} to MultiHeadGNN (detected from state_dict)")
+                    model_type_lower = "multihead_gnn"
+                elif "vae" in model_type_lower:
+                    logger.info(f"Redirecting {model_type} to MultiHeadVAE (detected from state_dict)")
+                    model_type_lower = "multihead_vae"
+                elif "tft" in model_type_lower:
+                    logger.info(f"Redirecting {model_type} to MultiHeadTFT (detected from state_dict)")
+                    model_type_lower = "multihead_tft"
+            
+            # Patterns: multihead_transformer OR transformer_multihead (both naming conventions)
+            if "multihead_transformer" in model_type_lower or "transformer_multihead" in model_type_lower:
                 from models.multihead import MultiHeadTransformer
                 return MultiHeadTransformer(
                     input_dim=input_dim,
@@ -210,7 +236,7 @@ class ModelManager:
                     dropout=dropout,
                     num_classes=output_dim
                 )
-            elif "multihead_lstm" in model_type_lower:
+            elif "multihead_lstm" in model_type_lower or "lstm_multihead" in model_type_lower:
                 from models.multihead import MultiHeadLSTM
                 return MultiHeadLSTM(
                     input_dim=input_dim,
@@ -219,7 +245,7 @@ class ModelManager:
                     dropout=dropout,
                     num_classes=output_dim
                 )
-            elif "multihead_cnn" in model_type_lower:
+            elif "multihead_cnn" in model_type_lower or "cnn_multihead" in model_type_lower:
                 from models.multihead import MultiHeadCNN
                 return MultiHeadCNN(
                     input_dim=input_dim,
@@ -228,7 +254,7 @@ class ModelManager:
                     dropout=dropout,
                     num_classes=output_dim
                 )
-            elif "multihead_gnn" in model_type_lower:
+            elif "multihead_gnn" in model_type_lower or "gnn_multihead" in model_type_lower:
                 from models.multihead import MultiHeadGNN
                 return MultiHeadGNN(
                     input_dim=input_dim,
@@ -238,7 +264,7 @@ class ModelManager:
                     dropout=dropout,
                     num_classes=output_dim
                 )
-            elif "multihead_vae" in model_type_lower:
+            elif "multihead_vae" in model_type_lower or "vae_multihead" in model_type_lower:
                 from models.multihead import MultiHeadVAE
                 return MultiHeadVAE(
                     input_dim=input_dim,
@@ -582,13 +608,22 @@ class ModelManager:
                     inferred["hidden_dim"] = node_shape[0]
                     inferred["input_dim"] = node_shape[1]
                     
-            # TemporalGNN: spatial_encoder.weight [hidden_dim, features_per_node]
+            # TemporalGNN/MultiHeadGNN: 
+            #   temporal_encoder.0.weight [hidden_dim, input_dim] - MultiHeadGNN
+            #   spatial_encoder.weight [hidden_dim, features_per_node] - TemporalGNN
             elif "gnn" in model_type_lower or "temporal_gnn" in model_type_lower:
-                shape = get_param_shape("spatial_encoder.weight")
+                # Try MultiHeadGNN pattern first (temporal_encoder.0.weight)
+                shape = get_param_shape("temporal_encoder.0.weight")
                 if shape:
                     inferred["hidden_dim"] = shape[0]
-                    # features_per_node = input_dim // num_nodes, but we'll store what we find
                     inferred["input_dim"] = shape[1]
+                    logger.info(f"GNN: Inferred from temporal_encoder.0.weight: {shape}")
+                else:
+                    # Fall back to TemporalGNN pattern (spatial_encoder.weight)
+                    shape = get_param_shape("spatial_encoder.weight")
+                    if shape:
+                        inferred["hidden_dim"] = shape[0]
+                        inferred["input_dim"] = shape[1]
                     
             if inferred:
                 logger.info(f"Inferred dimensions for {model_type}: {inferred}")
@@ -624,6 +659,20 @@ class ModelManager:
         if not state_dict:
             logger.warning(f"No state_dict in checkpoint for {model_name}")
             return None
+        
+        # Detect multi-head model from state_dict keys (reliable detection method)
+        state_keys = list(state_dict.keys())
+        has_multihead_keys = any(
+            k.startswith("class_head.") or 
+            k.startswith("regression_head.") or 
+            k.startswith("quantile_head.") or
+            k.startswith("trading_head.") or
+            k.startswith("candle_head.")
+            for k in state_keys
+        )
+        if has_multihead_keys:
+            config["is_multihead"] = True
+            logger.info(f"Detected multi-head architecture from state_dict keys for {model_name}")
         
         # Try to determine model type from name, config, or infer from state_dict keys
         model_type = config.get("model_type", "") or config.get("name", "")
