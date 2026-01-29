@@ -187,7 +187,7 @@ class RegressionTargetGenerator:
         
         return result
     
-    def generate_multihead_targets(self, df: pd.DataFrame) -> pd.DataFrame:
+    def generate_multihead_targets(self, df: pd.DataFrame, n_future_candles: int = 5) -> pd.DataFrame:
         """
         Generate targets specifically for multi-head model training.
         
@@ -197,12 +197,20 @@ class RegressionTargetGenerator:
             - sigma: Forward volatility (for uncertainty calibration)
             - class_label: 0=SHORT, 1=HOLD, 2=LONG (for classification head)
             - forward_return: The actual return to predict (same as mu, for quantile loss)
+            - entry_offset: Optimal entry offset based on volatility
+            - sl_distance: Optimal stop loss distance based on ATR
+            - tp_distance: Optimal take profit distance based on ATR
+            - candle_delta_close_N: Future close deltas for N steps
+            - candle_delta_high_N: Future high deltas for N steps  
+            - candle_delta_low_N: Future low deltas for N steps
         
         Note: The model predicts quantiles of the return distribution.
         The target for quantile loss is the actual realized return.
         Pinball loss naturally learns the correct quantiles from individual returns.
         """
         prices = df["close"]
+        highs = df["high"]
+        lows = df["low"]
         
         # Actual forward return (the target we're predicting)
         mu = self.compute_forward_returns(prices)
@@ -230,20 +238,67 @@ class RegressionTargetGenerator:
         short_mask = (mu < -min_return) & (edge > edge_threshold)
         class_label[short_mask] = 0  # SHORT
         
+        # === TRADING HEAD TARGETS ===
+        # Entry offset: small, based on recent volatility (aim for better fill)
+        atr = self._compute_atr(df, period=14)
+        entry_offset = pd.Series(0.0, index=df.index)  # No offset by default
+        
+        # SL distance: based on ATR (1-2x ATR typical)
+        sl_distance = (atr * 1.5 / prices).clip(lower=0.003, upper=0.05)  # As percentage
+        
+        # TP distance: based on ATR and risk-reward (2x SL typical for 1.5 R:R)
+        tp_distance = (atr * 3.0 / prices).clip(lower=0.005, upper=0.10)  # As percentage
+        
+        # === CANDLE PREDICTION TARGETS ===
+        # Compute future candle deltas (percentage changes from current close)
+        candle_targets = {}
+        for i in range(1, n_future_candles + 1):
+            # Delta close: (future_close - current_close) / current_close
+            future_close = prices.shift(-i)
+            candle_targets[f"candle_delta_close_{i}"] = (future_close - prices) / prices
+            
+            # Delta high: (future_high - current_close) / current_close
+            future_high = highs.shift(-i)
+            candle_targets[f"candle_delta_high_{i}"] = (future_high - prices) / prices
+            
+            # Delta low: (future_low - current_close) / current_close
+            future_low = lows.shift(-i)
+            candle_targets[f"candle_delta_low_{i}"] = (future_low - prices) / prices
+        
         targets = pd.DataFrame({
             "mu": mu,
             "sigma": sigma,
             "class_label": class_label,
             "forward_return": mu,  # Same as mu, explicit for quantile loss
             "edge": edge,
-            "current_volatility": current_vol
+            "current_volatility": current_vol,
+            "entry_offset": entry_offset,
+            "sl_distance": sl_distance,
+            "tp_distance": tp_distance,
+            **candle_targets
         })
         
         logger.info(f"Generated multihead targets: "
                    f"LONG={long_mask.sum()}, SHORT={short_mask.sum()}, "
-                   f"HOLD={(class_label == 1).sum()}")
+                   f"HOLD={(class_label == 1).sum()}, "
+                   f"candle_steps={n_future_candles}")
         
         return targets
+    
+    def _compute_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """Compute Average True Range (ATR)."""
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+        
+        tr1 = high - low
+        tr2 = abs(high - close.shift(1))
+        tr3 = abs(low - close.shift(1))
+        
+        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = true_range.rolling(window=period).mean()
+        
+        return atr.fillna(true_range)
     
     def compute_probability_profitable(self, 
                                         prices: pd.Series,

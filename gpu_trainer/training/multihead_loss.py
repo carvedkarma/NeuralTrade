@@ -25,6 +25,8 @@ class MultiHeadLossConfig:
     lambda_mu: float = 0.5          # Weight for regression (μ) loss
     lambda_sigma: float = 0.2       # Weight for uncertainty (σ) loss  
     lambda_quantile: float = 0.5    # Weight for quantile loss
+    lambda_trading: float = 0.3     # Weight for trading (entry/SL/TP) loss
+    lambda_candle: float = 0.3      # Weight for candle prediction loss
     
     # Classification options
     class_weights: Optional[torch.Tensor] = None  # For imbalanced classes
@@ -32,9 +34,14 @@ class MultiHeadLossConfig:
     
     # Regression options
     mu_huber_delta: float = 0.02    # Delta for Huber loss (robust to outliers)
+    trading_huber_delta: float = 0.01  # Delta for trading distances
+    candle_huber_delta: float = 0.02   # Delta for candle deltas
     
     # Quantile options
     quantiles: Tuple[float, ...] = (0.10, 0.25, 0.50, 0.75, 0.90)
+    
+    # Future candle options
+    n_future_candles: int = 5
 
 
 class PinballLoss(nn.Module):
@@ -122,13 +129,16 @@ class MultiHeadLoss(nn.Module):
     """
     Combined loss for multi-head trading model.
     
-    Total Loss = λ_class * L_class + λ_mu * L_mu + λ_sigma * L_sigma + λ_quantile * L_quantile
+    Total Loss = λ_class * L_class + λ_mu * L_mu + λ_sigma * L_sigma + 
+                 λ_quantile * L_quantile + λ_trading * L_trading + λ_candle * L_candle
     
     Where:
     - L_class: CrossEntropy with optional label smoothing
     - L_mu: Huber loss for expected return
     - L_sigma: Gaussian NLL for uncertainty calibration
     - L_quantile: Pinball loss for quantile regression
+    - L_trading: Huber loss for entry_offset, sl_distance, tp_distance
+    - L_candle: Huber loss for future candle deltas
     """
     
     def __init__(self, config: Optional[MultiHeadLossConfig] = None):
@@ -151,6 +161,12 @@ class MultiHeadLoss(nn.Module):
         # Quantile loss
         self.quantile_loss = PinballLoss(self.config.quantiles)
         
+        # Trading loss (entry/SL/TP)
+        self.trading_loss = nn.HuberLoss(delta=self.config.trading_huber_delta)
+        
+        # Candle prediction loss
+        self.candle_loss = nn.HuberLoss(delta=self.config.candle_huber_delta)
+        
     def forward(
         self,
         class_logits: torch.Tensor,
@@ -158,7 +174,13 @@ class MultiHeadLoss(nn.Module):
         sigma: torch.Tensor,
         quantiles: torch.Tensor,
         class_targets: torch.Tensor,
-        return_targets: torch.Tensor
+        return_targets: torch.Tensor,
+        entry_offset: Optional[torch.Tensor] = None,
+        sl_distance: Optional[torch.Tensor] = None,
+        tp_distance: Optional[torch.Tensor] = None,
+        candle_deltas: Optional[torch.Tensor] = None,
+        trading_targets: Optional[Dict[str, torch.Tensor]] = None,
+        candle_targets: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Compute combined loss.
@@ -170,6 +192,12 @@ class MultiHeadLoss(nn.Module):
             quantiles: [batch, 5] predicted quantiles
             class_targets: [batch] class labels (0=SHORT, 1=HOLD, 2=LONG)
             return_targets: [batch] or [batch, 1] actual forward returns
+            entry_offset: [batch, 1] predicted entry offset (optional)
+            sl_distance: [batch, 1] predicted SL distance (optional)
+            tp_distance: [batch, 1] predicted TP distance (optional)
+            candle_deltas: [batch, n_steps, 3] predicted candle deltas (optional)
+            trading_targets: Dict with 'entry_offset', 'sl_distance', 'tp_distance' targets
+            candle_targets: [batch, n_steps, 3] actual candle deltas
             
         Returns:
             Dict with 'total' loss and individual components
@@ -188,12 +216,27 @@ class MultiHeadLoss(nn.Module):
         # Quantile loss
         l_quantile = self.quantile_loss(quantiles, return_targets)
         
+        # Trading loss (if targets provided)
+        l_trading = torch.tensor(0.0, device=class_logits.device)
+        if trading_targets is not None and entry_offset is not None:
+            l_entry = self.trading_loss(entry_offset, trading_targets['entry_offset'])
+            l_sl = self.trading_loss(sl_distance, trading_targets['sl_distance'])
+            l_tp = self.trading_loss(tp_distance, trading_targets['tp_distance'])
+            l_trading = (l_entry + l_sl + l_tp) / 3.0
+        
+        # Candle prediction loss (if targets provided)
+        l_candle = torch.tensor(0.0, device=class_logits.device)
+        if candle_targets is not None and candle_deltas is not None:
+            l_candle = self.candle_loss(candle_deltas, candle_targets)
+        
         # Combined loss
         total = (
             self.config.lambda_class * l_class +
             self.config.lambda_mu * l_mu +
             self.config.lambda_sigma * l_sigma +
-            self.config.lambda_quantile * l_quantile
+            self.config.lambda_quantile * l_quantile +
+            self.config.lambda_trading * l_trading +
+            self.config.lambda_candle * l_candle
         )
         
         return {
@@ -201,7 +244,9 @@ class MultiHeadLoss(nn.Module):
             'class': l_class,
             'mu': l_mu,
             'sigma': l_sigma,
-            'quantile': l_quantile
+            'quantile': l_quantile,
+            'trading': l_trading,
+            'candle': l_candle
         }
 
 

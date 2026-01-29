@@ -1,19 +1,21 @@
 """
 Multi-Head Model Architecture for Institutional Trading
 
-Instead of classification-only training, these models output:
-1. Classification head → direction (LONG/HOLD/SHORT)
-2. Regression head → expected return (μ)
+Full trading output vector:
+1. Classification head → direction_score [-1, 1]
+2. Regression head → expected return (μ) and volatility (σ)
 3. Quantile head → uncertainty quantiles (q10, q25, q50, q75, q90)
+4. Trading head → entry_offset, sl_distance, tp_distance
+5. Candle head → future candle deltas (Δclose, Δhigh, Δlow) for N steps
 
-SL/TP are derived mathematically from quantiles, NOT learned directly.
+This enables complete trade planning from neural network output.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Dict, Tuple, NamedTuple
-from dataclasses import dataclass
+from typing import Optional, Dict, Tuple, NamedTuple, List
+from dataclasses import dataclass, field
 from .base import BaseModel, PositionalEncoding, AttentionBlock
 
 
@@ -31,6 +33,14 @@ class MultiHeadOutput:
     
     # Optional: uncertainty estimate (std of predictions)
     sigma: Optional[torch.Tensor] = None  # [batch, 1]
+    
+    # Trading head outputs
+    entry_offset: Optional[torch.Tensor] = None  # [batch, 1] entry price offset
+    sl_distance: Optional[torch.Tensor] = None   # [batch, 1] stop loss distance
+    tp_distance: Optional[torch.Tensor] = None   # [batch, 1] take profit distance
+    
+    # Candle prediction head outputs
+    candle_deltas: Optional[torch.Tensor] = None  # [batch, n_steps, 3] for Δclose, Δhigh, Δlow
 
 
 class QuantileHead(nn.Module):
@@ -155,6 +165,119 @@ class ClassificationHead(nn.Module):
         return self.classifier(x)
 
 
+class TradingHead(nn.Module):
+    """
+    Trading head for entry/SL/TP distance prediction.
+    
+    Outputs:
+    - entry_offset: Price offset from current (can be small positive/negative)
+    - sl_distance: Stop loss distance (always positive, applied directionally)
+    - tp_distance: Take profit distance (always positive, applied directionally)
+    
+    Distances are normalized by current volatility during training.
+    """
+    
+    def __init__(self, input_dim: int, hidden_dim: int = 128, dropout: float = 0.1):
+        super().__init__()
+        
+        self.shared = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Entry offset (small, can be + or -)
+        self.entry_head = nn.Linear(hidden_dim // 2, 1)
+        
+        # SL distance (must be positive)
+        self.sl_head = nn.Linear(hidden_dim // 2, 1)
+        
+        # TP distance (must be positive)
+        self.tp_head = nn.Linear(hidden_dim // 2, 1)
+        
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Returns (entry_offset, sl_distance, tp_distance).
+        
+        Distances are positive, offset can be small +/-.
+        """
+        h = self.shared(x)
+        
+        # Entry offset: small value, allow +/-
+        entry_offset = torch.tanh(self.entry_head(h)) * 0.01  # Max 1% offset
+        
+        # SL distance: positive, typically 0.5% - 5%
+        sl_distance = F.softplus(self.sl_head(h)) * 0.01 + 0.003  # Min 0.3%, scale to typical
+        
+        # TP distance: positive, typically 1% - 10%
+        tp_distance = F.softplus(self.tp_head(h)) * 0.02 + 0.005  # Min 0.5%, scale to typical
+        
+        return entry_offset, sl_distance, tp_distance
+
+
+class CandlePredictionHead(nn.Module):
+    """
+    Predicts future candle deltas (NOT raw prices).
+    
+    For each future step, predicts:
+    - Δclose: Close price change from current
+    - Δhigh: High price change from current  
+    - Δlow: Low price change from current
+    
+    Uses percentage changes for scale invariance.
+    """
+    
+    def __init__(self, input_dim: int, hidden_dim: int = 128, 
+                 n_future_steps: int = 5, dropout: float = 0.1):
+        super().__init__()
+        
+        self.n_steps = n_future_steps
+        self.n_outputs_per_step = 3  # Δclose, Δhigh, Δlow
+        
+        self.shared = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Separate heads for each future step (more capacity)
+        self.step_heads = nn.ModuleList([
+            nn.Linear(hidden_dim, self.n_outputs_per_step)
+            for _ in range(n_future_steps)
+        ])
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Returns candle deltas [batch, n_steps, 3].
+        
+        Output[:, i, 0] = Δclose for step i
+        Output[:, i, 1] = Δhigh for step i
+        Output[:, i, 2] = Δlow for step i
+        
+        Values are percentage changes (e.g., 0.01 = 1% move).
+        """
+        h = self.shared(x)
+        
+        step_outputs = []
+        for step_head in self.step_heads:
+            step_pred = step_head(h)  # [batch, 3]
+            step_outputs.append(step_pred)
+            
+        # Stack: [batch, n_steps, 3]
+        candle_deltas = torch.stack(step_outputs, dim=1)
+        
+        # Scale to reasonable range (typically -10% to +10%)
+        candle_deltas = torch.tanh(candle_deltas) * 0.10
+        
+        return candle_deltas
+
+
 class MultiHeadTransformer(BaseModel):
     """
     Transformer with multi-head output for institutional trading.
@@ -163,6 +286,8 @@ class MultiHeadTransformer(BaseModel):
     - Classification: direction probabilities
     - Regression: expected return (μ) and uncertainty (σ)
     - Quantiles: q10, q25, q50, q75, q90 for SL/TP derivation
+    - Trading: entry_offset, sl_distance, tp_distance
+    - Candles: future candle deltas (Δclose, Δhigh, Δlow)
     """
     
     def __init__(
@@ -175,15 +300,16 @@ class MultiHeadTransformer(BaseModel):
         dropout: float = 0.1,
         max_seq_len: int = 200,
         num_classes: int = 3,
-        num_quantiles: int = 5
+        num_quantiles: int = 5,
+        n_future_candles: int = 5
     ):
-        # Store num_quantiles for checkpoint compatibility
         super().__init__("multihead_transformer", input_dim, num_classes)
         
         self.d_model = d_model
         self.nhead = nhead
         self.num_layers = num_layers
         self.num_quantiles = num_quantiles
+        self.n_future_candles = n_future_candles
         
         # Shared encoder backbone
         self.input_projection = nn.Linear(input_dim, d_model)
@@ -196,10 +322,12 @@ class MultiHeadTransformer(BaseModel):
         
         self.global_pool = nn.AdaptiveAvgPool1d(1)
         
-        # Multi-head outputs
+        # Multi-head outputs (6 heads total)
         self.class_head = ClassificationHead(d_model, d_model // 2, num_classes, dropout)
         self.regression_head = RegressionHead(d_model, d_model // 2, dropout)
         self.quantile_head = QuantileHead(d_model, d_model // 2, dropout)
+        self.trading_head = TradingHead(d_model, d_model // 2, dropout)
+        self.candle_head = CandlePredictionHead(d_model, d_model // 2, n_future_candles, dropout)
         
         self._init_weights()
         
@@ -241,30 +369,40 @@ class MultiHeadTransformer(BaseModel):
         - mu: [batch, 1]
         - sigma: [batch, 1]
         - quantiles: [batch, 5]
+        - entry_offset, sl_distance, tp_distance: [batch, 1] each
+        - candle_deltas: [batch, n_steps, 3]
         """
         features = self.encode(x, mask)
         
         class_logits = self.class_head(features)
         mu, sigma = self.regression_head(features)
         quantiles = self.quantile_head(features)
+        entry_offset, sl_distance, tp_distance = self.trading_head(features)
+        candle_deltas = self.candle_head(features)
         
         return MultiHeadOutput(
             class_logits=class_logits,
             mu=mu,
             quantiles=quantiles,
-            sigma=sigma
+            sigma=sigma,
+            entry_offset=entry_offset,
+            sl_distance=sl_distance,
+            tp_distance=tp_distance,
+            candle_deltas=candle_deltas
         )
     
     def predict_with_quantiles(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Convenience method for inference.
         
-        Returns dict with:
+        Returns dict with full trading output:
         - probabilities: softmax of class logits
         - direction: argmax of probabilities
         - mu: expected return
         - sigma: uncertainty
         - quantiles: {q10, q25, q50, q75, q90}
+        - trading: {entry_offset, sl_distance, tp_distance}
+        - candle_deltas: future candle predictions
         """
         self.eval()
         with torch.no_grad():
@@ -283,6 +421,10 @@ class MultiHeadTransformer(BaseModel):
                 'q50': output.quantiles[:, 2:3],
                 'q75': output.quantiles[:, 3:4],
                 'q90': output.quantiles[:, 4:5],
+                'entry_offset': output.entry_offset,
+                'sl_distance': output.sl_distance,
+                'tp_distance': output.tp_distance,
+                'candle_deltas': output.candle_deltas,
             }
 
 
@@ -298,13 +440,15 @@ class MultiHeadLSTM(BaseModel):
         num_layers: int = 3,
         dropout: float = 0.2,
         num_classes: int = 3,
-        num_quantiles: int = 5
+        num_quantiles: int = 5,
+        n_future_candles: int = 5
     ):
         super().__init__("multihead_lstm", input_dim, num_classes)
         
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.num_quantiles = num_quantiles
+        self.n_future_candles = n_future_candles
         
         # Bidirectional LSTM encoder
         self.lstm = nn.LSTM(
@@ -319,10 +463,12 @@ class MultiHeadLSTM(BaseModel):
         # Output dimension is 2x hidden due to bidirectional
         encoder_dim = hidden_dim * 2
         
-        # Multi-head outputs
+        # Multi-head outputs (6 heads total)
         self.class_head = ClassificationHead(encoder_dim, encoder_dim // 2, num_classes, dropout)
         self.regression_head = RegressionHead(encoder_dim, encoder_dim // 2, dropout)
         self.quantile_head = QuantileHead(encoder_dim, encoder_dim // 2, dropout)
+        self.trading_head = TradingHead(encoder_dim, encoder_dim // 2, dropout)
+        self.candle_head = CandlePredictionHead(encoder_dim, encoder_dim // 2, n_future_candles, dropout)
         
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Returns the final hidden state from LSTM."""
@@ -341,18 +487,24 @@ class MultiHeadLSTM(BaseModel):
         return self.class_head(features)
     
     def forward_multihead(self, x: torch.Tensor) -> MultiHeadOutput:
-        """Full multi-head forward pass."""
+        """Full multi-head forward pass with all trading outputs."""
         features = self.encode(x)
         
         class_logits = self.class_head(features)
         mu, sigma = self.regression_head(features)
         quantiles = self.quantile_head(features)
+        entry_offset, sl_distance, tp_distance = self.trading_head(features)
+        candle_deltas = self.candle_head(features)
         
         return MultiHeadOutput(
             class_logits=class_logits,
             mu=mu,
             quantiles=quantiles,
-            sigma=sigma
+            sigma=sigma,
+            entry_offset=entry_offset,
+            sl_distance=sl_distance,
+            tp_distance=tp_distance,
+            candle_deltas=candle_deltas
         )
 
 
@@ -368,13 +520,15 @@ class MultiHeadCNN(BaseModel):
         num_blocks: int = 4,
         dropout: float = 0.2,
         num_classes: int = 3,
-        num_quantiles: int = 5
+        num_quantiles: int = 5,
+        n_future_candles: int = 5
     ):
         super().__init__("multihead_cnn", input_dim, num_classes)
         
         self.hidden_channels = hidden_channels
         self.num_blocks = num_blocks
         self.num_quantiles = num_quantiles
+        self.n_future_candles = n_future_candles
         
         # Initial projection
         self.input_conv = nn.Conv1d(input_dim, hidden_channels, kernel_size=3, padding=1)
@@ -394,10 +548,12 @@ class MultiHeadCNN(BaseModel):
         # Encoder output dimension
         encoder_dim = in_ch
         
-        # Multi-head outputs
+        # Multi-head outputs (6 heads total)
         self.class_head = ClassificationHead(encoder_dim, encoder_dim // 2, num_classes, dropout)
         self.regression_head = RegressionHead(encoder_dim, encoder_dim // 2, dropout)
         self.quantile_head = QuantileHead(encoder_dim, encoder_dim // 2, dropout)
+        self.trading_head = TradingHead(encoder_dim, encoder_dim // 2, dropout)
+        self.candle_head = CandlePredictionHead(encoder_dim, encoder_dim // 2, n_future_candles, dropout)
         
     def _make_block(self, in_ch: int, out_ch: int, dropout: float) -> nn.Module:
         return nn.Sequential(
@@ -435,18 +591,24 @@ class MultiHeadCNN(BaseModel):
         return self.class_head(features)
     
     def forward_multihead(self, x: torch.Tensor) -> MultiHeadOutput:
-        """Full multi-head forward pass."""
+        """Full multi-head forward pass with all trading outputs."""
         features = self.encode(x)
         
         class_logits = self.class_head(features)
         mu, sigma = self.regression_head(features)
         quantiles = self.quantile_head(features)
+        entry_offset, sl_distance, tp_distance = self.trading_head(features)
+        candle_deltas = self.candle_head(features)
         
         return MultiHeadOutput(
             class_logits=class_logits,
             mu=mu,
             quantiles=quantiles,
-            sigma=sigma
+            sigma=sigma,
+            entry_offset=entry_offset,
+            sl_distance=sl_distance,
+            tp_distance=tp_distance,
+            candle_deltas=candle_deltas
         )
 
 
