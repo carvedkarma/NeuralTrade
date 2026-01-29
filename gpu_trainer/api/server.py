@@ -34,11 +34,12 @@ class ModelManager:
     # Mapping from checkpoint filename patterns to standardized model types
     MODEL_TYPE_PATTERNS = {
         # Multi-head models (check first - have forward_multihead for quantile predictions)
-        "multihead_transformer": ["multihead_transformer", "transformer_multihead", "best_multihead_transformer"],
-        "multihead_lstm": ["multihead_lstm", "lstm_multihead", "best_multihead_lstm"],
-        "multihead_cnn": ["multihead_cnn", "cnn_multihead", "best_multihead_cnn"],
-        "multihead_gnn": ["multihead_gnn", "gnn_multihead", "best_multihead_gnn"],
-        "multihead_vae": ["multihead_vae", "vae_multihead", "best_multihead_vae"],
+        "multihead_transformer": ["multihead_transformer", "transformer_multihead", "best_transformer_multihead", "best_multihead_transformer"],
+        "multihead_tft": ["multihead_tft", "tft_multihead", "best_tft_multihead", "best_multihead_tft"],
+        "multihead_lstm": ["multihead_lstm", "lstm_multihead", "best_lstm_multihead", "best_multihead_lstm"],
+        "multihead_cnn": ["multihead_cnn", "cnn_multihead", "best_cnn_multihead", "best_multihead_cnn"],
+        "multihead_gnn": ["multihead_gnn", "gnn_multihead", "best_gnn_multihead", "best_multihead_gnn"],
+        "multihead_vae": ["multihead_vae", "vae_multihead", "best_vae_multihead", "best_multihead_vae"],
         # Legacy classification-only models
         "transformer": ["transformer_price", "transformer", "best_transformer"],
         "tft": ["temporal_fusion_transformer", "tft", "best_temporal_fusion", "best_tft"],
@@ -239,6 +240,16 @@ class ModelManager:
                     input_dim=input_dim,
                     sequence_length=sequence_length,
                     latent_dim=config.get("latent_dim", 64),
+                    dropout=dropout,
+                    num_classes=output_dim
+                )
+            elif "multihead_tft" in model_type_lower or "tft_multihead" in model_type_lower:
+                from models.multihead import MultiHeadTFT
+                return MultiHeadTFT(
+                    input_dim=input_dim,
+                    d_model=config.get("d_model", 256),
+                    nhead=config.get("nhead", 8),
+                    num_encoder_layers=config.get("num_encoder_layers", 4),
                     dropout=dropout,
                     num_classes=output_dim
                 )
@@ -670,8 +681,23 @@ class ModelManager:
             logger.warning(f"Checkpoint directory not found: {self.checkpoint_dir}")
             return
             
-        # Load scaler if exists
-        if self.scaler_path.exists():
+        # Load scaler if exists - try model-specific scalers first, then fallback to generic
+        scaler_loaded = False
+        
+        # Try to find any model-specific scaler (scaler_{model}*.joblib)
+        scaler_files = list(self.checkpoint_dir.glob("scaler_*.joblib"))
+        if scaler_files:
+            # Use the most recently modified scaler
+            scaler_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+            try:
+                self.scaler = joblib.load(scaler_files[0])
+                logger.info(f"Loaded model-specific scaler from {scaler_files[0]}")
+                scaler_loaded = True
+            except Exception as e:
+                logger.error(f"Failed to load model-specific scaler: {e}")
+        
+        # Fallback to generic scaler.joblib
+        if not scaler_loaded and self.scaler_path.exists():
             try:
                 self.scaler = joblib.load(self.scaler_path)
                 logger.info(f"Loaded scaler from {self.scaler_path}")

@@ -98,12 +98,13 @@ class GPUTrainerGUI:
         
         # Mapping from checkpoint filename patterns to standardized model types
         self.model_type_patterns = {
-            "transformer": ["transformer_price", "transformer", "best_transformer"],
-            "tft": ["temporal_fusion_transformer", "tft", "best_temporal_fusion", "best_tft"],
-            "lstm": ["bidirectional_lstm", "lstm", "stacked_lstm", "conv_lstm", "best_lstm", "best_bidirectional"],
-            "cnn": ["resnet_price", "resnet", "cnn", "inception", "wavenet", "best_resnet", "best_cnn"],
-            "vae": ["market_vae", "vae", "conditional_vae", "best_vae", "best_market_vae"],
-            "gnn": ["cross_asset_gnn", "temporal_gnn", "gnn", "best_gnn", "best_cross_asset"],
+            # Multi-head models (check first - have _multihead suffix) and legacy models
+            "transformer": ["best_transformer_multihead", "transformer_multihead", "multihead_transformer", "transformer_price", "transformer", "best_transformer"],
+            "tft": ["best_tft_multihead", "tft_multihead", "multihead_tft", "temporal_fusion_transformer", "tft", "best_temporal_fusion", "best_tft"],
+            "lstm": ["best_lstm_multihead", "lstm_multihead", "multihead_lstm", "bidirectional_lstm", "lstm", "stacked_lstm", "conv_lstm", "best_lstm", "best_bidirectional"],
+            "cnn": ["best_cnn_multihead", "cnn_multihead", "multihead_cnn", "resnet_price", "resnet", "cnn", "inception", "wavenet", "best_resnet", "best_cnn"],
+            "vae": ["best_vae_multihead", "vae_multihead", "multihead_vae", "market_vae", "vae", "conditional_vae", "best_vae", "best_market_vae"],
+            "gnn": ["best_gnn_multihead", "gnn_multihead", "multihead_gnn", "cross_asset_gnn", "temporal_gnn", "gnn", "best_gnn", "best_cross_asset"],
         }
         
         # Scan for existing checkpoints on startup
@@ -1731,8 +1732,13 @@ class GPUTrainerGUI:
                 
                 if self.is_training:
                     self.models_completed.append(model_type)
+                    
+                    # Save to checkpoints/ directory with best_* pattern (matches API server expectations)
+                    checkpoint_dir = Path(__file__).parent / "checkpoints"
+                    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                    
                     model_suffix = "_multihead" if use_multihead else ""
-                    save_path = config.model_dir / f"{model_type}{model_suffix}_trained.pt"
+                    save_path = checkpoint_dir / f"best_{model_type}{model_suffix}.pt"
                     model.save(str(save_path))
                     
                     elapsed = time.time() - self.training_start_time
@@ -1741,7 +1747,10 @@ class GPUTrainerGUI:
                     self.log(f"Best val loss: {self.best_val_loss:.4f} (epoch {self.best_epoch})")
                     self.log(f"Model saved: {save_path.name}")
                     
-                    engineer.save_scalers(str(config.model_dir / f"{model_type}_scalers.joblib"))
+                    # Save scalers to checkpoints/ directory with model-specific naming
+                    scaler_filename = f"scaler_{model_type}{model_suffix}.joblib"
+                    engineer.save_scalers(str(checkpoint_dir / scaler_filename))
+                    self.log(f"Scalers saved: {scaler_filename}")
                     
                     # Update model status as complete
                     self.update_model_status(
