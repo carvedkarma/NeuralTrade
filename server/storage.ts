@@ -21,7 +21,10 @@ import type {
   LearningStats,
   DataSourceStats,
   ModelPerformanceStats,
+  InsertShotPlanHistory,
+  ShotPlanHistoryEntry,
 } from "@shared/schema";
+import { shotPlanHistory } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { getKlines, getMultiTimeframeKlines, getFuturesData, detectLargeOrders } from "./binance";
 import { getAllIndicators, calculateMultiTimeframeScore, type TechnicalIndicators } from "./indicators";
@@ -51,6 +54,10 @@ export interface IStorage {
   requestAIAnalysis(): Promise<void>;
   reloadHistoricalCandles(): Promise<void>;
   getCandles(): Candle[];
+  // Shot plan history methods
+  getShotPlanHistory(limit?: number): Promise<ShotPlanHistoryEntry[]>;
+  recordShotPlan(entry: InsertShotPlanHistory): Promise<ShotPlanHistoryEntry>;
+  updateShotPlanOutcome(id: number, update: Partial<ShotPlanHistoryEntry>): Promise<void>;
 }
 
 class KalmanFilter {
@@ -2609,6 +2616,27 @@ export class MemStorage implements IStorage {
       dataSource: this.dataSource,
       dataError: this.dataError,
     };
+  }
+
+  async getShotPlanHistory(limit: number = 50): Promise<ShotPlanHistoryEntry[]> {
+    const { desc } = await import("drizzle-orm");
+    return await db.select()
+      .from(shotPlanHistory)
+      .orderBy(desc(shotPlanHistory.timestamp))
+      .limit(limit);
+  }
+
+  async recordShotPlan(entry: InsertShotPlanHistory): Promise<ShotPlanHistoryEntry> {
+    const [result] = await db.insert(shotPlanHistory)
+      .values(entry)
+      .returning();
+    return result;
+  }
+
+  async updateShotPlanOutcome(id: number, update: Partial<ShotPlanHistoryEntry>): Promise<void> {
+    await db.update(shotPlanHistory)
+      .set(update)
+      .where(eq(shotPlanHistory.id, id));
   }
 }
 

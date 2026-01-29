@@ -739,6 +739,32 @@ export const strategyLearnerState = pgTable("strategy_learner_state", {
   updatedTs: bigint("updated_ts", { mode: "number" }).notNull(),
 });
 
+// Shot Plan History - tracks shot plan signals and their outcomes
+export const shotPlanHistory = pgTable("shot_plan_history", {
+  id: serial("id").primaryKey(),
+  timestamp: bigint("timestamp", { mode: "number" }).notNull(),
+  signal: varchar("signal", { length: 10 }).notNull(), // LONG, SHORT, HOLD
+  entryPrice: real("entry_price"),
+  stopLoss: real("stop_loss"),
+  takeProfit1: real("take_profit_1"),
+  takeProfit2: real("take_profit_2"),
+  confidence: real("confidence").notNull(),
+  edge: real("edge"),
+  regime: varchar("regime", { length: 50 }),
+  // Outcome tracking
+  outcome: varchar("outcome", { length: 20 }), // HIT_TP1, HIT_TP2, HIT_SL, EXPIRED, PENDING
+  exitPrice: real("exit_price"),
+  pnlPercent: real("pnl_percent"),
+  exitTimestamp: bigint("exit_timestamp", { mode: "number" }),
+  candlesHeld: integer("candles_held"),
+  maxFavorableExcursion: real("max_favorable_excursion"),
+  maxAdverseExcursion: real("max_adverse_excursion"),
+});
+
+export const insertShotPlanHistorySchema = createInsertSchema(shotPlanHistory).omit({ id: true });
+export type InsertShotPlanHistory = z.infer<typeof insertShotPlanHistorySchema>;
+export type ShotPlanHistoryEntry = typeof shotPlanHistory.$inferSelect;
+
 export const insertCandleSchema = createInsertSchema(candles).omit({ id: true });
 export const insertFeatureSchema = createInsertSchema(features).omit({ id: true });
 export const insertPatternSchema = createInsertSchema(patterns).omit({ id: true });

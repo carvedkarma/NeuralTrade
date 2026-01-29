@@ -3,8 +3,9 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
 import { db } from "./db";
-import { candles } from "@shared/schema";
+import { candles, insertShotPlanHistorySchema } from "@shared/schema";
 import { and, eq, gte, lte, asc } from "drizzle-orm";
+import { z } from "zod";
 import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes, clearNNData, cancelNNDownload, getResumableStatus, resumeNNDataDownload, getDownloadETA, streamNNDataBulk } from "./historical-data";
 import zlib from "zlib";
 import { strategyLearner } from "./strategy-learner";
@@ -256,6 +257,105 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error clearing edge metrics:", error);
       res.status(500).json({ error: "Failed to clear edge metrics" });
+    }
+  });
+
+  // Shot Plan History endpoints
+  app.get("/api/shot-plan/history", async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 50;
+      
+      const history = await storage.getShotPlanHistory(limit);
+      
+      // Calculate stats
+      const completedTrades = history.filter(h => h.outcome && h.outcome !== "PENDING");
+      const tp1Hits = completedTrades.filter(h => h.outcome === "HIT_TP1").length;
+      const tp2Hits = completedTrades.filter(h => h.outcome === "HIT_TP2").length;
+      const slHits = completedTrades.filter(h => h.outcome === "HIT_SL").length;
+      const expired = completedTrades.filter(h => h.outcome === "EXPIRED").length;
+      const wins = tp1Hits + tp2Hits;
+      const totalCompleted = completedTrades.length;
+      
+      const pnls = completedTrades.map(h => h.pnlPercent || 0);
+      const avgPnl = pnls.length > 0 ? pnls.reduce((a, b) => a + b, 0) / pnls.length : 0;
+      const bestTrade = pnls.length > 0 ? Math.max(...pnls) : 0;
+      const worstTrade = pnls.length > 0 ? Math.min(...pnls) : 0;
+      
+      res.json({
+        history,
+        stats: {
+          totalTrades: totalCompleted,
+          winRate: totalCompleted > 0 ? (wins / totalCompleted) * 100 : 0,
+          avgPnl,
+          bestTrade,
+          worstTrade,
+          tp1Hits,
+          tp2Hits,
+          slHits,
+          expired
+        }
+      });
+    } catch (error) {
+      console.error("Error getting shot plan history:", error);
+      res.status(500).json({ error: "Failed to get shot plan history" });
+    }
+  });
+
+  const recordShotPlanSchema = insertShotPlanHistorySchema.extend({
+    outcome: z.string().optional().default("PENDING"),
+  });
+
+  app.post("/api/shot-plan/record", async (req, res) => {
+    try {
+      const validated = recordShotPlanSchema.parse({
+        ...req.body,
+        timestamp: Date.now(),
+      });
+      
+      const entry = await storage.recordShotPlan(validated);
+      res.json({ success: true, entry });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        res.status(400).json({ error: "Invalid request body", details: error.errors });
+        return;
+      }
+      console.error("Error recording shot plan:", error);
+      res.status(500).json({ error: "Failed to record shot plan" });
+    }
+  });
+
+  const updateOutcomeSchema = z.object({
+    id: z.number(),
+    outcome: z.string(),
+    exitPrice: z.number().optional(),
+    pnlPercent: z.number().optional(),
+    candlesHeld: z.number().optional(),
+    mfe: z.number().optional(),
+    mae: z.number().optional(),
+  });
+
+  app.post("/api/shot-plan/update-outcome", async (req, res) => {
+    try {
+      const { id, outcome, exitPrice, pnlPercent, candlesHeld, mfe, mae } = updateOutcomeSchema.parse(req.body);
+      
+      await storage.updateShotPlanOutcome(id, {
+        outcome,
+        exitPrice,
+        pnlPercent,
+        exitTimestamp: Date.now(),
+        candlesHeld,
+        maxFavorableExcursion: mfe,
+        maxAdverseExcursion: mae,
+      });
+      
+      res.json({ success: true });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        res.status(400).json({ error: "Invalid request body", details: error.errors });
+        return;
+      }
+      console.error("Error updating shot plan outcome:", error);
+      res.status(500).json({ error: "Failed to update outcome" });
     }
   });
 

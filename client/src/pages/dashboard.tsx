@@ -18,7 +18,7 @@ import { MTFScoreCard } from "@/components/mtf-score-card";
 import { WhaleActivityCard } from "@/components/whale-activity-card";
 import { PerformanceStatsCard } from "@/components/performance-stats-card";
 import { StrategySelectorCard } from "@/components/strategy-selector-card";
-import { ShotPlanCard } from "@/components/shot-plan-card";
+import { EnhancedShotPlanCard } from "@/components/enhanced-shot-plan-card";
 import { SentimentCard } from "@/components/sentiment-card";
 import { 
   DataSourcesCard, 
@@ -461,28 +461,48 @@ export default function Dashboard() {
           </TabsContent>
 
           <TabsContent value="signal" className="mt-0">
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-              <div className="lg:col-span-8 space-y-4">
-                <PriceChart 
-                  candles={data.candles} 
-                  kalmanFast={data.kalmanFast}
-                  kalmanSlow={data.kalmanSlow}
-                  strategySignal={data.strategySignal}
-                  activeTrade={data.activeTrade}
-                  recentTrades={data.recentTrades}
-                />
-                <AIAnalysisCard analysis={data.aiAnalysis} />
-              </div>
-              <div className="lg:col-span-4 space-y-4">
-                <ShotPlanCard shotPlan={data.shotPlan} />
-                <SentimentCard sentiment={data.sentiment} />
-                <EnsembleSignalCard 
-                  prediction={ensemblePrediction?.prediction ?? null}
-                  status={ensembleStatus?.status}
-                  isLoading={ensembleLoading}
-                />
-                <SignalCard signal={data.currentSignal} />
-                <RegimeCard signal={data.currentSignal} />
+            <div className="space-y-4">
+              {/* Premium Chart with Strategy Signal Levels */}
+              <PremiumCandlestickChart
+                historicalCandles={data.candles.map(c => ({
+                  timestamp: c.timestamp,
+                  open: Number(c.open),
+                  high: Number(c.high),
+                  low: Number(c.low),
+                  close: Number(c.close),
+                  volume: c.volume ? Number(c.volume) : undefined
+                }))}
+                predictedCandles={[]}
+                currentPrice={data.candles[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0}
+                action={data.shotPlan?.signal || data.currentSignal?.signal || "HOLD"}
+                tradeLevels={data.strategySignal?.entryZone ? {
+                  entry: data.strategySignal.entryZone,
+                  stopLoss: data.strategySignal.stopLoss ?? 0,
+                  takeProfit: data.strategySignal.takeProfit1 ?? 0
+                } : (data.shotPlan?.entryZone ? {
+                  entry: (data.shotPlan.entryZone.low + data.shotPlan.entryZone.high) / 2,
+                  stopLoss: data.shotPlan.stopLoss ?? 0,
+                  takeProfit: data.shotPlan.takeProfit1 ?? 0
+                } : undefined)}
+                symbol="BTCUSDT"
+                timeframe="15m"
+              />
+              
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                <div className="lg:col-span-8 space-y-4">
+                  <AIAnalysisCard analysis={data.aiAnalysis} />
+                </div>
+                <div className="lg:col-span-4 space-y-4">
+                  <EnhancedShotPlanCard shotPlan={data.shotPlan} />
+                  <SentimentCard sentiment={data.sentiment} />
+                  <EnsembleSignalCard 
+                    prediction={ensemblePrediction?.prediction ?? null}
+                    status={ensembleStatus?.status}
+                    isLoading={ensembleLoading}
+                  />
+                  <SignalCard signal={data.currentSignal} />
+                  <RegimeCard signal={data.currentSignal} />
+                </div>
               </div>
             </div>
           </TabsContent>
