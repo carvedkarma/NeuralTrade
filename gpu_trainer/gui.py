@@ -365,6 +365,23 @@ class GPUTrainerGUI:
         self.cost_display.pack(side=tk.LEFT, padx=(8, 0))
         cost_combo.bind('<<ComboboxSelected>>', self.on_cost_mode_changed)
         
+        # Multi-head mode checkbox
+        multihead_frame = ttk.Frame(frame)
+        multihead_frame.pack(fill=tk.X, pady=(0, 12))
+        
+        self.multihead_var = tk.BooleanVar(value=True)  # Default to multi-head mode
+        multihead_check = ttk.Checkbutton(
+            multihead_frame, 
+            text="Multi-Head Training (Classification + Regression + Quantile)",
+            variable=self.multihead_var
+        )
+        multihead_check.pack(side=tk.LEFT)
+        
+        multihead_info = tk.Label(multihead_frame, text="(recommended)",
+                                   bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
+                                   font=('Segoe UI', 9))
+        multihead_info.pack(side=tk.LEFT, padx=(8, 0))
+        
         # Auto-settings display
         settings_frame = tk.Frame(frame, bg=self.colors['bg_tertiary'], padx=10, pady=8)
         settings_frame.pack(fill=tk.X, pady=(0, 12))
@@ -1127,6 +1144,7 @@ class GPUTrainerGUI:
         lr = defaults["lr"]
         trading_cost = self.get_trading_cost()  # Capture selected cost mode
         cost_mode = self.cost_mode_var.get()
+        use_multihead = self.multihead_var.get()  # Capture multi-head mode selection
         
         def do_train():
             try:
@@ -1150,7 +1168,15 @@ class GPUTrainerGUI:
                 from config import config
                 from data.pipeline import FeatureEngineer, TradingDataset, create_labels
                 from torch.utils.data import DataLoader
-                from training.trainer import Trainer
+                
+                # Import appropriate trainer based on mode
+                if use_multihead:
+                    from training.multihead_trainer import MultiHeadTrainer, MultiHeadDataset, MultiHeadLossConfig
+                    from data.regression_targets import generate_multihead_targets
+                    self.log(f"  Mode: MULTI-HEAD (Classification + Regression + Quantile)")
+                else:
+                    from training.trainer import Trainer
+                    self.log(f"  Mode: LEGACY (Classification only)")
                 
                 if use_mtf_fusion:
                     # === MTF FUSION MODE ===
@@ -1241,8 +1267,22 @@ class GPUTrainerGUI:
                     
                     # Create labels
                     self.log(f"Creating labels (horizon={prediction_horizon_bars} bars, ~2.5h)...")
-                    train_labels = fusioner.create_labels(train_combined)
-                    val_labels = fusioner.create_labels(val_combined)
+                    
+                    if use_multihead:
+                        # Multi-head mode: generate class_labels and forward_returns
+                        train_targets = generate_multihead_targets(train_combined, horizon_periods=prediction_horizon_bars)
+                        val_targets = generate_multihead_targets(val_combined, horizon_periods=prediction_horizon_bars)
+                        
+                        train_labels = train_targets['class_label']
+                        val_labels = val_targets['class_label']
+                        train_returns = train_targets['forward_return']
+                        val_returns = val_targets['forward_return']
+                        self.log(f"  Generated multi-head targets with forward returns")
+                    else:
+                        train_labels = fusioner.create_labels(train_combined)
+                        val_labels = fusioner.create_labels(val_combined)
+                        train_returns = None
+                        val_returns = None
                     
                     # Drop rows with NaN labels (end of each asset's data)
                     train_valid = train_labels.notna()
@@ -1251,6 +1291,10 @@ class GPUTrainerGUI:
                     train_labels = train_labels[train_valid].reset_index(drop=True)
                     val_combined = val_combined[val_valid].reset_index(drop=True)
                     val_labels = val_labels[val_valid].reset_index(drop=True)
+                    
+                    if use_multihead:
+                        train_returns = train_returns[train_valid].reset_index(drop=True)
+                        val_returns = val_returns[val_valid].reset_index(drop=True)
                     
                     # Select numeric feature columns only
                     exclude_cols = ["datetime", "symbol", "timestamp", "open", "high", "low", "close", "volume"]
@@ -1372,21 +1416,38 @@ class GPUTrainerGUI:
                 val_labels_np = val_labels_np[valid_start:]
                 
                 # === HARD DATA CLEANSING - Drop NaN/Inf rows ===
-                def clean_data_gui(features, labels, name):
+                def clean_data_gui(features, labels, returns=None, name="Data"):
                     features = np.where(np.isinf(features), np.nan, features)
                     nan_mask = np.isnan(features).any(axis=1)
+                    if returns is not None:
+                        returns = np.where(np.isinf(returns), np.nan, returns)
+                        nan_mask = nan_mask | np.isnan(returns)
                     nan_count = nan_mask.sum()
                     if nan_count > 0:
                         self.log(f"{name}: Dropping {nan_count} rows with NaN/Inf ({nan_count/len(features)*100:.1f}%)")
                         valid_mask = ~nan_mask
                         features = features[valid_mask]
                         labels = labels[valid_mask]
+                        if returns is not None:
+                            returns = returns[valid_mask]
                     assert np.isfinite(features).all(), f"{name}: Non-finite values remain!"
                     self.log(f"{name}: {len(features)} clean samples")
+                    if returns is not None:
+                        return features, labels, returns
                     return features, labels
                 
-                train_features_np, train_labels_np = clean_data_gui(train_features_np, train_labels_np, "Train")
-                val_features_np, val_labels_np = clean_data_gui(val_features_np, val_labels_np, "Val")
+                if use_multihead:
+                    train_returns_np = train_returns.values.astype(np.float32) if hasattr(train_returns, 'values') else train_returns.astype(np.float32)
+                    val_returns_np = val_returns.values.astype(np.float32) if hasattr(val_returns, 'values') else val_returns.astype(np.float32)
+                    train_features_np, train_labels_np, train_returns_np = clean_data_gui(
+                        train_features_np, train_labels_np, train_returns_np, name="Train")
+                    val_features_np, val_labels_np, val_returns_np = clean_data_gui(
+                        val_features_np, val_labels_np, val_returns_np, name="Val")
+                else:
+                    train_features_np, train_labels_np = clean_data_gui(train_features_np, train_labels_np, name="Train")
+                    val_features_np, val_labels_np = clean_data_gui(val_features_np, val_labels_np, name="Val")
+                    train_returns_np = None
+                    val_returns_np = None
                 
                 # === CLASS WEIGHT BALANCING ===
                 # Cap weights to prevent gradient explosion (max 10x)
@@ -1401,8 +1462,13 @@ class GPUTrainerGUI:
                 self.log(f"Class weights (capped at {MAX_CLASS_WEIGHT}x): [{class_weights[0]:.2f}, {class_weights[1]:.2f}, {class_weights[2]:.2f}]")
                 
                 # Create datasets (with data validation)
-                train_dataset = TradingDataset(train_features_np, train_labels_np, config.data.sequence_length, validate_data=True)
-                val_dataset = TradingDataset(val_features_np, val_labels_np, config.data.sequence_length, validate_data=True)
+                if use_multihead:
+                    train_dataset = MultiHeadDataset(train_features_np, train_labels_np, train_returns_np, config.data.sequence_length)
+                    val_dataset = MultiHeadDataset(val_features_np, val_labels_np, val_returns_np, config.data.sequence_length)
+                    self.log(f"Created MultiHeadDataset (features, labels, returns)")
+                else:
+                    train_dataset = TradingDataset(train_features_np, train_labels_np, config.data.sequence_length, validate_data=True)
+                    val_dataset = TradingDataset(val_features_np, val_labels_np, config.data.sequence_length, validate_data=True)
                 
                 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
                 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
@@ -1413,35 +1479,68 @@ class GPUTrainerGUI:
                 self.log(f"")
                 
                 # Model creation
-                if model_type == "transformer":
-                    from models.transformer import TransformerPriceModel
-                    model = TransformerPriceModel(input_dim=input_dim, d_model=256, nhead=8, num_layers=6)
-                elif model_type == "tft":
-                    from models.transformer import TemporalFusionTransformer
-                    model = TemporalFusionTransformer(input_dim=input_dim, d_model=256, nhead=8)
-                elif model_type == "lstm":
-                    from models.lstm import BidirectionalLSTM
-                    model = BidirectionalLSTM(input_dim=input_dim, hidden_dim=256, num_layers=3)
-                elif model_type == "cnn":
-                    from models.cnn import ResNetPrice
-                    model = ResNetPrice(input_dim=input_dim, channels=[64, 128, 256, 512])
-                elif model_type == "vae":
-                    from models.vae import MarketVAE
-                    model = MarketVAE(input_dim=input_dim, sequence_length=config.data.sequence_length, latent_dim=64)
-                elif model_type == "gnn":
-                    from models.gnn import CrossAssetGNN
-                    model = CrossAssetGNN(input_dim=input_dim, num_assets=4)
+                if use_multihead:
+                    # Multi-head models with Classification + Regression + Quantile heads
+                    from models.multihead import MultiHeadTransformer, MultiHeadLSTM, MultiHeadCNN
+                    
+                    if model_type == "transformer":
+                        model = MultiHeadTransformer(input_dim=input_dim, d_model=256, nhead=8, num_layers=6)
+                    elif model_type == "lstm":
+                        model = MultiHeadLSTM(input_dim=input_dim, hidden_dim=256, num_layers=3)
+                    elif model_type == "cnn":
+                        model = MultiHeadCNN(input_dim=input_dim, channels=[64, 128, 256, 512])
+                    else:
+                        self.log(f"Multi-head mode not supported for: {model_type}")
+                        self.log(f"Supported: transformer, lstm, cnn")
+                        self.root.after(0, self.training_complete)
+                        return
+                    self.log(f"Multi-head model: {model.name}")
                 else:
-                    self.log(f"Unknown model: {model_type}")
-                    return
+                    # Legacy classification-only models
+                    if model_type == "transformer":
+                        from models.transformer import TransformerPriceModel
+                        model = TransformerPriceModel(input_dim=input_dim, d_model=256, nhead=8, num_layers=6)
+                    elif model_type == "tft":
+                        from models.transformer import TemporalFusionTransformer
+                        model = TemporalFusionTransformer(input_dim=input_dim, d_model=256, nhead=8)
+                    elif model_type == "lstm":
+                        from models.lstm import BidirectionalLSTM
+                        model = BidirectionalLSTM(input_dim=input_dim, hidden_dim=256, num_layers=3)
+                    elif model_type == "cnn":
+                        from models.cnn import ResNetPrice
+                        model = ResNetPrice(input_dim=input_dim, channels=[64, 128, 256, 512])
+                    elif model_type == "vae":
+                        from models.vae import MarketVAE
+                        model = MarketVAE(input_dim=input_dim, sequence_length=config.data.sequence_length, latent_dim=64)
+                    elif model_type == "gnn":
+                        from models.gnn import CrossAssetGNN
+                        model = CrossAssetGNN(input_dim=input_dim, num_assets=4)
+                    else:
+                        self.log(f"Unknown model: {model_type}")
+                        return
                     
                 self.log(f"Parameters: {model.count_parameters():,}")
                 
                 config.training.epochs = epochs
                 config.training.learning_rate = lr
                 
-                trainer = Trainer(model, train_loader, val_loader, config, device=config.device, 
-                                  gui_mode=True, class_weights=class_weights_tensor)
+                # Create trainer
+                if use_multihead:
+                    loss_config = MultiHeadLossConfig(class_weights=class_weights_tensor)
+                    trainer = MultiHeadTrainer(
+                        model=model,
+                        train_loader=train_loader,
+                        val_loader=val_loader,
+                        config=config,
+                        device=config.device,
+                        loss_config=loss_config,
+                        gui_mode=True
+                    )
+                    self.log(f"Using MultiHeadTrainer with combined loss:")
+                    self.log(f"  CrossEntropy + Huber + GaussianNLL + Pinball")
+                else:
+                    trainer = Trainer(model, train_loader, val_loader, config, device=config.device, 
+                                      gui_mode=True, class_weights=class_weights_tensor)
                 
                 self.current_model = model_type
                 self.total_epochs = epochs
@@ -1491,7 +1590,8 @@ class GPUTrainerGUI:
                 
                 if self.is_training:
                     self.models_completed.append(model_type)
-                    save_path = config.model_dir / f"{model_type}_trained.pt"
+                    model_suffix = "_multihead" if use_multihead else ""
+                    save_path = config.model_dir / f"{model_type}{model_suffix}_trained.pt"
                     model.save(str(save_path))
                     
                     elapsed = time.time() - self.training_start_time

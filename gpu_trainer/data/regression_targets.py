@@ -456,3 +456,22 @@ def create_regression_dataset(
     logger.info(f"Created regression dataset: X={X.shape}, y_reg={y_regression.shape}, y_dir={y_direction.shape}")
     
     return X, y_regression, y_direction
+
+
+def generate_multihead_targets(df: pd.DataFrame, horizon_periods: int = 48) -> pd.DataFrame:
+    """
+    Standalone function to generate multi-head training targets.
+    
+    Args:
+        df: DataFrame with OHLCV data (must have 'close' column)
+        horizon_periods: Prediction horizon in candle periods (default 48 = 4h in 5m candles)
+        
+    Returns:
+        DataFrame with:
+        - mu: Actual forward return (regression target)
+        - sigma: Forward volatility (for uncertainty calibration)
+        - class_label: 0=SHORT, 1=HOLD, 2=LONG (for classification head)
+        - forward_return: The actual return to predict (same as mu, for quantile loss)
+    """
+    generator = RegressionTargetGenerator(horizon_periods=horizon_periods)
+    return generator.generate_multihead_targets(df)

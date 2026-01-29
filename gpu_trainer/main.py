@@ -103,6 +103,12 @@ def train(args):
     1. Chronological split FIRST (before any scaling)
     2. Fit scalers ONLY on training data
     3. Purge gap at train/val boundary to prevent lookahead from label computation
+    
+    Multi-head mode (--multihead):
+    - Uses MultiHeadTrainer with combined loss (CrossEntropy + Huber + GaussianNLL + Pinball)
+    - Generates forward_returns and class_labels using generate_multihead_targets()
+    - Uses MultiHeadDataset which returns (features, class_labels, forward_returns)
+    - Uses multi-head model variants (MultiHeadTransformer, MultiHeadLSTM, MultiHeadCNN)
     """
     import torch
     import numpy as np
@@ -110,7 +116,17 @@ def train(args):
     from config import config
     from data.pipeline import FeatureEngineer, TradingDataset, create_labels
     from torch.utils.data import DataLoader
-    from training.trainer import Trainer
+    
+    # Use MultiHeadTrainer for multi-head mode
+    use_multihead = getattr(args, 'multihead', False)
+    
+    if use_multihead:
+        from training.multihead_trainer import MultiHeadTrainer, MultiHeadDataset, MultiHeadLossConfig
+        from data.regression_targets import generate_multihead_targets
+        logger.info("MULTI-HEAD MODE: Using combined loss (Classification + Regression + Quantile)")
+    else:
+        from training.trainer import Trainer
+        logger.info("LEGACY MODE: Using classification-only training")
     
     logger.info(f"Starting training for model: {args.model}")
     logger.info(f"Epochs: {args.epochs}, Batch size: {args.batch_size}")
@@ -135,8 +151,18 @@ def train(args):
     
     # === STEP 2: Create labels with lookahead (horizon candles into future) ===
     horizon = getattr(args, 'horizon', 5)
-    labels = create_labels(df, horizon=horizon, threshold=0.001)
-    labels = (labels + 1).astype(int)  # Convert -1/0/1 to 0/1/2
+    
+    if use_multihead:
+        # Multi-head mode: generate class_labels and forward_returns
+        targets_df = generate_multihead_targets(df, horizon_periods=horizon)
+        labels = targets_df['class_label'].values.astype(np.int64)
+        forward_returns = targets_df['forward_return'].values.astype(np.float32)
+        logger.info(f"Generated multi-head targets: labels shape={labels.shape}, returns shape={forward_returns.shape}")
+    else:
+        # Legacy mode: classification-only labels
+        labels = create_labels(df, horizon=horizon, threshold=0.001)
+        labels = (labels + 1).astype(int)  # Convert -1/0/1 to 0/1/2
+        forward_returns = None
     
     # === STEP 3: CHRONOLOGICAL SPLIT FIRST (before scaling!) ===
     # This prevents scaler from learning distribution info from validation/test data
@@ -145,6 +171,12 @@ def train(args):
     
     features_np = features_df.values[valid_start:].astype(np.float32)
     labels_np = labels[valid_start:].astype(np.int64)
+    
+    # Also slice forward_returns for multi-head mode
+    if use_multihead:
+        forward_returns_np = forward_returns[valid_start:].astype(np.float32)
+    else:
+        forward_returns_np = None
     
     # === STEP 4: PURGE GAP and EXPLICIT SPLIT SIZING ===
     # Labels near train end look `horizon` candles ahead, which may be in val
@@ -215,6 +247,14 @@ def train(args):
     val_features_raw = features_np[val_start:val_end]
     val_labels = labels_np[val_start:val_end]
     
+    # Split forward_returns for multi-head mode
+    if use_multihead:
+        train_returns = forward_returns_np[:train_end]
+        val_returns = forward_returns_np[val_start:val_end]
+    else:
+        train_returns = None
+        val_returns = None
+    
     # === STEP 5: FIT SCALER ON TRAINING DATA ONLY ===
     # This is critical - scaler must not see validation/test distribution
     train_features_df = pd.DataFrame(train_features_raw, columns=features_df.columns)
@@ -228,13 +268,19 @@ def train(args):
     
     # === STEP 5.5: HARD DATA CLEANSING - Drop NaN/Inf rows ===
     # This is critical: NaN/Inf in features will cause NaN loss and corrupt training
-    def clean_data(features: np.ndarray, labels: np.ndarray, name: str):
-        """Replace Inf->NaN, drop rows with any NaN, align labels."""
+    def clean_data(features: np.ndarray, labels: np.ndarray, returns: np.ndarray = None, name: str = "Data"):
+        """Replace Inf->NaN, drop rows with any NaN, align labels and returns."""
         # Replace Inf with NaN
         features = np.where(np.isinf(features), np.nan, features)
         
         # Find rows with any NaN
         nan_mask = np.isnan(features).any(axis=1)
+        
+        # Also check returns for NaN if provided
+        if returns is not None:
+            returns = np.where(np.isinf(returns), np.nan, returns)
+            nan_mask = nan_mask | np.isnan(returns)
+        
         nan_count = nan_mask.sum()
         
         if nan_count > 0:
@@ -242,19 +288,36 @@ def train(args):
             valid_mask = ~nan_mask
             features = features[valid_mask]
             labels = labels[valid_mask]
+            if returns is not None:
+                returns = returns[valid_mask]
         
         # Final assertion - must be all finite
         assert np.isfinite(features).all(), f"{name}: Still has non-finite values after cleaning!"
         logger.info(f"{name}: {len(features)} clean samples, all finite")
         
+        if returns is not None:
+            return features, labels, returns
         return features, labels
     
-    train_features_scaled, train_labels = clean_data(train_features_scaled, train_labels, "Train")
-    val_features_scaled, val_labels = clean_data(val_features_scaled, val_labels, "Val")
+    # Clean data (multi-head mode includes returns)
+    if use_multihead:
+        train_features_scaled, train_labels, train_returns = clean_data(
+            train_features_scaled, train_labels, train_returns, name="Train")
+        val_features_scaled, val_labels, val_returns = clean_data(
+            val_features_scaled, val_labels, val_returns, name="Val")
+    else:
+        train_features_scaled, train_labels = clean_data(train_features_scaled, train_labels, name="Train")
+        val_features_scaled, val_labels = clean_data(val_features_scaled, val_labels, name="Val")
     
     # === STEP 6: Create datasets ===
-    train_dataset = TradingDataset(train_features_scaled, train_labels, sequence_length, validate_data=True)
-    val_dataset = TradingDataset(val_features_scaled, val_labels, sequence_length, validate_data=True)
+    if use_multihead:
+        # Multi-head dataset returns (features, class_labels, forward_returns)
+        train_dataset = MultiHeadDataset(train_features_scaled, train_labels, train_returns, sequence_length)
+        val_dataset = MultiHeadDataset(val_features_scaled, val_labels, val_returns, sequence_length)
+        logger.info(f"Created MultiHeadDataset: train={len(train_dataset)}, val={len(val_dataset)}")
+    else:
+        train_dataset = TradingDataset(train_features_scaled, train_labels, sequence_length, validate_data=True)
+        val_dataset = TradingDataset(val_features_scaled, val_labels, sequence_length, validate_data=True)
     
     # Note: shuffle=True is OK for training since we've already done chronological split
     # and purged the boundary. Shuffling within train set is fine.
@@ -264,50 +327,80 @@ def train(args):
     input_dim = features_np.shape[1]
     logger.info(f"Input dimension: {input_dim}, Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
     
-    if args.model == "transformer":
-        from models.transformer import TransformerPriceModel
-        model = TransformerPriceModel(
-            input_dim=input_dim,
-            d_model=config.model.transformer_dim,
-            nhead=config.model.transformer_heads,
-            num_layers=config.model.transformer_layers
-        )
-    elif args.model == "tft":
-        from models.transformer import TemporalFusionTransformer
-        model = TemporalFusionTransformer(
-            input_dim=input_dim,
-            d_model=config.model.transformer_dim,
-            nhead=config.model.transformer_heads
-        )
-    elif args.model == "lstm":
-        from models.lstm import BidirectionalLSTM
-        model = BidirectionalLSTM(
-            input_dim=input_dim,
-            hidden_dim=config.model.lstm_hidden,
-            num_layers=config.model.lstm_layers
-        )
-    elif args.model == "cnn":
-        from models.cnn import ResNetPrice
-        model = ResNetPrice(
-            input_dim=input_dim,
-            channels=config.model.cnn_channels
-        )
-    elif args.model == "vae":
-        from models.vae import MarketVAE
-        model = MarketVAE(
-            input_dim=input_dim,
-            sequence_length=config.data.sequence_length,
-            latent_dim=config.model.vae_latent_dim
-        )
-    elif args.model == "gnn":
-        from models.gnn import CrossAssetGNN
-        model = CrossAssetGNN(
-            input_dim=input_dim,
-            num_assets=len(config.data.symbols)
-        )
+    # === STEP 7: Model selection ===
+    if use_multihead:
+        # Multi-head model variants with Classification + Regression + Quantile heads
+        from models.multihead import MultiHeadTransformer, MultiHeadLSTM, MultiHeadCNN
+        
+        if args.model == "transformer":
+            model = MultiHeadTransformer(
+                input_dim=input_dim,
+                d_model=config.model.transformer_dim,
+                nhead=config.model.transformer_heads,
+                num_layers=config.model.transformer_layers
+            )
+        elif args.model == "lstm":
+            model = MultiHeadLSTM(
+                input_dim=input_dim,
+                hidden_dim=config.model.lstm_hidden,
+                num_layers=config.model.lstm_layers
+            )
+        elif args.model == "cnn":
+            model = MultiHeadCNN(
+                input_dim=input_dim,
+                channels=config.model.cnn_channels
+            )
+        else:
+            logger.error(f"Multi-head mode not supported for model type: {args.model}")
+            logger.error("Supported multi-head models: transformer, lstm, cnn")
+            return
+        logger.info(f"Using MULTI-HEAD model: {model.name}")
     else:
-        logger.error(f"Unknown model type: {args.model}")
-        return
+        # Legacy classification-only models
+        if args.model == "transformer":
+            from models.transformer import TransformerPriceModel
+            model = TransformerPriceModel(
+                input_dim=input_dim,
+                d_model=config.model.transformer_dim,
+                nhead=config.model.transformer_heads,
+                num_layers=config.model.transformer_layers
+            )
+        elif args.model == "tft":
+            from models.transformer import TemporalFusionTransformer
+            model = TemporalFusionTransformer(
+                input_dim=input_dim,
+                d_model=config.model.transformer_dim,
+                nhead=config.model.transformer_heads
+            )
+        elif args.model == "lstm":
+            from models.lstm import BidirectionalLSTM
+            model = BidirectionalLSTM(
+                input_dim=input_dim,
+                hidden_dim=config.model.lstm_hidden,
+                num_layers=config.model.lstm_layers
+            )
+        elif args.model == "cnn":
+            from models.cnn import ResNetPrice
+            model = ResNetPrice(
+                input_dim=input_dim,
+                channels=config.model.cnn_channels
+            )
+        elif args.model == "vae":
+            from models.vae import MarketVAE
+            model = MarketVAE(
+                input_dim=input_dim,
+                sequence_length=config.data.sequence_length,
+                latent_dim=config.model.vae_latent_dim
+            )
+        elif args.model == "gnn":
+            from models.gnn import CrossAssetGNN
+            model = CrossAssetGNN(
+                input_dim=input_dim,
+                num_assets=len(config.data.symbols)
+            )
+        else:
+            logger.error(f"Unknown model type: {args.model}")
+            return
         
     logger.info(f"Model parameters: {model.count_parameters():,}")
     
@@ -341,15 +434,36 @@ def train(args):
                 f"LONG={label_counts[2] if 2 in unique_labels else 0}")
     logger.info(f"Class weights (capped at {MAX_CLASS_WEIGHT}x): {class_weights.numpy()}")
     
-    trainer = Trainer(model, train_loader, val_loader, config, device=config.device, 
-                      class_weights=class_weights)
+    # === STEP 8: Create trainer ===
+    if use_multihead:
+        # Multi-head trainer with combined loss
+        loss_config = MultiHeadLossConfig(class_weights=class_weights)
+        trainer = MultiHeadTrainer(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            config=config,
+            device=config.device,
+            loss_config=loss_config
+        )
+        logger.info("Using MultiHeadTrainer with combined loss:")
+        logger.info(f"  - CrossEntropyLoss (λ={loss_config.lambda_class})")
+        logger.info(f"  - HuberLoss for μ (λ={loss_config.lambda_mu})")
+        logger.info(f"  - GaussianNLLLoss for σ (λ={loss_config.lambda_sigma})")
+        logger.info(f"  - PinballLoss for quantiles (λ={loss_config.lambda_quantile})")
+    else:
+        # Legacy classification-only trainer
+        trainer = Trainer(model, train_loader, val_loader, config, device=config.device, 
+                          class_weights=class_weights)
     
     if args.resume:
         trainer.load_checkpoint(args.resume)
         
     history = trainer.train(epochs=args.epochs)
     
-    save_path = config.model_dir / f"{args.model}_trained.pt"
+    # Save model with appropriate suffix
+    model_suffix = "_multihead" if use_multihead else ""
+    save_path = config.model_dir / f"{args.model}{model_suffix}_trained.pt"
     model.save(str(save_path))
     logger.info(f"Model saved to {save_path}")
     
@@ -1014,6 +1128,8 @@ def main():
     train_parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     train_parser.add_argument("--horizon", type=int, default=5, help="Label lookahead horizon (candles)")
     train_parser.add_argument("--resume", type=str, help="Resume from checkpoint")
+    train_parser.add_argument("--multihead", action="store_true", 
+                             help="Use multi-head training with combined loss (Classification + Regression + Quantile)")
     
     train_all_parser = subparsers.add_parser("train-all", help="Retrain ALL models with MTF fusion (81 features)")
     train_all_parser.add_argument("--models", type=str, default="transformer,tft,lstm,cnn,vae,gnn",
