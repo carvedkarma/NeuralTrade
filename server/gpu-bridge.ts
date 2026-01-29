@@ -483,6 +483,8 @@ class GPUTrainerBridge {
    * - VAE for market regime detection (trend/range/chop)
    * - GNN for risk regime detection (risk-on/off)
    * - Walk-forward metric weighting
+   * 
+   * @deprecated Use predictEnsembleFromCandles for proper MTF feature alignment
    */
   async predictEnsemble(features: number[][]): Promise<EnsemblePredictionResponse | null> {
     if (!await this.isGPUAvailable()) {
@@ -507,6 +509,60 @@ class GPUTrainerBridge {
       return null;
     } catch (error) {
       console.error("Ensemble prediction error:", error);
+      return null;
+    }
+  }
+  
+  /**
+   * Get professional ensemble prediction from raw multi-timeframe candle data.
+   * 
+   * This endpoint computes MTF features (same as training) server-side,
+   * ensuring feature alignment between training and inference.
+   * 
+   * Features computed: ~66 MTF features (5m/15m/1h/4h)
+   */
+  async predictEnsembleFromCandles(
+    candles15m: { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[],
+    candles5m?: { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[],
+    candles1h?: { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[],
+    candles4h?: { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[],
+    symbol: string = "BTCUSDT"
+  ): Promise<EnsemblePredictionResponse | null> {
+    if (!await this.isGPUAvailable()) {
+      return null;
+    }
+    
+    try {
+      const requestBody: any = {
+        candles_15m: candles15m,
+        symbol: symbol
+      };
+      
+      if (candles5m && candles5m.length >= 50) {
+        requestBody.candles_5m = candles5m;
+      }
+      if (candles1h && candles1h.length >= 50) {
+        requestBody.candles_1h = candles1h;
+      }
+      if (candles4h && candles4h.length >= 20) {
+        requestBody.candles_4h = candles4h;
+      }
+      
+      const response = await fetch(`${this.baseUrl}/predict/ensemble/candles`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+        signal: AbortSignal.timeout(20000) // 20 second timeout (MTF feature computation + ensemble)
+      });
+      
+      if (response.ok) {
+        return await response.json() as EnsemblePredictionResponse;
+      }
+      
+      console.error("MTF Ensemble prediction failed:", await response.text());
+      return null;
+    } catch (error) {
+      console.error("MTF Ensemble prediction error:", error);
       return null;
     }
   }

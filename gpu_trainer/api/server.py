@@ -74,7 +74,7 @@ class ModelManager:
         self.saved_models_dir = Path(__file__).parent.parent / "saved_models"
         self.scaler_path = self.checkpoint_dir / "scaler.joblib"
         self.sequence_length = 100  # Default, updated from loaded model config
-        self.input_dim = 81  # Default feature count
+        self.input_dim = 66  # Default feature count (MTF: 5m/15m/1h/4h without embedding)
         self.instantiation_errors: Dict[str, str] = {}  # Track errors for /models/status
     
     def _map_filename_to_model_type(self, filename: str) -> str:
@@ -193,7 +193,7 @@ class ModelManager:
             sys.path.insert(0, str(Path(__file__).parent.parent))
             
             model_type_lower = model_type.lower()
-            input_dim = config.get("input_dim", 81)
+            input_dim = config.get("input_dim", 66)
             output_dim = config.get("output_dim", 3)
             hidden_dim = config.get("hidden_dim", 128)
             sequence_length = config.get("sequence_length", 100)
@@ -691,7 +691,7 @@ class ModelManager:
         
         try:
             # Get config values with defaults (now possibly updated by inferred dims)
-            input_dim = config.get("input_dim", 81)
+            input_dim = config.get("input_dim", 66)
             hidden_dim = config.get("hidden_dim", 128)
             d_model = config.get("d_model", 256)
             sequence_length = config.get("sequence_length", 100)
@@ -1138,6 +1138,14 @@ class CandlePredictionRequest(BaseModel):
     candles: List[CandleData]
     symbol: str = "BTCUSDT"
     timeframe: str = "15m"
+
+class MTFCandleData(BaseModel):
+    """Multi-timeframe candle data for ensemble prediction with MTF features."""
+    candles_15m: List[CandleData]  # Base timeframe (required, 200+ candles)
+    candles_5m: Optional[List[CandleData]] = None  # Optional context
+    candles_1h: Optional[List[CandleData]] = None  # Optional context
+    candles_4h: Optional[List[CandleData]] = None  # Optional context
+    symbol: str = "BTCUSDT"
     
 class PredictionResponse(BaseModel):
     action: str
@@ -1302,6 +1310,14 @@ async def predict(request: PredictionRequest):
             raise HTTPException(
                 status_code=400,
                 detail=f"Sequence length {seq_len} too short (minimum 10)"
+            )
+        
+        # Validate feature count against model expectation
+        if n_features != model_manager.input_dim:
+            logger.error(f"Feature mismatch in /predict: got {n_features}, expected {model_manager.input_dim}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Feature dimension mismatch: Expected {model_manager.input_dim}, got {n_features}. Use /predict/candles or /predict/ensemble/candles for proper feature alignment."
             )
         
         result = model_manager.predict(features)
@@ -1747,6 +1763,18 @@ async def predict_ensemble(request: EnsemblePredictionRequest):
                 detail=f"Expected 2D features [seq_len, n_features], got shape {features.shape}"
             )
         
+        # Validate feature count - warn if mismatch with model expectation
+        actual_feature_count = features.shape[1]
+        expected_feature_count = model_manager.input_dim
+        
+        if actual_feature_count != expected_feature_count:
+            logger.error(f"FEATURE MISMATCH in /predict/ensemble: got {actual_feature_count}, expected {expected_feature_count}")
+            logger.error("Consider using /predict/ensemble/candles which computes MTF features server-side")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Feature dimension mismatch: input.size(-1) must be equal to input_size. Expected {expected_feature_count}, got {actual_feature_count}. Use /predict/ensemble/candles for proper feature alignment."
+            )
+        
         predictor = get_ensemble_predictor()
         
         if predictor is None:
@@ -1872,6 +1900,188 @@ async def get_ensemble_status():
             "majority_weight": predictor.majority_weight_threshold
         }
     }
+
+@app.post("/predict/ensemble/candles")
+async def predict_ensemble_from_candles(request: MTFCandleData):
+    """
+    Make ensemble prediction from raw multi-timeframe candle data.
+    
+    This endpoint computes MTF features (same as training) from raw candles:
+    - Base: 15m candles (required, 200+ candles)
+    - Context: 5m, 1h, 4h candles (optional for enhanced features)
+    
+    The computed features will match the training feature set (~66 features).
+    """
+    try:
+        import pandas as pd
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        
+        # Convert candles to DataFrames
+        def candles_to_df(candles: List[CandleData]) -> pd.DataFrame:
+            data = [{
+                "datetime": pd.to_datetime(c.timestamp, unit="ms"),
+                "open": c.open,
+                "high": c.high,
+                "low": c.low,
+                "close": c.close,
+                "volume": c.volume
+            } for c in candles]
+            df = pd.DataFrame(data)
+            return df.sort_values("datetime").reset_index(drop=True)
+        
+        # Build timeframe data dict
+        tf_data = {}
+        
+        if len(request.candles_15m) < 100:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Need at least 100 15m candles, got {len(request.candles_15m)}"
+            )
+        
+        tf_data["15m"] = candles_to_df(request.candles_15m)
+        
+        if request.candles_5m and len(request.candles_5m) >= 50:
+            tf_data["5m"] = candles_to_df(request.candles_5m)
+        if request.candles_1h and len(request.candles_1h) >= 50:
+            tf_data["1h"] = candles_to_df(request.candles_1h)
+        if request.candles_4h and len(request.candles_4h) >= 20:
+            tf_data["4h"] = candles_to_df(request.candles_4h)
+        
+        # Check if we have all timeframes for full MTF
+        has_full_mtf = all(tf in tf_data for tf in ["5m", "15m", "1h", "4h"])
+        
+        if has_full_mtf:
+            # Use MTF Fusion for proper multi-timeframe features
+            from data.mtf_fusion import MTFFusion
+            mtf = MTFFusion()
+            fused_df = mtf.fuse(request.symbol, tf_data)
+            
+            if fused_df is None or len(fused_df) == 0:
+                raise HTTPException(status_code=400, detail="MTF fusion returned no data")
+            
+            # Drop NaN rows and get features
+            fused_df = fused_df.dropna()
+            feature_cols = [c for c in fused_df.columns if c != "datetime"]
+            features_np = fused_df[feature_cols].values
+            
+            logger.info(f"MTF features computed: {features_np.shape[1]} features, {len(fused_df)} rows")
+        else:
+            # Fallback to single-timeframe features
+            from data.pipeline import FeatureEngineer
+            fe = FeatureEngineer()
+            features_df = fe.compute_technical_features(tf_data["15m"])
+            features_df = features_df.dropna()
+            features_np = features_df.values
+            
+            logger.info(f"Single-TF features computed: {features_np.shape[1]} features, {len(features_df)} rows")
+        
+        # Scale features using saved scaler
+        features_scaled = model_manager.transform_features(
+            pd.DataFrame(features_np, columns=feature_cols if has_full_mtf else features_df.columns)
+        )
+        
+        # Get sequence for prediction
+        seq_len = min(model_manager.sequence_length, len(features_scaled))
+        features_seq = features_scaled[-seq_len:]
+        
+        # CRITICAL: Validate feature count matches model expectation
+        actual_feature_count = features_seq.shape[1]
+        expected_feature_count = model_manager.input_dim
+        
+        if actual_feature_count != expected_feature_count:
+            # Feature count mismatch - return HOLD with warning
+            logger.warning(f"Feature mismatch: computed {actual_feature_count} features, model expects {expected_feature_count}")
+            return {
+                "action": "HOLD",
+                "confidence": 0.0,
+                "confidence_margin": 0.0,
+                "edge": 0.0,
+                "market_regime": "UNKNOWN",
+                "risk_regime": "UNKNOWN",
+                "regime_confidence": 0.0,
+                "agreement_pct": 0.0,
+                "weighted_agreement": 0.0,
+                "disagreement_score": 1.0,
+                "position_size_pct": 0.0,
+                "regime_adjusted_size": 0.0,
+                "confidence_threshold_used": 0.15,
+                "regime_adjustment": "BLOCKED",
+                "model_votes": {},
+                "ensemble_probs": {"SHORT": 0.0, "HOLD": 1.0, "LONG": 0.0},
+                "reasons": [
+                    f"FEATURE MISMATCH: computed {actual_feature_count} features, model expects {expected_feature_count}",
+                    f"MTF mode: {has_full_mtf}, retraining may be needed"
+                ],
+                "mtf_mode": has_full_mtf,
+                "feature_count": actual_feature_count,
+                "expected_feature_count": expected_feature_count,
+                "feature_mismatch": True
+            }
+        
+        # Make ensemble prediction
+        predictor = get_ensemble_predictor()
+        
+        if predictor is None:
+            # Fallback to basic prediction
+            result = model_manager.predict(features_seq)
+            return {
+                "action": result.get("action_name", "HOLD"),
+                "confidence": result["confidence"],
+                "confidence_margin": 0.0,
+                "edge": 0.0,
+                "market_regime": "UNKNOWN",
+                "risk_regime": "UNKNOWN",
+                "regime_confidence": 0.0,
+                "agreement_pct": 1.0,
+                "weighted_agreement": 1.0,
+                "disagreement_score": 0.0,
+                "position_size_pct": 0.0,
+                "regime_adjusted_size": 0.0,
+                "confidence_threshold_used": 0.15,
+                "regime_adjustment": "NONE",
+                "model_votes": {},
+                "ensemble_probs": {
+                    "SHORT": result["probabilities"][0],
+                    "HOLD": result["probabilities"][1],
+                    "LONG": result["probabilities"][2]
+                },
+                "reasons": [f"MTF features: {features_seq.shape[1]}, used basic prediction"],
+                "mtf_mode": has_full_mtf,
+                "feature_count": features_seq.shape[1]
+            }
+        
+        signal = predictor.predict(features_seq)
+        
+        return {
+            "action": signal.action,
+            "confidence": signal.confidence,
+            "confidence_margin": signal.confidence_margin,
+            "edge": signal.edge,
+            "market_regime": signal.market_regime,
+            "risk_regime": signal.risk_regime,
+            "regime_confidence": signal.regime_confidence,
+            "agreement_pct": signal.agreement_pct,
+            "weighted_agreement": signal.weighted_agreement,
+            "disagreement_score": signal.disagreement_score,
+            "position_size_pct": signal.position_size_pct,
+            "regime_adjusted_size": signal.regime_adjusted_size,
+            "confidence_threshold_used": signal.confidence_threshold_used,
+            "regime_adjustment": signal.regime_adjustment,
+            "model_votes": signal.model_votes,
+            "ensemble_probs": signal.ensemble_probs,
+            "reasons": signal.reasons + [f"MTF mode: {has_full_mtf}, features: {features_seq.shape[1]}"],
+            "mtf_mode": has_full_mtf,
+            "feature_count": features_seq.shape[1]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        logger.error(f"MTF ensemble prediction error: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/training/status", response_model=TrainingStatusResponse)
 async def get_training_status():
@@ -2088,15 +2298,15 @@ async def get_models_status():
     failed_instances = len(model_manager.instantiation_errors)
     
     # Determine training mode from input_dim
-    # Quick training: 15m only with ~57 features
-    # Full MTF: 5m/15m/1h/4h with ~81 features (includes cross-asset + embedding)
+    # Quick training: 15m only with ~41 features
+    # Full MTF: 5m/15m/1h/4h with ~66 features
     input_dim = model_manager.input_dim
-    if input_dim <= 60:
+    if input_dim <= 50:
         training_mode = "quick"
-        training_mode_description = "Quick (15m only, ~57 features)"
+        training_mode_description = "Quick (15m only, ~41 features)"
     else:
         training_mode = "full"
-        training_mode_description = "Full MTF (5m/15m/1h/4h, ~81 features)"
+        training_mode_description = "Full MTF (5m/15m/1h/4h, ~66 features)"
     
     return {
         "summary": {

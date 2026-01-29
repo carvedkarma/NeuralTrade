@@ -61,7 +61,7 @@ Preferred communication style: Simple, everyday language.
 #### Classification System (Legacy)
 - **ML Ensemble Predictor**: Combines rule-based, pattern-based, and OpenAI models with weighted voting for action-based predictions (P(LONG), P(SHORT), P(HOLD)).
 - **Pattern Memory System**: Stores and retrieves historical trade setups using cosine similarity.
-- **Comprehensive Feature Engine**: Computes 81 features (57 core + 24 embedding) including OHLCV, momentum, volatility, regime, Kalman filters, and 10 cross-asset features (ETH, SOL, BNB correlations, relative strength, momentum divergence, crypto sector momentum).
+- **Comprehensive Feature Engine**: Computes ~66 MTF features (multi-timeframe returns, RSI, ATR, MACD, confluence metrics) from 5m/15m/1h/4h candles. Legacy TypeScript feature engine computes 81 features (57 core + 24 embedding) but is deprecated for GPU neural network inference.
 - **Shot Plan Generation**: Provides detailed trade plans with entry/exit zones, risk-reward ratios, and estimated hold times.
 - **Gatekeeper Logic**: Ensures trades are executed only with high confidence, positive edge, and sufficient supporting reasons, promoting selective trading. This includes horizon-specific thresholds, confidence ratio gates, multi-horizon decision logic, and 'NO-TRADE' conditions based on market state or horizon disagreement.
 - **Sentiment Integration**: Incorporates Fear & Greed Index, social sentiment, and news sentiment with caching.
@@ -126,7 +126,7 @@ Preferred communication style: Simple, everyday language.
   - For LONG: SL = price × (1 + q10), TP = price × (1 + q90)
   - For SHORT: SL = price × (1 + q90), TP = price × (1 + q10)
 - **Probabilistic Fan Chart**: Visualizes return path quantiles (q10-q90 outer band, q25-q75 inner band, q50 median line)
-- **Training Modes**: Quick (15m only, ~57 features) vs Full MTF (5m/15m/1h/4h, ~81 features)
+- **Training Modes**: Quick (15m only, ~41 features) vs Full MTF (5m/15m/1h/4h, ~66 features)
 - **API Endpoint**: `/predict/quantile` uses learned quantiles if multi-head model loaded, else falls back to heuristic
 - **Frontend Components**: `QuantileFanChart`, `DerivedTradeLevels` in `client/src/components/quantile-fan-chart.tsx`
 

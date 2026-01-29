@@ -1053,6 +1053,7 @@ export async function registerRoutes(
   });
 
   // Get current ensemble prediction using latest market data
+  // Uses MTF candles endpoint for proper feature alignment with training
   app.get("/api/gpu/ensemble/current", async (req, res) => {
     try {
       // Check if GPU is available
@@ -1065,39 +1066,39 @@ export async function registerRoutes(
         });
       }
       
-      // Get current candles and compute features
-      const candles = storage.getCandles();
+      // Get 15m candles (base timeframe)
+      const candles15m = storage.getCandles();
       
-      if (!candles || candles.length < 150) {
+      if (!candles15m || candles15m.length < 150) {
         return res.json({ 
           available: false, 
           prediction: null,
-          message: "Not enough candle data available"
+          message: "Not enough 15m candle data available"
         });
       }
       
-      // Get the last 150 candles for prediction
-      const recentCandles = candles.slice(-150);
+      // Format candles for MTF endpoint - use last 300 15m candles
+      const recent15m = candles15m.slice(-300).map(c => ({
+        timestamp: c.timestamp,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: c.volume
+      }));
       
-      // Compute features for each candle window
-      const featureArrays: number[][] = [];
-      for (let i = 100; i < recentCandles.length; i++) {
-        const windowCandles = recentCandles.slice(i - 100, i + 1);
-        const feature = getLatestFeatures(windowCandles);
-        if (feature) {
-          featureArrays.push(gpuBridge.featureVectorToArray(feature));
-        }
-      }
+      // Try to get multi-timeframe candles if available
+      // These would need to be stored separately - for now just use 15m
+      // In future: storage.getCandles5m(), storage.getCandles1h(), storage.getCandles4h()
       
-      if (featureArrays.length < 10) {
-        return res.json({ 
-          available: false, 
-          prediction: null,
-          message: "Could not compute enough features"
-        });
-      }
-      
-      const prediction = await gpuBridge.predictEnsemble(featureArrays);
+      // Use the new MTF endpoint that computes features server-side
+      const prediction = await gpuBridge.predictEnsembleFromCandles(
+        recent15m,
+        undefined,  // 5m candles (not yet available)
+        undefined,  // 1h candles (not yet available)
+        undefined,  // 4h candles (not yet available)
+        "BTCUSDT"
+      );
       
       if (!prediction) {
         return res.json({ 
