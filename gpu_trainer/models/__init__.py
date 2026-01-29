@@ -21,6 +21,10 @@ from .gnn import CrossAssetGNN, TemporalGNN
 from .rl_agent import PPOAgent, TradingEnvironment, ActorCritic
 from .sentiment import SentimentEncoder, MultiModalSentiment, SentimentPricePredictor
 from .ensemble import MetaLearner, DeepEnsemble, MasterEnsemble, OnlineLearningEnsemble
+from .multihead import (
+    MultiHeadOutput, MultiHeadTransformer, MultiHeadTFT, MultiHeadLSTM, 
+    MultiHeadCNN, MultiHeadGNN, MultiHeadVAE, get_multihead_model
+)
 
 __all__ = [
     # Base
@@ -67,4 +71,14 @@ __all__ = [
     "DeepEnsemble",
     "MasterEnsemble",
     "OnlineLearningEnsemble",
+    
+    # Multi-Head Models
+    "MultiHeadOutput",
+    "MultiHeadTransformer",
+    "MultiHeadTFT",
+    "MultiHeadLSTM",
+    "MultiHeadCNN",
+    "MultiHeadGNN",
+    "MultiHeadVAE",
+    "get_multihead_model",
 ]

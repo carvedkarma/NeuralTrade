@@ -1606,10 +1606,12 @@ class GPUTrainerGUI:
                 # Model creation
                 if use_multihead:
                     # Multi-head models with Classification + Regression + Quantile heads
-                    from models.multihead import MultiHeadTransformer, MultiHeadLSTM, MultiHeadCNN, MultiHeadGNN, MultiHeadVAE
+                    from models.multihead import MultiHeadTransformer, MultiHeadTFT, MultiHeadLSTM, MultiHeadCNN, MultiHeadGNN, MultiHeadVAE
                     
                     if model_type == "transformer":
                         model = MultiHeadTransformer(input_dim=input_dim, d_model=256, nhead=8, num_layers=6)
+                    elif model_type == "tft":
+                        model = MultiHeadTFT(input_dim=input_dim, d_model=256, nhead=8, num_encoder_layers=4)
                     elif model_type == "lstm":
                         model = MultiHeadLSTM(input_dim=input_dim, hidden_dim=256, num_layers=3)
                     elif model_type == "cnn":
@@ -1620,7 +1622,7 @@ class GPUTrainerGUI:
                         model = MultiHeadVAE(input_dim=input_dim, sequence_length=config.data.sequence_length, latent_dim=64)
                     else:
                         self.log(f"Multi-head mode not supported for: {model_type}")
-                        self.log(f"Supported: transformer, lstm, cnn, gnn, vae")
+                        self.log(f"Supported: transformer, tft, lstm, cnn, gnn, vae")
                         self.root.after(0, self.training_complete)
                         return
                     self.log(f"Multi-head model: {model.name}")

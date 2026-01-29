@@ -877,6 +877,220 @@ class MultiHeadVAE(BaseModel):
         return multihead_output, x_recon, mu_latent, log_var
 
 
+# Import TFT components from transformer module
+from .transformer import GatedResidualNetwork, InterpretableMultiHeadAttention
+
+
+class MultiHeadTFT(BaseModel):
+    """
+    Temporal Fusion Transformer with multi-head output for institutional trading.
+    
+    TFT-inspired architecture combining:
+    - Bidirectional LSTM for temporal encoding (captures sequential patterns)
+    - Gated residual networks (GRN) for non-linear processing with skip connections
+    - Static context encoder for aggregated sequence representation  
+    - Interpretable multi-head attention for temporal pattern recognition
+    - Multi-head outputs: classification, regression, quantile, trading, candle prediction
+    
+    Follows Google's TFT paper core concepts: https://arxiv.org/abs/1912.09363
+    Simplified for raw feature input without per-variable embedding.
+    Key TFT components: GRN gating, static enrichment, interpretable attention.
+    """
+    
+    def __init__(
+        self,
+        input_dim: int,
+        d_model: int = 256,
+        nhead: int = 8,
+        num_encoder_layers: int = 4,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.1,
+        num_classes: int = 3,
+        num_quantiles: int = 5,
+        n_future_candles: int = 5
+    ):
+        super().__init__("multihead_tft", input_dim, num_classes)
+        
+        self.d_model = d_model
+        self.nhead = nhead
+        self.num_layers = num_encoder_layers
+        self.num_quantiles = num_quantiles
+        self.n_future_candles = n_future_candles
+        
+        # Static context encoder (processes aggregated sequence features)
+        self.static_encoder = nn.Sequential(
+            nn.Linear(input_dim, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model)
+        )
+        
+        # Temporal encoder (LSTM for sequence processing)
+        self.temporal_encoder = nn.LSTM(
+            input_dim, d_model // 2,
+            num_layers=2,
+            bidirectional=True,
+            batch_first=True,
+            dropout=dropout
+        )
+        
+        # Gated residual networks for static enrichment
+        self.static_enrichment_grn = GatedResidualNetwork(d_model, d_model, dropout, context_dim=d_model)
+        
+        # Interpretable multi-head attention layers
+        self.attention_blocks = nn.ModuleList([
+            InterpretableMultiHeadAttention(d_model, nhead, dropout)
+            for _ in range(num_encoder_layers)
+        ])
+        
+        # Post-attention GRNs
+        self.post_attention_grns = nn.ModuleList([
+            GatedResidualNetwork(d_model, d_model, dropout)
+            for _ in range(num_encoder_layers)
+        ])
+        
+        # Positional encoding
+        self.pos_encoding = PositionalEncoding(d_model, max_len=500, dropout=dropout)
+        
+        # Multi-head outputs (6 heads total)
+        self.class_head = ClassificationHead(d_model, d_model // 2, num_classes, dropout)
+        self.regression_head = RegressionHead(d_model, d_model // 2, dropout)
+        self.quantile_head = QuantileHead(d_model, d_model // 2, dropout)
+        self.trading_head = TradingHead(d_model, d_model // 2, dropout)
+        self.candle_head = CandlePredictionHead(d_model, d_model // 2, n_future_candles, dropout)
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+    
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        TFT-style encoding: LSTM + static enrichment + attention.
+        Returns pooled representation for multi-head outputs.
+        """
+        # Temporal encoding via bidirectional LSTM
+        lstm_out, _ = self.temporal_encoder(x)  # [batch, seq, d_model]
+        
+        # Static context from aggregated features
+        static_features = self.static_encoder(x.mean(dim=1))  # [batch, d_model]
+        
+        # Static enrichment via GRN
+        # Expand static to match sequence length
+        static_expanded = static_features.unsqueeze(1).expand(-1, lstm_out.size(1), -1)
+        enriched = self.static_enrichment_grn(lstm_out, static_expanded)
+        
+        # Positional encoding
+        enriched = enriched.transpose(0, 1)
+        enriched = self.pos_encoding(enriched)
+        enriched = enriched.transpose(0, 1)
+        
+        # Interpretable attention layers
+        for attn_block, grn in zip(self.attention_blocks, self.post_attention_grns):
+            attn_out, _ = attn_block(enriched)
+            enriched = grn(attn_out + enriched)
+        
+        # Take final timestep representation (like TFT)
+        output_repr = enriched[:, -1, :]  # [batch, d_model]
+        
+        return output_repr
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass - returns class logits for backward compatibility.
+        Use forward_multihead() for full multi-head output.
+        """
+        features = self.encode(x)
+        return self.class_head(features)
+    
+    def forward_multihead(self, x: torch.Tensor) -> MultiHeadOutput:
+        """
+        Full multi-head forward pass.
+        
+        Returns MultiHeadOutput with all heads:
+        - class_logits: [batch, 3]
+        - mu: [batch, 1]
+        - sigma: [batch, 1]
+        - quantiles: [batch, 5]
+        - entry_offset, sl_distance, tp_distance: [batch, 1] each
+        - candle_deltas: [batch, n_steps, 3]
+        """
+        features = self.encode(x)
+        
+        class_logits = self.class_head(features)
+        mu, sigma = self.regression_head(features)
+        quantiles = self.quantile_head(features)
+        entry_offset, sl_distance, tp_distance = self.trading_head(features)
+        candle_deltas = self.candle_head(features)
+        
+        return MultiHeadOutput(
+            class_logits=class_logits,
+            mu=mu,
+            quantiles=quantiles,
+            sigma=sigma,
+            entry_offset=entry_offset,
+            sl_distance=sl_distance,
+            tp_distance=tp_distance,
+            candle_deltas=candle_deltas
+        )
+    
+    def predict_with_quantiles(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Convenience method for inference.
+        Returns dict with full trading output.
+        """
+        self.eval()
+        with torch.no_grad():
+            output = self.forward_multihead(x)
+            
+            probs = F.softmax(output.class_logits, dim=-1)
+            direction = torch.argmax(probs, dim=-1)
+            
+            return {
+                'probabilities': probs,
+                'direction': direction,
+                'mu': output.mu,
+                'sigma': output.sigma,
+                'q10': output.quantiles[:, 0:1],
+                'q25': output.quantiles[:, 1:2],
+                'q50': output.quantiles[:, 2:3],
+                'q75': output.quantiles[:, 3:4],
+                'q90': output.quantiles[:, 4:5],
+                'entry_offset': output.entry_offset,
+                'sl_distance': output.sl_distance,
+                'tp_distance': output.tp_distance,
+                'candle_deltas': output.candle_deltas,
+            }
+    
+    def get_attention_weights(self, x: torch.Tensor) -> List[torch.Tensor]:
+        """
+        Returns attention weights from all attention layers for interpretability.
+        TFT's interpretable attention allows understanding which time steps matter.
+        """
+        # Temporal encoding via bidirectional LSTM
+        lstm_out, _ = self.temporal_encoder(x)
+        
+        # Static context
+        static_features = self.static_encoder(x.mean(dim=1))
+        static_expanded = static_features.unsqueeze(1).expand(-1, lstm_out.size(1), -1)
+        enriched = self.static_enrichment_grn(lstm_out, static_expanded)
+        
+        # Positional encoding
+        enriched = enriched.transpose(0, 1)
+        enriched = self.pos_encoding(enriched)
+        enriched = enriched.transpose(0, 1)
+        
+        # Collect attention weights
+        all_weights = []
+        for attn_block, grn in zip(self.attention_blocks, self.post_attention_grns):
+            attn_out, weights = attn_block(enriched)
+            all_weights.append(weights)
+            enriched = grn(attn_out + enriched)
+        
+        return all_weights
+
+
 # Factory function to get multi-head model
 def get_multihead_model(
     architecture: str,
@@ -887,7 +1101,7 @@ def get_multihead_model(
     Factory function to create multi-head models.
     
     Args:
-        architecture: One of 'transformer', 'lstm', 'cnn', 'gnn', 'vae'
+        architecture: One of 'transformer', 'tft', 'lstm', 'cnn', 'gnn', 'vae'
         input_dim: Number of input features
         **kwargs: Architecture-specific arguments
         
@@ -896,6 +1110,7 @@ def get_multihead_model(
     """
     models = {
         'transformer': MultiHeadTransformer,
+        'tft': MultiHeadTFT,
         'lstm': MultiHeadLSTM,
         'cnn': MultiHeadCNN,
         'gnn': MultiHeadGNN,

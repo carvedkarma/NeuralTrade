@@ -330,7 +330,7 @@ def train(args):
     # === STEP 7: Model selection ===
     if use_multihead:
         # Multi-head model variants with Classification + Regression + Quantile heads
-        from models.multihead import MultiHeadTransformer, MultiHeadLSTM, MultiHeadCNN
+        from models.multihead import MultiHeadTransformer, MultiHeadTFT, MultiHeadLSTM, MultiHeadCNN
         
         if args.model == "transformer":
             model = MultiHeadTransformer(
@@ -338,6 +338,13 @@ def train(args):
                 d_model=config.model.transformer_dim,
                 nhead=config.model.transformer_heads,
                 num_layers=config.model.transformer_layers
+            )
+        elif args.model == "tft":
+            model = MultiHeadTFT(
+                input_dim=input_dim,
+                d_model=config.model.transformer_dim,
+                nhead=config.model.transformer_heads,
+                num_encoder_layers=4
             )
         elif args.model == "lstm":
             model = MultiHeadLSTM(
@@ -352,7 +359,7 @@ def train(args):
             )
         else:
             logger.error(f"Multi-head mode not supported for model type: {args.model}")
-            logger.error("Supported multi-head models: transformer, lstm, cnn")
+            logger.error("Supported multi-head models: transformer, tft, lstm, cnn")
             return
         logger.info(f"Using MULTI-HEAD model: {model.name}")
     else:
