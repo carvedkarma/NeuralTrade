@@ -34,19 +34,20 @@ class ModelManager:
     # Mapping from checkpoint filename patterns to standardized model types
     MODEL_TYPE_PATTERNS = {
         # Multi-head models (check first - have forward_multihead for quantile predictions)
-        "multihead_transformer": ["multihead_transformer", "transformer_multihead", "best_transformer_multihead", "best_multihead_transformer"],
-        "multihead_tft": ["multihead_tft", "tft_multihead", "best_tft_multihead", "best_multihead_tft"],
-        "multihead_lstm": ["multihead_lstm", "lstm_multihead", "best_lstm_multihead", "best_multihead_lstm"],
-        "multihead_cnn": ["multihead_cnn", "cnn_multihead", "best_cnn_multihead", "best_multihead_cnn"],
-        "multihead_gnn": ["multihead_gnn", "gnn_multihead", "best_gnn_multihead", "best_multihead_gnn"],
-        "multihead_vae": ["multihead_vae", "vae_multihead", "best_vae_multihead", "best_multihead_vae"],
+        # Includes both new (best_*_multihead) and legacy (*_multihead_trained) naming patterns
+        "multihead_transformer": ["transformer_multihead_trained", "multihead_transformer", "transformer_multihead", "best_transformer_multihead", "best_multihead_transformer"],
+        "multihead_tft": ["tft_multihead_trained", "multihead_tft", "tft_multihead", "best_tft_multihead", "best_multihead_tft"],
+        "multihead_lstm": ["lstm_multihead_trained", "multihead_lstm", "lstm_multihead", "best_lstm_multihead", "best_multihead_lstm"],
+        "multihead_cnn": ["cnn_multihead_trained", "multihead_cnn", "cnn_multihead", "best_cnn_multihead", "best_multihead_cnn"],
+        "multihead_gnn": ["gnn_multihead_trained", "multihead_gnn", "gnn_multihead", "best_gnn_multihead", "best_multihead_gnn"],
+        "multihead_vae": ["vae_multihead_trained", "multihead_vae", "vae_multihead", "best_vae_multihead", "best_multihead_vae"],
         # Legacy classification-only models
-        "transformer": ["transformer_price", "transformer", "best_transformer"],
-        "tft": ["temporal_fusion_transformer", "tft", "best_temporal_fusion", "best_tft"],
-        "lstm": ["bidirectional_lstm", "lstm", "stacked_lstm", "conv_lstm", "best_lstm", "best_bidirectional"],
-        "cnn": ["resnet_price", "resnet", "cnn", "inception", "wavenet", "best_resnet", "best_cnn"],
-        "vae": ["market_vae", "vae", "conditional_vae", "best_vae", "best_market_vae"],
-        "gnn": ["cross_asset_gnn", "temporal_gnn", "gnn", "best_gnn", "best_cross_asset"],
+        "transformer": ["transformer_trained", "transformer_price", "transformer", "best_transformer"],
+        "tft": ["tft_trained", "temporal_fusion_transformer", "tft", "best_temporal_fusion", "best_tft"],
+        "lstm": ["lstm_trained", "bidirectional_lstm", "lstm", "stacked_lstm", "conv_lstm", "best_lstm", "best_bidirectional"],
+        "cnn": ["cnn_trained", "resnet_price", "resnet", "cnn", "inception", "wavenet", "best_resnet", "best_cnn"],
+        "vae": ["vae_trained", "market_vae", "vae", "conditional_vae", "best_vae", "best_market_vae"],
+        "gnn": ["gnn_trained", "cross_asset_gnn", "temporal_gnn", "gnn", "best_gnn", "best_cross_asset"],
     }
     
     def __init__(self):
@@ -67,7 +68,10 @@ class ModelManager:
             "metrics": {}
         }
         self.prediction_history = []
+        # Primary checkpoint directory (new location)
         self.checkpoint_dir = Path(__file__).parent.parent / "checkpoints"
+        # Secondary checkpoint directory (legacy location from GUI training)
+        self.saved_models_dir = Path(__file__).parent.parent / "saved_models"
         self.scaler_path = self.checkpoint_dir / "scaler.joblib"
         self.sequence_length = 100  # Default, updated from loaded model config
         self.input_dim = 81  # Default feature count
@@ -676,25 +680,49 @@ class ModelManager:
             return None
     
     def load_best_models(self):
-        """Load best checkpoint models at startup."""
-        if not self.checkpoint_dir.exists():
+        """Load best checkpoint models at startup.
+        
+        Searches both checkpoints/ and saved_models/ directories for models.
+        """
+        # Collect checkpoint files from both directories
+        checkpoint_files = []
+        
+        # Primary: checkpoints/ directory
+        if self.checkpoint_dir.exists():
+            checkpoint_files.extend(list(self.checkpoint_dir.glob("*.pt")))
+            logger.info(f"Found {len(checkpoint_files)} .pt files in checkpoints/")
+        else:
             logger.warning(f"Checkpoint directory not found: {self.checkpoint_dir}")
-            return
+        
+        # Secondary: saved_models/ directory (legacy GUI training location)
+        if self.saved_models_dir.exists():
+            saved_model_files = list(self.saved_models_dir.glob("*.pt"))
+            checkpoint_files.extend(saved_model_files)
+            logger.info(f"Found {len(saved_model_files)} .pt files in saved_models/")
+        else:
+            logger.info(f"saved_models/ directory not found (not an error)")
             
-        # Load scaler if exists - try model-specific scalers first, then fallback to generic
+        # Load scaler - search both directories for model-specific scalers
         scaler_loaded = False
         
-        # Try to find any model-specific scaler (scaler_{model}*.joblib)
-        scaler_files = list(self.checkpoint_dir.glob("scaler_*.joblib"))
-        if scaler_files:
+        # Collect all scaler files from both directories
+        all_scaler_files = []
+        if self.checkpoint_dir.exists():
+            all_scaler_files.extend(list(self.checkpoint_dir.glob("scaler*.joblib")))
+            all_scaler_files.extend(list(self.checkpoint_dir.glob("*_scalers.joblib")))
+        if self.saved_models_dir.exists():
+            all_scaler_files.extend(list(self.saved_models_dir.glob("scaler*.joblib")))
+            all_scaler_files.extend(list(self.saved_models_dir.glob("*_scalers.joblib")))
+        
+        if all_scaler_files:
             # Use the most recently modified scaler
-            scaler_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+            all_scaler_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
             try:
-                self.scaler = joblib.load(scaler_files[0])
-                logger.info(f"Loaded model-specific scaler from {scaler_files[0]}")
+                self.scaler = joblib.load(all_scaler_files[0])
+                logger.info(f"Loaded scaler from {all_scaler_files[0]}")
                 scaler_loaded = True
             except Exception as e:
-                logger.error(f"Failed to load model-specific scaler: {e}")
+                logger.error(f"Failed to load scaler: {e}")
         
         # Fallback to generic scaler.joblib
         if not scaler_loaded and self.scaler_path.exists():
@@ -704,8 +732,11 @@ class ModelManager:
             except Exception as e:
                 logger.error(f"Failed to load scaler: {e}")
         
-        # Load expected feature list if exists (for alignment verification)
+        # Load expected feature list if exists (for alignment verification) - check both dirs
         feature_list_path = self.checkpoint_dir / "feature_columns.txt"
+        if not feature_list_path.exists() and self.saved_models_dir.exists():
+            feature_list_path = self.saved_models_dir / "feature_columns.txt"
+            
         if feature_list_path.exists():
             try:
                 with open(feature_list_path, 'r') as f:
@@ -720,20 +751,24 @@ class ModelManager:
         else:
             self.expected_features = None
         
-        # Find and load best checkpoint for each model type
-        checkpoint_files = list(self.checkpoint_dir.glob("*.pt"))
+        # Check if we found any checkpoint files
         if not checkpoint_files:
-            logger.warning("No checkpoint files found")
+            logger.warning("No checkpoint files found in checkpoints/ or saved_models/")
             return
         
-        # Only load "best_*" checkpoints to avoid loading epoch checkpoints
-        best_checkpoints = [f for f in checkpoint_files if f.stem.startswith("best_")]
-        if not best_checkpoints:
-            # Fallback: if no best_* files, use all checkpoints
-            best_checkpoints = checkpoint_files
-            logger.info("No best_* checkpoints found, loading all .pt files")
+        # Filter for loadable checkpoints - prioritize best_* and *_trained patterns
+        loadable_checkpoints = [
+            f for f in checkpoint_files 
+            if f.stem.startswith("best_") or "_trained" in f.stem or "_multihead" in f.stem
+        ]
+        if not loadable_checkpoints:
+            # Fallback: use all checkpoints
+            loadable_checkpoints = checkpoint_files
+            logger.info("No best_* or *_trained checkpoints found, loading all .pt files")
+        
+        logger.info(f"Loading {len(loadable_checkpoints)} checkpoint(s)...")
             
-        for ckpt_path in best_checkpoints:
+        for ckpt_path in loadable_checkpoints:
             try:
                 checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
                 model_name = ckpt_path.stem
