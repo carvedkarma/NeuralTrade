@@ -33,6 +33,13 @@ app.add_middleware(
 class ModelManager:
     # Mapping from checkpoint filename patterns to standardized model types
     MODEL_TYPE_PATTERNS = {
+        # Multi-head models (check first - have forward_multihead for quantile predictions)
+        "multihead_transformer": ["multihead_transformer", "transformer_multihead", "best_multihead_transformer"],
+        "multihead_lstm": ["multihead_lstm", "lstm_multihead", "best_multihead_lstm"],
+        "multihead_cnn": ["multihead_cnn", "cnn_multihead", "best_multihead_cnn"],
+        "multihead_gnn": ["multihead_gnn", "gnn_multihead", "best_multihead_gnn"],
+        "multihead_vae": ["multihead_vae", "vae_multihead", "best_multihead_vae"],
+        # Legacy classification-only models
         "transformer": ["transformer_price", "transformer", "best_transformer"],
         "tft": ["temporal_fusion_transformer", "tft", "best_temporal_fusion", "best_tft"],
         "lstm": ["bidirectional_lstm", "lstm", "stacked_lstm", "conv_lstm", "best_lstm", "best_bidirectional"],
@@ -168,6 +175,7 @@ class ModelManager:
         """Create model instance with correct constructor args for each model type.
         
         Covers all model classes from gpu_trainer/models/:
+        - multihead.py: MultiHeadTransformer, MultiHeadLSTM, MultiHeadCNN, MultiHeadGNN, MultiHeadVAE
         - transformer.py: TransformerPriceModel, TemporalFusionTransformer
         - lstm.py: BidirectionalLSTM, StackedLSTM, ConvLSTM
         - cnn.py: ResNetPrice, InceptionNet, WaveNet
@@ -185,6 +193,55 @@ class ModelManager:
             hidden_dim = config.get("hidden_dim", 128)
             sequence_length = config.get("sequence_length", 100)
             dropout = config.get("dropout", 0.2)
+            
+            # === MULTI-HEAD MODELS (check first - has forward_multihead for quantile predictions) ===
+            if "multihead_transformer" in model_type_lower:
+                from models.multihead import MultiHeadTransformer
+                return MultiHeadTransformer(
+                    input_dim=input_dim,
+                    d_model=config.get("d_model", 256),
+                    nhead=config.get("nhead", 8),
+                    num_layers=config.get("num_layers", 6),
+                    dropout=dropout,
+                    num_classes=output_dim
+                )
+            elif "multihead_lstm" in model_type_lower:
+                from models.multihead import MultiHeadLSTM
+                return MultiHeadLSTM(
+                    input_dim=input_dim,
+                    hidden_dim=config.get("hidden_dim", 256),
+                    num_layers=config.get("num_layers", 3),
+                    dropout=dropout,
+                    num_classes=output_dim
+                )
+            elif "multihead_cnn" in model_type_lower:
+                from models.multihead import MultiHeadCNN
+                return MultiHeadCNN(
+                    input_dim=input_dim,
+                    hidden_channels=config.get("hidden_channels", 256),
+                    num_blocks=config.get("num_blocks", 4),
+                    dropout=dropout,
+                    num_classes=output_dim
+                )
+            elif "multihead_gnn" in model_type_lower:
+                from models.multihead import MultiHeadGNN
+                return MultiHeadGNN(
+                    input_dim=input_dim,
+                    hidden_dim=config.get("hidden_dim", 128),
+                    num_layers=config.get("num_layers", 3),
+                    num_heads=config.get("num_heads", 4),
+                    dropout=dropout,
+                    num_classes=output_dim
+                )
+            elif "multihead_vae" in model_type_lower:
+                from models.multihead import MultiHeadVAE
+                return MultiHeadVAE(
+                    input_dim=input_dim,
+                    sequence_length=sequence_length,
+                    latent_dim=config.get("latent_dim", 64),
+                    dropout=dropout,
+                    num_classes=output_dim
+                )
             
             # === TRANSFORMER MODELS ===
             if "temporal_fusion" in model_type_lower or "tft" in model_type_lower:
