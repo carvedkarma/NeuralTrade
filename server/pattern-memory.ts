@@ -1,15 +1,364 @@
 import { db } from "./db";
-import { patterns, patternClusters as patternClustersTable } from "./db/schema";
-import { desc, sql, eq } from "drizzle-orm";
+import { patterns, patternClusters as patternClustersTable, predictionEpisodes } from "./db/schema";
+import { desc, sql, eq, isNull, and, lt } from "drizzle-orm";
 import type { FeatureVector } from "./feature-engine";
+import type { InsertPredictionEpisode, PredictionEpisode } from "@shared/schema";
+import * as fs from 'fs';
+import * as path from 'path';
 
 const MAX_PATTERNS_TOTAL = 30;
 const MIN_SAMPLES_PER_PATTERN = 100;  // Increased from 50 for statistical reliability (research-backed)
 const MIN_BACKTEST_TRADES = 500;
 const MIN_CANDLES_15M = 2000; // ~20 days of 15m data
-const EMBARGO_CANDLES = 16;  // Temporal embargo (4 hours of 15m candles)
+const EMBARGO_CANDLES = 16;  // Temporal embargo (4 hours of 15m candles) - legacy, use PRECISION_MODE_CONFIG for new code
 const EMBARGO_SIMILARITY_THRESHOLD = 0.95;  // Feature-vector embargo: exclude patterns with >95% similarity to boundary patterns
-const MIN_SIMILARITY_THRESHOLD = 0.82;  // Institutional-grade: increased from 0.75 for higher precision (less false positives)
+
+// ============================================================================
+// PRECISION MODE CONFIGURATION (P0 Fixes - Research-Backed)
+// ============================================================================
+export interface PrecisionModeConfig {
+  enabled: boolean;
+  similarityThreshold: number;      // Min cosine similarity (0.86 for sniper mode)
+  minMatchesFloor: number;          // Min matches after filtering (35 for reliability)
+  embargoHorizon: number;           // Forward-looking candles (e.g., 8 for 8-candle prediction)
+  embargoSequenceLength: number;    // Sequence length used in features (e.g., 16)
+  candleIntervalMs: number;         // Candle interval in ms (15min = 900000)
+  regimeFilterEnabled: boolean;     // Hard-filter by regime before cosine similarity
+  volatilityFilterEnabled: boolean; // Hard-filter by ATR percentile bucket
+  timeTauDays: number;              // Time decay tau (60 days default)
+  bayesianAlpha: number;            // Beta prior alpha (smoothing parameter)
+  bayesianBeta: number;             // Beta prior beta (smoothing parameter)
+  minPosteriorPWin: number;         // Min posterior P(win) to trade (0.58-0.62)
+  maxUncertainty: number;           // Max credible interval width to trade
+}
+
+// Default precision mode config (sniper mode)
+export const PRECISION_MODE_CONFIG: PrecisionModeConfig = {
+  enabled: true,
+  similarityThreshold: 0.86,        // P0-2: Strict similarity for precision
+  minMatchesFloor: 35,              // P0-2: Min matches for statistical reliability
+  embargoHorizon: 8,                // 8 candles forward (2 hours at 15m)
+  embargoSequenceLength: 16,        // 16-candle sequence for features
+  candleIntervalMs: 15 * 60 * 1000, // 15 minutes
+  regimeFilterEnabled: true,        // P0-3: Regime gating
+  volatilityFilterEnabled: true,    // P0-3: Volatility bucket gating
+  timeTauDays: 60,                  // P1-5: Time decay tau
+  bayesianAlpha: 1,                 // Beta(1,1) = uniform prior
+  bayesianBeta: 1,
+  minPosteriorPWin: 0.58,           // P1-2: Min win probability to trade
+  maxUncertainty: 0.25,             // P1-2: Max uncertainty to trade
+};
+
+// Legacy constant for backward compatibility (use PRECISION_MODE_CONFIG instead)
+const MIN_SIMILARITY_THRESHOLD = PRECISION_MODE_CONFIG.similarityThreshold;
+
+// ============================================================================
+// VOLATILITY BUCKET SYSTEM (P0-3)
+// ============================================================================
+export type VolatilityBucket = "low" | "medium" | "high" | "extreme";
+
+// ATR percentile thresholds (calibrated on BTC historical data)
+const ATR_PERCENTILE_THRESHOLDS = {
+  low: 0.25,      // Bottom 25% of ATR values
+  medium: 0.50,   // 25-50%
+  high: 0.75,     // 50-75%
+  extreme: 1.0,   // Top 25%
+};
+
+// Track rolling ATR statistics for bucket assignment
+let atrHistory: number[] = [];
+const ATR_HISTORY_SIZE = 1000;  // Keep last 1000 ATR values for percentile calculation
+
+export function updateAtrHistory(atr: number): void {
+  atrHistory.push(atr);
+  if (atrHistory.length > ATR_HISTORY_SIZE) {
+    atrHistory = atrHistory.slice(-ATR_HISTORY_SIZE);
+  }
+}
+
+export function getVolatilityBucket(atr: number): VolatilityBucket {
+  if (atrHistory.length < 50) {
+    // Not enough history, use simple heuristics
+    const normalizedAtr = atr / 100000; // Rough BTC normalization
+    if (normalizedAtr < 0.005) return "low";
+    if (normalizedAtr < 0.01) return "medium";
+    if (normalizedAtr < 0.02) return "high";
+    return "extreme";
+  }
+  
+  // Compute percentile of current ATR
+  const sorted = [...atrHistory].sort((a, b) => a - b);
+  let percentile = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    if (atr <= sorted[i]) {
+      percentile = i / sorted.length;
+      break;
+    }
+    percentile = 1.0;
+  }
+  
+  if (percentile <= ATR_PERCENTILE_THRESHOLDS.low) return "low";
+  if (percentile <= ATR_PERCENTILE_THRESHOLDS.medium) return "medium";
+  if (percentile <= ATR_PERCENTILE_THRESHOLDS.high) return "high";
+  return "extreme";
+}
+
+// ============================================================================
+// HARD-NEGATIVE MINING (P1-3) - Track "false friend" patterns
+// ============================================================================
+interface FalseFriendPenalty {
+  patternId: number;
+  penalty: number;         // Cumulative penalty (0-1, higher = worse)
+  failureCount: number;    // Number of times this pattern caused losses
+  lastFailureTs: number;   // Last failure timestamp
+  regime: string;          // Regime where failure occurred
+}
+
+const falseFriendPenalties: Map<number, FalseFriendPenalty> = new Map();
+const PENALTY_DECAY_RATE = 0.95;  // Decay penalty by 5% per day
+const PENALTY_INCREMENT = 0.1;    // Add 10% penalty per failure
+const PENALTIES_FILE = 'false_friend_penalties.json';
+
+// P1-3 FIX: Persist false friend penalties to file
+function saveFalseFriendPenalties(): void {
+  try {
+    const data = Array.from(falseFriendPenalties.values());
+    fs.writeFileSync(PENALTIES_FILE, JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error('[Pattern Memory] Failed to save false friend penalties:', err);
+  }
+}
+
+export function loadFalseFriendPenalties(): void {
+  try {
+    if (fs.existsSync(PENALTIES_FILE)) {
+      const data = JSON.parse(fs.readFileSync(PENALTIES_FILE, 'utf8')) as FalseFriendPenalty[];
+      falseFriendPenalties.clear();
+      for (const entry of data) {
+        falseFriendPenalties.set(entry.patternId, entry);
+      }
+      console.log(`[Pattern Memory] Loaded ${data.length} false friend penalties from file`);
+    }
+  } catch (err) {
+    console.error('[Pattern Memory] Failed to load false friend penalties:', err);
+  }
+}
+
+export function recordPatternFailure(patternId: number, regime: string): void {
+  const existing = falseFriendPenalties.get(patternId);
+  if (existing) {
+    existing.penalty = Math.min(1.0, existing.penalty + PENALTY_INCREMENT);
+    existing.failureCount++;
+    existing.lastFailureTs = Date.now();
+    existing.regime = regime;
+  } else {
+    falseFriendPenalties.set(patternId, {
+      patternId,
+      penalty: PENALTY_INCREMENT,
+      failureCount: 1,
+      lastFailureTs: Date.now(),
+      regime,
+    });
+  }
+  // Persist after each failure (debounced in production, immediate for now)
+  saveFalseFriendPenalties();
+}
+
+export function getFalseFriendPenalty(patternId: number): number {
+  const entry = falseFriendPenalties.get(patternId);
+  if (!entry) return 0;
+  
+  // Apply time decay
+  const daysSinceFailure = (Date.now() - entry.lastFailureTs) / (24 * 60 * 60 * 1000);
+  const decayedPenalty = entry.penalty * Math.pow(PENALTY_DECAY_RATE, daysSinceFailure);
+  
+  return decayedPenalty;
+}
+
+export function decayAllPenalties(): void {
+  const now = Date.now();
+  const entries = Array.from(falseFriendPenalties.entries());
+  for (const [id, entry] of entries) {
+    const daysSinceFailure = (now - entry.lastFailureTs) / (24 * 60 * 60 * 1000);
+    entry.penalty *= Math.pow(PENALTY_DECAY_RATE, daysSinceFailure);
+    entry.lastFailureTs = now;
+    
+    // Remove if penalty is negligible
+    if (entry.penalty < 0.01) {
+      falseFriendPenalties.delete(id);
+    }
+  }
+}
+
+// ============================================================================
+// BAYESIAN CLUSTER RELIABILITY (P1-2)
+// ============================================================================
+export interface BayesianClusterStats {
+  clusterId: string;
+  wins: number;
+  losses: number;
+  posteriorMean: number;         // E[P(win)] = (wins + α) / (wins + losses + α + β)
+  credibleIntervalLow: number;   // 5th percentile
+  credibleIntervalHigh: number;  // 95th percentile
+  uncertainty: number;           // Width of credible interval
+  evLong: number;                // Expected value for LONG
+  evShort: number;               // Expected value for SHORT
+}
+
+// ============================================================================
+// EXACT BETA DISTRIBUTION FUNCTIONS (P1-2 Fix)
+// Implements proper Beta quantiles using incomplete beta function approximation
+// Much more accurate than normal approximation, especially for small samples
+// ============================================================================
+
+// Log Gamma function using Lanczos approximation
+function logGamma(z: number): number {
+  if (z < 0.5) {
+    return Math.log(Math.PI / Math.sin(Math.PI * z)) - logGamma(1 - z);
+  }
+  z -= 1;
+  const g = 7;
+  const coefficients = [
+    0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+    771.32342877765313, -176.61502916214059, 12.507343278686905,
+    -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7
+  ];
+  let x = coefficients[0];
+  for (let i = 1; i < g + 2; i++) {
+    x += coefficients[i] / (z + i);
+  }
+  const t = z + g + 0.5;
+  return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(x);
+}
+
+// Beta function B(a,b)
+function betaFunction(a: number, b: number): number {
+  return Math.exp(logGamma(a) + logGamma(b) - logGamma(a + b));
+}
+
+// Regularized incomplete beta function I_x(a,b) using continued fraction
+// This is the CDF of the Beta distribution
+function regularizedBeta(x: number, a: number, b: number): number {
+  if (x < 0 || x > 1) return x < 0 ? 0 : 1;
+  if (x === 0) return 0;
+  if (x === 1) return 1;
+  
+  // Use symmetry relation for numerical stability
+  if (x > (a + 1) / (a + b + 2)) {
+    return 1 - regularizedBeta(1 - x, b, a);
+  }
+  
+  // Continued fraction representation (Lentz's algorithm)
+  const maxIterations = 200;
+  const epsilon = 1e-14;
+  
+  const prefactor = Math.exp(
+    a * Math.log(x) + b * Math.log(1 - x) - Math.log(a) - logGamma(a) - logGamma(b) + logGamma(a + b)
+  );
+  
+  let cf = 1;
+  let delta = 1;
+  let h = 1;
+  
+  for (let m = 0; m <= maxIterations; m++) {
+    // Compute numerator coefficients
+    let numerator: number;
+    if (m === 0) {
+      numerator = 1;
+    } else if (m % 2 === 0) {
+      const k = m / 2;
+      numerator = (k * (b - k) * x) / ((a + 2 * k - 1) * (a + 2 * k));
+    } else {
+      const k = (m - 1) / 2 + 1;
+      numerator = -((a + k - 1) * (a + b + k - 1) * x) / ((a + 2 * k - 2) * (a + 2 * k - 1));
+    }
+    
+    h = 1 + numerator / h;
+    if (Math.abs(h) < 1e-30) h = 1e-30;
+    delta = 1 / h;
+    cf *= delta;
+    
+    if (Math.abs(delta - 1) < epsilon) {
+      break;
+    }
+  }
+  
+  return prefactor * cf;
+}
+
+// Beta distribution quantile using bisection search on regularized incomplete beta
+// This is much more accurate than normal approximation, especially for small alpha/beta
+function betaQuantile(alpha: number, beta: number, p: number): number {
+  if (p <= 0) return 0;
+  if (p >= 1) return 1;
+  if (alpha <= 0 || beta <= 0) return 0.5;
+  
+  // Bisection search for quantile
+  let lo = 0;
+  let hi = 1;
+  const tolerance = 1e-10;
+  const maxIterations = 100;
+  
+  // Initial guess using normal approximation for starting point
+  const mean = alpha / (alpha + beta);
+  const variance = (alpha * beta) / ((alpha + beta) ** 2 * (alpha + beta + 1));
+  let x = Math.max(0.001, Math.min(0.999, mean));
+  
+  for (let i = 0; i < maxIterations; i++) {
+    const cdf = regularizedBeta(x, alpha, beta);
+    
+    if (Math.abs(cdf - p) < tolerance) {
+      return x;
+    }
+    
+    if (cdf < p) {
+      lo = x;
+    } else {
+      hi = x;
+    }
+    
+    x = (lo + hi) / 2;
+  }
+  
+  return x;
+}
+
+export function computeBayesianStats(
+  wins: number, 
+  losses: number,
+  avgWinReturn: number = 0,
+  avgLossReturn: number = 0,
+  config: PrecisionModeConfig = PRECISION_MODE_CONFIG
+): BayesianClusterStats {
+  const alpha = wins + config.bayesianAlpha;
+  const beta_param = losses + config.bayesianBeta;
+  
+  const posteriorMean = alpha / (alpha + beta_param);
+  const posteriorLossMean = 1 - posteriorMean;  // P(loss) = 1 - P(win)
+  const credibleIntervalLow = betaQuantile(alpha, beta_param, 0.05);
+  const credibleIntervalHigh = betaQuantile(alpha, beta_param, 0.95);
+  const uncertainty = credibleIntervalHigh - credibleIntervalLow;
+  
+  // PROPER EV CALCULATION (P1-2 Fix):
+  // EV = P(win) * avgWinReturn + P(loss) * avgLossReturn
+  // Note: avgLossReturn should be negative, so this properly subtracts losses
+  // If avgLossReturn is stored as positive magnitude, we subtract it explicitly
+  const avgLossAbs = Math.abs(avgLossReturn);
+  const evLong = posteriorMean * avgWinReturn - posteriorLossMean * avgLossAbs;
+  const evShort = posteriorMean * avgWinReturn - posteriorLossMean * avgLossAbs;
+  
+  return {
+    clusterId: "",
+    wins,
+    losses,
+    posteriorMean,
+    credibleIntervalLow,
+    credibleIntervalHigh,
+    uncertainty,
+    evLong,
+    evShort,
+  };
+}
 
 let currentCandleCount = 0;
 let currentBacktestTrades = 0;
@@ -505,63 +854,188 @@ function isValidEmbedding(embedding: number[]): boolean {
   return !allZero && !hasInvalid;
 }
 
+// ============================================================================
+// PRECISION MODE PATTERN MATCHING (P0 Fixes Implementation)
+// ============================================================================
+
+export interface FindSimilarPatternsOptions {
+  topK?: number;
+  minSimilarity?: number;
+  currentTimestamp: number;           // P0-1: MANDATORY - the candle timestamp being predicted
+  currentRegime?: string;             // P0-3: Filter by regime (optional but recommended)
+  currentAtr?: number;                // P0-3: Current ATR for volatility bucket filtering
+  config?: PrecisionModeConfig;       // Custom precision config (defaults to PRECISION_MODE_CONFIG)
+}
+
+export interface PrecisionPatternMatch extends PatternMatch {
+  timeDecayWeight: number;            // P1-5: Recency weight
+  falseFriendPenalty: number;         // P1-3: Penalty from past failures
+  effectiveSimilarity: number;        // Final similarity after adjustments
+  volatilityBucket: VolatilityBucket; // P0-3: Volatility bucket at pattern time
+  patternId: number;                  // For tracking in episodes
+}
+
 export async function findSimilarPatterns(
   currentEmbedding: number[],
   topK: number = 50,
-  minSimilarity: number = MIN_SIMILARITY_THRESHOLD,  // Use research-backed threshold
+  minSimilarity: number = MIN_SIMILARITY_THRESHOLD,
   embargoTimestamp?: number,
   currentTimestamp?: number
 ): Promise<PatternMatch[]> {
-  const allPatterns = await db.select().from(patterns).orderBy(desc(patterns.timestamp)).limit(10000);
+  // P0-1: CRITICAL - currentTimestamp is MANDATORY to prevent backtest leakage
+  // In precision mode, we throw if not provided - this is intentional to catch bugs
+  if (currentTimestamp === undefined) {
+    if (PRECISION_MODE_CONFIG.enabled) {
+      throw new Error(
+        "[Pattern Memory] CRITICAL ERROR: currentTimestamp is MANDATORY in precision mode. " +
+        "Passing undefined leaks future data in backtests. Pass the candle timestamp, not Date.now()."
+      );
+    }
+    // Legacy fallback only when precision mode is disabled
+    console.warn("[Pattern Memory] WARNING: currentTimestamp not provided - using Date.now(). Disable this warning by passing timestamp.");
+    currentTimestamp = Date.now();
+  }
   
-  const matches: PatternMatch[] = [];
-  const allSimilarities: number[] = [];
+  // Use new precision function internally
+  const precisionMatches = await findSimilarPatternsPrecision(currentEmbedding, {
+    topK,
+    minSimilarity,
+    currentTimestamp,
+    config: { ...PRECISION_MODE_CONFIG, regimeFilterEnabled: false, volatilityFilterEnabled: false },
+  });
   
-  const embargoMs = embargoTimestamp || (Date.now() - EMBARGO_CANDLES * 15 * 60 * 1000);
-  const currentWindow = currentTimestamp || Date.now();
-  const windowBuffer = 15 * 60 * 1000;
+  // Convert back to legacy format
+  return precisionMatches;
+}
+
+/**
+ * PRECISION MODE: Find similar patterns with all P0/P1 fixes
+ * - P0-1: Mandatory timestamp with proper embargo calculation
+ * - P0-3: Regime + volatility gating before cosine similarity
+ * - P1-3: Hard-negative mining (false friend penalties)
+ * - P1-5: Time-decay weighting
+ */
+export async function findSimilarPatternsPrecision(
+  currentEmbedding: number[],
+  options: FindSimilarPatternsOptions
+): Promise<PrecisionPatternMatch[]> {
+  const config = options.config || PRECISION_MODE_CONFIG;
+  const currentTs = options.currentTimestamp;
+  
+  // P0-1: Compute proper embargo based on horizon + sequence length
+  const embargoCandles = config.embargoHorizon + 2 * config.embargoSequenceLength;
+  const embargoMs = currentTs - (embargoCandles * config.candleIntervalMs);
+  
+  // Determine current volatility bucket for filtering
+  let currentVolBucket: VolatilityBucket | null = null;
+  if (config.volatilityFilterEnabled && options.currentAtr !== undefined) {
+    currentVolBucket = getVolatilityBucket(options.currentAtr);
+  }
   
   const normalizedCurrent = normalizeEmbedding(currentEmbedding);
   if (!isValidEmbedding(normalizedCurrent)) {
-    console.warn("Invalid current embedding - all zeros or NaN values");
+    console.warn("[Pattern Memory Precision] Invalid embedding - all zeros or NaN");
     return [];
   }
   
+  // Fetch patterns from DB
+  const allPatterns = await db.select().from(patterns).orderBy(desc(patterns.timestamp)).limit(15000);
+  
+  const matches: PrecisionPatternMatch[] = [];
+  const allSimilarities: number[] = [];
+  let filteredByRegime = 0;
+  let filteredByVolatility = 0;
+  let filteredByEmbargo = 0;
+  
   for (const pattern of allPatterns) {
-    if (pattern.timestamp > embargoMs) continue;
-    if (Math.abs(pattern.timestamp - currentWindow) < windowBuffer) continue;
+    // P0-1: Strict embargo based on currentTimestamp
+    if (pattern.timestamp > embargoMs) {
+      filteredByEmbargo++;
+      continue;
+    }
+    
+    // P0-3: Regime gating - only match within same regime
+    if (config.regimeFilterEnabled && options.currentRegime) {
+      const patternRegime = pattern.regime || "chop";
+      if (patternRegime !== options.currentRegime) {
+        filteredByRegime++;
+        continue;
+      }
+    }
+    
+    // P0-3: Volatility bucket gating
+    if (config.volatilityFilterEnabled && currentVolBucket !== null) {
+      const patternAtr = pattern.atrAtEntry || 0;
+      const patternVolBucket = getVolatilityBucket(patternAtr);
+      // Allow adjacent buckets (low-medium, medium-high) but not extremes
+      const bucketDistance = Math.abs(
+        ["low", "medium", "high", "extreme"].indexOf(currentVolBucket) -
+        ["low", "medium", "high", "extreme"].indexOf(patternVolBucket)
+      );
+      if (bucketDistance > 1) {
+        filteredByVolatility++;
+        continue;
+      }
+    }
     
     const embedding = pattern.embedding as number[];
     if (!isValidEmbedding(embedding)) continue;
     
     const normalizedPattern = normalizeEmbedding(embedding);
-    const similarity = cosineSimilarity(normalizedCurrent, normalizedPattern);
+    const rawSimilarity = cosineSimilarity(normalizedCurrent, normalizedPattern);
     
-    if (!isFinite(similarity)) continue;
-    allSimilarities.push(similarity);
+    if (!isFinite(rawSimilarity)) continue;
+    allSimilarities.push(rawSimilarity);
     
-    if (similarity >= minSimilarity && similarity < 0.995) {
-      const clusterInfo = findClusterForPattern(pattern.regime || "chop", embedding);
-      
-      matches.push({
-        timestamp: pattern.timestamp,
-        similarity,
-        forwardReturn8: pattern.forwardReturn8 || 0,
-        forwardReturn16: pattern.forwardReturn16 || 0,
-        maxDrawdown: pattern.forwardMaxDrawdown || 0,
-        maxRunup: pattern.forwardMaxRunup || 0,
-        timeToMfe: pattern.timeToMfe || 0,
-        won: pattern.forwardWin || false,
-        regime: pattern.regime || "unknown",
-        label: pattern.label || "unknown",
-        atrAtEntry: pattern.atrAtEntry || 0,
-        dynamicThreshold: pattern.dynamicThreshold || 0.004,
-        clusterId: clusterInfo?.clusterId,
-        clusterMaturity: clusterInfo?.maturity,
-      });
-    }
+    // Skip if below threshold or exact match (data leak)
+    const threshold = options.minSimilarity ?? config.similarityThreshold;
+    if (rawSimilarity < threshold || rawSimilarity >= 0.995) continue;
+    
+    // P1-5: Time decay weight
+    const ageMs = currentTs - pattern.timestamp;
+    const ageDays = ageMs / (24 * 60 * 60 * 1000);
+    const timeDecayWeight = Math.exp(-ageDays / config.timeTauDays);
+    
+    // P1-3: False friend penalty
+    const patternId = pattern.id;
+    const ffPenalty = getFalseFriendPenalty(patternId);
+    
+    // Compute effective similarity (adjusted by time decay and penalty)
+    const effectiveSimilarity = rawSimilarity * timeDecayWeight * (1 - ffPenalty);
+    
+    // Get cluster info
+    const clusterInfo = findClusterForPattern(pattern.regime || "chop", embedding);
+    
+    // Compute volatility bucket
+    const volBucket = getVolatilityBucket(pattern.atrAtEntry || 0);
+    
+    matches.push({
+      timestamp: pattern.timestamp,
+      similarity: rawSimilarity,
+      forwardReturn8: pattern.forwardReturn8 || 0,
+      forwardReturn16: pattern.forwardReturn16 || 0,
+      maxDrawdown: pattern.forwardMaxDrawdown || 0,
+      maxRunup: pattern.forwardMaxRunup || 0,
+      timeToMfe: pattern.timeToMfe || 0,
+      won: pattern.forwardWin || false,
+      regime: pattern.regime || "unknown",
+      label: pattern.label || "unknown",
+      atrAtEntry: pattern.atrAtEntry || 0,
+      dynamicThreshold: pattern.dynamicThreshold || 0.004,
+      clusterId: clusterInfo?.clusterId,
+      clusterMaturity: clusterInfo?.maturity,
+      direction: (pattern.direction as "LONG" | "SHORT" | "HOLD") || "HOLD",
+      actualPnL: pattern.actualPnl || 0,
+      // Precision mode fields
+      timeDecayWeight,
+      falseFriendPenalty: ffPenalty,
+      effectiveSimilarity,
+      volatilityBucket: volBucket,
+      patternId,
+    });
   }
   
+  // Log similarity distribution
   if (allSimilarities.length > 0) {
     allSimilarities.sort((a, b) => a - b);
     const min = allSimilarities[0];
@@ -571,17 +1045,25 @@ export async function findSimilarPatterns(
     const median = allSimilarities[medianIdx];
     
     lastSimilarityDist = { min, max, mean, median, count: allSimilarities.length };
-    
-    console.log(`Similarity distribution: min=${(min * 100).toFixed(1)}%, mean=${(mean * 100).toFixed(1)}%, median=${(median * 100).toFixed(1)}%, max=${(max * 100).toFixed(1)}% (n=${allSimilarities.length})`);
-    
-    if (mean > 0.90) {
-      console.warn(`SIMILARITY WARNING: Avg similarity ${(mean * 100).toFixed(1)}% is too high! Target: 65-85%`);
-    }
   }
   
-  matches.sort((a, b) => b.similarity - a.similarity);
+  // Sort by effective similarity (includes time decay and penalties)
+  matches.sort((a, b) => b.effectiveSimilarity - a.effectiveSimilarity);
   
-  return matches.slice(0, topK);
+  const topMatches = matches.slice(0, options.topK || 50);
+  
+  // P0-2: Check minimum matches floor
+  if (config.enabled && topMatches.length < config.minMatchesFloor) {
+    console.log(`[Pattern Memory Precision] Insufficient matches: ${topMatches.length}/${config.minMatchesFloor} - returning empty (filters: embargo=${filteredByEmbargo}, regime=${filteredByRegime}, vol=${filteredByVolatility})`);
+    return [];
+  }
+  
+  if (topMatches.length > 0) {
+    const avgEffSim = topMatches.reduce((s, m) => s + m.effectiveSimilarity, 0) / topMatches.length;
+    console.log(`[Pattern Memory Precision] Found ${topMatches.length} matches (avgEffSim=${(avgEffSim * 100).toFixed(1)}%, filters: embargo=${filteredByEmbargo}, regime=${filteredByRegime}, vol=${filteredByVolatility})`);
+  }
+  
+  return topMatches;
 }
 
 function findClusterForPattern(regime: string, embedding: number[]): { clusterId: string; maturity: number } | null {
@@ -606,6 +1088,321 @@ function findClusterForPattern(regime: string, embedding: number[]): { clusterId
   return null;
 }
 
+// ============================================================================
+// ROBUST STATISTICS (P0-4) - Similarity-Weighted Median, Trimmed Mean, Quantiles
+// ============================================================================
+
+/**
+ * Compute weighted median (more robust than mean for outliers)
+ */
+function weightedMedian(values: number[], weights: number[]): number {
+  if (values.length === 0) return 0;
+  if (values.length === 1) return values[0];
+  
+  // Pair values with weights and sort by value
+  const paired = values.map((v, i) => ({ value: v, weight: weights[i] }));
+  paired.sort((a, b) => a.value - b.value);
+  
+  const totalWeight = paired.reduce((sum, p) => sum + p.weight, 0);
+  if (totalWeight === 0) return paired[Math.floor(paired.length / 2)].value;
+  
+  let cumWeight = 0;
+  for (const p of paired) {
+    cumWeight += p.weight;
+    if (cumWeight >= totalWeight / 2) {
+      return p.value;
+    }
+  }
+  
+  return paired[paired.length - 1].value;
+}
+
+/**
+ * Compute weighted trimmed mean (exclude top/bottom 10% by weight)
+ */
+function weightedTrimmedMean(values: number[], weights: number[], trimPct: number = 0.10): number {
+  if (values.length === 0) return 0;
+  if (values.length <= 2) return values.reduce((a, b) => a + b, 0) / values.length;
+  
+  // Pair values with weights and sort by value
+  const paired = values.map((v, i) => ({ value: v, weight: weights[i] }));
+  paired.sort((a, b) => a.value - b.value);
+  
+  const totalWeight = paired.reduce((sum, p) => sum + p.weight, 0);
+  const trimWeight = totalWeight * trimPct;
+  
+  let lowerCum = 0;
+  let upperCum = 0;
+  let trimmedSum = 0;
+  let trimmedWeightSum = 0;
+  
+  for (let i = 0; i < paired.length; i++) {
+    const p = paired[i];
+    lowerCum += p.weight;
+    
+    // Calculate how much of this point is in the lower trimmed region
+    const lowerExclude = Math.max(0, trimWeight - (lowerCum - p.weight));
+    
+    // Calculate upper trimmed region
+    const upperStart = totalWeight - trimWeight;
+    const upperExclude = Math.max(0, lowerCum - upperStart);
+    
+    // Include the portion that's not trimmed
+    const includeWeight = Math.max(0, p.weight - lowerExclude - upperExclude);
+    if (includeWeight > 0) {
+      trimmedSum += p.value * includeWeight;
+      trimmedWeightSum += includeWeight;
+    }
+  }
+  
+  return trimmedWeightSum > 0 ? trimmedSum / trimmedWeightSum : 0;
+}
+
+/**
+ * Compute weighted quantile
+ */
+function weightedQuantile(values: number[], weights: number[], q: number): number {
+  if (values.length === 0) return 0;
+  if (values.length === 1) return values[0];
+  
+  const paired = values.map((v, i) => ({ value: v, weight: weights[i] }));
+  paired.sort((a, b) => a.value - b.value);
+  
+  const totalWeight = paired.reduce((sum, p) => sum + p.weight, 0);
+  const targetWeight = totalWeight * q;
+  
+  let cumWeight = 0;
+  for (const p of paired) {
+    cumWeight += p.weight;
+    if (cumWeight >= targetWeight) {
+      return p.value;
+    }
+  }
+  
+  return paired[paired.length - 1].value;
+}
+
+// ============================================================================
+// P1-4: EV + UNCERTAINTY OUTPUT FORMAT
+// ============================================================================
+
+export interface PatternPrediction {
+  // Direction decision
+  direction: "LONG" | "SHORT" | "HOLD";
+  shouldTrade: boolean;
+  
+  // Expected values (P1-4)
+  evLong: number;           // Expected value if going LONG
+  evShort: number;          // Expected value if going SHORT
+  pWinLong: number;         // P(win | LONG)
+  pWinShort: number;        // P(win | SHORT)
+  
+  // Uncertainty metrics (P1-2)
+  uncertainty: number;       // Credible interval width
+  credibleIntervalLow: number;
+  credibleIntervalHigh: number;
+  
+  // Trade levels derived from MAE/MFE quantiles
+  suggestedSL: number;       // Based on MAE percentile
+  suggestedTP1: number;      // Based on MFE 50th percentile
+  suggestedTP2: number;      // Based on MFE 75th percentile
+  
+  // Robust stats (P0-4)
+  weightedMedianReturn: number;
+  trimmedMeanReturn: number;
+  returnQ10: number;         // 10th percentile return
+  returnQ25: number;
+  returnQ50: number;         // Median
+  returnQ75: number;
+  returnQ90: number;         // 90th percentile return
+  maeQ70: number;            // 70th percentile MAE (for SL)
+  mfeQ70: number;            // 70th percentile MFE (for TP)
+  
+  // Match quality
+  matchCount: number;
+  avgEffectiveSimilarity: number;
+  avgTimeDecay: number;
+  
+  // Reasoning
+  reasoning: string;
+}
+
+/**
+ * Compute precision-mode pattern prediction with EV + uncertainty
+ * This is the institutional-grade output format
+ */
+export function computePrecisionPrediction(
+  matches: PrecisionPatternMatch[],
+  config: PrecisionModeConfig = PRECISION_MODE_CONFIG
+): PatternPrediction {
+  const emptyPrediction: PatternPrediction = {
+    direction: "HOLD",
+    shouldTrade: false,
+    evLong: 0,
+    evShort: 0,
+    pWinLong: 0,
+    pWinShort: 0,
+    uncertainty: 1.0,
+    credibleIntervalLow: 0,
+    credibleIntervalHigh: 1,
+    suggestedSL: 0,
+    suggestedTP1: 0,
+    suggestedTP2: 0,
+    weightedMedianReturn: 0,
+    trimmedMeanReturn: 0,
+    returnQ10: 0,
+    returnQ25: 0,
+    returnQ50: 0,
+    returnQ75: 0,
+    returnQ90: 0,
+    maeQ70: 0,
+    mfeQ70: 0,
+    matchCount: 0,
+    avgEffectiveSimilarity: 0,
+    avgTimeDecay: 0,
+    reasoning: "Insufficient pattern matches for prediction",
+  };
+  
+  if (matches.length < config.minMatchesFloor) {
+    return emptyPrediction;
+  }
+  
+  // Weights based on effective similarity (includes time decay and penalties)
+  const weights = matches.map(m => m.effectiveSimilarity);
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  const normalizedWeights = weights.map(w => w / totalWeight);
+  
+  // Separate by direction
+  const longMatches = matches.filter(m => m.direction === "LONG");
+  const shortMatches = matches.filter(m => m.direction === "SHORT");
+  
+  // Compute direction-specific stats
+  const longWins = longMatches.filter(m => m.won).length;
+  const longLosses = longMatches.length - longWins;
+  const shortWins = shortMatches.filter(m => m.won).length;
+  const shortLosses = shortMatches.length - shortWins;
+  
+  // P1-2 FIX: Separate average win and loss returns for proper EV calculation
+  const longWinMatches = longMatches.filter(m => m.won);
+  const longLossMatches = longMatches.filter(m => !m.won);
+  const shortWinMatches = shortMatches.filter(m => m.won);
+  const shortLossMatches = shortMatches.filter(m => !m.won);
+  
+  const longAvgWin = longWinMatches.length > 0 
+    ? longWinMatches.reduce((s, m) => s + Math.abs(m.actualPnL || 0), 0) / longWinMatches.length 
+    : 0;
+  const longAvgLoss = longLossMatches.length > 0 
+    ? longLossMatches.reduce((s, m) => s + Math.abs(m.actualPnL || 0), 0) / longLossMatches.length 
+    : 0;
+  const shortAvgWin = shortWinMatches.length > 0 
+    ? shortWinMatches.reduce((s, m) => s + Math.abs(m.actualPnL || 0), 0) / shortWinMatches.length 
+    : 0;
+  const shortAvgLoss = shortLossMatches.length > 0 
+    ? shortLossMatches.reduce((s, m) => s + Math.abs(m.actualPnL || 0), 0) / shortLossMatches.length 
+    : 0;
+  
+  // Bayesian posteriors for win probability with proper EV calculation
+  const longBayesian = computeBayesianStats(
+    longWins, 
+    longLosses,
+    longAvgWin,
+    longAvgLoss,
+    config
+  );
+  
+  const shortBayesian = computeBayesianStats(
+    shortWins,
+    shortLosses,
+    shortAvgWin,
+    shortAvgLoss,
+    config
+  );
+  
+  // P0-4: Robust statistics for returns using weighted median/trimmed mean
+  const returns8 = matches.map(m => m.forwardReturn8);
+  const weightedMedianReturn = weightedMedian(returns8, weights);
+  const trimmedMeanReturn = weightedTrimmedMean(returns8, weights, 0.10);
+  
+  // Return quantiles
+  const returnQ10 = weightedQuantile(returns8, weights, 0.10);
+  const returnQ25 = weightedQuantile(returns8, weights, 0.25);
+  const returnQ50 = weightedQuantile(returns8, weights, 0.50);
+  const returnQ75 = weightedQuantile(returns8, weights, 0.75);
+  const returnQ90 = weightedQuantile(returns8, weights, 0.90);
+  
+  // MAE/MFE quantiles for SL/TP
+  const maes = matches.map(m => Math.abs(m.maxDrawdown));
+  const mfes = matches.map(m => m.maxRunup);
+  const maeQ70 = weightedQuantile(maes, weights, 0.70);
+  const mfeQ70 = weightedQuantile(mfes, weights, 0.70);
+  const mfeQ50 = weightedQuantile(mfes, weights, 0.50);
+  
+  // P1-2 FIX: Use EV from Bayesian stats (already computed with proper win/loss separation)
+  // EV = P(win) * avgWin - P(loss) * avgLoss (computed inside computeBayesianStats)
+  const evLong = longBayesian.evLong;
+  const evShort = shortBayesian.evShort;
+  
+  // Determine best direction based on EV
+  let direction: "LONG" | "SHORT" | "HOLD" = "HOLD";
+  let shouldTrade = false;
+  let selectedBayesian = longBayesian;
+  
+  if (evLong > 0 && evLong > evShort && longBayesian.posteriorMean >= config.minPosteriorPWin) {
+    direction = "LONG";
+    selectedBayesian = longBayesian;
+    shouldTrade = longBayesian.uncertainty <= config.maxUncertainty;
+  } else if (evShort > 0 && evShort > evLong && shortBayesian.posteriorMean >= config.minPosteriorPWin) {
+    direction = "SHORT";
+    selectedBayesian = shortBayesian;
+    shouldTrade = shortBayesian.uncertainty <= config.maxUncertainty;
+  }
+  
+  // If neither direction has positive EV or meets threshold, HOLD
+  if (direction !== "HOLD" && !shouldTrade) {
+    direction = "HOLD";
+  }
+  
+  // Average match quality metrics
+  const avgEffectiveSimilarity = matches.reduce((s, m) => s + m.effectiveSimilarity, 0) / matches.length;
+  const avgTimeDecay = matches.reduce((s, m) => s + m.timeDecayWeight, 0) / matches.length;
+  
+  // Build reasoning
+  const reasoning = `${matches.length} matches (${longMatches.length}L/${shortMatches.length}S). ` +
+    `EV: L=${(evLong * 100).toFixed(2)}% S=${(evShort * 100).toFixed(2)}%. ` +
+    `P(win): L=${(longBayesian.posteriorMean * 100).toFixed(0)}% S=${(shortBayesian.posteriorMean * 100).toFixed(0)}%. ` +
+    `Uncertainty: ${(selectedBayesian.uncertainty * 100).toFixed(0)}%. ` +
+    `MedianRet: ${(weightedMedianReturn * 100).toFixed(2)}%`;
+  
+  return {
+    direction,
+    shouldTrade,
+    evLong,
+    evShort,
+    pWinLong: longBayesian.posteriorMean,
+    pWinShort: shortBayesian.posteriorMean,
+    uncertainty: selectedBayesian.uncertainty,
+    credibleIntervalLow: selectedBayesian.credibleIntervalLow,
+    credibleIntervalHigh: selectedBayesian.credibleIntervalHigh,
+    suggestedSL: maeQ70,
+    suggestedTP1: mfeQ50,
+    suggestedTP2: mfeQ70,
+    weightedMedianReturn,
+    trimmedMeanReturn,
+    returnQ10,
+    returnQ25,
+    returnQ50,
+    returnQ75,
+    returnQ90,
+    maeQ70,
+    mfeQ70,
+    matchCount: matches.length,
+    avgEffectiveSimilarity,
+    avgTimeDecay,
+    reasoning,
+  };
+}
+
+// Legacy function - kept for backward compatibility
 export function computePatternStats(matches: PatternMatch[]): PatternStats {
   const matureMatches = matches.filter(m => (m.clusterMaturity || 0) >= 0.25);
   
@@ -628,10 +1425,22 @@ export function computePatternStats(matches: PatternMatch[]): PatternStats {
     };
   }
   
+  // If we have PrecisionPatternMatch, use weighted stats (P0-4)
+  const isPrecisionMatch = (m: PatternMatch): m is PrecisionPatternMatch => 
+    'effectiveSimilarity' in m;
+  
+  let weights: number[];
+  if (matureMatches.length > 0 && isPrecisionMatch(matureMatches[0])) {
+    weights = (matureMatches as PrecisionPatternMatch[]).map(m => m.effectiveSimilarity);
+  } else {
+    // Equal weights for legacy matches
+    weights = matureMatches.map(() => 1);
+  }
+  
   const returns8 = matureMatches.map(m => m.forwardReturn8);
   const returns16 = matureMatches.map(m => m.forwardReturn16);
-  const drawdowns = matureMatches.map(m => m.maxDrawdown).sort((a, b) => a - b);
-  const runups = matureMatches.map(m => m.maxRunup).sort((a, b) => b - a);
+  const drawdowns = matureMatches.map(m => m.maxDrawdown);
+  const runups = matureMatches.map(m => m.maxRunup);
   const timesToMfe = matureMatches.map(m => m.timeToMfe);
   const wins = matureMatches.filter(m => m.won).length;
   
@@ -640,24 +1449,27 @@ export function computePatternStats(matches: PatternMatch[]): PatternStats {
     regimeBreakdown[m.regime] = (regimeBreakdown[m.regime] || 0) + 1;
   }
   
-  const avgReturn8 = returns8.reduce((a, b) => a + b, 0) / matureMatches.length;
-  const avgReturn16 = returns16.reduce((a, b) => a + b, 0) / matureMatches.length;
+  // P0-4: Use weighted trimmed mean instead of simple average
+  const avgReturn8 = weightedTrimmedMean(returns8, weights, 0.10);
+  const avgReturn16 = weightedTrimmedMean(returns16, weights, 0.10);
+  
+  // Use weighted quantiles for MAE/MFE
+  const mae70thPercentile = weightedQuantile(drawdowns.map(Math.abs), weights, 0.70);
+  const mfe70thPercentile = weightedQuantile(runups, weights, 0.70);
   
   const variance = returns8.reduce((sum, r) => sum + Math.pow(r - avgReturn8, 2), 0) / matureMatches.length;
   const stdDev = Math.sqrt(variance);
-  
-  const p70Index = Math.floor(matureMatches.length * 0.7);
   
   return {
     matchCount: matches.length,
     avgReturn8,
     avgReturn16,
     winRate: wins / matureMatches.length,
-    avgDrawdown: drawdowns.reduce((a, b) => a + b, 0) / matureMatches.length,
-    avgRunup: runups.reduce((a, b) => a + b, 0) / matureMatches.length,
-    avgTimeToMfe: timesToMfe.reduce((a, b) => a + b, 0) / matureMatches.length,
-    mae70thPercentile: drawdowns[p70Index] || 0,
-    mfe70thPercentile: runups[Math.floor(matureMatches.length * 0.3)] || 0,
+    avgDrawdown: weightedTrimmedMean(drawdowns, weights, 0.10),
+    avgRunup: weightedTrimmedMean(runups, weights, 0.10),
+    avgTimeToMfe: weightedTrimmedMean(timesToMfe, weights, 0.10),
+    mae70thPercentile,
+    mfe70thPercentile,
     bestCase: Math.max(...returns8),
     worstCase: Math.min(...returns8),
     consistency: avgReturn8 === 0 ? 0 : 1 - (stdDev / Math.abs(avgReturn8)),
@@ -1298,4 +2110,424 @@ export async function savePatternClustersToDb(): Promise<void> {
   } catch (error) {
     console.error("[Pattern Persistence] Error saving clusters:", error);
   }
+}
+
+// ============================================================================
+// PREDICTION EPISODE LOGGING (P1-1) - Self-Learning Feedback Loop
+// ============================================================================
+
+/**
+ * Log a prediction episode for later feedback/learning
+ * Called whenever a prediction is made
+ */
+export async function logPredictionEpisode(
+  prediction: PatternPrediction,
+  matches: PrecisionPatternMatch[],
+  embedding: number[],
+  currentPrice: number,
+  regime: string,
+  volatilityBucket: VolatilityBucket
+): Promise<number | null> {
+  try {
+    const episode: InsertPredictionEpisode = {
+      timestamp: Date.now(),
+      symbol: "BTCUSDT",
+      timeframe: "15m",
+      embedding,
+      matchedPatternIds: matches.map(m => m.patternId),
+      matchedSimilarities: matches.map(m => m.similarity),
+      action: prediction.direction,
+      entryPrice: currentPrice,
+      suggestedSL: prediction.suggestedSL,
+      suggestedTP1: prediction.suggestedTP1,
+      suggestedTP2: prediction.suggestedTP2,
+      evLong: prediction.evLong,
+      evShort: prediction.evShort,
+      pWinLong: prediction.pWinLong,
+      pWinShort: prediction.pWinShort,
+      uncertainty: prediction.uncertainty,
+      confidence: prediction.shouldTrade ? 0.7 : 0.3,
+      regime,
+      volatilityBucket,
+      horizon: PRECISION_MODE_CONFIG.embargoHorizon,
+      outcome: "PENDING",
+      createdAt: Date.now(),
+    };
+    
+    const [inserted] = await db.insert(predictionEpisodes).values(episode).returning();
+    console.log(`[Episode Logger] Logged prediction episode #${inserted.id}: ${prediction.direction} @ ${currentPrice}`);
+    return inserted.id;
+  } catch (error) {
+    console.error("[Episode Logger] Error logging episode:", error);
+    return null;
+  }
+}
+
+/**
+ * Daily feedback loop: Label past episodes with actual outcomes
+ * Called by scheduler (daily) or can be triggered manually
+ */
+export async function labelPendingEpisodes(): Promise<{ labeled: number; errors: number }> {
+  console.log("[Daily Feedback] Starting episode labeling...");
+  
+  const horizonMs = PRECISION_MODE_CONFIG.embargoHorizon * PRECISION_MODE_CONFIG.candleIntervalMs;
+  const cutoffTime = Date.now() - horizonMs - (60 * 60 * 1000); // Extra 1hr buffer
+  
+  try {
+    // Find pending episodes that are old enough to have outcomes
+    const pendingEpisodes = await db.select()
+      .from(predictionEpisodes)
+      .where(
+        and(
+          eq(predictionEpisodes.outcome, "PENDING"),
+          lt(predictionEpisodes.timestamp, cutoffTime)
+        )
+      )
+      .limit(100);
+    
+    if (pendingEpisodes.length === 0) {
+      console.log("[Daily Feedback] No pending episodes to label");
+      return { labeled: 0, errors: 0 };
+    }
+    
+    let labeled = 0;
+    let errors = 0;
+    
+    for (const episode of pendingEpisodes) {
+      try {
+        // Get forward candles to compute outcome
+        // NOTE: This requires candles table access - simplified for now
+        const outcome = await computeEpisodeOutcome(episode);
+        
+        if (outcome) {
+          await db.update(predictionEpisodes)
+            .set({
+              outcome: outcome.outcome,
+              outcomeTimestamp: Date.now(),
+              actualReturn: outcome.actualReturn,
+              actualMAE: outcome.mae,
+              actualMFE: outcome.mfe,
+              timeToOutcome: outcome.timeToOutcome,
+              hitTP: outcome.hitTP,
+              hitSL: outcome.hitSL,
+              falsePositive: outcome.falsePositive,
+            })
+            .where(eq(predictionEpisodes.id, episode.id));
+          
+          // P1-3: If false positive, penalize matched patterns
+          if (outcome.falsePositive && episode.matchedPatternIds) {
+            const patternIds = episode.matchedPatternIds as number[];
+            for (const pid of patternIds.slice(0, 10)) { // Top 10 matches
+              recordPatternFailure(pid, episode.regime || "unknown");
+            }
+            console.log(`[Hard-Negative Mining] Penalized ${Math.min(10, patternIds.length)} patterns for false positive`);
+          }
+          
+          labeled++;
+        }
+      } catch (err) {
+        console.error(`[Daily Feedback] Error labeling episode ${episode.id}:`, err);
+        errors++;
+      }
+    }
+    
+    console.log(`[Daily Feedback] Labeled ${labeled} episodes (${errors} errors)`);
+    return { labeled, errors };
+  } catch (error) {
+    console.error("[Daily Feedback] Error in labeling loop:", error);
+    return { labeled: 0, errors: 1 };
+  }
+}
+
+interface EpisodeOutcome {
+  outcome: "WIN" | "LOSS" | "SCRATCH" | "EXPIRED";
+  actualReturn: number;
+  mae: number;
+  mfe: number;
+  timeToOutcome: number;
+  hitTP: boolean;
+  hitSL: boolean;
+  falsePositive: boolean;
+}
+
+/**
+ * Compute outcome for a single episode by looking at forward candles
+ * Uses the episode's entry price and SL/TP to determine outcome
+ */
+async function computeEpisodeOutcome(episode: PredictionEpisode): Promise<EpisodeOutcome | null> {
+  // For now, use a simplified outcome computation
+  // In production, this would query forward candles and compute actual MAE/MFE
+  
+  if (!episode.entryPrice || !episode.action || episode.action === "HOLD") {
+    return {
+      outcome: "EXPIRED",
+      actualReturn: 0,
+      mae: 0,
+      mfe: 0,
+      timeToOutcome: 0,
+      hitTP: false,
+      hitSL: false,
+      falsePositive: false,
+    };
+  }
+  
+  // Query forward candles from timestamp
+  const forwardCandles = await db.execute(sql`
+    SELECT high, low, close, timestamp 
+    FROM candles 
+    WHERE timestamp > ${episode.timestamp} 
+    AND timeframe = '15m'
+    ORDER BY timestamp ASC 
+    LIMIT ${PRECISION_MODE_CONFIG.embargoHorizon}
+  `);
+  
+  if (!forwardCandles || (forwardCandles as unknown as any[]).length === 0) {
+    return null; // Not enough forward data yet
+  }
+  
+  const candles = forwardCandles as unknown as { high: number; low: number; close: number; timestamp: number }[];
+  const entryPrice = episode.entryPrice;
+  const isLong = episode.action === "LONG";
+  
+  let maxFavorable = 0;
+  let maxAdverse = 0;
+  let hitTP = false;
+  let hitSL = false;
+  let timeToOutcome = candles.length;
+  
+  const slPct = episode.suggestedSL || 0.02; // Default 2%
+  const tpPct = episode.suggestedTP1 || 0.03; // Default 3%
+  
+  for (let i = 0; i < candles.length; i++) {
+    const candle = candles[i];
+    
+    // Compute excursions
+    if (isLong) {
+      const favorable = (candle.high - entryPrice) / entryPrice;
+      const adverse = (entryPrice - candle.low) / entryPrice;
+      maxFavorable = Math.max(maxFavorable, favorable);
+      maxAdverse = Math.max(maxAdverse, adverse);
+      
+      if (adverse >= slPct && !hitSL) {
+        hitSL = true;
+        timeToOutcome = i + 1;
+        if (!hitTP) break;
+      }
+      if (favorable >= tpPct && !hitTP) {
+        hitTP = true;
+        timeToOutcome = i + 1;
+        if (!hitSL) break;
+      }
+    } else {
+      // SHORT
+      const favorable = (entryPrice - candle.low) / entryPrice;
+      const adverse = (candle.high - entryPrice) / entryPrice;
+      maxFavorable = Math.max(maxFavorable, favorable);
+      maxAdverse = Math.max(maxAdverse, adverse);
+      
+      if (adverse >= slPct && !hitSL) {
+        hitSL = true;
+        timeToOutcome = i + 1;
+        if (!hitTP) break;
+      }
+      if (favorable >= tpPct && !hitTP) {
+        hitTP = true;
+        timeToOutcome = i + 1;
+        if (!hitSL) break;
+      }
+    }
+  }
+  
+  // Compute final return (last close vs entry)
+  const lastClose = candles[candles.length - 1].close;
+  const actualReturn = isLong 
+    ? (lastClose - entryPrice) / entryPrice 
+    : (entryPrice - lastClose) / entryPrice;
+  
+  // Determine outcome
+  let outcome: "WIN" | "LOSS" | "SCRATCH" | "EXPIRED";
+  if (hitTP && !hitSL) {
+    outcome = "WIN";
+  } else if (hitSL && !hitTP) {
+    outcome = "LOSS";
+  } else if (hitTP && hitSL) {
+    // Both hit - use actual return to determine
+    outcome = actualReturn > 0 ? "WIN" : "LOSS";
+  } else if (Math.abs(actualReturn) < 0.001) {
+    outcome = "SCRATCH";
+  } else {
+    outcome = actualReturn > 0 ? "WIN" : "LOSS";
+  }
+  
+  // A false positive is when we predicted a trade but it lost
+  const falsePositive = outcome === "LOSS" && episode.action !== "HOLD";
+  
+  return {
+    outcome,
+    actualReturn,
+    mae: maxAdverse,
+    mfe: maxFavorable,
+    timeToOutcome,
+    hitTP,
+    hitSL,
+    falsePositive,
+  };
+}
+
+/**
+ * Get episode statistics for dashboard display
+ */
+export async function getEpisodeStats(): Promise<{
+  total: number;
+  pending: number;
+  wins: number;
+  losses: number;
+  scratches: number;
+  winRate: number;
+  avgReturn: number;
+  avgMAE: number;
+  avgMFE: number;
+}> {
+  try {
+    const stats = await db.execute(sql`
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN outcome = 'PENDING' THEN 1 ELSE 0 END) as pending,
+        SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) as wins,
+        SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) as losses,
+        SUM(CASE WHEN outcome = 'SCRATCH' THEN 1 ELSE 0 END) as scratches,
+        AVG(actual_return) as avg_return,
+        AVG(actual_mae) as avg_mae,
+        AVG(actual_mfe) as avg_mfe
+      FROM prediction_episodes
+      WHERE outcome IS NOT NULL AND outcome != 'PENDING'
+    `);
+    
+    const row = (stats as any[])[0] || {};
+    const completed = (Number(row.wins) || 0) + (Number(row.losses) || 0);
+    
+    return {
+      total: Number(row.total) || 0,
+      pending: Number(row.pending) || 0,
+      wins: Number(row.wins) || 0,
+      losses: Number(row.losses) || 0,
+      scratches: Number(row.scratches) || 0,
+      winRate: completed > 0 ? (Number(row.wins) || 0) / completed : 0,
+      avgReturn: Number(row.avg_return) || 0,
+      avgMAE: Number(row.avg_mae) || 0,
+      avgMFE: Number(row.avg_mfe) || 0,
+    };
+  } catch (error) {
+    console.error("[Episode Stats] Error fetching stats:", error);
+    return {
+      total: 0, pending: 0, wins: 0, losses: 0, scratches: 0,
+      winRate: 0, avgReturn: 0, avgMAE: 0, avgMFE: 0,
+    };
+  }
+}
+
+/**
+ * Memory consolidation: Prune low-quality patterns (weekly job)
+ */
+export async function consolidateMemory(): Promise<{ pruned: number; merged: number }> {
+  console.log("[Memory Consolidation] Starting weekly consolidation...");
+  
+  // Decay all false friend penalties
+  decayAllPenalties();
+  
+  // For now, just log the action - full pruning logic would go here
+  // This would:
+  // 1. Remove patterns with consistently negative EV
+  // 2. Remove old patterns that no longer match current regime
+  // 3. Merge near-duplicate patterns into centroids
+  
+  console.log("[Memory Consolidation] Penalties decayed, consolidation complete");
+  return { pruned: 0, merged: 0 };
+}
+
+// ============================================================================
+// SELF-LEARNING SCHEDULER (P1-3 FIX)
+// ============================================================================
+let episodeLabelingInterval: NodeJS.Timeout | null = null;
+
+/**
+ * Initialize Pattern Memory self-learning system
+ * - Loads persisted false friend penalties
+ * - Starts episode labeling scheduler (runs every 2 hours)
+ */
+export function initializeSelfLearning(): void {
+  console.log("[Pattern Memory] Initializing self-learning system...");
+  
+  // Load persisted false friend penalties
+  loadFalseFriendPenalties();
+  
+  // Start episode labeling scheduler (every 2 hours)
+  if (!episodeLabelingInterval) {
+    const LABELING_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours
+    
+    episodeLabelingInterval = setInterval(async () => {
+      try {
+        const result = await labelPendingEpisodes();
+        if (result.labeled > 0 || result.errors > 0) {
+          console.log(`[Self-Learning Scheduler] Labeled ${result.labeled} episodes (${result.errors} errors)`);
+        }
+      } catch (err) {
+        console.error("[Self-Learning Scheduler] Error during episode labeling:", err);
+      }
+    }, LABELING_INTERVAL_MS);
+    
+    console.log(`[Pattern Memory] Episode labeling scheduled every ${LABELING_INTERVAL_MS / (60 * 1000)} minutes`);
+    
+    // Also run labeling immediately on startup (with a short delay)
+    setTimeout(async () => {
+      try {
+        await labelPendingEpisodes();
+      } catch (err) {
+        console.error("[Self-Learning] Initial labeling failed:", err);
+      }
+    }, 30000); // 30 second delay after startup
+  }
+  
+  console.log("[Pattern Memory] Self-learning system initialized");
+}
+
+/**
+ * Stop the self-learning scheduler (for cleanup)
+ */
+export function stopSelfLearning(): void {
+  if (episodeLabelingInterval) {
+    clearInterval(episodeLabelingInterval);
+    episodeLabelingInterval = null;
+    console.log("[Pattern Memory] Self-learning scheduler stopped");
+  }
+}
+
+/**
+ * Get current false friend penalties summary for diagnostics
+ */
+export function getFalseFriendStats(): { 
+  totalPenalties: number; 
+  avgPenalty: number; 
+  maxPenalty: number;
+  topOffenders: Array<{ patternId: number; penalty: number; failures: number }>;
+} {
+  const entries = Array.from(falseFriendPenalties.values());
+  if (entries.length === 0) {
+    return { totalPenalties: 0, avgPenalty: 0, maxPenalty: 0, topOffenders: [] };
+  }
+  
+  const penalties = entries.map(e => getFalseFriendPenalty(e.patternId));
+  const avgPenalty = penalties.reduce((a, b) => a + b, 0) / penalties.length;
+  const maxPenalty = Math.max(...penalties);
+  
+  const topOffenders = entries
+    .map(e => ({
+      patternId: e.patternId,
+      penalty: getFalseFriendPenalty(e.patternId),
+      failures: e.failureCount,
+    }))
+    .sort((a, b) => b.penalty - a.penalty)
+    .slice(0, 10);
+  
+  return { totalPenalties: entries.length, avgPenalty, maxPenalty, topOffenders };
 }

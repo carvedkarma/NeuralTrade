@@ -931,7 +931,8 @@ export class StrategyLearner {
     let patternSupport = 0;
     
     try {
-      const patternMatches = await findSimilarPatterns(feature.embedding, 20);  // Uses MIN_SIMILARITY_THRESHOLD (0.75)
+      // P0-1 FIX: Pass feature.timestamp to prevent backtest leakage
+      const patternMatches = await findSimilarPatterns(feature.embedding, 20, undefined, undefined, feature.timestamp);
       if (patternMatches.length > 0) {
         patternSupport = patternMatches.length;
         const wins = patternMatches.filter(p => p.won).length;

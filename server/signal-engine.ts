@@ -271,7 +271,8 @@ export async function generateShotPlan(
     getSentimentData()
   ]);
   
-  const patternMatches = await findSimilarPatterns(feature.embedding, 20);  // Uses MIN_SIMILARITY_THRESHOLD (0.75)
+  // P0-1 FIX: Pass feature.timestamp to prevent backtest leakage
+  const patternMatches = await findSimilarPatterns(feature.embedding, 20, undefined, undefined, feature.timestamp);
   const patternStats = computePatternStats(patternMatches);
   
   const reasons: string[] = [];

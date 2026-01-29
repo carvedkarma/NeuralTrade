@@ -521,8 +521,66 @@ export const patterns = pgTable("patterns", {
   actualPnl: real("actual_pnl"),
   createdAt: bigint("created_at", { mode: "number" }),  // Epoch ms when pattern was stored
   trainingWindow: varchar("training_window", { length: 20 }),  // "train" or "test" split
+  volatilityBucket: varchar("volatility_bucket", { length: 10 }),  // P0-3: low/medium/high/extreme
+  falseFriendPenalty: real("false_friend_penalty"),  // P1-3: accumulated penalty from failed predictions
 }, (table) => ({
   timestampIdx: index("patterns_timestamp_idx").on(table.timestamp),
+}));
+
+// ============================================================================
+// PREDICTION EPISODES (P1-1) - Self-Learning Feedback Loop
+// Every prediction is logged with matched patterns, then labeled with outcome
+// ============================================================================
+export const predictionEpisodes = pgTable("prediction_episodes", {
+  id: serial("id").primaryKey(),
+  timestamp: bigint("timestamp", { mode: "number" }).notNull(),  // Candle being predicted
+  symbol: varchar("symbol", { length: 20 }).default("BTCUSDT"),
+  timeframe: varchar("timeframe", { length: 10 }).default("15m"),
+  
+  // Embedding used for prediction
+  embedding: jsonb("embedding"),
+  
+  // Matched patterns (array of pattern IDs)
+  matchedPatternIds: jsonb("matched_pattern_ids"),  // number[]
+  matchedSimilarities: jsonb("matched_similarities"),  // number[]
+  
+  // Prediction output
+  action: varchar("action", { length: 10 }),  // LONG, SHORT, HOLD
+  entryPrice: real("entry_price"),
+  suggestedSL: real("suggested_sl"),
+  suggestedTP1: real("suggested_tp1"),
+  suggestedTP2: real("suggested_tp2"),
+  
+  // Prediction metrics
+  evLong: real("ev_long"),
+  evShort: real("ev_short"),
+  pWinLong: real("p_win_long"),
+  pWinShort: real("p_win_short"),
+  uncertainty: real("uncertainty"),
+  confidence: real("confidence"),
+  
+  // Context
+  regime: varchar("regime", { length: 20 }),
+  volatilityBucket: varchar("volatility_bucket", { length: 10 }),
+  horizon: integer("horizon").default(8),  // Forward candles for outcome
+  
+  // Outcome (filled later by daily feedback loop)
+  outcome: varchar("outcome", { length: 20 }),  // WIN, LOSS, SCRATCH, PENDING
+  outcomeTimestamp: bigint("outcome_timestamp", { mode: "number" }),
+  actualReturn: real("actual_return"),
+  actualMAE: real("actual_mae"),  // Max Adverse Excursion
+  actualMFE: real("actual_mfe"),  // Max Favorable Excursion
+  timeToOutcome: integer("time_to_outcome"),  // Candles until SL/TP hit
+  hitTP: boolean("hit_tp"),
+  hitSL: boolean("hit_sl"),
+  
+  // For hard-negative mining (P1-3)
+  falsePositive: boolean("false_positive"),  // Did matched patterns mislead?
+  
+  createdAt: bigint("created_at", { mode: "number" }),
+}, (table) => ({
+  timestampIdx: index("prediction_episodes_timestamp_idx").on(table.timestamp),
+  outcomeIdx: index("prediction_episodes_outcome_idx").on(table.outcome),
 }));
 
 export const signals = pgTable("signals", {
@@ -779,6 +837,7 @@ export const insertPatternClusterSchema = createInsertSchema(patternClusters).om
 export const insertSocialMediaStatsSchema = createInsertSchema(socialMediaStats).omit({ id: true });
 export const insertBackfillJobSchema = createInsertSchema(backfillJobs).omit({ id: true });
 export const insertStrategyLearnerStateSchema = createInsertSchema(strategyLearnerState).omit({ id: true });
+export const insertPredictionEpisodeSchema = createInsertSchema(predictionEpisodes).omit({ id: true });
 
 export type InsertCandle = z.infer<typeof insertCandleSchema>;
 export type InsertFeature = z.infer<typeof insertFeatureSchema>;
@@ -810,3 +869,5 @@ export type PatternCluster = typeof patternClusters.$inferSelect;
 export type SocialMediaStats = typeof socialMediaStats.$inferSelect;
 export type BackfillJob = typeof backfillJobs.$inferSelect;
 export type StrategyLearnerState = typeof strategyLearnerState.$inferSelect;
+export type InsertPredictionEpisode = z.infer<typeof insertPredictionEpisodeSchema>;
+export type PredictionEpisode = typeof predictionEpisodes.$inferSelect;

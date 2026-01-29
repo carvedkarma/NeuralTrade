@@ -260,7 +260,8 @@ function ruleBasedPredict(feature: FeatureVector): MLPrediction {
 // Lower thresholds (0.6) include weak matches causing false positives
 async function patternBasedPredict(feature: FeatureVector): Promise<MLPrediction> {
   try {
-    const matches = await findSimilarPatterns(feature.embedding, 50, 0.82);
+    // P0-1 FIX: Pass feature.timestamp to prevent backtest leakage
+    const matches = await findSimilarPatterns(feature.embedding, 50, 0.82, undefined, feature.timestamp);
     const stats = computePatternStats(matches);
     const totalMatches = matches.length;
     

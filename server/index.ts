@@ -5,6 +5,7 @@ import { createServer } from "http";
 import { checkIncompleteBackfillJobs, backfillHistoricalData } from "./historical-data";
 import { loadPaperState } from "./paper/config";
 import { loadCandleTimestamps } from "./unified-learning-controller";
+import { initializeSelfLearning } from "./pattern-memory";
 
 const app = express();
 const httpServer = createServer(app);
@@ -103,6 +104,9 @@ app.use((req, res, next) => {
         return loadCandleTimestamps();
       }).then(() => {
         return initializeStrategyLearner();
+      }).then(() => {
+        // Initialize Pattern Memory self-learning system
+        initializeSelfLearning();
       }).then(() => {
         return checkIncompleteBackfillJobs();
       }).then(async (result) => {

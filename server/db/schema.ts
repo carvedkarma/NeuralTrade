@@ -14,6 +14,7 @@ export {
   socialMediaStats,
   backfillJobs,
   strategyLearnerState,
+  predictionEpisodes,
   insertCandleSchema,
   insertFeatureSchema,
   insertPatternSchema,
@@ -28,6 +29,7 @@ export {
   insertSocialMediaStatsSchema,
   insertBackfillJobSchema,
   insertStrategyLearnerStateSchema,
+  insertPredictionEpisodeSchema,
   type InsertCandle,
   type InsertFeature,
   type InsertPattern,
@@ -57,4 +59,6 @@ export {
   type SocialMediaStats,
   type BackfillJob,
   type StrategyLearnerState,
+  type InsertPredictionEpisode,
+  type PredictionEpisode,
 } from "@shared/schema";

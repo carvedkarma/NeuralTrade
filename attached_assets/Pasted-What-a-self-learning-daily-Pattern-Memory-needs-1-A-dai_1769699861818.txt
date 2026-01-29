@@ -1,0 +1,205 @@
+What a “self-learning daily” Pattern Memory needs
+1) A daily feedback loop (ground truth)
+
+Every prediction your system makes must later be labeled with what actually happened:
+
+direction outcome (win/loss)
+
+realized MAE/MFE (how far it went against / in favor)
+
+realized time-to-hit TP/SL
+
+realized volatility regime
+
+✅ Without this, Pattern Memory can’t learn; it only stores.
+
+2) Store “prediction episodes” separately from patterns
+
+Right now you store patterns and clusters. You also need a table/log for:
+PredictionEpisode
+
+timestamp, symbol, timeframe
+
+embedding used
+
+matched pattern IDs + similarity scores
+
+chosen action + entry/SL/TP
+
+horizon
+
+outcome (filled later)
+
+This lets you answer:
+
+“Which matches caused losses?”
+
+“Which patterns are consistently misleading?”
+
+“Which regimes are we bad at?”
+
+This is mandatory for a true self-learning system.
+
+3) Hard-negative mining (daily)
+
+This is the single most powerful precision booster.
+
+Daily job:
+
+find losing episodes
+
+take the top-K matched patterns that contributed
+
+mark them as “false friends” for that regime/volatility bucket
+
+increase their penalty weight
+
+Effect:
+
+the system learns what not to match, which is what precision really is.
+
+4) Bayesian reliability scoring per cluster (daily)
+
+For each cluster/pattern group maintain:
+
+wins, losses, average EV
+
+posterior P(win) using Beta distribution
+
+uncertainty (credible interval width)
+
+Daily job:
+
+update posteriors using new episodes
+
+decrease trust in clusters whose posterior worsens
+
+increase trust in stable clusters
+
+Then during prediction:
+
+cluster weight = similarity * posterior_mean * (1 - uncertainty)
+
+That’s how you get “precision mode” automatically.
+
+5) Memory consolidation + pruning (weekly/daily)
+
+If you keep storing every pattern, precision eventually drops (noise dominates).
+
+Daily/weekly job:
+
+remove patterns that:
+
+are old and no longer match current regime
+
+have consistently negative EV
+
+are redundant duplicates
+
+merge near-duplicates into centroids
+
+This prevents “memory bloat”.
+
+6) Regime-specific memory banks (huge precision gain)
+
+Instead of one memory, maintain separate banks:
+
+trend-up
+
+trend-down
+
+chop
+
+breakout
+
+high-vol panic
+
+low-vol grind
+
+When predicting:
+
+select the bank first (from your regime detector)
+
+only retrieve inside that bank
+
+This eliminates “wrong universe matches” — the biggest cause of false positives.
+
+7) Two-tier multi-asset memory (do this only after the above)
+
+Should you train pattern memory on other assets too?
+
+✅ Yes — but only as a secondary memory with strict gating.
+
+Tier 1: BTC-only patterns (primary)
+Tier 2: ETH/SOL/BNB/etc patterns (secondary), allowed only if:
+
+correlation with BTC is currently high
+
+same regime bucket
+
+volatility normalized
+
+apply an “asset penalty” so BTC matches always win if available
+
+This improves coverage of rare structures without poisoning BTC.
+
+The daily “self-learning” schedule (simple & elite)
+Every 15 minutes (optional)
+
+ingest latest candles
+
+store candidate patterns (if quality filter passes)
+
+Daily (most important)
+
+Label yesterday’s episodes
+
+Update cluster Bayesian posteriors
+
+Hard-negative mining (penalize false friends)
+
+Refresh ANN index/cache
+
+Generate a “precision report” per regime
+
+Weekly
+
+prune/merge memory
+
+The one thing you must add to avoid self-learning going wrong
+
+Guardrails.
+
+A self-learning system can drift if it learns from:
+
+bad data
+
+extreme events
+
+regime changes
+
+So add:
+
+data integrity gate (don’t learn when feed is incomplete)
+
+outlier handling (cap losses/wins used in stats)
+
+“cooldown” after extreme volatility spikes
+
+My recommendation (straight)
+
+Yes — you should do the self-learning daily loop.
+
+But do it in this order:
+
+Make Pattern Memory precise today (threshold + regime gating + robust stats)
+
+Add episode logging (so learning is grounded)
+
+Add Bayesian reliability + hard-negative mining (self-improves)
+
+Add consolidation/pruning (prevents decay)
+
+Add multi-asset tier-2 memory (boost coverage safely)
+
+That is the best path to “most precise and learns every day”.
