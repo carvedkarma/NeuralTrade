@@ -1425,6 +1425,8 @@ class GPUTrainerGUI:
                     train_labels_list = []
                     val_features_list = []
                     val_labels_list = []
+                    train_returns_list = []
+                    val_returns_list = []
                     engineer = FeatureEngineer()
                     
                     for i, df in enumerate(all_dfs):
@@ -1442,15 +1444,38 @@ class GPUTrainerGUI:
                         train_features = engineer.compute_technical_features(train_df).fillna(0)
                         val_features = engineer.compute_technical_features(val_df).fillna(0)
                         
-                        train_labels_arr = create_labels(train_df, horizon=horizon, threshold=0.001, trading_cost=trading_cost)
-                        val_labels_arr = create_labels(val_df, horizon=horizon, threshold=0.001, trading_cost=trading_cost)
-                        
-                        train_labels_arr = (train_labels_arr + 1).astype(int)
-                        val_labels_arr = (val_labels_arr + 1).astype(int)
-                        
-                        if len(train_features) > horizon:
-                            train_features = train_features.iloc[:-horizon]
-                            train_labels_arr = train_labels_arr[:-horizon]
+                        if use_multihead:
+                            train_targets = generate_multihead_targets(train_df, horizon_periods=horizon)
+                            val_targets = generate_multihead_targets(val_df, horizon_periods=horizon)
+                            
+                            train_labels_arr = train_targets['class_label'].values
+                            val_labels_arr = val_targets['class_label'].values
+                            train_returns_arr = train_targets['forward_return'].values
+                            val_returns_arr = val_targets['forward_return'].values
+                            
+                            valid_train = ~np.isnan(train_labels_arr)
+                            valid_val = ~np.isnan(val_labels_arr)
+                            
+                            train_features = train_features[valid_train]
+                            train_labels_arr = train_labels_arr[valid_train].astype(int)
+                            train_returns_arr = train_returns_arr[valid_train]
+                            
+                            val_features = val_features[valid_val]
+                            val_labels_arr = val_labels_arr[valid_val].astype(int)
+                            val_returns_arr = val_returns_arr[valid_val]
+                            
+                            train_returns_list.append(train_returns_arr)
+                            val_returns_list.append(val_returns_arr)
+                        else:
+                            train_labels_arr = create_labels(train_df, horizon=horizon, threshold=0.001, trading_cost=trading_cost)
+                            val_labels_arr = create_labels(val_df, horizon=horizon, threshold=0.001, trading_cost=trading_cost)
+                            
+                            train_labels_arr = (train_labels_arr + 1).astype(int)
+                            val_labels_arr = (val_labels_arr + 1).astype(int)
+                            
+                            if len(train_features) > horizon:
+                                train_features = train_features.iloc[:-horizon]
+                                train_labels_arr = train_labels_arr[:-horizon]
                         
                         train_features_list.append(train_features)
                         train_labels_list.append(train_labels_arr)
@@ -1464,6 +1489,14 @@ class GPUTrainerGUI:
                     val_features_raw = pd.concat(val_features_list, ignore_index=True)
                     train_labels = np.concatenate(train_labels_list)
                     val_labels = np.concatenate(val_labels_list)
+                    
+                    if use_multihead:
+                        train_returns = np.concatenate(train_returns_list)
+                        val_returns = np.concatenate(val_returns_list)
+                        self.log(f"  Generated multi-head targets with forward returns")
+                    else:
+                        train_returns = None
+                        val_returns = None
                 
                 self.log(f"")
                 self.log(f"Combined: train={len(train_features_raw):,}, val={len(val_features_raw):,}")

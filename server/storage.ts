@@ -1578,8 +1578,9 @@ export class MemStorage implements IStorage {
       const feature = getLatestFeatures(this.candles);
       if (!feature) return;
       
-      const futuresData = await getFuturesData("BTCUSDT", lastCandle.close);
-      const shotPlan = await generateShotPlan(this.candles, feature, futuresData, true);
+      const symbol = "BTCUSDT";  // TODO: Make configurable for multi-asset support
+      const futuresData = await getFuturesData(symbol, lastCandle.close);
+      const shotPlan = await generateShotPlan(this.candles, feature, futuresData, true, symbol);
       
       const atr = this.indicators?.atr?.value ?? 100;
       const kalmanFast = this.kalmanFastValues[this.kalmanFastValues.length - 1] ?? lastCandle.close;
@@ -2431,7 +2432,7 @@ export class MemStorage implements IStorage {
       try {
         const feature = getLatestFeatures(this.candles);
         if (feature) {
-          const shotPlanResult = await generateShotPlan(this.candles, feature, futuresData, false);
+          const shotPlanResult = await generateShotPlan(this.candles, feature, futuresData, false, "BTCUSDT");
           this.cachedShotPlan = {
             signal: shotPlanResult.signal,
             confidence: shotPlanResult.confidence,

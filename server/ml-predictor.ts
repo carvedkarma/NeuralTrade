@@ -81,7 +81,7 @@ export function getLatestGPUPrediction(symbol: string = "BTCUSDT"): GPUPredictio
 }
 
 // Convert GPU prediction to MLPrediction format for ensemble integration
-function gpuToMLPrediction(gpuPred: GPUPrediction, atr: number): MLPrediction {
+function gpuToMLPrediction(gpuPred: GPUPrediction, currentPrice: number): MLPrediction {
   // Sanitize quantile values to prevent NaN/undefined issues
   const q10 = isFinite(gpuPred.quantile10) ? gpuPred.quantile10 : 0;
   const q50 = isFinite(gpuPred.quantile50) ? gpuPred.quantile50 : gpuPred.returnH1 || 0;
@@ -132,8 +132,9 @@ function gpuToMLPrediction(gpuPred: GPUPrediction, atr: number): MLPrediction {
   pShort /= total;
   pHold /= total;
   
-  // Expected move from quantile median
-  const expectedMove = gpuPred.quantile50 * atr;
+  // Expected move from quantile median (quantile50 is a return, not price)
+  // Multiply by currentPrice to get expected price move
+  const expectedMove = gpuPred.quantile50 * currentPrice;
   
   // Determine direction based on probabilities
   let direction: "LONG" | "SHORT" | "HOLD" = "HOLD";
@@ -255,9 +256,11 @@ function ruleBasedPredict(feature: FeatureVector): MLPrediction {
 }
 
 // ACTION-BASED PATTERN MODEL: HOLD when pattern EV < 0 or insufficient history
+// PRECISION FIX: Use threshold 0.82 to match Pattern Memory's MIN_SIMILARITY_THRESHOLD
+// Lower thresholds (0.6) include weak matches causing false positives
 async function patternBasedPredict(feature: FeatureVector): Promise<MLPrediction> {
   try {
-    const matches = await findSimilarPatterns(feature.embedding, 50, 0.6);
+    const matches = await findSimilarPatterns(feature.embedding, 50, 0.82);
     const stats = computePatternStats(matches);
     const totalMatches = matches.length;
     
@@ -455,6 +458,7 @@ function computeConfidence(
   costs: number,
   patternMaturity: number,
   modelConfidences: number[],
+  modelDirections: ("LONG" | "SHORT" | "HOLD")[],
   adx: number
 ): { confidence: number; components: ConfidenceComponents } {
   const baseConfidence = Math.max(probUp, probDown);
@@ -471,24 +475,47 @@ function computeConfidence(
   
   const patternFactor = 0.6 + patternMaturity * 0.4;
   
-  let agreement = 1.0;
+  // Confidence agreement (variance of confidence scores)
+  let confidenceAgreement = 1.0;
   if (modelConfidences.length > 1) {
     const mean = modelConfidences.reduce((a, b) => a + b, 0) / modelConfidences.length;
     const variance = modelConfidences.reduce((sum, c) => sum + Math.pow(c - mean, 2), 0) / modelConfidences.length;
     const stdDev = Math.sqrt(variance);
-    agreement = Math.max(0.7, 1 - stdDev * 0.5);
+    confidenceAgreement = Math.max(0.7, 1 - stdDev * 0.5);
   }
+  
+  // DIRECTION AGREEMENT - Strongly penalize when models disagree on LONG vs SHORT
+  // This is the critical precision fix: opposing directions = high uncertainty
+  let directionAgreement = 1.0;
+  if (modelDirections.length > 1) {
+    const longCount = modelDirections.filter(d => d === "LONG").length;
+    const shortCount = modelDirections.filter(d => d === "SHORT").length;
+    
+    // If any models say LONG and others say SHORT, apply severe penalty
+    if (longCount > 0 && shortCount > 0) {
+      // Opposing signals: the more balanced the split, the worse the penalty
+      const opposition = Math.min(longCount, shortCount);
+      const totalDirectional = longCount + shortCount;
+      const oppositionRatio = opposition / totalDirectional;  // 0.5 = perfect split
+      
+      // Severe penalty for directional disagreement (0.3 to 0.7 range)
+      directionAgreement = 0.3 + (1 - oppositionRatio) * 0.4;
+    }
+  }
+  
+  // Combined agreement: min of confidence and direction agreement
+  const agreement = Math.min(confidenceAgreement, directionAgreement);
   
   const trendStrength = Math.min(1.0, adx / 40);
   const trendFactor = 0.8 + trendStrength * 0.2;
   
   const weightedConfidence = (
-    baseConfidence * 0.40 +
-    regimeClarity * 0.25 +
+    baseConfidence * 0.35 +
+    regimeClarity * 0.20 +
     edgePenalty * 0.10 +
     patternFactor * 0.10 +
-    agreement * 0.10 +
-    trendFactor * 0.05
+    agreement * 0.15 +  // Increased weight for direction agreement
+    trendFactor * 0.10
   );
   
   const confidence = Math.max(0.20, Math.min(0.85, weightedConfidence));
@@ -520,15 +547,18 @@ export async function getEnsemblePrediction(
   candles: Candle[],
   feature: FeatureVector,
   futuresData: FuturesData,
-  includeAI: boolean = true
+  includeAI: boolean = true,
+  symbol: string = "BTCUSDT"  // Added symbol parameter for GPU predictions
 ): Promise<EnsemblePrediction> {
   const rulePrediction = ruleBasedPredict(feature);
   const patternPrediction = await patternBasedPredict(feature);
   const aiPrediction = includeAI ? await aiBasedPredict(candles, feature, futuresData) : null;
   
-  // Get GPU prediction if available
-  const gpuRawPrediction = getLatestGPUPrediction("BTCUSDT");
-  const gpuPrediction = gpuRawPrediction ? gpuToMLPrediction(gpuRawPrediction, feature.atr14) : null;
+  // Get GPU prediction for the specified symbol
+  const gpuRawPrediction = getLatestGPUPrediction(symbol);
+  // Use close price for expected move calculation (quantiles are returns, not prices)
+  const latestPrice = candles.length > 0 ? candles[candles.length - 1].close : feature.kalmanFast || 50000;
+  const gpuPrediction = gpuRawPrediction ? gpuToMLPrediction(gpuRawPrediction, latestPrice) : null;
   
   // Model weights - GPU gets significant weight when available (trained on larger dataset)
   // If GPU available: rule=0.25, pattern=0.25, ai=0.20, gpu=0.30
@@ -661,8 +691,9 @@ export async function getEnsemblePrediction(
   if (aiPrediction) modelConfidences.push(aiPrediction.confidence);
   if (gpuPrediction) modelConfidences.push(gpuPrediction.confidence);
   
+  // Pass model directions for direction-agreement penalty
   const { confidence } = computeConfidence(
-    pLong, pShort, pHold, expectedMove, currentPrice, tradingCosts, patternMaturity, modelConfidences, feature.adx
+    pLong, pShort, pHold, expectedMove, currentPrice, tradingCosts, patternMaturity, modelConfidences, votes, feature.adx
   );
   
   // Calculate GPU uncertainty from quantile spread if available

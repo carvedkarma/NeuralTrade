@@ -255,7 +255,8 @@ export async function generateShotPlan(
   candles: Candle[],
   feature: FeatureVector,
   futuresData: FuturesData,
-  includeAI: boolean = true
+  includeAI: boolean = true,
+  symbol: string = "BTCUSDT"  // Added symbol for multi-asset GPU prediction support
 ): Promise<ShotPlan> {
   const currentPrice = candles[candles.length - 1].close;
   
@@ -266,7 +267,7 @@ export async function generateShotPlan(
   const holdTimeStr = getEstimatedHoldTime(regime, feature);
   
   const [ensemble, sentiment] = await Promise.all([
-    getEnsemblePrediction(candles, feature, futuresData, includeAI),
+    getEnsemblePrediction(candles, feature, futuresData, includeAI, symbol),
     getSentimentData()
   ]);
   
