@@ -1670,7 +1670,17 @@ class GPUTrainerGUI:
                 self.current_model = model_type
                 self.total_epochs = epochs
                 
-                def progress_callback(epoch, train_loss, val_loss):
+                def progress_callback(epoch, total_epochs, train_metrics, val_metrics):
+                    # Extract losses from metrics dictionaries (MultiHeadTrainer format)
+                    if isinstance(train_metrics, dict):
+                        train_loss = train_metrics.get('total_loss', train_metrics.get('loss', 0.0))
+                    else:
+                        train_loss = float(train_metrics)
+                    if isinstance(val_metrics, dict):
+                        val_loss = val_metrics.get('total_loss', val_metrics.get('loss', 0.0))
+                    else:
+                        val_loss = float(val_metrics)
+                    
                     epoch_end_time = time.time()
                     if len(self.epoch_times) > 0:
                         epoch_duration = epoch_end_time - self.epoch_times[-1]
@@ -1679,7 +1689,7 @@ class GPUTrainerGUI:
                     self.epoch_times.append(epoch_end_time)
                     
                     # Calculate ETA
-                    epochs_remaining = epochs - (epoch + 1)
+                    epochs_remaining = total_epochs - (epoch + 1)
                     if len(self.epoch_times) >= 2:
                         avg_epoch_time = (self.epoch_times[-1] - self.training_start_time) / (epoch + 1)
                         eta_seconds = avg_epoch_time * epochs_remaining
@@ -1695,13 +1705,13 @@ class GPUTrainerGUI:
                     self.train_loss = train_loss
                     self.val_loss = val_loss
                     
-                    progress = (epoch + 1) / epochs * 100
+                    progress = (epoch + 1) / total_epochs * 100
                     
                     self.root.after(0, lambda: self._update_training_progress(
-                        progress, epoch + 1, epochs, train_loss, val_loss, eta_seconds
+                        progress, epoch + 1, total_epochs, train_loss, val_loss, eta_seconds
                     ))
                     
-                    self.log(f"Epoch {epoch+1:3d}/{epochs}: loss={train_loss:.4f}, val={val_loss:.4f}" + 
+                    self.log(f"Epoch {epoch+1:3d}/{total_epochs}: loss={train_loss:.4f}, val={val_loss:.4f}" + 
                              (f" ★ best" if val_loss == self.best_val_loss else ""))
                     
                     return self.is_training
