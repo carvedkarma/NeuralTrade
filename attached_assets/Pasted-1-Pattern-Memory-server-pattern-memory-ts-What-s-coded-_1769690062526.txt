@@ -1,0 +1,264 @@
+1) Pattern Memory — server/pattern-memory.ts
+What’s coded well ✅
+
+Uses cosine similarity on embeddings (reasonable)
+
+Has maturity / minimum samples gating (good for precision)
+
+Has temporal embargo concept (important)
+
+Fixes win-labeling to be PnL-based (good)
+
+Stores direction-specific stats inside clusters (strong idea)
+
+Precision-breaking issues ❌ (important)
+A) Data leakage risk: embargo uses Date.now() by default
+
+In findSimilarPatterns(), embargo defaults to:
+
+embargoMs = Date.now() - EMBARGO_CANDLES * 15m
+
+That’s OK for “live now”, but NOT OK for backtests / offline training unless you always pass the current candle timestamp.
+
+If you run historical evaluation and don’t pass embargoTimestamp/currentTimestamp, you can accidentally include patterns from the “future” relative to the candle being evaluated.
+
+✅ Fix
+
+Always call findSimilarPatterns(embedding, ..., embargoTimestamp=currentCandleTs, currentTimestamp=currentCandleTs)
+
+Or change defaults to require timestamp (safer).
+
+B) Your “train/test split” isn’t actually walk-forward
+
+In storePattern():
+
+const trainingWindow = params.isTestSet ? "test" : "train";
+
+
+This is not walk-forward unless something upstream correctly sets isTestSet.
+
+✅ Fix
+Make it deterministic:
+
+If timestamp >= splitTimestamp => test
+
+else train
+…and compute splitTimestamp by percent or by date window.
+
+C) Performance issue that can hurt “precision via lag”
+
+findSimilarPatterns() pulls 10,000 patterns from DB every call:
+
+db.select().from(patterns).orderBy(desc(...)).limit(10000)
+
+
+If you call it frequently (dashboard polling / signal engine), your system will lag → stale signals → worse precision.
+
+✅ Fix
+
+Keep an in-memory cache of last N embeddings + metadata updated incrementally
+
+Or precluster in DB and only search candidate clusters
+
+D) Threshold mismatch between Pattern Memory & usage
+
+Inside pattern-memory.ts, you set:
+
+MIN_SIMILARITY_THRESHOLD = 0.82
+
+But in your “pattern brain” inside ml-predictor.ts, you call:
+
+findSimilarPatterns(feature.embedding, 50, 0.6)
+
+
+That completely changes the precision profile (0.6 includes a lot of weak matches → more false positives).
+
+✅ Fix
+
+Raise that to match your intended “precision mode” (0.78–0.85)
+
+Or adaptive threshold: higher in chop, lower in trend.
+
+E) Cluster memory is not persisted
+
+You store patterns in DB, but clusters live only in memory (patternClusters: Map), which means after restart cluster maturity resets.
+
+That makes the system’s decisions unstable after restarts.
+
+✅ Fix
+
+Either persist clusters to DB (patternClustersTable is imported but not truly used as the single source of truth)
+
+Or rebuild clusters at boot from DB patterns.
+
+Verdict on Pattern Memory precision
+
+Not “perfect” yet. The biggest precision killers are:
+
+default embargo timestamps (leakage in backtests)
+
+using 0.6 similarity in the predictor (too loose)
+
+clusters not persisted (unstable behavior)
+
+DB scan per call (staleness + lag)
+
+2) Strategy Learner — server/strategy-learner.ts
+What’s coded well ✅
+
+Uses triple-barrier style labeling with SL/TP simulation (good)
+
+Uses regime risk params from shared feature-engine (consistency = good)
+
+Tracks MAE/MFE and holdBars
+
+Has incremental training via trainingProgressIdx (good)
+
+Precision-breaking issues ❌
+A) Intrabar “which hit first” heuristic is weak
+
+When TP and SL are hit in same candle, you decide based on distance-to-open:
+
+distToHigh < distToLow ? TP first : SL first
+
+
+That’s a crude heuristic. In crypto, wick behavior can make this wrong often.
+
+✅ Fix options
+
+Better heuristic: assume worst-case (SL first) for conservative labels (improves robustness)
+
+Or estimate using volume profile / microstructure (hard)
+
+Or store both outcomes with probability weight (advanced)
+
+For precision, worst-case labeling often produces fewer “false confident” signals.
+
+B) The policy model accuracy is not real accuracy
+
+You compute:
+
+correct = count(pnl>0 for long) + count(pnl>0 for short)
+accuracy = correct / total
+
+
+That’s not model accuracy — that’s just “how often simulated outcomes were positive”, not how often your policy predicted correctly.
+
+✅ Fix
+Track:
+
+predictedAction vs optimalAction labels on a validation slice
+
+or compute action-selection accuracy on held-out samples
+
+C) HOLD action is treated as “0 pnl always”
+
+In real life, HOLD can be optimal in chop — but you don’t label HOLD as “correct” vs “incorrect” properly; you just set HOLD pnl to 0 and don’t model opportunity cost.
+
+✅ Fix
+Define HOLD as optimal when:
+
+neither LONG nor SHORT has positive cost-adjusted EV
+…and score HOLD decisions as correct when it avoids negative EV trades.
+
+D) Feature quantization may be too brittle
+
+You quantize features like:
+
+Math.round(f * 100)
+
+
+Some features are ratios and others are binary, volatility*100, etc. This can cause:
+
+over-fragmentation (too many bins, sparse patterns)
+
+or wrong grouping (different regimes collide)
+
+✅ Fix
+Use per-feature bins (different scales per feature) or use a compact hash:
+
+normalize features first
+
+bin per feature based on stddev or percentiles
+
+Verdict on Strategy Learner precision
+
+It works, but it’s not “precision-grade” yet because:
+
+intrabar ordering is unreliable
+
+HOLD optimality isn’t scored correctly
+
+“accuracy” metric is misleading
+
+feature binning likely causes sparse/noisy patterns
+
+3) Neural Network brain — server/ml-predictor.ts (GPU predictions + ensemble)
+What’s coded well ✅
+
+Has a GPU prediction cache + TTL (good)
+
+Converts GPU outputs into HOLD/LONG/SHORT with uncertainty penalty (good concept)
+
+Ensemble weighting changes when GPU available (good)
+
+Precision-breaking issues ❌
+A) Unit mismatch risk in expectedMove
+
+Rule-based expectedMove is in price units (atr14 * something).
+Pattern expectedMove is return * price (price units).
+GPU expectedMove is computed as:
+
+expectedMove = gpuPred.quantile50 * atr;
+
+
+If quantile50 is already a return (very likely), multiplying by ATR (price) makes it “return * ATR”, which is usually wrong scale.
+
+✅ Fix
+Use:
+
+if quantiles are returns: expectedMove = quantile50 * currentPrice
+
+if quantiles are price deltas: keep as-is
+But you must enforce one standard across all models.
+
+This one mismatch can wreck confidence, gating, and precision.
+
+B) getLatestGPUPrediction() is hardcoded to BTCUSDT
+
+Inside getEnsemblePrediction():
+
+getLatestGPUPrediction("BTCUSDT")
+
+
+So if your app ever switches symbol, your “NN brain” still uses BTC.
+
+✅ Fix
+Pass symbol through the stack properly.
+
+C) Pattern brain uses similarity threshold 0.6 (again)
+
+This reduces overall ensemble precision because pattern predictions become noisier, and the ensemble blends that noise in.
+
+✅ Fix
+Use your intended threshold, or adaptive threshold.
+
+D) Confidence aggregation doesn’t include “direction agreement”
+
+computeConfidence() uses:
+
+base confidence
+
+regime clarity
+
+edge penalty
+
+pattern maturity
+
+agreement (std dev of confidences)
+But it doesn’t strongly penalize “models disagree on direction”.
+
+✅ Fix
+Add explicit direction-agreement factor:
+
+if models split LONG vs SHORT → confidence should drop hard and HOLD should rise.
