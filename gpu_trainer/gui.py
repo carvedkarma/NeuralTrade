@@ -1453,6 +1453,20 @@ class GPUTrainerGUI:
                             train_returns_arr = train_targets['forward_return'].values
                             val_returns_arr = val_targets['forward_return'].values
                             
+                            # CRITICAL: Align features and targets to same length BEFORE filtering
+                            # Features and targets may have different lengths due to horizon offset
+                            min_train_len = min(len(train_features), len(train_labels_arr))
+                            min_val_len = min(len(val_features), len(val_labels_arr))
+                            
+                            train_features = train_features.iloc[:min_train_len]
+                            train_labels_arr = train_labels_arr[:min_train_len]
+                            train_returns_arr = train_returns_arr[:min_train_len]
+                            
+                            val_features = val_features.iloc[:min_val_len]
+                            val_labels_arr = val_labels_arr[:min_val_len]
+                            val_returns_arr = val_returns_arr[:min_val_len]
+                            
+                            # Now apply NaN filtering with aligned arrays
                             valid_train = ~np.isnan(train_labels_arr)
                             valid_val = ~np.isnan(val_labels_arr)
                             
