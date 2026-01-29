@@ -52,6 +52,7 @@ import { DataManagementCard } from "@/components/data-management-card";
 import { NeuralNetworkDataCard } from "@/components/nn-data-card";
 import { NeuralNetworkPredictionCard, TrainingModeBadge, type QuantilePrediction } from "@/components/neural-network-prediction";
 import { QuantileFanChart, DerivedTradeLevels } from "@/components/quantile-fan-chart";
+import { PremiumCandlestickChart } from "@/components/premium-candlestick-chart";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff, Brain, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -488,18 +489,48 @@ export default function Dashboard() {
 
           <TabsContent value="neural-network" className="mt-0">
             <div className="space-y-4">
-              {/* Probabilistic Return Path Visualization */}
+              {/* Premium Candlestick Chart with Predictions */}
+              <PremiumCandlestickChart
+                historicalCandles={data.candles.map(c => ({
+                  timestamp: c.timestamp,
+                  open: Number(c.open),
+                  high: Number(c.high),
+                  low: Number(c.low),
+                  close: Number(c.close),
+                  volume: c.volume ? Number(c.volume) : undefined
+                }))}
+                predictedCandles={nnPrediction?.predictedCandles?.map(pc => ({
+                  timestamp: pc.timestamp,
+                  q10: pc.q10,
+                  q25: pc.q25,
+                  q50: pc.q50,
+                  q75: pc.q75,
+                  q90: pc.q90,
+                  direction: pc.direction || (pc.q50 >= 0 ? "up" : "down")
+                })) || []}
+                currentPrice={data.candles[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0}
+                action={nnPrediction?.prediction?.action || "HOLD"}
+                tradeLevels={nnPrediction?.prediction ? {
+                  entry: nnPrediction.prediction.entry,
+                  stopLoss: nnPrediction.prediction.stopLoss,
+                  takeProfit: nnPrediction.prediction.takeProfit
+                } : undefined}
+                symbol="BTCUSDT"
+                timeframe="15m"
+              />
+
+              {/* Probabilistic Return Path & Derived Levels */}
               {nnPrediction?.prediction && (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                   <QuantileFanChart 
-                    currentPrice={data.candles[data.candles.length - 1]?.close || 0}
+                    currentPrice={data.candles[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0}
                     quantiles={nnPrediction.prediction.quantiles}
                     action={nnPrediction.prediction.action}
                     horizonBars={10}
                     timeframeMinutes={15}
                   />
                   <DerivedTradeLevels
-                    currentPrice={data.candles[data.candles.length - 1]?.close || 0}
+                    currentPrice={data.candles[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0}
                     quantiles={nnPrediction.prediction.quantiles}
                     action={nnPrediction.prediction.action}
                   />
