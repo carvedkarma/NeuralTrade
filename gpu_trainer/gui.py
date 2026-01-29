@@ -1220,6 +1220,9 @@ class GPUTrainerGUI:
         use_multihead = self.multihead_var.get()  # Capture multi-head mode selection
         
         def do_train():
+            # Initialize feature_cols at function scope (set in MTF or legacy branch)
+            feature_cols = None
+            
             try:
                 self.log(f"")
                 self.log(f"{'='*55}")
@@ -1516,6 +1519,11 @@ class GPUTrainerGUI:
                 self.log(f"")
                 self.log(f"Combined: train={len(train_features_raw):,}, val={len(val_features_raw):,}")
                 
+                # Store feature columns for later saving (both MTF and legacy modes)
+                # In MTF mode, feature_cols was set at line ~1380; in legacy mode, set here
+                if feature_cols is None:
+                    feature_cols = list(train_features_raw.columns)
+                
                 # === FIT SCALERS ON TRAINING DATA ONLY ===
                 self.log(f"Fitting scalers on training data only (no leakage)")
                 engineer.fit_scalers(train_features_raw)
@@ -1751,6 +1759,23 @@ class GPUTrainerGUI:
                     scaler_filename = f"scaler_{model_type}{model_suffix}.joblib"
                     engineer.save_scalers(str(checkpoint_dir / scaler_filename))
                     self.log(f"Scalers saved: {scaler_filename}")
+                    
+                    # Save feature columns for inference alignment
+                    if feature_cols is not None and len(feature_cols) > 0:
+                        feature_columns_path = checkpoint_dir / f"feature_columns_{model_type}{model_suffix}.txt"
+                        with open(feature_columns_path, 'w') as f:
+                            for col in feature_cols:
+                                f.write(f"{col}\n")
+                        self.log(f"Feature columns saved: {feature_columns_path.name} ({len(feature_cols)} features)")
+                    else:
+                        self.log(f"WARNING: feature_cols not available, skipping feature_columns.txt save")
+                    
+                    # Also save a generic feature_columns.txt for API server
+                    if feature_cols is not None and len(feature_cols) > 0:
+                        generic_feature_path = checkpoint_dir / "feature_columns.txt"
+                        with open(generic_feature_path, 'w') as f:
+                            for col in feature_cols:
+                                f.write(f"{col}\n")
                     
                     # Update model status as complete
                     self.update_model_status(
