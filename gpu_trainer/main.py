@@ -960,9 +960,14 @@ def train_all_mtf(args):
     combined = pd.concat(all_fused, ignore_index=True)
     logger.info(f"Combined: {len(combined):,} samples")
     
-    # Add cross-asset features
-    logger.info("Adding cross-asset features...")
-    combined = add_cross_asset_features(combined, reference_symbol="BTCUSDT")
+    # NOTE: Cross-asset features REMOVED (FIX #1 - training-inference alignment)
+    # These features (btc_ret, relative_strength_vs_btc, btc_correlation_proxy, 
+    # sector_momentum, outperform_sector) cannot be computed at inference time
+    # because we only have BTC candles. Removing them ensures training and
+    # inference use identical feature sets.
+    # If you need cross-asset features, you must also compute them during inference
+    # by fetching ETH/SOL/BNB candles.
+    logger.info("Skipping cross-asset features (BTC-only inference alignment)")
     
     # Time-based train/val split per asset with proper purge gap
     logger.info("Splitting by time per asset with leakage-safe purge gap...")

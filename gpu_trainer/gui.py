@@ -1312,9 +1312,9 @@ class GPUTrainerGUI:
                     self.log(f"")
                     self.log(f"Combined: {len(combined):,} samples")
                     
-                    # Add cross-asset features
-                    self.log(f"Adding cross-asset features...")
-                    combined = add_cross_asset_features(combined, reference_symbol="BTCUSDT")
+                    # NOTE: Cross-asset features REMOVED (FIX #1 - training-inference alignment)
+                    # These features cannot be computed at inference with BTC-only data
+                    self.log(f"Skipping cross-asset features (BTC-only inference alignment)")
                     
                     # Time-based train/val split per asset
                     self.log(f"Splitting by time per asset...")

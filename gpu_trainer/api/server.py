@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 ACTION_MAP = {0: "SHORT", 1: "HOLD", 2: "LONG"}
 ACTION_NAMES = ["SHORT", "HOLD", "LONG"]  # Index-aligned with training labels
 
+# FIX #4: Lock sequence length at pipeline level
+# This MUST match training config (config.data.sequence_length = 100)
+# Never dynamically resize - always require exactly this many candles
+SEQUENCE_LENGTH_LOCKED = 100
+
 app = FastAPI(title="BTC Trading GPU Trainer API", version="1.0.0")
 
 app.add_middleware(
@@ -73,7 +78,8 @@ class ModelManager:
         # Secondary checkpoint directory (legacy location from GUI training)
         self.saved_models_dir = Path(__file__).parent.parent / "saved_models"
         self.scaler_path = self.checkpoint_dir / "scaler.joblib"
-        self.sequence_length = 100  # Default, updated from loaded model config
+        # FIX #4: Use locked sequence length - NEVER dynamically resize
+        self.sequence_length = SEQUENCE_LENGTH_LOCKED
         self.input_dim = 66  # Default feature count (MTF: 5m/15m/1h/4h without embedding)
         self.instantiation_errors: Dict[str, str] = {}  # Track errors for /models/status
     
@@ -1090,9 +1096,17 @@ class ModelManager:
             features, schema_stats = validator.enforce_schema(
                 feature_names=feature_names,
                 features=features,
-                fill_value=0.0
+                fill_value=0.0,
+                max_missing_pct=0.15  # FIX #2: Abort to HOLD if >15% features missing
             )
             logger.info(f"[predict_multihead] Schema enforced: {schema_stats['incoming_features']} -> {schema_stats['expected_features']} features")
+            
+            # FIX #2: If too many features are missing, abort to HOLD
+            if schema_stats.get("should_abort_to_hold", False):
+                return safe_hold_response(
+                    f"Too many missing features: {schema_stats['missing_filled']}/{schema_stats['expected_features']} "
+                    f"({schema_stats['missing_pct']:.1%}). Missing: {schema_stats.get('missing_names', [])[:5]}"
+                )
         else:
             # Legacy validation: Feature dimension validation (critical)
             input_features = features.shape[-1] if len(features.shape) >= 2 else features.shape[0]
@@ -1649,27 +1663,38 @@ async def predict_multihead_from_candles(request: CandlePredictionRequest):
             fe = FeatureEngineer()
             features_df = fe.compute_technical_features(df)
             
-            # Handle NaNs
-            if "close" in features_df.columns:
-                features_df = features_df.dropna(subset=["close"])
-            feature_cols = [c for c in features_df.columns if c not in ["datetime", "timestamp", "close", "open", "high", "low", "volume"]]
+            # FIX #3: Drop OHLCV columns before feature extraction (they're not model features)
+            # These are metadata columns that shouldn't be included in model input
+            ohlcv_cols = ["datetime", "timestamp", "close", "open", "high", "low", "volume", "symbol"]
+            feature_cols = [c for c in features_df.columns if c not in ohlcv_cols]
+            
+            # Handle NaNs with forward-fill then zero-fill (FIX #2)
             if len(feature_cols) > 0:
                 features_df[feature_cols] = features_df[feature_cols].ffill().fillna(0.0)
             
-            if len(features_df) == 0:
+            # Extract only feature columns (not OHLCV)
+            features_only_df = features_df[feature_cols].copy()
+            
+            if len(features_only_df) == 0:
                 raise HTTPException(
                     status_code=400,
                     detail="No valid features after computation (all NaN)"
                 )
             
             # Scale features
-            features_np = model_manager.transform_features(features_df)
+            features_np = model_manager.transform_features(features_only_df)
             
-            # Use sequence length from model
+            # FIX #4: Lock sequence_length=100 - NO dynamic resizing
             seq_len = model_manager.sequence_length
             if len(features_np) < seq_len:
-                seq_len = len(features_np)
+                # FAIL if not enough data instead of silently reducing sequence length
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Insufficient data: need {seq_len} candles for sequence, got {len(features_np)}. "
+                           f"This ensures training-inference alignment."
+                )
             
+            # Always use exactly seq_len (default 100)
             features_seq = features_np[-seq_len:]
             
         except ImportError as e:

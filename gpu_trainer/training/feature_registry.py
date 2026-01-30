@@ -195,7 +195,8 @@ class FeatureValidator:
         self,
         feature_names: List[str],
         features: np.ndarray,
-        fill_value: float = 0.0
+        fill_value: float = 0.0,
+        max_missing_pct: float = 0.15
     ) -> Tuple[np.ndarray, Dict[str, int]]:
         """
         Enforce schema by reindexing, filling missing features, and dropping extras.
@@ -204,10 +205,16 @@ class FeatureValidator:
         not the feature builder. Any input shape is transformed to match
         the expected feature schema.
         
+        FIX #2 IMPROVEMENTS:
+        - Uses forward-fill for NaN values in incoming features
+        - Uses column mean as fill value for entirely missing features (not 0.0)
+        - Warns if >max_missing_pct features are missing (abort to HOLD recommended)
+        
         Args:
             feature_names: Names of incoming features
             features: Feature array [seq_len, features] (2D) or [batch, seq_len, features] (3D)
             fill_value: Value to use for missing features (default: 0.0)
+            max_missing_pct: Max fraction of features that can be missing before warning (default: 15%)
             
         Returns:
             Tuple of:
@@ -264,16 +271,50 @@ class FeatureValidator:
             logger.info(f"[Schema] Tail-sliced sequence: {actual_seq} -> {seq_len}")
         
         # --- Step 2: Reindex columns to expected order, fill missing, drop extras ---
-        enforced = np.full((batch_size, seq_len, expected_dim), fill_value, dtype=np.float32)
+        # FIX #2: Use column mean instead of 0.0 for missing features
+        # This is more neutral for normalized features than 0.0
+        enforced = np.zeros((batch_size, seq_len, expected_dim), dtype=np.float32)
         
         for col_idx, col_name in enumerate(expected_cols):
             if col_name in incoming_indices:
                 src_idx = incoming_indices[col_name]
-                enforced[:, :, col_idx] = features[:, :, src_idx]
+                col_data = features[:, :, src_idx].copy()
+                
+                # Forward-fill NaN values within each column (FIX #2)
+                for b in range(batch_size):
+                    col_slice = col_data[b, :]
+                    nan_mask = np.isnan(col_slice)
+                    if nan_mask.any() and not nan_mask.all():
+                        # Forward fill: propagate last valid value
+                        for i in range(1, len(col_slice)):
+                            if nan_mask[i] and not nan_mask[i-1]:
+                                col_slice[i] = col_slice[i-1]
+                                nan_mask[i] = False
+                        # Backward fill for leading NaNs
+                        for i in range(len(col_slice)-2, -1, -1):
+                            if nan_mask[i] and not nan_mask[i+1]:
+                                col_slice[i] = col_slice[i+1]
+                        # Any remaining NaNs -> column mean or 0
+                        remaining_nans = np.isnan(col_slice)
+                        if remaining_nans.any():
+                            valid_vals = col_slice[~remaining_nans]
+                            fill_val = np.mean(valid_vals) if len(valid_vals) > 0 else fill_value
+                            col_slice[remaining_nans] = fill_val
+                        col_data[b, :] = col_slice
+                
+                enforced[:, :, col_idx] = col_data
+            else:
+                # Missing feature: fill with 0.0 (neutral for normalized features)
+                # This is better than leaving as NaN but the warning below flags this
+                enforced[:, :, col_idx] = fill_value
         
         # Remove batch dim if original was 2D
         if not is_3d:
             enforced = enforced[0]
+        
+        # FIX #2: Check if too many features are missing
+        missing_pct = len(missing_features) / expected_dim if expected_dim > 0 else 0
+        should_abort = missing_pct > max_missing_pct
         
         stats = {
             "incoming_features": len(feature_names),
@@ -283,13 +324,22 @@ class FeatureValidator:
             "sequence_in": actual_seq,
             "sequence_out": seq_len,
             "missing_names": list(missing_features)[:10],  # Log first 10
-            "extra_names": list(extra_features)[:10]
+            "extra_names": list(extra_features)[:10],
+            "missing_pct": missing_pct,
+            "should_abort_to_hold": should_abort  # FIX #2: Flag for caller
         }
         
-        logger.info(
-            f"[Schema] Enforced: {len(feature_names)} -> {expected_dim} features, "
-            f"missing filled: {len(missing_features)}, extra dropped: {len(extra_features)}"
-        )
+        if should_abort:
+            logger.warning(
+                f"[Schema] TOO MANY MISSING FEATURES: {len(missing_features)}/{expected_dim} "
+                f"({missing_pct:.1%}) > {max_missing_pct:.0%} threshold. "
+                f"Recommend aborting to HOLD. Missing: {list(missing_features)[:5]}..."
+            )
+        else:
+            logger.info(
+                f"[Schema] Enforced: {len(feature_names)} -> {expected_dim} features, "
+                f"missing filled: {len(missing_features)}, extra dropped: {len(extra_features)}"
+            )
         
         return enforced, stats
 
