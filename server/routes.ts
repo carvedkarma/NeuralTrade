@@ -8,6 +8,7 @@ import { and, eq, gte, lte, asc } from "drizzle-orm";
 import { z } from "zod";
 import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes, clearNNData, cancelNNDownload, getResumableStatus, resumeNNDataDownload, getDownloadETA, streamNNDataBulk } from "./historical-data";
 import zlib from "zlib";
+import { getMultiTimeframeKlines } from "./binance";
 import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
 import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning, loadCandleTimestamps } from "./unified-learning-controller";
@@ -1066,10 +1067,46 @@ export async function registerRoutes(
         });
       }
       
-      // Get 15m candles (base timeframe)
-      const candles15m = storage.getCandles();
+      // Helper to get latest N candles from database by timeframe
+      const getDbCandles = async (timeframe: string, limit: number = 200) => {
+        const result = await db.select()
+          .from(candles)
+          .where(and(eq(candles.symbol, "BTCUSDT"), eq(candles.timeframe, timeframe)))
+          .orderBy(asc(candles.timestamp))
+          .limit(limit);
+        return result.slice(-limit); // Get most recent
+      };
       
-      if (!candles15m || candles15m.length < 150) {
+      // Common candle type for both sources
+      type CandleData = { timestamp: number; open: number; high: number; low: number; close: number; volume: number };
+      
+      // Try live API first, fallback to database if blocked (HTTP 451)
+      let mtfCandles: { m5: CandleData[]; m15: CandleData[]; h1: CandleData[]; h4: CandleData[] };
+      let dataSource = "live";
+      
+      try {
+        const liveCandles = await getMultiTimeframeKlines("BTCUSDT");
+        if (liveCandles.m15.length > 50) {
+          mtfCandles = liveCandles;
+        } else {
+          throw new Error("Insufficient live data");
+        }
+      } catch (liveError) {
+        // Fallback to database candles
+        console.log("[GPU Ensemble] Live API failed, using database candles:", liveError instanceof Error ? liveError.message : "unknown");
+        dataSource = "database";
+        
+        const [db5m, db15m, db1h, db4h] = await Promise.all([
+          getDbCandles("5m", 300),
+          getDbCandles("15m", 200),
+          getDbCandles("1h", 100),
+          getDbCandles("4h", 50)
+        ]);
+        
+        mtfCandles = { m5: db5m, m15: db15m, h1: db1h, h4: db4h };
+      }
+      
+      if (!mtfCandles.m15 || mtfCandles.m15.length < 50) {
         return res.json({ 
           available: false, 
           prediction: null,
@@ -1077,26 +1114,30 @@ export async function registerRoutes(
         });
       }
       
-      // Format candles for MTF endpoint - use last 300 15m candles
-      const recent15m = candles15m.slice(-300).map(c => ({
-        timestamp: c.timestamp,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-        volume: c.volume
-      }));
+      // Format candles for MTF endpoint
+      const formatCandles = (candleData: typeof mtfCandles.m15) => 
+        candleData.map(c => ({
+          timestamp: c.timestamp,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+          volume: c.volume
+        }));
       
-      // Try to get multi-timeframe candles if available
-      // These would need to be stored separately - for now just use 15m
-      // In future: storage.getCandles5m(), storage.getCandles1h(), storage.getCandles4h()
+      const recent15m = formatCandles(mtfCandles.m15);
+      const recent5m = mtfCandles.m5.length > 0 ? formatCandles(mtfCandles.m5) : undefined;
+      const recent1h = mtfCandles.h1.length > 0 ? formatCandles(mtfCandles.h1) : undefined;
+      const recent4h = mtfCandles.h4.length > 0 ? formatCandles(mtfCandles.h4) : undefined;
       
-      // Use the new MTF endpoint that computes features server-side
+      console.log(`[GPU Ensemble] MTF candles (${dataSource}): 5m=${mtfCandles.m5.length}, 15m=${mtfCandles.m15.length}, 1h=${mtfCandles.h1.length}, 4h=${mtfCandles.h4.length}`);
+      
+      // Use the MTF endpoint that computes features server-side (matches training)
       const prediction = await gpuBridge.predictEnsembleFromCandles(
         recent15m,
-        undefined,  // 5m candles (not yet available)
-        undefined,  // 1h candles (not yet available)
-        undefined,  // 4h candles (not yet available)
+        recent5m,
+        recent1h,
+        recent4h,
         "BTCUSDT"
       );
       
@@ -1109,7 +1150,7 @@ export async function registerRoutes(
       }
       
       // Pass through GPU response directly - matches EnsemblePrediction interface
-      res.json({ available: true, prediction });
+      res.json({ available: true, prediction, dataSource });
     } catch (error) {
       console.error("[GPU Ensemble] Current prediction error:", error);
       res.json({ 
