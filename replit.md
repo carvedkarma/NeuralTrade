@@ -109,3 +109,14 @@ Preferred communication style: Simple, everyday language.
 ### Development Tools
 - Replit-specific plugins for dev banner and error overlay.
 - TypeScript.
+
+## API Unit Standards
+
+### Return Values (Critical for UI Display)
+- **Standard**: All return values (mu, sigma, quantiles, expectedMove, uncertainty) are returned as **decimal returns** from the API (e.g., 0.01 = 1%, -0.0099 = -0.99%).
+- **UI Conversion**: The UI multiplies by 100 only at display time using `formatDecimalAsPercent(val) => (val * 100).toFixed(2)%`.
+- **Price Derivation**: `low_price = current_price * (1 + q10)`, `high_price = current_price * (1 + q90)`. No rounding before calculation.
+- **API Response Fields**:
+  - `units: "decimal_return"` - Indicates values are decimals
+  - `derived_low_price` / `derived_high_price` - Backend-computed prices for frontend verification
+- **DEBUG Panel**: Neural Network Prediction card has a bug icon toggle that shows raw API values vs displayed values for unit verification.

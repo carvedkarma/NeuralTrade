@@ -1,7 +1,8 @@
+import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Brain, TrendingUp, TrendingDown, Minus, Target, Shield, Crosshair, AlertTriangle, Loader2 } from "lucide-react";
+import { Brain, TrendingUp, TrendingDown, Minus, Target, Shield, Crosshair, AlertTriangle, Loader2, Bug } from "lucide-react";
 
 export interface QuantilePrediction {
   action: "LONG" | "SHORT" | "HOLD";
@@ -10,10 +11,10 @@ export interface QuantilePrediction {
   stopLoss: number;
   takeProfit: number;
   riskReward: number;
-  expectedMove: number;
-  uncertainty: number;
+  expectedMove: number;  // Decimal return (e.g., 0.01 = 1%)
+  uncertainty: number;   // Decimal (e.g., 0.02 = 2%)
   quantiles: {
-    q10: number;
+    q10: number;  // Decimal returns
     q25: number;
     q50: number;
     q75: number;
@@ -27,19 +28,26 @@ export interface QuantilePrediction {
   horizon: string;
   timestamp: number;
   currentPrice?: number;  // Base price used to compute predictions (for consistent upside/downside %)
+  units?: "decimal_return" | "percent_return";  // API units indicator
+  derived_low_price?: number;  // Backend-computed low price for verification
+  derived_high_price?: number; // Backend-computed high price for verification
 }
 
 interface NeuralNetworkPredictionCardProps {
   prediction: QuantilePrediction | null;
   isLoading?: boolean;
   onRefresh?: () => void;
+  showDebug?: boolean;
 }
 
 export function NeuralNetworkPredictionCard({ 
   prediction, 
   isLoading = false,
-  onRefresh 
+  onRefresh,
+  showDebug: initialShowDebug = false
 }: NeuralNetworkPredictionCardProps) {
+  const [showDebug, setShowDebug] = useState(initialShowDebug);
+
   if (isLoading) {
     return (
       <Card data-testid="card-nn-prediction-loading">
@@ -88,8 +96,15 @@ export function NeuralNetworkPredictionCard({
   
   const isHold = prediction.action === "HOLD";
 
-  const formatPercent = (val: number) => `${val >= 0 ? '+' : ''}${val.toFixed(2)}%`;
+  const formatDecimalAsPercent = (val: number) => {
+    const pct = val * 100;
+    return `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+  };
+  const formatPercent = formatDecimalAsPercent;
   const formatPrice = (val: number) => `$${val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const computedLowPrice = prediction.currentPrice ? prediction.currentPrice * (1 + prediction.quantiles.q10) : null;
+  const computedHighPrice = prediction.currentPrice ? prediction.currentPrice * (1 + prediction.quantiles.q90) : null;
 
   return (
     <Card data-testid="card-nn-prediction">
@@ -97,7 +112,16 @@ export function NeuralNetworkPredictionCard({
         <CardTitle className="text-sm font-medium flex items-center gap-2">
           <Brain className="h-4 w-4 text-primary" />
           Neural Network Prediction
-          <Badge variant="outline" className="ml-auto text-xs">
+          <Button 
+            variant="ghost" 
+            size="icon" 
+            className="h-6 w-6 ml-auto" 
+            onClick={() => setShowDebug(!showDebug)}
+            data-testid="button-toggle-debug"
+          >
+            <Bug className={`h-3 w-3 ${showDebug ? "text-amber-400" : "text-muted-foreground"}`} />
+          </Button>
+          <Badge variant="outline" className="text-xs">
             {prediction.horizon}
           </Badge>
         </CardTitle>
@@ -205,10 +229,82 @@ export function NeuralNetworkPredictionCard({
         {/* Uncertainty */}
         <div className="flex items-center justify-between bg-muted/20 rounded-lg px-3 py-2">
           <span className="text-xs text-muted-foreground">Uncertainty (q90-q10 spread)</span>
-          <Badge variant="outline" className={prediction.uncertainty > 5 ? "text-amber-400" : "text-muted-foreground"}>
-            {prediction.uncertainty.toFixed(2)}%
+          <Badge variant="outline" className={(prediction.uncertainty * 100) > 5 ? "text-amber-400" : "text-muted-foreground"}>
+            {(prediction.uncertainty * 100).toFixed(2)}%
           </Badge>
         </div>
+
+        {/* DEBUG Panel - Shows raw values for unit verification */}
+        {showDebug && (
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 space-y-2" data-testid="debug-panel">
+            <div className="text-xs font-medium text-amber-400 flex items-center gap-1">
+              <Bug className="h-3 w-3" /> Debug: Raw API Values
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+              <div>
+                <span className="text-muted-foreground">units:</span>
+                <span className="ml-1 text-amber-300">{prediction.units || "unknown"}</span>
+              </div>
+              <div>
+                <span className="text-muted-foreground">currentPrice:</span>
+                <span className="ml-1">${prediction.currentPrice?.toFixed(2) || "N/A"}</span>
+              </div>
+              <div>
+                <span className="text-muted-foreground">raw mu:</span>
+                <span className="ml-1">{prediction.expectedMove?.toFixed(6) || "N/A"}</span>
+              </div>
+              <div>
+                <span className="text-muted-foreground">raw σ:</span>
+                <span className="ml-1">{prediction.uncertainty?.toFixed(6) || "N/A"}</span>
+              </div>
+              <div>
+                <span className="text-muted-foreground">raw q10:</span>
+                <span className="ml-1">{prediction.quantiles.q10.toFixed(6)}</span>
+              </div>
+              <div>
+                <span className="text-muted-foreground">raw q50:</span>
+                <span className="ml-1">{prediction.quantiles.q50.toFixed(6)}</span>
+              </div>
+              <div>
+                <span className="text-muted-foreground">raw q90:</span>
+                <span className="ml-1">{prediction.quantiles.q90.toFixed(6)}</span>
+              </div>
+              <div>
+                <span className="text-muted-foreground">displayed q10:</span>
+                <span className="ml-1 text-amber-300">{formatPercent(prediction.quantiles.q10)}</span>
+              </div>
+            </div>
+            <div className="border-t border-amber-500/20 pt-2 mt-2">
+              <div className="text-[10px] text-muted-foreground mb-1">Price Range Verification:</div>
+              <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+                <div>
+                  <span className="text-muted-foreground">computed low:</span>
+                  <span className="ml-1">${computedLowPrice?.toFixed(2) || "N/A"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">derived_low:</span>
+                  <span className="ml-1">${prediction.derived_low_price?.toFixed(2) || "N/A"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">computed high:</span>
+                  <span className="ml-1">${computedHighPrice?.toFixed(2) || "N/A"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">derived_high:</span>
+                  <span className="ml-1">${prediction.derived_high_price?.toFixed(2) || "N/A"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">displayed SL:</span>
+                  <span className="ml-1">${prediction.stopLoss?.toFixed(2) || "N/A"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">displayed TP:</span>
+                  <span className="ml-1">${prediction.takeProfit?.toFixed(2) || "N/A"}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {onRefresh && (
           <Button 

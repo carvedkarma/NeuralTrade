@@ -1319,13 +1319,16 @@ export async function registerRoutes(
         stopLoss,
         takeProfit,
         riskReward,
-        expectedMove: sanitizedQuantiles.q50 * 100,
-        uncertainty: (sanitizedQuantiles.q90 - sanitizedQuantiles.q10) * 100,
+        expectedMove: sanitizedQuantiles.q50,
+        uncertainty: sanitizedQuantiles.q90 - sanitizedQuantiles.q10,
         quantiles: sanitizedQuantiles,
         directionProbs: probs,
         horizon: "4 hours (16 x 15m bars)",
         timestamp: Date.now(),
-        currentPrice,  // Include the exact price used to compute predictions
+        currentPrice,
+        units: "decimal_return" as const,
+        derived_low_price: currentPrice * (1 + sanitizedQuantiles.q10),
+        derived_high_price: currentPrice * (1 + sanitizedQuantiles.q90),
       };
       
       console.log(`[GPU NN] Prediction: ${direction} @ ${confidence.toFixed(2)} conf, q50=${(sanitizedQuantiles.q50 * 100).toFixed(2)}%`);
@@ -1424,7 +1427,10 @@ export async function registerRoutes(
         available: true,
         prediction: signal,
         currentPrice: prediction.current_price,
-        isMultihead: prediction.is_multihead
+        isMultihead: prediction.is_multihead,
+        units: "decimal_return",
+        derived_low_price: prediction.current_price * (1 + prediction.quantiles.q10),
+        derived_high_price: prediction.current_price * (1 + prediction.quantiles.q90)
       });
       
     } catch (error) {
