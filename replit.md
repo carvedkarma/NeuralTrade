@@ -10,139 +10,80 @@ Preferred communication style: Simple, everyday language.
 
 ## System Architecture
 
-### Frontend Architecture
-- **Framework**: React with TypeScript, using Vite.
+### Frontend
+- **Framework**: React with TypeScript (Vite).
 - **Routing**: Wouter.
-- **State Management**: TanStack React Query for real-time data updates.
-- **UI Components**: shadcn/ui built on Radix UI, styled with Tailwind CSS for theming.
-- **Charts**: Recharts for data visualization.
+- **State Management**: TanStack React Query for real-time data.
+- **UI Components**: shadcn/ui (Radix UI, Tailwind CSS).
+- **Charts**: Recharts.
 - **Animations**: Framer Motion.
-- **Navigation**: Tabbed interface covering Overview, Signal, Neural Network, Paper Trading, GPU Training, Strategy Learner, Learning, AI Analysis, Indicators, and Performance views. A dedicated GPU Training tab displays real-time status, loss curves, model comparisons, and cross-asset analysis. The Neural Network tab displays quantile-based predictions with Entry/SL/TP levels and predicted price bands.
+- **Navigation**: Tabbed interface covering Overview, Signal, Neural Network, Paper Trading, GPU Training, Strategy Learner, Learning, AI Analysis, Indicators, and Performance. The Neural Network tab displays quantile-based predictions (Entry/SL/TP) and predicted price bands.
 
-### Backend Architecture
+### Backend
 - **Runtime**: Node.js with Express.js.
-- **Language**: TypeScript with ESM modules.
-- **API Pattern**: RESTful endpoints.
+- **Language**: TypeScript with ESM.
+- **API Pattern**: RESTful.
 - **AI Integration**: OpenAI via Replit AI Integrations.
-- **Market Data**: Primary reliance on Binance Vision API, with CoinGecko and CryptoCompare as fallbacks, augmented by a Replit-hosted data proxy.
-- **Development**: Vite dev server with HMR.
-- **Production**: Static file serving.
+- **Market Data**: Binance Vision API, with CoinGecko and CryptoCompare fallbacks, augmented by a Replit-hosted data proxy.
 - **GPU Trainer Communication**: Bi-directional communication with a local GPU trainer via dedicated API endpoints.
 
 ### Data Layer
 - **ORM**: Drizzle ORM for PostgreSQL.
 - **Schema**: Zod for type-safe validation.
-- **Data Separation**: Critical design principle ensuring separation of live sentiment data from historical price/volume data to prevent data leakage.
-- **Key Data Models**: Includes Candle, Signal, FuturesData, TechnicalIndicator, MultiTimeframeScore, WhaleActivity, PerformanceStats, AIAnalysis, Trade, PaperPortfolio, PaperPosition, PaperTrade, PaperEquityCurve.
-- **Persistence System**: All learning states, including pattern clusters and social media stats, are persisted in a database to ensure continuity across restarts.
+- **Data Separation**: Live sentiment data is separated from historical price/volume data to prevent leakage.
+- **Key Data Models**: Candle, Signal, FuturesData, TechnicalIndicator, MultiTimeframeScore, WhaleActivity, PerformanceStats, AIAnalysis, Trade, PaperPortfolio, PaperPosition, PaperTrade, PaperEquityCurve.
+- **Persistence**: All learning states, including pattern clusters and social media stats, are persisted in a database.
 
 ### Machine Learning and Signal Generation
 
 #### Regression-Based Signal System (Institutional Upgrade)
-- **Edge Calculation**: `edge = (μ - cost) / σ` where μ = expected return, σ = uncertainty
-- **Signal Output Format**: action, confidence, expected_move, uncertainty, edge, cost_estimate, suggested_order_type, urgency, position_size_pct, stop_loss_pct, take_profit_pct, regime, expert_weights
-- **Regression Targets**: Compute μ (4h forward return), σ (uncertainty), P(move>cost), quantiles (p10/p50/p90), MFE/MAE
-- **Market Microstructure Data**: Funding rates, open interest, liquidations, order book depth, taker buy/sell volume from Binance Futures API
-- **Walk-Forward Evaluation**: Purged time-series splits with gap between train/test, after-cost PnL metrics, Sharpe ratio, maximum drawdown
+- **Edge Calculation**: `edge = (μ - cost) / σ`.
+- **Signal Output Format**: Comprehensive, including action, confidence, expected_move, uncertainty, edge, cost_estimate, suggested_order_type, urgency, position_size_pct, stop_loss_pct, take_profit_pct, regime, expert_weights.
+- **Regression Targets**: μ (4h forward return), σ (uncertainty), P(move>cost), quantiles (p10/p50/p90), MFE/MAE.
+- **Market Microstructure Data**: Funding rates, open interest, liquidations, order book depth, taker buy/sell volume from Binance Futures API.
+- **Walk-Forward Evaluation**: Purged time-series splits with gap between train/test, after-cost PnL metrics, Sharpe ratio, maximum drawdown.
 
 #### Regime Detection & Mixture-of-Experts
-- **Regime Types**: TRENDING, MEAN_REVERTING, HIGH_VOLATILITY, LOW_VOLATILITY, TRANSITION, UNKNOWN
-- **Expert Models**: 4 specialists (trend, mean-reversion, volatility, chaos) + gating network
-- **MoE Architecture**: GatingNetwork outputs soft weights, RegimeAwareExpert adapts to detected regime
-- **Expert Outputs**: Each expert produces (μ, σ), combined via uncertainty-weighted averaging
+- **Regime Types**: TRENDING, MEAN_REVERTING, HIGH_VOLATILITY, LOW_VOLATILITY, TRANSITION, UNKNOWN.
+- **Expert Models**: 4 specialists (trend, mean-reversion, volatility, chaos) plus a gating network.
+- **MoE Architecture**: GatingNetwork outputs soft weights, RegimeAwareExpert adapts to detected regime.
 
 #### Self-Supervised Pretraining
-- **Masked Time-Series**: Mask segments of input, predict masked values (BERT-style for time-series)
-- **Next-Step Distribution**: Predict quantiles of future returns (teaches uncertainty)
-- **Contrastive Learning**: Learn regime-invariant representations across assets
-- **Regime Clustering**: Deep clustering to discover market conditions without labels
-- **Pretraining Flow**: Self-supervised on billions of timesteps → fine-tune on trading objective
-
-#### Classification System (Legacy)
-- **ML Ensemble Predictor**: Combines rule-based, pattern-based, and OpenAI models with weighted voting for action-based predictions (P(LONG), P(SHORT), P(HOLD)).
-- **Pattern Memory System**: Stores and retrieves historical trade setups using cosine similarity.
-- **Comprehensive Feature Engine**: Computes ~66 MTF features (multi-timeframe returns, RSI, ATR, MACD, confluence metrics) from 5m/15m/1h/4h candles. Legacy TypeScript feature engine computes 81 features (57 core + 24 embedding) but is deprecated for GPU neural network inference.
-- **Shot Plan Generation**: Provides detailed trade plans with entry/exit zones, risk-reward ratios, and estimated hold times.
-- **Gatekeeper Logic**: Ensures trades are executed only with high confidence, positive edge, and sufficient supporting reasons, promoting selective trading. This includes horizon-specific thresholds, confidence ratio gates, multi-horizon decision logic, and 'NO-TRADE' conditions based on market state or horizon disagreement.
-- **Sentiment Integration**: Incorporates Fear & Greed Index, social sentiment, and news sentiment with caching.
-- **Multi-timeframe Confluence**: Scores signals across 5m, 15m, 1h, and 4h timeframes.
-- **Automated Paper Trading**: Features an ATR-based risk management system, Half-Kelly position sizing, and performance analytics.
-
-#### Training Pipeline (Leakage-Free)
-- **Chronological Split First**: Data is split into train/val BEFORE fitting scalers to prevent distribution leakage
-- **Scaler on Train Only**: `fit_scalers()` only sees training data, val/test use transform-only
-- **Purge Gap**: Configurable gap (default: horizon + sequence_length samples) between train/val to prevent lookahead from label computation
-- **Walk-Forward Evaluation**: CLI command `python main.py backtest` runs proper hedge fund-style walk-forward with after-cost PnL metrics
-- **Per-Class Metrics**: Trainer logs precision/recall/F1 for each class (SHORT/HOLD/LONG), macro-F1, and class distribution
-- **No Synthetic Data**: Training aborts if no real data exists (prevents meaningless models)
+- **Techniques**: Masked Time-Series, Next-Step Distribution prediction, Contrastive Learning, Deep clustering for regime discovery.
+- **Pretraining Flow**: Self-supervised on billions of timesteps then fine-tuned on trading objectives.
 
 #### GPU Neural Network Training
-- **Deep Learning Architectures**: Supports 12+ architectures trainable on local GPU with real-time status push and multi-timeframe data:
-  - Transformers: TransformerPriceModel, TemporalFusionTransformer (TFT)
-  - LSTMs: BidirectionalLSTM, StackedLSTM, ConvLSTM
-  - CNNs: ResNetPrice, InceptionNet, WaveNet
-  - VAEs: MarketVAE, ConditionalVAE
-  - GNNs: CrossAssetGNN, TemporalGNN
-  - Ensembles: MetaLearner, AttentionEnsemble, MasterEnsemble
-- **GPU Trainer API**: FastAPI server at port 8000 with:
-  - `/predict` and `/predict/candles` endpoints for model inference
-  - `/predict/regression` endpoint returning institutional-grade signal format (μ, σ, edge, confidence, position sizing, stops)
-  - `/predict/multihead/candles` endpoint returning ALL 6 heads: direction, μ/σ, quantiles, entry/SL/TP (MFE-learned), predicted candles
-  - `/models/load` and `/models/status` for model management
-- **Dashboard API Endpoints**:
-  - `/api/gpu/multihead/current` - Canonical endpoint for multihead inference from Replit dashboard, returns institutional signal format with MFE-learned levels
-  - Automatic model loading at startup from checkpoints
-  - Architecture-specific factory method handling each model's unique constructor signature
-  - Label mapping: 0=SHORT, 1=HOLD/NEUTRAL, 2=LONG (matches training labels)
-  - Instantiation error tracking with detailed status reporting
-- **Advanced Exit Logic**: Implements dynamic take-profit targets, MFE tracking, and failure stop detection.
-- **Unified Learning Controller**: Synchronizes Strategy Learner, Pattern Memory, and GPU Trainer to process consistent historical data ranges, with enhanced training status, ETA calculation, and staged decision logic.
-- **Multi-timeframe Data Download**: Parallel download of 1m, 5m, 15m, 1h, 4h data across 4 assets (BTC, ETH, SOL, BNB) with 8 concurrent streams, ordered by timeframe for optimal parallelism.
+- **Deep Learning Architectures**: Supports 12+ architectures including Transformers, LSTMs, CNNs, VAEs, GNNs, and Ensembles, trainable on local GPU with real-time status.
+- **GPU Trainer API**: FastAPI server providing `/predict` (including regression and multihead) and model management endpoints.
+- **Advanced Exit Logic**: Dynamic take-profit targets, MFE tracking, and failure stop detection.
+- **Unified Learning Controller**: Synchronizes Strategy Learner, Pattern Memory, and GPU Trainer for consistent historical data processing.
 - **Dual Decision Display**: Separate outputs for Combined Learning (Strategy Learner + Pattern Memory) and GPU Neural Network decisions with confidence levels.
-- **Signal Threshold Tuning**: Classification probability-based threshold (scoreThreshold=0.15, minConfidence=0.45, minMargin=0.10) that controls signal frequency to target 2-3 trades/day using directional score (pLong - pShort).
-- **Edge Tracker**: File-based persistence system (edge_tracker_state.json) that monitors actual signal performance including avg net return, hit rate, expectancy, Sharpe ratio, and monthly stability scores. API endpoints at /api/edge-metrics and /api/edge-metrics/clear.
+- **Edge Tracker**: File-based persistence for monitoring actual signal performance (avg net return, hit rate, expectancy, Sharpe ratio, monthly stability scores).
 
 #### Multi-Head Model Architecture (Institutional Upgrade)
-- **Three Output Heads**: Each model produces:
-  1. Classification head: Direction probabilities (LONG/HOLD/SHORT)
-  2. Regression head: Expected return μ and uncertainty σ
-  3. Quantile head: q10, q25, q50, q75, q90 with monotonic ordering constraint
-- **Combined Loss Function**: L = L_class + λ₁·L_μ + λ₂·L_σ + λ₃·L_quantile
-  - L_class: CrossEntropyLoss with label smoothing
-  - L_μ: HuberLoss for robust regression
-  - L_σ: GaussianNLLLoss for uncertainty calibration
-  - L_quantile: Pinball loss for quantile regression
-- **Multi-Head Models**: MultiHeadTransformer, MultiHeadLSTM, MultiHeadCNN share encoder, diverge at heads
-- **Files**: `gpu_trainer/models/multihead.py`, `gpu_trainer/training/multihead_loss.py`, `gpu_trainer/training/multihead_trainer.py`
+- **Three Output Heads**: Classification (Direction probabilities), Regression (Expected return μ and uncertainty σ), and Quantile (q10, q25, q50, q75, q90).
+- **Combined Loss Function**: Integrates CrossEntropyLoss, HuberLoss, GaussianNLLLoss, and Pinball loss.
 
 #### Feature Version Locking (Safety Critical)
-- **Mandatory for Live Trading**: Every trained model saves feature configuration
-- **FeatureConfig**: Stores feature_columns (ordered), version_hash, sequence_length, horizon
-- **FeatureValidator**: Validates/aligns incoming features at inference time
-- **Safe Prediction**: Returns HOLD with confidence=0 if feature mismatch detected
-- **File**: `gpu_trainer/training/feature_registry.py`
+- **Mandatory for Live Trading**: Every trained model saves its feature configuration (`FeatureConfig`).
+- **FeatureValidator**: Validates and aligns incoming features at inference.
+- **Safe Prediction**: Returns HOLD with 0 confidence if feature mismatch.
+
+#### Training-Inference Alignment
+- **Key Fixes**: Removed cross-asset features, uses forward-fill for missing features (aborts if >15% missing), explicitly drops OHLCV columns before feature extraction, and locks `sequence_length` to 100.
+- **Retraining Required**: Models must be retrained after these fixes.
 
 #### Quantile-Based Predictions & SL/TP Derivation
-- **Learned Quantiles**: Multi-head models output true learned quantiles (not heuristic synthesis)
-- **Entry/SL/TP Derivation (Mathematical, NOT Learned)**:
-  - Entry = current price
-  - For LONG: SL = price × (1 + q10), TP = price × (1 + q90)
-  - For SHORT: SL = price × (1 + q90), TP = price × (1 + q10)
-- **Probabilistic Fan Chart**: Visualizes return path quantiles (q10-q90 outer band, q25-q75 inner band, q50 median line)
-- **Training Modes**: Quick (15m only, ~41 features) vs Full MTF (5m/15m/1h/4h, ~66 features)
-- **API Endpoint**: `/predict/quantile` uses learned quantiles if multi-head model loaded, else falls back to heuristic
-- **Frontend Components**: `QuantileFanChart`, `DerivedTradeLevels` in `client/src/components/quantile-fan-chart.tsx`
+- **Learned Quantiles**: Multi-head models output true learned quantiles.
+- **Entry/SL/TP Derivation**: Mathematically derived from current price and learned quantiles.
+- **Probabilistic Fan Chart**: Visualizes return path quantiles.
 
 #### Professional Ensemble Predictor
-- **Direction Model Voting**: Transformer, TFT, LSTM, CNN models vote on direction with confidence margin (p_top1 - p_top2)
-- **VAE Regime Gating**: MarketVAE detects market regime (TRENDING, RANGING, CHOPPY, HIGH_VOLATILITY) to adjust thresholds
-- **GNN Risk Filtering**: CrossAssetGNN/TemporalGNN detect risk regime (RISK_ON, RISK_OFF, CORRELATION_SHOCK) to adjust position sizing
-- **Walk-Forward Metric Weighting**: Models weighted by trading metrics (expectancy, precision on trades, profit factor, F1 directional, Sharpe) not accuracy
-- **Temperature Scaling**: Probability calibration for comparable confidence scores across models
-- **Weighted Consensus**: Requires majority weight ≥ 55% and confidence margin ≥ threshold (adjusted by regime)
-- **Position Sizing Adjustment**: Regime-aware position sizing (reduced in choppy/high-vol/risk-off, increased in trending/risk-on)
-- **API Endpoints**: `/predict/ensemble` for ensemble prediction, `/ensemble/status` for model classification, `/ensemble/update-weights` for weight updates
-- **Dashboard Integration**: EnsembleSignalCard displays action, regime tags, model agreement, position sizing, and per-model votes
+- **Model Voting**: Transformer, TFT, LSTM, CNN models vote on direction with confidence margin.
+- **Regime Gating**: VAE detects market regime (TRENDING, RANGING, CHOPPY, HIGH_VOLATILITY) to adjust thresholds.
+- **Risk Filtering**: GNN detects risk regime (RISK_ON, RISK_OFF, CORRELATION_SHOCK) to adjust position sizing.
+- **Metric Weighting**: Models weighted by trading metrics (expectancy, precision, profit factor, F1, Sharpe).
+- **Position Sizing Adjustment**: Regime-aware position sizing.
 
 ### Build System
 - **Client Build**: Vite bundles React app to `dist/public`.
@@ -151,7 +92,7 @@ Preferred communication style: Simple, everyday language.
 ## External Dependencies
 
 ### Database
-- PostgreSQL (configured via `DATABASE_URL`).
+- PostgreSQL (via `DATABASE_URL`).
 - Drizzle Kit for schema migrations.
 - connect-pg-simple for session storage.
 
@@ -167,4 +108,4 @@ Preferred communication style: Simple, everyday language.
 
 ### Development Tools
 - Replit-specific plugins for dev banner and error overlay.
-- TypeScript with strict mode.
+- TypeScript.
