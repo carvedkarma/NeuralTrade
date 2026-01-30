@@ -1,0 +1,155 @@
+Perfect — these logs confirm the earlier diagnosis 100%:
+
+✅ Your GPU server loaded models that expect:
+
+66 features
+
+seq_len = 100
+
+scaler also expects 66 columns
+
+But your runtime inference input (from your Web-App / API caller) is sending:
+
+81 features
+
+and likely seq_len = 50 (based on earlier errors)
+
+So the models are loaded correctly — the bug is in the feature builder / request payload going into /predict (or whatever endpoint your Web-App calls).
+
+What you need to fix (no guessing)
+✅ Fix 1: Force inference to use the model’s schema (66 features)
+
+You already load:
+
+“Loaded expected feature list: 66 columns”
+
+So you must enforce this rule:
+
+Build features however you want (even 81)
+
+Then select only the 66 expected columns in the exact order
+
+If any expected feature is missing → fill with 0
+
+This should happen inside the GPU API server right before scaling + tensor conversion, so you never get shape errors again even if the web app changes.
+
+Best practice: the model dictates schema, not the caller.
+
+✅ Fix 2: Force inference seq_len = 100
+
+All models were instantiated with:
+
+seq=100
+
+So your input must always be shaped:
+
+(batch, 100, 66) before model forward
+
+If caller sends 50 candles:
+
+pad to 100 (left-pad with the earliest row or zeros)
+or
+
+fetch more candles in the caller (better)
+
+The fastest “make it work now” patch (inside GPU API)
+
+In your api/server.py (or whichever file prepares tensors), implement this flow:
+
+Load expected_feature_list.json (already done)
+
+When request arrives, turn incoming candles/features into a dataframe
+
+Reindex to expected features:
+
+df = df.reindex(columns=expected_features, fill_value=0.0)
+
+Enforce sequence length:
+
+if len(df) < 100: pad
+
+if len(df) > 100: take last 100
+
+Apply scaler
+
+Convert to tensor
+
+That will immediately stop:
+
+LSTM/TFT “Expected 66 got 81”
+
+Transformer matmul errors
+
+VAE flatten mismatches
+
+GNN mismatches
+
+Why your models show acc=0.00% in logs
+
+This line:
+
+Loaded & instantiated ... (acc=0.00%)
+
+is not necessarily a model problem. It usually means:
+
+you didn’t store accuracy in the checkpoint metadata
+
+so loader defaulted to 0.00
+
+Not a blocker for prediction.
+
+Where the wrong 81 features are coming from (almost always)
+
+In your Web-App server/ml-predictor.ts or feature builder:
+
+you enabled extra features recently (microstructure, more MTF scores, regime features)
+
+and those are now being sent to the GPU server
+
+That’s fine — but the GPU server models were trained on the old 66-feature schema.
+
+The “correct” long-term solution (so this never happens again)
+A) Save schema per checkpoint
+
+When training finishes, save with checkpoint:
+
+feature_names
+
+seq_len
+
+version_id (e.g. v3_66f_seq100)
+
+B) GPU server should auto-adapt to the checkpoint schema
+
+Not just one global expected_feature_list.
+Each model can have its own expected list (in case you retrain later with 81 features).
+
+What I need from you to give the exact code line fix
+
+Tell me which GPU endpoint you call and from where:
+
+In Web-App: is it calling http://localhost:8000/predict or similar?
+
+In GPU server: what file contains the request handler? (api/server.py?)
+
+If you paste the function that receives the request and builds x tensor, I’ll tell you exactly where to insert the 66-feature reindex + seq_len padding (10–15 lines).
+
+Quick check you can do right now
+
+Log inside GPU predict handler:
+
+received feature count
+
+received seq_len
+
+If it prints 81 and 50, you’ve confirmed it instantly.
+
+Bottom line
+
+Your models are fine.
+Your input schema is wrong.
+
+Fix by enforcing:
+✅ (100, 66) before passing into models.
+
+If you paste your GPU server predict handler code, I’ll rewrite it cleanly with schema enforcement and padding.
