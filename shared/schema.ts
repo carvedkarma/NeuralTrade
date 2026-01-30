@@ -65,6 +65,27 @@ export const signalSchema = z.object({
   urgency: z.enum(["low", "medium", "high"]).optional(),
   suggestedOrderType: z.enum(["limit", "market"]).optional(),
   expertWeights: z.record(z.number()).optional(),
+  // Multihead-specific fields
+  isMultihead: z.boolean().optional(),
+  entryOffsetPct: z.number().optional(),  // Learned entry offset from MFE
+  entryPrice: z.number().optional(),
+  stopLossPrice: z.number().optional(),
+  takeProfitPrice: z.number().optional(),
+  quantiles: z.object({
+    q10: z.number(),
+    q25: z.number(),
+    q50: z.number(),
+    q75: z.number(),
+    q90: z.number(),
+  }).optional(),
+  predictedCandles: z.array(z.object({
+    step: z.number(),
+    closeDeleta: z.number(),
+    highDelta: z.number(),
+    lowDelta: z.number(),
+  })).optional(),
+  riskRewardRatio: z.number().optional(),
+  isLearnedLevels: z.boolean().optional(),  // True if SL/TP from training, not heuristic
 });
 export type Signal = z.infer<typeof signalSchema>;
 

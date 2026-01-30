@@ -239,15 +239,11 @@ class RegressionTargetGenerator:
         class_label[short_mask] = 0  # SHORT
         
         # === TRADING HEAD TARGETS ===
-        # Entry offset: small, based on recent volatility (aim for better fill)
+        # Entry offset: MFE-based optimal limit entry (learned from price path)
         atr = self._compute_atr(df, period=14)
-        entry_offset = pd.Series(0.0, index=df.index)  # No offset by default
-        
-        # SL distance: based on ATR (1-2x ATR typical)
-        sl_distance = (atr * 1.5 / prices).clip(lower=0.003, upper=0.05)  # As percentage
-        
-        # TP distance: based on ATR and risk-reward (2x SL typical for 1.5 R:R)
-        tp_distance = (atr * 3.0 / prices).clip(lower=0.005, upper=0.10)  # As percentage
+        entry_offset, sl_distance, tp_distance = self._compute_mfe_trading_targets(
+            df, prices, class_label, atr, n_future_candles
+        )
         
         # === CANDLE PREDICTION TARGETS ===
         # Compute future candle deltas (percentage changes from current close)
@@ -299,6 +295,122 @@ class RegressionTargetGenerator:
         atr = true_range.rolling(window=period).mean()
         
         return atr.fillna(true_range)
+    
+    def _compute_mfe_trading_targets(
+        self, 
+        df: pd.DataFrame, 
+        prices: pd.Series,
+        class_label: pd.Series,
+        atr: pd.Series,
+        n_future_candles: int
+    ) -> Tuple[pd.Series, pd.Series, pd.Series]:
+        """
+        Compute MFE-based (Maximum Favorable Excursion) trading targets.
+        
+        MFE Logic:
+        - For LONG: entry_offset = how far below current price did price dip 
+          before moving up (optimal limit buy placement)
+        - For SHORT: entry_offset = how far above current price did price spike
+          before moving down (optimal limit sell placement)
+        - For HOLD: entry_offset = 0 (no trade)
+        
+        SL/TP are derived from MAE (Maximum Adverse Excursion) and MFE:
+        - SL = MAE (maximum adverse move during the trade)
+        - TP = MFE (maximum favorable move during the trade)
+        
+        All values are normalized by ATR for cross-volatility learning.
+        
+        Returns:
+            entry_offset: Optimal entry as percentage of price (negative = buy lower)
+            sl_distance: Stop loss distance as percentage
+            tp_distance: Take profit distance as percentage
+        """
+        highs = df["high"]
+        lows = df["low"]
+        
+        # Initialize with zeros
+        entry_offset = pd.Series(0.0, index=df.index)
+        sl_distance = pd.Series(0.0, index=df.index)
+        tp_distance = pd.Series(0.0, index=df.index)
+        
+        # Horizon for MFE/MAE calculation (same as forward return horizon)
+        horizon = self.horizon_periods
+        
+        for i in range(len(df) - horizon):
+            current_price = prices.iloc[i]
+            label = class_label.iloc[i]
+            current_atr = atr.iloc[i] if not pd.isna(atr.iloc[i]) else current_price * 0.01
+            
+            # Get future price path
+            future_highs = highs.iloc[i+1:i+horizon+1]
+            future_lows = lows.iloc[i+1:i+horizon+1]
+            future_closes = prices.iloc[i+1:i+horizon+1]
+            
+            if len(future_highs) == 0:
+                continue
+            
+            # MFE/MAE from the current entry point
+            max_high = future_highs.max()
+            min_low = future_lows.min()
+            
+            # LONG trade analysis
+            if label == 2:  # LONG
+                # Best entry = lowest price in first few candles (optimal limit buy)
+                # We look at the first 1/4 of horizon for entry opportunity
+                entry_window = max(1, horizon // 4)
+                best_entry_price = future_lows.iloc[:entry_window].min()
+                
+                # Entry offset: how much lower than current could we have bought?
+                # Negative means better (lower) entry
+                entry_off = (best_entry_price - current_price) / current_price
+                entry_offset.iloc[i] = np.clip(entry_off, -0.05, 0.0)  # Max 5% better entry
+                
+                # MAE (Maximum Adverse Excursion) = worst drawdown during trade
+                mae = (min_low - current_price) / current_price
+                sl_distance.iloc[i] = abs(mae) + (current_atr / current_price) * 0.5
+                
+                # MFE (Maximum Favorable Excursion) = best profit potential
+                mfe = (max_high - current_price) / current_price
+                tp_distance.iloc[i] = max(mfe, current_atr / current_price * 2)
+                
+            # SHORT trade analysis
+            elif label == 0:  # SHORT
+                # Best entry = highest price in first few candles (optimal limit sell)
+                entry_window = max(1, horizon // 4)
+                best_entry_price = future_highs.iloc[:entry_window].max()
+                
+                # Entry offset: how much higher than current could we have sold?
+                # Positive means better (higher) entry for short
+                entry_off = (best_entry_price - current_price) / current_price
+                entry_offset.iloc[i] = np.clip(entry_off, 0.0, 0.05)  # Max 5% better entry
+                
+                # MAE for short = worst spike up during trade
+                mae = (max_high - current_price) / current_price
+                sl_distance.iloc[i] = abs(mae) + (current_atr / current_price) * 0.5
+                
+                # MFE for short = best drop potential
+                mfe = (current_price - min_low) / current_price
+                tp_distance.iloc[i] = max(mfe, current_atr / current_price * 2)
+                
+            else:  # HOLD
+                # For HOLD, use ATR-based defaults (fallback)
+                entry_offset.iloc[i] = 0.0
+                sl_distance.iloc[i] = (current_atr / current_price) * 1.5
+                tp_distance.iloc[i] = (current_atr / current_price) * 3.0
+        
+        # Clip to reasonable ranges
+        sl_distance = sl_distance.clip(lower=0.003, upper=0.05)  # 0.3% to 5%
+        tp_distance = tp_distance.clip(lower=0.005, upper=0.10)  # 0.5% to 10%
+        
+        # Log statistics
+        long_mask = class_label == 2
+        short_mask = class_label == 0
+        logger.info(f"MFE Trading Targets - "
+                   f"LONG entry_offset mean: {entry_offset[long_mask].mean():.4f}, "
+                   f"SHORT entry_offset mean: {entry_offset[short_mask].mean():.4f}, "
+                   f"SL mean: {sl_distance.mean():.4f}, TP mean: {tp_distance.mean():.4f}")
+        
+        return entry_offset, sl_distance, tp_distance
     
     def compute_probability_profitable(self, 
                                         prices: pd.Series,

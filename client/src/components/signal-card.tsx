@@ -127,27 +127,76 @@ export function SignalCard({ signal }: SignalCardProps) {
         </div>
 
         {signal.positionSizePct !== undefined && (
-          <div className="grid grid-cols-3 gap-3 pt-2 border-t border-border">
-            <div className="space-y-1">
-              <p className="text-xs text-muted-foreground">Position Size</p>
-              <span className="text-sm font-mono font-medium text-primary" data-testid="text-position-size">
-                {(signal.positionSizePct * 100).toFixed(1)}%
-              </span>
-            </div>
-            {signal.stopLossPct !== undefined && (
-              <div className="space-y-1">
-                <p className="text-xs text-muted-foreground">Stop Loss</p>
-                <span className="text-sm font-mono text-red-400" data-testid="text-stop-loss">
-                  -{(signal.stopLossPct * 100).toFixed(2)}%
-                </span>
+          <div className="space-y-3 pt-2 border-t border-border">
+            {/* Learned levels indicator */}
+            {signal.isLearnedLevels && (
+              <div className="flex items-center gap-2">
+                <Badge className="bg-purple-500/20 text-purple-400 border-0 text-xs" data-testid="badge-learned">
+                  MFE/MAE Learned
+                </Badge>
+                {signal.riskRewardRatio !== undefined && (
+                  <span className="text-xs text-muted-foreground">
+                    R:R 1:{signal.riskRewardRatio.toFixed(2)}
+                  </span>
+                )}
               </div>
             )}
-            {signal.takeProfitPct !== undefined && (
+            
+            <div className="grid grid-cols-3 gap-3">
               <div className="space-y-1">
-                <p className="text-xs text-muted-foreground">Take Profit</p>
-                <span className="text-sm font-mono text-emerald-400" data-testid="text-take-profit">
-                  +{(signal.takeProfitPct * 100).toFixed(2)}%
+                <p className="text-xs text-muted-foreground">Position Size</p>
+                <span className="text-sm font-mono font-medium text-primary" data-testid="text-position-size">
+                  {(signal.positionSizePct * 100).toFixed(1)}%
                 </span>
+              </div>
+              {signal.stopLossPct !== undefined && (
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground">Stop Loss</p>
+                  <span className="text-sm font-mono text-red-400" data-testid="text-stop-loss">
+                    -{(signal.stopLossPct * 100).toFixed(2)}%
+                  </span>
+                </div>
+              )}
+              {signal.takeProfitPct !== undefined && (
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground">Take Profit</p>
+                  <span className="text-sm font-mono text-emerald-400" data-testid="text-take-profit">
+                    +{(signal.takeProfitPct * 100).toFixed(2)}%
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Price levels if multihead */}
+            {signal.isMultihead && signal.entryPrice && (
+              <div className="grid grid-cols-3 gap-3 pt-2 border-t border-border/50">
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground">Entry</p>
+                  <span className="text-sm font-mono font-medium" data-testid="text-entry-price">
+                    ${signal.entryPrice.toLocaleString()}
+                  </span>
+                  {signal.entryOffsetPct !== undefined && signal.entryOffsetPct !== 0 && (
+                    <span className="text-xs text-muted-foreground">
+                      ({signal.entryOffsetPct > 0 ? "+" : ""}{(signal.entryOffsetPct * 100).toFixed(3)}%)
+                    </span>
+                  )}
+                </div>
+                {signal.stopLossPrice && (
+                  <div className="space-y-1">
+                    <p className="text-xs text-muted-foreground">SL Price</p>
+                    <span className="text-sm font-mono text-red-400" data-testid="text-sl-price">
+                      ${signal.stopLossPrice.toLocaleString()}
+                    </span>
+                  </div>
+                )}
+                {signal.takeProfitPrice && (
+                  <div className="space-y-1">
+                    <p className="text-xs text-muted-foreground">TP Price</p>
+                    <span className="text-sm font-mono text-emerald-400" data-testid="text-tp-price">
+                      ${signal.takeProfitPrice.toLocaleString()}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
           </div>

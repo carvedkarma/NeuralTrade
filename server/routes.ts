@@ -4,7 +4,7 @@ import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
 import { db } from "./db";
 import { candles, insertShotPlanHistorySchema } from "@shared/schema";
-import { and, eq, gte, lte, asc } from "drizzle-orm";
+import { and, eq, gte, lte, asc, desc } from "drizzle-orm";
 import { z } from "zod";
 import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes, clearNNData, cancelNNDownload, getResumableStatus, resumeNNDataDownload, getDownloadETA, streamNNDataBulk } from "./historical-data";
 import zlib from "zlib";
@@ -1337,6 +1337,101 @@ export async function registerRoutes(
         available: false, 
         prediction: null,
         predictedCandles: [],
+        error: error instanceof Error ? error.message : "Unknown error"
+      });
+    }
+  });
+
+  // ============ MULTIHEAD PREDICTION ENDPOINT ============
+  // Canonical endpoint for multi-head model inference
+  // Returns ALL 6 heads: direction, μ/σ, quantiles, entry/SL/TP, candles
+  app.get("/api/gpu/multihead/current", async (req, res) => {
+    try {
+      // Get MOST RECENT candle data from database (order desc, then reverse for chronological)
+      const getDbCandles = async (timeframe: string, limit: number = 200) => {
+        const result = await db.select()
+          .from(candles)
+          .where(and(eq(candles.symbol, "BTCUSDT"), eq(candles.timeframe, timeframe)))
+          .orderBy(desc(candles.timestamp))  // Get most recent first
+          .limit(limit);
+        return result.reverse();  // Reverse to chronological order (oldest first)
+      };
+      
+      const candleData = await getDbCandles("15m", 200);
+      
+      if (candleData.length < 100) {
+        return res.json({
+          available: false,
+          prediction: null,
+          error: "Not enough candle data (need 100+, have " + candleData.length + ")"
+        });
+      }
+      
+      // Format candles for GPU trainer (chronological order, oldest to newest)
+      const formattedCandles = candleData.map((c: any) => ({
+        timestamp: c.timestamp,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: c.volume
+      }));
+      
+      console.log(`[GPU Multihead] Using ${formattedCandles.length} candles, latest: ${new Date(formattedCandles[formattedCandles.length - 1]?.timestamp).toISOString()}`);
+      
+      // Call multihead endpoint
+      const prediction = await gpuBridge.predictMultiheadFromCandles(formattedCandles);
+      
+      if (!prediction) {
+        return res.json({
+          available: false,
+          prediction: null,
+          error: "Multihead prediction failed - GPU trainer not connected or no multihead model"
+        });
+      }
+      
+      // Return multihead prediction with signal format
+      const signal = {
+        signal: prediction.action,
+        confidence: prediction.confidence,
+        expectedMove: prediction.expected_return,
+        costs: 0.001,  // ~0.1% round-trip
+        edge: prediction.edge,
+        regime: "unknown",
+        riskMode: "normal",
+        topFeatures: [],
+        mu: prediction.expected_return,
+        sigma: prediction.uncertainty,
+        positionSizePct: prediction.position_size_pct / 100,  // Convert to decimal
+        stopLossPct: prediction.stop_loss_pct,
+        takeProfitPct: prediction.take_profit_pct,
+        urgency: prediction.urgency.toLowerCase() as "low" | "medium" | "high",
+        suggestedOrderType: prediction.suggested_order_type.toLowerCase() as "limit" | "market",
+        isMultihead: prediction.is_multihead,
+        entryOffsetPct: prediction.entry_offset_pct,
+        entryPrice: prediction.entry_price,
+        stopLossPrice: prediction.stop_loss_price,
+        takeProfitPrice: prediction.take_profit_price,
+        quantiles: prediction.quantiles,
+        predictedCandles: prediction.predicted_candles,
+        riskRewardRatio: prediction.risk_reward_ratio,
+        isLearnedLevels: prediction.is_multihead,  // If multihead, levels are learned
+        modelName: prediction.model_name,
+        reasons: prediction.reasons
+      };
+      
+      res.json({
+        available: true,
+        prediction: signal,
+        currentPrice: prediction.current_price,
+        isMultihead: prediction.is_multihead
+      });
+      
+    } catch (error) {
+      console.error("[GPU Multihead] Prediction error:", error);
+      res.json({
+        available: false,
+        prediction: null,
         error: error instanceof Error ? error.message : "Unknown error"
       });
     }

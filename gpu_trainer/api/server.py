@@ -938,6 +938,17 @@ class ModelManager:
             return self.model_instances[model_name]
         return self.models.get(model_name)
     
+    def get_multihead_model(self):
+        """Get the first available multi-head model instance.
+        
+        Returns:
+            Model instance with forward_multihead() method, or None if not available.
+        """
+        for name, model in self.model_instances.items():
+            if hasattr(model, 'forward_multihead'):
+                return model
+        return None
+    
     def predict(self, features: np.ndarray, feature_names: List[str] = None) -> Dict:
         """Make prediction with correct label mapping.
         
@@ -1320,6 +1331,58 @@ class EnsemblePredictionResponse(BaseModel):
     # Reasons
     reasons: List[str]
 
+
+class MultiHeadPredictionResponse(BaseModel):
+    """
+    Unified multihead prediction response.
+    
+    Returns ALL 6 heads from multi-head models:
+    1. Direction (classification)
+    2. Expected return (mu) and uncertainty (sigma)
+    3. Quantiles (q10, q25, q50, q75, q90)
+    4. Trading levels (entry_offset, sl_distance, tp_distance)
+    5. Future candle predictions
+    6. Derived trade plan
+    """
+    # Direction
+    action: str  # LONG, SHORT, HOLD
+    direction_probs: Dict[str, float]  # P(SHORT), P(HOLD), P(LONG)
+    confidence: float
+    
+    # Regression (μ, σ)
+    expected_return: float  # mu
+    uncertainty: float  # sigma
+    edge: float  # mu - cost
+    
+    # Quantiles (learned, not heuristic)
+    quantiles: Dict[str, float]  # q10, q25, q50, q75, q90 as percentage returns
+    
+    # Trading levels (learned from MFE/MAE)
+    entry_offset_pct: float  # Optimal limit order offset
+    stop_loss_pct: float  # Stop loss distance
+    take_profit_pct: float  # Take profit distance
+    
+    # Derived price levels
+    current_price: float
+    entry_price: float  # current_price * (1 + entry_offset)
+    stop_loss_price: float
+    take_profit_price: float
+    
+    # Future candle predictions (optional)
+    predicted_candles: Optional[List[Dict[str, float]]] = None  # [{close_delta, high_delta, low_delta}, ...]
+    
+    # Trade plan
+    suggested_order_type: str  # MAKER or TAKER
+    urgency: str  # LOW, MEDIUM, HIGH
+    position_size_pct: float
+    risk_reward_ratio: float
+    
+    # Metadata
+    model_name: str
+    is_multihead: bool
+    reasons: List[str]
+
+
 start_time = datetime.now()
 
 @app.get("/health", response_model=HealthResponse)
@@ -1532,6 +1595,254 @@ async def predict_from_candles(request: CandlePredictionRequest):
     except Exception as e:
         logger.error(f"Candle prediction error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/predict/multihead/candles", response_model=MultiHeadPredictionResponse)
+async def predict_multihead_from_candles(request: CandlePredictionRequest):
+    """
+    Unified multihead prediction endpoint.
+    
+    This is the CANONICAL endpoint for multi-head model inference.
+    It uses forward_multihead() internally and returns ALL 6 heads:
+    1. Direction probabilities (classification)
+    2. Expected return (μ) and uncertainty (σ)
+    3. Quantiles (q10, q25, q50, q75, q90)
+    4. Trading levels (entry_offset, sl_distance, tp_distance) - learned from MFE/MAE
+    5. Future candle predictions
+    6. Derived trade plan with price levels
+    
+    This endpoint REPLACES /predict/candles for trading purposes.
+    """
+    try:
+        if len(request.candles) < 100:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Need at least 100 candles for feature computation, got {len(request.candles)}"
+            )
+        
+        # Get current price from last candle
+        current_price = request.candles[-1].close
+        
+        # Convert candles to DataFrame
+        import pandas as pd
+        candle_data = [
+            {
+                "timestamp": c.timestamp,
+                "open": c.open,
+                "high": c.high,
+                "low": c.low,
+                "close": c.close,
+                "volume": c.volume
+            }
+            for c in request.candles
+        ]
+        df = pd.DataFrame(candle_data)
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        
+        # Import feature computation from pipeline
+        try:
+            import sys
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from data.pipeline import FeatureEngineer
+            
+            # Compute features
+            fe = FeatureEngineer()
+            features_df = fe.compute_technical_features(df)
+            
+            # Handle NaNs
+            if "close" in features_df.columns:
+                features_df = features_df.dropna(subset=["close"])
+            feature_cols = [c for c in features_df.columns if c not in ["datetime", "timestamp", "close", "open", "high", "low", "volume"]]
+            if len(feature_cols) > 0:
+                features_df[feature_cols] = features_df[feature_cols].ffill().fillna(0.0)
+            
+            if len(features_df) == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No valid features after computation (all NaN)"
+                )
+            
+            # Scale features
+            features_np = model_manager.transform_features(features_df)
+            
+            # Use sequence length from model
+            seq_len = model_manager.sequence_length
+            if len(features_np) < seq_len:
+                seq_len = len(features_np)
+            
+            features_seq = features_np[-seq_len:]
+            
+        except ImportError as e:
+            logger.error(f"Failed to import feature pipeline: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Feature pipeline not available: {e}"
+            )
+        
+        # Check if multihead model is available
+        multihead_model = model_manager.get_multihead_model()
+        
+        if multihead_model is None:
+            # Fallback to basic prediction
+            result = model_manager.predict(features_seq)
+            
+            return MultiHeadPredictionResponse(
+                action=result.get("action_name", ACTION_NAMES[result["action"]]),
+                direction_probs={
+                    "SHORT": result["probabilities"][0],
+                    "HOLD": result["probabilities"][1],
+                    "LONG": result["probabilities"][2]
+                },
+                confidence=result["confidence"],
+                expected_return=0.0,
+                uncertainty=0.02,
+                edge=0.0,
+                quantiles={"q10": -0.02, "q25": -0.01, "q50": 0.0, "q75": 0.01, "q90": 0.02},
+                entry_offset_pct=0.0,
+                stop_loss_pct=0.02,
+                take_profit_pct=0.04,
+                current_price=current_price,
+                entry_price=current_price,
+                stop_loss_price=current_price * 0.98,
+                take_profit_price=current_price * 1.04,
+                predicted_candles=None,
+                suggested_order_type="TAKER",
+                urgency="MEDIUM",
+                position_size_pct=2.0,
+                risk_reward_ratio=2.0,
+                model_name="classification_fallback",
+                is_multihead=False,
+                reasons=["No multihead model available, using classification fallback"]
+            )
+        
+        # Use multihead model with forward_multihead()
+        import torch
+        import torch.nn.functional as F
+        
+        device = next(multihead_model.parameters()).device
+        x = torch.from_numpy(features_seq).float().unsqueeze(0).to(device)
+        
+        with torch.no_grad():
+            # This is the key - use forward_multihead NOT forward
+            output = multihead_model.forward_multihead(x)
+        
+        # Extract all heads
+        class_probs = F.softmax(output.class_logits, dim=-1).cpu().numpy()[0]
+        mu = output.mu.cpu().item()
+        sigma = output.sigma.cpu().item()
+        quantiles_raw = output.quantiles.cpu().numpy()[0]  # [q10, q25, q50, q75, q90]
+        entry_offset = output.entry_offset.cpu().item()
+        sl_distance = output.sl_distance.cpu().item()
+        tp_distance = output.tp_distance.cpu().item()
+        candle_deltas = output.candle_deltas.cpu().numpy()[0]  # [n_steps, 3]
+        
+        # Determine action
+        action_idx = int(np.argmax(class_probs))
+        action = ACTION_NAMES[action_idx]
+        confidence = float(class_probs[action_idx])
+        
+        # Calculate edge
+        cost = 0.001  # ~0.1% round trip
+        edge = abs(mu) - cost
+        
+        # Derive price levels based on action
+        entry_price = current_price * (1 + entry_offset)
+        
+        if action == "LONG":
+            stop_loss_price = current_price * (1 - sl_distance)
+            take_profit_price = current_price * (1 + tp_distance)
+        elif action == "SHORT":
+            stop_loss_price = current_price * (1 + sl_distance)
+            take_profit_price = current_price * (1 - tp_distance)
+        else:  # HOLD
+            stop_loss_price = current_price * (1 - sl_distance)
+            take_profit_price = current_price * (1 + tp_distance)
+        
+        # Risk-reward ratio
+        risk = abs(current_price - stop_loss_price)
+        reward = abs(take_profit_price - current_price)
+        rr_ratio = reward / risk if risk > 0 else 0.0
+        
+        # Suggested order type based on urgency
+        if confidence > 0.7 and abs(mu) > 0.01:
+            urgency = "HIGH"
+            suggested_order_type = "TAKER"
+        elif confidence > 0.5:
+            urgency = "MEDIUM"
+            suggested_order_type = "MAKER"
+        else:
+            urgency = "LOW"
+            suggested_order_type = "MAKER"
+        
+        # Position sizing based on confidence and edge
+        base_size = 2.0  # 2% base
+        position_size = base_size * min(confidence * 2, 1.5) * (1 + edge)
+        position_size = min(max(position_size, 0.5), 5.0)  # 0.5% to 5%
+        
+        # Format predicted candles
+        predicted_candles = []
+        for i in range(len(candle_deltas)):
+            predicted_candles.append({
+                "step": i + 1,
+                "close_delta": float(candle_deltas[i, 0]),
+                "high_delta": float(candle_deltas[i, 1]),
+                "low_delta": float(candle_deltas[i, 2])
+            })
+        
+        # Build reasons
+        reasons = [
+            f"Model prediction: {action} with {confidence:.1%} confidence",
+            f"Expected return (μ): {mu:.4f} ({mu*100:.2f}%)",
+            f"Uncertainty (σ): {sigma:.4f}",
+            f"Edge after costs: {edge:.4f}",
+            f"Entry offset: {entry_offset*100:.3f}% (learned from MFE)",
+            f"SL distance: {sl_distance*100:.2f}%, TP distance: {tp_distance*100:.2f}% (learned from MAE/MFE)",
+            f"Risk:Reward = 1:{rr_ratio:.2f}"
+        ]
+        
+        return MultiHeadPredictionResponse(
+            action=action,
+            direction_probs={
+                "SHORT": float(class_probs[0]),
+                "HOLD": float(class_probs[1]),
+                "LONG": float(class_probs[2])
+            },
+            confidence=confidence,
+            expected_return=mu,
+            uncertainty=sigma,
+            edge=edge,
+            quantiles={
+                "q10": float(quantiles_raw[0]),
+                "q25": float(quantiles_raw[1]),
+                "q50": float(quantiles_raw[2]),
+                "q75": float(quantiles_raw[3]),
+                "q90": float(quantiles_raw[4])
+            },
+            entry_offset_pct=entry_offset,
+            stop_loss_pct=sl_distance,
+            take_profit_pct=tp_distance,
+            current_price=current_price,
+            entry_price=entry_price,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+            predicted_candles=predicted_candles,
+            suggested_order_type=suggested_order_type,
+            urgency=urgency,
+            position_size_pct=position_size,
+            risk_reward_ratio=rr_ratio,
+            model_name=getattr(multihead_model, '__class__.__name__', 'MultiHeadModel'),
+            is_multihead=True,
+            reasons=reasons
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Multihead prediction error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/predict/regression", response_model=RegressionPredictionResponse)
 async def predict_regression(request: RegressionPredictionRequest):

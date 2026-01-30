@@ -338,7 +338,128 @@ class MultiHeadTrainer:
             avg_losses['q75_cal'] = calibration[3].item()
             avg_losses['q90_cal'] = calibration[4].item()
         
+        # Compute trading-aware metrics
+        trading_metrics = self._compute_trading_metrics()
+        avg_losses.update(trading_metrics)
+        
         return avg_losses
+    
+    def _compute_trading_metrics(self) -> Dict[str, float]:
+        """
+        Compute trading-aware evaluation metrics.
+        
+        These metrics are what actually matter for trading performance:
+        - Expectancy: Average profit per trade (R-multiple)
+        - Hit rate: Percentage of winning trades
+        - Cost-adjusted Sharpe: Risk-adjusted returns after costs
+        - Max drawdown: Largest peak-to-trough decline
+        - Profit factor: Gross profits / gross losses
+        
+        Returns:
+            Dictionary of trading metrics
+        """
+        all_predictions = []
+        all_returns = []
+        all_mus = []
+        
+        cost = 0.001  # 0.1% round-trip cost
+        
+        with torch.no_grad():
+            for features, class_labels, returns, trading, candle_tgt in self.val_loader:
+                features = features.to(self.device)
+                output = self.model.forward_multihead(features)
+                
+                probs = torch.softmax(output.class_logits, dim=-1)
+                preds = probs.argmax(dim=-1)
+                confidence = probs.max(dim=-1).values
+                
+                all_predictions.extend(preds.cpu().numpy())
+                all_returns.extend(returns.cpu().numpy())
+                all_mus.extend(output.mu.squeeze().cpu().numpy())
+        
+        preds = np.array(all_predictions)
+        returns = np.array(all_returns)
+        mus = np.array(all_mus)
+        
+        metrics = {}
+        
+        # Filter for directional predictions (LONG=2, SHORT=0)
+        long_mask = preds == 2
+        short_mask = preds == 0
+        trade_mask = long_mask | short_mask
+        
+        if trade_mask.sum() == 0:
+            logger.warning("No directional trades in validation set")
+            return {
+                'expectancy': 0.0, 'hit_rate': 0.0, 'profit_factor': 0.0,
+                'sharpe': 0.0, 'max_drawdown': 0.0, 'num_trades': 0
+            }
+        
+        # Compute PnL for each trade
+        trade_pnl = np.zeros(len(returns))
+        trade_pnl[long_mask] = returns[long_mask] - cost  # LONG: profit if price goes up
+        trade_pnl[short_mask] = -returns[short_mask] - cost  # SHORT: profit if price goes down
+        
+        # Filter to only actual trades
+        trade_returns = trade_pnl[trade_mask]
+        num_trades = len(trade_returns)
+        
+        # Expectancy (average R per trade)
+        metrics['expectancy'] = float(np.mean(trade_returns)) if num_trades > 0 else 0.0
+        
+        # Hit rate (percentage of winning trades)
+        wins = (trade_returns > 0).sum()
+        metrics['hit_rate'] = float(wins / num_trades) if num_trades > 0 else 0.0
+        
+        # Profit factor (gross profits / gross losses)
+        gross_profits = trade_returns[trade_returns > 0].sum()
+        gross_losses = abs(trade_returns[trade_returns < 0].sum())
+        metrics['profit_factor'] = float(gross_profits / gross_losses) if gross_losses > 0 else 0.0
+        
+        # Cost-adjusted Sharpe ratio (annualized)
+        if num_trades > 1 and np.std(trade_returns) > 0:
+            # Assuming each trade is ~4h, so ~6 trades/day = ~2190 trades/year
+            annual_factor = np.sqrt(2190)
+            sharpe = (np.mean(trade_returns) / np.std(trade_returns)) * annual_factor
+            metrics['sharpe'] = float(sharpe)
+        else:
+            metrics['sharpe'] = 0.0
+        
+        # Max drawdown (simple cumulative PnL version)
+        cumulative = np.cumsum(trade_returns)
+        running_max = np.maximum.accumulate(cumulative)
+        drawdown = running_max - cumulative
+        metrics['max_drawdown'] = float(np.max(drawdown)) if len(drawdown) > 0 else 0.0
+        
+        # Number of trades
+        metrics['num_trades'] = int(num_trades)
+        
+        # Average win / average loss
+        if wins > 0:
+            avg_win = np.mean(trade_returns[trade_returns > 0])
+            metrics['avg_win'] = float(avg_win)
+        else:
+            metrics['avg_win'] = 0.0
+        
+        losses_count = (trade_returns < 0).sum()
+        if losses_count > 0:
+            avg_loss = np.mean(trade_returns[trade_returns < 0])
+            metrics['avg_loss'] = float(avg_loss)
+        else:
+            metrics['avg_loss'] = 0.0
+        
+        # Win/loss ratio (R:R)
+        if metrics['avg_loss'] != 0:
+            metrics['win_loss_ratio'] = abs(metrics['avg_win'] / metrics['avg_loss'])
+        else:
+            metrics['win_loss_ratio'] = 0.0
+        
+        logger.info(f"Trading Metrics - Expectancy: {metrics['expectancy']:.4f}, "
+                   f"Hit Rate: {metrics['hit_rate']:.2%}, "
+                   f"Sharpe: {metrics['sharpe']:.2f}, "
+                   f"Trades: {metrics['num_trades']}")
+        
+        return metrics
     
     def train(
         self,
@@ -387,6 +508,15 @@ class MultiHeadTrainer:
             for q in ['q10', 'q25', 'q50', 'q75', 'q90']:
                 if f'{q}_cal' in val_metrics:
                     self.writer.add_scalar(f'Calibration/{q}', val_metrics[f'{q}_cal'], epoch)
+            
+            # Trading metrics
+            if 'expectancy' in val_metrics:
+                self.writer.add_scalar('Trading/expectancy', val_metrics['expectancy'], epoch)
+                self.writer.add_scalar('Trading/hit_rate', val_metrics['hit_rate'], epoch)
+                self.writer.add_scalar('Trading/sharpe', val_metrics['sharpe'], epoch)
+                self.writer.add_scalar('Trading/profit_factor', val_metrics['profit_factor'], epoch)
+                self.writer.add_scalar('Trading/max_drawdown', val_metrics['max_drawdown'], epoch)
+                self.writer.add_scalar('Trading/num_trades', val_metrics['num_trades'], epoch)
             
             # Progress callback
             if self.epoch_callback:

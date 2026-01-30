@@ -49,6 +49,62 @@ interface QuantilePredictionResponse {
   confidence: number;
 }
 
+// Multihead prediction response - returns ALL 6 heads
+interface MultiHeadPredictionResponse {
+  // Direction
+  action: "LONG" | "SHORT" | "HOLD";
+  direction_probs: {
+    SHORT: number;
+    HOLD: number;
+    LONG: number;
+  };
+  confidence: number;
+  
+  // Regression (μ, σ)
+  expected_return: number;
+  uncertainty: number;
+  edge: number;
+  
+  // Quantiles (learned, not heuristic)
+  quantiles: {
+    q10: number;
+    q25: number;
+    q50: number;
+    q75: number;
+    q90: number;
+  };
+  
+  // Trading levels (learned from MFE/MAE)
+  entry_offset_pct: number;
+  stop_loss_pct: number;
+  take_profit_pct: number;
+  
+  // Derived price levels
+  current_price: number;
+  entry_price: number;
+  stop_loss_price: number;
+  take_profit_price: number;
+  
+  // Future candle predictions
+  predicted_candles: {
+    step: number;
+    close_delta: number;
+    high_delta: number;
+    low_delta: number;
+  }[] | null;
+  
+  // Trade plan
+  suggested_order_type: "MAKER" | "TAKER";
+  urgency: "LOW" | "MEDIUM" | "HIGH";
+  position_size_pct: number;
+  risk_reward_ratio: number;
+  
+  // Metadata
+  model_name: string;
+  is_multihead: boolean;
+  reasons: string[];
+}
+
 interface EnsemblePredictionResponse {
   action: "LONG" | "SHORT" | "HOLD" | "NO_TRADE";
   confidence: number;
@@ -638,6 +694,43 @@ class GPUTrainerBridge {
   }
   
   /**
+   * Get multihead prediction from raw candle data.
+   * 
+   * This is the CANONICAL endpoint for multi-head model inference.
+   * Returns ALL 6 heads: direction, μ/σ, quantiles, entry/SL/TP, candles.
+   * 
+   * Uses forward_multihead() internally for proper multi-head output.
+   */
+  async predictMultiheadFromCandles(
+    candles: { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[]
+  ): Promise<MultiHeadPredictionResponse | null> {
+    if (!await this.isGPUAvailable()) {
+      return null;
+    }
+    
+    try {
+      const response = await fetch(`${this.baseUrl}/predict/multihead/candles`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          candles: candles
+        }),
+        signal: AbortSignal.timeout(15000) // 15 second timeout
+      });
+      
+      if (response.ok) {
+        return await response.json() as MultiHeadPredictionResponse;
+      }
+      
+      console.error("Multihead prediction failed:", await response.text());
+      return null;
+    } catch (error) {
+      console.error("Multihead prediction error:", error);
+      return null;
+    }
+  }
+  
+  /**
    * Get GPU metrics for dashboard
    */
   async getGPUMetrics(): Promise<Record<string, any> | null> {
@@ -673,4 +766,4 @@ export const gpuBridge = new GPUTrainerBridge(
   process.env.GPU_TRAINER_URL || "http://localhost:8000"
 );
 
-export type { GPUPredictionResponse, GPUHealthResponse, GPUTrainingStatus, EnsemblePredictionResponse, EnsembleStatus };
+export type { GPUPredictionResponse, GPUHealthResponse, GPUTrainingStatus, EnsemblePredictionResponse, EnsembleStatus, MultiHeadPredictionResponse };

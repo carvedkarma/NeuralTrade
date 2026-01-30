@@ -87,7 +87,10 @@ Preferred communication style: Simple, everyday language.
 - **GPU Trainer API**: FastAPI server at port 8000 with:
   - `/predict` and `/predict/candles` endpoints for model inference
   - `/predict/regression` endpoint returning institutional-grade signal format (μ, σ, edge, confidence, position sizing, stops)
+  - `/predict/multihead/candles` endpoint returning ALL 6 heads: direction, μ/σ, quantiles, entry/SL/TP (MFE-learned), predicted candles
   - `/models/load` and `/models/status` for model management
+- **Dashboard API Endpoints**:
+  - `/api/gpu/multihead/current` - Canonical endpoint for multihead inference from Replit dashboard, returns institutional signal format with MFE-learned levels
   - Automatic model loading at startup from checkpoints
   - Architecture-specific factory method handling each model's unique constructor signature
   - Label mapping: 0=SHORT, 1=HOLD/NEUTRAL, 2=LONG (matches training labels)
