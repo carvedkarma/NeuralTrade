@@ -1,0 +1,208 @@
+Great — these logs are extremely useful. They tell us exactly what is wrong, and now we can fix it cleanly instead of guessing.
+
+I’ll break this down into what is happening, why, and the correct fix (not a hack).
+
+🔴 What is happening (from your logs)
+1️⃣ Your GPU models expect 66 features
+
+Confirmed multiple times:
+
+Loaded expected feature list: 66 columns
+Model instantiated with input_dim=66
+
+2️⃣ Your inference pipeline is producing inconsistent feature counts
+
+From logs:
+
+Feature mismatch: computed 41 features, model expects 66
+[BLOCK] Feature mismatch: expected 66, got 81
+Single-TF features computed: 41 features, 200 rows
+
+
+So you actually have THREE different feature outputs happening:
+
+Situation	Feature count
+Single timeframe builder	41
+Full feature builder	81
+Model expectation	66
+
+This is the core problem.
+
+3️⃣ The GPU server is correctly blocking bad inputs
+
+This line is good, not bad:
+
+[BLOCK] Feature mismatch: expected 66, got 81
+
+
+That means:
+
+your guardrails are working
+
+models are protected from garbage input
+
+prediction quality is being preserved
+
+So do NOT remove this block.
+
+❌ Why this is happening (root cause)
+
+You currently have multiple feature pipelines, but no single enforced feature schema:
+
+Likely pipelines in your project
+
+Single-TF features
+→ produces 41 features
+→ used by /predict/ensemble/candles
+
+Multi-TF / advanced features
+→ produces 81 features
+→ used by /predict/quantile or other endpoints
+
+Training feature schema
+→ exactly 66 features, in a specific order
+→ saved with scaler + checkpoints
+
+🚨 These are not aligned.
+
+🔥 The ONLY correct fix (production-grade)
+👉 The model decides the schema — not the feature builder
+
+Right now, your pipeline is:
+
+feature_builder → model
+
+
+It must be:
+
+feature_builder → SCHEMA ENFORCER → model
+
+✅ Step-by-step fix (do this exactly)
+✅ Step 1: Load the expected feature list (already done)
+
+You already have:
+
+Loaded expected feature list: 66 columns
+
+
+This is your golden schema.
+
+✅ Step 2: Enforce schema BEFORE scaling & tensor conversion
+
+Wherever you do inference (GPU server, likely api/server.py):
+
+🔧 Add this logic (conceptual)
+# df = dataframe built from candles/features
+
+# 1. Enforce column order & presence
+df = df.reindex(columns=expected_feature_list, fill_value=0.0)
+
+# 2. Validate shape
+if df.shape[1] != len(expected_feature_list):
+    raise ValueError("Schema enforcement failed")
+
+# 3. Enforce seq_len
+if len(df) < SEQ_LEN:
+    df = pad_left(df, SEQ_LEN)
+elif len(df) > SEQ_LEN:
+    df = df.iloc[-SEQ_LEN:]
+
+
+📌 This solves all of these at once:
+
+41 → 66 (missing features filled)
+
+81 → 66 (extra features dropped)
+
+wrong column order
+
+wrong seq length
+
+✅ Step 3: REMOVE feature-count-based branching
+
+You currently have logic like:
+
+if single_tf:
+   build 41 features
+else:
+   build 81 features
+
+
+This is fine internally, but the output must always be normalized to the model schema.
+
+👉 Keep feature builders flexible, but always finish with schema enforcement.
+
+✅ Step 4: Log schema reconciliation (for debugging)
+
+Add a log once per request:
+
+Incoming features: 81
+After schema enforcement: 66
+Missing filled: 25
+Extra dropped: 15
+
+
+This will save you days later.
+
+🧠 Important: why this affects prediction quality
+
+If you don’t enforce schema:
+
+models see shifted feature meanings
+
+learned weights map to wrong indicators
+
+predictions become random even if shapes match
+
+You avoided this by blocking — good.
+
+Once you enforce schema:
+
+predictions become stable
+
+ensemble agreement improves
+
+Pattern Memory + NN alignment improves
+
+❗ About /models/status returning 404
+
+This is not related to prediction errors.
+
+It just means:
+
+you didn’t implement /models/status
+
+or route path mismatch
+
+It does not affect inference.
+
+✅ What you should do right now (priority order)
+P0 — must do today
+
+Add schema enforcement before model forward
+
+Keep the BLOCK on mismatched shapes
+
+Force seq_len = 100
+
+P1 — cleanup
+
+Log missing/extra features
+
+Version feature schemas (e.g. v1_66f, v2_81f)
+
+Retrain models only after schema is stable
+
+🧪 Quick sanity test (you can do this now)
+
+After implementing schema enforcement:
+
+You should see ZERO logs like:
+
+“computed 41 features”
+
+“expected 66, got 81”
+
+All predictions should flow without BLOCK warnings
+
+Loss of performance → expected at first if many features are zero-filled (that’s OK)
