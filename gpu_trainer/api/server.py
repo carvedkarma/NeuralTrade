@@ -1275,6 +1275,7 @@ class EnsemblePredictionRequest(BaseModel):
 class QuantilePredictionRequest(BaseModel):
     """Request for quantile regression prediction."""
     features: List[List[float]]
+    feature_names: Optional[List[str]] = None  # For schema enforcement
 
 class QuantilePredictionResponse(BaseModel):
     """Response with quantile regression for Entry/SL/TP derivation."""
@@ -1676,6 +1677,7 @@ async def predict_quantile(request: QuantilePredictionRequest):
     """
     try:
         features = np.array(request.features)
+        feature_names = request.feature_names
         
         if len(features.shape) == 2 and features.shape[0] == 1:
             features = features.reshape(1, features.shape[0], features.shape[1])
@@ -1685,9 +1687,33 @@ async def predict_quantile(request: QuantilePredictionRequest):
                 detail=f"Expected features shape [batch, seq_len, features], got {features.shape}"
             )
         
+        # === SCHEMA ENFORCEMENT ===
+        # If feature_names provided and feature_config exists, enforce schema
+        schema_stats = None
+        if feature_names is not None and model_manager.feature_config is not None:
+            from training.feature_registry import FeatureValidator
+            validator = FeatureValidator(model_manager.feature_config)
+            
+            # Apply schema enforcement (works on 2D or 3D arrays)
+            features_for_enforcement = features[0] if features.shape[0] == 1 else features
+            features_for_enforcement, schema_stats = validator.enforce_schema(
+                feature_names=feature_names,
+                features=features_for_enforcement,
+                fill_value=0.0
+            )
+            logger.info(f"[/predict/quantile] Schema enforced: {schema_stats['incoming_features']} -> {schema_stats['expected_features']} features")
+            
+            # Restore batch dimension if needed
+            if len(features_for_enforcement.shape) == 2:
+                features = features_for_enforcement.reshape(1, *features_for_enforcement.shape)
+            else:
+                features = features_for_enforcement
+        
         # Check if we have a multi-head model with learned quantiles
+        # Pass feature_names for internal schema enforcement if not done above
         multihead_result = model_manager.predict_multihead(
-            features[0] if features.shape[0] == 1 else features
+            features[0] if features.shape[0] == 1 else features,
+            feature_names=feature_names if schema_stats is None else None  # Already enforced if schema_stats exists
         )
         
         if multihead_result is not None:
@@ -1720,7 +1746,11 @@ async def predict_quantile(request: QuantilePredictionRequest):
             )
         
         # Fallback to heuristic synthesis from classification probabilities
-        result = model_manager.predict(features[0] if features.shape[0] == 1 else features)
+        # Pass feature_names for schema enforcement if not done above
+        result = model_manager.predict(
+            features[0] if features.shape[0] == 1 else features,
+            feature_names=feature_names if schema_stats is None else None
+        )
         
         probs = result.get("probabilities", [0.33, 0.34, 0.33])
         direction_probs = {
@@ -2010,8 +2040,8 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
         
         if has_full_mtf:
             # Use MTF Fusion for proper multi-timeframe features
-            from data.mtf_fusion import MTFFusion
-            mtf = MTFFusion()
+            from data.mtf_fusion import MTFFeatureFusion
+            mtf = MTFFeatureFusion()
             fused_df = mtf.fuse(request.symbol, tf_data)
             
             if fused_df is None or len(fused_df) == 0:
