@@ -190,6 +190,122 @@ class FeatureValidator:
             aligned = features[:, :, reorder_indices]
         
         return aligned
+    
+    def enforce_schema(
+        self,
+        feature_names: List[str],
+        features: np.ndarray,
+        fill_value: float = 0.0
+    ) -> Tuple[np.ndarray, Dict[str, int]]:
+        """
+        Enforce schema by reindexing, filling missing features, and dropping extras.
+        
+        This is the production-grade approach: the model decides the schema,
+        not the feature builder. Any input shape is transformed to match
+        the expected feature schema.
+        
+        Args:
+            feature_names: Names of incoming features
+            features: Feature array [seq_len, features] (2D) or [batch, seq_len, features] (3D)
+            fill_value: Value to use for missing features (default: 0.0)
+            
+        Returns:
+            Tuple of:
+              - enforced: Features array with exactly config.input_dim columns in correct order
+              - stats: Dict with schema reconciliation stats for logging
+        """
+        expected_cols = self.config.feature_columns
+        expected_dim = self.config.input_dim
+        seq_len = self.config.sequence_length
+        
+        # === DEFENSIVE CHECK: feature_names must match feature dimension ===
+        actual_feature_dim = features.shape[-1] if features.ndim >= 2 else features.shape[0]
+        if len(feature_names) != actual_feature_dim:
+            logger.error(
+                f"[Schema] CRITICAL: feature_names length ({len(feature_names)}) != "
+                f"feature dimension ({actual_feature_dim}). Cannot enforce schema safely."
+            )
+            # Return zero-filled array with stats indicating failure
+            is_3d = features.ndim == 3
+            if is_3d:
+                batch_size = features.shape[0]
+                enforced = np.full((batch_size, seq_len, expected_dim), fill_value, dtype=np.float32)
+            else:
+                enforced = np.full((seq_len, expected_dim), fill_value, dtype=np.float32)
+            
+            stats = {
+                "incoming_features": len(feature_names),
+                "expected_features": expected_dim,
+                "missing_filled": expected_dim,  # All filled since we can't map
+                "extra_dropped": 0,
+                "sequence_in": features.shape[-2] if features.ndim >= 2 else features.shape[0],
+                "sequence_out": seq_len,
+                "missing_names": ["ALL - dimension mismatch"],
+                "extra_names": [],
+                "error": f"feature_names length ({len(feature_names)}) != feature dimension ({actual_feature_dim})"
+            }
+            return enforced, stats
+        
+        incoming_set = set(feature_names)
+        expected_set = set(expected_cols)
+        
+        missing_features = expected_set - incoming_set
+        extra_features = incoming_set - expected_set
+        
+        # Build mapping: expected column name -> index in incoming (or -1 if missing)
+        incoming_indices = {name: idx for idx, name in enumerate(feature_names)}
+        
+        # Determine shape
+        is_3d = features.ndim == 3
+        if is_3d:
+            batch_size, actual_seq, actual_dim = features.shape
+        else:
+            actual_seq, actual_dim = features.shape
+            batch_size = 1
+            features = features[np.newaxis, ...]  # Add batch dim for uniform processing
+        
+        # --- Step 1: Enforce sequence length ---
+        if actual_seq < seq_len:
+            # Left-pad with fill_value
+            pad_len = seq_len - actual_seq
+            pad_shape = (batch_size, pad_len, actual_dim)
+            pad = np.full(pad_shape, fill_value, dtype=np.float32)
+            features = np.concatenate([pad, features], axis=1)
+            logger.info(f"[Schema] Left-padded sequence: {actual_seq} -> {seq_len}")
+        elif actual_seq > seq_len:
+            # Tail-slice (keep most recent)
+            features = features[:, -seq_len:, :]
+            logger.info(f"[Schema] Tail-sliced sequence: {actual_seq} -> {seq_len}")
+        
+        # --- Step 2: Reindex columns to expected order, fill missing, drop extras ---
+        enforced = np.full((batch_size, seq_len, expected_dim), fill_value, dtype=np.float32)
+        
+        for col_idx, col_name in enumerate(expected_cols):
+            if col_name in incoming_indices:
+                src_idx = incoming_indices[col_name]
+                enforced[:, :, col_idx] = features[:, :, src_idx]
+        
+        # Remove batch dim if original was 2D
+        if not is_3d:
+            enforced = enforced[0]
+        
+        stats = {
+            "incoming_features": len(feature_names),
+            "expected_features": expected_dim,
+            "missing_filled": len(missing_features),
+            "extra_dropped": len(extra_features),
+            "sequence_in": actual_seq,
+            "sequence_out": seq_len,
+            "missing_names": list(missing_features)[:10],  # Log first 10
+            "extra_names": list(extra_features)[:10]
+        }
+        
+        logger.info(
+            f"[Schema] Enforced: {len(feature_names)} -> {expected_dim} features, "
+            f"missing filled: {len(missing_features)}, extra dropped: {len(extra_features)}"
+        )
+        
+        return enforced, stats
 
 
 class FeatureRegistry:

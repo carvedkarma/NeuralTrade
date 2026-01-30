@@ -794,11 +794,39 @@ class ModelManager:
                 # Update input_dim to match expected features
                 self.input_dim = len(self.expected_features)
                 logger.info(f"Updated input_dim to {self.input_dim} based on feature list")
+                
+                # Create FeatureConfig for schema enforcement
+                from training.feature_registry import FeatureConfig
+                self.feature_config = FeatureConfig(
+                    feature_columns=self.expected_features,
+                    sequence_length=self.sequence_length,
+                    horizon_periods=16,  # Default 4h horizon
+                    timeframes=["5m", "15m", "1h", "4h"],
+                    input_dim=self.input_dim
+                )
+                logger.info(f"Created FeatureConfig for schema enforcement (hash: {self.feature_config.version_hash})")
+                
             except Exception as e:
                 logger.warning(f"Failed to load feature list: {e}")
                 self.expected_features = None
         else:
             self.expected_features = None
+            
+        # Also try to load feature_config from JSON file (more complete)
+        feature_config_path = self.checkpoint_dir / "feature_config.json"
+        if not feature_config_path.exists() and self.saved_models_dir.exists():
+            feature_config_path = self.saved_models_dir / "feature_config.json"
+        
+        if feature_config_path.exists():
+            try:
+                from training.feature_registry import FeatureConfig
+                self.feature_config = FeatureConfig.load(str(feature_config_path))
+                logger.info(f"Loaded FeatureConfig from JSON (hash: {self.feature_config.version_hash}, dim: {self.feature_config.input_dim})")
+                # Update input_dim to match
+                self.input_dim = self.feature_config.input_dim
+                self.sequence_length = self.feature_config.sequence_length
+            except Exception as e:
+                logger.warning(f"Failed to load feature_config.json: {e}")
         
         # Check if we found any checkpoint files
         if not checkpoint_files:
@@ -910,30 +938,45 @@ class ModelManager:
             return self.model_instances[model_name]
         return self.models.get(model_name)
     
-    def predict(self, features: np.ndarray) -> Dict:
+    def predict(self, features: np.ndarray, feature_names: List[str] = None) -> Dict:
         """Make prediction with correct label mapping.
         
         CRITICAL: Training labels are 0=SHORT, 1=NEUTRAL, 2=LONG
+        
+        If feature_names are provided and feature_config exists, schema enforcement
+        will reindex, fill missing, and drop extras to match the model's expected schema.
         """
         if not self.model_instances:
             return self._default_prediction()
         
-        # Feature count validation - strict mode fails on mismatch
-        input_features = features.shape[-1] if len(features.shape) >= 2 else features.shape[0]
-        if hasattr(self, 'expected_features') and self.expected_features:
-            expected_count = len(self.expected_features)
-            if input_features != expected_count:
-                error_msg = f"Feature count mismatch: received {input_features}, expected {expected_count}"
-                logger.error(error_msg)
-                # Return error prediction instead of potentially wrong prediction
-                return {
-                    "action": "HOLD",
-                    "confidence": 0.0,
-                    "probabilities": {"LONG": 0.33, "SHORT": 0.33, "HOLD": 0.34},
-                    "error": error_msg,
-                    "expected_features": expected_count,
-                    "received_features": input_features
-                }
+        # === SCHEMA ENFORCEMENT ===
+        # If we have feature_config and feature_names, enforce schema instead of blocking
+        if feature_names is not None and self.feature_config is not None:
+            from training.feature_registry import FeatureValidator
+            validator = FeatureValidator(self.feature_config)
+            features, schema_stats = validator.enforce_schema(
+                feature_names=feature_names,
+                features=features,
+                fill_value=0.0
+            )
+            logger.info(f"[predict] Schema enforced: {schema_stats['incoming_features']} -> {schema_stats['expected_features']} features")
+        else:
+            # Legacy: Feature count validation - strict mode fails on mismatch
+            input_features = features.shape[-1] if len(features.shape) >= 2 else features.shape[0]
+            if hasattr(self, 'expected_features') and self.expected_features:
+                expected_count = len(self.expected_features)
+                if input_features != expected_count:
+                    error_msg = f"Feature count mismatch: received {input_features}, expected {expected_count}"
+                    logger.error(error_msg)
+                    # Return error prediction instead of potentially wrong prediction
+                    return {
+                        "action": "HOLD",
+                        "confidence": 0.0,
+                        "probabilities": {"LONG": 0.33, "SHORT": 0.33, "HOLD": 0.34},
+                        "error": error_msg,
+                        "expected_features": expected_count,
+                        "received_features": input_features
+                    }
             
         predictions = []
         for name, model in self.model_instances.items():
@@ -983,7 +1026,7 @@ class ModelManager:
             "reasoning": ["No models loaded - defaulting to HOLD"]
         }
     
-    def predict_multihead(self, features: np.ndarray) -> Optional[Dict]:
+    def predict_multihead(self, features: np.ndarray, feature_names: List[str] = None) -> Optional[Dict]:
         """Make prediction using multi-head model with learned quantiles.
         
         Returns None if no multi-head model is available.
@@ -997,9 +1040,10 @@ class ModelManager:
         - [seq_len, features] -> single sample
         - [batch, seq_len, features] -> batch of samples
         
-        Feature version locking:
-        - Validates feature dimension, sequence length, and horizon
-        - Returns HOLD with confidence=0 on any mismatch (safety behavior)
+        Schema Enforcement (production-grade):
+        - If feature_names provided and feature_config exists, reindex to expected schema
+        - Missing features filled with 0.0, extra features dropped
+        - Sequence length enforced via padding/trimming
         """
         # Check for multi-head model instances
         multihead_model = None
@@ -1026,24 +1070,37 @@ class ModelManager:
             "feature_dim_validated": False
         }
         
-        # Feature dimension validation (critical)
-        input_features = features.shape[-1] if len(features.shape) >= 2 else features.shape[0]
-        expected_dim = getattr(multihead_model, 'input_dim', self.input_dim)
-        
-        if input_features != expected_dim:
-            logger.warning(f"[BLOCK] Feature mismatch: expected {expected_dim}, got {input_features}")
-            return safe_hold_response(f"Feature dimension mismatch: expected {expected_dim}, got {input_features}")
-        
-        # Sequence length validation (critical - hard failure)
-        if len(features.shape) == 2:
-            actual_seq = features.shape[0]
+        # === SCHEMA ENFORCEMENT ===
+        # If we have feature_config and feature_names, enforce schema instead of blocking
+        schema_stats = None
+        if feature_names is not None and self.feature_config is not None:
+            from training.feature_registry import FeatureValidator
+            validator = FeatureValidator(self.feature_config)
+            features, schema_stats = validator.enforce_schema(
+                feature_names=feature_names,
+                features=features,
+                fill_value=0.0
+            )
+            logger.info(f"[predict_multihead] Schema enforced: {schema_stats['incoming_features']} -> {schema_stats['expected_features']} features")
         else:
-            actual_seq = features.shape[1]
-        
-        expected_seq = getattr(self, 'sequence_length', 100)
-        if actual_seq != expected_seq:
-            logger.warning(f"[BLOCK] Sequence length mismatch: expected {expected_seq}, got {actual_seq}")
-            return safe_hold_response(f"Sequence length mismatch: expected {expected_seq}, got {actual_seq}")
+            # Legacy validation: Feature dimension validation (critical)
+            input_features = features.shape[-1] if len(features.shape) >= 2 else features.shape[0]
+            expected_dim = getattr(multihead_model, 'input_dim', self.input_dim)
+            
+            if input_features != expected_dim:
+                logger.warning(f"[BLOCK] Feature mismatch: expected {expected_dim}, got {input_features}")
+                return safe_hold_response(f"Feature dimension mismatch: expected {expected_dim}, got {input_features}")
+            
+            # Sequence length validation (critical - hard failure)
+            if len(features.shape) == 2:
+                actual_seq = features.shape[0]
+            else:
+                actual_seq = features.shape[1]
+            
+            expected_seq = getattr(self, 'sequence_length', 100)
+            if actual_seq != expected_seq:
+                logger.warning(f"[BLOCK] Sequence length mismatch: expected {expected_seq}, got {actual_seq}")
+                return safe_hold_response(f"Sequence length mismatch: expected {expected_seq}, got {actual_seq}")
         
         try:
             multihead_model.eval()
@@ -1976,48 +2033,75 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
             
             logger.info(f"Single-TF features computed: {features_np.shape[1]} features, {len(features_df)} rows")
         
+        # Get feature column names
+        incoming_feature_names = list(feature_cols if has_full_mtf else features_df.columns)
+        
         # Scale features using saved scaler
         features_scaled = model_manager.transform_features(
-            pd.DataFrame(features_np, columns=feature_cols if has_full_mtf else features_df.columns)
+            pd.DataFrame(features_np, columns=incoming_feature_names)
         )
         
-        # Get sequence for prediction
-        seq_len = min(model_manager.sequence_length, len(features_scaled))
-        features_seq = features_scaled[-seq_len:]
+        # === SCHEMA ENFORCEMENT (production-grade) ===
+        # Instead of blocking on feature mismatch, enforce the model's expected schema:
+        # - Reindex to expected 66 columns in correct order
+        # - Fill missing features with 0.0
+        # - Drop extra features
+        # - Enforce sequence_length = 100
+        schema_stats = None
         
-        # CRITICAL: Validate feature count matches model expectation
-        actual_feature_count = features_seq.shape[1]
-        expected_feature_count = model_manager.input_dim
-        
-        if actual_feature_count != expected_feature_count:
-            # Feature count mismatch - return HOLD with warning
-            logger.warning(f"Feature mismatch: computed {actual_feature_count} features, model expects {expected_feature_count}")
-            return {
-                "action": "HOLD",
-                "confidence": 0.0,
-                "confidence_margin": 0.0,
-                "edge": 0.0,
-                "market_regime": "UNKNOWN",
-                "risk_regime": "UNKNOWN",
-                "regime_confidence": 0.0,
-                "agreement_pct": 0.0,
-                "weighted_agreement": 0.0,
-                "disagreement_score": 1.0,
-                "position_size_pct": 0.0,
-                "regime_adjusted_size": 0.0,
-                "confidence_threshold_used": 0.15,
-                "regime_adjustment": "BLOCKED",
-                "model_votes": {},
-                "ensemble_probs": {"SHORT": 0.0, "HOLD": 1.0, "LONG": 0.0},
-                "reasons": [
-                    f"FEATURE MISMATCH: computed {actual_feature_count} features, model expects {expected_feature_count}",
-                    f"MTF mode: {has_full_mtf}, retraining may be needed"
-                ],
-                "mtf_mode": has_full_mtf,
-                "feature_count": actual_feature_count,
-                "expected_feature_count": expected_feature_count,
-                "feature_mismatch": True
-            }
+        if model_manager.feature_config is not None:
+            from training.feature_registry import FeatureValidator
+            validator = FeatureValidator(model_manager.feature_config)
+            
+            features_seq, schema_stats = validator.enforce_schema(
+                feature_names=incoming_feature_names,
+                features=features_scaled,
+                fill_value=0.0
+            )
+            
+            logger.info(
+                f"[Schema Enforcement] {schema_stats['incoming_features']} -> {schema_stats['expected_features']} features, "
+                f"missing: {schema_stats['missing_filled']}, dropped: {schema_stats['extra_dropped']}, "
+                f"seq: {schema_stats['sequence_in']} -> {schema_stats['sequence_out']}"
+            )
+        else:
+            # No feature config - use raw features with basic sequence handling
+            logger.warning("No feature_config loaded - using raw features without schema enforcement")
+            seq_len = min(model_manager.sequence_length, len(features_scaled))
+            features_seq = features_scaled[-seq_len:]
+            
+            # Still validate feature count as a safety check
+            actual_feature_count = features_seq.shape[1]
+            expected_feature_count = model_manager.input_dim
+            
+            if actual_feature_count != expected_feature_count:
+                logger.warning(f"Feature mismatch: computed {actual_feature_count}, model expects {expected_feature_count}")
+                return {
+                    "action": "HOLD",
+                    "confidence": 0.0,
+                    "confidence_margin": 0.0,
+                    "edge": 0.0,
+                    "market_regime": "UNKNOWN",
+                    "risk_regime": "UNKNOWN",
+                    "regime_confidence": 0.0,
+                    "agreement_pct": 0.0,
+                    "weighted_agreement": 0.0,
+                    "disagreement_score": 1.0,
+                    "position_size_pct": 0.0,
+                    "regime_adjusted_size": 0.0,
+                    "confidence_threshold_used": 0.15,
+                    "regime_adjustment": "BLOCKED",
+                    "model_votes": {},
+                    "ensemble_probs": {"SHORT": 0.0, "HOLD": 1.0, "LONG": 0.0},
+                    "reasons": [
+                        f"FEATURE MISMATCH: computed {actual_feature_count}, model expects {expected_feature_count}",
+                        "No feature_config available for schema enforcement"
+                    ],
+                    "mtf_mode": has_full_mtf,
+                    "feature_count": actual_feature_count,
+                    "expected_feature_count": expected_feature_count,
+                    "feature_mismatch": True
+                }
         
         # Make ensemble prediction
         predictor = get_ensemble_predictor()
@@ -2053,6 +2137,14 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
         
         signal = predictor.predict(features_seq)
         
+        # Build schema enforcement info for response
+        schema_info = []
+        if schema_stats:
+            if schema_stats['missing_filled'] > 0:
+                schema_info.append(f"Schema: filled {schema_stats['missing_filled']} missing features")
+            if schema_stats['extra_dropped'] > 0:
+                schema_info.append(f"Schema: dropped {schema_stats['extra_dropped']} extra features")
+        
         return {
             "action": signal.action,
             "confidence": signal.confidence,
@@ -2070,9 +2162,11 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
             "regime_adjustment": signal.regime_adjustment,
             "model_votes": signal.model_votes,
             "ensemble_probs": signal.ensemble_probs,
-            "reasons": signal.reasons + [f"MTF mode: {has_full_mtf}, features: {features_seq.shape[1]}"],
+            "reasons": signal.reasons + schema_info + [f"MTF mode: {has_full_mtf}, features: {features_seq.shape[1]}"],
             "mtf_mode": has_full_mtf,
-            "feature_count": features_seq.shape[1]
+            "feature_count": features_seq.shape[1],
+            "schema_enforced": schema_stats is not None,
+            "schema_stats": schema_stats
         }
         
     except HTTPException:
