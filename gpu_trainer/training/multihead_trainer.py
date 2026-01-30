@@ -96,7 +96,8 @@ class MultiHeadDataset(Dataset):
         seq = self.features[start_idx:actual_idx]
         
         # Trading targets: [entry_offset, sl_distance, tp_distance]
-        if self.entry_offset is not None:
+        # Check all three are available before accessing
+        if self.entry_offset is not None and self.sl_distance is not None and self.tp_distance is not None:
             trading = np.array([
                 self.entry_offset[actual_idx],
                 self.sl_distance[actual_idx],
