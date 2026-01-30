@@ -2042,7 +2042,7 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
             # Use MTF Fusion for proper multi-timeframe features
             from data.mtf_fusion import MTFFeatureFusion
             mtf = MTFFeatureFusion()
-            fused_df = mtf.fuse(request.symbol, tf_data)
+            fused_df = mtf.align_timeframes(tf_data, request.symbol)
             
             if fused_df is None or len(fused_df) == 0:
                 raise HTTPException(status_code=400, detail="MTF fusion returned no data")
