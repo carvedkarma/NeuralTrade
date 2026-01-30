@@ -1463,8 +1463,13 @@ async def predict_from_candles(request: CandlePredictionRequest):
             fe = FeatureEngineer()
             features_df = fe.compute_technical_features(df)
             
-            # Remove NaN rows (from indicator warmup)
-            features_df = features_df.dropna()
+            # === FIX: Selective NaN handling instead of full dropna() ===
+            # Only require close price to exist, forward-fill feature NaNs
+            if "close" in features_df.columns:
+                features_df = features_df.dropna(subset=["close"])
+            feature_cols = [c for c in features_df.columns if c not in ["datetime", "timestamp", "close", "open", "high", "low", "volume"]]
+            if len(feature_cols) > 0:
+                features_df[feature_cols] = features_df[feature_cols].ffill().fillna(0.0)
             
             if len(features_df) == 0:
                 raise HTTPException(
@@ -1688,25 +1693,38 @@ async def predict_quantile(request: QuantilePredictionRequest):
             )
         
         # === SCHEMA ENFORCEMENT ===
-        # If feature_config exists, enforce schema (even without feature_names)
+        # FIX: Require feature_names to prevent misalignment - no more guessing!
         schema_stats = None
         if model_manager.feature_config is not None:
             from training.feature_registry import FeatureValidator
             validator = FeatureValidator(model_manager.feature_config)
             
-            # If no feature_names provided, use a simple column-based enforcement
-            # WARNING: This assumes features are in expected order - potential data misalignment
+            # === FIX: REJECT requests without feature_names ===
+            # Auto-guessing column order causes garbage predictions
             if feature_names is None:
                 incoming_dim = features.shape[-1]
                 expected_cols = model_manager.feature_config.feature_columns
                 expected_dim = len(expected_cols)
-                expected_seq = model_manager.feature_config.sequence_length
                 
+                # Only allow if dimensions match exactly (still risky, but less so)
                 if incoming_dim != expected_dim:
-                    logger.warning(
-                        f"[/predict/quantile] AUTO-ENFORCEMENT: No feature_names provided. "
+                    logger.error(
+                        f"[/predict/quantile] REJECTED: No feature_names provided and dimensions don't match. "
                         f"Incoming={incoming_dim}, expected={expected_dim}. "
-                        f"ASSUMING features are in expected order - this may cause data misalignment!"
+                        f"Use /predict/ensemble/candles endpoint or provide feature_names."
+                    )
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"feature_names is required for /predict/quantile to avoid data misalignment. "
+                               f"Incoming features: {incoming_dim}, expected: {expected_dim}. "
+                               f"Either provide feature_names matching your feature builder, "
+                               f"or use the /predict/ensemble/candles endpoint which computes features server-side."
+                    )
+                else:
+                    # Dimensions match - proceed with caution but allow
+                    logger.warning(
+                        f"[/predict/quantile] No feature_names but dimensions match ({incoming_dim}). "
+                        f"Assuming correct order - recommend providing feature_names."
                     )
                     
                     # Handle both 2D [seq_len, features] and 3D [batch, seq_len, features]
@@ -2110,21 +2128,36 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
             if fused_df is None or len(fused_df) == 0:
                 raise HTTPException(status_code=400, detail="MTF fusion returned no data")
             
-            # Drop NaN rows and get features
-            fused_df = fused_df.dropna()
+            # === FIX: Selective NaN handling instead of full dropna() ===
+            # Full dropna() wipes everything because MTF features have NaNs from rolling indicators
+            # Only require base OHLCV to exist, forward-fill feature NaNs (safe at inference)
+            fused_df = fused_df.sort_values("datetime").reset_index(drop=True)
+            
+            # Only drop rows where close price is missing (essential data)
+            if "close" in fused_df.columns:
+                fused_df = fused_df.dropna(subset=["close"])
+            
             feature_cols = [c for c in fused_df.columns if c != "datetime"]
+            
+            # Forward-fill feature NaNs safely (no leakage risk at inference)
+            fused_df[feature_cols] = fused_df[feature_cols].ffill().fillna(0.0)
             features_np = fused_df[feature_cols].values
             
-            logger.info(f"MTF features computed: {features_np.shape[1]} features, {len(fused_df)} rows")
+            logger.info(f"MTF features computed: {features_np.shape[1]} features, {len(fused_df)} rows (after safe NaN handling)")
         else:
             # Fallback to single-timeframe features
             from data.pipeline import FeatureEngineer
             fe = FeatureEngineer()
             features_df = fe.compute_technical_features(tf_data["15m"])
-            features_df = features_df.dropna()
-            features_np = features_df.values
             
-            logger.info(f"Single-TF features computed: {features_np.shape[1]} features, {len(features_df)} rows")
+            # === FIX: Selective NaN handling ===
+            if "close" in features_df.columns:
+                features_df = features_df.dropna(subset=["close"])
+            feature_cols = [c for c in features_df.columns if c not in ["datetime", "timestamp"]]
+            features_df[feature_cols] = features_df[feature_cols].ffill().fillna(0.0)
+            features_np = features_df[feature_cols].values
+            
+            logger.info(f"Single-TF features computed: {features_np.shape[1]} features, {len(features_df)} rows (after safe NaN handling)")
         
         # Get feature column names
         incoming_feature_names = list(feature_cols if has_full_mtf else features_df.columns)

@@ -251,11 +251,23 @@ class EnsemblePredictor:
             model.eval()
             with torch.no_grad():
                 # Get latent representation
+                # === FIX: Handle VAE encode correctly ===
+                # MultiHeadVAE.encode() returns single z tensor, not (mu, log_var)
+                # Use encode_to_latent() if available for (mu, log_var) tuple
                 if hasattr(model, 'get_latent'):
                     z = model.get_latent(features)
+                elif hasattr(model, 'encode_to_latent'):
+                    # Use encode_to_latent() which returns (mu, log_var)
+                    mu, log_var = model.encode_to_latent(features)
+                    z = mu  # Use mu for regime stability
                 elif hasattr(model, 'encode'):
-                    mu, _ = model.encode(features)
-                    z = mu
+                    # encode() may return single tensor (z) or tuple (mu, log_var)
+                    result = model.encode(features)
+                    if isinstance(result, tuple) and len(result) == 2:
+                        mu, _ = result
+                        z = mu
+                    else:
+                        z = result  # Single tensor returned
                 else:
                     # Fallback: use forward pass
                     output = model(features)
