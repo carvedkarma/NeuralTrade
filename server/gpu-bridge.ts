@@ -95,6 +95,20 @@ interface EnsemblePredictionResponse {
   
   // Reasons
   reasons: string[];
+  
+  // === Multi-head outputs (aggregated from models with forward_multihead) ===
+  quantiles?: {
+    q10: number;
+    q25: number;
+    q50: number;
+    q75: number;
+    q90: number;
+  };
+  mu?: number;  // Expected return
+  sigma?: number;  // Uncertainty
+  entry_offset?: number;  // Entry price offset
+  sl_distance?: number;  // Stop loss distance (%)
+  tp_distance?: number;  // Take profit distance (%)
 }
 
 interface EnsembleStatus {

@@ -1175,10 +1175,48 @@ export async function registerRoutes(
         });
       }
       
-      // Get current candles and compute features
-      const candles = storage.getCandles();
+      // ============================================================
+      // USE ENSEMBLE PREDICTOR (same as /api/gpu/ensemble/current)
+      // This uses the correct 66 MTF features that models were trained on
+      // ============================================================
       
-      if (!candles || candles.length < 150) {
+      // Helper to get latest N candles from database by timeframe
+      const getDbCandles = async (timeframe: string, limit: number = 200) => {
+        const result = await db.select()
+          .from(candles)
+          .where(and(eq(candles.symbol, "BTCUSDT"), eq(candles.timeframe, timeframe)))
+          .orderBy(asc(candles.timestamp))
+          .limit(limit);
+        return result.slice(-limit);
+      };
+      
+      type CandleData = { timestamp: number; open: number; high: number; low: number; close: number; volume: number };
+      
+      // Try live API first, fallback to database if blocked (HTTP 451)
+      let mtfCandles: { m5: CandleData[]; m15: CandleData[]; h1: CandleData[]; h4: CandleData[] };
+      
+      try {
+        const liveCandles = await getMultiTimeframeKlines("BTCUSDT");
+        if (liveCandles.m15.length > 50) {
+          mtfCandles = liveCandles;
+        } else {
+          throw new Error("Insufficient live data");
+        }
+      } catch (liveError) {
+        console.log("[GPU NN] Live API failed, using database candles");
+        
+        const [db5m, db15m, db1h, db4h] = await Promise.all([
+          getDbCandles("5m", 300),
+          getDbCandles("15m", 200),
+          getDbCandles("1h", 100),
+          getDbCandles("4h", 50)
+        ]);
+        
+        mtfCandles = { m5: db5m, m15: db15m, h1: db1h, h4: db4h };
+      }
+      
+      // Validate we have enough data
+      if (mtfCandles.m15.length < 50) {
         return res.json({ 
           available: false, 
           prediction: null,
@@ -1187,85 +1225,58 @@ export async function registerRoutes(
         });
       }
       
-      // Get the last 150 candles for prediction
-      const recentCandles = candles.slice(-150);
+      // Call ensemble predictor via GPU bridge
+      const ensembleResult = await gpuBridge.predictEnsembleFromCandles(
+        mtfCandles.m15,
+        mtfCandles.m5,
+        mtfCandles.h1,
+        mtfCandles.h4,
+        "BTCUSDT"
+      );
       
-      // Compute features for the most recent window
-      const windowCandles = recentCandles.slice(-101);
-      const feature = getLatestFeatures(windowCandles);
-      
-      if (!feature) {
+      if (!ensembleResult || !ensembleResult.quantiles) {
         return res.json({ 
           available: false, 
           prediction: null,
           predictedCandles: [],
-          error: "Could not compute features"
+          error: "Neural network prediction failed - no quantiles available"
         });
       }
       
-      const featureArray = gpuBridge.featureVectorToArray(feature);
+      // Get current price from most recent candle
+      const currentPrice = mtfCandles.m15[mtfCandles.m15.length - 1].close;
+      const lastTimestamp = mtfCandles.m15[mtfCandles.m15.length - 1].timestamp;
       
-      // Call GPU trainer for quantile prediction
-      const nnResult = await gpuBridge.predictQuantile(featureArray);
-      
-      if (!nnResult) {
-        return res.json({ 
-          available: false, 
-          prediction: null,
-          predictedCandles: [],
-          error: "Neural network prediction failed"
-        });
-      }
-      
-      const currentPrice = recentCandles[recentCandles.length - 1].close;
-      const lastTimestamp = recentCandles[recentCandles.length - 1].timestamp;
-      
-      // Derive Entry/SL/TP from quantiles
-      // Entry = current price
-      // For LONG: SL = price * (1 + q10), TP = price * (1 + q90)
-      // For SHORT: SL = price * (1 + q90), TP = price * (1 + q10)
-      // For HOLD: No trade
-      const probs = nnResult.direction_probs;
-      const maxProb = Math.max(probs.LONG, probs.SHORT, probs.HOLD);
-      
-      // Determine direction - respect HOLD if it's the highest
-      let direction: "LONG" | "SHORT" | "HOLD";
-      if (probs.HOLD === maxProb && probs.HOLD > 0.4) {
-        direction = "HOLD";
-      } else {
-        direction = probs.LONG > probs.SHORT ? "LONG" : "SHORT";
-      }
-      
+      // Extract direction and confidence from ensemble
+      const direction = ensembleResult.action as "LONG" | "SHORT" | "HOLD";
       const isLong = direction === "LONG";
       const isHold = direction === "HOLD";
       
-      const entry = currentPrice;
-      
       // Sanitize quantiles to reasonable bounds (-50% to +50%)
-      // This prevents absurd price values when model outputs garbage
       const clamp = (val: number, min: number, max: number) => Math.max(min, Math.min(max, val));
       const sanitizedQuantiles = {
-        q10: clamp(nnResult.quantiles.q10, -0.5, 0.5),
-        q25: clamp(nnResult.quantiles.q25, -0.5, 0.5),
-        q50: clamp(nnResult.quantiles.q50, -0.5, 0.5),
-        q75: clamp(nnResult.quantiles.q75, -0.5, 0.5),
-        q90: clamp(nnResult.quantiles.q90, -0.5, 0.5),
+        q10: clamp(ensembleResult.quantiles.q10, -0.5, 0.5),
+        q25: clamp(ensembleResult.quantiles.q25, -0.5, 0.5),
+        q50: clamp(ensembleResult.quantiles.q50, -0.5, 0.5),
+        q75: clamp(ensembleResult.quantiles.q75, -0.5, 0.5),
+        q90: clamp(ensembleResult.quantiles.q90, -0.5, 0.5),
       };
       
-      // For HOLD, set neutral SL/TP based on uncertainty range
+      const entry = currentPrice;
+      
+      // Derive SL/TP from quantiles
       let stopLoss: number;
       let takeProfit: number;
       
       if (isHold) {
-        // For HOLD signals, use symmetric uncertainty bands
         stopLoss = currentPrice * (1 + sanitizedQuantiles.q10);
         takeProfit = currentPrice * (1 + sanitizedQuantiles.q90);
       } else if (isLong) {
-        stopLoss = currentPrice * (1 + sanitizedQuantiles.q10);  // q10 is negative for down move
-        takeProfit = currentPrice * (1 + sanitizedQuantiles.q90); // q90 is positive for up move
+        stopLoss = currentPrice * (1 + sanitizedQuantiles.q10);
+        takeProfit = currentPrice * (1 + sanitizedQuantiles.q90);
       } else {
-        stopLoss = currentPrice * (1 + sanitizedQuantiles.q90); // q90 is positive for up move
-        takeProfit = currentPrice * (1 + sanitizedQuantiles.q10); // q10 is negative for down move
+        stopLoss = currentPrice * (1 + sanitizedQuantiles.q90);
+        takeProfit = currentPrice * (1 + sanitizedQuantiles.q10);
       }
       
       // Risk/Reward ratio
@@ -1273,17 +1284,17 @@ export async function registerRoutes(
       const reward = Math.abs(takeProfit - entry);
       const riskReward = risk > 0 ? reward / risk : 0;
       
-      // Confidence from direction probabilities
-      const confidence = isHold ? probs.HOLD : Math.max(probs.LONG, probs.SHORT);
+      // Get confidence and probs from ensemble
+      const confidence = ensembleResult.confidence;
+      const probs = ensembleResult.ensemble_probs || { LONG: 0.33, SHORT: 0.33, HOLD: 0.34 };
       
-      // Generate predicted candles for visualization (10 bars horizon)
+      // Generate predicted candles for visualization (16 bars = 4h horizon for 15m bars)
       const predictedCandles = [];
       const intervalMs = 15 * 60 * 1000; // 15 minutes
       
-      for (let i = 1; i <= 10; i++) {
-        const t = i / 10; // Progress through horizon
+      for (let i = 1; i <= 16; i++) {
+        const t = i / 16; // Progress through 4h horizon
         
-        // Interpolate quantiles for each future candle (using sanitized values)
         const q10 = currentPrice * (1 + sanitizedQuantiles.q10 * t);
         const q25 = currentPrice * (1 + sanitizedQuantiles.q25 * t);
         const q50 = currentPrice * (1 + sanitizedQuantiles.q50 * t);
@@ -1297,31 +1308,26 @@ export async function registerRoutes(
           q50,
           q75,
           q90,
-          direction: q50 >= currentPrice ? "up" : "down"
+          direction: (q50 >= currentPrice ? "up" : "down") as "up" | "down"
         });
       }
       
       const prediction = {
-        action: direction as "LONG" | "SHORT",
+        action: direction,
         confidence,
         entry,
         stopLoss,
         takeProfit,
         riskReward,
-        expectedMove: sanitizedQuantiles.q50 * 100, // As percentage for display
-        uncertainty: (sanitizedQuantiles.q90 - sanitizedQuantiles.q10) * 100, // Spread as percentage for display
-        quantiles: {
-          // Keep as decimals for price calculations in frontend (e.g., 0.02 = 2%)
-          q10: sanitizedQuantiles.q10,
-          q25: sanitizedQuantiles.q25,
-          q50: sanitizedQuantiles.q50,
-          q75: sanitizedQuantiles.q75,
-          q90: sanitizedQuantiles.q90,
-        },
-        directionProbs: nnResult.direction_probs,
-        horizon: "2-3 hours (10 x 15m bars)",
+        expectedMove: sanitizedQuantiles.q50 * 100,
+        uncertainty: (sanitizedQuantiles.q90 - sanitizedQuantiles.q10) * 100,
+        quantiles: sanitizedQuantiles,
+        directionProbs: probs,
+        horizon: "4 hours (16 x 15m bars)",
         timestamp: Date.now(),
       };
+      
+      console.log(`[GPU NN] Prediction: ${direction} @ ${confidence.toFixed(2)} conf, q50=${(sanitizedQuantiles.q50 * 100).toFixed(2)}%`);
       
       res.json({ available: true, prediction, predictedCandles });
     } catch (error) {
