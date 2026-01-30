@@ -166,9 +166,17 @@ def train(args):
         sl_distance = targets_df['sl_distance'].values.astype(np.float32)
         tp_distance = targets_df['tp_distance'].values.astype(np.float32)
         
-        # Candle prediction targets (collect all delta columns)
-        candle_cols = [c for c in targets_df.columns if c.startswith("candle_delta_")]
+        # Candle prediction targets (collect all delta columns in DETERMINISTIC order)
+        # Order must be: close_1, high_1, low_1, close_2, high_2, low_2, ... to match model output
+        candle_cols = []
+        for i in range(1, n_future_candles + 1):
+            candle_cols.extend([
+                f"candle_delta_close_{i}",
+                f"candle_delta_high_{i}",
+                f"candle_delta_low_{i}"
+            ])
         candle_targets = targets_df[candle_cols].values.astype(np.float32)  # [N, n_future*3]
+        logger.info(f"Candle target columns (ordered): {candle_cols[:6]}...{candle_cols[-3:]}")
         
         logger.info(f"Generated multi-head targets: labels shape={labels.shape}, returns shape={forward_returns.shape}")
         logger.info(f"  Trading targets: entry_offset, sl_distance, tp_distance")
@@ -306,46 +314,77 @@ def train(args):
     
     # === STEP 5.5: HARD DATA CLEANSING - Drop NaN/Inf rows ===
     # This is critical: NaN/Inf in features will cause NaN loss and corrupt training
-    def clean_data(features: np.ndarray, labels: np.ndarray, returns: np.ndarray = None, name: str = "Data"):
-        """Replace Inf->NaN, drop rows with any NaN, align labels and returns."""
-        # Replace Inf with NaN
+    # IMPORTANT: Must clean ALL arrays together to maintain alignment!
+    def clean_data_multihead(features, labels, returns, entry_offset, sl_distance, tp_distance, candle_targets, name):
+        """Replace Inf->NaN, drop rows with any NaN, align ALL targets together."""
+        # Replace Inf with NaN in features
         features = np.where(np.isinf(features), np.nan, features)
         
-        # Find rows with any NaN
+        # Find rows with any NaN in features
         nan_mask = np.isnan(features).any(axis=1)
         
-        # Also check returns for NaN if provided
-        if returns is not None:
-            returns = np.where(np.isinf(returns), np.nan, returns)
-            nan_mask = nan_mask | np.isnan(returns)
+        # Also check returns for NaN
+        returns = np.where(np.isinf(returns), np.nan, returns)
+        nan_mask = nan_mask | np.isnan(returns)
+        
+        # Check trading targets for NaN
+        entry_offset = np.where(np.isinf(entry_offset), np.nan, entry_offset)
+        sl_distance = np.where(np.isinf(sl_distance), np.nan, sl_distance)
+        tp_distance = np.where(np.isinf(tp_distance), np.nan, tp_distance)
+        nan_mask = nan_mask | np.isnan(entry_offset) | np.isnan(sl_distance) | np.isnan(tp_distance)
+        
+        # Check candle targets for NaN
+        candle_targets = np.where(np.isinf(candle_targets), np.nan, candle_targets)
+        nan_mask = nan_mask | np.isnan(candle_targets).any(axis=1)
         
         nan_count = nan_mask.sum()
+        valid_mask = ~nan_mask
         
+        if nan_count > 0:
+            logger.warning(f"{name}: Dropping {nan_count} rows with NaN/Inf ({nan_count/len(features)*100:.1f}%)")
+            features = features[valid_mask]
+            labels = labels[valid_mask]
+            returns = returns[valid_mask]
+            entry_offset = entry_offset[valid_mask]
+            sl_distance = sl_distance[valid_mask]
+            tp_distance = tp_distance[valid_mask]
+            candle_targets = candle_targets[valid_mask]
+        
+        # Final assertion - must be all finite
+        assert np.isfinite(features).all(), f"{name}: Features still have non-finite values!"
+        assert np.isfinite(returns).all(), f"{name}: Returns still have non-finite values!"
+        assert np.isfinite(candle_targets).all(), f"{name}: Candle targets still have non-finite values!"
+        logger.info(f"{name}: {len(features)} clean samples, all finite and aligned")
+        
+        return features, labels, returns, entry_offset, sl_distance, tp_distance, candle_targets
+    
+    def clean_data_legacy(features, labels, name):
+        """Replace Inf->NaN, drop rows with any NaN (legacy classification mode)."""
+        features = np.where(np.isinf(features), np.nan, features)
+        nan_mask = np.isnan(features).any(axis=1)
+        nan_count = nan_mask.sum()
         if nan_count > 0:
             logger.warning(f"{name}: Dropping {nan_count} rows with NaN/Inf ({nan_count/len(features)*100:.1f}%)")
             valid_mask = ~nan_mask
             features = features[valid_mask]
             labels = labels[valid_mask]
-            if returns is not None:
-                returns = returns[valid_mask]
-        
-        # Final assertion - must be all finite
         assert np.isfinite(features).all(), f"{name}: Still has non-finite values after cleaning!"
         logger.info(f"{name}: {len(features)} clean samples, all finite")
-        
-        if returns is not None:
-            return features, labels, returns
         return features, labels
     
-    # Clean data (multi-head mode includes returns)
+    # Clean data - CRITICAL: Must clean ALL arrays together for alignment!
     if use_multihead:
-        train_features_scaled, train_labels, train_returns = clean_data(
-            train_features_scaled, train_labels, train_returns, name="Train")
-        val_features_scaled, val_labels, val_returns = clean_data(
-            val_features_scaled, val_labels, val_returns, name="Val")
+        train_features_scaled, train_labels, train_returns, train_entry_offset, train_sl_distance, train_tp_distance, train_candle_targets = clean_data_multihead(
+            train_features_scaled, train_labels, train_returns,
+            train_entry_offset, train_sl_distance, train_tp_distance, train_candle_targets,
+            name="Train")
+        val_features_scaled, val_labels, val_returns, val_entry_offset, val_sl_distance, val_tp_distance, val_candle_targets = clean_data_multihead(
+            val_features_scaled, val_labels, val_returns,
+            val_entry_offset, val_sl_distance, val_tp_distance, val_candle_targets,
+            name="Val")
     else:
-        train_features_scaled, train_labels = clean_data(train_features_scaled, train_labels, name="Train")
-        val_features_scaled, val_labels = clean_data(val_features_scaled, val_labels, name="Val")
+        train_features_scaled, train_labels = clean_data_legacy(train_features_scaled, train_labels, name="Train")
+        val_features_scaled, val_labels = clean_data_legacy(val_features_scaled, val_labels, name="Val")
     
     # === STEP 6: Create datasets ===
     if use_multihead:
@@ -385,25 +424,29 @@ def train(args):
                 input_dim=input_dim,
                 d_model=config.model.transformer_dim,
                 nhead=config.model.transformer_heads,
-                num_layers=config.model.transformer_layers
+                num_layers=config.model.transformer_layers,
+                n_future_candles=n_future_candles  # Must match target generation!
             )
         elif args.model == "tft":
             model = MultiHeadTFT(
                 input_dim=input_dim,
                 d_model=config.model.transformer_dim,
                 nhead=config.model.transformer_heads,
-                num_encoder_layers=4
+                num_encoder_layers=4,
+                n_future_candles=n_future_candles  # Must match target generation!
             )
         elif args.model == "lstm":
             model = MultiHeadLSTM(
                 input_dim=input_dim,
                 hidden_dim=config.model.lstm_hidden,
-                num_layers=config.model.lstm_layers
+                num_layers=config.model.lstm_layers,
+                n_future_candles=n_future_candles  # Must match target generation!
             )
         elif args.model == "cnn":
             model = MultiHeadCNN(
                 input_dim=input_dim,
-                channels=config.model.cnn_channels
+                hidden_channels=config.model.cnn_channels,  # Note: param name is hidden_channels
+                n_future_candles=n_future_candles  # Must match target generation!
             )
         else:
             logger.error(f"Multi-head mode not supported for model type: {args.model}")
