@@ -43,6 +43,8 @@ class MultiHeadDataset(Dataset):
     - features: [seq_len, input_dim] input sequence
     - class_label: int (0=SHORT, 1=HOLD, 2=LONG)
     - forward_return: float (actual return for regression/quantile targets)
+    - trading_targets: [3] tensor (entry_offset, sl_distance, tp_distance)
+    - candle_targets: [n_future, 3] tensor (close, high, low deltas)
     """
     
     def __init__(
@@ -50,12 +52,26 @@ class MultiHeadDataset(Dataset):
         features: np.ndarray,
         class_labels: np.ndarray,
         forward_returns: np.ndarray,
+        entry_offset: Optional[np.ndarray] = None,
+        sl_distance: Optional[np.ndarray] = None,
+        tp_distance: Optional[np.ndarray] = None,
+        candle_targets: Optional[np.ndarray] = None,
+        n_future_candles: int = 5,
         sequence_length: int = 100
     ):
         self.features = features.astype(np.float32)
         self.class_labels = class_labels.astype(np.int64)
         self.forward_returns = forward_returns.astype(np.float32)
         self.sequence_length = sequence_length
+        self.n_future_candles = n_future_candles
+        
+        # Trading targets (entry/SL/TP) - optional for backward compatibility
+        self.entry_offset = entry_offset.astype(np.float32) if entry_offset is not None else None
+        self.sl_distance = sl_distance.astype(np.float32) if sl_distance is not None else None
+        self.tp_distance = tp_distance.astype(np.float32) if tp_distance is not None else None
+        
+        # Candle prediction targets - optional for backward compatibility
+        self.candle_targets = candle_targets.astype(np.float32) if candle_targets is not None else None
         
         # Create sequences
         self.valid_indices = list(range(sequence_length, len(features)))
@@ -63,17 +79,38 @@ class MultiHeadDataset(Dataset):
     def __len__(self) -> int:
         return len(self.valid_indices)
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, ...]:
         actual_idx = self.valid_indices[idx]
         
         # Get sequence ending at actual_idx
         start_idx = actual_idx - self.sequence_length
         seq = self.features[start_idx:actual_idx]
         
+        # Trading targets: [entry_offset, sl_distance, tp_distance]
+        if self.entry_offset is not None:
+            trading = np.array([
+                self.entry_offset[actual_idx],
+                self.sl_distance[actual_idx],
+                self.tp_distance[actual_idx]
+            ], dtype=np.float32)
+        else:
+            trading = np.zeros(3, dtype=np.float32)
+        
+        # Candle targets: reshape to [n_future, 3]
+        if self.candle_targets is not None:
+            c = self.candle_targets[actual_idx]
+            # Columns are: close_1, high_1, low_1, close_2, high_2, low_2, ...
+            # Reshape to [n_future, 3] where 3 = (close, high, low)
+            c = c.reshape(self.n_future_candles, 3)
+        else:
+            c = np.zeros((self.n_future_candles, 3), dtype=np.float32)
+        
         return (
             torch.from_numpy(seq),
             torch.tensor(self.class_labels[actual_idx]),
-            torch.tensor(self.forward_returns[actual_idx])
+            torch.tensor(self.forward_returns[actual_idx]),
+            torch.from_numpy(trading),
+            torch.from_numpy(c)
         )
 
 
@@ -137,34 +174,49 @@ class MultiHeadTrainer:
         self.writer = SummaryWriter(log_dir)
         
     def train_epoch(self, epoch: int) -> Dict[str, float]:
-        """Train one epoch with multi-head outputs."""
+        """Train one epoch with multi-head outputs (all 6 heads)."""
         self.model.train()
         
         total_losses = {
             'total': 0.0, 'class': 0.0, 'mu': 0.0, 
-            'sigma': 0.0, 'quantile': 0.0
+            'sigma': 0.0, 'quantile': 0.0, 'trading': 0.0, 'candle': 0.0
         }
         correct = 0
         total = 0
         
-        for batch_idx, (features, class_labels, returns) in enumerate(self.train_loader):
+        for batch_idx, (features, class_labels, returns, trading, candle_tgt) in enumerate(self.train_loader):
             features = features.to(self.device)
             class_labels = class_labels.to(self.device)
             returns = returns.to(self.device)
+            trading = trading.to(self.device)  # [batch, 3]
+            candle_tgt = candle_tgt.to(self.device)  # [batch, n_future, 3]
             
             self.optimizer.zero_grad()
             
             # Multi-head forward pass
             output = self.model.forward_multihead(features)
             
-            # Compute combined loss
+            # Build trading_targets dict
+            trading_targets = {
+                "entry_offset": trading[:, 0:1],
+                "sl_distance": trading[:, 1:2],
+                "tp_distance": trading[:, 2:3],
+            }
+            
+            # Compute combined loss (all 6 heads)
             losses = self.criterion(
                 class_logits=output.class_logits,
                 mu=output.mu,
                 sigma=output.sigma,
                 quantiles=output.quantiles,
                 class_targets=class_labels,
-                return_targets=returns
+                return_targets=returns,
+                entry_offset=output.entry_offset,
+                sl_distance=output.sl_distance,
+                tp_distance=output.tp_distance,
+                candle_deltas=output.candle_deltas,
+                trading_targets=trading_targets,
+                candle_targets=candle_tgt
             )
             
             loss = losses['total']
@@ -178,7 +230,8 @@ class MultiHeadTrainer:
             
             # Track losses
             for key in total_losses:
-                total_losses[key] += losses[key].item()
+                if key in losses:
+                    total_losses[key] += losses[key].item()
             
             # Track accuracy
             preds = output.class_logits.argmax(dim=-1)
@@ -195,12 +248,12 @@ class MultiHeadTrainer:
         return avg_losses
     
     def validate(self) -> Dict[str, float]:
-        """Validate with all heads."""
+        """Validate with all heads (6 heads)."""
         self.model.eval()
         
         total_losses = {
             'total': 0.0, 'class': 0.0, 'mu': 0.0,
-            'sigma': 0.0, 'quantile': 0.0
+            'sigma': 0.0, 'quantile': 0.0, 'trading': 0.0, 'candle': 0.0
         }
         correct = 0
         total = 0
@@ -214,12 +267,21 @@ class MultiHeadTrainer:
         quantile_count = 0
         
         with torch.no_grad():
-            for features, class_labels, returns in self.val_loader:
+            for features, class_labels, returns, trading, candle_tgt in self.val_loader:
                 features = features.to(self.device)
                 class_labels = class_labels.to(self.device)
                 returns = returns.to(self.device)
+                trading = trading.to(self.device)
+                candle_tgt = candle_tgt.to(self.device)
                 
                 output = self.model.forward_multihead(features)
+                
+                # Build trading_targets dict
+                trading_targets = {
+                    "entry_offset": trading[:, 0:1],
+                    "sl_distance": trading[:, 1:2],
+                    "tp_distance": trading[:, 2:3],
+                }
                 
                 losses = self.criterion(
                     class_logits=output.class_logits,
@@ -227,11 +289,18 @@ class MultiHeadTrainer:
                     sigma=output.sigma,
                     quantiles=output.quantiles,
                     class_targets=class_labels,
-                    return_targets=returns
+                    return_targets=returns,
+                    entry_offset=output.entry_offset,
+                    sl_distance=output.sl_distance,
+                    tp_distance=output.tp_distance,
+                    candle_deltas=output.candle_deltas,
+                    trading_targets=trading_targets,
+                    candle_targets=candle_tgt
                 )
                 
                 for key in total_losses:
-                    total_losses[key] += losses[key].item()
+                    if key in losses:
+                        total_losses[key] += losses[key].item()
                 
                 # Classification accuracy
                 preds = output.class_logits.argmax(dim=-1)

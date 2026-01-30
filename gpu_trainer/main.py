@@ -153,11 +153,26 @@ def train(args):
     horizon = getattr(args, 'horizon', 5)
     
     if use_multihead:
-        # Multi-head mode: generate class_labels and forward_returns
-        targets_df = generate_multihead_targets(df, horizon_periods=horizon)
+        # Multi-head mode: generate all targets (class, returns, trading, candles)
+        n_future_candles = getattr(args, 'n_future_candles', 5)
+        targets_df = generate_multihead_targets(df, horizon_periods=horizon, n_future_candles=n_future_candles)
+        
+        # Classification and regression targets
         labels = targets_df['class_label'].values.astype(np.int64)
         forward_returns = targets_df['forward_return'].values.astype(np.float32)
+        
+        # Trading head targets (entry/SL/TP)
+        entry_offset = targets_df['entry_offset'].values.astype(np.float32)
+        sl_distance = targets_df['sl_distance'].values.astype(np.float32)
+        tp_distance = targets_df['tp_distance'].values.astype(np.float32)
+        
+        # Candle prediction targets (collect all delta columns)
+        candle_cols = [c for c in targets_df.columns if c.startswith("candle_delta_")]
+        candle_targets = targets_df[candle_cols].values.astype(np.float32)  # [N, n_future*3]
+        
         logger.info(f"Generated multi-head targets: labels shape={labels.shape}, returns shape={forward_returns.shape}")
+        logger.info(f"  Trading targets: entry_offset, sl_distance, tp_distance")
+        logger.info(f"  Candle targets: {len(candle_cols)} columns ({n_future_candles} steps x 3)")
     else:
         # Legacy mode: classification-only labels
         labels = create_labels(df, horizon=horizon, threshold=0.001)
@@ -172,11 +187,19 @@ def train(args):
     features_np = features_df.values[valid_start:].astype(np.float32)
     labels_np = labels[valid_start:].astype(np.int64)
     
-    # Also slice forward_returns for multi-head mode
+    # Also slice all targets for multi-head mode
     if use_multihead:
         forward_returns_np = forward_returns[valid_start:].astype(np.float32)
+        entry_offset_np = entry_offset[valid_start:].astype(np.float32)
+        sl_distance_np = sl_distance[valid_start:].astype(np.float32)
+        tp_distance_np = tp_distance[valid_start:].astype(np.float32)
+        candle_targets_np = candle_targets[valid_start:].astype(np.float32)
     else:
         forward_returns_np = None
+        entry_offset_np = None
+        sl_distance_np = None
+        tp_distance_np = None
+        candle_targets_np = None
     
     # === STEP 4: PURGE GAP and EXPLICIT SPLIT SIZING ===
     # Labels near train end look `horizon` candles ahead, which may be in val
@@ -247,13 +270,28 @@ def train(args):
     val_features_raw = features_np[val_start:val_end]
     val_labels = labels_np[val_start:val_end]
     
-    # Split forward_returns for multi-head mode
+    # Split all targets for multi-head mode
     if use_multihead:
         train_returns = forward_returns_np[:train_end]
         val_returns = forward_returns_np[val_start:val_end]
+        
+        # Trading targets (entry/SL/TP)
+        train_entry_offset = entry_offset_np[:train_end]
+        train_sl_distance = sl_distance_np[:train_end]
+        train_tp_distance = tp_distance_np[:train_end]
+        val_entry_offset = entry_offset_np[val_start:val_end]
+        val_sl_distance = sl_distance_np[val_start:val_end]
+        val_tp_distance = tp_distance_np[val_start:val_end]
+        
+        # Candle targets
+        train_candle_targets = candle_targets_np[:train_end]
+        val_candle_targets = candle_targets_np[val_start:val_end]
     else:
         train_returns = None
         val_returns = None
+        train_entry_offset = train_sl_distance = train_tp_distance = None
+        val_entry_offset = val_sl_distance = val_tp_distance = None
+        train_candle_targets = val_candle_targets = None
     
     # === STEP 5: FIT SCALER ON TRAINING DATA ONLY ===
     # This is critical - scaler must not see validation/test distribution
@@ -311,9 +349,19 @@ def train(args):
     
     # === STEP 6: Create datasets ===
     if use_multihead:
-        # Multi-head dataset returns (features, class_labels, forward_returns)
-        train_dataset = MultiHeadDataset(train_features_scaled, train_labels, train_returns, sequence_length)
-        val_dataset = MultiHeadDataset(val_features_scaled, val_labels, val_returns, sequence_length)
+        # Multi-head dataset returns (features, class_labels, forward_returns, trading_targets, candle_targets)
+        train_dataset = MultiHeadDataset(
+            train_features_scaled, train_labels, train_returns,
+            entry_offset=train_entry_offset, sl_distance=train_sl_distance, tp_distance=train_tp_distance,
+            candle_targets=train_candle_targets, n_future_candles=n_future_candles,
+            sequence_length=sequence_length
+        )
+        val_dataset = MultiHeadDataset(
+            val_features_scaled, val_labels, val_returns,
+            entry_offset=val_entry_offset, sl_distance=val_sl_distance, tp_distance=val_tp_distance,
+            candle_targets=val_candle_targets, n_future_candles=n_future_candles,
+            sequence_length=sequence_length
+        )
         logger.info(f"Created MultiHeadDataset: train={len(train_dataset)}, val={len(val_dataset)}")
     else:
         train_dataset = TradingDataset(train_features_scaled, train_labels, sequence_length, validate_data=True)
@@ -453,11 +501,13 @@ def train(args):
             device=config.device,
             loss_config=loss_config
         )
-        logger.info("Using MultiHeadTrainer with combined loss:")
-        logger.info(f"  - CrossEntropyLoss (λ={loss_config.lambda_class})")
+        logger.info("Using MultiHeadTrainer with combined loss (6 heads):")
+        logger.info(f"  - CrossEntropyLoss for direction (λ={loss_config.lambda_class})")
         logger.info(f"  - HuberLoss for μ (λ={loss_config.lambda_mu})")
         logger.info(f"  - GaussianNLLLoss for σ (λ={loss_config.lambda_sigma})")
         logger.info(f"  - PinballLoss for quantiles (λ={loss_config.lambda_quantile})")
+        logger.info(f"  - HuberLoss for trading entry/SL/TP (λ={loss_config.lambda_trading})")
+        logger.info(f"  - HuberLoss for candle deltas (λ={loss_config.lambda_candle})")
     else:
         # Legacy classification-only trainer
         trainer = Trainer(model, train_loader, val_loader, config, device=config.device, 
@@ -468,13 +518,25 @@ def train(args):
         
     history = trainer.train(epochs=args.epochs)
     
-    # Save model with appropriate suffix
+    # Save model with appropriate suffix - PAIRED with matching scaler
     model_suffix = "_multihead" if use_multihead else ""
-    save_path = config.model_dir / f"{args.model}{model_suffix}_trained.pt"
+    model_prefix = f"{args.model}{model_suffix}"
+    
+    save_path = config.model_dir / f"{model_prefix}_trained.pt"
     model.save(str(save_path))
     logger.info(f"Model saved to {save_path}")
     
-    engineer.save_scalers(str(config.model_dir / f"{args.model}_scalers.joblib"))
+    # Save scaler with MATCHING prefix (critical for inference alignment)
+    scaler_path = config.model_dir / f"{model_prefix}_scalers.joblib"
+    engineer.save_scalers(str(scaler_path))
+    logger.info(f"Scaler saved to {scaler_path}")
+    
+    # Save feature columns for validation at inference time
+    feature_cols_path = config.model_dir / f"{model_prefix}_feature_columns.txt"
+    with open(feature_cols_path, 'w') as f:
+        f.write('\n'.join(features_df.columns.tolist()))
+    logger.info(f"Feature columns saved to {feature_cols_path}")
+    
     logger.info("Training complete!")
 
 def train_rl(args):
