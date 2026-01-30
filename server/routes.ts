@@ -1241,20 +1241,31 @@ export async function registerRoutes(
       
       const entry = currentPrice;
       
+      // Sanitize quantiles to reasonable bounds (-50% to +50%)
+      // This prevents absurd price values when model outputs garbage
+      const clamp = (val: number, min: number, max: number) => Math.max(min, Math.min(max, val));
+      const sanitizedQuantiles = {
+        q10: clamp(nnResult.quantiles.q10, -0.5, 0.5),
+        q25: clamp(nnResult.quantiles.q25, -0.5, 0.5),
+        q50: clamp(nnResult.quantiles.q50, -0.5, 0.5),
+        q75: clamp(nnResult.quantiles.q75, -0.5, 0.5),
+        q90: clamp(nnResult.quantiles.q90, -0.5, 0.5),
+      };
+      
       // For HOLD, set neutral SL/TP based on uncertainty range
       let stopLoss: number;
       let takeProfit: number;
       
       if (isHold) {
         // For HOLD signals, use symmetric uncertainty bands
-        stopLoss = currentPrice * (1 + nnResult.quantiles.q10);
-        takeProfit = currentPrice * (1 + nnResult.quantiles.q90);
+        stopLoss = currentPrice * (1 + sanitizedQuantiles.q10);
+        takeProfit = currentPrice * (1 + sanitizedQuantiles.q90);
       } else if (isLong) {
-        stopLoss = currentPrice * (1 + nnResult.quantiles.q10);  // q10 is negative for down move
-        takeProfit = currentPrice * (1 + nnResult.quantiles.q90); // q90 is positive for up move
+        stopLoss = currentPrice * (1 + sanitizedQuantiles.q10);  // q10 is negative for down move
+        takeProfit = currentPrice * (1 + sanitizedQuantiles.q90); // q90 is positive for up move
       } else {
-        stopLoss = currentPrice * (1 + nnResult.quantiles.q90); // q90 is positive for up move
-        takeProfit = currentPrice * (1 + nnResult.quantiles.q10); // q10 is negative for down move
+        stopLoss = currentPrice * (1 + sanitizedQuantiles.q90); // q90 is positive for up move
+        takeProfit = currentPrice * (1 + sanitizedQuantiles.q10); // q10 is negative for down move
       }
       
       // Risk/Reward ratio
@@ -1272,12 +1283,12 @@ export async function registerRoutes(
       for (let i = 1; i <= 10; i++) {
         const t = i / 10; // Progress through horizon
         
-        // Interpolate quantiles for each future candle
-        const q10 = currentPrice * (1 + nnResult.quantiles.q10 * t);
-        const q25 = currentPrice * (1 + nnResult.quantiles.q25 * t);
-        const q50 = currentPrice * (1 + nnResult.quantiles.q50 * t);
-        const q75 = currentPrice * (1 + nnResult.quantiles.q75 * t);
-        const q90 = currentPrice * (1 + nnResult.quantiles.q90 * t);
+        // Interpolate quantiles for each future candle (using sanitized values)
+        const q10 = currentPrice * (1 + sanitizedQuantiles.q10 * t);
+        const q25 = currentPrice * (1 + sanitizedQuantiles.q25 * t);
+        const q50 = currentPrice * (1 + sanitizedQuantiles.q50 * t);
+        const q75 = currentPrice * (1 + sanitizedQuantiles.q75 * t);
+        const q90 = currentPrice * (1 + sanitizedQuantiles.q90 * t);
         
         predictedCandles.push({
           timestamp: lastTimestamp + (i * intervalMs),
@@ -1297,14 +1308,15 @@ export async function registerRoutes(
         stopLoss,
         takeProfit,
         riskReward,
-        expectedMove: nnResult.quantiles.q50 * 100, // As percentage
-        uncertainty: (nnResult.quantiles.q90 - nnResult.quantiles.q10) * 100, // Spread as percentage
+        expectedMove: sanitizedQuantiles.q50 * 100, // As percentage for display
+        uncertainty: (sanitizedQuantiles.q90 - sanitizedQuantiles.q10) * 100, // Spread as percentage for display
         quantiles: {
-          q10: nnResult.quantiles.q10 * 100,
-          q25: nnResult.quantiles.q25 * 100,
-          q50: nnResult.quantiles.q50 * 100,
-          q75: nnResult.quantiles.q75 * 100,
-          q90: nnResult.quantiles.q90 * 100,
+          // Keep as decimals for price calculations in frontend (e.g., 0.02 = 2%)
+          q10: sanitizedQuantiles.q10,
+          q25: sanitizedQuantiles.q25,
+          q50: sanitizedQuantiles.q50,
+          q75: sanitizedQuantiles.q75,
+          q90: sanitizedQuantiles.q90,
         },
         directionProbs: nnResult.direction_probs,
         horizon: "2-3 hours (10 x 15m bars)",

@@ -3,27 +3,54 @@ import { Badge } from "@/components/ui/badge";
 import { Brain, TrendingUp, TrendingDown, Minus } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, ResponsiveContainer, ReferenceLine, Tooltip } from "recharts";
 
+interface QuantileValues {
+  q10: number;
+  q25: number;
+  q50: number;
+  q75: number;
+  q90: number;
+}
+
 interface QuantileFanChartProps {
   currentPrice: number;
-  quantiles: {
-    q10: number;
-    q25: number;
-    q50: number;
-    q75: number;
-    q90: number;
-  };
+  quantiles: QuantileValues;
   action: "LONG" | "SHORT" | "HOLD";
   horizonBars: number;
   timeframeMinutes: number;
 }
 
+/**
+ * Sanitize quantile values to reasonable bounds.
+ * Quantiles should be return percentages (e.g., 0.02 = 2%, -0.03 = -3%)
+ * Clamp to [-0.5, 0.5] which is [-50%, +50%] - extreme but plausible for crypto
+ */
+function sanitizeQuantiles(quantiles: QuantileValues): QuantileValues {
+  const clamp = (val: number, min: number, max: number) => 
+    Math.max(min, Math.min(max, val));
+  
+  // Reasonable bounds for 10-bar horizon return distribution
+  const MIN_RETURN = -0.5;  // -50%
+  const MAX_RETURN = 0.5;   // +50%
+  
+  return {
+    q10: clamp(quantiles.q10, MIN_RETURN, MAX_RETURN),
+    q25: clamp(quantiles.q25, MIN_RETURN, MAX_RETURN),
+    q50: clamp(quantiles.q50, MIN_RETURN, MAX_RETURN),
+    q75: clamp(quantiles.q75, MIN_RETURN, MAX_RETURN),
+    q90: clamp(quantiles.q90, MIN_RETURN, MAX_RETURN),
+  };
+}
+
 export function QuantileFanChart({
   currentPrice,
-  quantiles,
+  quantiles: rawQuantiles,
   action,
   horizonBars = 10,
   timeframeMinutes = 15
 }: QuantileFanChartProps) {
+  // Sanitize quantiles to prevent absurd values from breaking the UI
+  const quantiles = sanitizeQuantiles(rawQuantiles);
+  
   const generateProbabilisticPath = () => {
     const data = [];
     
@@ -228,24 +255,25 @@ export function QuantileFanChart({
 
 interface DerivedLevelsProps {
   currentPrice: number;
-  quantiles: {
-    q10: number;
-    q25: number;
-    q50: number;
-    q75: number;
-    q90: number;
-  };
+  quantiles: QuantileValues;
   action: "LONG" | "SHORT" | "HOLD";
 }
 
-export function DerivedTradeLevels({ currentPrice, quantiles, action }: DerivedLevelsProps) {
+export function DerivedTradeLevels({ currentPrice, quantiles: rawQuantiles, action }: DerivedLevelsProps) {
+  // Sanitize quantiles to prevent absurd values from breaking the UI
+  const quantiles = sanitizeQuantiles(rawQuantiles);
+  
   const deriveLevels = () => {
+    // Prevent division by zero in R:R calculation
+    const safeDiv = (num: number, den: number) => 
+      den === 0 ? 1 : Math.abs(num) / Math.abs(den);
+    
     if (action === "LONG") {
       return {
         entry: currentPrice,
         stopLoss: currentPrice * (1 + quantiles.q10),
         takeProfit: currentPrice * (1 + quantiles.q90),
-        riskReward: Math.abs(quantiles.q90) / Math.abs(quantiles.q10),
+        riskReward: safeDiv(quantiles.q90, quantiles.q10),
         description: "SL at 10th percentile, TP at 90th percentile"
       };
     } else if (action === "SHORT") {
@@ -253,7 +281,7 @@ export function DerivedTradeLevels({ currentPrice, quantiles, action }: DerivedL
         entry: currentPrice,
         stopLoss: currentPrice * (1 + quantiles.q90),
         takeProfit: currentPrice * (1 + quantiles.q10),
-        riskReward: Math.abs(quantiles.q10) / Math.abs(quantiles.q90),
+        riskReward: safeDiv(quantiles.q10, quantiles.q90),
         description: "SL at 90th percentile, TP at 10th percentile"
       };
     } else {
