@@ -66,9 +66,18 @@ class MultiHeadDataset(Dataset):
         self.n_future_candles = n_future_candles
         
         # Trading targets (entry/SL/TP) - optional for backward compatibility
-        self.entry_offset = entry_offset.astype(np.float32) if entry_offset is not None else None
-        self.sl_distance = sl_distance.astype(np.float32) if sl_distance is not None else None
-        self.tp_distance = tp_distance.astype(np.float32) if tp_distance is not None else None
+        # Handle both numpy arrays and scalars
+        def to_float_array(val):
+            if val is None:
+                return None
+            if isinstance(val, np.ndarray):
+                return val.astype(np.float32)
+            # Scalar - convert to array of same length as features
+            return np.full(len(features), float(val), dtype=np.float32)
+        
+        self.entry_offset = to_float_array(entry_offset)
+        self.sl_distance = to_float_array(sl_distance)
+        self.tp_distance = to_float_array(tp_distance)
         
         # Candle prediction targets - optional for backward compatibility
         self.candle_targets = candle_targets.astype(np.float32) if candle_targets is not None else None
