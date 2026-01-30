@@ -1,0 +1,44 @@
+INFO:     Started server process [10840]
+INFO:     Waiting for application startup.
+2026-01-30 18:58:06,775 - api.server - INFO - Loading models at startup...
+2026-01-30 18:58:06,776 - api.server - INFO - Found 6 .pt files in checkpoints/
+2026-01-30 18:58:06,776 - api.server - INFO - saved_models/ directory not found (not an error)
+2026-01-30 18:58:07,642 - api.server - INFO - Loaded scaler from C:\Users\muham\Downloads\gpu_trainer\checkpoints\scaler_gnn_multihead.joblib
+2026-01-30 18:58:07,643 - api.server - INFO - Loaded expected feature list: 66 columns
+2026-01-30 18:58:07,643 - api.server - INFO - Updated input_dim to 66 based on feature list
+2026-01-30 18:58:07,657 - api.server - INFO - Created FeatureConfig for schema enforcement (hash: 282b439d85c9)
+2026-01-30 18:58:07,657 - api.server - INFO - Loading 6 checkpoint(s)...
+2026-01-30 18:58:07,755 - api.server - INFO - Detected multi-head architecture from state_dict keys for best_cnn_multihead
+2026-01-30 18:58:07,755 - api.server - WARNING - Could not infer dims for best_cnn_multihead. Sample keys: ['input_conv.weight', 'input_conv.bias', 'input_bn.weight', 'input_bn.bias', 'input_bn.running_mean', 'input_bn.running_var', 'input_bn.num_batches_tracked', 'blocks.0.0.weight', 'blocks.0.0.bias', 'blocks.0.1.weight']
+2026-01-30 18:58:07,756 - api.server - INFO - Creating model best_cnn_multihead with: input_dim=66, hidden_dim=128, d_model=256
+2026-01-30 18:58:09,054 - api.server - INFO - Instantiated model: best_cnn_multihead (type=best_cnn_multihead, input=66, seq=100)
+2026-01-30 18:58:09,054 - api.server - INFO - Loaded & instantiated: best_cnn_multihead -> multihead_cnn (acc=0.00%)
+2026-01-30 18:58:09,061 - api.server - INFO - Detected multi-head architecture from state_dict keys for best_gnn_multihead
+2026-01-30 18:58:09,061 - api.server - INFO - GNN: Inferred from temporal_encoder.0.weight: (128, 66)
+2026-01-30 18:58:09,061 - api.server - INFO - Inferred dimensions for best_gnn_multihead: {'hidden_dim': 128, 'input_dim': 66}
+2026-01-30 18:58:09,061 - api.server - INFO - Creating model best_gnn_multihead with: input_dim=66, hidden_dim=128, d_model=256
+2026-01-30 18:58:09,089 - api.server - INFO - Instantiated model: best_gnn_multihead (type=best_gnn_multihead, input=66, seq=100)
+2026-01-30 18:58:09,089 - api.server - INFO - Loaded & instantiated: best_gnn_multihead -> multihead_gnn (acc=0.00%)
+2026-01-30 18:58:09,098 - api.server - INFO - Detected multi-head architecture from state_dict keys for best_lstm_multihead
+2026-01-30 18:58:09,098 - api.server - INFO - Inferred dimensions for best_lstm_multihead: {'hidden_dim': 256, 'input_dim': 66}
+2026-01-30 18:58:09,098 - api.server - INFO - Creating model best_lstm_multihead with: input_dim=66, hidden_dim=256, d_model=256
+2026-01-30 18:58:09,120 - api.server - INFO - Instantiated model: best_lstm_multihead (type=best_lstm_multihead, input=66, seq=100)
+2026-01-30 18:58:09,120 - api.server - INFO - Loaded & instantiated: best_lstm_multihead -> multihead_lstm (acc=0.00%)
+2026-01-30 18:58:09,133 - api.server - INFO - Detected multi-head architecture from state_dict keys for best_tft_multihead
+2026-01-30 18:58:09,134 - api.server - INFO - Inferred dimensions for best_tft_multihead: {'d_model': 256, 'input_dim': 66}
+2026-01-30 18:58:09,134 - api.server - INFO - Creating model best_tft_multihead with: input_dim=66, hidden_dim=128, d_model=256
+2026-01-30 18:58:09,171 - api.server - INFO - Instantiated model: best_tft_multihead (type=best_tft_multihead, input=66, seq=100)
+2026-01-30 18:58:09,171 - api.server - INFO - Loaded & instantiated: best_tft_multihead -> multihead_tft (acc=0.00%)
+2026-01-30 18:58:09,263 - api.server - INFO - Detected multi-head architecture from state_dict keys for best_transformer_multihead
+2026-01-30 18:58:09,263 - api.server - INFO - Inferred dimensions for best_transformer_multihead: {'d_model': 256, 'input_dim': 66}
+2026-01-30 18:58:09,263 - api.server - INFO - Creating model best_transformer_multihead with: input_dim=66, hidden_dim=128, d_model=256
+2026-01-30 18:58:09,314 - api.server - INFO - Instantiated model: best_transformer_multihead (type=best_transformer_multihead, input=66, seq=100)
+2026-01-30 18:58:09,314 - api.server - INFO - Loaded & instantiated: best_transformer_multihead -> multihead_transformer (acc=0.00%)
+2026-01-30 18:58:09,325 - api.server - INFO - Detected multi-head architecture from state_dict keys for best_vae_multihead
+2026-01-30 18:58:09,325 - api.server - INFO - Inferred dimensions for best_vae_multihead: {'input_dim': 66, 'sequence_length': 100, 'hidden_dims': [128, 256, 512], 'latent_dim': 64}
+2026-01-30 18:58:09,325 - api.server - INFO - Creating model best_vae_multihead with: input_dim=66, hidden_dim=128, d_model=256
+2026-01-30 18:58:09,341 - api.server - INFO - Instantiated model: best_vae_multihead (type=best_vae_multihead, input=66, seq=100)
+2026-01-30 18:58:09,342 - api.server - INFO - Loaded & instantiated: best_vae_multihead -> multihead_vae (acc=0.00%)
+2026-01-30 18:58:09,342 - api.server - INFO - Loaded 6 checkpoints, 6 instantiated
+2026-01-30 18:58:09,342 - api.server - INFO - Model type mapping: {'best_cnn_multihead': 'multihead_cnn', 'best_gnn_multihead': 'multihead_gnn', 'best_lstm_multihead': 'multihead_lstm', 'best_tft_multihead': 'multihead_tft', 'best_transformer_multihead': 'multihead_transformer', 'best_vae_multihead': 'multihead_vae'}
+2026-01-30 18:58:09,342 - api.server - INFO - Startup complete. Device: cuda, Models: 6
