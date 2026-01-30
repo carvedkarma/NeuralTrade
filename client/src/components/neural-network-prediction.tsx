@@ -26,6 +26,7 @@ export interface QuantilePrediction {
   };
   horizon: string;
   timestamp: number;
+  currentPrice?: number;  // Base price used to compute predictions (for consistent upside/downside %)
 }
 
 interface NeuralNetworkPredictionCardProps {

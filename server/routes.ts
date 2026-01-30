@@ -1325,6 +1325,7 @@ export async function registerRoutes(
         directionProbs: probs,
         horizon: "4 hours (16 x 15m bars)",
         timestamp: Date.now(),
+        currentPrice,  // Include the exact price used to compute predictions
       };
       
       console.log(`[GPU NN] Prediction: ${direction} @ ${confidence.toFixed(2)} conf, q50=${(sanitizedQuantiles.q50 * 100).toFixed(2)}%`);

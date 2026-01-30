@@ -528,7 +528,7 @@ export default function Dashboard() {
                   q90: pc.q90,
                   direction: pc.direction || (pc.q50 >= 0 ? "up" : "down")
                 })) || []}
-                currentPrice={data.candles[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0}
+                currentPrice={nnPrediction?.prediction?.currentPrice ?? (data.candles[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0)}
                 action={nnPrediction?.prediction?.action || "HOLD"}
                 tradeLevels={nnPrediction?.prediction ? {
                   entry: nnPrediction.prediction.entry,
@@ -543,14 +543,14 @@ export default function Dashboard() {
               {nnPrediction?.prediction && (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                   <QuantileFanChart 
-                    currentPrice={data.candles[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0}
+                    currentPrice={nnPrediction.prediction.currentPrice ?? (data.candles[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0)}
                     quantiles={nnPrediction.prediction.quantiles}
                     action={nnPrediction.prediction.action}
                     horizonBars={10}
                     timeframeMinutes={15}
                   />
                   <DerivedTradeLevels
-                    currentPrice={data.candles[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0}
+                    currentPrice={nnPrediction.prediction.currentPrice ?? (data.candles[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0)}
                     quantiles={nnPrediction.prediction.quantiles}
                     action={nnPrediction.prediction.action}
                   />
