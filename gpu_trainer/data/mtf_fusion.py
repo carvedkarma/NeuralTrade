@@ -70,12 +70,24 @@ class MTFFeatureFusion:
         
         base_df = data_by_tf[self.BASE_TF].copy()
         
-        if "timestamp" in base_df.columns:
-            base_df["datetime"] = pd.to_datetime(base_df["timestamp"], unit="ms")
-        elif not isinstance(base_df.index, pd.DatetimeIndex):
-            raise ValueError("Base DataFrame must have timestamp column or DatetimeIndex")
-        else:
+        # Handle multiple possible timestamp column names from different sources
+        timestamp_cols = ["timestamp", "open_time", "openTime", "time", "datetime"]
+        found_col = None
+        for col in timestamp_cols:
+            if col in base_df.columns:
+                found_col = col
+                break
+        
+        if found_col:
+            # Check if already datetime or needs conversion from ms
+            if pd.api.types.is_datetime64_any_dtype(base_df[found_col]):
+                base_df["datetime"] = base_df[found_col]
+            else:
+                base_df["datetime"] = pd.to_datetime(base_df[found_col], unit="ms")
+        elif isinstance(base_df.index, pd.DatetimeIndex):
             base_df["datetime"] = base_df.index
+        else:
+            raise ValueError(f"Base DataFrame must have timestamp column (one of {timestamp_cols}) or DatetimeIndex. Found columns: {list(base_df.columns)}")
             
         base_df = base_df.sort_values("datetime").reset_index(drop=True)
         
@@ -91,10 +103,23 @@ class MTFFeatureFusion:
                 
             tf_df = data_by_tf[tf].copy()
             
-            if "timestamp" in tf_df.columns:
-                tf_df["datetime"] = pd.to_datetime(tf_df["timestamp"], unit="ms")
-            else:
+            # Handle multiple possible timestamp column names
+            found_col = None
+            for col in timestamp_cols:
+                if col in tf_df.columns:
+                    found_col = col
+                    break
+            
+            if found_col:
+                if pd.api.types.is_datetime64_any_dtype(tf_df[found_col]):
+                    tf_df["datetime"] = tf_df[found_col]
+                else:
+                    tf_df["datetime"] = pd.to_datetime(tf_df[found_col], unit="ms")
+            elif isinstance(tf_df.index, pd.DatetimeIndex):
                 tf_df["datetime"] = tf_df.index
+            else:
+                logger.warning(f"No timestamp column found for {tf}, skipping")
+                continue
                 
             tf_df = tf_df.sort_values("datetime").reset_index(drop=True)
             
