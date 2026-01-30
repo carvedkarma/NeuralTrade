@@ -219,32 +219,18 @@ class FeatureValidator:
         seq_len = self.config.sequence_length
         
         # === DEFENSIVE CHECK: feature_names must match feature dimension ===
+        # FIX: Raise ValueError instead of returning silent zeros - prevents fake predictions
         actual_feature_dim = features.shape[-1] if features.ndim >= 2 else features.shape[0]
         if len(feature_names) != actual_feature_dim:
-            logger.error(
+            error_msg = (
                 f"[Schema] CRITICAL: feature_names length ({len(feature_names)}) != "
-                f"feature dimension ({actual_feature_dim}). Cannot enforce schema safely."
+                f"feature dimension ({actual_feature_dim}). Cannot enforce schema safely. "
+                f"This usually means incoming_feature_names was built from wrong source. "
+                f"Expected: feature_names from same array used to build features."
             )
-            # Return zero-filled array with stats indicating failure
-            is_3d = features.ndim == 3
-            if is_3d:
-                batch_size = features.shape[0]
-                enforced = np.full((batch_size, seq_len, expected_dim), fill_value, dtype=np.float32)
-            else:
-                enforced = np.full((seq_len, expected_dim), fill_value, dtype=np.float32)
-            
-            stats = {
-                "incoming_features": len(feature_names),
-                "expected_features": expected_dim,
-                "missing_filled": expected_dim,  # All filled since we can't map
-                "extra_dropped": 0,
-                "sequence_in": features.shape[-2] if features.ndim >= 2 else features.shape[0],
-                "sequence_out": seq_len,
-                "missing_names": ["ALL - dimension mismatch"],
-                "extra_names": [],
-                "error": f"feature_names length ({len(feature_names)}) != feature dimension ({actual_feature_dim})"
-            }
-            return enforced, stats
+            logger.error(error_msg)
+            # Raise error instead of returning zeros - prevents garbage predictions
+            raise ValueError(error_msg)
         
         incoming_set = set(feature_names)
         expected_set = set(expected_cols)

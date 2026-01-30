@@ -99,6 +99,15 @@ class EnsembleSignal:
     
     # Probabilities
     ensemble_probs: Dict[str, float]
+    
+    # === Multi-head output: Quantiles, regression, trading params ===
+    # Aggregated from all direction models that support forward_multihead()
+    quantiles: Optional[Dict[str, float]] = None  # q10, q25, q50, q75, q90
+    mu: Optional[float] = None  # Expected return
+    sigma: Optional[float] = None  # Uncertainty
+    entry_offset: Optional[float] = None  # Entry price offset
+    sl_distance: Optional[float] = None  # Stop loss distance (%)
+    tp_distance: Optional[float] = None  # Take profit distance (%)
 
 class EnsemblePredictor:
     """
@@ -212,12 +221,63 @@ class EnsemblePredictor:
         return calibrated
     
     def _get_model_prediction(self, model: torch.nn.Module, features: torch.Tensor, model_name: str) -> Dict:
-        """Get prediction from a single model."""
+        """Get prediction from a single model.
+        
+        If model supports forward_multihead(), extract full multi-head output:
+        - class_logits -> direction probs
+        - mu, sigma -> regression outputs
+        - quantiles -> q10, q25, q50, q75, q90
+        - entry_offset, sl_distance, tp_distance -> trading parameters
+        """
         try:
             model.eval()
             with torch.no_grad():
-                output = model(features)
-                probs = F.softmax(output, dim=-1).cpu().numpy()[0]
+                # Check if model supports forward_multihead for full output
+                has_multihead = hasattr(model, 'forward_multihead')
+                
+                if has_multihead:
+                    # Use forward_multihead for full multi-head output
+                    output = model.forward_multihead(features)
+                    probs = F.softmax(output.class_logits, dim=-1).cpu().numpy()
+                    
+                    # Handle batch dimension
+                    if len(probs.shape) == 2 and probs.shape[0] == 1:
+                        probs = probs[0]
+                    elif len(probs.shape) == 2:
+                        probs = probs.mean(axis=0)  # Average across batch
+                    
+                    # Extract regression outputs (mu, sigma)
+                    mu = float(output.mu.cpu().numpy().mean()) if output.mu is not None else None
+                    sigma = float(output.sigma.cpu().numpy().mean()) if output.sigma is not None else None
+                    
+                    # Extract quantiles q10, q25, q50, q75, q90
+                    quantiles = None
+                    if output.quantiles is not None:
+                        q = output.quantiles.cpu().numpy()
+                        if len(q.shape) == 2:
+                            q = q.mean(axis=0)  # Average across batch
+                        quantiles = {
+                            "q10": float(q[0]),
+                            "q25": float(q[1]),
+                            "q50": float(q[2]),
+                            "q75": float(q[3]),
+                            "q90": float(q[4])
+                        }
+                    
+                    # Extract trading parameters
+                    entry_offset = float(output.entry_offset.cpu().numpy().mean()) if output.entry_offset is not None else None
+                    sl_distance = float(output.sl_distance.cpu().numpy().mean()) if output.sl_distance is not None else None
+                    tp_distance = float(output.tp_distance.cpu().numpy().mean()) if output.tp_distance is not None else None
+                else:
+                    # Fallback: standard forward() returns just class logits
+                    output = model(features)
+                    probs = F.softmax(output, dim=-1).cpu().numpy()[0]
+                    mu = None
+                    sigma = None
+                    quantiles = None
+                    entry_offset = None
+                    sl_distance = None
+                    tp_distance = None
                 
                 # Calibrate probabilities
                 probs = self._calibrate_probs(probs, model_name)
@@ -230,7 +290,7 @@ class EnsemblePredictor:
                 
                 action_map = {0: "SHORT", 1: "HOLD", 2: "LONG"}
                 
-                return {
+                result = {
                     "model": model_name,
                     "probs": probs.tolist(),
                     "action_idx": action_idx,
@@ -239,10 +299,22 @@ class EnsemblePredictor:
                     "confidence_margin": confidence_margin,
                     "p_long": float(probs[2]),
                     "p_short": float(probs[0]),
-                    "p_hold": float(probs[1])
+                    "p_hold": float(probs[1]),
+                    # Multi-head outputs (None if not available)
+                    "mu": mu,
+                    "sigma": sigma,
+                    "quantiles": quantiles,
+                    "entry_offset": entry_offset,
+                    "sl_distance": sl_distance,
+                    "tp_distance": tp_distance,
+                    "has_multihead": has_multihead
                 }
+                
+                return result
         except Exception as e:
             logger.error(f"Prediction error for {model_name}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
     
     def _detect_regime_from_vae(self, model: torch.nn.Module, features: torch.Tensor, model_name: str) -> Tuple[MarketRegime, float]:
@@ -286,6 +358,13 @@ class EnsemblePredictor:
                 
                 # Analyze latent dimensions for regime
                 z_np = z.cpu().numpy()[0]
+                
+                # === FIX: Check for NaN/inf in latent space ===
+                # Corrupted latent values contaminate regime detection
+                if np.isnan(z_np).any() or np.isinf(z_np).any():
+                    logger.warning(f"[{model_name}] Latent space contains NaN/inf - returning UNKNOWN regime")
+                    return MarketRegime.UNKNOWN, 0.0
+                
                 z_var = np.var(z_np)
                 z_mean_abs = np.mean(np.abs(z_np))
                 
@@ -476,6 +555,61 @@ class EnsemblePredictor:
         else:
             ensemble_probs = np.array([0.2, 0.6, 0.2])
         
+        # === Step 6b: Aggregate multi-head outputs (quantiles, mu, sigma, trading params) ===
+        # Weight-average outputs from models that support forward_multihead()
+        multihead_preds = [p for p in direction_predictions if p.get("has_multihead") and p.get("quantiles")]
+        
+        aggregated_quantiles = None
+        aggregated_mu = None
+        aggregated_sigma = None
+        aggregated_entry_offset = None
+        aggregated_sl_distance = None
+        aggregated_tp_distance = None
+        
+        if multihead_preds:
+            # Compute weights for multihead models
+            total_weight = 0.0
+            q_sum = {"q10": 0.0, "q25": 0.0, "q50": 0.0, "q75": 0.0, "q90": 0.0}
+            mu_sum = 0.0
+            sigma_sum = 0.0
+            entry_sum = 0.0
+            sl_sum = 0.0
+            tp_sum = 0.0
+            
+            for pred in multihead_preds:
+                weight_obj = self.model_weights.get(pred["model"], ModelWeight(
+                    model_name=pred["model"],
+                    expectancy=0, precision_on_trade=0.5,
+                    profit_factor=1.0, f1_directional=0.4, sharpe=0
+                ))
+                w = weight_obj.composite_weight
+                total_weight += w
+                
+                q = pred["quantiles"]
+                for key in q_sum:
+                    q_sum[key] += q[key] * w
+                
+                if pred.get("mu") is not None:
+                    mu_sum += pred["mu"] * w
+                if pred.get("sigma") is not None:
+                    sigma_sum += pred["sigma"] * w
+                if pred.get("entry_offset") is not None:
+                    entry_sum += pred["entry_offset"] * w
+                if pred.get("sl_distance") is not None:
+                    sl_sum += pred["sl_distance"] * w
+                if pred.get("tp_distance") is not None:
+                    tp_sum += pred["tp_distance"] * w
+            
+            if total_weight > 0:
+                aggregated_quantiles = {k: v / total_weight for k, v in q_sum.items()}
+                aggregated_mu = mu_sum / total_weight
+                aggregated_sigma = sigma_sum / total_weight
+                aggregated_entry_offset = entry_sum / total_weight
+                aggregated_sl_distance = sl_sum / total_weight
+                aggregated_tp_distance = tp_sum / total_weight
+                
+                reasons.append(f"Multi-head: {len(multihead_preds)} models contributed quantiles (q50={aggregated_quantiles['q50']:.4f})")
+        
         confidence = float(ensemble_probs.max())
         sorted_probs = np.sort(ensemble_probs)[::-1]
         final_margin = float(sorted_probs[0] - sorted_probs[1])
@@ -554,6 +688,13 @@ class EnsemblePredictor:
             regime_adjustment=regime_adjustment,
             model_votes=model_votes,
             reasons=reasons,
+            # Multi-head aggregated outputs
+            quantiles=aggregated_quantiles,
+            mu=aggregated_mu,
+            sigma=aggregated_sigma,
+            entry_offset=aggregated_entry_offset,
+            sl_distance=aggregated_sl_distance,
+            tp_distance=aggregated_tp_distance,
             ensemble_probs={
                 "SHORT": float(ensemble_probs[0]),
                 "HOLD": float(ensemble_probs[1]),

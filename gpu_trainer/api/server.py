@@ -1693,87 +1693,33 @@ async def predict_quantile(request: QuantilePredictionRequest):
             )
         
         # === SCHEMA ENFORCEMENT ===
-        # FIX: Require feature_names to prevent misalignment - no more guessing!
+        # FIX: Always require feature_names - no more guessing or permissive fallback!
         schema_stats = None
+        expected_seq = model_manager.sequence_length  # FIX: Define expected_seq upfront
+        
         if model_manager.feature_config is not None:
             from training.feature_registry import FeatureValidator
             validator = FeatureValidator(model_manager.feature_config)
             
-            # === FIX: REJECT requests without feature_names ===
-            # Auto-guessing column order causes garbage predictions
+            # === FIX: ALWAYS REJECT requests without feature_names ===
+            # Even "dims match" is dangerous because order can still mismatch
             if feature_names is None:
                 incoming_dim = features.shape[-1]
                 expected_cols = model_manager.feature_config.feature_columns
                 expected_dim = len(expected_cols)
                 
-                # Only allow if dimensions match exactly (still risky, but less so)
-                if incoming_dim != expected_dim:
-                    logger.error(
-                        f"[/predict/quantile] REJECTED: No feature_names provided and dimensions don't match. "
-                        f"Incoming={incoming_dim}, expected={expected_dim}. "
-                        f"Use /predict/ensemble/candles endpoint or provide feature_names."
-                    )
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"feature_names is required for /predict/quantile to avoid data misalignment. "
-                               f"Incoming features: {incoming_dim}, expected: {expected_dim}. "
-                               f"Either provide feature_names matching your feature builder, "
-                               f"or use the /predict/ensemble/candles endpoint which computes features server-side."
-                    )
-                else:
-                    # Dimensions match - proceed with caution but allow
-                    logger.warning(
-                        f"[/predict/quantile] No feature_names but dimensions match ({incoming_dim}). "
-                        f"Assuming correct order - recommend providing feature_names."
-                    )
-                    
-                    # Handle both 2D [seq_len, features] and 3D [batch, seq_len, features]
-                    if features.ndim == 3:
-                        batch_size, seq_len, feat_dim = features.shape
-                        
-                        # Truncate or pad feature dimension
-                        if feat_dim > expected_dim:
-                            features = features[:, :, :expected_dim]
-                            logger.info(f"[/predict/quantile] Truncated {feat_dim} -> {expected_dim} features (batch={batch_size})")
-                        elif feat_dim < expected_dim:
-                            padding = np.zeros((batch_size, seq_len, expected_dim - feat_dim), dtype=np.float32)
-                            features = np.concatenate([features, padding], axis=2)
-                            logger.info(f"[/predict/quantile] Padded {feat_dim} -> {expected_dim} features (batch={batch_size})")
-                        
-                        # Enforce sequence length
-                        if seq_len != expected_seq:
-                            if seq_len > expected_seq:
-                                features = features[:, -expected_seq:, :]
-                            else:
-                                padding = np.zeros((batch_size, expected_seq - seq_len, expected_dim), dtype=np.float32)
-                                features = np.concatenate([padding, features], axis=1)
-                            logger.info(f"[/predict/quantile] Sequence adjusted {seq_len} -> {expected_seq} (batch={batch_size})")
-                        
-                        schema_stats = {"auto_enforced": True, "from": incoming_dim, "to": expected_dim, "batch": batch_size}
-                    
-                    elif features.ndim == 2:
-                        # Single sample: [seq_len, features]
-                        seq_len, feat_dim = features.shape
-                        
-                        if feat_dim > expected_dim:
-                            features = features[:, :expected_dim]
-                            logger.info(f"[/predict/quantile] Truncated {feat_dim} -> {expected_dim} features")
-                        elif feat_dim < expected_dim:
-                            padding = np.zeros((seq_len, expected_dim - feat_dim), dtype=np.float32)
-                            features = np.hstack([features, padding])
-                            logger.info(f"[/predict/quantile] Padded {feat_dim} -> {expected_dim} features")
-                        
-                        if seq_len != expected_seq:
-                            if seq_len > expected_seq:
-                                features = features[-expected_seq:, :]
-                            else:
-                                padding = np.zeros((expected_seq - seq_len, expected_dim), dtype=np.float32)
-                                features = np.vstack([padding, features])
-                            logger.info(f"[/predict/quantile] Sequence adjusted {seq_len} -> {expected_seq}")
-                        
-                        # Restore batch dimension
-                        features = features.reshape(1, *features.shape)
-                        schema_stats = {"auto_enforced": True, "from": incoming_dim, "to": expected_dim}
+                logger.error(
+                    f"[/predict/quantile] REJECTED: feature_names is required. "
+                    f"Incoming={incoming_dim}, expected={expected_dim}. "
+                    f"Use /predict/ensemble/candles endpoint or provide feature_names."
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"feature_names is ALWAYS required for /predict/quantile to avoid data misalignment. "
+                           f"Incoming features: {incoming_dim}, expected: {expected_dim}. "
+                           f"Either provide feature_names matching your feature builder, "
+                           f"or use the /predict/ensemble/candles endpoint which computes features server-side."
+                )
             else:
                 # Full schema enforcement with column names
                 features_for_enforcement = features[0] if features.shape[0] == 1 else features
@@ -2160,7 +2106,10 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
             logger.info(f"Single-TF features computed: {features_np.shape[1]} features, {len(features_df)} rows (after safe NaN handling)")
         
         # Get feature column names
-        incoming_feature_names = list(feature_cols if has_full_mtf else features_df.columns)
+        # === FIX: Always use feature_cols - it's the source of truth for features_np ===
+        # Previously: 'features_df.columns' in single-TF included datetime/timestamp which
+        # caused feature_names length != feature dimension, breaking schema enforcement
+        incoming_feature_names = list(feature_cols)
         
         # Scale features using saved scaler
         features_scaled = model_manager.transform_features(
@@ -2266,10 +2215,16 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
         # Build schema enforcement info for response
         schema_info = []
         if schema_stats:
-            if schema_stats['missing_filled'] > 0:
+            if schema_stats.get('missing_filled', 0) > 0:
                 schema_info.append(f"Schema: filled {schema_stats['missing_filled']} missing features")
-            if schema_stats['extra_dropped'] > 0:
+                # Log which features were missing
+                if schema_stats.get('missing_names'):
+                    logger.info(f"[Schema] Missing features filled with 0: {schema_stats['missing_names']}")
+            if schema_stats.get('extra_dropped', 0) > 0:
                 schema_info.append(f"Schema: dropped {schema_stats['extra_dropped']} extra features")
+                # Log which features were dropped
+                if schema_stats.get('extra_names'):
+                    logger.info(f"[Schema] Extra features dropped: {schema_stats['extra_names']}")
         
         return {
             "action": signal.action,
@@ -2292,7 +2247,14 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
             "mtf_mode": has_full_mtf,
             "feature_count": features_seq.shape[1],
             "schema_enforced": schema_stats is not None,
-            "schema_stats": schema_stats
+            "schema_stats": schema_stats,
+            # === Multi-head outputs: quantiles, regression, trading params ===
+            "quantiles": signal.quantiles,
+            "mu": signal.mu,
+            "sigma": signal.sigma,
+            "entry_offset": signal.entry_offset,
+            "sl_distance": signal.sl_distance,
+            "tp_distance": signal.tp_distance
         }
         
     except HTTPException:
