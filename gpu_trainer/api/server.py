@@ -1688,26 +1688,89 @@ async def predict_quantile(request: QuantilePredictionRequest):
             )
         
         # === SCHEMA ENFORCEMENT ===
-        # If feature_names provided and feature_config exists, enforce schema
+        # If feature_config exists, enforce schema (even without feature_names)
         schema_stats = None
-        if feature_names is not None and model_manager.feature_config is not None:
+        if model_manager.feature_config is not None:
             from training.feature_registry import FeatureValidator
             validator = FeatureValidator(model_manager.feature_config)
             
-            # Apply schema enforcement (works on 2D or 3D arrays)
-            features_for_enforcement = features[0] if features.shape[0] == 1 else features
-            features_for_enforcement, schema_stats = validator.enforce_schema(
-                feature_names=feature_names,
-                features=features_for_enforcement,
-                fill_value=0.0
-            )
-            logger.info(f"[/predict/quantile] Schema enforced: {schema_stats['incoming_features']} -> {schema_stats['expected_features']} features")
-            
-            # Restore batch dimension if needed
-            if len(features_for_enforcement.shape) == 2:
-                features = features_for_enforcement.reshape(1, *features_for_enforcement.shape)
+            # If no feature_names provided, use a simple column-based enforcement
+            # WARNING: This assumes features are in expected order - potential data misalignment
+            if feature_names is None:
+                incoming_dim = features.shape[-1]
+                expected_cols = model_manager.feature_config.feature_columns
+                expected_dim = len(expected_cols)
+                expected_seq = model_manager.feature_config.sequence_length
+                
+                if incoming_dim != expected_dim:
+                    logger.warning(
+                        f"[/predict/quantile] AUTO-ENFORCEMENT: No feature_names provided. "
+                        f"Incoming={incoming_dim}, expected={expected_dim}. "
+                        f"ASSUMING features are in expected order - this may cause data misalignment!"
+                    )
+                    
+                    # Handle both 2D [seq_len, features] and 3D [batch, seq_len, features]
+                    if features.ndim == 3:
+                        batch_size, seq_len, feat_dim = features.shape
+                        
+                        # Truncate or pad feature dimension
+                        if feat_dim > expected_dim:
+                            features = features[:, :, :expected_dim]
+                            logger.info(f"[/predict/quantile] Truncated {feat_dim} -> {expected_dim} features (batch={batch_size})")
+                        elif feat_dim < expected_dim:
+                            padding = np.zeros((batch_size, seq_len, expected_dim - feat_dim), dtype=np.float32)
+                            features = np.concatenate([features, padding], axis=2)
+                            logger.info(f"[/predict/quantile] Padded {feat_dim} -> {expected_dim} features (batch={batch_size})")
+                        
+                        # Enforce sequence length
+                        if seq_len != expected_seq:
+                            if seq_len > expected_seq:
+                                features = features[:, -expected_seq:, :]
+                            else:
+                                padding = np.zeros((batch_size, expected_seq - seq_len, expected_dim), dtype=np.float32)
+                                features = np.concatenate([padding, features], axis=1)
+                            logger.info(f"[/predict/quantile] Sequence adjusted {seq_len} -> {expected_seq} (batch={batch_size})")
+                        
+                        schema_stats = {"auto_enforced": True, "from": incoming_dim, "to": expected_dim, "batch": batch_size}
+                    
+                    elif features.ndim == 2:
+                        # Single sample: [seq_len, features]
+                        seq_len, feat_dim = features.shape
+                        
+                        if feat_dim > expected_dim:
+                            features = features[:, :expected_dim]
+                            logger.info(f"[/predict/quantile] Truncated {feat_dim} -> {expected_dim} features")
+                        elif feat_dim < expected_dim:
+                            padding = np.zeros((seq_len, expected_dim - feat_dim), dtype=np.float32)
+                            features = np.hstack([features, padding])
+                            logger.info(f"[/predict/quantile] Padded {feat_dim} -> {expected_dim} features")
+                        
+                        if seq_len != expected_seq:
+                            if seq_len > expected_seq:
+                                features = features[-expected_seq:, :]
+                            else:
+                                padding = np.zeros((expected_seq - seq_len, expected_dim), dtype=np.float32)
+                                features = np.vstack([padding, features])
+                            logger.info(f"[/predict/quantile] Sequence adjusted {seq_len} -> {expected_seq}")
+                        
+                        # Restore batch dimension
+                        features = features.reshape(1, *features.shape)
+                        schema_stats = {"auto_enforced": True, "from": incoming_dim, "to": expected_dim}
             else:
-                features = features_for_enforcement
+                # Full schema enforcement with column names
+                features_for_enforcement = features[0] if features.shape[0] == 1 else features
+                features_for_enforcement, schema_stats = validator.enforce_schema(
+                    feature_names=feature_names,
+                    features=features_for_enforcement,
+                    fill_value=0.0
+                )
+                logger.info(f"[/predict/quantile] Schema enforced: {schema_stats['incoming_features']} -> {schema_stats['expected_features']} features")
+                
+                # Restore batch dimension if needed
+                if len(features_for_enforcement.shape) == 2:
+                    features = features_for_enforcement.reshape(1, *features_for_enforcement.shape)
+                else:
+                    features = features_for_enforcement
         
         # Check if we have a multi-head model with learned quantiles
         # Pass feature_names for internal schema enforcement if not done above

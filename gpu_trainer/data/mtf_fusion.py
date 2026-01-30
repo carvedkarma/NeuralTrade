@@ -117,6 +117,20 @@ class MTFFeatureFusion:
         
         return fused
     
+    def fuse(self, symbol: str, data_by_tf: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        """
+        Compatibility wrapper used by api/server.py.
+        Aligns all timeframes to the base timeframe without lookahead.
+        
+        Args:
+            symbol: Asset symbol for logging
+            data_by_tf: Dict mapping timeframe -> DataFrame with OHLCV data
+            
+        Returns:
+            DataFrame with 15m index and aligned features from all timeframes
+        """
+        return self.align_timeframes(data_by_tf, symbol)
+    
     def _compute_tf_features(self, df: pd.DataFrame, tf: str) -> pd.DataFrame:
         """
         Compute features for a single timeframe with proper suffix.
