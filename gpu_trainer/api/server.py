@@ -1634,6 +1634,28 @@ async def predict_from_candles(request: CandlePredictionRequest):
             
             features_seq = features_np[-seq_len:]
             
+            # === REQUIRED INFERENCE RULE: Check schema mismatch ===
+            # Enforce 15% threshold - HTTP 422 if too many features missing
+            actual_feature_count = features_seq.shape[1]
+            expected_feature_count = model_manager.input_dim
+            
+            if expected_feature_count > 0:
+                missing_count = max(0, expected_feature_count - actual_feature_count)
+                missing_pct = (missing_count / expected_feature_count) * 100
+            else:
+                missing_pct = 0 if actual_feature_count == 0 else 100
+            
+            if missing_pct > 15:
+                error_msg = f"Feature mismatch: computed {actual_feature_count}, model expects {expected_feature_count} ({missing_pct:.1f}% missing)"
+                logger.error(f"[HARD ERROR] {error_msg}")
+                raise HTTPException(
+                    status_code=422,
+                    detail="Feature schema mismatch — wrong endpoint or retrain required. "
+                           f"Details: {missing_pct:.1f}% features missing. "
+                           f"Got {actual_feature_count} features, expected {expected_feature_count}. "
+                           f"Training mode: {model_manager.training_mode}."
+                )
+            
         except ImportError as e:
             logger.error(f"Failed to import feature pipeline: {e}")
             raise HTTPException(
@@ -1768,6 +1790,28 @@ async def predict_multihead_from_candles(request: CandlePredictionRequest):
             
             # Always use exactly seq_len (default 100)
             features_seq = features_np[-seq_len:]
+            
+            # === REQUIRED INFERENCE RULE: Check schema mismatch ===
+            # Enforce 15% threshold - HTTP 422 if too many features missing
+            actual_feature_count = features_seq.shape[1]
+            expected_feature_count = model_manager.input_dim
+            
+            if expected_feature_count > 0:
+                missing_count = max(0, expected_feature_count - actual_feature_count)
+                missing_pct = (missing_count / expected_feature_count) * 100
+            else:
+                missing_pct = 0 if actual_feature_count == 0 else 100
+            
+            if missing_pct > 15:
+                error_msg = f"Feature mismatch: computed {actual_feature_count}, model expects {expected_feature_count} ({missing_pct:.1f}% missing)"
+                logger.error(f"[HARD ERROR] {error_msg}")
+                raise HTTPException(
+                    status_code=422,
+                    detail="Feature schema mismatch — wrong endpoint or retrain required. "
+                           f"Details: {missing_pct:.1f}% features missing. "
+                           f"Got {actual_feature_count} features, expected {expected_feature_count}. "
+                           f"Training mode: {model_manager.training_mode}."
+                )
             
         except ImportError as e:
             logger.error(f"Failed to import feature pipeline: {e}")
@@ -2187,6 +2231,20 @@ async def predict_quantile(request: QuantilePredictionRequest):
                     fill_value=0.0
                 )
                 logger.info(f"[/predict/quantile] Schema enforced: {schema_stats['incoming_features']} -> {schema_stats['expected_features']} features")
+                
+                # === REQUIRED INFERENCE RULE: Check schema mismatch ===
+                # Enforce 15% threshold - HTTP 422 if too many features missing
+                missing_pct = (schema_stats['missing_filled'] / schema_stats['expected_features']) * 100 if schema_stats['expected_features'] > 0 else 0
+                
+                if missing_pct > 15:
+                    error_msg = f"SCHEMA MISMATCH: {missing_pct:.1f}% features missing ({schema_stats['missing_filled']}/{schema_stats['expected_features']})"
+                    logger.error(f"[HARD ERROR] {error_msg}")
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Feature schema mismatch — wrong endpoint or retrain required. "
+                               f"Details: {missing_pct:.1f}% features missing ({schema_stats['missing_filled']}/{schema_stats['expected_features']}). "
+                               f"Training mode: {model_manager.training_mode}."
+                    )
                 
                 # Restore batch dimension if needed
                 if len(features_for_enforcement.shape) == 2:
@@ -2685,6 +2743,7 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
             
             # === CRITICAL: Error on >15% missing features ===
             # This indicates a pipeline mismatch - do NOT silently fill and produce garbage predictions
+            # REQUIRED INFERENCE RULE: HTTP 422 with specific message
             if missing_pct > 15:
                 error_msg = (
                     f"SCHEMA MISMATCH: {missing_pct:.1f}% features missing ({schema_stats['missing_filled']}/{schema_stats['expected_features']}). "
@@ -2692,11 +2751,12 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
                     f"Expected features: {model_manager.expected_features[:5] if model_manager.expected_features else 'unknown'}... "
                     f"Incoming features: {incoming_feature_names[:5]}..."
                 )
-                logger.error(error_msg)
+                logger.error(f"[HARD ERROR] {error_msg}")
                 raise HTTPException(
-                    status_code=400,
-                    detail=f"Schema mismatch error: {error_msg}. "
-                           f"Check that inference pipeline matches training pipeline (STF vs MTF)."
+                    status_code=422,
+                    detail="Feature schema mismatch — wrong endpoint or retrain required. "
+                           f"Details: {missing_pct:.1f}% features missing ({schema_stats['missing_filled']}/{schema_stats['expected_features']}). "
+                           f"Training mode: {model_manager.training_mode}."
                 )
         else:
             # No feature config - use raw features with basic sequence handling
@@ -2708,31 +2768,24 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
             actual_feature_count = features_seq.shape[1]
             expected_feature_count = model_manager.input_dim
             
-            if actual_feature_count != expected_feature_count:
-                error_msg = f"Feature mismatch: computed {actual_feature_count}, model expects {expected_feature_count}"
-                logger.error(error_msg)
+            # Calculate mismatch percentage for the 15% rule
+            if expected_feature_count > 0:
+                missing_count = max(0, expected_feature_count - actual_feature_count)
+                missing_pct = (missing_count / expected_feature_count) * 100
+            else:
+                missing_pct = 0 if actual_feature_count == 0 else 100
+            
+            # REQUIRED INFERENCE RULE: HTTP 422 if >15% missing
+            if missing_pct > 15:
+                error_msg = f"Feature mismatch: computed {actual_feature_count}, model expects {expected_feature_count} ({missing_pct:.1f}% missing)"
+                logger.error(f"[HARD ERROR] {error_msg}")
                 raise HTTPException(
-                    status_code=400,
-                    detail=f"Feature count mismatch: {error_msg}. "
-                           f"Training mode: {model_manager.training_mode}. Ensure pipeline alignment."
+                    status_code=422,
+                    detail="Feature schema mismatch — wrong endpoint or retrain required. "
+                           f"Details: {missing_pct:.1f}% features missing. "
+                           f"Got {actual_feature_count} features, expected {expected_feature_count}. "
+                           f"Training mode: {model_manager.training_mode}."
                 )
-                    "regime_adjusted_size": 0.0,
-                    "confidence_threshold_used": 0.15,
-                    "regime_adjustment": "BLOCKED",
-                    "model_votes": {},
-                    "ensemble_probs": {"SHORT": 0.0, "HOLD": 1.0, "LONG": 0.0},
-                    "reasons": [
-                        f"FEATURE MISMATCH: computed {actual_feature_count}, model expects {expected_feature_count}",
-                        "No feature_config available for schema enforcement",
-                        f"inference_mode={mode_lower}, training_mode={training_mode_lower}"
-                    ],
-                    "inference_mode": mode_lower,
-                    "training_mode": training_mode_lower,
-                    "mtf_mode": mode_lower == "mtf",
-                    "feature_count": actual_feature_count,
-                    "expected_feature_count": expected_feature_count,
-                    "feature_mismatch": True
-                }
         
         # Make ensemble prediction
         predictor = get_ensemble_predictor()
