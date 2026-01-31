@@ -859,14 +859,17 @@ class ModelManager:
                 
                 # Create FeatureConfig for schema enforcement
                 from training.feature_registry import FeatureConfig
+                from data.pipeline import FeatureEngineer
                 self.feature_config = FeatureConfig(
                     feature_columns=self.expected_features,
                     sequence_length=self.sequence_length,
                     horizon_periods=16,
                     timeframes=["15m"] if self.training_mode == "STF" else ["5m", "15m", "1h", "4h"],
-                    input_dim=self.input_dim
+                    input_dim=self.input_dim,
+                    feature_engineer_version=FeatureEngineer.VERSION,
+                    mode=self.training_mode.lower()
                 )
-                logger.info(f"Created FeatureConfig for schema enforcement (hash: {self.feature_config.version_hash})")
+                logger.info(f"Created FeatureConfig for schema enforcement (hash: {self.feature_config.version_hash}, FE version: {FeatureEngineer.VERSION})")
                 feature_config_loaded = True
             except Exception as e:
                 logger.warning(f"Failed to load feature list: {e}")
@@ -883,14 +886,17 @@ class ModelManager:
             # Create STF FeatureConfig
             try:
                 from training.feature_registry import FeatureConfig
+                from data.pipeline import FeatureEngineer
                 self.feature_config = FeatureConfig(
                     feature_columns=self.STF_FEATURE_NAMES,
                     sequence_length=self.sequence_length,
                     horizon_periods=16,
                     timeframes=["15m"],
-                    input_dim=self.STF_FEATURE_COUNT
+                    input_dim=self.STF_FEATURE_COUNT,
+                    feature_engineer_version=FeatureEngineer.VERSION,
+                    mode="stf"
                 )
-                logger.info(f"Created STF FeatureConfig as default (hash: {self.feature_config.version_hash})")
+                logger.info(f"Created STF FeatureConfig as default (hash: {self.feature_config.version_hash}, FE version: {FeatureEngineer.VERSION})")
             except Exception as e:
                 logger.warning(f"Failed to create STF FeatureConfig: {e}")
         
@@ -2551,6 +2557,22 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
             # Same pipeline used during training on 15m-only data
             from data.pipeline import FeatureEngineer
             fe = FeatureEngineer()
+            
+            # Log version for debugging train/infer parity
+            logger.info(f"[STF] FeatureEngineer VERSION: {FeatureEngineer.VERSION}")
+            
+            # Validate version matches training if available
+            if model_manager.feature_config:
+                training_version = model_manager.feature_config.get("feature_engineer_version")
+                if training_version and training_version != FeatureEngineer.VERSION:
+                    logger.error(f"[VERSION MISMATCH] Training used {training_version}, inference using {FeatureEngineer.VERSION}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"FeatureEngineer version mismatch: model trained with {training_version}, "
+                               f"but current FeatureEngineer is {FeatureEngineer.VERSION}. "
+                               f"This can cause silent signal degradation. Retrain with current version or rollback code."
+                    )
+            
             features_df = fe.compute_technical_features(tf_data["15m"])
             computed_feature_count = len([c for c in features_df.columns if c not in ["datetime", "timestamp"]])
             logger.info(f"STF features computed using compute_technical_features: {computed_feature_count} features")
@@ -2567,9 +2589,11 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
                     )
                 else:
                     logger.warning(f"Minor STF feature count deviation: computed {computed_feature_count}, expected {ModelManager.STF_FEATURE_COUNT}")
-        else:
+        elif mode_lower == "mtf":
             # MTF mode: Use MTF fusion (66 features)
-            # Only use if model was trained on MTF data
+            # HARD GUARD: Only import MTF when explicitly requested
+            # This ensures STF path never accidentally triggers MTF code
+            logger.info("[MTF] Explicitly requested - importing MTFFeatureFusion")
             from data.mtf_fusion import MTFFeatureFusion
             mtf = MTFFeatureFusion()
             fused_df = mtf.align_timeframes(tf_data, request.symbol if hasattr(request, 'symbol') else "BTCUSDT")
@@ -2591,6 +2615,13 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
                     )
                 else:
                     logger.warning(f"Minor MTF feature count deviation: computed {computed_feature_count}, expected {ModelManager.MTF_FEATURE_COUNT}")
+        else:
+            # Unknown mode - hard error
+            logger.error(f"Unknown prediction mode: {mode_lower}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid prediction mode: '{mode_lower}'. Must be 'stf' or 'mtf'."
+            )
         
         # === Selective NaN handling ===
         if "close" in features_df.columns:

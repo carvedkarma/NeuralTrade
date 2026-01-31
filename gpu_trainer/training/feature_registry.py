@@ -36,6 +36,8 @@ class FeatureConfig:
     timeframes: List[str]                # e.g., ["15m"] or ["5m", "15m", "1h", "4h"]
     input_dim: int                       # Number of features
     version_hash: str = ""               # Auto-computed hash
+    feature_engineer_version: str = ""   # FeatureEngineer.VERSION at training time
+    mode: str = "stf"                    # "stf" or "mtf" - which pipeline was used
     
     def __post_init__(self):
         if not self.version_hash:
@@ -47,7 +49,9 @@ class FeatureConfig:
             "columns": sorted(self.feature_columns),  # Sorted for consistency
             "seq_len": self.sequence_length,
             "horizon": self.horizon_periods,
-            "input_dim": self.input_dim
+            "input_dim": self.input_dim,
+            "feature_engineer_version": self.feature_engineer_version,  # Include version in hash
+            "mode": self.mode
         }
         json_str = json.dumps(data, sort_keys=True)
         return hashlib.sha256(json_str.encode()).hexdigest()[:12]
@@ -416,20 +420,40 @@ def save_feature_config_with_checkpoint(
     sequence_length: int,
     horizon_periods: int,
     timeframes: List[str],
-    input_dim: int
+    input_dim: int,
+    feature_engineer_version: str = "",
+    mode: str = "stf"
 ):
     """
     Save feature config alongside a model checkpoint.
     
     Creates a .features.json file next to the checkpoint.
+    
+    Args:
+        feature_engineer_version: FeatureEngineer.VERSION string from training
+        mode: "stf" or "mtf" - which pipeline was used during training
     """
+    # Get version from FeatureEngineer if not provided
+    if not feature_engineer_version:
+        try:
+            from data.pipeline import FeatureEngineer
+            feature_engineer_version = FeatureEngineer.VERSION
+            logger.info(f"Using FeatureEngineer.VERSION: {feature_engineer_version}")
+        except ImportError:
+            logger.warning("Could not import FeatureEngineer - version not recorded")
+            feature_engineer_version = "unknown"
+    
     config = FeatureConfig(
         feature_columns=feature_columns,
         sequence_length=sequence_length,
         horizon_periods=horizon_periods,
         timeframes=timeframes,
-        input_dim=input_dim
+        input_dim=input_dim,
+        feature_engineer_version=feature_engineer_version,
+        mode=mode
     )
+    
+    logger.info(f"Saving feature config with FE version: {feature_engineer_version}, mode: {mode}")
     
     # Save alongside checkpoint
     features_path = checkpoint_path.replace('.pth', '.features.json')

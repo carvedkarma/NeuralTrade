@@ -623,6 +623,29 @@ class BinanceDataFetcher:
 
 
 class FeatureEngineer:
+    """
+    Feature engineering class for STF (Single-TimeFrame) features.
+    
+    CRITICAL: This class must remain in sync between training and inference.
+    Any changes to feature computation MUST increment the VERSION.
+    """
+    # Version string documents the exact computation method
+    # Format: major.minor.patch-mode-details
+    # Increment when ANY computation changes (windows, formulas, normalization)
+    VERSION = "1.0.0-stf-pctreturns"
+    
+    # Feature computation details for version tracking
+    VERSION_DETAILS = {
+        "return_type": "pct_change",  # df["close"].pct_change()
+        "log_return_type": "log_ratio",  # np.log(close / close.shift(1))
+        "ema_warmup": "full_history",  # ewm uses full available history
+        "rsi_method": "wilder_smoothing",  # Standard RSI with Wilder smoothing
+        "bb_window": 20,  # Bollinger Bands window
+        "bb_std": 2,  # Bollinger Bands std multiplier
+        "atr_window": 14,  # ATR window
+        "periods": [5, 10, 20, 50, 100],  # Rolling window periods
+    }
+    
     def __init__(self, wavelet: str = "db4", wavelet_level: int = 4):
         self.wavelet = wavelet
         self.wavelet_level = wavelet_level
