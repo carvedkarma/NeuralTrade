@@ -2452,48 +2452,25 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
         if request.candles_4h and len(request.candles_4h) >= 20:
             tf_data["4h"] = candles_to_df(request.candles_4h)
         
-        # Check if we have all timeframes for full MTF
-        has_full_mtf = all(tf in tf_data for tf in ["5m", "15m", "1h", "4h"])
+        # === CRITICAL FIX: Use compute_technical_features (training-compatible) ===
+        # The model was trained on features from compute_technical_features:
+        #   return_50, bb_upper, ema_5, rsi_14, etc.
+        # MTF fusion produces DIFFERENT feature names:
+        #   ret_1_15m, rolling_vol_20_4h, etc.
+        # This mismatch causes 100% missing features and HOLD fallback.
+        # Always use compute_technical_features for inference to match training.
+        from data.pipeline import FeatureEngineer
+        fe = FeatureEngineer()
+        features_df = fe.compute_technical_features(tf_data["15m"])
         
-        if has_full_mtf:
-            # Use MTF Fusion for proper multi-timeframe features
-            from data.mtf_fusion import MTFFeatureFusion
-            mtf = MTFFeatureFusion()
-            fused_df = mtf.align_timeframes(tf_data, request.symbol)
-            
-            if fused_df is None or len(fused_df) == 0:
-                raise HTTPException(status_code=400, detail="MTF fusion returned no data")
-            
-            # === FIX: Selective NaN handling instead of full dropna() ===
-            # Full dropna() wipes everything because MTF features have NaNs from rolling indicators
-            # Only require base OHLCV to exist, forward-fill feature NaNs (safe at inference)
-            fused_df = fused_df.sort_values("datetime").reset_index(drop=True)
-            
-            # Only drop rows where close price is missing (essential data)
-            if "close" in fused_df.columns:
-                fused_df = fused_df.dropna(subset=["close"])
-            
-            feature_cols = [c for c in fused_df.columns if c != "datetime"]
-            
-            # Forward-fill feature NaNs safely (no leakage risk at inference)
-            fused_df[feature_cols] = fused_df[feature_cols].ffill().fillna(0.0)
-            features_np = fused_df[feature_cols].values
-            
-            logger.info(f"MTF features computed: {features_np.shape[1]} features, {len(fused_df)} rows (after safe NaN handling)")
-        else:
-            # Fallback to single-timeframe features
-            from data.pipeline import FeatureEngineer
-            fe = FeatureEngineer()
-            features_df = fe.compute_technical_features(tf_data["15m"])
-            
-            # === FIX: Selective NaN handling ===
-            if "close" in features_df.columns:
-                features_df = features_df.dropna(subset=["close"])
-            feature_cols = [c for c in features_df.columns if c not in ["datetime", "timestamp"]]
-            features_df[feature_cols] = features_df[feature_cols].ffill().fillna(0.0)
-            features_np = features_df[feature_cols].values
-            
-            logger.info(f"Single-TF features computed: {features_np.shape[1]} features, {len(features_df)} rows (after safe NaN handling)")
+        # === Selective NaN handling ===
+        if "close" in features_df.columns:
+            features_df = features_df.dropna(subset=["close"])
+        feature_cols = [c for c in features_df.columns if c not in ["datetime", "timestamp"]]
+        features_df[feature_cols] = features_df[feature_cols].ffill().fillna(0.0)
+        features_np = features_df[feature_cols].values
+        
+        logger.info(f"Features computed (training-compatible): {features_np.shape[1]} features, {len(features_df)} rows")
         
         # Get feature column names
         # === FIX: Always use feature_cols - it's the source of truth for features_np ===
