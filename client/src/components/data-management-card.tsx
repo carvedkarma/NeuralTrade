@@ -45,8 +45,18 @@ interface DownloadStatus {
   progress: DownloadProgress[];
 }
 
+const TIMEFRAME_OPTIONS = [
+  { value: "all", label: "All Timeframes (1m, 5m, 15m, 1h, 4h)" },
+  { value: "1m", label: "1 Minute" },
+  { value: "5m", label: "5 Minutes" },
+  { value: "15m", label: "15 Minutes" },
+  { value: "1h", label: "1 Hour" },
+  { value: "4h", label: "4 Hours" },
+];
+
 export function DataManagementCard() {
   const [selectedYears, setSelectedYears] = useState("1");
+  const [selectedTimeframe, setSelectedTimeframe] = useState("15m");
   const [showDownloadSection, setShowDownloadSection] = useState(false);
 
   const { data: summary, isLoading: summaryLoading, refetch: refetchSummary } = useQuery<MultiAssetDataSummary>({
@@ -60,8 +70,8 @@ export function DataManagementCard() {
   });
 
   const downloadMutation = useMutation({
-    mutationFn: async (years: number) => {
-      return apiRequest("POST", "/api/data/download", { years });
+    mutationFn: async ({ years, timeframe }: { years: number; timeframe: string }) => {
+      return apiRequest("POST", "/api/data/download", { years, timeframe });
     },
     onSuccess: () => {
       refetchDownloadStatus();
@@ -208,43 +218,70 @@ export function DataManagementCard() {
                   Download Data
                 </Button>
               ) : (
-                <div className="flex-1 flex flex-wrap gap-2 items-center">
-                  <span className="text-sm text-muted-foreground">Years:</span>
-                  <Select value={selectedYears} onValueChange={setSelectedYears}>
-                    <SelectTrigger className="w-28" data-testid="select-years">
-                      <SelectValue placeholder="Select years">{selectedYears} year{parseInt(selectedYears) > 1 ? "s" : ""}</SelectValue>
-                    </SelectTrigger>
-                    <SelectContent className="z-50">
-                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map((y) => (
-                        <SelectItem key={y} value={y.toString()}>
-                          {y} year{y > 1 ? "s" : ""}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      downloadMutation.mutate(parseInt(selectedYears));
-                      setShowDownloadSection(false);
-                    }}
-                    disabled={downloadMutation.isPending || downloadStatus?.inProgress}
-                    data-testid="button-start-download"
-                  >
-                    {downloadMutation.isPending ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <>Start</>
-                    )}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setShowDownloadSection(false)}
-                    data-testid="button-cancel-download"
-                  >
-                    Cancel
-                  </Button>
+                <div className="flex-1 space-y-2">
+                  <div className="flex flex-wrap gap-2 items-center">
+                    <span className="text-sm text-muted-foreground">Years:</span>
+                    <Select value={selectedYears} onValueChange={setSelectedYears}>
+                      <SelectTrigger className="w-28" data-testid="select-years">
+                        <SelectValue placeholder="Select years">{selectedYears} year{parseInt(selectedYears) > 1 ? "s" : ""}</SelectValue>
+                      </SelectTrigger>
+                      <SelectContent className="z-50">
+                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map((y) => (
+                          <SelectItem key={y} value={y.toString()}>
+                            {y} year{y > 1 ? "s" : ""}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex flex-wrap gap-2 items-center">
+                    <span className="text-sm text-muted-foreground">Timeframe:</span>
+                    <Select value={selectedTimeframe} onValueChange={setSelectedTimeframe}>
+                      <SelectTrigger className="w-52" data-testid="select-timeframe">
+                        <SelectValue placeholder="Select timeframe">
+                          {TIMEFRAME_OPTIONS.find(t => t.value === selectedTimeframe)?.label || selectedTimeframe}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectContent className="z-50">
+                        {TIMEFRAME_OPTIONS.map((tf) => (
+                          <SelectItem key={tf.value} value={tf.value}>
+                            {tf.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        downloadMutation.mutate({ 
+                          years: parseInt(selectedYears), 
+                          timeframe: selectedTimeframe 
+                        });
+                        setShowDownloadSection(false);
+                      }}
+                      disabled={downloadMutation.isPending || downloadStatus?.inProgress}
+                      data-testid="button-start-download"
+                    >
+                      {downloadMutation.isPending ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <>
+                          <Download className="h-4 w-4 mr-1" />
+                          Start Download
+                        </>
+                      )}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setShowDownloadSection(false)}
+                      data-testid="button-cancel-download"
+                    >
+                      Cancel
+                    </Button>
+                  </div>
                 </div>
               )}
               <Button

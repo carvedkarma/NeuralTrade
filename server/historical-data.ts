@@ -974,17 +974,30 @@ export function getBulkDownloadStatus(): { inProgress: boolean; progress: BulkDo
 export async function downloadMultiAssetData(
   years: number,
   assets: string[] = SUPPORTED_ASSETS,
-  onProgress?: (symbol: string, progress: number, candlesFetched: number) => void
+  onProgress?: (symbol: string, progress: number, candlesFetched: number) => void,
+  timeframe: string = "15m"
 ): Promise<BulkDownloadResult> {
   if (bulkDownloadInProgress) {
     throw new Error("Bulk download already in progress");
   }
   
+  // Calculate milliseconds per candle based on timeframe
+  const msPerCandle: Record<string, number> = {
+    "1m": 60 * 1000,
+    "5m": 5 * 60 * 1000,
+    "15m": 15 * 60 * 1000,
+    "1h": 60 * 60 * 1000,
+    "4h": 4 * 60 * 60 * 1000,
+  };
+  
+  const candleInterval = msPerCandle[timeframe] || MS_PER_15M;
+  
   bulkDownloadInProgress = true;
   bulkDownloadProgress.clear();
   
   const daysToFetch = years * 365;
-  const candlesExpected = Math.floor(daysToFetch * 24 * 4); // 15-min candles
+  const candlesPerDay = (24 * 60 * 60 * 1000) / candleInterval;
+  const candlesExpected = Math.floor(daysToFetch * candlesPerDay);
   const now = Date.now();
   const startTime = now - (daysToFetch * 24 * 60 * 60 * 1000);
   
@@ -1015,22 +1028,22 @@ export async function downloadMultiAssetData(
         totalExpected: candlesExpected,
       });
       
-      console.log(`[Bulk Download] Starting ${symbol}: fetching ${years} years (${candlesExpected} candles)`);
+      console.log(`[Bulk Download] Starting ${symbol} ${timeframe}: fetching ${years} years (${candlesExpected} candles)`);
       
       try {
         let cursor = startTime;
         let totalFetched = 0;
         
         while (cursor < now) {
-          const batchEnd = Math.min(cursor + (CANDLES_PER_REQUEST * MS_PER_15M), now);
+          const batchEnd = Math.min(cursor + (CANDLES_PER_REQUEST * candleInterval), now);
           
-          const klines = await fetchKlinesBatch(symbol, "15m", cursor, batchEnd);
+          const klines = await fetchKlinesBatch(symbol, timeframe, cursor, batchEnd);
           
           if (klines.length > 0) {
             const candleInserts = klines.map(k => ({
               symbol,
               timestamp: k.openTime,
-              timeframe: "15m" as const,
+              timeframe: timeframe,
               open: parseFloat(k.open),
               high: parseFloat(k.high),
               low: parseFloat(k.low),
@@ -1045,9 +1058,9 @@ export async function downloadMultiAssetData(
             }
             
             totalFetched += klines.length;
-            cursor = klines[klines.length - 1].openTime + MS_PER_15M;
+            cursor = klines[klines.length - 1].openTime + candleInterval;
           } else {
-            cursor = batchEnd + MS_PER_15M;
+            cursor = batchEnd + candleInterval;
           }
           
           const progress = Math.min(((cursor - startTime) / (now - startTime)) * 100, 100);

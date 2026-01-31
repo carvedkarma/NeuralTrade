@@ -994,32 +994,63 @@ export async function registerRoutes(
 
   app.post("/api/data/download", async (req, res) => {
     try {
-      const { years = 1, assets } = req.body;
+      const { years = 1, assets, timeframe = "15m" } = req.body;
       
       if (years < 1 || years > 15) {
         return res.status(400).json({ error: "Years must be between 1 and 15" });
+      }
+      
+      // Validate timeframe
+      const validTimeframes = ["1m", "5m", "15m", "1h", "4h", "all"];
+      if (!validTimeframes.includes(timeframe)) {
+        return res.status(400).json({ error: `Invalid timeframe. Must be one of: ${validTimeframes.join(", ")}` });
       }
       
       const { downloadMultiAssetData, getSupportedAssets } = await import("./historical-data");
       const supportedAssets = getSupportedAssets();
       const assetsToDownload = assets || supportedAssets;
       
+      // Determine which timeframes to download
+      const timeframesToDownload = timeframe === "all" 
+        ? ["1m", "5m", "15m", "1h", "4h"] 
+        : [timeframe];
+      
+      // Calculate estimated candles based on timeframe
+      const candlesPerDay: Record<string, number> = {
+        "1m": 24 * 60,      // 1440 candles per day
+        "5m": 24 * 12,      // 288 candles per day
+        "15m": 24 * 4,      // 96 candles per day
+        "1h": 24,           // 24 candles per day
+        "4h": 6,            // 6 candles per day
+      };
+      
+      const estimatedCandles = timeframesToDownload.reduce((total, tf) => {
+        return total + Math.floor(years * 365 * (candlesPerDay[tf] || 96)) * assetsToDownload.length;
+      }, 0);
+      
       // Start download in background
       res.json({ 
-        message: `Started downloading ${years} years of data for ${assetsToDownload.length} assets`,
+        message: `Started downloading ${years} years of ${timeframe === "all" ? "all timeframes" : timeframe} data for ${assetsToDownload.length} assets`,
         assets: assetsToDownload,
-        estimatedCandles: Math.floor(years * 365 * 24 * 4) * assetsToDownload.length,
+        timeframes: timeframesToDownload,
+        estimatedCandles,
       });
       
-      // Run download async, reload data when complete
-      downloadMultiAssetData(years, assetsToDownload).then(async (result) => {
-        console.log("[Data Download] Complete:", result);
-        // Reload historical candles into memory
+      // Run download async for each timeframe, reload data when complete
+      (async () => {
+        for (const tf of timeframesToDownload) {
+          try {
+            console.log(`[Data Download] Starting ${tf} timeframe...`);
+            const result = await downloadMultiAssetData(years, assetsToDownload, undefined, tf);
+            console.log(`[Data Download] ${tf} Complete:`, result);
+          } catch (err) {
+            console.error(`[Data Download] Error for ${tf}:`, err);
+          }
+        }
+        // Reload historical candles into memory after all downloads
         await storage.reloadHistoricalCandles();
-        console.log("[Data Download] Reloaded candles into memory, all learning systems now use new data");
-      }).catch(err => {
-        console.error("[Data Download] Error:", err);
-      });
+        console.log("[Data Download] All downloads complete, reloaded candles into memory");
+      })();
       
     } catch (error) {
       console.error("Error starting download:", error);
