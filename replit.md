@@ -52,8 +52,30 @@ Preferred communication style: Simple, everyday language.
 - **Regime-Balanced Training**: Utilizes a 4-regime classification (BULL, BEAR, HIGH_VOL, LOW_VOL_CHOP) with balanced sampling and per-regime validation.
 
 #### Multi-Head Model Architecture
-- **Output Heads**: Three distinct heads for Classification (direction probabilities), Regression (expected return μ and uncertainty σ), and Quantile (q10, q25, q50, q75, q90).
-- **Loss Function**: Combines CrossEntropyLoss, HuberLoss, GaussianNLLLoss, and Pinball loss.
+- **Output Heads**: Five distinct head types:
+  - Classification: Direction probabilities (LONG/SHORT/HOLD)
+  - Regression: Expected return μ and uncertainty σ
+  - Quantile: q10, q25, q50, q75, q90 price projections
+  - VolState: 3-class volatility state (contraction/neutral/expansion)
+  - Acceleration: Scalar momentum change prediction
+- **Loss Function**: Combines CrossEntropyLoss (classification + vol_state), HuberLoss (regression + acceleration), GaussianNLLLoss, and Pinball loss.
+
+#### Flow Forecast System (NEW - Jan 2026)
+- **Purpose**: Replace triangle probability cones with regime-conditioned quantile path projections
+- **Vol_State Classification**: Predicts forward volatility regime based on forward_vol/current_vol ratio
+  - Contraction (0): ratio < 0.9 - volatility expected to decrease
+  - Neutral (1): ratio 0.9-1.1 - stable volatility
+  - Expansion (2): ratio > 1.1 - volatility expected to increase
+- **Acceleration Prediction**: Momentum change = momentum_forward - momentum_now (4-bar returns)
+- **Quantile Path Generation**:
+  - Alpha shaping: expansion=1.5 (fast growth), neutral=1.0 (linear), contraction=0.7 (concave)
+  - Path formula: `path[k] = close * exp((k/h)^α * quantile)` for 16-bar horizon
+  - Three paths rendered: q10 (bearish), q50 (median), q90 (bullish)
+- **Volatility Gate**: NO_FORECAST mode triggered when:
+  - vol_state == contraction (compression regime)
+  - OR (q75-q25) < 3×cost (insufficient expected spread)
+- **Frontend Rendering**: Recharts LineChart with color-coded paths; "No Tradeable Flow" message when gated
+- **Training Targets**: Vol_state uses CrossEntropy with 0.05 label smoothing; acceleration uses Huber with delta=0.02
 
 #### Advanced Labeling and Prediction
 - **Cost-Aware Labeling**: Signals generated only when net edge (accounting for trading costs) exceeds a minimum threshold and confidence is sufficient.
