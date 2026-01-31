@@ -433,6 +433,11 @@ class MultiHeadTrainer:
         trading_metrics = self._compute_trading_metrics()
         avg_losses.update(trading_metrics)
         
+        # Compute per-regime metrics (if regime_ids available)
+        regime_metrics = self._compute_regime_metrics()
+        if regime_metrics:
+            avg_losses['regime_metrics'] = regime_metrics
+        
         return avg_losses
     
     def _compute_trading_metrics(self) -> Dict[str, float]:
@@ -551,6 +556,113 @@ class MultiHeadTrainer:
                    f"Trades: {metrics['num_trades']}")
         
         return metrics
+    
+    def _compute_regime_metrics(self) -> Dict[str, Dict[str, float]]:
+        """
+        Compute per-regime trading metrics for validation.
+        
+        Tracks performance separately for:
+        - BULL (0): Trending up markets
+        - BEAR (1): Trending down markets  
+        - HIGH_VOL (2): High volatility periods
+        - LOW_VOL_CHOP (3): Low volatility ranging
+        
+        Returns:
+            Dictionary mapping regime name to metrics dict
+        """
+        REGIME_NAMES = {0: "BULL", 1: "BEAR", 2: "HIGH_VOL", 3: "LOW_VOL_CHOP"}
+        
+        # Check if val_loader dataset has regime_ids
+        val_dataset = self.val_loader.dataset
+        if not hasattr(val_dataset, 'regime_ids') or val_dataset.regime_ids is None:
+            return {}  # No regime data available
+        
+        all_predictions = []
+        all_returns = []
+        all_regime_ids = []
+        
+        cost = 0.001  # 0.1% round-trip cost
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(self.val_loader):
+                features, class_labels, returns, trading, candle_tgt = batch
+                features = features.to(self.device)
+                output = self.model.forward_multihead(features)
+                
+                probs = torch.softmax(output.class_logits, dim=-1)
+                preds = probs.argmax(dim=-1)
+                
+                all_predictions.extend(preds.cpu().numpy())
+                all_returns.extend(returns.cpu().numpy())
+                
+                # Get regime IDs for this batch
+                start_idx = batch_idx * self.val_loader.batch_size
+                end_idx = start_idx + len(returns)
+                batch_regime_ids = val_dataset.get_regime_ids_for_valid_indices()[start_idx:end_idx]
+                all_regime_ids.extend(batch_regime_ids)
+        
+        preds = np.array(all_predictions)
+        returns = np.array(all_returns)
+        regime_ids = np.array(all_regime_ids)
+        
+        regime_metrics = {}
+        
+        for regime_id, regime_name in REGIME_NAMES.items():
+            regime_mask = regime_ids == regime_id
+            regime_count = regime_mask.sum()
+            
+            if regime_count == 0:
+                regime_metrics[regime_name] = {
+                    'samples': 0, 'trades': 0, 'expectancy': 0.0, 'hit_rate': 0.0
+                }
+                continue
+            
+            regime_preds = preds[regime_mask]
+            regime_returns = returns[regime_mask]
+            
+            # Filter for directional predictions
+            long_mask = regime_preds == 2
+            short_mask = regime_preds == 0
+            trade_mask = long_mask | short_mask
+            
+            # Compute PnL for each trade
+            trade_pnl = np.zeros(len(regime_returns))
+            trade_pnl[long_mask] = regime_returns[long_mask] - cost
+            trade_pnl[short_mask] = -regime_returns[short_mask] - cost
+            
+            trade_returns = trade_pnl[trade_mask]
+            num_trades = len(trade_returns)
+            
+            if num_trades == 0:
+                regime_metrics[regime_name] = {
+                    'samples': int(regime_count),
+                    'trades': 0,
+                    'expectancy': 0.0,
+                    'hit_rate': 0.0
+                }
+                continue
+            
+            expectancy = float(np.mean(trade_returns))
+            wins = (trade_returns > 0).sum()
+            hit_rate = float(wins / num_trades) if num_trades > 0 else 0.0
+            
+            regime_metrics[regime_name] = {
+                'samples': int(regime_count),
+                'trades': int(num_trades),
+                'expectancy': expectancy,
+                'hit_rate': hit_rate
+            }
+        
+        # Log per-regime performance
+        logger.info("Per-Regime Validation Metrics:")
+        for regime_name, metrics in regime_metrics.items():
+            if metrics['trades'] > 0:
+                logger.info(f"  {regime_name}: {metrics['samples']} samples, {metrics['trades']} trades, "
+                           f"Exp={metrics['expectancy']:.4f}, HitRate={metrics['hit_rate']:.2%}")
+            else:
+                logger.info(f"  {regime_name}: {metrics['samples']} samples, 0 trades")
+        
+        return regime_metrics
     
     def train(
         self,
