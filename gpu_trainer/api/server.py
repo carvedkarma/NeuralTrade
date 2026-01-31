@@ -55,6 +55,26 @@ class ModelManager:
         "gnn": ["gnn_trained", "cross_asset_gnn", "temporal_gnn", "gnn", "best_gnn", "best_cross_asset"],
     }
     
+    # STF (Single-TimeFrame) feature names - 41 features from compute_technical_features
+    STF_FEATURE_NAMES = [
+        "returns", "log_returns",
+        "sma_5", "ema_5", "std_5", "return_5",
+        "sma_10", "ema_10", "std_10", "return_10",
+        "sma_20", "ema_20", "std_20", "return_20",
+        "sma_50", "ema_50", "std_50", "return_50",
+        "sma_100", "ema_100", "std_100", "return_100",
+        "rsi_14", "rsi_7",
+        "macd", "macd_signal", "macd_hist",
+        "bb_upper", "bb_middle", "bb_lower", "bb_width", "bb_position",
+        "atr_14", "atr_7",
+        "volume_sma_20", "volume_ratio",
+        "adx_14",
+        "stoch_k", "stoch_d",
+        "obv", "obv_sma"
+    ]
+    STF_FEATURE_COUNT = 41
+    MTF_FEATURE_COUNT = 66
+    
     def __init__(self):
         self.models = {}
         self.model_instances = {}
@@ -64,6 +84,7 @@ class ModelManager:
         self.scaler = None  # Dict of per-column scalers (NOT a single sklearn scaler)
         self.scaler_columns = None  # Column names for the scaler dict
         self.feature_config = None  # Feature configuration
+        self.training_mode = "STF"  # Default to STF (15m only) - safer for 15m-trained models
         self.training_status = {
             "is_training": False,
             "current_epoch": 0,
@@ -80,7 +101,8 @@ class ModelManager:
         self.scaler_path = self.checkpoint_dir / "scaler.joblib"
         # FIX #4: Use locked sequence length - NEVER dynamically resize
         self.sequence_length = SEQUENCE_LENGTH_LOCKED
-        self.input_dim = 66  # Default feature count (MTF: 5m/15m/1h/4h without embedding)
+        # Default to STF feature count (41) since most models are 15m-only trained
+        self.input_dim = self.STF_FEATURE_COUNT
         self.instantiation_errors: Dict[str, str] = {}  # Track errors for /models/status
     
     def _map_filename_to_model_type(self, filename: str) -> str:
@@ -791,48 +813,88 @@ class ModelManager:
         feature_list_path = self.checkpoint_dir / "feature_columns.txt"
         if not feature_list_path.exists() and self.saved_models_dir.exists():
             feature_list_path = self.saved_models_dir / "feature_columns.txt"
-            
-        if feature_list_path.exists():
-            try:
-                with open(feature_list_path, 'r') as f:
-                    self.expected_features = [line.strip() for line in f if line.strip()]
-                logger.info(f"Loaded expected feature list: {len(self.expected_features)} columns")
-                # Update input_dim to match expected features
-                self.input_dim = len(self.expected_features)
-                logger.info(f"Updated input_dim to {self.input_dim} based on feature list")
-                
-                # Create FeatureConfig for schema enforcement
-                from training.feature_registry import FeatureConfig
-                self.feature_config = FeatureConfig(
-                    feature_columns=self.expected_features,
-                    sequence_length=self.sequence_length,
-                    horizon_periods=16,  # Default 4h horizon
-                    timeframes=["5m", "15m", "1h", "4h"],
-                    input_dim=self.input_dim
-                )
-                logger.info(f"Created FeatureConfig for schema enforcement (hash: {self.feature_config.version_hash})")
-                
-            except Exception as e:
-                logger.warning(f"Failed to load feature list: {e}")
-                self.expected_features = None
-        else:
-            self.expected_features = None
-            
-        # Also try to load feature_config from JSON file (more complete)
+        
+        # Also check for feature_config.json
         feature_config_path = self.checkpoint_dir / "feature_config.json"
         if not feature_config_path.exists() and self.saved_models_dir.exists():
             feature_config_path = self.saved_models_dir / "feature_config.json"
+        
+        # Priority: feature_config.json > feature_columns.txt > STF default
+        feature_config_loaded = False
         
         if feature_config_path.exists():
             try:
                 from training.feature_registry import FeatureConfig
                 self.feature_config = FeatureConfig.load(str(feature_config_path))
                 logger.info(f"Loaded FeatureConfig from JSON (hash: {self.feature_config.version_hash}, dim: {self.feature_config.input_dim})")
-                # Update input_dim to match
                 self.input_dim = self.feature_config.input_dim
                 self.sequence_length = self.feature_config.sequence_length
+                self.expected_features = self.feature_config.feature_columns
+                feature_config_loaded = True
+                
+                # Detect training mode from feature count
+                if self.input_dim <= self.STF_FEATURE_COUNT + 5:  # Allow some tolerance
+                    self.training_mode = "STF"
+                    logger.info(f"Detected STF training mode ({self.input_dim} features)")
+                else:
+                    self.training_mode = "MTF"
+                    logger.info(f"Detected MTF training mode ({self.input_dim} features)")
             except Exception as e:
                 logger.warning(f"Failed to load feature_config.json: {e}")
+        
+        if not feature_config_loaded and feature_list_path.exists():
+            try:
+                with open(feature_list_path, 'r') as f:
+                    self.expected_features = [line.strip() for line in f if line.strip()]
+                logger.info(f"Loaded expected feature list: {len(self.expected_features)} columns")
+                self.input_dim = len(self.expected_features)
+                
+                # Detect training mode from feature count
+                if self.input_dim <= self.STF_FEATURE_COUNT + 5:
+                    self.training_mode = "STF"
+                    logger.info(f"Detected STF training mode ({self.input_dim} features)")
+                else:
+                    self.training_mode = "MTF"
+                    logger.info(f"Detected MTF training mode ({self.input_dim} features)")
+                
+                # Create FeatureConfig for schema enforcement
+                from training.feature_registry import FeatureConfig
+                self.feature_config = FeatureConfig(
+                    feature_columns=self.expected_features,
+                    sequence_length=self.sequence_length,
+                    horizon_periods=16,
+                    timeframes=["15m"] if self.training_mode == "STF" else ["5m", "15m", "1h", "4h"],
+                    input_dim=self.input_dim
+                )
+                logger.info(f"Created FeatureConfig for schema enforcement (hash: {self.feature_config.version_hash})")
+                feature_config_loaded = True
+            except Exception as e:
+                logger.warning(f"Failed to load feature list: {e}")
+                self.expected_features = None
+        
+        # === CRITICAL: Default to STF if no feature config found ===
+        # Most models are trained on 15m only, so use STF as safe default
+        if not feature_config_loaded:
+            logger.warning("No feature_config found - defaulting to STF mode (41 features)")
+            self.training_mode = "STF"
+            self.input_dim = self.STF_FEATURE_COUNT
+            self.expected_features = self.STF_FEATURE_NAMES.copy()
+            
+            # Create STF FeatureConfig
+            try:
+                from training.feature_registry import FeatureConfig
+                self.feature_config = FeatureConfig(
+                    feature_columns=self.STF_FEATURE_NAMES,
+                    sequence_length=self.sequence_length,
+                    horizon_periods=16,
+                    timeframes=["15m"],
+                    input_dim=self.STF_FEATURE_COUNT
+                )
+                logger.info(f"Created STF FeatureConfig as default (hash: {self.feature_config.version_hash})")
+            except Exception as e:
+                logger.warning(f"Failed to create STF FeatureConfig: {e}")
+        
+        logger.info(f"=== Training Mode: {self.training_mode}, Expected Features: {self.input_dim} ===")
         
         # Check if we found any checkpoint files
         if not checkpoint_files:
@@ -2406,16 +2468,32 @@ async def get_ensemble_status():
     }
 
 @app.post("/predict/ensemble/candles")
-async def predict_ensemble_from_candles(request: MTFCandleData):
+async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf"):
     """
-    Make ensemble prediction from raw multi-timeframe candle data.
+    Make ensemble prediction from raw candle data.
     
-    This endpoint computes MTF features (same as training) from raw candles:
-    - Base: 15m candles (required, 200+ candles)
-    - Context: 5m, 1h, 4h candles (optional for enhanced features)
+    Query Parameters:
+    - mode: "stf" (default) or "mtf"
+      - stf: Single-TimeFrame (15m only) - uses compute_technical_features (41 features)
+      - mtf: Multi-TimeFrame - uses MTF fusion (66 features) - only if model was trained on MTF
     
-    The computed features will match the training feature set (~66 features).
+    This endpoint:
+    - Uses 15m candles (required, 100+ candles) for STF mode
+    - Produces training-compatible features (41 features for STF, 66 for MTF)
+    - Errors on >15% missing features instead of silent HOLD fallback
     """
+    # Validate mode parameter
+    mode = mode.lower()
+    if mode not in ["stf", "mtf"]:
+        raise HTTPException(status_code=400, detail=f"Invalid mode '{mode}'. Use 'stf' or 'mtf'.")
+    
+    # Check model training mode matches request mode
+    if model_manager.training_mode == "STF" and mode == "mtf":
+        logger.warning(f"Mode mismatch: model trained on STF but request mode is MTF. Using STF.")
+        mode = "stf"
+    elif model_manager.training_mode == "MTF" and mode == "stf":
+        logger.warning(f"Mode mismatch: model trained on MTF but request mode is STF. Using MTF.")
+        mode = "mtf"
     try:
         import pandas as pd
         import sys
@@ -2452,16 +2530,26 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
         if request.candles_4h and len(request.candles_4h) >= 20:
             tf_data["4h"] = candles_to_df(request.candles_4h)
         
-        # === CRITICAL FIX: Use compute_technical_features (training-compatible) ===
-        # The model was trained on features from compute_technical_features:
-        #   return_50, bb_upper, ema_5, rsi_14, etc.
-        # MTF fusion produces DIFFERENT feature names:
-        #   ret_1_15m, rolling_vol_20_4h, etc.
-        # This mismatch causes 100% missing features and HOLD fallback.
-        # Always use compute_technical_features for inference to match training.
-        from data.pipeline import FeatureEngineer
-        fe = FeatureEngineer()
-        features_df = fe.compute_technical_features(tf_data["15m"])
+        # === Feature computation based on mode ===
+        logger.info(f"[/predict/ensemble/candles] Mode: {mode.upper()}, Model training mode: {model_manager.training_mode}")
+        
+        if mode == "stf":
+            # STF mode: Use compute_technical_features (41 features)
+            # Same pipeline used during training on 15m-only data
+            from data.pipeline import FeatureEngineer
+            fe = FeatureEngineer()
+            features_df = fe.compute_technical_features(tf_data["15m"])
+            logger.info(f"STF features computed using compute_technical_features")
+        else:
+            # MTF mode: Use MTF fusion (66 features)
+            # Only use if model was trained on MTF data
+            from data.mtf_fusion import MTFFeatureFusion
+            mtf = MTFFeatureFusion()
+            fused_df = mtf.align_timeframes(tf_data, request.symbol if hasattr(request, 'symbol') else "BTCUSDT")
+            if fused_df is None or len(fused_df) == 0:
+                raise HTTPException(status_code=400, detail="MTF fusion returned no data")
+            features_df = fused_df
+            logger.info(f"MTF features computed using MTFFeatureFusion")
         
         # === Selective NaN handling ===
         if "close" in features_df.columns:
@@ -2470,7 +2558,7 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
         features_df[feature_cols] = features_df[feature_cols].ffill().fillna(0.0)
         features_np = features_df[feature_cols].values
         
-        logger.info(f"Features computed (training-compatible): {features_np.shape[1]} features, {len(features_df)} rows")
+        logger.info(f"{mode.upper()} features computed: {features_np.shape[1]} features, {len(features_df)} rows")
         
         # Get feature column names
         # === FIX: Always use feature_cols - it's the source of truth for features_np ===
@@ -2484,12 +2572,12 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
         )
         
         # === SCHEMA ENFORCEMENT (production-grade) ===
-        # Instead of blocking on feature mismatch, enforce the model's expected schema:
-        # - Reindex to expected 66 columns in correct order
-        # - Fill missing features with 0.0
-        # - Drop extra features
+        # - Reindex to expected columns in correct order
+        # - ERROR on >15% missing (not silent fill) - this indicates pipeline mismatch
         # - Enforce sequence_length = 100
         schema_stats = None
+        
+        logger.info(f"[STF Inference] Training mode: {model_manager.training_mode}, Expected features: {model_manager.input_dim}")
         
         if model_manager.feature_config is not None:
             from training.feature_registry import FeatureValidator
@@ -2501,11 +2589,30 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
                 fill_value=0.0
             )
             
+            # Calculate missing percentage
+            missing_pct = (schema_stats['missing_filled'] / schema_stats['expected_features']) * 100 if schema_stats['expected_features'] > 0 else 0
+            
             logger.info(
                 f"[Schema Enforcement] {schema_stats['incoming_features']} -> {schema_stats['expected_features']} features, "
-                f"missing: {schema_stats['missing_filled']}, dropped: {schema_stats['extra_dropped']}, "
+                f"missing: {schema_stats['missing_filled']} ({missing_pct:.1f}%), dropped: {schema_stats['extra_dropped']}, "
                 f"seq: {schema_stats['sequence_in']} -> {schema_stats['sequence_out']}"
             )
+            
+            # === CRITICAL: Error on >15% missing features ===
+            # This indicates a pipeline mismatch - do NOT silently fill and produce garbage predictions
+            if missing_pct > 15:
+                error_msg = (
+                    f"SCHEMA MISMATCH: {missing_pct:.1f}% features missing ({schema_stats['missing_filled']}/{schema_stats['expected_features']}). "
+                    f"Training mode: {model_manager.training_mode}. "
+                    f"Expected features: {model_manager.expected_features[:5] if model_manager.expected_features else 'unknown'}... "
+                    f"Incoming features: {incoming_feature_names[:5]}..."
+                )
+                logger.error(error_msg)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Schema mismatch error: {error_msg}. "
+                           f"Check that inference pipeline matches training pipeline (STF vs MTF)."
+                )
         else:
             # No feature config - use raw features with basic sequence handling
             logger.warning("No feature_config loaded - using raw features without schema enforcement")
@@ -2517,19 +2624,13 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
             expected_feature_count = model_manager.input_dim
             
             if actual_feature_count != expected_feature_count:
-                logger.warning(f"Feature mismatch: computed {actual_feature_count}, model expects {expected_feature_count}")
-                return {
-                    "action": "HOLD",
-                    "confidence": 0.0,
-                    "confidence_margin": 0.0,
-                    "edge": 0.0,
-                    "market_regime": "UNKNOWN",
-                    "risk_regime": "UNKNOWN",
-                    "regime_confidence": 0.0,
-                    "agreement_pct": 0.0,
-                    "weighted_agreement": 0.0,
-                    "disagreement_score": 1.0,
-                    "position_size_pct": 0.0,
+                error_msg = f"Feature mismatch: computed {actual_feature_count}, model expects {expected_feature_count}"
+                logger.error(error_msg)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Feature count mismatch: {error_msg}. "
+                           f"Training mode: {model_manager.training_mode}. Ensure pipeline alignment."
+                )
                     "regime_adjusted_size": 0.0,
                     "confidence_threshold_used": 0.15,
                     "regime_adjustment": "BLOCKED",
@@ -2539,7 +2640,7 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
                         f"FEATURE MISMATCH: computed {actual_feature_count}, model expects {expected_feature_count}",
                         "No feature_config available for schema enforcement"
                     ],
-                    "mtf_mode": has_full_mtf,
+                    "mtf_mode": mode == "mtf",
                     "feature_count": actual_feature_count,
                     "expected_feature_count": expected_feature_count,
                     "feature_mismatch": True
@@ -2573,7 +2674,7 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
                     "LONG": float(result["probabilities"][2])
                 },
                 "reasons": [f"MTF features: {features_seq.shape[1]}, used basic prediction"],
-                "mtf_mode": has_full_mtf,
+                "mtf_mode": mode == "mtf",
                 "feature_count": int(features_seq.shape[1])
             }
         
@@ -2629,8 +2730,8 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
             "regime_adjustment": signal.regime_adjustment,
             "model_votes": signal.model_votes,
             "ensemble_probs": convert_probs(signal.ensemble_probs),
-            "reasons": signal.reasons + schema_info + [f"MTF mode: {has_full_mtf}, features: {features_seq.shape[1]}"],
-            "mtf_mode": has_full_mtf,
+            "reasons": signal.reasons + schema_info + [f"Mode: {mode.upper()}, features: {features_seq.shape[1]}"],
+            "mtf_mode": mode == "mtf",
             "feature_count": int(features_seq.shape[1]),
             "schema_enforced": schema_stats is not None,
             "schema_stats": schema_stats,
@@ -2650,6 +2751,43 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
         logger.error(f"MTF ensemble prediction error: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/predict/stf")
+async def predict_stf_from_candles(request: MTFCandleData):
+    """
+    Dedicated Single-TimeFrame (STF) prediction endpoint.
+    
+    This is a convenience endpoint that:
+    - ALWAYS uses STF mode (15m candles only)
+    - Uses compute_technical_features (41 features)
+    - Matches models trained on 15m data
+    
+    Use this endpoint if your model was trained on 15m-only data.
+    For MTF models, use /predict/ensemble/candles?mode=mtf
+    """
+    # Delegate to ensemble endpoint with forced STF mode
+    return await predict_ensemble_from_candles(request, mode="stf")
+
+
+@app.get("/predict/mode")
+async def get_prediction_mode():
+    """
+    Get the current model's training mode (STF or MTF).
+    
+    Returns the detected training mode and feature configuration.
+    """
+    return {
+        "training_mode": model_manager.training_mode,
+        "expected_features": model_manager.input_dim,
+        "stf_feature_count": ModelManager.STF_FEATURE_COUNT,
+        "mtf_feature_count": ModelManager.MTF_FEATURE_COUNT,
+        "feature_columns": model_manager.expected_features[:10] if model_manager.expected_features else [],
+        "feature_columns_count": len(model_manager.expected_features) if model_manager.expected_features else 0,
+        "feature_config_loaded": model_manager.feature_config is not None,
+        "recommendation": "Use /predict/stf for STF models, /predict/ensemble/candles?mode=mtf for MTF models"
+    }
+
 
 @app.get("/training/status", response_model=TrainingStatusResponse)
 async def get_training_status():
