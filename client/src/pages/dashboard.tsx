@@ -509,9 +509,46 @@ export default function Dashboard() {
 
           <TabsContent value="neural-network" className="mt-0">
             <div className="space-y-4">
-              {/* Premium Candlestick Chart with Predictions */}
+              {/* STALE data warning - show when chart data differs from live price */}
+              {(() => {
+                const lastCandleClose = data?.candles?.[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0;
+                const tickerPrice = nnPrediction?.prediction?.currentPrice ?? lastCandleClose;
+                const priceGapPct = tickerPrice > 0 && lastCandleClose > 0 
+                  ? Math.abs(lastCandleClose - tickerPrice) / tickerPrice * 100 
+                  : 0;
+                const isStale = priceGapPct > 0.2;
+                
+                if (!isStale) return null;
+                
+                return (
+                  <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 flex items-center gap-2 flex-wrap" data-testid="warning-stale-candles">
+                    <Clock className="h-4 w-4 text-amber-500" />
+                    <span className="text-amber-500 text-sm font-medium">
+                      STALE CANDLES: Chart data (${lastCandleClose.toFixed(0)}) differs from live price (${tickerPrice.toFixed(0)}) by {priceGapPct.toFixed(2)}%
+                    </span>
+                    <Button 
+                      size="sm" 
+                      variant="outline" 
+                      className="ml-auto text-amber-500 border-amber-500/30 hover-elevate"
+                      onClick={() => {
+                        apiRequest('/api/self-learning/run-now', { method: 'POST' })
+                          .then(() => {
+                            queryClient.invalidateQueries({ queryKey: ['/api/dashboard'] });
+                            refetch();
+                          })
+                          .catch((err) => console.error('Failed to trigger data refresh:', err));
+                      }}
+                      data-testid="button-refresh-data"
+                    >
+                      Refresh Data
+                    </Button>
+                  </div>
+                );
+              })()}
+              
+              {/* Premium Candlestick Chart with Predictions - ANCHORED TO LAST CANDLE CLOSE */}
               <PremiumCandlestickChart
-                historicalCandles={data.candles.map(c => ({
+                historicalCandles={(data?.candles || []).map(c => ({
                   timestamp: c.timestamp,
                   open: Number(c.open),
                   high: Number(c.high),
@@ -519,16 +556,29 @@ export default function Dashboard() {
                   close: Number(c.close),
                   volume: c.volume ? Number(c.volume) : undefined
                 }))}
-                predictedCandles={nnPrediction?.predictedCandles?.map(pc => ({
-                  timestamp: pc.timestamp,
-                  q10: pc.q10,
-                  q25: pc.q25,
-                  q50: pc.q50,
-                  q75: pc.q75,
-                  q90: pc.q90,
-                  direction: pc.direction || (pc.q50 >= 0 ? "up" : "down")
-                })) || []}
-                currentPrice={nnPrediction?.prediction?.currentPrice ?? (data.candles[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0)}
+                predictedCandles={(() => {
+                  const lastCandleClose = data?.candles?.[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0;
+                  const tickerPrice = nnPrediction?.prediction?.currentPrice ?? lastCandleClose;
+                  
+                  return (nnPrediction?.predictedCandles || []).map(pc => {
+                    const q10Ret = tickerPrice > 0 ? (pc.q10 / tickerPrice - 1) : 0;
+                    const q25Ret = tickerPrice > 0 ? (pc.q25 / tickerPrice - 1) : 0;
+                    const q50Ret = tickerPrice > 0 ? (pc.q50 / tickerPrice - 1) : 0;
+                    const q75Ret = tickerPrice > 0 ? (pc.q75 / tickerPrice - 1) : 0;
+                    const q90Ret = tickerPrice > 0 ? (pc.q90 / tickerPrice - 1) : 0;
+                    
+                    return {
+                      timestamp: pc.timestamp,
+                      q10: lastCandleClose * (1 + q10Ret),
+                      q25: lastCandleClose * (1 + q25Ret),
+                      q50: lastCandleClose * (1 + q50Ret),
+                      q75: lastCandleClose * (1 + q75Ret),
+                      q90: lastCandleClose * (1 + q90Ret),
+                      direction: pc.direction || (q50Ret >= 0 ? "up" as const : "down" as const)
+                    };
+                  });
+                })()}
+                currentPrice={data?.candles?.[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0}
                 action={nnPrediction?.prediction?.action || "HOLD"}
                 tradeLevels={nnPrediction?.prediction ? {
                   entry: nnPrediction.prediction.entry,
@@ -543,14 +593,14 @@ export default function Dashboard() {
               {nnPrediction?.prediction && (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                   <QuantileFanChart 
-                    currentPrice={nnPrediction.prediction.currentPrice ?? (data.candles[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0)}
+                    currentPrice={data?.candles?.[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0}
                     quantiles={nnPrediction.prediction.quantiles}
                     action={nnPrediction.prediction.action}
                     horizonBars={10}
                     timeframeMinutes={15}
                   />
                   <DerivedTradeLevels
-                    currentPrice={nnPrediction.prediction.currentPrice ?? (data.candles[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0)}
+                    currentPrice={data?.candles?.[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0}
                     quantiles={nnPrediction.prediction.quantiles}
                     action={nnPrediction.prediction.action}
                   />

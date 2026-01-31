@@ -677,6 +677,86 @@ export async function registerRoutes(
     }
   });
 
+  // Self-learning loop endpoints
+  app.get("/api/self-learning/status", async (req, res) => {
+    try {
+      const { getLearningStatus } = await import("./self-learning-loop");
+      const status = await getLearningStatus();
+      res.json(status);
+    } catch (error) {
+      console.error("Error getting self-learning status:", error);
+      res.status(500).json({ error: "Failed to get self-learning status" });
+    }
+  });
+
+  app.post("/api/self-learning/enable", async (req, res) => {
+    try {
+      const { enabled } = req.body;
+      const { setSelfLearningEnabled } = await import("./self-learning-loop");
+      setSelfLearningEnabled(enabled ?? true);
+      res.json({ success: true, enabled: enabled ?? true });
+    } catch (error) {
+      console.error("Error enabling self-learning:", error);
+      res.status(500).json({ error: "Failed to enable self-learning" });
+    }
+  });
+
+  app.post("/api/self-learning/run-now", async (req, res) => {
+    try {
+      const { startSelfLearningLoop, getSelfLearningConfig } = await import("./self-learning-loop");
+      const config = getSelfLearningConfig();
+      if (!config.enabled) {
+        return res.status(400).json({ error: "Self-learning is not enabled. Enable it first." });
+      }
+      startSelfLearningLoop();
+      res.json({ success: true, message: "Self-learning job triggered" });
+    } catch (error) {
+      console.error("Error running self-learning job:", error);
+      res.status(500).json({ error: "Failed to run self-learning job" });
+    }
+  });
+
+  app.post("/api/self-learning/training-callback", async (req, res) => {
+    try {
+      const { runId, status, metrics } = req.body;
+      if (!runId || !status) {
+        return res.status(400).json({ error: "runId and status are required" });
+      }
+      const { handleTrainingCallback } = await import("./self-learning-loop");
+      const result = await handleTrainingCallback(runId, status, metrics);
+      res.json(result);
+    } catch (error) {
+      console.error("Error handling training callback:", error);
+      res.status(500).json({ error: "Failed to handle training callback" });
+    }
+  });
+
+  app.post("/api/self-learning/rollback", async (req, res) => {
+    try {
+      const { rollbackToPrevious } = await import("./self-learning-loop");
+      const result = await rollbackToPrevious();
+      res.json(result);
+    } catch (error) {
+      console.error("Error rolling back model:", error);
+      res.status(500).json({ error: "Failed to rollback model" });
+    }
+  });
+
+  app.post("/api/self-learning/add-sample", async (req, res) => {
+    try {
+      const { timestamp, features, currentPrice, regime } = req.body;
+      if (!timestamp || !features || !currentPrice) {
+        return res.status(400).json({ error: "timestamp, features, and currentPrice are required" });
+      }
+      const { addPendingSample } = await import("./self-learning-loop");
+      await addPendingSample(timestamp, features, currentPrice, regime);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error adding sample:", error);
+      res.status(500).json({ error: "Failed to add sample" });
+    }
+  });
+
   // Multi-asset data management routes
   app.get("/api/data/summary", async (req, res) => {
     try {

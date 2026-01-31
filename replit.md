@@ -120,3 +120,10 @@ Preferred communication style: Simple, everyday language.
   - `units: "decimal_return"` - Indicates values are decimals
   - `derived_low_price` / `derived_high_price` - Backend-computed prices for frontend verification
 - **DEBUG Panel**: Neural Network Prediction card has a bug icon toggle that shows raw API values vs displayed values for unit verification.
+
+### Chart-Prediction Anchoring (Critical for Visual Alignment)
+- **Problem**: GPU trainer uses live ticker price for predictions, but chart candles may be stale from database.
+- **Solution**: Chart always anchors predictions to last candle's close price (not live ticker).
+- **Re-anchoring Logic**: Predicted candle prices are converted back to returns relative to ticker price, then re-applied to last candle close: `anchoredPrice = lastCandleClose * (1 + (predictedPrice / tickerPrice - 1))`.
+- **STALE Warning**: Amber warning banner appears when `|lastCandleClose - tickerPrice| / tickerPrice > 0.2%` with "Refresh Data" button.
+- **Quantile Components**: QuantileFanChart and DerivedTradeLevels receive lastCandleClose as currentPrice with quantiles unchanged (since quantiles are returns, not absolute prices).

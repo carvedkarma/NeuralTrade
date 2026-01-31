@@ -819,6 +819,172 @@ export const strategyLearnerState = pgTable("strategy_learner_state", {
 });
 
 // Shot Plan History - tracks shot plan signals and their outcomes
+// ============================================================================
+// SELF-LEARNING LOOP TABLES
+// Continuous learning infrastructure with gated deployment
+// ============================================================================
+
+// Training runs - tracks candidate models and deployments
+export const trainingRuns = pgTable("training_runs", {
+  id: serial("id").primaryKey(),
+  runId: varchar("run_id", { length: 64 }).notNull().unique(), // UUID
+  status: varchar("status", { length: 20 }).notNull().default("pending"), // pending, training, evaluating, passed, failed, deployed, rollback
+  modelType: varchar("model_type", { length: 50 }).notNull().default("transformer"),
+  
+  // Training parameters
+  warmStartFromRunId: varchar("warm_start_from_run_id", { length: 64 }),
+  learningRate: real("learning_rate"),
+  epochs: integer("epochs"),
+  newSamplesPct: real("new_samples_pct").default(0.3), // 30% new, 70% replay
+  replaySamplesPct: real("replay_samples_pct").default(0.7),
+  
+  // Training data
+  newSamplesCount: integer("new_samples_count").default(0),
+  replaySamplesCount: integer("replay_samples_count").default(0),
+  totalTrainingSamples: integer("total_training_samples").default(0),
+  
+  // Candidate metrics (from holdout evaluation)
+  candidateExpectancy: real("candidate_expectancy"),
+  candidateSharpe: real("candidate_sharpe"),
+  candidateMaxDrawdown: real("candidate_max_drawdown"),
+  candidateWinRate: real("candidate_win_rate"),
+  candidateProfitFactor: real("candidate_profit_factor"),
+  candidateTrades: integer("candidate_trades"),
+  candidateStability: real("candidate_stability"), // Month-over-month consistency
+  
+  // Current model metrics (for comparison)
+  currentExpectancy: real("current_expectancy"),
+  currentSharpe: real("current_sharpe"),
+  currentMaxDrawdown: real("current_max_drawdown"),
+  currentWinRate: real("current_win_rate"),
+  
+  // Deployment decision
+  beatsCurrent: boolean("beats_current").default(false),
+  deploymentReason: text("deployment_reason"),
+  isDeployed: boolean("is_deployed").default(false),
+  deployedTs: bigint("deployed_ts", { mode: "number" }),
+  
+  // Checkpoint paths (on GPU trainer)
+  checkpointPath: varchar("checkpoint_path", { length: 255 }),
+  rollbackPath: varchar("rollback_path", { length: 255 }),
+  
+  startedTs: bigint("started_ts", { mode: "number" }),
+  completedTs: bigint("completed_ts", { mode: "number" }),
+  createdTs: bigint("created_ts", { mode: "number" }).notNull(),
+  updatedTs: bigint("updated_ts", { mode: "number" }).notNull(),
+}, (table) => ({
+  statusIdx: index("training_runs_status_idx").on(table.status),
+  deployedIdx: index("training_runs_deployed_idx").on(table.isDeployed),
+}));
+
+// Replay buffer - stores prioritized samples for training
+export const replayBuffer = pgTable("replay_buffer", {
+  id: serial("id").primaryKey(),
+  sampleId: varchar("sample_id", { length: 64 }).notNull().unique(),
+  
+  // Sample data
+  timestamp: bigint("timestamp", { mode: "number" }).notNull(),
+  features: jsonb("features").notNull(), // Feature vector (JSON array)
+  
+  // Targets
+  actualReturn: real("actual_return"),
+  mfe: real("mfe"), // Max Favorable Excursion
+  mae: real("mae"), // Max Adverse Excursion
+  direction: varchar("direction", { length: 10 }), // LONG, SHORT, HOLD
+  outcome: varchar("outcome", { length: 20 }), // WIN, LOSS, SCRATCH
+  
+  // Priority for importance sampling
+  priority: real("priority").default(1.0), // Higher = more important
+  timesUsed: integer("times_used").default(0), // How many times sampled for training
+  lastUsedTs: bigint("last_used_ts", { mode: "number" }),
+  
+  // Context
+  regime: varchar("regime", { length: 20 }),
+  volatilityBucket: varchar("volatility_bucket", { length: 10 }),
+  
+  createdTs: bigint("created_ts", { mode: "number" }).notNull(),
+}, (table) => ({
+  priorityIdx: index("replay_buffer_priority_idx").on(table.priority),
+  timestampIdx: index("replay_buffer_timestamp_idx").on(table.timestamp),
+}));
+
+// Labeled samples - samples awaiting training (horizon has matured)
+export const labeledSamples = pgTable("labeled_samples", {
+  id: serial("id").primaryKey(),
+  sampleId: varchar("sample_id", { length: 64 }).notNull().unique(),
+  
+  // Candle info
+  timestamp: bigint("timestamp", { mode: "number" }).notNull(),
+  symbol: varchar("symbol", { length: 20 }).default("BTCUSDT"),
+  timeframe: varchar("timeframe", { length: 10 }).default("15m"),
+  
+  // Features at prediction time
+  features: jsonb("features").notNull(),
+  currentPrice: real("current_price").notNull(),
+  
+  // Targets (filled when horizon matures)
+  horizonBars: integer("horizon_bars").default(16), // How many bars forward
+  actualReturn: real("actual_return"),
+  mfe: real("mfe"),
+  mae: real("mae"),
+  direction: varchar("direction", { length: 10 }), // Actual direction (UP/DOWN/FLAT)
+  
+  // Labeling status
+  status: varchar("status", { length: 20 }).notNull().default("pending"), // pending, labeled, used
+  labeledTs: bigint("labeled_ts", { mode: "number" }),
+  usedInRunId: varchar("used_in_run_id", { length: 64 }), // Which training run consumed this
+  
+  // Context
+  regime: varchar("regime", { length: 20 }),
+  
+  createdTs: bigint("created_ts", { mode: "number" }).notNull(),
+}, (table) => ({
+  statusIdx: index("labeled_samples_status_idx").on(table.status),
+  timestampIdx: index("labeled_samples_timestamp_idx").on(table.timestamp),
+}));
+
+// Learning job status - tracks the 15-minute self-learning job
+export const learningJobStatus = pgTable("learning_job_status", {
+  id: serial("id").primaryKey(),
+  jobType: varchar("job_type", { length: 50 }).notNull().unique(), // gap_fill, labeling, training_trigger
+  
+  // Last run info
+  lastRunTs: bigint("last_run_ts", { mode: "number" }),
+  lastSuccessTs: bigint("last_success_ts", { mode: "number" }),
+  lastErrorTs: bigint("last_error_ts", { mode: "number" }),
+  lastError: text("last_error"),
+  
+  // Stats
+  runsTotal: integer("runs_total").default(0),
+  runsSuccess: integer("runs_success").default(0),
+  runsFailed: integer("runs_failed").default(0),
+  
+  // Gap fill stats
+  gapBarsMissing: integer("gap_bars_missing").default(0),
+  lastCandleTs: bigint("last_candle_ts", { mode: "number" }),
+  lastCandleClose: real("last_candle_close"),
+  tickerPrice: real("ticker_price"),
+  priceGapPct: real("price_gap_pct"),
+  
+  // Labeling stats
+  pendingSamplesCount: integer("pending_samples_count").default(0),
+  labeledSamplesCount: integer("labeled_samples_count").default(0),
+  
+  // Replay buffer stats
+  replayBufferSize: integer("replay_buffer_size").default(0),
+  replayBufferMaxSize: integer("replay_buffer_max_size").default(100000),
+  
+  // Training trigger
+  samplesUntilTrain: integer("samples_until_train").default(0),
+  trainThreshold: integer("train_threshold").default(1000), // Trigger training when N new samples
+  
+  // Deployed model info
+  deployedModelId: varchar("deployed_model_id", { length: 64 }),
+  deployedTs: bigint("deployed_ts", { mode: "number" }),
+  
+  updatedTs: bigint("updated_ts", { mode: "number" }).notNull(),
+});
+
 export const shotPlanHistory = pgTable("shot_plan_history", {
   id: serial("id").primaryKey(),
   timestamp: bigint("timestamp", { mode: "number" }).notNull(),
@@ -859,6 +1025,10 @@ export const insertSocialMediaStatsSchema = createInsertSchema(socialMediaStats)
 export const insertBackfillJobSchema = createInsertSchema(backfillJobs).omit({ id: true });
 export const insertStrategyLearnerStateSchema = createInsertSchema(strategyLearnerState).omit({ id: true });
 export const insertPredictionEpisodeSchema = createInsertSchema(predictionEpisodes).omit({ id: true });
+export const insertTrainingRunSchema = createInsertSchema(trainingRuns).omit({ id: true });
+export const insertReplayBufferSchema = createInsertSchema(replayBuffer).omit({ id: true });
+export const insertLabeledSampleSchema = createInsertSchema(labeledSamples).omit({ id: true });
+export const insertLearningJobStatusSchema = createInsertSchema(learningJobStatus).omit({ id: true });
 
 export type InsertCandle = z.infer<typeof insertCandleSchema>;
 export type InsertFeature = z.infer<typeof insertFeatureSchema>;
@@ -892,3 +1062,11 @@ export type BackfillJob = typeof backfillJobs.$inferSelect;
 export type StrategyLearnerState = typeof strategyLearnerState.$inferSelect;
 export type InsertPredictionEpisode = z.infer<typeof insertPredictionEpisodeSchema>;
 export type PredictionEpisode = typeof predictionEpisodes.$inferSelect;
+export type InsertTrainingRun = z.infer<typeof insertTrainingRunSchema>;
+export type TrainingRun = typeof trainingRuns.$inferSelect;
+export type InsertReplayBuffer = z.infer<typeof insertReplayBufferSchema>;
+export type ReplayBufferSample = typeof replayBuffer.$inferSelect;
+export type InsertLabeledSample = z.infer<typeof insertLabeledSampleSchema>;
+export type LabeledSample = typeof labeledSamples.$inferSelect;
+export type InsertLearningJobStatus = z.infer<typeof insertLearningJobStatusSchema>;
+export type LearningJobStatus = typeof learningJobStatus.$inferSelect;
