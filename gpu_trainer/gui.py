@@ -270,7 +270,7 @@ class GPUTrainerGUI:
         proxy_entry.pack(fill=tk.X, pady=(4, 0), ipady=6)
         
         # Data info label
-        info_label = ttk.Label(frame, text="Downloads all training data from Replit\n(4 assets × 5 timeframes, ~8M+ candles)", 
+        info_label = ttk.Label(frame, text="Downloads 15m training data from Replit\n(BTCUSDT only - matches training config)", 
                                style='Dim.TLabel')
         info_label.pack(anchor=tk.W, pady=(0, 10))
         
@@ -347,41 +347,37 @@ class GPUTrainerGUI:
                                           font=('Segoe UI', 9), wraplength=340, justify=tk.LEFT)
         self.model_desc_label.pack(anchor=tk.W, pady=(0, 8))
         
-        # Timeframe mode selection
+        # Timeframe mode - FIXED to 15m only (matches Replit data and training config)
         tf_frame = ttk.Frame(frame)
         tf_frame.pack(fill=tk.X, pady=(0, 8))
         
         ttk.Label(tf_frame, text="Timeframe:", style='Card.TLabel').pack(side=tk.LEFT)
         
-        self.timeframe_var = tk.StringVar(value="15m")  # Default to quick 15m mode for faster results
-        tf_combo = ttk.Combobox(tf_frame, textvariable=self.timeframe_var,
-                                 values=["15m", "Full MTF (5m/15m/1h/4h)"], 
-                                 width=20, state='readonly')
-        tf_combo.pack(side=tk.LEFT, padx=(10, 0))
-        tf_combo.bind('<<ComboboxSelected>>', self.on_timeframe_changed)
+        self.timeframe_var = tk.StringVar(value="15m")  # Fixed to 15m only
+        tf_label = ttk.Label(tf_frame, text="15m (fixed)", style='Card.TLabel')
+        tf_label.pack(side=tk.LEFT, padx=(10, 0))
         
         # Timeframe description
-        self.tf_desc_label = tk.Label(frame, text="15m only: ~57 features, faster training",
+        self.tf_desc_label = tk.Label(frame, text="15m only: matches Replit data & training config",
                                        bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
                                        font=('Segoe UI', 9), wraplength=340, justify=tk.LEFT)
         self.tf_desc_label.pack(anchor=tk.W, pady=(0, 8))
         
-        # Asset selection
+        # Asset selection - FIXED to BTCUSDT only (matches Replit data)
         asset_frame = ttk.Frame(frame)
         asset_frame.pack(fill=tk.X, pady=(0, 8))
         
-        ttk.Label(asset_frame, text="Assets:", style='Card.TLabel').pack(side=tk.LEFT)
+        ttk.Label(asset_frame, text="Asset:", style='Card.TLabel').pack(side=tk.LEFT)
         
         self.asset_vars = {}
-        for asset in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]:
-            var = tk.BooleanVar(value=(asset == "BTCUSDT"))  # Default BTC selected
-            self.asset_vars[asset] = var
-            cb = ttk.Checkbutton(asset_frame, text=asset[:3], variable=var)
-            cb.pack(side=tk.LEFT, padx=(6, 0))
+        # Only BTCUSDT is supported - show as fixed label
+        btc_label = ttk.Label(asset_frame, text="BTCUSDT (fixed)", style='Card.TLabel')
+        btc_label.pack(side=tk.LEFT, padx=(10, 0))
         
-        # Select all assets button
-        ttk.Button(asset_frame, text="All", command=self.select_all_assets,
-                   style='Secondary.TButton', width=4).pack(side=tk.LEFT, padx=(10, 0))
+        # Keep asset_vars for compatibility but only BTC
+        for asset in ["BTCUSDT"]:
+            var = tk.BooleanVar(value=True)
+            self.asset_vars[asset] = var
         
         # Cost mode selection
         cost_frame = ttk.Frame(frame)
@@ -571,11 +567,8 @@ class GPUTrainerGUI:
         self.cost_display.config(text=f"({display} round-trip)")
     
     def on_timeframe_changed(self, event=None):
-        tf = self.timeframe_var.get()
-        if tf == "15m":
-            self.tf_desc_label.config(text="15m only: ~57 features, faster training")
-        else:
-            self.tf_desc_label.config(text="Full MTF: 5m/15m/1h/4h context, ~81 features")
+        # Timeframe is now fixed to 15m only
+        self.tf_desc_label.config(text="15m only: matches Replit data & training config")
     
     def select_all_assets(self):
         for var in self.asset_vars.values():
@@ -586,9 +579,8 @@ class GPUTrainerGUI:
         return [asset for asset, var in self.asset_vars.items() if var.get()]
     
     def get_timeframe_mode(self):
-        """Get timeframe mode: '15m' or 'mtf'"""
-        tf = self.timeframe_var.get()
-        return "15m" if tf == "15m" else "mtf"
+        """Get timeframe mode: always '15m' (fixed to match Replit data)"""
+        return "15m"  # Fixed to 15m only
         
     def get_trading_cost(self) -> float:
         """Get the selected trading cost for label creation"""
@@ -1027,9 +1019,10 @@ class GPUTrainerGUI:
         self.fetch_start_time = time.time()
         self.fetch_completed_items = 0
         
-        # All symbols and timeframes
-        symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
-        timeframes = ["1m", "5m", "15m", "1h", "4h"]
+        # Only fetch 15m timeframe - matches Replit NN data and training config
+        # Other timeframes (1m, 5m, 1h, 4h) are NOT used for training
+        symbols = ["BTCUSDT"]  # Only BTC for focused training
+        timeframes = ["15m"]   # Only 15m - matches training configuration
         self.fetch_total_items = len(symbols) * len(timeframes)
         
         def do_fetch():
