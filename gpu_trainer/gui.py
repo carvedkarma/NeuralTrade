@@ -1340,8 +1340,23 @@ class GPUTrainerGUI:
                     
                     if use_multihead:
                         # Multi-head mode: generate class_labels and forward_returns
-                        train_targets = generate_multihead_targets(train_combined, horizon_periods=prediction_horizon_bars)
-                        val_targets = generate_multihead_targets(val_combined, horizon_periods=prediction_horizon_bars)
+                        # Use relaxed thresholds for better label density
+                        train_targets = generate_multihead_targets(
+                            train_combined, 
+                            horizon_periods=prediction_horizon_bars,
+                            min_net_edge=0.0,  # No edge filter for debugging
+                            min_confidence=0.3,  # Relaxed confidence threshold
+                            use_volatility_cost=False,
+                            fixed_cost=0.0009  # 0.09% taker/taker
+                        )
+                        val_targets = generate_multihead_targets(
+                            val_combined, 
+                            horizon_periods=prediction_horizon_bars,
+                            min_net_edge=0.0,
+                            min_confidence=0.3,
+                            use_volatility_cost=False,
+                            fixed_cost=0.0009
+                        )
                         
                         train_labels = train_targets['class_label']
                         val_labels = val_targets['class_label']
@@ -1442,8 +1457,22 @@ class GPUTrainerGUI:
                         val_features = engineer.compute_technical_features(val_df).fillna(0)
                         
                         if use_multihead:
-                            train_targets = generate_multihead_targets(train_df, horizon_periods=horizon)
-                            val_targets = generate_multihead_targets(val_df, horizon_periods=horizon)
+                            train_targets = generate_multihead_targets(
+                                train_df, 
+                                horizon_periods=horizon,
+                                min_net_edge=0.0,
+                                min_confidence=0.3,
+                                use_volatility_cost=False,
+                                fixed_cost=0.0009
+                            )
+                            val_targets = generate_multihead_targets(
+                                val_df, 
+                                horizon_periods=horizon,
+                                min_net_edge=0.0,
+                                min_confidence=0.3,
+                                use_volatility_cost=False,
+                                fixed_cost=0.0009
+                            )
                             
                             train_labels_arr = train_targets['class_label'].values
                             val_labels_arr = val_targets['class_label'].values

@@ -166,7 +166,25 @@ def train(args):
     if use_multihead:
         # Multi-head mode: generate all targets (class, returns, trading, candles)
         n_future_candles = getattr(args, 'n_future_candles', 5)
-        targets_df = generate_multihead_targets(df, horizon_periods=horizon, n_future_candles=n_future_candles)
+        
+        # Get cost/threshold config from args or config
+        min_net_edge = getattr(args, 'min_net_edge', 0.0)  # Default: no edge filter for debugging
+        min_confidence = getattr(args, 'min_confidence', 0.3)  # Default: relaxed for debugging
+        fixed_cost = getattr(args, 'cost', config.institution.cost_mode.get_cost())
+        use_volatility_cost = getattr(args, 'volatility_cost', False)
+        
+        logger.info(f"Label config: horizon={horizon}, cost={fixed_cost:.4%}, "
+                   f"min_net_edge={min_net_edge:.4%}, min_confidence={min_confidence:.2f}")
+        
+        targets_df = generate_multihead_targets(
+            df, 
+            horizon_periods=horizon, 
+            n_future_candles=n_future_candles,
+            min_net_edge=min_net_edge,
+            min_confidence=min_confidence,
+            use_volatility_cost=use_volatility_cost,
+            fixed_cost=fixed_cost
+        )
         
         # Classification and regression targets
         labels = targets_df['class_label'].values.astype(np.int64)
@@ -1280,6 +1298,14 @@ def main():
     train_parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
     train_parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     train_parser.add_argument("--horizon", type=int, default=5, help="Label lookahead horizon (candles)")
+    train_parser.add_argument("--cost", type=float, default=0.0009, 
+                             help="Fixed round-trip trading cost (default: 0.09%% = 0.0009)")
+    train_parser.add_argument("--min-net-edge", type=float, default=0.0, dest="min_net_edge",
+                             help="Minimum net edge after costs for trade signals (default: 0.0 = no filter)")
+    train_parser.add_argument("--min-confidence", type=float, default=0.3, dest="min_confidence",
+                             help="Minimum mu/sigma ratio for trade signals (default: 0.3 = relaxed)")
+    train_parser.add_argument("--volatility-cost", action="store_true", dest="volatility_cost",
+                             help="Use volatility-based cost instead of fixed cost")
     train_parser.add_argument("--resume", type=str, help="Resume from checkpoint")
     train_parser.add_argument("--multihead", action="store_true", 
                              help="Use multi-head training with combined loss (Classification + Regression + Quantile)")
@@ -1291,6 +1317,12 @@ def main():
     train_all_parser.add_argument("--batch-size", dest="batch_size", type=int, default=64, help="Batch size")
     train_all_parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     train_all_parser.add_argument("--horizon", type=int, default=10, help="Prediction horizon in 15m bars (default: 10 = 2.5h)")
+    train_all_parser.add_argument("--cost", type=float, default=0.0009, 
+                                  help="Fixed round-trip trading cost (default: 0.09%%)")
+    train_all_parser.add_argument("--min-net-edge", type=float, default=0.0, dest="min_net_edge",
+                                  help="Minimum net edge after costs (default: 0.0)")
+    train_all_parser.add_argument("--min-confidence", type=float, default=0.3, dest="min_confidence",
+                                  help="Minimum mu/sigma ratio (default: 0.3)")
     
     rl_parser = subparsers.add_parser("train-rl", help="Train reinforcement learning agent")
     rl_parser.add_argument("--episodes", type=int, default=1000, help="Number of episodes")

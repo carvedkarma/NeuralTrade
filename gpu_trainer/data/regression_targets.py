@@ -187,9 +187,25 @@ class RegressionTargetGenerator:
         
         return result
     
-    def generate_multihead_targets(self, df: pd.DataFrame, n_future_candles: int = 5) -> pd.DataFrame:
+    def generate_multihead_targets(
+        self, 
+        df: pd.DataFrame, 
+        n_future_candles: int = 5,
+        min_net_edge: float = 0.0,
+        min_confidence: float = 0.3,
+        use_volatility_cost: bool = False,
+        fixed_cost: float = 0.0009
+    ) -> pd.DataFrame:
         """
         Generate targets specifically for multi-head model training.
+        
+        Args:
+            df: DataFrame with OHLCV data
+            n_future_candles: Number of future candles to predict
+            min_net_edge: Minimum net edge after costs for trade signals (default 0.0 for debugging)
+            min_confidence: Minimum mu/sigma ratio for trade signals (default 0.3 for debugging)
+            use_volatility_cost: If True, use volatility-based cost calculation. If False, use fixed_cost
+            fixed_cost: Fixed round-trip trading cost when not using volatility-based (default 0.09%)
         
         Returns:
             DataFrame with:
@@ -228,16 +244,22 @@ class RegressionTargetGenerator:
         # Trade only if edge_net > min_edge AND mu/sigma > confidence_min
         # This eliminates garbage signals that don't beat costs
         
-        # Compute trading cost that varies with volatility
+        # Compute trading cost
         hold_hours = self.horizon_periods * 0.25  # 15-minute bars -> hours
         trading_costs = pd.Series(index=df.index, dtype=float)
-        for i in range(len(df)):
-            vol = current_vol.iloc[i] if not pd.isna(current_vol.iloc[i]) else 0.01
-            trading_costs.iloc[i] = self.costs.total_round_trip_cost(
-                volatility=vol, 
-                is_taker=True, 
-                hold_hours=hold_hours
-            )
+        
+        if use_volatility_cost:
+            # Volatility-based cost calculation (original behavior)
+            for i in range(len(df)):
+                vol = current_vol.iloc[i] if not pd.isna(current_vol.iloc[i]) else 0.01
+                trading_costs.iloc[i] = self.costs.total_round_trip_cost(
+                    volatility=vol, 
+                    is_taker=True, 
+                    hold_hours=hold_hours
+                )
+        else:
+            # Fixed cost mode - uses the exact cost from config
+            trading_costs[:] = fixed_cost
         
         # Net edge = absolute expected return - trading costs
         net_edge = mu.abs() - trading_costs
@@ -246,9 +268,34 @@ class RegressionTargetGenerator:
         sigma_safe = sigma.clip(lower=0.001)
         confidence_ratio = mu.abs() / sigma_safe
         
-        # Thresholds for cost-aware labeling
-        min_net_edge = 0.0005  # Minimum 0.05% net edge after costs
-        min_confidence = 0.5    # Minimum mu/sigma ratio (lowered for training signal)
+        # ============================================================
+        # LABEL DENSITY DEBUG REPORT (printed BEFORE training)
+        # ============================================================
+        valid_mu = mu.dropna()
+        valid_net_edge = net_edge.dropna()
+        valid_conf = confidence_ratio.dropna()
+        
+        total_samples = len(valid_mu)
+        pct_positive_edge = (valid_net_edge > min_net_edge).sum() / max(1, total_samples) * 100
+        pct_high_conf = (valid_conf > min_confidence).sum() / max(1, total_samples) * 100
+        pct_both_gates = ((valid_net_edge > min_net_edge) & (valid_conf > min_confidence)).sum() / max(1, total_samples) * 100
+        
+        logger.info("=" * 60)
+        logger.info("LABEL GENERATION DEBUG REPORT")
+        logger.info("=" * 60)
+        logger.info(f"Config: horizon={self.horizon_periods} bars, cost_mode={'volatility' if use_volatility_cost else 'fixed'}, "
+                   f"avg_cost={trading_costs.mean():.4%}")
+        logger.info(f"Thresholds: min_net_edge={min_net_edge:.4%}, min_confidence={min_confidence:.2f}")
+        logger.info(f"Total samples: {total_samples}")
+        logger.info(f"Stats: mean(|mu|)={valid_mu.abs().mean():.4%}, mean(sigma)={sigma_safe.dropna().mean():.4%}, "
+                   f"mean(|mu|/sigma)={valid_conf.mean():.2f}")
+        logger.info(f"Cost: mean(cost)={trading_costs.dropna().mean():.4%}, mean(net_edge)={valid_net_edge.mean():.4%}")
+        logger.info(f"Gate pass rates: net_edge_gate={pct_positive_edge:.1f}%, confidence_gate={pct_high_conf:.1f}%, "
+                   f"BOTH_gates={pct_both_gates:.1f}%")
+        
+        if pct_both_gates < 1.0:
+            logger.warning(f"!!! LOW TRADE DENSITY: Only {pct_both_gates:.2f}% samples pass both gates !!!")
+            logger.warning(f"!!! Consider: min_net_edge=0.0, min_confidence=0.3 for debugging !!!")
         
         # Generate class labels - only trade when net_edge AND confidence are sufficient
         class_label = pd.Series(1, index=df.index)  # Default HOLD
@@ -260,6 +307,17 @@ class RegressionTargetGenerator:
         # SHORT: negative return with sufficient NET edge and confidence
         short_mask = (mu < 0) & (net_edge > min_net_edge) & (confidence_ratio > min_confidence)
         class_label[short_mask] = 0  # SHORT
+        
+        # Log class distribution
+        n_long = long_mask.sum()
+        n_short = short_mask.sum()
+        n_hold = (class_label == 1).sum()
+        total = n_long + n_short + n_hold
+        
+        logger.info(f"Class distribution: SHORT={n_short} ({n_short/max(1,total)*100:.1f}%), "
+                   f"HOLD={n_hold} ({n_hold/max(1,total)*100:.1f}%), "
+                   f"LONG={n_long} ({n_long/max(1,total)*100:.1f}%)")
+        logger.info("=" * 60)
         
         # Legacy edge for backward compatibility
         edge = self.compute_directional_edge(mu, sigma_safe)
@@ -692,14 +750,26 @@ def create_regression_dataset(
     return X, y_regression, y_direction
 
 
-def generate_multihead_targets(df: pd.DataFrame, horizon_periods: int = 48, n_future_candles: int = 5) -> pd.DataFrame:
+def generate_multihead_targets(
+    df: pd.DataFrame, 
+    horizon_periods: int = 16,  # Default 16 bars = 4h at 15m timeframe
+    n_future_candles: int = 5,
+    min_net_edge: float = 0.0,  # Default 0 for debugging (no edge filter)
+    min_confidence: float = 0.3,  # Default 0.3 for debugging (relaxed)
+    use_volatility_cost: bool = False,  # Default to fixed cost mode
+    fixed_cost: float = 0.0009  # Default 0.09% round-trip (taker/taker)
+) -> pd.DataFrame:
     """
     Standalone function to generate multi-head training targets.
     
     Args:
         df: DataFrame with OHLCV data (must have 'close' column)
-        horizon_periods: Prediction horizon in candle periods (default 48 = 4h in 5m candles)
+        horizon_periods: Prediction horizon in candle periods (default 16 = 4h in 15m candles)
         n_future_candles: Number of future candles to predict (default 5)
+        min_net_edge: Minimum net edge after costs for trade signals (default 0.0 for debugging)
+        min_confidence: Minimum mu/sigma ratio for trade signals (default 0.3 for debugging)
+        use_volatility_cost: If True, use volatility-based cost. If False, use fixed_cost
+        fixed_cost: Fixed round-trip trading cost (default 0.09%)
         
     Returns:
         DataFrame with:
@@ -711,4 +781,11 @@ def generate_multihead_targets(df: pd.DataFrame, horizon_periods: int = 48, n_fu
         - candle_delta_*: Future candle prediction targets
     """
     generator = RegressionTargetGenerator(horizon_periods=horizon_periods)
-    return generator.generate_multihead_targets(df, n_future_candles=n_future_candles)
+    return generator.generate_multihead_targets(
+        df, 
+        n_future_candles=n_future_candles,
+        min_net_edge=min_net_edge,
+        min_confidence=min_confidence,
+        use_volatility_cost=use_volatility_cost,
+        fixed_cost=fixed_cost
+    )
