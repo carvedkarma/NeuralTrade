@@ -2537,14 +2537,12 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
         
         # CRITICAL: Validate mode matches model's training mode
         if mode_lower != training_mode_lower:
-            logger.warning(f"[MODE MISMATCH] Requested mode={mode_lower}, but model trained as {training_mode_lower}")
-            # Allow override but log warning - user may know what they're doing
-            # For strict mode, uncomment:
-            # raise HTTPException(
-            #     status_code=400,
-            #     detail=f"Mode mismatch: requested '{mode_lower}' but model expects '{training_mode_lower}'. "
-            #            f"Use ?mode={training_mode_lower} or load a different model."
-            # )
+            logger.error(f"[MODE MISMATCH] Requested mode={mode_lower}, but model trained as {training_mode_lower}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Mode mismatch: requested '{mode_lower}' but model expects '{training_mode_lower}'. "
+                       f"Use ?mode={training_mode_lower} or load a compatible model."
+            )
         
         logger.info(f"[/predict/ensemble/candles] Mode: {mode_lower.upper()}, Model training mode: {training_mode_lower.upper()}")
         
@@ -2557,9 +2555,18 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
             computed_feature_count = len([c for c in features_df.columns if c not in ["datetime", "timestamp"]])
             logger.info(f"STF features computed using compute_technical_features: {computed_feature_count} features")
             
-            # Validate STF feature count
+            # Validate STF feature count - hard error if significantly wrong
             if computed_feature_count != ModelManager.STF_FEATURE_COUNT:
-                logger.warning(f"STF feature count mismatch: computed {computed_feature_count}, expected {ModelManager.STF_FEATURE_COUNT}")
+                mismatch_pct = abs(computed_feature_count - ModelManager.STF_FEATURE_COUNT) / ModelManager.STF_FEATURE_COUNT
+                if mismatch_pct > 0.15:  # >15% off indicates pipeline issue
+                    logger.error(f"STF feature count mismatch: computed {computed_feature_count}, expected {ModelManager.STF_FEATURE_COUNT}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"STF feature pipeline error: computed {computed_feature_count} features, expected {ModelManager.STF_FEATURE_COUNT}. "
+                               f"This indicates a bug in compute_technical_features()."
+                    )
+                else:
+                    logger.warning(f"Minor STF feature count deviation: computed {computed_feature_count}, expected {ModelManager.STF_FEATURE_COUNT}")
         else:
             # MTF mode: Use MTF fusion (66 features)
             # Only use if model was trained on MTF data
@@ -2572,9 +2579,18 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
             computed_feature_count = len([c for c in features_df.columns if c not in ["datetime", "timestamp"]])
             logger.info(f"MTF features computed using MTFFeatureFusion: {computed_feature_count} features")
             
-            # Validate MTF feature count
+            # Validate MTF feature count - hard error if significantly wrong
             if computed_feature_count != ModelManager.MTF_FEATURE_COUNT:
-                logger.warning(f"MTF feature count mismatch: computed {computed_feature_count}, expected {ModelManager.MTF_FEATURE_COUNT}")
+                mismatch_pct = abs(computed_feature_count - ModelManager.MTF_FEATURE_COUNT) / ModelManager.MTF_FEATURE_COUNT
+                if mismatch_pct > 0.15:  # >15% off indicates pipeline issue
+                    logger.error(f"MTF feature count mismatch: computed {computed_feature_count}, expected {ModelManager.MTF_FEATURE_COUNT}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"MTF feature pipeline error: computed {computed_feature_count} features, expected {ModelManager.MTF_FEATURE_COUNT}. "
+                               f"This indicates a bug in MTFFeatureFusion."
+                    )
+                else:
+                    logger.warning(f"Minor MTF feature count deviation: computed {computed_feature_count}, expected {ModelManager.MTF_FEATURE_COUNT}")
         
         # === Selective NaN handling ===
         if "close" in features_df.columns:
