@@ -6,14 +6,21 @@ from pathlib import Path
 
 @dataclass
 class DataConfig:
-    symbols: List[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"])
-    timeframes: List[str] = field(default_factory=lambda: ["1m", "5m", "15m", "1h", "4h"])
-    lookback_candles: int = 50000
+    # BTCUSDT only for focused institutional-grade training
+    symbols: List[str] = field(default_factory=lambda: ["BTCUSDT"])
+    # 15m timeframe only for deep learning models (3 year training horizon)
+    timeframes: List[str] = field(default_factory=lambda: ["15m"])
+    # 3 years of 15m candles: 3 * 365 * 24 * 4 = 105,120 candles
+    lookback_candles: int = 105120
     sequence_length: int = 100
-    prediction_horizon: int = 5
+    prediction_horizon: int = 16  # 16-bar horizon = 4 hours at 15m
     train_split: float = 0.8
     val_split: float = 0.1
     test_split: float = 0.1
+    
+    # Regime-balanced training
+    regime_balanced: bool = True
+    target_regime_balance: float = 0.25  # Target ~25% per regime in each batch
 
 @dataclass
 class ModelConfig:

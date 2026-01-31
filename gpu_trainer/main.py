@@ -121,8 +121,9 @@ def train(args):
     use_multihead = getattr(args, 'multihead', False)
     
     if use_multihead:
-        from training.multihead_trainer import MultiHeadTrainer, MultiHeadDataset, MultiHeadLossConfig
+        from training.multihead_trainer import MultiHeadTrainer, MultiHeadDataset, MultiHeadLossConfig, create_regime_balanced_loader
         from data.regression_targets import generate_multihead_targets
+        from data.regime_labeler import RegimeLabeler
         logger.info("MULTI-HEAD MODE: Using combined loss (Classification + Regression + Quantile)")
     else:
         from training.trainer import Trainer
@@ -143,6 +144,16 @@ def train(args):
         logger.error("No cached data found. Run 'python main.py fetch' first to download data.")
         logger.error("Training on synthetic data produces meaningless models - aborting.")
         return
+    
+    # === STEP 0.5: Compute regime labels for balanced training (candle-only, no leakage) ===
+    regime_ids = None
+    if use_multihead and config.data.regime_balanced:
+        logger.info("Computing regime labels for balanced training...")
+        regime_labeler = RegimeLabeler()
+        regime_ids = regime_labeler.label_regimes(df)
+        dist = regime_labeler.get_regime_distribution(regime_ids)
+        logger.info(f"Regime distribution (raw): BULL={dist['BULL']*100:.1f}%, BEAR={dist['BEAR']*100:.1f}%, "
+                   f"HIGH_VOL={dist['HIGH_VOL']*100:.1f}%, LOW_VOL_CHOP={dist['LOW_VOL_CHOP']*100:.1f}%")
     
     # === STEP 1: Compute features (before split, features don't leak future) ===
     engineer = FeatureEngineer()
@@ -202,12 +213,15 @@ def train(args):
         sl_distance_np = sl_distance[valid_start:].astype(np.float32)
         tp_distance_np = tp_distance[valid_start:].astype(np.float32)
         candle_targets_np = candle_targets[valid_start:].astype(np.float32)
+        # Also slice regime_ids if available
+        regime_ids_np = regime_ids[valid_start:] if regime_ids is not None else None
     else:
         forward_returns_np = None
         entry_offset_np = None
         sl_distance_np = None
         tp_distance_np = None
         candle_targets_np = None
+        regime_ids_np = None
     
     # === STEP 4: PURGE GAP and EXPLICIT SPLIT SIZING ===
     # Labels near train end look `horizon` candles ahead, which may be in val
@@ -294,12 +308,17 @@ def train(args):
         # Candle targets
         train_candle_targets = candle_targets_np[:train_end]
         val_candle_targets = candle_targets_np[val_start:val_end]
+        
+        # Regime IDs for balanced training
+        train_regime_ids = regime_ids_np[:train_end] if regime_ids_np is not None else None
+        val_regime_ids = regime_ids_np[val_start:val_end] if regime_ids_np is not None else None
     else:
         train_returns = None
         val_returns = None
         train_entry_offset = train_sl_distance = train_tp_distance = None
         val_entry_offset = val_sl_distance = val_tp_distance = None
         train_candle_targets = val_candle_targets = None
+        train_regime_ids = val_regime_ids = None
     
     # === STEP 5: FIT SCALER ON TRAINING DATA ONLY ===
     # This is critical - scaler must not see validation/test distribution
@@ -315,8 +334,8 @@ def train(args):
     # === STEP 5.5: HARD DATA CLEANSING - Drop NaN/Inf rows ===
     # This is critical: NaN/Inf in features will cause NaN loss and corrupt training
     # IMPORTANT: Must clean ALL arrays together to maintain alignment!
-    def clean_data_multihead(features, labels, returns, entry_offset, sl_distance, tp_distance, candle_targets, name):
-        """Replace Inf->NaN, drop rows with any NaN, align ALL targets together."""
+    def clean_data_multihead(features, labels, returns, entry_offset, sl_distance, tp_distance, candle_targets, regime_ids, name):
+        """Replace Inf->NaN, drop rows with any NaN, align ALL targets together (including regime_ids)."""
         # Replace Inf with NaN in features
         features = np.where(np.isinf(features), np.nan, features)
         
@@ -349,6 +368,9 @@ def train(args):
             sl_distance = sl_distance[valid_mask]
             tp_distance = tp_distance[valid_mask]
             candle_targets = candle_targets[valid_mask]
+            # Also filter regime_ids if available
+            if regime_ids is not None:
+                regime_ids = regime_ids[valid_mask]
         
         # Final assertion - must be all finite
         assert np.isfinite(features).all(), f"{name}: Features still have non-finite values!"
@@ -356,7 +378,7 @@ def train(args):
         assert np.isfinite(candle_targets).all(), f"{name}: Candle targets still have non-finite values!"
         logger.info(f"{name}: {len(features)} clean samples, all finite and aligned")
         
-        return features, labels, returns, entry_offset, sl_distance, tp_distance, candle_targets
+        return features, labels, returns, entry_offset, sl_distance, tp_distance, candle_targets, regime_ids
     
     def clean_data_legacy(features, labels, name):
         """Replace Inf->NaN, drop rows with any NaN (legacy classification mode)."""
@@ -374,13 +396,13 @@ def train(args):
     
     # Clean data - CRITICAL: Must clean ALL arrays together for alignment!
     if use_multihead:
-        train_features_scaled, train_labels, train_returns, train_entry_offset, train_sl_distance, train_tp_distance, train_candle_targets = clean_data_multihead(
+        train_features_scaled, train_labels, train_returns, train_entry_offset, train_sl_distance, train_tp_distance, train_candle_targets, train_regime_ids = clean_data_multihead(
             train_features_scaled, train_labels, train_returns,
-            train_entry_offset, train_sl_distance, train_tp_distance, train_candle_targets,
+            train_entry_offset, train_sl_distance, train_tp_distance, train_candle_targets, train_regime_ids,
             name="Train")
-        val_features_scaled, val_labels, val_returns, val_entry_offset, val_sl_distance, val_tp_distance, val_candle_targets = clean_data_multihead(
+        val_features_scaled, val_labels, val_returns, val_entry_offset, val_sl_distance, val_tp_distance, val_candle_targets, val_regime_ids = clean_data_multihead(
             val_features_scaled, val_labels, val_returns,
-            val_entry_offset, val_sl_distance, val_tp_distance, val_candle_targets,
+            val_entry_offset, val_sl_distance, val_tp_distance, val_candle_targets, val_regime_ids,
             name="Val")
     else:
         train_features_scaled, train_labels = clean_data_legacy(train_features_scaled, train_labels, name="Train")
@@ -392,23 +414,37 @@ def train(args):
         train_dataset = MultiHeadDataset(
             train_features_scaled, train_labels, train_returns,
             entry_offset=train_entry_offset, sl_distance=train_sl_distance, tp_distance=train_tp_distance,
-            candle_targets=train_candle_targets, n_future_candles=n_future_candles,
+            candle_targets=train_candle_targets, regime_ids=train_regime_ids, n_future_candles=n_future_candles,
             sequence_length=sequence_length
         )
         val_dataset = MultiHeadDataset(
             val_features_scaled, val_labels, val_returns,
             entry_offset=val_entry_offset, sl_distance=val_sl_distance, tp_distance=val_tp_distance,
-            candle_targets=val_candle_targets, n_future_candles=n_future_candles,
+            candle_targets=val_candle_targets, regime_ids=val_regime_ids, n_future_candles=n_future_candles,
             sequence_length=sequence_length
         )
         logger.info(f"Created MultiHeadDataset: train={len(train_dataset)}, val={len(val_dataset)}")
+        
+        # Log regime distribution in training set
+        if train_regime_ids is not None:
+            dist = train_dataset.get_regime_distribution()
+            logger.info(f"Training regime distribution: BULL={dist['BULL']*100:.1f}%, BEAR={dist['BEAR']*100:.1f}%, "
+                       f"HIGH_VOL={dist['HIGH_VOL']*100:.1f}%, LOW_VOL_CHOP={dist['LOW_VOL_CHOP']*100:.1f}%")
     else:
         train_dataset = TradingDataset(train_features_scaled, train_labels, sequence_length, validate_data=True)
         val_dataset = TradingDataset(val_features_scaled, val_labels, sequence_length, validate_data=True)
     
-    # Note: shuffle=True is OK for training since we've already done chronological split
-    # and purged the boundary. Shuffling within train set is fine.
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    # Create dataloaders - use regime-balanced sampling for multihead training
+    if use_multihead and config.data.regime_balanced and train_regime_ids is not None:
+        logger.info("Using REGIME-BALANCED sampling for training (target ~25% per regime)")
+        train_loader = create_regime_balanced_loader(
+            train_dataset, batch_size=args.batch_size, num_workers=0, 
+            target_balance=config.data.target_regime_balance
+        )
+    else:
+        # Note: shuffle=True is OK for training since we've already done chronological split
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
     
     input_dim = features_np.shape[1]

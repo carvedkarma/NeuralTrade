@@ -11,7 +11,7 @@ Uses combined loss with configurable weights.
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import OneCycleLR
 from typing import Dict, List, Tuple, Optional, Callable
@@ -45,6 +45,7 @@ class MultiHeadDataset(Dataset):
     - forward_return: float (actual return for regression/quantile targets)
     - trading_targets: [3] tensor (entry_offset, sl_distance, tp_distance)
     - candle_targets: [n_future, 3] tensor (close, high, low deltas)
+    - regime_id: int (0=BULL, 1=BEAR, 2=HIGH_VOL, 3=LOW_VOL_CHOP) - for training balance only
     """
     
     def __init__(
@@ -56,6 +57,7 @@ class MultiHeadDataset(Dataset):
         sl_distance: Optional[np.ndarray] = None,
         tp_distance: Optional[np.ndarray] = None,
         candle_targets: Optional[np.ndarray] = None,
+        regime_ids: Optional[np.ndarray] = None,
         n_future_candles: int = 5,
         sequence_length: int = 100
     ):
@@ -81,6 +83,9 @@ class MultiHeadDataset(Dataset):
         
         # Candle prediction targets - optional for backward compatibility
         self.candle_targets = candle_targets.astype(np.float32) if candle_targets is not None else None
+        
+        # Regime IDs for balanced training (0=BULL, 1=BEAR, 2=HIGH_VOL, 3=LOW_VOL_CHOP)
+        self.regime_ids = regime_ids.astype(np.int64) if regime_ids is not None else None
         
         # Create sequences
         self.valid_indices = list(range(sequence_length, len(features)))
@@ -122,6 +127,82 @@ class MultiHeadDataset(Dataset):
             torch.from_numpy(trading),
             torch.from_numpy(c)
         )
+    
+    def get_regime_ids_for_valid_indices(self) -> np.ndarray:
+        """Get regime IDs only for valid indices (for creating balanced sampler)."""
+        if self.regime_ids is None:
+            # Default to LOW_VOL_CHOP (3) if no regime labels
+            return np.full(len(self.valid_indices), 3, dtype=np.int64)
+        return self.regime_ids[self.valid_indices]
+    
+    def get_regime_distribution(self) -> Dict[str, float]:
+        """Get regime distribution for logging."""
+        regime_ids = self.get_regime_ids_for_valid_indices()
+        total = len(regime_ids)
+        
+        REGIME_NAMES = {0: "BULL", 1: "BEAR", 2: "HIGH_VOL", 3: "LOW_VOL_CHOP"}
+        distribution = {}
+        
+        for regime_id, name in REGIME_NAMES.items():
+            count = np.sum(regime_ids == regime_id)
+            distribution[name] = count / total if total > 0 else 0.0
+        
+        return distribution
+
+
+def create_regime_balanced_loader(
+    dataset: 'MultiHeadDataset',
+    batch_size: int = 64,
+    num_workers: int = 4,
+    target_balance: float = 0.25
+) -> DataLoader:
+    """
+    Create a DataLoader with regime-balanced sampling.
+    
+    Uses WeightedRandomSampler to ensure ~25% of each regime in training batches.
+    This prevents the model from overfitting to dominant market regimes.
+    
+    Args:
+        dataset: MultiHeadDataset with regime_ids
+        batch_size: Batch size
+        num_workers: Number of data loader workers
+        target_balance: Target proportion per regime (default 0.25 for 4 regimes)
+        
+    Returns:
+        DataLoader with balanced sampling
+    """
+    regime_ids = dataset.get_regime_ids_for_valid_indices()
+    total = len(regime_ids)
+    
+    # Calculate inverse frequency weights
+    weights = np.ones(total, dtype=np.float64)
+    
+    for regime_id in range(4):  # 4 regimes
+        count = np.sum(regime_ids == regime_id)
+        if count > 0:
+            actual_proportion = count / total
+            regime_weight = target_balance / actual_proportion
+            regime_weight = np.clip(regime_weight, 0.25, 4.0)
+            mask = regime_ids == regime_id
+            weights[mask] = regime_weight
+    
+    # Normalize weights
+    weights = weights * (total / weights.sum())
+    
+    sampler = WeightedRandomSampler(
+        weights=torch.from_numpy(weights).double(),
+        num_samples=total,
+        replacement=True
+    )
+    
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True
+    )
 
 
 class MultiHeadTrainer:
