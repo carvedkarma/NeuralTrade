@@ -30,9 +30,19 @@ interface TradeLevels {
   takeProfit: number;
 }
 
+interface HorizonQuantiles {
+  q10: number;  // decimal return e.g. -0.01 = -1%
+  q25: number;
+  q50: number;
+  q75: number;
+  q90: number;
+}
+
 interface PremiumCandlestickChartProps {
   historicalCandles: Candle[];
-  predictedCandles?: PredictedCandle[];
+  predictedCandles?: PredictedCandle[];  // Deprecated - use horizonQuantiles
+  horizonQuantiles?: HorizonQuantiles;   // Final horizon quantile predictions
+  horizonBars?: number;                  // How many bars in the horizon (default 16)
   currentPrice: number;
   action?: "LONG" | "SHORT" | "HOLD";
   tradeLevels?: TradeLevels;
@@ -63,6 +73,8 @@ const calculateEMA = (candles: Candle[], period: number): number[] => {
 export function PremiumCandlestickChart({
   historicalCandles,
   predictedCandles = [],
+  horizonQuantiles,
+  horizonBars = 16,
   currentPrice,
   action = "HOLD",
   tradeLevels,
@@ -75,20 +87,36 @@ export function PremiumCandlestickChart({
   const [hoveredCandle, setHoveredCandle] = useState<number | null>(null);
   const [crosshairPos, setCrosshairPos] = useState<{ x: number; y: number } | null>(null);
 
+  // Calculate final horizon prices from quantiles (returns are decimal)
+  const coneTargets = useMemo(() => {
+    if (!horizonQuantiles || !currentPrice) return null;
+    return {
+      q10: currentPrice * (1 + horizonQuantiles.q10),
+      q25: currentPrice * (1 + horizonQuantiles.q25),
+      q50: currentPrice * (1 + horizonQuantiles.q50),
+      q75: currentPrice * (1 + horizonQuantiles.q75),
+      q90: currentPrice * (1 + horizonQuantiles.q90),
+    };
+  }, [horizonQuantiles, currentPrice]);
+
   const chartData = useMemo(() => {
     const displayHistorical = historicalCandles.slice(-40);
     
     const allPrices = [
       ...displayHistorical.map(c => c.high),
       ...displayHistorical.map(c => c.low),
-      ...predictedCandles.map(c => c.q90),
-      ...predictedCandles.map(c => c.q10),
       tradeLevels?.stopLoss || 0,
       tradeLevels?.takeProfit || 0,
-    ].filter(p => p > 0);
+    ];
     
-    const minPrice = Math.min(...allPrices) * 0.998;
-    const maxPrice = Math.max(...allPrices) * 1.002;
+    // Include cone targets in price range if we have them
+    if (coneTargets) {
+      allPrices.push(coneTargets.q10, coneTargets.q90);
+    }
+    
+    const validPrices = allPrices.filter(p => p > 0);
+    const minPrice = Math.min(...validPrices) * 0.998;
+    const maxPrice = Math.max(...validPrices) * 1.002;
     const priceRange = maxPrice - minPrice;
     
     const volumes = displayHistorical.map(c => c.volume || 0);
@@ -98,7 +126,7 @@ export function PremiumCandlestickChart({
     const ema21 = calculateEMA(displayHistorical, 21);
     
     return { displayHistorical, minPrice, maxPrice, priceRange, maxVolume, ema9, ema21 };
-  }, [historicalCandles, predictedCandles, tradeLevels]);
+  }, [historicalCandles, coneTargets, tradeLevels]);
 
   const { displayHistorical, minPrice, maxPrice, priceRange, maxVolume, ema9, ema21 } = chartData;
 
@@ -109,7 +137,9 @@ export function PremiumCandlestickChart({
   const mainChartHeight = chartHeight - volumeHeight - padding.top - padding.bottom;
   const innerWidth = chartWidth - padding.left - padding.right;
 
-  const totalCandles = displayHistorical.length + predictedCandles.length;
+  // Reserve space for probability cone (horizonBars worth of space)
+  const coneSpaceBars = coneTargets ? horizonBars : 0;
+  const totalCandles = displayHistorical.length + coneSpaceBars;
   const candleWidth = Math.min(16, (innerWidth / totalCandles) * 0.75);
   const candleGap = candleWidth * 0.35;
   const totalCandleWidth = candleWidth + candleGap;
@@ -427,31 +457,6 @@ export function PremiumCandlestickChart({
               </>
             )}
 
-            {predictedCandles.length > 0 && (
-              <>
-                <line
-                  x1={padding.left + displayHistorical.length * totalCandleWidth - candleGap/2}
-                  y1={padding.top}
-                  x2={padding.left + displayHistorical.length * totalCandleWidth - candleGap/2}
-                  y2={padding.top + mainChartHeight}
-                  stroke={actionColors.primary}
-                  strokeWidth="2"
-                  strokeDasharray="6,4"
-                  strokeOpacity="0.6"
-                />
-                <text
-                  x={padding.left + (displayHistorical.length + predictedCandles.length / 2) * totalCandleWidth}
-                  y={padding.top + 18}
-                  fontSize="11"
-                  fill={actionColors.primary}
-                  textAnchor="middle"
-                  fontWeight="600"
-                  letterSpacing="0.5"
-                >
-                  NEURAL NETWORK PREDICTION
-                </text>
-              </>
-            )}
 
             {showEMA9 && ema9.length > 1 && (
               <path
@@ -525,52 +530,112 @@ export function PremiumCandlestickChart({
               );
             })}
 
-            {predictedCandles.map((pred, i) => {
-              const x = padding.left + (displayHistorical.length + i) * totalCandleWidth;
-              const isUp = pred.direction === "up";
+            {/* Probability Cone - smooth gradient from current price to horizon quantiles */}
+            {coneTargets && (() => {
+              const startX = padding.left + displayHistorical.length * totalCandleWidth;
+              const endX = padding.left + (displayHistorical.length + horizonBars) * totalCandleWidth;
+              const startY = priceToY(currentPrice);
+              const isUp = coneTargets.q50 >= currentPrice;
+              
+              // Outer cone (q10 to q90) - 80% confidence interval
+              const outerPath = `
+                M ${startX} ${startY}
+                L ${endX} ${priceToY(coneTargets.q90)}
+                L ${endX} ${priceToY(coneTargets.q10)}
+                Z
+              `;
+              
+              // Inner cone (q25 to q75) - 50% confidence interval
+              const innerPath = `
+                M ${startX} ${startY}
+                L ${endX} ${priceToY(coneTargets.q75)}
+                L ${endX} ${priceToY(coneTargets.q25)}
+                Z
+              `;
               
               return (
-                <g key={`pred-${i}`}>
-                  <rect
-                    x={x - 2}
-                    y={priceToY(pred.q90)}
-                    width={candleWidth + 4}
-                    height={priceToY(pred.q10) - priceToY(pred.q90)}
-                    fill="url(#predictionZoneGradient)"
-                    rx="2"
-                  />
+                <g>
+                  {/* Prediction zone label */}
+                  <text
+                    x={(startX + endX) / 2}
+                    y={padding.top + 15}
+                    fontSize="11"
+                    fill="hsl(var(--primary))"
+                    textAnchor="middle"
+                    fontWeight="500"
+                  >
+                    Probability Cone ({horizonBars} bars)
+                  </text>
+                  
+                  {/* Separator line */}
                   <line
-                    x1={x + candleWidth / 2}
-                    y1={priceToY(pred.q90)}
-                    x2={x + candleWidth / 2}
-                    y2={priceToY(pred.q10)}
-                    stroke={isUp ? "#10b981" : "#ef4444"}
-                    strokeWidth="1"
-                    strokeDasharray="3,3"
+                    x1={startX}
+                    y1={padding.top}
+                    x2={startX}
+                    y2={padding.top + mainChartHeight}
+                    stroke="hsl(var(--primary))"
+                    strokeWidth="1.5"
+                    strokeDasharray="6,4"
                     opacity="0.6"
                   />
-                  <rect
-                    x={x}
-                    y={priceToY(pred.q75)}
-                    width={candleWidth}
-                    height={Math.max(2, priceToY(pred.q25) - priceToY(pred.q75))}
-                    fill={isUp ? "rgba(16, 185, 129, 0.4)" : "rgba(239, 68, 68, 0.4)"}
-                    stroke={isUp ? "#10b981" : "#ef4444"}
+                  
+                  {/* Outer cone (q10-q90) - lighter shade */}
+                  <path
+                    d={outerPath}
+                    fill={isUp ? "rgba(16, 185, 129, 0.12)" : "rgba(239, 68, 68, 0.12)"}
+                    stroke={isUp ? "rgba(16, 185, 129, 0.3)" : "rgba(239, 68, 68, 0.3)"}
                     strokeWidth="1"
-                    strokeDasharray="4,2"
-                    rx="1"
                   />
+                  
+                  {/* Inner cone (q25-q75) - darker shade */}
+                  <path
+                    d={innerPath}
+                    fill={isUp ? "rgba(16, 185, 129, 0.25)" : "rgba(239, 68, 68, 0.25)"}
+                    stroke={isUp ? "rgba(16, 185, 129, 0.5)" : "rgba(239, 68, 68, 0.5)"}
+                    strokeWidth="1"
+                  />
+                  
+                  {/* Median line (q50) - expected path */}
                   <line
-                    x1={x}
-                    y1={priceToY(pred.q50)}
-                    x2={x + candleWidth}
-                    y2={priceToY(pred.q50)}
+                    x1={startX}
+                    y1={startY}
+                    x2={endX}
+                    y2={priceToY(coneTargets.q50)}
                     stroke={isUp ? "#10b981" : "#ef4444"}
-                    strokeWidth="2.5"
+                    strokeWidth="2"
+                    strokeDasharray="6,3"
                   />
+                  
+                  {/* Quantile markers at horizon end */}
+                  {[
+                    { q: coneTargets.q90, label: "q90", opacity: 0.6 },
+                    { q: coneTargets.q75, label: "q75", opacity: 0.7 },
+                    { q: coneTargets.q50, label: "q50", opacity: 1 },
+                    { q: coneTargets.q25, label: "q25", opacity: 0.7 },
+                    { q: coneTargets.q10, label: "q10", opacity: 0.6 },
+                  ].map(({ q, label, opacity }) => (
+                    <g key={label}>
+                      <circle
+                        cx={endX}
+                        cy={priceToY(q)}
+                        r="3"
+                        fill={isUp ? "#10b981" : "#ef4444"}
+                        opacity={opacity}
+                      />
+                      <text
+                        x={endX + 8}
+                        y={priceToY(q) + 4}
+                        fontSize="9"
+                        fill="hsl(var(--muted-foreground))"
+                        opacity={opacity}
+                      >
+                        {label}: ${formatPrice(q)}
+                      </text>
+                    </g>
+                  ))}
                 </g>
               );
-            })}
+            })()}
 
             <g filter="url(#priceGlow)">
               <line
@@ -767,31 +832,31 @@ export function PremiumCandlestickChart({
           )}
         </AnimatePresence>
 
-        {predictedCandles.length > 0 && (
+        {coneTargets && (
           <div className="px-4 pb-4">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <div className="bg-muted/20 rounded-lg p-3 text-center border border-border/30">
-                <div className="text-xs text-muted-foreground mb-1">Predicted Range</div>
+                <div className="text-xs text-muted-foreground mb-1">80% Confidence Range</div>
                 <div className="text-sm font-semibold tabular-nums">
-                  ${formatPrice(Math.min(...predictedCandles.map(c => c.q10)))} - ${formatPrice(Math.max(...predictedCandles.map(c => c.q90)))}
+                  ${formatPrice(coneTargets.q10)} - ${formatPrice(coneTargets.q90)}
                 </div>
               </div>
               <div className="bg-muted/20 rounded-lg p-3 text-center border border-border/30">
                 <div className="text-xs text-muted-foreground mb-1">Expected (Median)</div>
                 <div className="text-sm font-semibold tabular-nums">
-                  ${formatPrice(predictedCandles[predictedCandles.length - 1]?.q50 || currentPrice)}
+                  ${formatPrice(coneTargets.q50)}
                 </div>
               </div>
               <div className="bg-muted/20 rounded-lg p-3 text-center border border-border/30">
-                <div className="text-xs text-muted-foreground mb-1">Upside (90%)</div>
+                <div className="text-xs text-muted-foreground mb-1">Upside (q90)</div>
                 <div className="text-sm font-semibold text-emerald-400 tabular-nums">
-                  +{((predictedCandles[predictedCandles.length - 1]?.q90 / currentPrice - 1) * 100).toFixed(2)}%
+                  +{((coneTargets.q90 / currentPrice - 1) * 100).toFixed(2)}%
                 </div>
               </div>
               <div className="bg-muted/20 rounded-lg p-3 text-center border border-border/30">
-                <div className="text-xs text-muted-foreground mb-1">Downside (10%)</div>
+                <div className="text-xs text-muted-foreground mb-1">Downside (q10)</div>
                 <div className="text-sm font-semibold text-red-400 tabular-nums">
-                  {((predictedCandles[predictedCandles.length - 1]?.q10 / currentPrice - 1) * 100).toFixed(2)}%
+                  {((coneTargets.q10 / currentPrice - 1) * 100).toFixed(2)}%
                 </div>
               </div>
             </div>

@@ -546,7 +546,7 @@ export default function Dashboard() {
                 );
               })()}
               
-              {/* Premium Candlestick Chart with Predictions - ANCHORED TO LAST CANDLE CLOSE */}
+              {/* Premium Candlestick Chart with Probability Cone */}
               <PremiumCandlestickChart
                 historicalCandles={(data?.candles || []).map(c => ({
                   timestamp: c.timestamp,
@@ -556,28 +556,8 @@ export default function Dashboard() {
                   close: Number(c.close),
                   volume: c.volume ? Number(c.volume) : undefined
                 }))}
-                predictedCandles={(() => {
-                  const lastCandleClose = data?.candles?.[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0;
-                  const tickerPrice = nnPrediction?.prediction?.currentPrice ?? lastCandleClose;
-                  
-                  return (nnPrediction?.predictedCandles || []).map(pc => {
-                    const q10Ret = tickerPrice > 0 ? (pc.q10 / tickerPrice - 1) : 0;
-                    const q25Ret = tickerPrice > 0 ? (pc.q25 / tickerPrice - 1) : 0;
-                    const q50Ret = tickerPrice > 0 ? (pc.q50 / tickerPrice - 1) : 0;
-                    const q75Ret = tickerPrice > 0 ? (pc.q75 / tickerPrice - 1) : 0;
-                    const q90Ret = tickerPrice > 0 ? (pc.q90 / tickerPrice - 1) : 0;
-                    
-                    return {
-                      timestamp: pc.timestamp,
-                      q10: lastCandleClose * (1 + q10Ret),
-                      q25: lastCandleClose * (1 + q25Ret),
-                      q50: lastCandleClose * (1 + q50Ret),
-                      q75: lastCandleClose * (1 + q75Ret),
-                      q90: lastCandleClose * (1 + q90Ret),
-                      direction: pc.direction || (q50Ret >= 0 ? "up" as const : "down" as const)
-                    };
-                  });
-                })()}
+                horizonQuantiles={nnPrediction?.prediction?.quantiles}
+                horizonBars={16}
                 currentPrice={data?.candles?.[data.candles.length - 1]?.close ? Number(data.candles[data.candles.length - 1].close) : 0}
                 action={nnPrediction?.prediction?.action || "HOLD"}
                 tradeLevels={nnPrediction?.prediction ? {
