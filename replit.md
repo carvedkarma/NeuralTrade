@@ -150,5 +150,12 @@ The following institutional-grade features are **enabled by default**:
 - **GPU Trainer**: Uses 140K+ parquet candles for training (separate data flow)
 - **Training is NOT affected by live candle fetch** - completely separate data paths
 
+### Feature Pipeline Alignment (Critical Fix - Jan 2026)
+- **Root Cause Fixed**: Model trained on `compute_technical_features` (41 features) but inference used MTF fusion (66 features with different names)
+- **Training Feature Names**: `return_50`, `bb_upper`, `ema_5`, `rsi_14`, `atr_14`, etc.
+- **MTF Fusion Names (incompatible)**: `ret_1_15m`, `rolling_vol_20_4h`, `ema_slope_26_1h`, etc.
+- **Solution**: `/predict/ensemble/candles` endpoint now ALWAYS uses `compute_technical_features` from `data/pipeline.py`
+- **Impact**: Resolves 100% missing features issue and silent HOLD fallback during predictions
+
 ### GUI Configuration
 - Fixed to BTCUSDT 15m timeframe only (no multi-timeframe/multi-asset options)
