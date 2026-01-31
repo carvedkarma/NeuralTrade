@@ -25,17 +25,7 @@ import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useState } from "react";
 import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip, Legend } from "recharts";
 
-interface FlowForecast {
-  volState: "contraction" | "neutral" | "expansion";
-  volStateProbs: { contraction: number; neutral: number; expansion: number };
-  acceleration: number;
-  forecastMode: "QUANTILE_PATHS" | "NO_FORECAST";
-  quantilePaths?: {
-    q10: number[];
-    q50: number[];
-    q90: number[];
-  };
-}
+import type { FlowForecast } from "@shared/schema";
 
 interface ConeSignal {
   direction: "LONG" | "SHORT" | "HOLD";
