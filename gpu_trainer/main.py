@@ -170,7 +170,7 @@ def train(args):
         
         # Get cost/threshold config from args or config
         min_net_edge = getattr(args, 'min_net_edge', 0.0)  # Default: no edge filter for debugging
-        min_confidence = getattr(args, 'min_confidence', 0.3)  # Default: relaxed for debugging
+        min_confidence = getattr(args, 'min_confidence', 0.7)  # Default: 0.7 for quality signals
         fixed_cost = getattr(args, 'cost', config.institution.cost_mode.get_cost())
         use_volatility_cost = getattr(args, 'volatility_cost', False)
         
@@ -1304,8 +1304,8 @@ def main():
                              help="Fixed round-trip trading cost (default: 0.09%% = 0.0009)")
     train_parser.add_argument("--min-net-edge", type=float, default=0.0, dest="min_net_edge",
                              help="Minimum net edge after costs for trade signals (default: 0.0 = no filter)")
-    train_parser.add_argument("--min-confidence", type=float, default=0.3, dest="min_confidence",
-                             help="Minimum mu/sigma ratio for trade signals (default: 0.3 = relaxed)")
+    train_parser.add_argument("--min-confidence", type=float, default=0.7, dest="min_confidence",
+                             help="Minimum mu/sigma ratio for trade signals (default: 0.7)")
     train_parser.add_argument("--volatility-cost", action="store_true", dest="volatility_cost",
                              help="Use volatility-based cost instead of fixed cost")
     train_parser.add_argument("--resume", type=str, help="Resume from checkpoint")
@@ -1324,8 +1324,8 @@ def main():
                                   help="Fixed round-trip trading cost (default: 0.09%%)")
     train_all_parser.add_argument("--min-net-edge", type=float, default=0.0, dest="min_net_edge",
                                   help="Minimum net edge after costs (default: 0.0)")
-    train_all_parser.add_argument("--min-confidence", type=float, default=0.3, dest="min_confidence",
-                                  help="Minimum mu/sigma ratio (default: 0.3)")
+    train_all_parser.add_argument("--min-confidence", type=float, default=0.7, dest="min_confidence",
+                                  help="Minimum mu/sigma ratio (default: 0.7)")
     
     rl_parser = subparsers.add_parser("train-rl", help="Train reinforcement learning agent")
     rl_parser.add_argument("--episodes", type=int, default=1000, help="Number of episodes")

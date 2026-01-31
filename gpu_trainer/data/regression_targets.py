@@ -197,7 +197,7 @@ class RegressionTargetGenerator:
         df: pd.DataFrame, 
         n_future_candles: int = 5,
         min_net_edge: float = 0.0,
-        min_confidence: float = 0.3,
+        min_confidence: float = 0.7,
         use_volatility_cost: bool = False,
         fixed_cost: float = 0.0009
     ) -> pd.DataFrame:
@@ -760,7 +760,7 @@ def generate_multihead_targets(
     horizon_periods: int = 16,  # Default 16 bars = 4h at 15m timeframe
     n_future_candles: int = 5,
     min_net_edge: float = 0.0,  # Default 0 for debugging (no edge filter)
-    min_confidence: float = 0.3,  # Default 0.3 for debugging (relaxed)
+    min_confidence: float = 0.7,  # Default 0.7 for higher quality signals
     use_volatility_cost: bool = False,  # Default to fixed cost mode
     fixed_cost: float = 0.0009  # Default 0.09% round-trip (taker/taker)
 ) -> pd.DataFrame:

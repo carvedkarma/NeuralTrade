@@ -1345,7 +1345,7 @@ class GPUTrainerGUI:
                             train_combined, 
                             horizon_periods=prediction_horizon_bars,
                             min_net_edge=0.0,  # No edge filter for debugging
-                            min_confidence=0.3,  # Relaxed confidence threshold
+                            min_confidence=0.7,  # Higher confidence threshold
                             use_volatility_cost=False,
                             fixed_cost=0.0009  # 0.09% taker/taker
                         )
@@ -1353,7 +1353,7 @@ class GPUTrainerGUI:
                             val_combined, 
                             horizon_periods=prediction_horizon_bars,
                             min_net_edge=0.0,
-                            min_confidence=0.3,
+                            min_confidence=0.7,
                             use_volatility_cost=False,
                             fixed_cost=0.0009
                         )
@@ -1461,7 +1461,7 @@ class GPUTrainerGUI:
                                 train_df, 
                                 horizon_periods=horizon,
                                 min_net_edge=0.0,
-                                min_confidence=0.3,
+                                min_confidence=0.7,
                                 use_volatility_cost=False,
                                 fixed_cost=0.0009
                             )
@@ -1469,7 +1469,7 @@ class GPUTrainerGUI:
                                 val_df, 
                                 horizon_periods=horizon,
                                 min_net_edge=0.0,
-                                min_confidence=0.3,
+                                min_confidence=0.7,
                                 use_volatility_cost=False,
                                 fixed_cost=0.0009
                             )
