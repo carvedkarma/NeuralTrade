@@ -165,6 +165,17 @@ interface EnsemblePredictionResponse {
   entry_offset?: number;  // Entry price offset
   sl_distance?: number;  // Stop loss distance (%)
   tp_distance?: number;  // Take profit distance (%)
+  
+  // === Flow Forecast outputs (from VolStateHead and AccelerationHead) ===
+  vol_state?: "contraction" | "neutral" | "expansion";
+  vol_state_probs?: { contraction: number; neutral: number; expansion: number };
+  acceleration?: number;
+  forecast_mode?: "QUANTILE_PATHS" | "NO_FORECAST";
+  quantile_paths?: {
+    q10: number[];
+    q50: number[];
+    q90: number[];
+  };
 }
 
 interface EnsembleStatus {

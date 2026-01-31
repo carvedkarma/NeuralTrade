@@ -1067,6 +1067,24 @@ export const insertConeSignalSchema = createInsertSchema(coneSignals).omit({ id:
 export type InsertConeSignal = z.infer<typeof insertConeSignalSchema>;
 export type ConeSignal = typeof coneSignals.$inferSelect;
 
+// Flow forecast schema for volatility regime and path projections
+export const flowForecastSchema = z.object({
+  volState: z.enum(["contraction", "neutral", "expansion"]),
+  volStateProbs: z.object({
+    contraction: z.number(),
+    neutral: z.number(),
+    expansion: z.number(),
+  }),
+  acceleration: z.number(),
+  forecastMode: z.enum(["QUANTILE_PATHS", "NO_FORECAST"]),
+  quantilePaths: z.object({
+    q10: z.array(z.number()),
+    q50: z.array(z.number()),
+    q90: z.array(z.number()),
+  }).optional(),
+});
+export type FlowForecast = z.infer<typeof flowForecastSchema>;
+
 // Cone signal schema for API responses
 export const coneSignalResponseSchema = z.object({
   direction: signalTypeSchema,
@@ -1091,6 +1109,7 @@ export const coneSignalResponseSchema = z.object({
   edgeThreshold: z.number(),
   cooldownBarsRemaining: z.number(),
   timestamp: z.number(),
+  flowForecast: flowForecastSchema.optional(),
 });
 export type ConeSignalResponse = z.infer<typeof coneSignalResponseSchema>;
 

@@ -107,6 +107,10 @@ class MultiHeadLossConfig:
     lambda_trading: float = 0.3     # Weight for trading (entry/SL/TP) loss
     lambda_candle: float = 0.3      # Weight for candle prediction loss
     
+    # Flow Forecast loss weights
+    lambda_vol_state: float = 0.4   # Weight for volatility state classification
+    lambda_acceleration: float = 0.3  # Weight for acceleration (momentum change) regression
+    
     # Classification options
     class_weights: Optional[torch.Tensor] = None  # For imbalanced classes
     label_smoothing: float = 0.1    # Smoothing for classification
@@ -115,6 +119,7 @@ class MultiHeadLossConfig:
     mu_huber_delta: float = 0.02    # Delta for Huber loss (robust to outliers)
     trading_huber_delta: float = 0.01  # Delta for trading distances
     candle_huber_delta: float = 0.02   # Delta for candle deltas
+    acceleration_huber_delta: float = 0.02  # Delta for acceleration loss
     
     # Quantile options
     quantiles: Tuple[float, ...] = (0.10, 0.25, 0.50, 0.75, 0.90)
@@ -286,6 +291,10 @@ class MultiHeadLoss(nn.Module):
         # Candle prediction loss
         self.candle_loss = nn.HuberLoss(delta=self.config.candle_huber_delta)
         
+        # Flow Forecast losses
+        self.vol_state_loss = nn.CrossEntropyLoss(label_smoothing=0.05)  # 3-class: contraction/neutral/expansion
+        self.acceleration_loss = nn.HuberLoss(delta=self.config.acceleration_huber_delta)
+        
     def forward(
         self,
         class_logits: torch.Tensor,
@@ -299,7 +308,11 @@ class MultiHeadLoss(nn.Module):
         tp_distance: Optional[torch.Tensor] = None,
         candle_deltas: Optional[torch.Tensor] = None,
         trading_targets: Optional[Dict[str, torch.Tensor]] = None,
-        candle_targets: Optional[torch.Tensor] = None
+        candle_targets: Optional[torch.Tensor] = None,
+        vol_state_logits: Optional[torch.Tensor] = None,
+        vol_state_targets: Optional[torch.Tensor] = None,
+        acceleration_pred: Optional[torch.Tensor] = None,
+        acceleration_targets: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Compute combined loss.
@@ -317,6 +330,10 @@ class MultiHeadLoss(nn.Module):
             candle_deltas: [batch, n_steps, 3] predicted candle deltas (optional)
             trading_targets: Dict with 'entry_offset', 'sl_distance', 'tp_distance' targets
             candle_targets: [batch, n_steps, 3] actual candle deltas
+            vol_state_logits: [batch, 3] flow forecast volatility state logits (optional)
+            vol_state_targets: [batch] volatility state labels 0=contraction, 1=neutral, 2=expansion
+            acceleration_pred: [batch, 1] predicted acceleration (momentum change)
+            acceleration_targets: [batch, 1] actual acceleration targets
             
         Returns:
             Dict with 'total' loss and individual components
@@ -348,6 +365,18 @@ class MultiHeadLoss(nn.Module):
         if candle_targets is not None and candle_deltas is not None:
             l_candle = self.candle_loss(candle_deltas, candle_targets)
         
+        # Flow Forecast: Volatility state classification loss
+        l_vol_state = torch.tensor(0.0, device=class_logits.device)
+        if vol_state_logits is not None and vol_state_targets is not None:
+            l_vol_state = self.vol_state_loss(vol_state_logits, vol_state_targets)
+        
+        # Flow Forecast: Acceleration (momentum change) regression loss
+        l_acceleration = torch.tensor(0.0, device=class_logits.device)
+        if acceleration_pred is not None and acceleration_targets is not None:
+            if acceleration_targets.dim() == 1:
+                acceleration_targets = acceleration_targets.unsqueeze(-1)
+            l_acceleration = self.acceleration_loss(acceleration_pred, acceleration_targets)
+        
         # Combined loss
         total = (
             self.config.lambda_class * l_class +
@@ -355,7 +384,9 @@ class MultiHeadLoss(nn.Module):
             self.config.lambda_sigma * l_sigma +
             self.config.lambda_quantile * l_quantile +
             self.config.lambda_trading * l_trading +
-            self.config.lambda_candle * l_candle
+            self.config.lambda_candle * l_candle +
+            self.config.lambda_vol_state * l_vol_state +
+            self.config.lambda_acceleration * l_acceleration
         )
         
         return {
@@ -365,7 +396,9 @@ class MultiHeadLoss(nn.Module):
             'sigma': l_sigma,
             'quantile': l_quantile,
             'trading': l_trading,
-            'candle': l_candle
+            'candle': l_candle,
+            'vol_state': l_vol_state,
+            'acceleration': l_acceleration
         }
 
 

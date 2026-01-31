@@ -19,7 +19,7 @@
  * Cooldown: 6 bars after any trade signal
  */
 
-import { SignalType, ConeSignalResponse } from "@shared/schema";
+import { SignalType, ConeSignalResponse, FlowForecast as SchemaFlowForecast } from "@shared/schema";
 
 export interface QuantilePrediction {
   q10: number;  // All as decimal returns (e.g., -0.02 = -2%)
@@ -35,6 +35,18 @@ export interface DirectionProbabilities {
   probHold: number;
 }
 
+export interface FlowForecast {
+  volState: "contraction" | "neutral" | "expansion";
+  volStateProbs: { contraction: number; neutral: number; expansion: number };
+  acceleration: number;
+  forecastMode: "QUANTILE_PATHS" | "NO_FORECAST";
+  quantilePaths?: {
+    q10: number[];
+    q50: number[];
+    q90: number[];
+  };
+}
+
 export interface ConeInput {
   currentPrice: number;
   quantiles: QuantilePrediction;
@@ -42,6 +54,7 @@ export interface ConeInput {
   mu: number;       // Expected return (decimal)
   sigma?: number;   // Uncertainty (decimal)
   timestamp: number;
+  flowForecast?: FlowForecast;  // Optional flow forecast from GPU trainer
 }
 
 interface EdgeHistoryEntry {
@@ -79,7 +92,7 @@ class ConeSignalGenerator {
    * Generate a cone-based trading signal
    */
   generateSignal(input: ConeInput): ConeSignalResponse {
-    const { currentPrice, quantiles, probs, mu, sigma, timestamp } = input;
+    const { currentPrice, quantiles, probs, mu, sigma, timestamp, flowForecast } = input;
     
     // Calculate derived values
     const coneWidth = quantiles.q90 - quantiles.q10;
@@ -99,6 +112,12 @@ class ConeSignalGenerator {
     
     // Check all gate conditions
     const holdReasons: string[] = [];
+    
+    // Flow Forecast: Volatility Gate
+    // NO_FORECAST when vol_state==contraction OR spread < 3×cost
+    if (flowForecast?.forecastMode === "NO_FORECAST") {
+      holdReasons.push(`No tradeable flow: ${flowForecast.volState} regime (compression)`);
+    }
     
     if (cooldownBarsRemaining > 0) {
       holdReasons.push(`Cooldown: ${cooldownBarsRemaining} bars remaining`);
@@ -149,6 +168,7 @@ class ConeSignalGenerator {
       edgeThreshold: this.edgeThreshold,
       cooldownBarsRemaining,
       timestamp,
+      flowForecast: flowForecast,
     };
   }
   

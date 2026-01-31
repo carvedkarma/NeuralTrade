@@ -17,10 +17,25 @@ import {
   BarChart3,
   RefreshCw,
   Loader2,
-  AlertTriangle
+  AlertTriangle,
+  Activity,
+  Wind
 } from "lucide-react";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useState } from "react";
+import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip, Legend } from "recharts";
+
+interface FlowForecast {
+  volState: "contraction" | "neutral" | "expansion";
+  volStateProbs: { contraction: number; neutral: number; expansion: number };
+  acceleration: number;
+  forecastMode: "QUANTILE_PATHS" | "NO_FORECAST";
+  quantilePaths?: {
+    q10: number[];
+    q50: number[];
+    q90: number[];
+  };
+}
 
 interface ConeSignal {
   direction: "LONG" | "SHORT" | "HOLD";
@@ -45,6 +60,7 @@ interface ConeSignal {
   timestamp: number;
   edgeThreshold: number;
   cooldownBarsRemaining: number;
+  flowForecast?: FlowForecast;
 }
 
 interface ConeStats {
@@ -89,6 +105,151 @@ const formatPercent = (val: number | string | null, decimals = 2) => {
   const num = typeof val === "string" ? parseFloat(val) : val;
   return `${num >= 0 ? "+" : ""}${(num * 100).toFixed(decimals)}%`;
 };
+
+function FlowForecastChart({ flowForecast, entryPrice }: { flowForecast: FlowForecast; entryPrice: number }) {
+  if (flowForecast.forecastMode === "NO_FORECAST" || !flowForecast.quantilePaths) {
+    return (
+      <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4" data-testid="flow-forecast-gated">
+        <div className="flex items-center gap-2 text-amber-400 mb-2">
+          <Wind className="h-4 w-4" />
+          <span className="text-sm font-medium">No Tradeable Flow</span>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {flowForecast.volState === "contraction" 
+            ? "Volatility compression regime detected. Price action too tight for confident projections."
+            : "Quantile spread too narrow relative to trading costs."}
+        </p>
+        <div className="flex items-center gap-4 mt-3 text-xs">
+          <div className="flex items-center gap-1">
+            <span className="text-muted-foreground">Vol State:</span>
+            <Badge variant="outline" className="text-xs capitalize">
+              {flowForecast.volState}
+            </Badge>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-muted-foreground">Accel:</span>
+            <span className={flowForecast.acceleration >= 0 ? "text-emerald-400" : "text-red-400"}>
+              {flowForecast.acceleration >= 0 ? "+" : ""}{(flowForecast.acceleration * 100).toFixed(3)}%
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const { q10, q50, q90 } = flowForecast.quantilePaths;
+  const chartData = q10.map((_, i) => ({
+    bar: i + 1,
+    q10: q10[i],
+    q50: q50[i],
+    q90: q90[i],
+  }));
+
+  const allPrices = [...q10, ...q50, ...q90, entryPrice];
+  const minPrice = Math.min(...allPrices) * 0.9995;
+  const maxPrice = Math.max(...allPrices) * 1.0005;
+
+  const volStateColor = flowForecast.volState === "expansion" 
+    ? "text-emerald-400" 
+    : flowForecast.volState === "contraction" 
+      ? "text-amber-400" 
+      : "text-blue-400";
+
+  return (
+    <div className="space-y-2" data-testid="flow-forecast-chart">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Activity className="h-4 w-4 text-primary" />
+          <span className="text-xs font-medium">Flow Forecast</span>
+        </div>
+        <div className="flex items-center gap-3 text-xs">
+          <div className="flex items-center gap-1">
+            <span className="text-muted-foreground">Vol:</span>
+            <Badge variant="outline" className={`text-xs capitalize ${volStateColor}`}>
+              {flowForecast.volState}
+            </Badge>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-muted-foreground">α:</span>
+            <span className="text-foreground">
+              {flowForecast.volState === "expansion" ? "1.5" : flowForecast.volState === "contraction" ? "0.7" : "1.0"}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="h-32 w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+            <XAxis 
+              dataKey="bar" 
+              tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
+              axisLine={{ stroke: 'hsl(var(--border))' }}
+              tickLine={{ stroke: 'hsl(var(--border))' }}
+            />
+            <YAxis 
+              domain={[minPrice, maxPrice]}
+              tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
+              tickFormatter={(val) => `$${val.toLocaleString()}`}
+              axisLine={{ stroke: 'hsl(var(--border))' }}
+              tickLine={{ stroke: 'hsl(var(--border))' }}
+              width={70}
+            />
+            <Tooltip 
+              contentStyle={{ 
+                backgroundColor: 'hsl(var(--card))', 
+                border: '1px solid hsl(var(--border))',
+                borderRadius: '6px',
+                fontSize: '11px'
+              }}
+              formatter={(value: number) => [`$${value.toLocaleString(undefined, { minimumFractionDigits: 2 })}`, '']}
+              labelFormatter={(bar) => `Bar ${bar}`}
+            />
+            <Line 
+              type="monotone" 
+              dataKey="q90" 
+              stroke="#10b981" 
+              strokeWidth={1.5}
+              dot={false}
+              name="q90 (Upper)"
+            />
+            <Line 
+              type="monotone" 
+              dataKey="q50" 
+              stroke="#3b82f6" 
+              strokeWidth={2}
+              dot={false}
+              name="q50 (Median)"
+            />
+            <Line 
+              type="monotone" 
+              dataKey="q10" 
+              stroke="#ef4444" 
+              strokeWidth={1.5}
+              dot={false}
+              name="q10 (Lower)"
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div className="flex items-center justify-center gap-4 text-[10px]">
+        <div className="flex items-center gap-1">
+          <div className="w-3 h-0.5 bg-emerald-500 rounded" />
+          <span className="text-muted-foreground">q90</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <div className="w-3 h-0.5 bg-blue-500 rounded" />
+          <span className="text-muted-foreground">q50</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <div className="w-3 h-0.5 bg-red-500 rounded" />
+          <span className="text-muted-foreground">q10</span>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function ConeSignalCard() {
   const [isRecording, setIsRecording] = useState(false);
@@ -283,6 +444,10 @@ export function ConeSignalCard() {
                 </div>
               </div>
             </div>
+          )}
+
+          {signal.flowForecast && (
+            <FlowForecastChart flowForecast={signal.flowForecast} entryPrice={signal.entryPrice} />
           )}
 
           <div className="grid grid-cols-2 gap-3">

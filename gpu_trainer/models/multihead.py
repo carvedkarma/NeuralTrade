@@ -41,6 +41,10 @@ class MultiHeadOutput:
     
     # Candle prediction head outputs
     candle_deltas: Optional[torch.Tensor] = None  # [batch, n_steps, 3] for Δclose, Δhigh, Δlow
+    
+    # Flow Forecast heads (for regime-conditioned path generation)
+    vol_state_logits: Optional[torch.Tensor] = None  # [batch, 3] for CONTRACTION/NEUTRAL/EXPANSION
+    acceleration: Optional[torch.Tensor] = None      # [batch, 1] momentum change over horizon
 
 
 class QuantileHead(nn.Module):
@@ -307,6 +311,81 @@ class CandlePredictionHead(nn.Module):
         return candle_deltas
 
 
+class VolStateHead(nn.Module):
+    """
+    Volatility State Classification Head for Flow Forecast.
+    
+    Predicts 3-class volatility regime:
+    - 0: CONTRACTION (forward_vol/current_vol < 0.9)
+    - 1: NEUTRAL (0.9 <= ratio <= 1.1)
+    - 2: EXPANSION (ratio > 1.1)
+    
+    Used to shape alpha parameter in quantile path generation.
+    """
+    
+    VOL_STATE_NAMES = ["CONTRACTION", "NEUTRAL", "EXPANSION"]
+    
+    def __init__(self, input_dim: int, hidden_dim: int = 128, 
+                 num_classes: int = 3, dropout: float = 0.1):
+        super().__init__()
+        
+        self.num_classes = num_classes
+        
+        self.classifier = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, num_classes)
+        )
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Returns logits [batch, 3] for CONTRACTION/NEUTRAL/EXPANSION."""
+        return self.classifier(x)
+
+
+class AccelerationHead(nn.Module):
+    """
+    Acceleration Prediction Head for Flow Forecast.
+    
+    Predicts momentum change over horizon period:
+    acceleration = momentum_forward - momentum_now
+    
+    Where momentum = 4-bar return (for 15m, this is 1 hour momentum).
+    
+    Positive acceleration = momentum increasing (trend strengthening)
+    Negative acceleration = momentum decreasing (trend weakening)
+    
+    Used for path shaping - adjusts how quickly paths diverge.
+    """
+    
+    def __init__(self, input_dim: int, hidden_dim: int = 128, dropout: float = 0.1):
+        super().__init__()
+        
+        self.predictor = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 1)
+        )
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Returns acceleration prediction [batch, 1].
+        
+        Output is unbounded momentum change (typically -0.05 to +0.05).
+        Positive = momentum increasing, negative = momentum decreasing.
+        """
+        # Clamp output to reasonable range (±10% momentum change)
+        raw_accel = self.predictor(x)
+        return torch.tanh(raw_accel) * 0.10
+
+
 class ConstrainedCandleHead(nn.Module):
     """
     PHASE 2: Constrained candle parameterization.
@@ -484,12 +563,16 @@ class MultiHeadTransformer(BaseModel):
         
         self.global_pool = nn.AdaptiveAvgPool1d(1)
         
-        # Multi-head outputs (6 heads total)
+        # Multi-head outputs (8 heads total)
         self.class_head = ClassificationHead(d_model, d_model // 2, num_classes, dropout)
         self.regression_head = RegressionHead(d_model, d_model // 2, dropout, use_log_sigma=use_log_sigma)
         self.quantile_head = QuantileHead(d_model, d_model // 2, dropout)
         self.trading_head = TradingHead(d_model, d_model // 2, dropout)
         self.candle_head = CandlePredictionHead(d_model, d_model // 2, n_future_candles, dropout)
+        
+        # Flow Forecast heads (for regime-conditioned path generation)
+        self.vol_state_head = VolStateHead(d_model, d_model // 2, 3, dropout)
+        self.acceleration_head = AccelerationHead(d_model, d_model // 2, dropout)
         
         self._init_weights()
         
@@ -533,6 +616,8 @@ class MultiHeadTransformer(BaseModel):
         - quantiles: [batch, 5]
         - entry_offset, sl_distance, tp_distance: [batch, 1] each
         - candle_deltas: [batch, n_steps, 3]
+        - vol_state_logits: [batch, 3] for flow forecast
+        - acceleration: [batch, 1] for flow forecast
         """
         features = self.encode(x, mask)
         
@@ -542,6 +627,10 @@ class MultiHeadTransformer(BaseModel):
         entry_offset, sl_distance, tp_distance = self.trading_head(features)
         candle_deltas = self.candle_head(features)
         
+        # Flow Forecast heads
+        vol_state_logits = self.vol_state_head(features)
+        acceleration = self.acceleration_head(features)
+        
         return MultiHeadOutput(
             class_logits=class_logits,
             mu=mu,
@@ -550,7 +639,9 @@ class MultiHeadTransformer(BaseModel):
             entry_offset=entry_offset,
             sl_distance=sl_distance,
             tp_distance=tp_distance,
-            candle_deltas=candle_deltas
+            candle_deltas=candle_deltas,
+            vol_state_logits=vol_state_logits,
+            acceleration=acceleration
         )
     
     def predict_with_quantiles(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -627,12 +718,16 @@ class MultiHeadLSTM(BaseModel):
         # Output dimension is 2x hidden due to bidirectional
         encoder_dim = hidden_dim * 2
         
-        # Multi-head outputs (6 heads total)
+        # Multi-head outputs (8 heads total)
         self.class_head = ClassificationHead(encoder_dim, encoder_dim // 2, num_classes, dropout)
         self.regression_head = RegressionHead(encoder_dim, encoder_dim // 2, dropout, use_log_sigma=use_log_sigma)
         self.quantile_head = QuantileHead(encoder_dim, encoder_dim // 2, dropout)
         self.trading_head = TradingHead(encoder_dim, encoder_dim // 2, dropout)
         self.candle_head = CandlePredictionHead(encoder_dim, encoder_dim // 2, n_future_candles, dropout)
+        
+        # Flow Forecast heads
+        self.vol_state_head = VolStateHead(encoder_dim, encoder_dim // 2, 3, dropout)
+        self.acceleration_head = AccelerationHead(encoder_dim, encoder_dim // 2, dropout)
         
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Returns the final hidden state from LSTM."""
@@ -659,6 +754,8 @@ class MultiHeadLSTM(BaseModel):
         quantiles = self.quantile_head(features)
         entry_offset, sl_distance, tp_distance = self.trading_head(features)
         candle_deltas = self.candle_head(features)
+        vol_state_logits = self.vol_state_head(features)
+        acceleration = self.acceleration_head(features)
         
         return MultiHeadOutput(
             class_logits=class_logits,
@@ -668,7 +765,9 @@ class MultiHeadLSTM(BaseModel):
             entry_offset=entry_offset,
             sl_distance=sl_distance,
             tp_distance=tp_distance,
-            candle_deltas=candle_deltas
+            candle_deltas=candle_deltas,
+            vol_state_logits=vol_state_logits,
+            acceleration=acceleration
         )
 
 
@@ -714,12 +813,16 @@ class MultiHeadCNN(BaseModel):
         # Encoder output dimension
         encoder_dim = in_ch
         
-        # Multi-head outputs (6 heads total)
+        # Multi-head outputs (8 heads total)
         self.class_head = ClassificationHead(encoder_dim, encoder_dim // 2, num_classes, dropout)
         self.regression_head = RegressionHead(encoder_dim, encoder_dim // 2, dropout, use_log_sigma=use_log_sigma)
         self.quantile_head = QuantileHead(encoder_dim, encoder_dim // 2, dropout)
         self.trading_head = TradingHead(encoder_dim, encoder_dim // 2, dropout)
         self.candle_head = CandlePredictionHead(encoder_dim, encoder_dim // 2, n_future_candles, dropout)
+        
+        # Flow Forecast heads
+        self.vol_state_head = VolStateHead(encoder_dim, encoder_dim // 2, 3, dropout)
+        self.acceleration_head = AccelerationHead(encoder_dim, encoder_dim // 2, dropout)
         
     def _make_block(self, in_ch: int, out_ch: int, dropout: float) -> nn.Module:
         return nn.Sequential(
@@ -765,6 +868,8 @@ class MultiHeadCNN(BaseModel):
         quantiles = self.quantile_head(features)
         entry_offset, sl_distance, tp_distance = self.trading_head(features)
         candle_deltas = self.candle_head(features)
+        vol_state_logits = self.vol_state_head(features)
+        acceleration = self.acceleration_head(features)
         
         return MultiHeadOutput(
             class_logits=class_logits,
@@ -774,7 +879,9 @@ class MultiHeadCNN(BaseModel):
             entry_offset=entry_offset,
             sl_distance=sl_distance,
             tp_distance=tp_distance,
-            candle_deltas=candle_deltas
+            candle_deltas=candle_deltas,
+            vol_state_logits=vol_state_logits,
+            acceleration=acceleration
         )
 
 
@@ -844,12 +951,16 @@ class MultiHeadGNN(BaseModel):
             nn.Sigmoid()
         )
         
-        # Multi-head outputs
+        # Multi-head outputs (8 heads total)
         self.class_head = ClassificationHead(hidden_dim, num_classes)
         self.regression_head = RegressionHead(hidden_dim, use_log_sigma=use_log_sigma)
         self.quantile_head = QuantileHead(hidden_dim, num_quantiles)
         self.trading_head = TradingHead(hidden_dim)
         self.candle_head = CandlePredictionHead(hidden_dim, n_future_steps=n_future_candles)
+        
+        # Flow Forecast heads
+        self.vol_state_head = VolStateHead(hidden_dim, hidden_dim // 2, 3, dropout)
+        self.acceleration_head = AccelerationHead(hidden_dim, hidden_dim // 2, dropout)
     
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Extract features using temporal + attention encoding."""
@@ -884,6 +995,8 @@ class MultiHeadGNN(BaseModel):
         quantiles = self.quantile_head(features)
         entry_offset, sl_distance, tp_distance = self.trading_head(features)
         candle_deltas = self.candle_head(features)
+        vol_state_logits = self.vol_state_head(features)
+        acceleration = self.acceleration_head(features)
         
         return MultiHeadOutput(
             class_logits=class_logits,
@@ -893,7 +1006,9 @@ class MultiHeadGNN(BaseModel):
             entry_offset=entry_offset,
             sl_distance=sl_distance,
             tp_distance=tp_distance,
-            candle_deltas=candle_deltas
+            candle_deltas=candle_deltas,
+            vol_state_logits=vol_state_logits,
+            acceleration=acceleration
         )
 
 
@@ -960,12 +1075,16 @@ class MultiHeadVAE(BaseModel):
         decoder_layers.append(nn.Linear(hidden_dims[0], input_dim * sequence_length))
         self.decoder = nn.Sequential(*decoder_layers)
         
-        # Multi-head outputs (from latent space)
+        # Multi-head outputs (8 heads total, from latent space)
         self.class_head = ClassificationHead(latent_dim, num_classes)
         self.regression_head = RegressionHead(latent_dim, use_log_sigma=use_log_sigma)
         self.quantile_head = QuantileHead(latent_dim, num_quantiles)
         self.trading_head = TradingHead(latent_dim)
         self.candle_head = CandlePredictionHead(latent_dim, n_future_steps=n_future_candles)
+        
+        # Flow Forecast heads
+        self.vol_state_head = VolStateHead(latent_dim, latent_dim // 2, 3, dropout)
+        self.acceleration_head = AccelerationHead(latent_dim, latent_dim // 2, dropout)
     
     def encode_to_latent(self, x: torch.Tensor) -> tuple:
         """Encode input to latent distribution parameters (mu, log_var)."""
@@ -1008,6 +1127,8 @@ class MultiHeadVAE(BaseModel):
         quantiles = self.quantile_head(features)
         entry_offset, sl_distance, tp_distance = self.trading_head(features)
         candle_deltas = self.candle_head(features)
+        vol_state_logits = self.vol_state_head(features)
+        acceleration = self.acceleration_head(features)
         
         return MultiHeadOutput(
             class_logits=class_logits,
@@ -1017,7 +1138,9 @@ class MultiHeadVAE(BaseModel):
             entry_offset=entry_offset,
             sl_distance=sl_distance,
             tp_distance=tp_distance,
-            candle_deltas=candle_deltas
+            candle_deltas=candle_deltas,
+            vol_state_logits=vol_state_logits,
+            acceleration=acceleration
         )
     
     def forward_with_reconstruction(self, x: torch.Tensor) -> tuple:
@@ -1123,12 +1246,16 @@ class MultiHeadTFT(BaseModel):
         # Positional encoding
         self.pos_encoding = PositionalEncoding(d_model, max_len=500, dropout=dropout)
         
-        # Multi-head outputs (6 heads total)
+        # Multi-head outputs (8 heads total)
         self.class_head = ClassificationHead(d_model, d_model // 2, num_classes, dropout)
         self.regression_head = RegressionHead(d_model, d_model // 2, dropout, use_log_sigma=use_log_sigma)
         self.quantile_head = QuantileHead(d_model, d_model // 2, dropout)
         self.trading_head = TradingHead(d_model, d_model // 2, dropout)
         self.candle_head = CandlePredictionHead(d_model, d_model // 2, n_future_candles, dropout)
+        
+        # Flow Forecast heads
+        self.vol_state_head = VolStateHead(d_model, d_model // 2, 3, dropout)
+        self.acceleration_head = AccelerationHead(d_model, d_model // 2, dropout)
         
         self._init_weights()
     
@@ -1187,6 +1314,8 @@ class MultiHeadTFT(BaseModel):
         - quantiles: [batch, 5]
         - entry_offset, sl_distance, tp_distance: [batch, 1] each
         - candle_deltas: [batch, n_steps, 3]
+        - vol_state_logits: [batch, 3] for flow forecast
+        - acceleration: [batch, 1] for flow forecast
         """
         features = self.encode(x)
         
@@ -1195,6 +1324,8 @@ class MultiHeadTFT(BaseModel):
         quantiles = self.quantile_head(features)
         entry_offset, sl_distance, tp_distance = self.trading_head(features)
         candle_deltas = self.candle_head(features)
+        vol_state_logits = self.vol_state_head(features)
+        acceleration = self.acceleration_head(features)
         
         return MultiHeadOutput(
             class_logits=class_logits,
@@ -1204,7 +1335,9 @@ class MultiHeadTFT(BaseModel):
             entry_offset=entry_offset,
             sl_distance=sl_distance,
             tp_distance=tp_distance,
-            candle_deltas=candle_deltas
+            candle_deltas=candle_deltas,
+            vol_state_logits=vol_state_logits,
+            acceleration=acceleration
         )
     
     def predict_with_quantiles(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -1233,6 +1366,8 @@ class MultiHeadTFT(BaseModel):
                 'sl_distance': output.sl_distance,
                 'tp_distance': output.tp_distance,
                 'candle_deltas': output.candle_deltas,
+                'vol_state_logits': output.vol_state_logits,
+                'acceleration': output.acceleration,
             }
     
     def get_attention_weights(self, x: torch.Tensor) -> List[torch.Tensor]:

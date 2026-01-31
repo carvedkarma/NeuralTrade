@@ -1418,13 +1418,15 @@ class MultiHeadPredictionResponse(BaseModel):
     """
     Unified multihead prediction response.
     
-    Returns ALL 6 heads from multi-head models:
+    Returns ALL 8 heads from multi-head models:
     1. Direction (classification)
     2. Expected return (mu) and uncertainty (sigma)
     3. Quantiles (q10, q25, q50, q75, q90)
     4. Trading levels (entry_offset, sl_distance, tp_distance)
     5. Future candle predictions
     6. Derived trade plan
+    7. Vol state (flow forecast) - volatility regime classification
+    8. Acceleration (flow forecast) - momentum change prediction
     """
     # Direction
     action: str  # LONG, SHORT, HOLD
@@ -1452,6 +1454,15 @@ class MultiHeadPredictionResponse(BaseModel):
     
     # Future candle predictions (optional)
     predicted_candles: Optional[List[Dict[str, float]]] = None  # [{close_delta, high_delta, low_delta}, ...]
+    
+    # Flow Forecast (volatility regime + acceleration)
+    vol_state: str  # "contraction", "neutral", "expansion"
+    vol_state_probs: Dict[str, float]  # P(contraction), P(neutral), P(expansion)
+    acceleration: float  # momentum change prediction
+    forecast_mode: str  # "QUANTILE_PATHS" or "NO_FORECAST" (gated)
+    
+    # Quantile path projections (for UI rendering)
+    quantile_paths: Optional[Dict[str, List[float]]] = None  # {q10: [...], q50: [...], q90: [...]}
     
     # Trade plan
     suggested_order_type: str  # MAKER or TAKER
@@ -1869,6 +1880,13 @@ async def predict_multihead_from_candles(request: CandlePredictionRequest):
         learned_tp_distance = output.tp_distance.cpu().item()  # Keep for debugging
         candle_deltas = output.candle_deltas.cpu().numpy()[0]  # [n_steps, 3]
         
+        # Flow Forecast: Extract vol_state and acceleration
+        vol_state_probs_raw = F.softmax(output.vol_state_logits, dim=-1).cpu().numpy()[0] if output.vol_state_logits is not None else np.array([0.0, 1.0, 0.0])
+        acceleration_pred = output.acceleration.cpu().item() if output.acceleration is not None else 0.0
+        vol_state_idx = int(np.argmax(vol_state_probs_raw))
+        VOL_STATE_NAMES = ["contraction", "neutral", "expansion"]
+        vol_state_name = VOL_STATE_NAMES[vol_state_idx]
+        
         # PHASE 1b: Handle log_sigma output
         # If model uses log_sigma, convert to sigma: σ = exp(log_sigma)
         use_log_sigma = getattr(multihead_model, 'use_log_sigma', True)  # Default to True for new models
@@ -1970,6 +1988,30 @@ async def predict_multihead_from_candles(request: CandlePredictionRequest):
                 "low_delta": float(candle_deltas[i, 2])
             })
         
+        # Flow Forecast: Generate quantile paths with alpha shaping
+        # Alpha controls path curvature: contraction=0.7, neutral=1.0, expansion=1.5
+        ALPHA_MAP = {"contraction": 0.7, "neutral": 1.0, "expansion": 1.5}
+        alpha = ALPHA_MAP.get(vol_state_name, 1.0)
+        
+        # Volatility gate: NO_FORECAST when vol_state==contraction OR spread too narrow
+        spread = q75 - q25  # IQR as percentage return
+        min_spread = 3 * cost  # Must exceed 3x trading cost
+        
+        if vol_state_name == "contraction" or spread < min_spread:
+            forecast_mode = "NO_FORECAST"
+            quantile_paths = None
+        else:
+            forecast_mode = "QUANTILE_PATHS"
+            # Generate paths: path[k] = close * exp((k/h)^α * quantile)
+            horizon = 16  # 16 bars = 4 hours at 15m
+            steps = list(range(1, horizon + 1))
+            
+            quantile_paths = {
+                "q10": [float(current_price * np.exp((k / horizon) ** alpha * q10)) for k in steps],
+                "q50": [float(current_price * np.exp((k / horizon) ** alpha * q50)) for k in steps],
+                "q90": [float(current_price * np.exp((k / horizon) ** alpha * q90)) for k in steps],
+            }
+        
         # Build reasons with institutional-grade details
         reasons = [
             f"Model prediction: {action} with {confidence:.1%} confidence",
@@ -1980,7 +2022,9 @@ async def predict_multihead_from_candles(request: CandlePredictionRequest):
             f"Entry offset: {entry_offset*100:.3f}%",
             f"SL: {sl_distance*100:.2f}% (from q{10 if action=='LONG' else 90}), TP: {tp_distance*100:.2f}% (from q{90 if action=='LONG' else 10})",
             f"[Debug] Learned SL/TP: {learned_sl_distance*100:.2f}%/{learned_tp_distance*100:.2f}%",
-            f"Risk:Reward = 1:{rr_ratio:.2f}"
+            f"Risk:Reward = 1:{rr_ratio:.2f}",
+            f"Vol State: {vol_state_name} (α={alpha:.1f}), Acceleration: {acceleration_pred:.4f}",
+            f"Forecast Mode: {forecast_mode}" + (f" (spread {spread*100:.3f}% < {min_spread*100:.3f}% min)" if forecast_mode == "NO_FORECAST" else "")
         ]
         
         return MultiHeadPredictionResponse(
@@ -2009,6 +2053,15 @@ async def predict_multihead_from_candles(request: CandlePredictionRequest):
             stop_loss_price=stop_loss_price,
             take_profit_price=take_profit_price,
             predicted_candles=predicted_candles,
+            vol_state=vol_state_name,
+            vol_state_probs={
+                "contraction": float(vol_state_probs_raw[0]),
+                "neutral": float(vol_state_probs_raw[1]),
+                "expansion": float(vol_state_probs_raw[2])
+            },
+            acceleration=float(acceleration_pred),
+            forecast_mode=forecast_mode,
+            quantile_paths=quantile_paths,
             suggested_order_type=suggested_order_type,
             urgency=urgency,
             position_size_pct=position_size,

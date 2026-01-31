@@ -384,6 +384,50 @@ class RegressionTargetGenerator:
         # We predict log_sigma (unbounded) and exp it to get sigma (always positive)
         log_sigma = np.log(sigma_safe)
         
+        # ============================================================
+        # FLOW FORECAST: VOL_STATE AND ACCELERATION TARGETS
+        # ============================================================
+        # Vol_state: Volatility regime prediction (expansion/neutral/contraction)
+        # forward_vol / current_vol ratio determines regime:
+        #   < 0.9 = contraction (0)
+        #   0.9 - 1.1 = neutral (1)
+        #   > 1.1 = expansion (2)
+        
+        # Forward volatility over horizon
+        forward_vol = self.compute_forward_volatility(prices)
+        forward_vol_safe = forward_vol.fillna(current_vol)
+        current_vol_safe = current_vol.fillna(0.01)
+        
+        vol_ratio = forward_vol_safe / current_vol_safe.clip(lower=0.001)
+        vol_state = pd.Series(1, index=df.index, dtype=int)  # Default neutral
+        vol_state[vol_ratio < 0.9] = 0   # Contraction
+        vol_state[vol_ratio > 1.1] = 2   # Expansion
+        
+        # Log vol_state distribution
+        n_contraction = (vol_state == 0).sum()
+        n_neutral = (vol_state == 1).sum()
+        n_expansion = (vol_state == 2).sum()
+        total = max(1, n_contraction + n_neutral + n_expansion)
+        logger.info(f"Vol_state distribution: CONTRACTION={n_contraction} ({n_contraction/total*100:.1f}%), "
+                   f"NEUTRAL={n_neutral} ({n_neutral/total*100:.1f}%), "
+                   f"EXPANSION={n_expansion} ({n_expansion/total*100:.1f}%)")
+        
+        # Acceleration: momentum change = momentum_forward - momentum_now
+        # Momentum = 4-bar return (for 15m, this is 1 hour momentum)
+        momentum_window = min(4, self.horizon_periods // 4) if self.horizon_periods >= 4 else 1
+        momentum_now = (prices / prices.shift(momentum_window) - 1).fillna(0)
+        
+        # Forward momentum: return from horizon-4 to horizon
+        forward_prices = prices.shift(-self.horizon_periods)
+        forward_prices_back = prices.shift(-(self.horizon_periods - momentum_window))
+        momentum_forward = (forward_prices / forward_prices_back - 1).fillna(0)
+        
+        # Acceleration = momentum change over horizon
+        acceleration = momentum_forward - momentum_now
+        
+        logger.info(f"Acceleration stats: mean={acceleration.mean():.6f}, std={acceleration.std():.6f}, "
+                   f"min={acceleration.min():.6f}, max={acceleration.max():.6f}")
+        
         targets = pd.DataFrame({
             "mu": mu,
             "sigma": sigma,
@@ -398,6 +442,9 @@ class RegressionTargetGenerator:
             "entry_offset": entry_offset,
             "sl_distance": sl_distance,
             "tp_distance": tp_distance,
+            "vol_state": vol_state,  # Flow forecast: 0=contraction, 1=neutral, 2=expansion
+            "acceleration": acceleration,  # Flow forecast: momentum change over horizon
+            "vol_ratio": vol_ratio,  # For debugging
             **candle_targets
         })
         

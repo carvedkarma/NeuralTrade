@@ -46,6 +46,8 @@ class MultiHeadDataset(Dataset):
     - trading_targets: [3] tensor (entry_offset, sl_distance, tp_distance)
     - candle_targets: [n_future, 3] tensor (close, high, low deltas)
     - regime_id: int (0=BULL, 1=BEAR, 2=HIGH_VOL, 3=LOW_VOL_CHOP) - for training balance only
+    - vol_state: int (0=contraction, 1=neutral, 2=expansion) - Flow Forecast target
+    - acceleration: float (momentum change) - Flow Forecast target
     """
     
     def __init__(
@@ -58,6 +60,8 @@ class MultiHeadDataset(Dataset):
         tp_distance: Optional[np.ndarray] = None,
         candle_targets: Optional[np.ndarray] = None,
         regime_ids: Optional[np.ndarray] = None,
+        vol_state: Optional[np.ndarray] = None,
+        acceleration: Optional[np.ndarray] = None,
         n_future_candles: int = 5,
         sequence_length: int = 100
     ):
@@ -86,6 +90,10 @@ class MultiHeadDataset(Dataset):
         
         # Regime IDs for balanced training (0=BULL, 1=BEAR, 2=HIGH_VOL, 3=LOW_VOL_CHOP)
         self.regime_ids = regime_ids.astype(np.int64) if regime_ids is not None else None
+        
+        # Flow Forecast targets - optional for backward compatibility
+        self.vol_state = vol_state.astype(np.int64) if vol_state is not None else None
+        self.acceleration = to_float_array(acceleration)
         
         # Create sequences
         self.valid_indices = list(range(sequence_length, len(features)))
@@ -120,12 +128,18 @@ class MultiHeadDataset(Dataset):
         else:
             c = np.zeros((self.n_future_candles, 3), dtype=np.float32)
         
+        # Flow Forecast targets
+        vol_state = self.vol_state[actual_idx] if self.vol_state is not None else 1  # default neutral
+        accel = self.acceleration[actual_idx] if self.acceleration is not None else 0.0
+        
         return (
             torch.from_numpy(seq),
             torch.tensor(self.class_labels[actual_idx]),
             torch.tensor(self.forward_returns[actual_idx]),
             torch.from_numpy(trading),
-            torch.from_numpy(c)
+            torch.from_numpy(c),
+            torch.tensor(vol_state, dtype=torch.long),
+            torch.tensor(accel, dtype=torch.float32)
         )
     
     def get_regime_ids_for_valid_indices(self) -> np.ndarray:
@@ -275,22 +289,38 @@ class MultiHeadTrainer:
         self.writer = SummaryWriter(log_dir)
         
     def train_epoch(self, epoch: int) -> Dict[str, float]:
-        """Train one epoch with multi-head outputs (all 6 heads)."""
+        """Train one epoch with multi-head outputs (all 8 heads)."""
         self.model.train()
         
         total_losses = {
             'total': 0.0, 'class': 0.0, 'mu': 0.0, 
-            'sigma': 0.0, 'quantile': 0.0, 'trading': 0.0, 'candle': 0.0
+            'sigma': 0.0, 'quantile': 0.0, 'trading': 0.0, 'candle': 0.0,
+            'vol_state': 0.0, 'acceleration': 0.0
         }
         correct = 0
         total = 0
         
-        for batch_idx, (features, class_labels, returns, trading, candle_tgt) in enumerate(self.train_loader):
+        for batch_idx, batch_data in enumerate(self.train_loader):
+            # Handle both 5-item (legacy) and 7-item (with flow forecast) batches
+            if len(batch_data) == 7:
+                features, class_labels, returns, trading, candle_tgt, vol_state_tgt, accel_tgt = batch_data
+            else:
+                # Legacy 5-item format
+                features, class_labels, returns, trading, candle_tgt = batch_data
+                vol_state_tgt = None
+                accel_tgt = None
+            
             features = features.to(self.device)
             class_labels = class_labels.to(self.device)
             returns = returns.to(self.device)
             trading = trading.to(self.device)  # [batch, 3]
             candle_tgt = candle_tgt.to(self.device)  # [batch, n_future, 3]
+            
+            # Flow Forecast targets
+            if vol_state_tgt is not None:
+                vol_state_tgt = vol_state_tgt.to(self.device)
+            if accel_tgt is not None:
+                accel_tgt = accel_tgt.to(self.device)
             
             self.optimizer.zero_grad()
             
@@ -304,7 +334,7 @@ class MultiHeadTrainer:
                 "tp_distance": trading[:, 2:3],
             }
             
-            # Compute combined loss (all 6 heads)
+            # Compute combined loss (all 8 heads)
             losses = self.criterion(
                 class_logits=output.class_logits,
                 mu=output.mu,
@@ -317,7 +347,11 @@ class MultiHeadTrainer:
                 tp_distance=output.tp_distance,
                 candle_deltas=output.candle_deltas,
                 trading_targets=trading_targets,
-                candle_targets=candle_tgt
+                candle_targets=candle_tgt,
+                vol_state_logits=output.vol_state_logits,
+                vol_state_targets=vol_state_tgt,
+                acceleration_pred=output.acceleration,
+                acceleration_targets=accel_tgt
             )
             
             loss = losses['total']
@@ -349,12 +383,13 @@ class MultiHeadTrainer:
         return avg_losses
     
     def validate(self) -> Dict[str, float]:
-        """Validate with all heads (6 heads)."""
+        """Validate with all heads (8 heads)."""
         self.model.eval()
         
         total_losses = {
             'total': 0.0, 'class': 0.0, 'mu': 0.0,
-            'sigma': 0.0, 'quantile': 0.0, 'trading': 0.0, 'candle': 0.0
+            'sigma': 0.0, 'quantile': 0.0, 'trading': 0.0, 'candle': 0.0,
+            'vol_state': 0.0, 'acceleration': 0.0
         }
         correct = 0
         total = 0
@@ -368,12 +403,26 @@ class MultiHeadTrainer:
         quantile_count = 0
         
         with torch.no_grad():
-            for features, class_labels, returns, trading, candle_tgt in self.val_loader:
+            for batch_data in self.val_loader:
+                # Handle both 5-item (legacy) and 7-item (with flow forecast) batches
+                if len(batch_data) == 7:
+                    features, class_labels, returns, trading, candle_tgt, vol_state_tgt, accel_tgt = batch_data
+                else:
+                    features, class_labels, returns, trading, candle_tgt = batch_data
+                    vol_state_tgt = None
+                    accel_tgt = None
+                
                 features = features.to(self.device)
                 class_labels = class_labels.to(self.device)
                 returns = returns.to(self.device)
                 trading = trading.to(self.device)
                 candle_tgt = candle_tgt.to(self.device)
+                
+                # Flow Forecast targets
+                if vol_state_tgt is not None:
+                    vol_state_tgt = vol_state_tgt.to(self.device)
+                if accel_tgt is not None:
+                    accel_tgt = accel_tgt.to(self.device)
                 
                 output = self.model.forward_multihead(features)
                 
@@ -396,7 +445,11 @@ class MultiHeadTrainer:
                     tp_distance=output.tp_distance,
                     candle_deltas=output.candle_deltas,
                     trading_targets=trading_targets,
-                    candle_targets=candle_tgt
+                    candle_targets=candle_tgt,
+                    vol_state_logits=output.vol_state_logits,
+                    vol_state_targets=vol_state_tgt,
+                    acceleration_pred=output.acceleration,
+                    acceleration_targets=accel_tgt
                 )
                 
                 for key in total_losses:

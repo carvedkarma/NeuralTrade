@@ -500,6 +500,15 @@ export async function registerRoutes(
       let mu = 0;
       let sigma: number | undefined;
       
+      // Flow forecast from GPU trainer
+      let flowForecast: {
+        volState: "contraction" | "neutral" | "expansion";
+        volStateProbs: { contraction: number; neutral: number; expansion: number };
+        acceleration: number;
+        forecastMode: "QUANTILE_PATHS" | "NO_FORECAST";
+        quantilePaths?: { q10: number[]; q50: number[]; q90: number[] };
+      } | undefined;
+      
       // Try GPU prediction first
       if (gpuStatus.connected && gpuStatus.modelsLoaded.length > 0) {
         try {
@@ -516,6 +525,17 @@ export async function registerRoutes(
               };
               mu = prediction.mu || 0;
               sigma = prediction.sigma;
+              
+              // Extract flow forecast data if available
+              if (prediction.vol_state && prediction.forecast_mode) {
+                flowForecast = {
+                  volState: prediction.vol_state,
+                  volStateProbs: prediction.vol_state_probs || { contraction: 0.33, neutral: 0.34, expansion: 0.33 },
+                  acceleration: prediction.acceleration || 0,
+                  forecastMode: prediction.forecast_mode,
+                  quantilePaths: prediction.quantile_paths,
+                };
+              }
             }
           }
         } catch (e) {
@@ -547,7 +567,7 @@ export async function registerRoutes(
         sigma = projectedStd;
       }
       
-      // Generate cone signal
+      // Generate cone signal with optional flow forecast
       const signal = coneSignalGenerator.generateSignal({
         currentPrice,
         quantiles,
@@ -555,6 +575,7 @@ export async function registerRoutes(
         mu,
         sigma,
         timestamp: lastCandle.timestamp,
+        flowForecast,
       });
       
       // Get generator stats
