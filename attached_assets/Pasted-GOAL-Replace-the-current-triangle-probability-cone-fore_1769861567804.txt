@@ -1,0 +1,147 @@
+GOAL: Replace the current “triangle / probability cone” forecast with a BTC “flow forecast” that is regime-aware and quantile-based. Implement the top 4 upgrades:
+
+(1) Predict returns + volatility state (not raw price)
+(2) Quantile path projection (q10/q50/q90 paths) instead of a symmetric widening fan
+(3) Volatility gate (suppress forecasts in chop/compression)
+(4) Predict acceleration (momentum change) to detect flow impulses
+
+CONSTRAINTS:
+- STF only (BTCUSDT 15m)
+- Horizon = 16 bars (4h)
+- Keep existing pipeline, but add these outputs + logic.
+- MUST avoid leakage (only use completed candles).
+
+================================================================
+(1) RETURN + VOL STATE HEADS (replace raw price forecast)
+================================================================
+A) Training targets (data/regression_targets.py or equivalent)
+- Define forward log-return over horizon:
+  y_ret = log(close[t+h] / close[t])
+- Define realized forward volatility over the same horizon:
+  y_vol = std( log(close[t+1:t+h] / close[t:t+h-1]) )
+- Define vol_state label using current vs forward vol:
+  vol_ratio = forward_vol / rolling_vol_now
+  vol_state = 0 if vol_ratio < 0.9 (contraction)
+             1 if 0.9 <= vol_ratio <= 1.1 (neutral)
+             2 if vol_ratio > 1.1 (expansion)
+(rolling_vol_now can be rolling std of returns over lookback e.g. 32-64 bars)
+
+B) Model outputs (models/multihead*.py)
+- Add output heads:
+  - return_mu (scalar)
+  - return_log_sigma (scalar)  # use NLL
+  - vol_state_logits (3-class)
+Keep existing direction head optional, but DO NOT rely on it as primary.
+
+C) Loss (training/multihead_loss.py)
+- Return loss: Gaussian NLL using (mu, log_sigma) against y_ret
+- Vol-state loss: cross-entropy against vol_state
+- Keep quantile pinball loss (see section 2)
+
+================================================================
+(2) QUANTILE PATH PROJECTION (replace triangle cone)
+================================================================
+A) Predict return quantiles at horizon h (already have quantiles? extend if needed):
+- q10, q25, q50, q75, q90 of the forward return distribution.
+Loss: pinball for each quantile.
+
+B) Convert quantiles into PRICE levels at horizon:
+- price_qX = current_close * exp(qX)
+
+C) Build PATHS, not just endpoints:
+We need a path for 16 steps (not a straight linear cone).
+Implement a simple “shared early slope then diverge” path generator:
+
+Inputs:
+- current_close
+- q10,q50,q90 (returns for horizon)
+- predicted vol_state (expansion/neutral/contraction)
+- predicted acceleration score (section 4)
+
+Path function:
+- Define a shape parameter alpha based on vol_state:
+  alpha = 1.5 for expansion (moves happen earlier)
+  alpha = 1.0 for neutral
+  alpha = 0.7 for contraction (moves happen later)
+- For step k=1..h:
+  frac = (k/h) ** alpha
+  path_qX[k] = current_close * exp(frac * qX)
+
+This produces curves that feel like “flow” instead of a linear fan.
+
+D) UI:
+- Replace triangle fan with 3 lines/bands:
+  - q10 path (lower band)
+  - q50 path (median)
+  - q90 path (upper band)
+Optionally fill between q10-q90 as the confidence band (but NOT a symmetric triangle).
+
+================================================================
+(3) VOLATILITY GATE (suppress forecasts in chop)
+================================================================
+A) Compute a “tradeable forecast gate” signal:
+- Use predicted vol_state and predicted distribution width:
+  spread = q75 - q25  (in return units)
+- Define cost in return terms (e.g. 0.0009 for 0.09%)
+Gate rule:
+- If vol_state == contraction OR spread < 3*cost:
+    ForecastMode = "NO_FORECAST" and Signal = HOLD
+  else:
+    ForecastMode = "FLOW_FORECAST"
+
+B) UI behavior:
+- If NO_FORECAST: do NOT draw projection cone.
+- Instead display: “No tradeable flow: compression regime”
+
+This is crucial: forcing a forecast always creates a triangle.
+
+================================================================
+(4) ACCELERATION HEAD (detect impulse flow)
+================================================================
+A) Define acceleration target:
+We want change in momentum / trend strength across next horizon.
+Example target:
+- mom_now = return over last 4 bars: log(close[t]/close[t-4])
+- mom_fwd = return over next 4 bars: log(close[t+4]/close[t])
+- y_accel = mom_fwd - mom_now
+
+Alternative (smoother):
+- y_accel = (EMA_fast_return_fwd - EMA_slow_return_fwd) - (EMA_fast_return_now - EMA_slow_return_now)
+
+B) Model output:
+- accel_pred (scalar regression)
+Loss: Huber/MSE on y_accel
+
+C) Use accel_pred to shape path and gating:
+- If accel_pred near 0 => suppress direction + use neutral alpha
+- If accel_pred positive and large => bullish flow, alpha higher (earlier move)
+- If accel_pred negative and large => bearish flow, alpha higher (earlier move downward)
+- Also optionally require |accel_pred| > accel_min as an additional trade filter.
+
+================================================================
+INTEGRATION NOTES (IMPORTANT)
+================================================================
+1) Keep STF only. Do not call any MTF code path.
+2) Save model artifacts with meta.json + features.json so inference uses identical schema.
+3) Add API response fields:
+- return_mu, return_sigma
+- vol_state (contraction/neutral/expansion) + prob
+- accel_pred
+- quantiles
+- paths: path_q10[], path_q50[], path_q90[] (16 points each)
+- forecast_mode (NO_FORECAST vs FLOW_FORECAST)
+4) Update the UI:
+- If forecast_mode == NO_FORECAST: show “compression / low opportunity”
+- Else draw three quantile paths (q10/q50/q90) and optional band.
+
+DELIVERABLES / SUCCESS CRITERIA
+================================================================
+- The projection is NOT a generic widening triangle anymore.
+- In chop: forecast_mode=NO_FORECAST and no cone drawn.
+- In impulse regimes: tight directional quantile paths that move earlier.
+- Backtest metrics improve when gating is enabled:
+  trades drop, expectancy increases.
+
+Do it in 2 steps:
+STEP 1: add targets + heads + API fields (no UI changes)
+STEP 2: implement path generator + gating + UI rendering changes.
