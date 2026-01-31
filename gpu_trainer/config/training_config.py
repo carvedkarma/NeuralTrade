@@ -161,9 +161,9 @@ class Config:
     seed: int = 42
     num_workers: int = 4
     
-    base_dir: Path = Path(__file__).parent
-    data_dir: Path = field(default_factory=lambda: Path(__file__).parent / "data_cache")
-    model_dir: Path = field(default_factory=lambda: Path(__file__).parent / "saved_models")
+    base_dir: Path = Path(__file__).parent.parent  # gpu_trainer directory
+    data_dir: Path = field(default_factory=lambda: Path(__file__).parent.parent / "data_cache")
+    model_dir: Path = field(default_factory=lambda: Path(__file__).parent.parent / "saved_models")
     
     db_url: str = os.getenv("DATABASE_URL", "postgresql://localhost:5432/btc_signals")
     redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379")

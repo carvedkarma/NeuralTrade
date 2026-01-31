@@ -15,7 +15,22 @@ from .timeframe_config import (
     get_default_cost,
 )
 
+# Re-export training configuration classes (previously in config.py)
+from .training_config import (
+    Config,
+    config,
+    DataConfig,
+    ModelConfig,
+    TrainingConfig,
+    RLConfig,
+    HorizonConfig,
+    NoTradeConfig,
+    CostModeConfig,
+    InstitutionConfig,
+)
+
 __all__ = [
+    # Timeframe configuration
     "TimeframeConfig",
     "TIMEFRAME_CONFIGS",
     "DEFAULT_TIMEFRAME",
@@ -24,4 +39,15 @@ __all__ = [
     "get_horizon_for_timeframe",
     "get_lookback_for_timeframe",
     "get_default_cost",
+    # Training configuration (from original config.py)
+    "Config",
+    "config",
+    "DataConfig",
+    "ModelConfig",
+    "TrainingConfig",
+    "RLConfig",
+    "HorizonConfig",
+    "NoTradeConfig",
+    "CostModeConfig",
+    "InstitutionConfig",
 ]
