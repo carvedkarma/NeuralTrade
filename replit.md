@@ -127,3 +127,13 @@ Preferred communication style: Simple, everyday language.
 - **Re-anchoring Logic**: Predicted candle prices are converted back to returns relative to ticker price, then re-applied to last candle close: `anchoredPrice = lastCandleClose * (1 + (predictedPrice / tickerPrice - 1))`.
 - **STALE Warning**: Amber warning banner appears when `|lastCandleClose - tickerPrice| / tickerPrice > 0.2%` with "Refresh Data" button.
 - **Quantile Components**: QuantileFanChart and DerivedTradeLevels receive lastCandleClose as currentPrice with quantiles unchanged (since quantiles are returns, not absolute prices).
+
+### Probability Cone Visualization (Chart Component)
+- **Interface**: `HorizonQuantiles` with q10/q25/q50/q75/q90 as decimal returns.
+- **Props**: `horizonQuantiles` (quantile values) and `horizonBars` (forecast horizon in candles, default 16).
+- **Outer Cone**: q10-q90 triangle representing 80% confidence interval (lighter fill).
+- **Inner Cone**: q25-q75 triangle representing 50% confidence interval (darker fill).
+- **Median Line**: Dashed line from last candle close to q50 target price.
+- **Horizon Markers**: Price labels at horizon end showing exact target prices for each quantile.
+- **Separator**: Dashed vertical line with "NEURAL NETWORK PREDICTION" label marks forecast zone.
+- **Deprecated**: Old `predictedCandles` prop (per-bar synthetic candles) kept for backward compatibility but replaced by cone visualization.
