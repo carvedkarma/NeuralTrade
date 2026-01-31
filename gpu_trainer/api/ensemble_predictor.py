@@ -155,32 +155,70 @@ class EnsemblePredictor:
         logger.info(f"  Risk models: {list(self.risk_models.keys())}")
     
     def _load_or_create_weights(self) -> Dict[str, ModelWeight]:
-        """Load walk-forward metric weights or create defaults."""
+        """
+        Load walk-forward metric weights. MANDATORY for production.
+        
+        PHASE 3: Ensemble weights are now MANDATORY.
+        - Training must run walk-forward evaluation and save model_weights.json
+        - Using default weights produces LOUD WARNINGS
+        - Call save_walk_forward_weights() after training to populate
+        """
         weights_path = Path(__file__).parent.parent / "checkpoints" / "model_weights.json"
+        self._using_default_weights = False  # Track if we're using defaults
         
         if weights_path.exists():
             try:
                 with open(weights_path) as f:
                     data = json.load(f)
-                return {
+                loaded_weights = {
                     name: ModelWeight(**w) for name, w in data.items()
                 }
+                logger.info(f"Loaded {len(loaded_weights)} model weights from {weights_path}")
+                for name, w in loaded_weights.items():
+                    logger.info(f"  {name}: expectancy={w.expectancy:.4f}, sharpe={w.sharpe:.2f}")
+                return loaded_weights
             except Exception as e:
-                logger.warning(f"Failed to load model weights: {e}")
+                logger.error(f"CRITICAL: Failed to load model weights: {e}")
+                logger.error(f"  Path: {weights_path}")
         
-        # Create default weights for all models
+        # =========================================================================
+        # PHASE 3: LOUD WARNING - Using default weights is NOT recommended
+        # =========================================================================
+        self._using_default_weights = True
+        
+        logger.warning("=" * 80)
+        logger.warning("CRITICAL: model_weights.json NOT FOUND - USING DEFAULT WEIGHTS")
+        logger.warning("=" * 80)
+        logger.warning("")
+        logger.warning("  This means ensemble predictions are NOT using real walk-forward metrics!")
+        logger.warning("  Models are weighted equally with placeholder values.")
+        logger.warning("")
+        logger.warning("  To fix this:")
+        logger.warning("    1. Run walk-forward training: evaluate_and_save_model_weights()")
+        logger.warning("    2. This computes real expectancy, Sharpe, profit factor per model")
+        logger.warning("    3. Weights saved to: checkpoints/model_weights.json")
+        logger.warning("")
+        logger.warning("  Production systems MUST have real weights for proper model voting.")
+        logger.warning("=" * 80)
+        
+        # Create default weights for all models (PLACEHOLDER - NOT RECOMMENDED)
         defaults = {}
         for name in self.model_instances:
             defaults[name] = ModelWeight(
                 model_name=name,
-                expectancy=0.001,  # 0.1% expected per trade
-                precision_on_trade=0.55,  # 55% precision on trades
-                profit_factor=1.2,  # 1.2:1 profit factor
-                f1_directional=0.45,  # 45% F1 on LONG/SHORT
-                sharpe=0.5,  # 0.5 Sharpe ratio
-                calibration_temp=1.0
+                expectancy=0.001,  # Placeholder: 0.1% expected per trade
+                precision_on_trade=0.55,  # Placeholder: 55% precision
+                profit_factor=1.2,  # Placeholder: 1.2:1 profit factor
+                f1_directional=0.45,  # Placeholder: 45% F1
+                sharpe=0.5,  # Placeholder: 0.5 Sharpe
+                calibration_temp=1.0  # Default: no calibration
             )
         return defaults
+    
+    @property
+    def using_default_weights(self) -> bool:
+        """Returns True if ensemble is using default weights (not walk-forward metrics)."""
+        return getattr(self, '_using_default_weights', True)
     
     def save_weights(self, weights: Dict[str, ModelWeight]):
         """Save model weights from walk-forward evaluation."""

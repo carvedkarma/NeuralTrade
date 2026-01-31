@@ -1754,21 +1754,67 @@ async def predict_multihead_from_candles(request: CandlePredictionRequest):
         # Extract all heads
         class_probs = F.softmax(output.class_logits, dim=-1).cpu().numpy()[0]
         mu = output.mu.cpu().item()
-        sigma = output.sigma.cpu().item()
+        sigma_or_log_sigma = output.sigma.cpu().item()
         quantiles_raw = output.quantiles.cpu().numpy()[0]  # [q10, q25, q50, q75, q90]
         entry_offset = output.entry_offset.cpu().item()
-        sl_distance = output.sl_distance.cpu().item()
-        tp_distance = output.tp_distance.cpu().item()
+        learned_sl_distance = output.sl_distance.cpu().item()  # Keep for debugging
+        learned_tp_distance = output.tp_distance.cpu().item()  # Keep for debugging
         candle_deltas = output.candle_deltas.cpu().numpy()[0]  # [n_steps, 3]
+        
+        # PHASE 1b: Handle log_sigma output
+        # If model uses log_sigma, convert to sigma: σ = exp(log_sigma)
+        use_log_sigma = getattr(multihead_model, 'use_log_sigma', True)  # Default to True for new models
+        if use_log_sigma:
+            sigma = float(np.exp(np.clip(sigma_or_log_sigma, -10, 5)))  # exp(log_sigma)
+        else:
+            sigma = float(sigma_or_log_sigma)  # Already sigma
         
         # Determine action
         action_idx = int(np.argmax(class_probs))
         action = ACTION_NAMES[action_idx]
         confidence = float(class_probs[action_idx])
         
-        # Calculate edge
-        cost = 0.001  # ~0.1% round trip
+        # PHASE 1a: Cost-aware edge calculation using TradingCosts
+        # Calculate volatility from recent candles (ATR-based)
+        recent_candles = df.tail(14)
+        high_low = recent_candles['high'] - recent_candles['low']
+        atr = float(high_low.mean())
+        volatility = atr / current_price  # As percentage
+        
+        # Trading costs with volatility + 4h hold (16 bars @ 15m = 4 hours)
+        hold_hours = 4.0  # 16 bars * 15min = 4 hours
+        maker_fee = 0.0002  # 0.02%
+        taker_fee = 0.0004  # 0.04%
+        slippage = volatility * 0.1  # ~10% of ATR as slippage estimate
+        funding_periods = hold_hours / 8.0  # Funding every 8 hours
+        funding_rate = 0.0001  # ~0.01% typical
+        
+        # Total round-trip cost
+        cost = taker_fee * 2 + slippage * 2 + funding_rate * funding_periods
+        
+        # Net edge = |μ| - cost (PHASE 1a)
         edge = abs(mu) - cost
+        
+        # PHASE 1c: Derive SL/TP from quantiles instead of learned heads
+        # This ensures internal consistency - SL/TP come from the same distribution
+        q10, q25, q50, q75, q90 = quantiles_raw
+        
+        if action == "LONG":
+            # LONG: SL from q10 (downside risk), TP from q90 (upside potential)
+            sl_distance = abs(q10) if q10 < 0 else abs(q25)  # Use negative quantile
+            tp_distance = q90 if q90 > 0 else q75  # Use positive quantile
+        elif action == "SHORT":
+            # SHORT: SL from q90 (upside risk), TP from q10 (downside potential)
+            sl_distance = q90 if q90 > 0 else abs(q75)  # Use positive quantile (adverse move)
+            tp_distance = abs(q10) if q10 < 0 else abs(q25)  # Use negative quantile (favorable move)
+        else:  # HOLD
+            # Conservative defaults for HOLD
+            sl_distance = 0.005  # 0.5%
+            tp_distance = 0.005  # 0.5%
+        
+        # Enforce minimum SL/TP to avoid micro-trades (at least 0.1%)
+        sl_distance = max(abs(sl_distance), 0.001)
+        tp_distance = max(abs(tp_distance), 0.001)
         
         # Derive price levels based on action
         entry_price = current_price * (1 + entry_offset)
@@ -1814,14 +1860,16 @@ async def predict_multihead_from_candles(request: CandlePredictionRequest):
                 "low_delta": float(candle_deltas[i, 2])
             })
         
-        # Build reasons
+        # Build reasons with institutional-grade details
         reasons = [
             f"Model prediction: {action} with {confidence:.1%} confidence",
             f"Expected return (μ): {mu:.4f} ({mu*100:.2f}%)",
-            f"Uncertainty (σ): {sigma:.4f}",
-            f"Edge after costs: {edge:.4f}",
-            f"Entry offset: {entry_offset*100:.3f}% (learned from MFE)",
-            f"SL distance: {sl_distance*100:.2f}%, TP distance: {tp_distance*100:.2f}% (learned from MAE/MFE)",
+            f"Uncertainty (σ): {sigma:.4f}" + (" [from log_sigma]" if use_log_sigma else ""),
+            f"Trading cost: {cost*100:.3f}% (fees + slippage + funding)",
+            f"Net edge: {edge:.4f} (μ - cost)",
+            f"Entry offset: {entry_offset*100:.3f}%",
+            f"SL: {sl_distance*100:.2f}% (from q{10 if action=='LONG' else 90}), TP: {tp_distance*100:.2f}% (from q{90 if action=='LONG' else 10})",
+            f"[Debug] Learned SL/TP: {learned_sl_distance*100:.2f}%/{learned_tp_distance*100:.2f}%",
             f"Risk:Reward = 1:{rr_ratio:.2f}"
         ]
         

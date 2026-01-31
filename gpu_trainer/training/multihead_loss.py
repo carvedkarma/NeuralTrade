@@ -123,7 +123,9 @@ class MultiHeadLossConfig:
     n_future_candles: int = 5
     
     # Phase 1b: Log-sigma mode for proper Gaussian NLL calibration
-    use_log_sigma: bool = False  # If True, model outputs log(sigma) for better calibration
+    # ENABLED by default: model outputs log(sigma) for proper uncertainty calibration
+    # This prevents σ from being "gamed" and couples uncertainty to prediction error
+    use_log_sigma: bool = True  # Model outputs log(σ) for better calibration
     
     # Phase 1c: Derive SL/TP from quantiles instead of separate heads
     derive_sl_tp_from_quantiles: bool = True  # Use quantile-based SL/TP derivation

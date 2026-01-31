@@ -111,10 +111,26 @@ class QuantileHead(nn.Module):
 class RegressionHead(nn.Module):
     """
     Regression head for expected return (μ) and uncertainty (σ).
+    
+    PHASE 1b: Supports log-sigma mode for proper Gaussian NLL calibration.
+    When use_log_sigma=True, outputs log(σ) directly (unbounded) instead of
+    using softplus. This prevents σ from being "gamed" and couples uncertainty
+    to actual prediction error.
     """
     
-    def __init__(self, input_dim: int, hidden_dim: int = 128, dropout: float = 0.1):
+    def __init__(self, input_dim: int, hidden_dim: int = 128, dropout: float = 0.1,
+                 use_log_sigma: bool = True):
+        """
+        Args:
+            input_dim: Input feature dimension
+            hidden_dim: Hidden layer dimension
+            dropout: Dropout rate
+            use_log_sigma: If True (default), output log(σ) directly for Phase 1b.
+                          If False, use softplus for backward compatibility.
+        """
         super().__init__()
+        
+        self.use_log_sigma = use_log_sigma
         
         self.shared = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -128,17 +144,30 @@ class RegressionHead(nn.Module):
         # Expected return (can be negative or positive)
         self.mu_head = nn.Linear(hidden_dim // 2, 1)
         
-        # Uncertainty (must be positive)
+        # Uncertainty: log_sigma if use_log_sigma, else raw (transformed by softplus)
         self.sigma_head = nn.Linear(hidden_dim // 2, 1)
         
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Returns (mu, sigma) tensors."""
+        """
+        Returns (mu, sigma_or_log_sigma) tensors.
+        
+        If use_log_sigma=True: returns (mu, log_sigma) where log_sigma is unbounded
+        If use_log_sigma=False: returns (mu, sigma) where sigma = softplus(raw) + eps
+        """
         h = self.shared(x)
         
         mu = self.mu_head(h)
-        sigma = F.softplus(self.sigma_head(h)) + 1e-6  # Ensure positive
         
-        return mu, sigma
+        if self.use_log_sigma:
+            # PHASE 1b: Output log_sigma directly (unbounded)
+            # Loss function will handle: σ = exp(log_sigma)
+            # NLL = log_sigma + 0.5 * (y - μ)² * exp(-2 * log_sigma)
+            log_sigma = self.sigma_head(h)
+            return mu, log_sigma
+        else:
+            # Legacy: softplus ensures positive sigma
+            sigma = F.softplus(self.sigma_head(h)) + 1e-6
+            return mu, sigma
 
 
 class ClassificationHead(nn.Module):
@@ -278,6 +307,137 @@ class CandlePredictionHead(nn.Module):
         return candle_deltas
 
 
+class ConstrainedCandleHead(nn.Module):
+    """
+    PHASE 2: Constrained candle parameterization.
+    
+    Problem: Raw high/low predictions can violate high >= low constraint.
+    Solution: Predict (Δclose, log_range, skew) and reconstruct valid candles.
+    
+    Parameters:
+    - Δclose: Close price change from current (unbounded, scaled by tanh)
+    - log_range: log(high - low), always positive after exp()
+    - skew ∈ [-1, 1]: Where close sits within the range (0 = middle)
+    
+    Reconstruction:
+        range = exp(log_range)  # Always positive
+        high = close + range * (0.5 + 0.5 * skew)  # Upper portion
+        low = close - range * (0.5 - 0.5 * skew)   # Lower portion
+    
+    This GUARANTEES high >= low for all predictions.
+    """
+    
+    def __init__(self, input_dim: int, hidden_dim: int = 128,
+                 n_future_steps: int = 5, dropout: float = 0.1):
+        super().__init__()
+        
+        self.n_steps = n_future_steps
+        self.n_raw_outputs = 3  # Δclose, log_range, skew
+        self.n_reconstructed_outputs = 3  # Δclose, Δhigh, Δlow (for compatibility)
+        
+        self.shared = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Separate heads for each future step
+        self.step_heads = nn.ModuleList([
+            nn.Linear(hidden_dim, self.n_raw_outputs)
+            for _ in range(n_future_steps)
+        ])
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Returns reconstructed candle deltas [batch, n_steps, 3].
+        
+        Output[:, i, 0] = Δclose for step i (percentage change)
+        Output[:, i, 1] = Δhigh for step i (reconstructed, >= Δlow guaranteed)
+        Output[:, i, 2] = Δlow for step i (reconstructed, <= Δhigh guaranteed)
+        
+        Internally predicts (Δclose, log_range, skew) and reconstructs.
+        """
+        h = self.shared(x)
+        
+        reconstructed_candles = []
+        for step_head in self.step_heads:
+            raw = step_head(h)  # [batch, 3]: (Δclose_raw, log_range_raw, skew_raw)
+            
+            # Extract components
+            delta_close_raw = raw[:, 0]   # Unbounded
+            log_range_raw = raw[:, 1]     # Unbounded (will exp())
+            skew_raw = raw[:, 2]          # Unbounded (will tanh())
+            
+            # Constrain outputs
+            # Δclose: scale to ±10% range
+            delta_close = torch.tanh(delta_close_raw) * 0.10
+            
+            # log_range: clip to prevent explosion, then exp() for positive range
+            # Typical range: exp(-5) ≈ 0.007 to exp(-1) ≈ 0.37 (0.7% to 37% range)
+            log_range = torch.clamp(log_range_raw, -8, 0)  # Outputs 0.03% to 100% range
+            range_val = torch.exp(log_range) * 0.10  # Scale to reasonable %
+            
+            # skew: constrain to [-1, 1] via tanh
+            skew = torch.tanh(skew_raw)
+            
+            # Reconstruct high/low from close, range, and skew
+            # skew = 0: close in middle (high = close + range/2, low = close - range/2)
+            # skew = 1: close at low (high = close + range, low = close)
+            # skew = -1: close at high (high = close, low = close - range)
+            delta_high = delta_close + range_val * (0.5 + 0.5 * skew)
+            delta_low = delta_close - range_val * (0.5 - 0.5 * skew)
+            
+            # Stack [batch, 3]
+            step_candle = torch.stack([delta_close, delta_high, delta_low], dim=1)
+            reconstructed_candles.append(step_candle)
+        
+        # Stack all steps: [batch, n_steps, 3]
+        return torch.stack(reconstructed_candles, dim=1)
+    
+    def forward_with_params(self, x: torch.Tensor) -> dict:
+        """
+        Alternative forward that returns both raw params and reconstructed candles.
+        Useful for debugging and monitoring the constrained parameterization.
+        
+        Returns dict with:
+        - 'candle_deltas': [batch, n_steps, 3] - reconstructed Δclose, Δhigh, Δlow
+        - 'raw_params': [batch, n_steps, 3] - Δclose, log_range, skew (before reconstruction)
+        """
+        h = self.shared(x)
+        
+        reconstructed_candles = []
+        raw_params = []
+        
+        for step_head in self.step_heads:
+            raw = step_head(h)  # [batch, 3]
+            
+            delta_close_raw = raw[:, 0]
+            log_range_raw = raw[:, 1]
+            skew_raw = raw[:, 2]
+            
+            delta_close = torch.tanh(delta_close_raw) * 0.10
+            log_range = torch.clamp(log_range_raw, -8, 0)
+            range_val = torch.exp(log_range) * 0.10
+            skew = torch.tanh(skew_raw)
+            
+            delta_high = delta_close + range_val * (0.5 + 0.5 * skew)
+            delta_low = delta_close - range_val * (0.5 - 0.5 * skew)
+            
+            step_candle = torch.stack([delta_close, delta_high, delta_low], dim=1)
+            step_params = torch.stack([delta_close, log_range, skew], dim=1)
+            
+            reconstructed_candles.append(step_candle)
+            raw_params.append(step_params)
+        
+        return {
+            'candle_deltas': torch.stack(reconstructed_candles, dim=1),
+            'raw_params': torch.stack(raw_params, dim=1)
+        }
+
+
 class MultiHeadTransformer(BaseModel):
     """
     Transformer with multi-head output for institutional trading.
@@ -301,7 +461,8 @@ class MultiHeadTransformer(BaseModel):
         max_seq_len: int = 200,
         num_classes: int = 3,
         num_quantiles: int = 5,
-        n_future_candles: int = 5
+        n_future_candles: int = 5,
+        use_log_sigma: bool = True  # PHASE 1b: Enable log-sigma by default
     ):
         super().__init__("multihead_transformer", input_dim, num_classes)
         
@@ -310,6 +471,7 @@ class MultiHeadTransformer(BaseModel):
         self.num_layers = num_layers
         self.num_quantiles = num_quantiles
         self.n_future_candles = n_future_candles
+        self.use_log_sigma = use_log_sigma
         
         # Shared encoder backbone
         self.input_projection = nn.Linear(input_dim, d_model)
@@ -324,7 +486,7 @@ class MultiHeadTransformer(BaseModel):
         
         # Multi-head outputs (6 heads total)
         self.class_head = ClassificationHead(d_model, d_model // 2, num_classes, dropout)
-        self.regression_head = RegressionHead(d_model, d_model // 2, dropout)
+        self.regression_head = RegressionHead(d_model, d_model // 2, dropout, use_log_sigma=use_log_sigma)
         self.quantile_head = QuantileHead(d_model, d_model // 2, dropout)
         self.trading_head = TradingHead(d_model, d_model // 2, dropout)
         self.candle_head = CandlePredictionHead(d_model, d_model // 2, n_future_candles, dropout)
@@ -441,7 +603,8 @@ class MultiHeadLSTM(BaseModel):
         dropout: float = 0.2,
         num_classes: int = 3,
         num_quantiles: int = 5,
-        n_future_candles: int = 5
+        n_future_candles: int = 5,
+        use_log_sigma: bool = True  # PHASE 1b: Enable log-sigma by default
     ):
         super().__init__("multihead_lstm", input_dim, num_classes)
         
@@ -449,6 +612,7 @@ class MultiHeadLSTM(BaseModel):
         self.num_layers = num_layers
         self.num_quantiles = num_quantiles
         self.n_future_candles = n_future_candles
+        self.use_log_sigma = use_log_sigma
         
         # Bidirectional LSTM encoder
         self.lstm = nn.LSTM(
@@ -465,7 +629,7 @@ class MultiHeadLSTM(BaseModel):
         
         # Multi-head outputs (6 heads total)
         self.class_head = ClassificationHead(encoder_dim, encoder_dim // 2, num_classes, dropout)
-        self.regression_head = RegressionHead(encoder_dim, encoder_dim // 2, dropout)
+        self.regression_head = RegressionHead(encoder_dim, encoder_dim // 2, dropout, use_log_sigma=use_log_sigma)
         self.quantile_head = QuantileHead(encoder_dim, encoder_dim // 2, dropout)
         self.trading_head = TradingHead(encoder_dim, encoder_dim // 2, dropout)
         self.candle_head = CandlePredictionHead(encoder_dim, encoder_dim // 2, n_future_candles, dropout)
@@ -521,7 +685,8 @@ class MultiHeadCNN(BaseModel):
         dropout: float = 0.2,
         num_classes: int = 3,
         num_quantiles: int = 5,
-        n_future_candles: int = 5
+        n_future_candles: int = 5,
+        use_log_sigma: bool = True  # PHASE 1b: Enable log-sigma by default
     ):
         super().__init__("multihead_cnn", input_dim, num_classes)
         
@@ -529,6 +694,7 @@ class MultiHeadCNN(BaseModel):
         self.num_blocks = num_blocks
         self.num_quantiles = num_quantiles
         self.n_future_candles = n_future_candles
+        self.use_log_sigma = use_log_sigma
         
         # Initial projection
         self.input_conv = nn.Conv1d(input_dim, hidden_channels, kernel_size=3, padding=1)
@@ -550,7 +716,7 @@ class MultiHeadCNN(BaseModel):
         
         # Multi-head outputs (6 heads total)
         self.class_head = ClassificationHead(encoder_dim, encoder_dim // 2, num_classes, dropout)
-        self.regression_head = RegressionHead(encoder_dim, encoder_dim // 2, dropout)
+        self.regression_head = RegressionHead(encoder_dim, encoder_dim // 2, dropout, use_log_sigma=use_log_sigma)
         self.quantile_head = QuantileHead(encoder_dim, encoder_dim // 2, dropout)
         self.trading_head = TradingHead(encoder_dim, encoder_dim // 2, dropout)
         self.candle_head = CandlePredictionHead(encoder_dim, encoder_dim // 2, n_future_candles, dropout)
@@ -629,7 +795,8 @@ class MultiHeadGNN(BaseModel):
         dropout: float = 0.2,
         num_classes: int = 3,
         num_quantiles: int = 5,
-        n_future_candles: int = 5
+        n_future_candles: int = 5,
+        use_log_sigma: bool = True  # PHASE 1b: Enable log-sigma by default
     ):
         super().__init__("multihead_gnn", input_dim, num_classes)
         
@@ -637,6 +804,7 @@ class MultiHeadGNN(BaseModel):
         self.hidden_dim = hidden_dim
         self.num_quantiles = num_quantiles
         self.n_future_candles = n_future_candles
+        self.use_log_sigma = use_log_sigma
         
         # Temporal encoder (from CrossAssetGNN)
         self.temporal_encoder = nn.Sequential(
@@ -678,7 +846,7 @@ class MultiHeadGNN(BaseModel):
         
         # Multi-head outputs
         self.class_head = ClassificationHead(hidden_dim, num_classes)
-        self.regression_head = RegressionHead(hidden_dim)
+        self.regression_head = RegressionHead(hidden_dim, use_log_sigma=use_log_sigma)
         self.quantile_head = QuantileHead(hidden_dim, num_quantiles)
         self.trading_head = TradingHead(hidden_dim)
         self.candle_head = CandlePredictionHead(hidden_dim, n_future_steps=n_future_candles)
@@ -745,7 +913,8 @@ class MultiHeadVAE(BaseModel):
         dropout: float = 0.2,
         num_classes: int = 3,
         num_quantiles: int = 5,
-        n_future_candles: int = 5
+        n_future_candles: int = 5,
+        use_log_sigma: bool = True  # PHASE 1b: Enable log-sigma by default
     ):
         super().__init__("multihead_vae", input_dim, num_classes)
         
@@ -757,6 +926,7 @@ class MultiHeadVAE(BaseModel):
         self.latent_dim = latent_dim
         self.hidden_dims = hidden_dims
         self.num_quantiles = num_quantiles
+        self.use_log_sigma = use_log_sigma
         self.n_future_candles = n_future_candles
         
         # Encoder (from MarketVAE)
@@ -792,7 +962,7 @@ class MultiHeadVAE(BaseModel):
         
         # Multi-head outputs (from latent space)
         self.class_head = ClassificationHead(latent_dim, num_classes)
-        self.regression_head = RegressionHead(latent_dim)
+        self.regression_head = RegressionHead(latent_dim, use_log_sigma=use_log_sigma)
         self.quantile_head = QuantileHead(latent_dim, num_quantiles)
         self.trading_head = TradingHead(latent_dim)
         self.candle_head = CandlePredictionHead(latent_dim, n_future_steps=n_future_candles)
@@ -907,7 +1077,8 @@ class MultiHeadTFT(BaseModel):
         dropout: float = 0.1,
         num_classes: int = 3,
         num_quantiles: int = 5,
-        n_future_candles: int = 5
+        n_future_candles: int = 5,
+        use_log_sigma: bool = True  # PHASE 1b: Enable log-sigma by default
     ):
         super().__init__("multihead_tft", input_dim, num_classes)
         
@@ -916,6 +1087,7 @@ class MultiHeadTFT(BaseModel):
         self.num_layers = num_encoder_layers
         self.num_quantiles = num_quantiles
         self.n_future_candles = n_future_candles
+        self.use_log_sigma = use_log_sigma
         
         # Static context encoder (processes aggregated sequence features)
         self.static_encoder = nn.Sequential(
@@ -953,7 +1125,7 @@ class MultiHeadTFT(BaseModel):
         
         # Multi-head outputs (6 heads total)
         self.class_head = ClassificationHead(d_model, d_model // 2, num_classes, dropout)
-        self.regression_head = RegressionHead(d_model, d_model // 2, dropout)
+        self.regression_head = RegressionHead(d_model, d_model // 2, dropout, use_log_sigma=use_log_sigma)
         self.quantile_head = QuantileHead(d_model, d_model // 2, dropout)
         self.trading_head = TradingHead(d_model, d_model // 2, dropout)
         self.candle_head = CandlePredictionHead(d_model, d_model // 2, n_future_candles, dropout)
