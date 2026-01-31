@@ -2,7 +2,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { useState } from "react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { 
@@ -16,12 +17,14 @@ import {
   Copy,
   Terminal,
   Cpu,
-  HardDrive
+  HardDrive,
+  Layers
 } from "lucide-react";
 
 interface GPUSettings {
   url: string;
   defaultUrl: string;
+  predictionMode: "stf" | "mtf";
 }
 
 interface TestConnectionResult {
@@ -49,12 +52,19 @@ interface GPUStatus {
 
 export function GPUConnectionSettings() {
   const [inputUrl, setInputUrl] = useState("");
+  const [predictionMode, setPredictionMode] = useState<"stf" | "mtf">("stf");
   const [testResult, setTestResult] = useState<TestConnectionResult | null>(null);
   const [copied, setCopied] = useState(false);
 
   const { data: settings, isLoading: settingsLoading } = useQuery<GPUSettings>({
     queryKey: ["/api/gpu/settings"],
   });
+
+  useEffect(() => {
+    if (settings?.predictionMode) {
+      setPredictionMode(settings.predictionMode);
+    }
+  }, [settings]);
 
   const { data: gpuStatus } = useQuery<GPUStatus>({
     queryKey: ["/api/gpu/pushed-status"],
@@ -72,7 +82,8 @@ export function GPUConnectionSettings() {
   });
 
   const saveSettingsMutation = useMutation({
-    mutationFn: (url: string) => apiRequest("POST", "/api/gpu/settings", { url }),
+    mutationFn: (data: { url: string; predictionMode: "stf" | "mtf" }) => 
+      apiRequest("POST", "/api/gpu/settings", data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/gpu/settings"] });
       queryClient.invalidateQueries({ queryKey: ["/api/gpu/pushed-status"] });
@@ -91,7 +102,7 @@ export function GPUConnectionSettings() {
   const handleSaveAndConnect = () => {
     const urlToSave = inputUrl || settings?.url || settings?.defaultUrl || "";
     if (urlToSave) {
-      saveSettingsMutation.mutate(urlToSave);
+      saveSettingsMutation.mutate({ url: urlToSave, predictionMode });
     }
   };
 
@@ -183,6 +194,41 @@ export function GPUConnectionSettings() {
                 Current: {settings?.url || settings?.defaultUrl}
               </p>
             )}
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <Layers className="w-4 h-4 text-muted-foreground" />
+              <label className="text-sm font-medium">Prediction Mode</label>
+            </div>
+            <Select 
+              value={predictionMode} 
+              onValueChange={(value: "stf" | "mtf") => setPredictionMode(value)}
+            >
+              <SelectTrigger className="w-full" data-testid="select-prediction-mode">
+                <SelectValue placeholder="Select prediction mode" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="stf">
+                  <div className="flex flex-col">
+                    <span className="font-medium">STF - Single Timeframe</span>
+                    <span className="text-xs text-muted-foreground">15m only, 41 features (recommended)</span>
+                  </div>
+                </SelectItem>
+                <SelectItem value="mtf">
+                  <div className="flex flex-col">
+                    <span className="font-medium">MTF - Multi-Timeframe</span>
+                    <span className="text-xs text-muted-foreground">5m/15m/1h/4h fusion, 66 features</span>
+                  </div>
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {predictionMode === "stf" 
+                ? "Uses compute_technical_features (41 features) - matches 15m-trained models"
+                : "Uses MTF fusion pipeline (66 features) - requires MTF-trained models"
+              }
+            </p>
           </div>
 
           {testResult && (

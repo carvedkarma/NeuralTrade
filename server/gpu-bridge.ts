@@ -241,6 +241,7 @@ class GPUTrainerBridge {
   private isAvailable: boolean = false;
   private lastHealthCheck: number = 0;
   private healthCheckInterval: number = 30000; // 30 seconds
+  private predictionMode: "stf" | "mtf" = "stf"; // Default to STF for 15m-trained models
   
   // Pushed status from remote GPU trainer
   private pushedStatus: PushedGPUStatus = {
@@ -283,6 +284,23 @@ class GPUTrainerBridge {
     this.isAvailable = false;
     this.lastHealthCheck = 0;
     console.log(`[GPU Bridge] URL updated to: ${newUrl}`);
+  }
+  
+  /**
+   * Get the current prediction mode (STF or MTF)
+   */
+  getPredictionMode(): "stf" | "mtf" {
+    return this.predictionMode;
+  }
+  
+  /**
+   * Set the prediction mode for inference
+   * STF: Single-TimeFrame (41 features from compute_technical_features)
+   * MTF: Multi-TimeFrame (66 features from MTF fusion)
+   */
+  setPredictionMode(mode: "stf" | "mtf"): void {
+    this.predictionMode = mode;
+    console.log(`[GPU Bridge] Prediction mode set to: ${mode.toUpperCase()}`);
   }
   
   /**
@@ -618,21 +636,26 @@ class GPUTrainerBridge {
         requestBody.candles_4h = candles4h;
       }
       
-      const response = await fetch(`${this.baseUrl}/predict/ensemble/candles`, {
+      // Use the configured prediction mode
+      const mode = this.predictionMode;
+      const url = `${this.baseUrl}/predict/ensemble/candles?mode=${mode}`;
+      console.log(`[GPU Bridge] Prediction request using mode: ${mode.toUpperCase()}`);
+      
+      const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestBody),
-        signal: AbortSignal.timeout(20000) // 20 second timeout (MTF feature computation + ensemble)
+        signal: AbortSignal.timeout(20000) // 20 second timeout (feature computation + ensemble)
       });
       
       if (response.ok) {
         return await response.json() as EnsemblePredictionResponse;
       }
       
-      console.error("MTF Ensemble prediction failed:", await response.text());
+      console.error(`${mode.toUpperCase()} Ensemble prediction failed:`, await response.text());
       return null;
     } catch (error) {
-      console.error("MTF Ensemble prediction error:", error);
+      console.error(`${this.predictionMode.toUpperCase()} Ensemble prediction error:`, error);
       return null;
     }
   }

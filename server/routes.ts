@@ -1262,14 +1262,15 @@ export async function registerRoutes(
   app.get("/api/gpu/settings", (req, res) => {
     res.json({
       url: gpuBridge.getUrl(),
-      defaultUrl: "http://localhost:8000"
+      defaultUrl: "http://localhost:8000",
+      predictionMode: gpuBridge.getPredictionMode()
     });
   });
 
-  // Update GPU trainer URL
+  // Update GPU trainer URL and prediction mode
   app.post("/api/gpu/settings", async (req, res) => {
     try {
-      const { url } = req.body;
+      const { url, predictionMode } = req.body;
       
       if (!url || typeof url !== "string") {
         return res.status(400).json({ error: "URL is required" });
@@ -1282,8 +1283,18 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Invalid URL format" });
       }
       
+      // Validate prediction mode
+      if (predictionMode && !["stf", "mtf"].includes(predictionMode)) {
+        return res.status(400).json({ error: "Invalid prediction mode. Must be 'stf' or 'mtf'" });
+      }
+      
       // Update the GPU bridge URL
       gpuBridge.setUrl(url);
+      
+      // Update prediction mode if provided
+      if (predictionMode) {
+        gpuBridge.setPredictionMode(predictionMode);
+      }
       
       // Test connection to the new URL
       const health = await gpuBridge.checkHealth();
@@ -1291,6 +1302,7 @@ export async function registerRoutes(
       res.json({
         success: true,
         url,
+        predictionMode: gpuBridge.getPredictionMode(),
         connected: health !== null,
         health
       });
