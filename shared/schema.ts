@@ -1010,6 +1010,90 @@ export const insertShotPlanHistorySchema = createInsertSchema(shotPlanHistory).o
 export type InsertShotPlanHistory = z.infer<typeof insertShotPlanHistorySchema>;
 export type ShotPlanHistoryEntry = typeof shotPlanHistory.$inferSelect;
 
+// Cone-based trading signals - probabilistic signals from quantile predictions
+export const coneSignals = pgTable("cone_signals", {
+  id: serial("id").primaryKey(),
+  timestamp: bigint("timestamp", { mode: "number" }).notNull(),
+  
+  // Signal info
+  direction: varchar("direction", { length: 10 }).notNull(), // LONG, SHORT, HOLD
+  
+  // Entry/Exit levels
+  entryPrice: real("entry_price").notNull(),
+  stopLoss: real("stop_loss"),
+  takeProfit: real("take_profit"),
+  
+  // Metrics
+  mu: real("mu").notNull(), // Expected move (decimal)
+  sigma: real("sigma"), // Uncertainty (decimal)
+  edge: real("edge").notNull(), // abs(mu)/(q90-q10)
+  riskReward: real("risk_reward"),
+  
+  // Quantiles (all as decimal returns)
+  q10: real("q10").notNull(),
+  q25: real("q25").notNull(),
+  q50: real("q50").notNull(),
+  q75: real("q75").notNull(),
+  q90: real("q90").notNull(),
+  
+  // Probabilities
+  probUp: real("prob_up"),
+  probDown: real("prob_down"),
+  probHold: real("prob_hold"),
+  
+  // Hold reasons (if HOLD)
+  holdReasons: jsonb("hold_reasons").$type<string[]>(),
+  
+  // Auto-calibration
+  edgeThreshold: real("edge_threshold"), // What threshold was used
+  edgePercentile: real("edge_percentile"), // What percentile the threshold represents
+  
+  // Outcome tracking
+  outcome: varchar("outcome", { length: 20 }), // HIT_TP, HIT_SL, EXPIRED, PENDING
+  exitPrice: real("exit_price"),
+  exitTimestamp: bigint("exit_timestamp", { mode: "number" }),
+  pnlPercent: real("pnl_percent"),
+  candlesHeld: integer("candles_held"),
+  maxFavorableExcursion: real("max_favorable_excursion"),
+  maxAdverseExcursion: real("max_adverse_excursion"),
+  
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (table) => ({
+  timestampIdx: index("cone_signals_timestamp_idx").on(table.timestamp),
+  outcomeIdx: index("cone_signals_outcome_idx").on(table.outcome),
+}));
+
+export const insertConeSignalSchema = createInsertSchema(coneSignals).omit({ id: true });
+export type InsertConeSignal = z.infer<typeof insertConeSignalSchema>;
+export type ConeSignal = typeof coneSignals.$inferSelect;
+
+// Cone signal schema for API responses
+export const coneSignalResponseSchema = z.object({
+  direction: signalTypeSchema,
+  entryPrice: z.number(),
+  stopLoss: z.number().nullable(),
+  takeProfit: z.number().nullable(),
+  mu: z.number(),
+  sigma: z.number().optional(),
+  edge: z.number(),
+  riskReward: z.number().nullable(),
+  quantiles: z.object({
+    q10: z.number(),
+    q25: z.number(),
+    q50: z.number(),
+    q75: z.number(),
+    q90: z.number(),
+  }),
+  probUp: z.number(),
+  probDown: z.number(),
+  probHold: z.number(),
+  holdReasons: z.array(z.string()),
+  edgeThreshold: z.number(),
+  cooldownBarsRemaining: z.number(),
+  timestamp: z.number(),
+});
+export type ConeSignalResponse = z.infer<typeof coneSignalResponseSchema>;
+
 export const insertCandleSchema = createInsertSchema(candles).omit({ id: true });
 export const insertFeatureSchema = createInsertSchema(features).omit({ id: true });
 export const insertPatternSchema = createInsertSchema(patterns).omit({ id: true });

@@ -360,6 +360,218 @@ export async function registerRoutes(
     }
   });
 
+  // Cone-based signal endpoints
+  app.get("/api/cone-signals", async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 50;
+      const signals = await storage.getConeSignals(limit);
+      
+      // Calculate stats
+      const completedSignals = signals.filter(s => s.outcome && s.outcome !== "PENDING");
+      const tpHits = completedSignals.filter(s => s.outcome === "HIT_TP").length;
+      const slHits = completedSignals.filter(s => s.outcome === "HIT_SL").length;
+      const expired = completedSignals.filter(s => s.outcome === "EXPIRED").length;
+      const totalCompleted = completedSignals.length;
+      
+      const pnls = completedSignals.map(s => s.pnlPercent || 0);
+      const avgPnl = pnls.length > 0 ? pnls.reduce((a, b) => a + b, 0) / pnls.length : 0;
+      const bestTrade = pnls.length > 0 ? Math.max(...pnls) : 0;
+      const worstTrade = pnls.length > 0 ? Math.min(...pnls) : 0;
+      
+      res.json({
+        signals,
+        stats: {
+          totalSignals: signals.length,
+          totalCompleted,
+          winRate: totalCompleted > 0 ? (tpHits / totalCompleted) * 100 : 0,
+          avgPnl,
+          bestTrade,
+          worstTrade,
+          tpHits,
+          slHits,
+          expired,
+          pending: signals.filter(s => s.outcome === "PENDING").length,
+        },
+      });
+    } catch (error) {
+      console.error("Error getting cone signals:", error);
+      res.status(500).json({ error: "Failed to get cone signals" });
+    }
+  });
+
+  const recordConeSignalSchema = z.object({
+    timestamp: z.number(),
+    direction: z.enum(["LONG", "SHORT", "HOLD"]),
+    entryPrice: z.number(),
+    stopLoss: z.number().nullable().optional(),
+    takeProfit: z.number().nullable().optional(),
+    mu: z.number(),
+    sigma: z.number().optional(),
+    edge: z.number(),
+    riskReward: z.number().nullable().optional(),
+    q10: z.number(),
+    q25: z.number(),
+    q50: z.number(),
+    q75: z.number(),
+    q90: z.number(),
+    probUp: z.number().optional(),
+    probDown: z.number().optional(),
+    probHold: z.number().optional(),
+    holdReasons: z.array(z.string()).optional(),
+    edgeThreshold: z.number().optional(),
+    edgePercentile: z.number().optional(),
+    outcome: z.string().default("PENDING"),
+  });
+
+  app.post("/api/cone-signals/record", async (req, res) => {
+    try {
+      const validated = recordConeSignalSchema.parse(req.body);
+      
+      const entry = await storage.recordConeSignal({
+        ...validated,
+        createdAt: Date.now(),
+      });
+      res.json({ success: true, entry });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        res.status(400).json({ error: "Invalid request body", details: error.errors });
+        return;
+      }
+      console.error("Error recording cone signal:", error);
+      res.status(500).json({ error: "Failed to record cone signal" });
+    }
+  });
+
+  const updateConeOutcomeSchema = z.object({
+    id: z.number(),
+    outcome: z.string(),
+    exitPrice: z.number().optional(),
+    pnlPercent: z.number().optional(),
+    candlesHeld: z.number().optional(),
+    mfe: z.number().optional(),
+    mae: z.number().optional(),
+  });
+
+  app.post("/api/cone-signals/update-outcome", async (req, res) => {
+    try {
+      const { id, outcome, exitPrice, pnlPercent, candlesHeld, mfe, mae } = updateConeOutcomeSchema.parse(req.body);
+      
+      await storage.updateConeSignalOutcome(id, {
+        outcome,
+        exitPrice,
+        exitTimestamp: BigInt(Date.now()) as any,
+        pnlPercent,
+        candlesHeld,
+        maxFavorableExcursion: mfe,
+        maxAdverseExcursion: mae,
+      });
+      
+      res.json({ success: true });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        res.status(400).json({ error: "Invalid request body", details: error.errors });
+        return;
+      }
+      console.error("Error updating cone signal outcome:", error);
+      res.status(500).json({ error: "Failed to update outcome" });
+    }
+  });
+
+  // Cone signal generator endpoint
+  app.get("/api/cone-signal/current", async (req, res) => {
+    try {
+      const { coneSignalGenerator } = await import("./cone-signal-generator");
+      const { gpuBridge } = await import("./gpu-bridge");
+      
+      // Get latest candle price
+      const candles = storage.getCandles();
+      if (candles.length === 0) {
+        res.json({ available: false, reason: "No candle data available" });
+        return;
+      }
+      
+      const lastCandle = candles[candles.length - 1];
+      const currentPrice = lastCandle.close;
+      
+      // Get quantiles from GPU or fallback
+      const gpuStatus = gpuBridge.getPushedStatus();
+      let quantiles: { q10: number; q25: number; q50: number; q75: number; q90: number } | null = null;
+      let probs = { probUp: 0.33, probDown: 0.33, probHold: 0.34 };
+      let mu = 0;
+      let sigma: number | undefined;
+      
+      // Try GPU prediction first
+      if (gpuStatus.connected && gpuStatus.modelsLoaded.length > 0) {
+        try {
+          const ensembleStatus = await gpuBridge.getEnsembleStatus();
+          if (ensembleStatus?.initialized) {
+            // Use predictEnsembleFromCandles to get quantile predictions
+            const prediction = await gpuBridge.predictEnsembleFromCandles(candles.slice(-100));
+            if (prediction?.quantiles) {
+              quantiles = prediction.quantiles;
+              probs = {
+                probUp: prediction.ensemble_probs?.LONG || 0.33,
+                probDown: prediction.ensemble_probs?.SHORT || 0.33,
+                probHold: prediction.ensemble_probs?.HOLD || 0.34,
+              };
+              mu = prediction.mu || 0;
+              sigma = prediction.sigma;
+            }
+          }
+        } catch (e) {
+          console.log("[ConeSignal] GPU prediction failed, using fallback");
+        }
+      }
+      
+      // Fallback: generate simple quantiles from recent volatility
+      if (!quantiles) {
+        const recentCandles = candles.slice(-100);
+        const returns = recentCandles.slice(1).map((c, i) => 
+          (c.close - recentCandles[i].close) / recentCandles[i].close
+        );
+        const avgReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
+        const stdReturn = Math.sqrt(returns.map(r => Math.pow(r - avgReturn, 2)).reduce((a, b) => a + b, 0) / returns.length);
+        
+        // 16-bar horizon multiplier
+        const horizonMultiplier = Math.sqrt(16);
+        const projectedStd = stdReturn * horizonMultiplier;
+        
+        quantiles = {
+          q10: avgReturn * 16 - 1.28 * projectedStd,
+          q25: avgReturn * 16 - 0.67 * projectedStd,
+          q50: avgReturn * 16,
+          q75: avgReturn * 16 + 0.67 * projectedStd,
+          q90: avgReturn * 16 + 1.28 * projectedStd,
+        };
+        mu = avgReturn * 16;
+        sigma = projectedStd;
+      }
+      
+      // Generate cone signal
+      const signal = coneSignalGenerator.generateSignal({
+        currentPrice,
+        quantiles,
+        probs,
+        mu,
+        sigma,
+        timestamp: lastCandle.timestamp,
+      });
+      
+      // Get generator stats
+      const stats = coneSignalGenerator.getStats();
+      
+      res.json({
+        available: true,
+        signal,
+        stats,
+        source: gpuStatus.connected ? "gpu" : "fallback",
+      });
+    } catch (error) {
+      console.error("Error getting cone signal:", error);
+      res.status(500).json({ error: "Failed to get cone signal" });
+    }
+  });
+
   // Neural Network multi-timeframe data endpoints
   app.get("/api/nn-data/summary", async (req, res) => {
     try {

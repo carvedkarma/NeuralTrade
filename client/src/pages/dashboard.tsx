@@ -53,6 +53,7 @@ import { NeuralNetworkDataCard } from "@/components/nn-data-card";
 import { NeuralNetworkPredictionCard, TrainingModeBadge, type QuantilePrediction } from "@/components/neural-network-prediction";
 import { QuantileFanChart, DerivedTradeLevels } from "@/components/quantile-fan-chart";
 import { PremiumCandlestickChart } from "@/components/premium-candlestick-chart";
+import { ConeSignalCard } from "@/components/cone-signal-card";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff, Brain, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -531,7 +532,7 @@ export default function Dashboard() {
                       variant="outline" 
                       className="ml-auto text-amber-500 border-amber-500/30 hover-elevate"
                       onClick={() => {
-                        apiRequest('/api/self-learning/run-now', { method: 'POST' })
+                        apiRequest('POST', '/api/self-learning/run-now')
                           .then(() => {
                             queryClient.invalidateQueries({ queryKey: ['/api/dashboard'] });
                             refetch();
@@ -588,15 +589,22 @@ export default function Dashboard() {
               )}
               
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                {/* Cone Signal Generator */}
+                <div className="lg:col-span-6 space-y-4">
+                  <ConeSignalCard />
+                </div>
+                
                 {/* Neural Network Prediction */}
-                <div className="lg:col-span-4 space-y-4">
+                <div className="lg:col-span-6 space-y-4">
                   <NeuralNetworkPredictionCard 
                     prediction={nnPrediction?.prediction || null}
                     isLoading={nnPredictionLoading}
                     onRefresh={() => refetchNnPrediction()}
                   />
                 </div>
-                
+              </div>
+              
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
                 {/* Training Controls */}
                 <div className="lg:col-span-4 space-y-4">
                   <TrainingModeBadge 

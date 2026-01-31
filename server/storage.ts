@@ -23,8 +23,10 @@ import type {
   ModelPerformanceStats,
   InsertShotPlanHistory,
   ShotPlanHistoryEntry,
+  InsertConeSignal,
+  ConeSignal,
 } from "@shared/schema";
-import { shotPlanHistory } from "@shared/schema";
+import { shotPlanHistory, coneSignals } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { getKlines, getMultiTimeframeKlines, getFuturesData, detectLargeOrders } from "./binance";
 import { getAllIndicators, calculateMultiTimeframeScore, type TechnicalIndicators } from "./indicators";
@@ -42,7 +44,7 @@ import { initializeUnifiedLearning, updatePatternMemoryProgress, getUnifiedProgr
 import { isAutoTradingEnabled, isPaperTradingEnabled, getConfig as getPaperConfig } from "./paper/config";
 import { db } from "./db";
 import { learningState, socialMediaStats, patternClusters as patternClustersTable } from "./db/schema";
-import { eq } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 
 export interface IStorage {
   getDashboardData(): Promise<DashboardData>;
@@ -58,6 +60,11 @@ export interface IStorage {
   getShotPlanHistory(limit?: number): Promise<ShotPlanHistoryEntry[]>;
   recordShotPlan(entry: InsertShotPlanHistory): Promise<ShotPlanHistoryEntry>;
   updateShotPlanOutcome(id: number, update: Partial<ShotPlanHistoryEntry>): Promise<void>;
+  // Cone signal methods
+  getConeSignals(limit?: number): Promise<ConeSignal[]>;
+  getConeSignalsPending(): Promise<ConeSignal[]>;
+  recordConeSignal(signal: InsertConeSignal): Promise<ConeSignal>;
+  updateConeSignalOutcome(id: number, update: Partial<ConeSignal>): Promise<void>;
 }
 
 class KalmanFilter {
@@ -2637,6 +2644,33 @@ export class MemStorage implements IStorage {
     await db.update(shotPlanHistory)
       .set(update)
       .where(eq(shotPlanHistory.id, id));
+  }
+
+  async getConeSignals(limit: number = 50): Promise<ConeSignal[]> {
+    return await db.select()
+      .from(coneSignals)
+      .orderBy(desc(coneSignals.timestamp))
+      .limit(limit);
+  }
+
+  async getConeSignalsPending(): Promise<ConeSignal[]> {
+    return await db.select()
+      .from(coneSignals)
+      .where(eq(coneSignals.outcome, "PENDING"))
+      .orderBy(desc(coneSignals.timestamp));
+  }
+
+  async recordConeSignal(signal: InsertConeSignal): Promise<ConeSignal> {
+    const [result] = await db.insert(coneSignals)
+      .values(signal)
+      .returning();
+    return result;
+  }
+
+  async updateConeSignalOutcome(id: number, update: Partial<ConeSignal>): Promise<void> {
+    await db.update(coneSignals)
+      .set(update)
+      .where(eq(coneSignals.id, id));
   }
 }
 
