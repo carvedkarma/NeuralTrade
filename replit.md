@@ -131,5 +131,24 @@ The following institutional-grade features are **enabled by default**:
 - PSI, KL Divergence, ECE tracking available via `DriftMonitor`
 - History saved to `checkpoints/drift_history/drift_history.json`
 
+### Phase 5: Configurable Label Generation (NEW)
+- **Removed hardcoded thresholds** that caused 99% HOLD signals
+- `generate_multihead_targets()` now accepts:
+  - `min_net_edge`: Minimum net edge after costs (default 0.0 for debugging)
+  - `min_confidence`: Minimum mu/sigma ratio (default 0.3 for debugging)
+  - `use_volatility_cost`: Use volatility-based vs fixed cost
+  - `fixed_cost`: Fixed round-trip cost (default 0.09% = 0.0009)
+- **Label Density Debug Report**: Logs BEFORE training:
+  - Total samples, mean |mu|, mean sigma, mean cost
+  - Gate pass rates (edge gate %, confidence gate %, BOTH gates %)
+  - Class distribution (SHORT %, HOLD %, LONG %)
+- **CLI arguments**: `--cost`, `--min-net-edge`, `--min-confidence`, `--volatility-cost`
+- Target class distribution: SHORT 7-15%, HOLD 70-85%, LONG 7-15%
+
+### Data Architecture
+- **Dashboard**: Uses 35K+ database candles + 1 live Binance candle (display only)
+- **GPU Trainer**: Uses 140K+ parquet candles for training (separate data flow)
+- **Training is NOT affected by live candle fetch** - completely separate data paths
+
 ### GUI Configuration
 - Fixed to BTCUSDT 15m timeframe only (no multi-timeframe/multi-asset options)
