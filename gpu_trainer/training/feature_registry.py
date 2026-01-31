@@ -61,7 +61,38 @@ class FeatureConfig:
     
     @classmethod
     def from_dict(cls, d: dict) -> "FeatureConfig":
+        """Create FeatureConfig from dict with legacy compatibility handling."""
+        # Handle legacy configs missing new fields
+        is_legacy = False
+        
+        # Infer missing mode from timeframes or feature count
+        if 'mode' not in d or not d.get('mode'):
+            timeframes = d.get('timeframes', ['15m'])
+            input_dim = d.get('input_dim', 41)
+            
+            # Infer mode: MTF has multiple timeframes or ~66 features
+            if len(timeframes) > 1 or input_dim > 50:
+                d['mode'] = 'mtf'
+                logger.warning(f"Legacy config: inferred mode='mtf' from timeframes={timeframes}, input_dim={input_dim}")
+            else:
+                d['mode'] = 'stf'
+                logger.info(f"Legacy config: inferred mode='stf' from timeframes={timeframes}, input_dim={input_dim}")
+            is_legacy = True
+        
+        # Handle missing feature_engineer_version
+        if 'feature_engineer_version' not in d or not d.get('feature_engineer_version'):
+            d['feature_engineer_version'] = 'legacy-unknown'
+            logger.warning("Legacy config: feature_engineer_version not found, setting to 'legacy-unknown'")
+            is_legacy = True
+        
+        if is_legacy:
+            logger.warning("=== LEGACY FEATURE CONFIG DETECTED - Version validation will be lenient ===")
+        
         return cls(**d)
+    
+    def is_legacy(self) -> bool:
+        """Check if this config is from a legacy model without version tracking."""
+        return self.feature_engineer_version in ('', 'legacy-unknown', 'unknown')
     
     def save(self, path: str):
         """Save feature config to JSON file."""
@@ -69,14 +100,16 @@ class FeatureConfig:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, 'w') as f:
             json.dump(self.to_dict(), f, indent=2)
-        logger.info(f"Saved feature config to {path} (hash: {self.version_hash})")
+        logger.info(f"Saved feature config to {path} (hash: {self.version_hash}, version: {self.feature_engineer_version})")
     
     @classmethod
     def load(cls, path: str) -> "FeatureConfig":
-        """Load feature config from JSON file."""
+        """Load feature config from JSON file with legacy handling."""
         with open(path, 'r') as f:
             data = json.load(f)
-        return cls.from_dict(data)
+        config = cls.from_dict(data)
+        logger.info(f"Loaded feature config from {path} (hash: {config.version_hash}, version: {config.feature_engineer_version}, mode: {config.mode})")
+        return config
 
 
 class FeatureValidator:

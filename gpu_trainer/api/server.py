@@ -2563,8 +2563,19 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
             
             # Validate version matches training if available
             if model_manager.feature_config:
-                training_version = model_manager.feature_config.get("feature_engineer_version")
-                if training_version and training_version != FeatureEngineer.VERSION:
+                # Handle both dict (legacy) and FeatureConfig object
+                if hasattr(model_manager.feature_config, 'feature_engineer_version'):
+                    training_version = model_manager.feature_config.feature_engineer_version
+                    is_legacy = model_manager.feature_config.is_legacy() if hasattr(model_manager.feature_config, 'is_legacy') else False
+                else:
+                    training_version = model_manager.feature_config.get("feature_engineer_version", "")
+                    is_legacy = training_version in ('', 'legacy-unknown', 'unknown')
+                
+                if is_legacy:
+                    # Legacy config - warn but allow inference
+                    logger.warning(f"[LEGACY MODEL] Training version unknown, using current FeatureEngineer {FeatureEngineer.VERSION}")
+                    logger.warning("Consider retraining to capture version tracking for production safety")
+                elif training_version and training_version != FeatureEngineer.VERSION:
                     logger.error(f"[VERSION MISMATCH] Training used {training_version}, inference using {FeatureEngineer.VERSION}")
                     raise HTTPException(
                         status_code=500,
@@ -2572,6 +2583,8 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
                                f"but current FeatureEngineer is {FeatureEngineer.VERSION}. "
                                f"This can cause silent signal degradation. Retrain with current version or rollback code."
                     )
+                else:
+                    logger.info(f"[VERSION OK] Training and inference both using {FeatureEngineer.VERSION}")
             
             features_df = fe.compute_technical_features(tf_data["15m"])
             computed_feature_count = len([c for c in features_df.columns if c not in ["datetime", "timestamp"]])

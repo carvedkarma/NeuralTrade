@@ -169,5 +169,23 @@ The following institutional-grade features are **enabled by default**:
 - **STF Feature Count**: 41 features from compute_technical_features
 - **MTF Feature Count**: 66 features from MTFFeatureFusion
 
+### FeatureEngineer Version Tracking (Added Jan 2026)
+- **Purpose**: Prevent silent signal degradation from train/inference feature computation mismatch
+- **Version String**: `FeatureEngineer.VERSION = "v1.0.0-stf-pctreturns"` captures computation details
+- **Saved During Training**: Version stored in `feature_config.json` alongside model checkpoints
+- **Validated At Inference**: Hard error if version mismatch (different version = different features)
+- **Legacy Compatibility**:
+  - Models without version tracking marked as `legacy-unknown`
+  - Legacy models get warning but inference proceeds (lenient)
+  - Mode auto-inferred from timeframes/feature count for legacy configs
+- **FeatureConfig Fields**:
+  - `feature_engineer_version`: Version string at training time
+  - `mode`: "stf" or "mtf" - which pipeline was used
+  - `is_legacy()`: Method to check if model predates version tracking
+- **Validation Logic**:
+  - Legacy models: Warning only, inference allowed
+  - Known version match: OK log, proceed normally
+  - Known version mismatch: Hard error, prevents silent degradation
+
 ### GUI Configuration
 - Fixed to BTCUSDT 15m timeframe only (no multi-timeframe/multi-asset options)
