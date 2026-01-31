@@ -7,6 +7,12 @@ Where:
 - L_class: CrossEntropyLoss for direction classification
 - L_regression: MSE for expected return (μ)
 - L_quantile: Pinball loss for quantile regression (q10, q25, q50, q75, q90)
+
+PHASE 1c: Quantile-based SL/TP derivation
+Instead of predicting SL/TP as separate targets, derive them from quantiles:
+- For LONG: SL from q10 or q25 (downside risk), TP from q75 or q90 (upside)
+- For SHORT: SL from q75 or q90 (upside risk), TP from q10 or q25 (downside)
+This ensures internal consistency and uses the distribution we already train.
 """
 
 import torch
@@ -14,6 +20,79 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
+
+
+def derive_sl_tp_from_quantiles(
+    quantiles: torch.Tensor,
+    direction: torch.Tensor,
+    current_price: float = 1.0,
+    sl_quantile_idx: int = 0,  # q10 index
+    tp_quantile_idx: int = 4,  # q90 index
+    conservative_sl_idx: int = 1,  # q25 index (less aggressive SL)
+    conservative_tp_idx: int = 3,  # q75 index (less aggressive TP)
+    use_conservative: bool = False
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    PHASE 1c: Derive Stop Loss and Take Profit from predicted quantiles.
+    
+    This enforces internal consistency - SL/TP come from the same distribution
+    that the model is already learning, rather than being separate targets.
+    
+    Args:
+        quantiles: [batch, 5] predicted return quantiles (q10, q25, q50, q75, q90)
+        direction: [batch] trade direction (0=SHORT, 1=HOLD, 2=LONG)
+        current_price: Current price for converting returns to distances
+        sl_quantile_idx: Index for aggressive SL (0=q10)
+        tp_quantile_idx: Index for aggressive TP (4=q90)
+        conservative_sl_idx: Index for conservative SL (1=q25)
+        conservative_tp_idx: Index for conservative TP (3=q75)
+        use_conservative: Whether to use q25/q75 instead of q10/q90
+        
+    Returns:
+        sl_distance: [batch, 1] stop loss as percentage distance (always positive)
+        tp_distance: [batch, 1] take profit as percentage distance (always positive)
+    """
+    batch_size = quantiles.shape[0]
+    
+    # Select quantile indices based on conservatism
+    sl_idx = conservative_sl_idx if use_conservative else sl_quantile_idx
+    tp_idx = conservative_tp_idx if use_conservative else tp_quantile_idx
+    
+    # Initialize outputs
+    sl_distance = torch.zeros(batch_size, 1, device=quantiles.device)
+    tp_distance = torch.zeros(batch_size, 1, device=quantiles.device)
+    
+    # LONG positions: SL from q10/q25 (downside), TP from q75/q90 (upside)
+    long_mask = (direction == 2)
+    if long_mask.any():
+        # For longs: q10/q25 is the worst case downside (negative return)
+        # SL distance = |q10| (how far down before we exit)
+        sl_distance[long_mask] = torch.abs(quantiles[long_mask, sl_idx:sl_idx+1])
+        # TP distance = q90/q75 (how far up before we take profit)
+        tp_distance[long_mask] = quantiles[long_mask, tp_idx:tp_idx+1].clamp(min=0)
+    
+    # SHORT positions: SL from q75/q90 (upside), TP from q10/q25 (downside)
+    short_mask = (direction == 0)
+    if short_mask.any():
+        # For shorts: q90/q75 is the worst case upside (positive return = loss for shorts)
+        # SL distance = q90 (how far up before we exit)
+        sl_distance[short_mask] = quantiles[short_mask, tp_idx:tp_idx+1].clamp(min=0)
+        # TP distance = |q10/q25| (how far down = profit for shorts)
+        tp_distance[short_mask] = torch.abs(quantiles[short_mask, sl_idx:sl_idx+1])
+    
+    # HOLD positions: No trade, keep zeros (or small defaults)
+    hold_mask = (direction == 1)
+    if hold_mask.any():
+        # Default small values for HOLD
+        sl_distance[hold_mask] = 0.005  # 0.5%
+        tp_distance[hold_mask] = 0.005  # 0.5%
+    
+    # Enforce minimum SL/TP to avoid micro-trades
+    min_distance = 0.001  # 0.1% minimum
+    sl_distance = sl_distance.clamp(min=min_distance)
+    tp_distance = tp_distance.clamp(min=min_distance)
+    
+    return sl_distance, tp_distance
 
 
 @dataclass
@@ -42,6 +121,12 @@ class MultiHeadLossConfig:
     
     # Future candle options
     n_future_candles: int = 5
+    
+    # Phase 1b: Log-sigma mode for proper Gaussian NLL calibration
+    use_log_sigma: bool = False  # If True, model outputs log(sigma) for better calibration
+    
+    # Phase 1c: Derive SL/TP from quantiles instead of separate heads
+    derive_sl_tp_from_quantiles: bool = True  # Use quantile-based SL/TP derivation
 
 
 class PinballLoss(nn.Module):
@@ -91,36 +176,68 @@ class GaussianNLLLoss(nn.Module):
     """
     Negative log-likelihood loss for Gaussian distribution.
     
-    Encourages model to predict both mean (μ) and variance (σ²).
-    NLL = 0.5 * (log(σ²) + (y - μ)² / σ²)
+    PHASE 1b UPGRADE: Proper Gaussian NLL that couples σ to prediction error.
+    
+    Encourages model to predict both mean (μ) and log(σ) (unbounded).
+    The model predicts log_sigma directly, which:
+    1. Prevents σ from being gamed (inflated to reduce penalties)
+    2. Couples σ to actual prediction error
+    3. Produces calibrated uncertainty estimates
+    
+    NLL = 0.5 * (2*log_sigma + (y - μ)² / exp(2*log_sigma))
+        = 0.5 * (2*log_sigma + (y - μ)² * exp(-2*log_sigma))
+    
+    This is equivalent to: log_sigma + 0.5 * (y - μ)² / σ²
     """
     
-    def __init__(self, eps: float = 1e-6):
+    def __init__(self, eps: float = 1e-6, use_log_sigma: bool = False):
+        """
+        Args:
+            eps: Small epsilon for numerical stability
+            use_log_sigma: If True, expects log(sigma) as input (preferred).
+                          If False (default), expects sigma directly (legacy mode).
+                          Default is False for backward compatibility with existing models.
+        """
         super().__init__()
         self.eps = eps
+        self.use_log_sigma = use_log_sigma
         
-    def forward(self, mu: torch.Tensor, sigma: torch.Tensor, 
-                targets: torch.Tensor) -> torch.Tensor:
+    def forward(self, mu: torch.Tensor, sigma_or_log_sigma: torch.Tensor, 
+                targets: torch.Tensor, is_log_sigma: bool = None) -> torch.Tensor:
         """
         Compute Gaussian NLL loss.
         
         Args:
             mu: [batch, 1] predicted mean
-            sigma: [batch, 1] predicted std (must be positive)
+            sigma_or_log_sigma: [batch, 1] predicted σ or log(σ) depending on is_log_sigma
             targets: [batch, 1] or [batch] actual values
+            is_log_sigma: If True, input is log(σ). If None, uses self.use_log_sigma
             
         Returns:
             Scalar loss value
         """
         if targets.dim() == 1:
             targets = targets.unsqueeze(-1)
-            
-        # Ensure sigma is positive
-        sigma = sigma.clamp(min=self.eps)
-        variance = sigma ** 2
         
-        # NLL = 0.5 * (log(σ²) + (y - μ)² / σ²)
-        nll = 0.5 * (torch.log(variance) + (targets - mu) ** 2 / variance)
+        use_log = is_log_sigma if is_log_sigma is not None else self.use_log_sigma
+        
+        if use_log:
+            # Input is log_sigma (unbounded) - preferred approach
+            log_sigma = sigma_or_log_sigma
+            # Clamp log_sigma to prevent extreme values
+            log_sigma = log_sigma.clamp(min=-10, max=5)  # exp(-10) ≈ 0, exp(5) ≈ 148
+            
+            # NLL = log_sigma + 0.5 * (y - μ)² / σ²
+            #     = log_sigma + 0.5 * (y - μ)² * exp(-2 * log_sigma)
+            squared_error = (targets - mu) ** 2
+            nll = log_sigma + 0.5 * squared_error * torch.exp(-2 * log_sigma)
+        else:
+            # Legacy: Input is sigma (must be positive)
+            sigma = sigma_or_log_sigma.clamp(min=self.eps)
+            variance = sigma ** 2
+            
+            # NLL = 0.5 * (log(σ²) + (y - μ)² / σ²)
+            nll = 0.5 * (torch.log(variance) + (targets - mu) ** 2 / variance)
         
         return nll.mean()
 
@@ -155,8 +272,8 @@ class MultiHeadLoss(nn.Module):
         # Regression loss (Huber for robustness)
         self.mu_loss = nn.HuberLoss(delta=self.config.mu_huber_delta)
         
-        # Uncertainty loss
-        self.sigma_loss = GaussianNLLLoss()
+        # Uncertainty loss - Phase 1b: use config for log_sigma mode
+        self.sigma_loss = GaussianNLLLoss(use_log_sigma=self.config.use_log_sigma)
         
         # Quantile loss
         self.quantile_loss = PinballLoss(self.config.quantiles)

@@ -220,23 +220,49 @@ class RegressionTargetGenerator:
         sigma = self.compute_forward_volatility(prices)
         sigma = sigma.fillna(current_vol)
         
-        # Classification labels derived from return direction and magnitude
-        edge = self.compute_directional_edge(mu, sigma.clip(lower=0.001))
+        # ============================================================
+        # PHASE 1a: COST-AWARE CLASS LABELS
+        # ============================================================
+        # Derive class labels from NET EDGE after trading costs
+        # edge_net = |mu| - cost(volatility, hold_hours)
+        # Trade only if edge_net > min_edge AND mu/sigma > confidence_min
+        # This eliminates garbage signals that don't beat costs
         
-        # Generate class labels
+        # Compute trading cost that varies with volatility
+        hold_hours = self.horizon_periods * 0.25  # 15-minute bars -> hours
+        trading_costs = pd.Series(index=df.index, dtype=float)
+        for i in range(len(df)):
+            vol = current_vol.iloc[i] if not pd.isna(current_vol.iloc[i]) else 0.01
+            trading_costs.iloc[i] = self.costs.total_round_trip_cost(
+                volatility=vol, 
+                is_taker=True, 
+                hold_hours=hold_hours
+            )
+        
+        # Net edge = absolute expected return - trading costs
+        net_edge = mu.abs() - trading_costs
+        
+        # Confidence ratio: mu/sigma (signal-to-noise)
+        sigma_safe = sigma.clip(lower=0.001)
+        confidence_ratio = mu.abs() / sigma_safe
+        
+        # Thresholds for cost-aware labeling
+        min_net_edge = 0.0005  # Minimum 0.05% net edge after costs
+        min_confidence = 0.5    # Minimum mu/sigma ratio (lowered for training signal)
+        
+        # Generate class labels - only trade when net_edge AND confidence are sufficient
         class_label = pd.Series(1, index=df.index)  # Default HOLD
         
-        # Edge threshold for directional trades
-        edge_threshold = 0.3  # Lower threshold for more training signal
-        min_return = 0.002   # Minimum 0.2% move to be directional
-        
-        # LONG: positive return with sufficient edge
-        long_mask = (mu > min_return) & (edge > edge_threshold)
+        # LONG: positive return with sufficient NET edge and confidence
+        long_mask = (mu > 0) & (net_edge > min_net_edge) & (confidence_ratio > min_confidence)
         class_label[long_mask] = 2  # LONG
         
-        # SHORT: negative return with sufficient edge
-        short_mask = (mu < -min_return) & (edge > edge_threshold)
+        # SHORT: negative return with sufficient NET edge and confidence
+        short_mask = (mu < 0) & (net_edge > min_net_edge) & (confidence_ratio > min_confidence)
         class_label[short_mask] = 0  # SHORT
+        
+        # Legacy edge for backward compatibility
+        edge = self.compute_directional_edge(mu, sigma_safe)
         
         # === TRADING HEAD TARGETS ===
         # Entry offset: MFE-based optimal limit entry (learned from price path)
@@ -245,28 +271,66 @@ class RegressionTargetGenerator:
             df, prices, class_label, atr, n_future_candles
         )
         
-        # === CANDLE PREDICTION TARGETS ===
-        # Compute future candle deltas (percentage changes from current close)
+        # ============================================================
+        # PHASE 2: CONSTRAINED CANDLE PARAMETERIZATION
+        # ============================================================
+        # Instead of predicting raw close/high/low which can be inconsistent,
+        # we predict: delta_close, log_range (always positive), skew in [-1, 1]
+        # Then reconstruct: range = exp(log_range)
+        #                   high = close + range * (0.5 + 0.5 * skew)
+        #                   low = close - range * (0.5 - 0.5 * skew)
+        # This guarantees: high >= low and valid candles
+        
         candle_targets = {}
         for i in range(1, n_future_candles + 1):
             # Delta close: (future_close - current_close) / current_close
             future_close = prices.shift(-i)
-            candle_targets[f"candle_delta_close_{i}"] = (future_close - prices) / prices
-            
-            # Delta high: (future_high - current_close) / current_close
             future_high = highs.shift(-i)
-            candle_targets[f"candle_delta_high_{i}"] = (future_high - prices) / prices
-            
-            # Delta low: (future_low - current_close) / current_close
             future_low = lows.shift(-i)
+            
+            delta_close = (future_close - prices) / prices
+            candle_targets[f"candle_delta_close_{i}"] = delta_close
+            
+            # Constrained parameterization:
+            # Range = (high - low) / close (always positive)
+            candle_range = (future_high - future_low) / prices
+            candle_range = candle_range.clip(lower=0.0001)  # Prevent zero/negative
+            
+            # Log range for numerical stability (network predicts unbounded, we exp it)
+            log_range = np.log(candle_range)
+            candle_targets[f"candle_log_range_{i}"] = log_range
+            
+            # Skew in [-1, 1]: where is close relative to high/low
+            # skew = (close - midpoint) / (range/2)
+            # = 2 * (close - (high + low)/2) / (high - low)
+            # = (close - low) / (high - low) * 2 - 1  (when close is at high, skew = 1)
+            # Use future close position within high-low range
+            range_safe = (future_high - future_low).clip(lower=prices * 0.0001)
+            skew = 2 * (future_close - future_low) / range_safe - 1
+            skew = skew.clip(lower=-1, upper=1)
+            candle_targets[f"candle_skew_{i}"] = skew
+            
+            # Keep legacy targets for backward compatibility (but use constrained for new training)
+            candle_targets[f"candle_delta_high_{i}"] = (future_high - prices) / prices
             candle_targets[f"candle_delta_low_{i}"] = (future_low - prices) / prices
+        
+        # ============================================================
+        # PHASE 1b: LOG_SIGMA FOR GAUSSIAN NLL
+        # ============================================================
+        # For proper Gaussian NLL loss: loss = (y-mu)^2/(2*sigma^2) + log(sigma)
+        # We predict log_sigma (unbounded) and exp it to get sigma (always positive)
+        log_sigma = np.log(sigma_safe)
         
         targets = pd.DataFrame({
             "mu": mu,
             "sigma": sigma,
+            "log_sigma": log_sigma,  # For Gaussian NLL loss
             "class_label": class_label,
             "forward_return": mu,  # Same as mu, explicit for quantile loss
             "edge": edge,
+            "net_edge": net_edge,  # Cost-aware edge
+            "trading_cost": trading_costs,  # For debugging
+            "confidence_ratio": confidence_ratio,  # mu/sigma
             "current_volatility": current_vol,
             "entry_offset": entry_offset,
             "sl_distance": sl_distance,
@@ -274,9 +338,12 @@ class RegressionTargetGenerator:
             **candle_targets
         })
         
-        logger.info(f"Generated multihead targets: "
+        # Log cost-aware labeling stats
+        avg_cost = trading_costs.mean()
+        logger.info(f"Generated multihead targets (cost-aware): "
                    f"LONG={long_mask.sum()}, SHORT={short_mask.sum()}, "
                    f"HOLD={(class_label == 1).sum()}, "
+                   f"avg_trading_cost={avg_cost:.4%}, "
                    f"candle_steps={n_future_candles}")
         
         return targets

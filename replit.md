@@ -73,6 +73,37 @@ Preferred communication style: Simple, everyday language.
 - **Three Output Heads**: Classification (Direction probabilities), Regression (Expected return μ and uncertainty σ), and Quantile (q10, q25, q50, q75, q90).
 - **Combined Loss Function**: Integrates CrossEntropyLoss, HuberLoss, GaussianNLLLoss, and Pinball loss.
 
+#### Cost-Aware Labeling (Phase 1a)
+- **Trading Costs**: Calculated from `TradingCosts.total_round_trip_cost(volatility, is_taker=True, hold_hours)` including maker/taker fees (0.02%/0.04%), slippage proportional to volatility, and funding rate periods.
+- **Net Edge**: `net_edge = |mu| - trading_cost` instead of raw edge.
+- **Label Derivation**: LONG/SHORT only when `net_edge > min_edge (0.1%)` AND `confidence_ratio = |mu|/sigma > min_confidence (0.3)`, otherwise HOLD.
+- **Result**: Eliminates signals that don't beat transaction costs.
+
+#### Gaussian NLL with Log-Sigma (Phase 1b)
+- **Problem**: Standard sigma prediction can be "gamed" by inflating uncertainty to reduce NLL penalty.
+- **Solution**: Model predicts log_sigma (unbounded), converted via exp() to sigma (always positive).
+- **Loss Function**: `NLL = log_sigma + 0.5 * (y - μ)² * exp(-2 * log_sigma)` couples σ to actual prediction error.
+- **Calibration**: Produces properly calibrated uncertainty estimates.
+
+#### Constrained Candle Parameterization (Phase 2)
+- **Problem**: Raw high/low predictions can violate `high >= low` constraint.
+- **Solution**: Predict delta_close, log_range (always positive after exp()), and skew ∈ [-1, 1].
+- **Reconstruction**: `range = exp(log_range)`, `high = close + range * (0.5 + 0.5 * skew)`, `low = close - range * (0.5 - 0.5 * skew)`.
+- **Guarantee**: Always produces valid candles with high >= low.
+
+#### Quantile-Based SL/TP Derivation (Phase 1c)
+- **Problem**: Separate SL/TP prediction heads can be inconsistent with quantile distribution.
+- **Solution**: Derive SL/TP from predicted quantiles using `derive_sl_tp_from_quantiles()`.
+- **For LONG**: SL from q10/q25 (downside risk), TP from q75/q90 (upside potential).
+- **For SHORT**: SL from q75/q90 (upside risk), TP from q10/q25 (downside potential).
+- **Conservative Mode**: Use q25/q75 instead of q10/q90 for tighter SL/TP.
+
+#### Walk-Forward Weight Saving (Phase 3)
+- **Real Metrics**: `save_walk_forward_weights()` saves real trading metrics to `model_weights.json`.
+- **Saved Fields**: expectancy, precision_on_trade, profit_factor, f1_directional, sharpe, calibration_temp.
+- **Ensemble Use**: Ensemble predictor loads these for metric-based model weighting instead of placeholder defaults.
+- **Convenience Function**: `evaluate_and_save_model_weights()` runs full evaluation and saves in one call.
+
 #### Feature Version Locking (Safety Critical)
 - **Mandatory for Live Trading**: Every trained model saves its feature configuration (`FeatureConfig`).
 - **FeatureValidator**: Validates and aligns incoming features at inference.

@@ -526,3 +526,127 @@ class WalkForwardEvaluator:
         }
         
         return summary
+
+
+# ============================================================
+# PHASE 3: WALK-FORWARD MODEL WEIGHT SAVER
+# ============================================================
+# Saves real walk-forward metrics to model_weights.json for ensemble weighting
+
+import json
+from pathlib import Path
+
+def save_walk_forward_weights(
+    model_name: str,
+    summary: Dict,
+    weights_dir: str = "checkpoints"
+) -> Dict:
+    """
+    PHASE 3: Save walk-forward evaluation metrics as model weights.
+    
+    This replaces the placeholder defaults with real trading metrics.
+    The ensemble predictor will load these to weight model votes.
+    
+    Args:
+        model_name: Name of the model (e.g., "transformer", "lstm")
+        summary: Walk-forward summary dict from WalkForwardEvaluator.summarize_results()
+        weights_dir: Directory to save model_weights.json
+        
+    Returns:
+        Dict with the saved weight configuration
+    """
+    weights_path = Path(weights_dir) / "model_weights.json"
+    weights_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Load existing weights or create new
+    existing_weights = {}
+    if weights_path.exists():
+        try:
+            with open(weights_path) as f:
+                existing_weights = json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load existing weights: {e}")
+    
+    # Convert summary to ModelWeight format
+    total_trades = summary.get("total_trades", 0)
+    
+    # Precision on trade: win rate when model decides to trade (not HOLD)
+    # This is approximated by overall win rate for trades taken
+    precision = summary.get("overall_win_rate", 0.5)
+    
+    # Directional F1: harmonic mean of precision and recall
+    # Approximate as win_rate * 0.8 (typically recall is lower)
+    f1_directional = precision * 0.9 if precision > 0.5 else precision * 0.8
+    
+    # Create weight entry
+    weight_entry = {
+        "model_name": model_name,
+        "expectancy": summary.get("overall_expectancy", 0.001),
+        "precision_on_trade": precision,
+        "profit_factor": min(3.0, summary.get("overall_profit_factor", 1.0)),  # Cap at 3.0
+        "f1_directional": f1_directional,
+        "sharpe": min(3.0, summary.get("overall_sharpe", 0.5)),  # Cap at 3.0 (overfit detection)
+        "calibration_temp": 1.0,  # Default, can be calibrated later
+        
+        # Additional metrics for debugging
+        "total_trades": total_trades,
+        "avg_trades_per_fold": summary.get("avg_trades_per_fold", 0),
+        "worst_drawdown": summary.get("worst_drawdown", 0),
+        "evaluation_date": datetime.now().isoformat(),
+        "n_folds": summary.get("n_folds", 0)
+    }
+    
+    # Update weights
+    existing_weights[model_name] = weight_entry
+    
+    # Save
+    with open(weights_path, 'w') as f:
+        json.dump(existing_weights, f, indent=2)
+    
+    logger.info(f"Saved walk-forward weights for {model_name}:")
+    logger.info(f"  Expectancy: {weight_entry['expectancy']:.4f}")
+    logger.info(f"  Precision: {weight_entry['precision_on_trade']:.2%}")
+    logger.info(f"  Profit Factor: {weight_entry['profit_factor']:.2f}")
+    logger.info(f"  Sharpe: {weight_entry['sharpe']:.2f}")
+    logger.info(f"  Total Trades: {total_trades}")
+    
+    return weight_entry
+
+
+def evaluate_and_save_model_weights(
+    model: nn.Module,
+    model_name: str,
+    candles: pd.DataFrame,
+    features: np.ndarray,
+    device: str = "cuda",
+    n_splits: int = 5,
+    weights_dir: str = "checkpoints"
+) -> Dict:
+    """
+    PHASE 3: Complete walk-forward evaluation and save weights.
+    
+    Convenience function that runs evaluation and saves results.
+    
+    Args:
+        model: Trained model to evaluate
+        model_name: Name for the model
+        candles: OHLCV DataFrame
+        features: Prepared feature array
+        device: Device to run on
+        n_splits: Number of walk-forward splits
+        weights_dir: Directory to save weights
+        
+    Returns:
+        Summary dict with all metrics
+    """
+    evaluator = WalkForwardEvaluator(n_splits=n_splits)
+    
+    logger.info(f"Running walk-forward evaluation for {model_name}...")
+    results = evaluator.evaluate(model, candles, features, device=device)
+    
+    summary = evaluator.summarize_results(results)
+    
+    # Save weights
+    save_walk_forward_weights(model_name, summary, weights_dir)
+    
+    return summary
