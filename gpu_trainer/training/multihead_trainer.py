@@ -787,7 +787,14 @@ class MultiHeadTrainer:
         return history
     
     def _save_checkpoint(self, path: str, metrics: Dict[str, float]):
-        """Save model checkpoint with metrics."""
+        """Save model checkpoint with metrics, scaler, and feature config."""
+        # Get FeatureEngineer version for tracking
+        try:
+            from data.pipeline import FeatureEngineer
+            fe_version = FeatureEngineer.VERSION
+        except:
+            fe_version = "unknown"
+        
         checkpoint = {
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
@@ -798,13 +805,26 @@ class MultiHeadTrainer:
             'timestamp': datetime.now().isoformat(),
             'model_name': self.model.name,
             'input_dim': self.model.input_dim,
-            'model_type': 'multihead'
+            'model_type': 'multihead',
+            'feature_engineer_version': fe_version,
+            'training_mode': 'stf',  # Default to STF for 15m only training
+            'horizon_periods': 16,   # Default 4h at 15m
         }
+        
+        # Include scaler if available
+        if hasattr(self, 'scaler') and self.scaler is not None:
+            checkpoint['scaler_state'] = self.scaler.get_params() if hasattr(self.scaler, 'get_params') else None
+            checkpoint['scaler_mean'] = self.scaler.mean_.tolist() if hasattr(self.scaler, 'mean_') else None
+            checkpoint['scaler_scale'] = self.scaler.scale_.tolist() if hasattr(self.scaler, 'scale_') else None
+        
+        # Include feature columns if available
+        if hasattr(self, 'feature_columns') and self.feature_columns is not None:
+            checkpoint['feature_columns'] = self.feature_columns
         
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(checkpoint, path)
-        logger.info(f"Saved checkpoint to {path}")
+        logger.info(f"Saved checkpoint to {path} (FE version: {fe_version})")
 
 
 def create_multihead_dataloaders(

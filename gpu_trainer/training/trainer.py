@@ -331,6 +331,13 @@ class Trainer:
         path = Path(self.config.training.checkpoint_dir) / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         
+        # Get FeatureEngineer version for tracking
+        try:
+            from data.pipeline import FeatureEngineer
+            fe_version = FeatureEngineer.VERSION
+        except:
+            fe_version = "unknown"
+        
         # Include model-specific config with input_dim for proper loading
         model_config = {
             "name": self.model.name,
@@ -363,11 +370,24 @@ class Trainer:
             "best_val_loss": self.best_val_loss,
             "global_step": self.global_step,
             "config": self.config,
-            "model_config": model_config  # Model-specific config with input_dim
+            "model_config": model_config,  # Model-specific config with input_dim
+            "feature_engineer_version": fe_version,
+            "training_mode": "stf",  # Default to STF for 15m only
+            "horizon_periods": 16,   # Default 4h at 15m
         }
+        
+        # Include scaler if available
+        if hasattr(self, 'scaler') and self.scaler is not None:
+            checkpoint['scaler_mean'] = self.scaler.mean_.tolist() if hasattr(self.scaler, 'mean_') else None
+            checkpoint['scaler_scale'] = self.scaler.scale_.tolist() if hasattr(self.scaler, 'scale_') else None
+        
+        # Include feature columns if available
+        if hasattr(self, 'feature_columns') and self.feature_columns is not None:
+            checkpoint['feature_columns'] = self.feature_columns
+            
         torch.save(checkpoint, path)
         if not self.gui_mode:
-            logger.info(f"Saved checkpoint to {path}")
+            logger.info(f"Saved checkpoint to {path} (FE version: {fe_version})")
         
     def load_checkpoint(self, filename: str):
         path = Path(self.config.training.checkpoint_dir) / filename
