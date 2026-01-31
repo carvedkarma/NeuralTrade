@@ -560,6 +560,43 @@ export async function registerRoutes(
       // Get generator stats
       const stats = coneSignalGenerator.getStats();
       
+      // AUTO-SAVE: If LONG or SHORT signal, automatically record to database
+      if (signal.direction !== "HOLD") {
+        try {
+          // Check if this timestamp was already recorded to avoid duplicates
+          const existingSignal = await storage.getConeSignalByTimestamp(signal.timestamp);
+          
+          if (!existingSignal) {
+            await storage.recordConeSignal({
+              timestamp: signal.timestamp,
+              direction: signal.direction,
+              entryPrice: signal.entryPrice,
+              stopLoss: signal.stopLoss,
+              takeProfit: signal.takeProfit,
+              mu: signal.mu,
+              sigma: signal.sigma,
+              edge: signal.edge,
+              riskReward: signal.riskReward,
+              q10: signal.quantiles.q10,
+              q25: signal.quantiles.q25,
+              q50: signal.quantiles.q50,
+              q75: signal.quantiles.q75,
+              q90: signal.quantiles.q90,
+              probUp: signal.probUp,
+              probDown: signal.probDown,
+              probHold: signal.probHold,
+              holdReasons: signal.holdReasons || [],
+              edgeThreshold: signal.edgeThreshold,
+              outcome: "PENDING",
+              createdAt: Date.now(),
+            });
+            console.log(`[ConeSignal] Auto-saved ${signal.direction} signal at ${new Date(signal.timestamp).toISOString()}`);
+          }
+        } catch (saveError) {
+          console.error("[ConeSignal] Failed to auto-save signal:", saveError);
+        }
+      }
+      
       res.json({
         available: true,
         signal,

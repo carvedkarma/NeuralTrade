@@ -64,6 +64,7 @@ export interface IStorage {
   // Cone signal methods
   getConeSignals(limit?: number): Promise<ConeSignal[]>;
   getConeSignalsPending(): Promise<ConeSignal[]>;
+  getConeSignalByTimestamp(timestamp: number): Promise<ConeSignal | null>;
   recordConeSignal(signal: InsertConeSignal): Promise<ConeSignal>;
   updateConeSignalOutcome(id: number, update: Partial<ConeSignal>): Promise<void>;
 }
@@ -2731,6 +2732,14 @@ export class MemStorage implements IStorage {
       .from(coneSignals)
       .where(eq(coneSignals.outcome, "PENDING"))
       .orderBy(desc(coneSignals.timestamp));
+  }
+
+  async getConeSignalByTimestamp(timestamp: number): Promise<ConeSignal | null> {
+    const results = await db.select()
+      .from(coneSignals)
+      .where(eq(coneSignals.timestamp, timestamp))
+      .limit(1);
+    return results[0] || null;
   }
 
   async recordConeSignal(signal: InsertConeSignal): Promise<ConeSignal> {

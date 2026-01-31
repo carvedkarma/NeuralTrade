@@ -93,9 +93,9 @@ const formatPercent = (val: number | string | null, decimals = 2) => {
 export function ConeSignalCard() {
   const [isRecording, setIsRecording] = useState(false);
 
-  const { data: coneSignal, isLoading, refetch } = useQuery<{ available: boolean; signal: ConeSignal }>({
+  const { data: coneSignal, isLoading, refetch, dataUpdatedAt } = useQuery<{ available: boolean; signal: ConeSignal }>({
     queryKey: ['/api/cone-signal/current'],
-    refetchInterval: 60000,
+    refetchInterval: 15000, // Refresh every 15 seconds for more responsive updates
   });
 
   const { data: signalHistory } = useQuery<{ signals: SignalHistoryItem[] }>({
@@ -184,6 +184,9 @@ export function ConeSignalCard() {
             <Badge variant="outline" className="text-xs ml-auto">
               16-bar horizon
             </Badge>
+            <span className="text-xs text-muted-foreground" data-testid="text-last-updated">
+              Updated: {dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : '-'}
+            </span>
             <Button 
               variant="ghost" 
               size="icon" 
