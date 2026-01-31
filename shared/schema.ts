@@ -450,7 +450,7 @@ export const dashboardDataSchema = z.object({
   performanceStats: performanceStatsSchema.optional(),
   learningStats: learningStatsSchema.optional(),
   isLiveData: z.boolean().optional(),
-  dataSource: z.enum(["coingecko", "cryptocompare", "binance", "none"]).optional(),
+  dataSource: z.enum(["coingecko", "cryptocompare", "binance", "database", "database+binance", "none"]).optional(),
   dataError: z.string().nullable().optional(),
 });
 export type DashboardData = z.infer<typeof dashboardDataSchema>;

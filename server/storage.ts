@@ -33,7 +33,8 @@ import { getAllIndicators, calculateMultiTimeframeScore, type TechnicalIndicator
 import { analyzeMarket, generateAISignal } from "./ai-analysis";
 import { getFullBTCData, getBTCPrice } from "./coingecko";
 import { getFullBTCDataCryptoCompare } from "./cryptocompare";
-import { getFullBTCDataBinanceVision } from "./binance-vision";
+import { getFullBTCDataBinanceVision, getBTCPriceBinanceVision, getBTCCandlesBinanceVision } from "./binance-vision";
+import { getStoredCandles, getStoredCandleCount } from "./historical-data";
 import { computeFeatures, getLatestFeatures, detectCandlestickPatterns, analyzeVolumeProfile, analyzeMultiTimeframePatterns, enrichFeaturesWithCrossAsset, type FeatureVector, type CandlestickPattern, type VolumeProfile, type MultiTimeframeCorrelation } from "./feature-engine";
 import { generateShotPlan, type ShotPlan as ShotPlanInternal } from "./signal-engine";
 import { getSentimentData, interpretFearGreed, getNewsStats } from "./sentiment-api";
@@ -140,7 +141,7 @@ export class MemStorage implements IStorage {
   private whaleActivity: WhaleActivity | null = null;
   private isLiveData = false;
   private dataError: string | null = null;
-  private dataSource: "coingecko" | "cryptocompare" | "binance" | "none" = "none";
+  private dataSource: "coingecko" | "cryptocompare" | "binance" | "database" | "database+binance" | "none" = "none";
   private cachedShotPlan: ShotPlan | null = null;
   private cachedSentiment: Sentiment | null = null;
   private lastShotPlanUpdate = 0;
@@ -1458,27 +1459,99 @@ export class MemStorage implements IStorage {
     
     let dataFetched = false;
     
+    // PRIORITY 1: Use database for historical candles (already downloaded from Replit proxy)
+    // Only fetch 1 live candle from Binance for real-time price updates
     try {
-      console.log("Attempting to fetch data from Binance Vision...");
-      this.learningStats.binanceAttempts++;
-      const binanceVisionData = await getFullBTCDataBinanceVision();
+      const dbCandleCount = await getStoredCandleCount();
       
-      if (binanceVisionData && binanceVisionData.candles.length > 0) {
-        this.candles = binanceVisionData.candles;
-        this.isLiveData = true;
-        this.dataSource = "binance";
-        this.dataError = null;
-        this.initializeKalmanFilters();
-        this.indicators = getAllIndicators(this.candles);
-        this.lastBinanceUpdate = now;
-        dataFetched = true;
-        this.learningStats.binanceSuccesses++;
-        this.learningStats.lastBinanceFetch = now;
-        this.learningStats.binanceError = false;
-        console.log(`Binance Vision data fetched: ${binanceVisionData.candles.length} candles, price: $${binanceVisionData.currentPrice}`);
+      if (dbCandleCount >= 500) {
+        // We have enough historical data in database - use it!
+        console.log(`Using ${dbCandleCount} candles from database (no external fetch needed)`);
+        
+        // Get last 500 candles from database (ordered by timestamp desc, so reverse for chronological)
+        const dbCandles = await getStoredCandles(500);
+        const historicalCandles: Candle[] = dbCandles
+          .reverse()
+          .map(c => ({
+            timestamp: c.timestamp,
+            open: Number(c.open),
+            high: Number(c.high),
+            low: Number(c.low),
+            close: Number(c.close),
+            volume: Number(c.volume),
+          }));
+        
+        // Only fetch 1 live candle from Binance for real-time price
+        this.learningStats.binanceAttempts++;
+        const liveCandles = await getBTCCandlesBinanceVision("15m", 1);
+        
+        if (liveCandles.length > 0) {
+          const liveCandle = liveCandles[0];
+          const lastDbTs = historicalCandles[historicalCandles.length - 1]?.timestamp ?? 0;
+          
+          // Only add live candle if it's newer than what we have
+          if (liveCandle.timestamp > lastDbTs) {
+            this.candles = [...historicalCandles.slice(-499), liveCandle];
+          } else {
+            // Update the last candle with live data
+            this.candles = [...historicalCandles.slice(-499)];
+            if (this.candles.length > 0 && liveCandle.timestamp === this.candles[this.candles.length - 1].timestamp) {
+              this.candles[this.candles.length - 1] = liveCandle;
+            }
+          }
+          
+          this.isLiveData = true;
+          this.dataSource = "database+binance";
+          this.dataError = null;
+          this.initializeKalmanFilters();
+          this.indicators = getAllIndicators(this.candles);
+          this.lastBinanceUpdate = now;
+          dataFetched = true;
+          this.learningStats.binanceSuccesses++;
+          this.learningStats.lastBinanceFetch = now;
+          this.learningStats.binanceError = false;
+          console.log(`Database: ${historicalCandles.length} candles + 1 live from Binance, price: $${liveCandle.close.toFixed(2)}`);
+        } else {
+          // Binance live fetch failed - use database candles only
+          this.candles = historicalCandles.slice(-500);
+          this.isLiveData = false;
+          this.dataSource = "database";
+          this.dataError = null;
+          this.initializeKalmanFilters();
+          this.indicators = getAllIndicators(this.candles);
+          this.lastBinanceUpdate = now;
+          dataFetched = true;
+          console.log(`Database only: ${this.candles.length} candles (live fetch failed)`);
+        }
       }
     } catch (error) {
-      console.error("Error fetching Binance Vision data:", error);
+      console.error("Error loading candles from database:", error);
+    }
+    
+    // FALLBACK: If database doesn't have enough data, fetch from external APIs
+    if (!dataFetched) {
+      try {
+        console.log("Database has insufficient data, fetching from Binance Vision...");
+        this.learningStats.binanceAttempts++;
+        const binanceVisionData = await getFullBTCDataBinanceVision();
+        
+        if (binanceVisionData && binanceVisionData.candles.length > 0) {
+          this.candles = binanceVisionData.candles;
+          this.isLiveData = true;
+          this.dataSource = "binance";
+          this.dataError = null;
+          this.initializeKalmanFilters();
+          this.indicators = getAllIndicators(this.candles);
+          this.lastBinanceUpdate = now;
+          dataFetched = true;
+          this.learningStats.binanceSuccesses++;
+          this.learningStats.lastBinanceFetch = now;
+          this.learningStats.binanceError = false;
+          console.log(`Binance Vision data fetched: ${binanceVisionData.candles.length} candles, price: $${binanceVisionData.currentPrice}`);
+        }
+      } catch (error) {
+        console.error("Error fetching Binance Vision data:", error);
+      }
     }
     
     if (!dataFetched) {
