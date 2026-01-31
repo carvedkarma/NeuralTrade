@@ -161,7 +161,8 @@ def train(args):
     features_df = features_df.fillna(0)
     
     # === STEP 2: Create labels with lookahead (horizon candles into future) ===
-    horizon = getattr(args, 'horizon', 5)
+    # Default: 16 bars = 4 hours for 15m timeframe
+    horizon = getattr(args, 'horizon', 16)
     
     if use_multihead:
         # Multi-head mode: generate all targets (class, returns, trading, candles)
@@ -1297,7 +1298,8 @@ def main():
     train_parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
     train_parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
     train_parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    train_parser.add_argument("--horizon", type=int, default=5, help="Label lookahead horizon (candles)")
+    train_parser.add_argument("--horizon", type=int, default=16, 
+                             help="Label lookahead horizon in bars (default: 16 = 4h at 15m timeframe)")
     train_parser.add_argument("--cost", type=float, default=0.0009, 
                              help="Fixed round-trip trading cost (default: 0.09%% = 0.0009)")
     train_parser.add_argument("--min-net-edge", type=float, default=0.0, dest="min_net_edge",
@@ -1316,7 +1318,8 @@ def main():
     train_all_parser.add_argument("--epochs", type=int, default=100, help="Number of epochs per model")
     train_all_parser.add_argument("--batch-size", dest="batch_size", type=int, default=64, help="Batch size")
     train_all_parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    train_all_parser.add_argument("--horizon", type=int, default=10, help="Prediction horizon in 15m bars (default: 10 = 2.5h)")
+    train_all_parser.add_argument("--horizon", type=int, default=16, 
+                                  help="Prediction horizon in 15m bars (default: 16 = 4h)")
     train_all_parser.add_argument("--cost", type=float, default=0.0009, 
                                   help="Fixed round-trip trading cost (default: 0.09%%)")
     train_all_parser.add_argument("--min-net-edge", type=float, default=0.0, dest="min_net_edge",

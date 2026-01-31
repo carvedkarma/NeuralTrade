@@ -75,12 +75,14 @@ class RegressionTargetGenerator:
     """
     
     def __init__(self, 
-                 horizon_periods: int = 48,  # 4 hours in 5-minute candles
-                 lookback_periods: int = 96,  # 8 hours for volatility
+                 horizon_periods: int = 16,  # 4 hours in 15-minute candles (production default)
+                 lookback_periods: int = 32,  # 8 hours = 2x horizon for volatility
                  costs: Optional[TradingCosts] = None):
         self.horizon_periods = horizon_periods
         self.lookback_periods = lookback_periods
         self.costs = costs or TradingCosts()
+        
+        logger.info(f"RegressionTargetGenerator: horizon={horizon_periods}, lookback={lookback_periods}")
         
     def compute_forward_returns(self, prices: pd.Series) -> pd.Series:
         """
@@ -93,16 +95,19 @@ class RegressionTargetGenerator:
         returns = (future_prices - prices) / prices
         return returns
     
-    def compute_realized_volatility(self, prices: pd.Series) -> pd.Series:
+    def compute_realized_volatility(self, prices: pd.Series, bars_per_day: int = 96) -> pd.Series:
         """
         Compute realized volatility (standard deviation of returns).
         
         Uses rolling window of lookback periods.
+        
+        Args:
+            bars_per_day: Number of bars per day for annualization (96 for 15m, 288 for 5m)
         """
         log_returns = np.log(prices / prices.shift(1))
         volatility = log_returns.rolling(window=self.lookback_periods).std()
         
-        annualization = np.sqrt(288)  # 5-min candles per day
+        annualization = np.sqrt(bars_per_day)  # 96 for 15m, 288 for 5m
         volatility_annualized = volatility * annualization
         
         return volatility_annualized
@@ -711,7 +716,7 @@ class MultiHorizonTargetGenerator:
 def create_regression_dataset(
     candle_df: pd.DataFrame,
     features_df: pd.DataFrame,
-    horizon_periods: int = 48,
+    horizon_periods: int = 16,  # Default 16 bars = 4h at 15m timeframe (was 48 for 5m)
     min_edge_threshold: float = 0.3
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
