@@ -1646,14 +1646,10 @@ async def predict_from_candles(request: CandlePredictionRequest):
                 missing_pct = 0 if actual_feature_count == 0 else 100
             
             if missing_pct > 15:
-                error_msg = f"Feature mismatch: computed {actual_feature_count}, model expects {expected_feature_count} ({missing_pct:.1f}% missing)"
-                logger.error(f"[HARD ERROR] {error_msg}")
+                logger.error(f"[HARD ERROR] Feature mismatch: computed {actual_feature_count}, model expects {expected_feature_count} ({missing_pct:.1f}% missing)")
                 raise HTTPException(
                     status_code=422,
-                    detail="Feature schema mismatch — wrong endpoint or retrain required. "
-                           f"Details: {missing_pct:.1f}% features missing. "
-                           f"Got {actual_feature_count} features, expected {expected_feature_count}. "
-                           f"Training mode: {model_manager.training_mode}."
+                    detail="Feature schema mismatch — wrong endpoint or retrain required"
                 )
             
         except ImportError as e:
@@ -1803,14 +1799,10 @@ async def predict_multihead_from_candles(request: CandlePredictionRequest):
                 missing_pct = 0 if actual_feature_count == 0 else 100
             
             if missing_pct > 15:
-                error_msg = f"Feature mismatch: computed {actual_feature_count}, model expects {expected_feature_count} ({missing_pct:.1f}% missing)"
-                logger.error(f"[HARD ERROR] {error_msg}")
+                logger.error(f"[HARD ERROR] Feature mismatch: computed {actual_feature_count}, model expects {expected_feature_count} ({missing_pct:.1f}% missing)")
                 raise HTTPException(
                     status_code=422,
-                    detail="Feature schema mismatch — wrong endpoint or retrain required. "
-                           f"Details: {missing_pct:.1f}% features missing. "
-                           f"Got {actual_feature_count} features, expected {expected_feature_count}. "
-                           f"Training mode: {model_manager.training_mode}."
+                    detail="Feature schema mismatch — wrong endpoint or retrain required"
                 )
             
         except ImportError as e:
@@ -2237,13 +2229,10 @@ async def predict_quantile(request: QuantilePredictionRequest):
                 missing_pct = (schema_stats['missing_filled'] / schema_stats['expected_features']) * 100 if schema_stats['expected_features'] > 0 else 0
                 
                 if missing_pct > 15:
-                    error_msg = f"SCHEMA MISMATCH: {missing_pct:.1f}% features missing ({schema_stats['missing_filled']}/{schema_stats['expected_features']})"
-                    logger.error(f"[HARD ERROR] {error_msg}")
+                    logger.error(f"[HARD ERROR] SCHEMA MISMATCH: {missing_pct:.1f}% features missing ({schema_stats['missing_filled']}/{schema_stats['expected_features']})")
                     raise HTTPException(
                         status_code=422,
-                        detail="Feature schema mismatch — wrong endpoint or retrain required. "
-                               f"Details: {missing_pct:.1f}% features missing ({schema_stats['missing_filled']}/{schema_stats['expected_features']}). "
-                               f"Training mode: {model_manager.training_mode}."
+                        detail="Feature schema mismatch — wrong endpoint or retrain required"
                     )
                 
                 # Restore batch dimension if needed
@@ -2745,18 +2734,15 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
             # This indicates a pipeline mismatch - do NOT silently fill and produce garbage predictions
             # REQUIRED INFERENCE RULE: HTTP 422 with specific message
             if missing_pct > 15:
-                error_msg = (
-                    f"SCHEMA MISMATCH: {missing_pct:.1f}% features missing ({schema_stats['missing_filled']}/{schema_stats['expected_features']}). "
+                logger.error(
+                    f"[HARD ERROR] SCHEMA MISMATCH: {missing_pct:.1f}% features missing ({schema_stats['missing_filled']}/{schema_stats['expected_features']}). "
                     f"Training mode: {model_manager.training_mode}. "
                     f"Expected features: {model_manager.expected_features[:5] if model_manager.expected_features else 'unknown'}... "
                     f"Incoming features: {incoming_feature_names[:5]}..."
                 )
-                logger.error(f"[HARD ERROR] {error_msg}")
                 raise HTTPException(
                     status_code=422,
-                    detail="Feature schema mismatch — wrong endpoint or retrain required. "
-                           f"Details: {missing_pct:.1f}% features missing ({schema_stats['missing_filled']}/{schema_stats['expected_features']}). "
-                           f"Training mode: {model_manager.training_mode}."
+                    detail="Feature schema mismatch — wrong endpoint or retrain required"
                 )
         else:
             # No feature config - use raw features with basic sequence handling
@@ -2777,14 +2763,10 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
             
             # REQUIRED INFERENCE RULE: HTTP 422 if >15% missing
             if missing_pct > 15:
-                error_msg = f"Feature mismatch: computed {actual_feature_count}, model expects {expected_feature_count} ({missing_pct:.1f}% missing)"
-                logger.error(f"[HARD ERROR] {error_msg}")
+                logger.error(f"[HARD ERROR] Feature mismatch: computed {actual_feature_count}, model expects {expected_feature_count} ({missing_pct:.1f}% missing)")
                 raise HTTPException(
                     status_code=422,
-                    detail="Feature schema mismatch — wrong endpoint or retrain required. "
-                           f"Details: {missing_pct:.1f}% features missing. "
-                           f"Got {actual_feature_count} features, expected {expected_feature_count}. "
-                           f"Training mode: {model_manager.training_mode}."
+                    detail="Feature schema mismatch — wrong endpoint or retrain required"
                 )
         
         # Make ensemble prediction
