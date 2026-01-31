@@ -109,6 +109,15 @@ Preferred communication style: Simple, everyday language.
 - **FeatureValidator**: Validates and aligns incoming features at inference.
 - **Safe Prediction**: Returns HOLD with 0 confidence if feature mismatch.
 
+#### Prediction Drift Monitoring (Phase 4b)
+- **PSI (Population Stability Index)**: Detects feature distribution shifts (< 0.1 OK, 0.1-0.25 Warning, > 0.25 Critical).
+- **KL Divergence**: Measures prediction distribution changes using Jensen-Shannon divergence.
+- **ECE (Expected Calibration Error)**: Monitors confidence calibration (when model says 70% confident, should be right ~70%).
+- **Brier Score**: Overall probabilistic calibration (lower is better, random = 0.25).
+- **DriftMonitor Class**: Comprehensive monitoring with `check_drift()` returning detailed DriftReport.
+- **Automatic History**: Reports saved to `checkpoints/drift_history/drift_history.json`.
+- **Usage**: `create_drift_monitor_from_training()` to initialize, `load_drift_monitor()` to restore.
+
 #### Training-Inference Alignment
 - **Key Fixes**: Removed cross-asset features, uses forward-fill for missing features (aborts if >15% missing), explicitly drops OHLCV columns before feature extraction, and locks `sequence_length` to 100.
 - **Retraining Required**: Models must be retrained after these fixes.
