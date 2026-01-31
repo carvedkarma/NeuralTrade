@@ -1462,13 +1462,14 @@ async def predict(request: PredictionRequest):
         action = result.get("action_name", ACTION_NAMES[action_idx])
         
         # Map probabilities correctly: [P(SHORT), P(HOLD), P(LONG)]
+        # Convert numpy values to Python floats for JSON serialization
         probs = {
-            "SHORT": result["probabilities"][0],
-            "HOLD": result["probabilities"][1],
-            "LONG": result["probabilities"][2]
+            "SHORT": float(result["probabilities"][0]),
+            "HOLD": float(result["probabilities"][1]),
+            "LONG": float(result["probabilities"][2])
         }
-        confidence = result["confidence"]
-        uncertainty = result["uncertainty"]
+        confidence = float(result["confidence"])
+        uncertainty = float(result["uncertainty"])
         model_weights = result.get("model_weights", {})
         reasoning = result.get("reasoning", [])
             
@@ -1578,16 +1579,19 @@ async def predict_from_candles(request: CandlePredictionRequest):
         action_idx = result["action"]
         action = result.get("action_name", ACTION_NAMES[action_idx])
         
+        # Convert numpy values to Python floats for JSON serialization
         probs = {
-            "SHORT": result["probabilities"][0],
-            "HOLD": result["probabilities"][1],
-            "LONG": result["probabilities"][2]
+            "SHORT": float(result["probabilities"][0]),
+            "HOLD": float(result["probabilities"][1]),
+            "LONG": float(result["probabilities"][2])
         }
+        confidence = float(result["confidence"])
+        uncertainty = float(result["uncertainty"])
         
         prediction = {
             "action": action,
             "probabilities": probs,
-            "confidence": result["confidence"],
+            "confidence": confidence,
             "features_shape": list(features_seq.shape),
             "candles_used": len(request.candles)
         }
@@ -1596,8 +1600,8 @@ async def predict_from_candles(request: CandlePredictionRequest):
         return PredictionResponse(
             action=action,
             probabilities=probs,
-            confidence=result["confidence"],
-            uncertainty=result["uncertainty"],
+            confidence=confidence,
+            uncertainty=uncertainty,
             model_weights=result.get("model_weights", {}),
             reasoning=result.get("reasoning", []) + [
                 f"Processed {len(request.candles)} candles → {features_seq.shape[0]} sequences"
@@ -1797,7 +1801,8 @@ async def predict_multihead_from_candles(request: CandlePredictionRequest):
         
         # PHASE 1c: Derive SL/TP from quantiles instead of learned heads
         # This ensures internal consistency - SL/TP come from the same distribution
-        q10, q25, q50, q75, q90 = quantiles_raw
+        # Convert numpy.float32 to Python float immediately to avoid JSON serialization issues
+        q10, q25, q50, q75, q90 = [float(q) for q in quantiles_raw]
         
         if action == "LONG":
             # LONG: SL from q10 (downside risk), TP from q90 (upside potential)
@@ -1813,26 +1818,27 @@ async def predict_multihead_from_candles(request: CandlePredictionRequest):
             tp_distance = 0.005  # 0.5%
         
         # Enforce minimum SL/TP to avoid micro-trades (at least 0.1%)
-        sl_distance = max(abs(sl_distance), 0.001)
-        tp_distance = max(abs(tp_distance), 0.001)
+        sl_distance = float(max(abs(sl_distance), 0.001))
+        tp_distance = float(max(abs(tp_distance), 0.001))
         
-        # Derive price levels based on action
-        entry_price = current_price * (1 + entry_offset)
+        # Derive price levels based on action - ensure all are Python floats
+        entry_offset = float(entry_offset)
+        entry_price = float(current_price * (1 + entry_offset))
         
         if action == "LONG":
-            stop_loss_price = current_price * (1 - sl_distance)
-            take_profit_price = current_price * (1 + tp_distance)
+            stop_loss_price = float(current_price * (1 - sl_distance))
+            take_profit_price = float(current_price * (1 + tp_distance))
         elif action == "SHORT":
-            stop_loss_price = current_price * (1 + sl_distance)
-            take_profit_price = current_price * (1 - tp_distance)
+            stop_loss_price = float(current_price * (1 + sl_distance))
+            take_profit_price = float(current_price * (1 - tp_distance))
         else:  # HOLD
-            stop_loss_price = current_price * (1 - sl_distance)
-            take_profit_price = current_price * (1 + tp_distance)
+            stop_loss_price = float(current_price * (1 - sl_distance))
+            take_profit_price = float(current_price * (1 + tp_distance))
         
         # Risk-reward ratio
         risk = abs(current_price - stop_loss_price)
         reward = abs(take_profit_price - current_price)
-        rr_ratio = reward / risk if risk > 0 else 0.0
+        rr_ratio = float(reward / risk) if risk > 0 else 0.0
         
         # Suggested order type based on urgency
         if confidence > 0.7 and abs(mu) > 0.01:
@@ -1848,7 +1854,7 @@ async def predict_multihead_from_candles(request: CandlePredictionRequest):
         # Position sizing based on confidence and edge
         base_size = 2.0  # 2% base
         position_size = base_size * min(confidence * 2, 1.5) * (1 + edge)
-        position_size = min(max(position_size, 0.5), 5.0)  # 0.5% to 5%
+        position_size = float(min(max(position_size, 0.5), 5.0))  # 0.5% to 5%
         
         # Format predicted candles
         predicted_candles = []
@@ -1880,21 +1886,21 @@ async def predict_multihead_from_candles(request: CandlePredictionRequest):
                 "HOLD": float(class_probs[1]),
                 "LONG": float(class_probs[2])
             },
-            confidence=confidence,
-            expected_return=mu,
-            uncertainty=sigma,
-            edge=edge,
+            confidence=float(confidence),
+            expected_return=float(mu),
+            uncertainty=float(sigma),
+            edge=float(edge),
             quantiles={
-                "q10": float(quantiles_raw[0]),
-                "q25": float(quantiles_raw[1]),
-                "q50": float(quantiles_raw[2]),
-                "q75": float(quantiles_raw[3]),
-                "q90": float(quantiles_raw[4])
+                "q10": q10,
+                "q25": q25,
+                "q50": q50,
+                "q75": q75,
+                "q90": q90
             },
             entry_offset_pct=entry_offset,
             stop_loss_pct=sl_distance,
             take_profit_pct=tp_distance,
-            current_price=current_price,
+            current_price=float(current_price),
             entry_price=entry_price,
             stop_loss_price=stop_loss_price,
             take_profit_price=take_profit_price,
@@ -2566,11 +2572,11 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
         predictor = get_ensemble_predictor()
         
         if predictor is None:
-            # Fallback to basic prediction
+            # Fallback to basic prediction - ensure all numpy values are converted to Python floats
             result = model_manager.predict(features_seq)
             return {
                 "action": result.get("action_name", "HOLD"),
-                "confidence": result["confidence"],
+                "confidence": float(result["confidence"]),
                 "confidence_margin": 0.0,
                 "edge": 0.0,
                 "market_regime": "UNKNOWN",
@@ -2585,13 +2591,13 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
                 "regime_adjustment": "NONE",
                 "model_votes": {},
                 "ensemble_probs": {
-                    "SHORT": result["probabilities"][0],
-                    "HOLD": result["probabilities"][1],
-                    "LONG": result["probabilities"][2]
+                    "SHORT": float(result["probabilities"][0]),
+                    "HOLD": float(result["probabilities"][1]),
+                    "LONG": float(result["probabilities"][2])
                 },
                 "reasons": [f"MTF features: {features_seq.shape[1]}, used basic prediction"],
                 "mtf_mode": has_full_mtf,
-                "feature_count": features_seq.shape[1]
+                "feature_count": int(features_seq.shape[1])
             }
         
         signal = predictor.predict(features_seq)
@@ -2610,35 +2616,54 @@ async def predict_ensemble_from_candles(request: MTFCandleData):
                 if schema_stats.get('extra_names'):
                     logger.info(f"[Schema] Extra features dropped: {schema_stats['extra_names']}")
         
+        # Convert all potential numpy values to Python native types for JSON serialization
+        def to_float(val):
+            """Convert numpy types to Python float."""
+            if val is None:
+                return None
+            return float(val)
+        
+        def convert_probs(probs):
+            """Convert probability dict values to Python floats."""
+            if probs is None:
+                return {}
+            return {k: to_float(v) for k, v in probs.items()}
+        
+        def convert_quantiles(quants):
+            """Convert quantile dict values to Python floats."""
+            if quants is None:
+                return {}
+            return {k: to_float(v) for k, v in quants.items()}
+        
         return {
             "action": signal.action,
-            "confidence": signal.confidence,
-            "confidence_margin": signal.confidence_margin,
-            "edge": signal.edge,
+            "confidence": to_float(signal.confidence),
+            "confidence_margin": to_float(signal.confidence_margin),
+            "edge": to_float(signal.edge),
             "market_regime": signal.market_regime,
             "risk_regime": signal.risk_regime,
-            "regime_confidence": signal.regime_confidence,
-            "agreement_pct": signal.agreement_pct,
-            "weighted_agreement": signal.weighted_agreement,
-            "disagreement_score": signal.disagreement_score,
-            "position_size_pct": signal.position_size_pct,
-            "regime_adjusted_size": signal.regime_adjusted_size,
-            "confidence_threshold_used": signal.confidence_threshold_used,
+            "regime_confidence": to_float(signal.regime_confidence),
+            "agreement_pct": to_float(signal.agreement_pct),
+            "weighted_agreement": to_float(signal.weighted_agreement),
+            "disagreement_score": to_float(signal.disagreement_score),
+            "position_size_pct": to_float(signal.position_size_pct),
+            "regime_adjusted_size": to_float(signal.regime_adjusted_size),
+            "confidence_threshold_used": to_float(signal.confidence_threshold_used),
             "regime_adjustment": signal.regime_adjustment,
             "model_votes": signal.model_votes,
-            "ensemble_probs": signal.ensemble_probs,
+            "ensemble_probs": convert_probs(signal.ensemble_probs),
             "reasons": signal.reasons + schema_info + [f"MTF mode: {has_full_mtf}, features: {features_seq.shape[1]}"],
             "mtf_mode": has_full_mtf,
-            "feature_count": features_seq.shape[1],
+            "feature_count": int(features_seq.shape[1]),
             "schema_enforced": schema_stats is not None,
             "schema_stats": schema_stats,
             # === Multi-head outputs: quantiles, regression, trading params ===
-            "quantiles": signal.quantiles,
-            "mu": signal.mu,
-            "sigma": signal.sigma,
-            "entry_offset": signal.entry_offset,
-            "sl_distance": signal.sl_distance,
-            "tp_distance": signal.tp_distance
+            "quantiles": convert_quantiles(signal.quantiles),
+            "mu": to_float(signal.mu),
+            "sigma": to_float(signal.sigma),
+            "entry_offset": to_float(signal.entry_offset),
+            "sl_distance": to_float(signal.sl_distance),
+            "tp_distance": to_float(signal.tp_distance)
         }
         
     except HTTPException:
