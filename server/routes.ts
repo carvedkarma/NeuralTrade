@@ -596,12 +596,14 @@ export async function registerRoutes(
 
   app.post("/api/nn-data/download", async (req, res) => {
     const years = req.body.years || 3;
+    const timeframe = req.body.timeframe || "all";
     
-    res.json({ started: true, message: `Starting download for ${years} year(s) of multi-timeframe data (1m, 5m, 15m, 1h, 4h)` });
+    const timeframeLabel = timeframe === "all" ? "all timeframes (1m, 5m, 15m, 1h, 4h)" : timeframe;
+    res.json({ started: true, message: `Starting download for ${years} year(s) of ${timeframeLabel} data` });
     
-    downloadNNData(years, (symbol, timeframe, progress) => {
-      console.log(`[NN Data] ${symbol} ${timeframe}: ${progress.toFixed(1)}%`);
-    }).then(result => {
+    downloadNNData(years, (symbol, tf, progress) => {
+      console.log(`[NN Data] ${symbol} ${tf}: ${progress.toFixed(1)}%`);
+    }, timeframe).then(result => {
       console.log(`[NN Data] Download complete: ${result.totalCandles} candles`);
     }).catch(error => {
       console.error("[NN Data] Download error:", error);

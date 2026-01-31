@@ -45,6 +45,7 @@ interface DownloadProgress {
 
 export function NeuralNetworkDataCard() {
   const [selectedYears, setSelectedYears] = useState("3");
+  const [selectedTimeframe, setSelectedTimeframe] = useState("all");
   const { toast } = useToast();
 
   const { data: summary, isLoading } = useQuery<NNDataSummary>({
@@ -58,7 +59,8 @@ export function NeuralNetworkDataCard() {
   });
 
   const downloadMutation = useMutation({
-    mutationFn: (years: number) => apiRequest("POST", "/api/nn-data/download", { years }),
+    mutationFn: (params: { years: number; timeframe: string }) => 
+      apiRequest("POST", "/api/nn-data/download", params),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/nn-data/summary"] });
       queryClient.invalidateQueries({ queryKey: ["/api/nn-data/progress"] });
@@ -181,7 +183,7 @@ export function NeuralNetworkDataCard() {
                           <div className="text-muted-foreground">~{(estimatedCandles[selectedYears] / 1000000).toFixed(1)}M ({selectedYears} years)</div>
                         </div>
                       </div>
-                      <div className="flex items-center gap-2 mt-2">
+                      <div className="flex items-center gap-2 mt-2 flex-wrap">
                         <span className="text-sm">Download period:</span>
                         <Select value={selectedYears} onValueChange={setSelectedYears}>
                           <SelectTrigger className="w-28" data-testid="select-download-years-dialog">
@@ -195,6 +197,22 @@ export function NeuralNetworkDataCard() {
                           </SelectContent>
                         </Select>
                       </div>
+                      <div className="flex items-center gap-2 mt-2 flex-wrap">
+                        <span className="text-sm">Timeframe:</span>
+                        <Select value={selectedTimeframe} onValueChange={setSelectedTimeframe}>
+                          <SelectTrigger className="w-40" data-testid="select-nn-timeframe">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="all" data-testid="select-nn-timeframe-all">All Timeframes</SelectItem>
+                            <SelectItem value="1m" data-testid="select-nn-timeframe-1m">1 Minute</SelectItem>
+                            <SelectItem value="5m" data-testid="select-nn-timeframe-5m">5 Minutes</SelectItem>
+                            <SelectItem value="15m" data-testid="select-nn-timeframe-15m">15 Minutes</SelectItem>
+                            <SelectItem value="1h" data-testid="select-nn-timeframe-1h">1 Hour</SelectItem>
+                            <SelectItem value="4h" data-testid="select-nn-timeframe-4h">4 Hours</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
                     </div>
                   </AlertDialogDescription>
                 </AlertDialogHeader>
@@ -202,10 +220,11 @@ export function NeuralNetworkDataCard() {
                   <AlertDialogCancel data-testid="button-cancel-download-dialog">Cancel</AlertDialogCancel>
                   <AlertDialogAction
                     onClick={() => {
-                      downloadMutation.mutate(Number(selectedYears));
+                      downloadMutation.mutate({ years: Number(selectedYears), timeframe: selectedTimeframe });
+                      const tfLabel = selectedTimeframe === "all" ? "all timeframes" : selectedTimeframe;
                       toast({ 
                         title: "Download Started", 
-                        description: `Downloading ${selectedYears} years of GPU training data...` 
+                        description: `Downloading ${selectedYears} years of ${tfLabel} GPU training data...` 
                       });
                     }}
                     className="bg-purple-600"

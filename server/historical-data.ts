@@ -1535,7 +1535,8 @@ async function downloadSingleStream(
 
 export async function downloadNNData(
   years: number = 3,
-  onProgress?: (symbol: string, timeframe: string, progress: number) => void
+  onProgress?: (symbol: string, timeframe: string, progress: number) => void,
+  timeframeFilter: string = "all"
 ): Promise<{ success: boolean; totalCandles: number; cancelled?: boolean }> {
   // Reset cancel flag at start
   nnDownloadCancelled = false;
@@ -1543,10 +1544,20 @@ export async function downloadNNData(
   const now = Date.now();
   const targetStartTime = now - (years * 365 * 24 * 60 * 60 * 1000);
   
+  // Determine which timeframes to download
+  let timeframesToDownload: NNTimeframe[] = timeframeFilter === "all" 
+    ? [...NN_TIMEFRAMES] 
+    : NN_TIMEFRAMES.filter(tf => tf === timeframeFilter);
+  
+  if (timeframesToDownload.length === 0) {
+    console.warn(`[NN Download] Invalid timeframe filter: ${timeframeFilter}, using all`);
+    timeframesToDownload = [...NN_TIMEFRAMES];
+  }
+  
   // Build list of all symbol/timeframe combinations
   // Order by timeframe first so all assets for each TF download in parallel
   const downloadTasks: Array<{ symbol: string; tf: NNTimeframe }> = [];
-  for (const tf of NN_TIMEFRAMES) {
+  for (const tf of timeframesToDownload) {
     for (const symbol of SUPPORTED_ASSETS) {
       downloadTasks.push({ symbol, tf });
     }
