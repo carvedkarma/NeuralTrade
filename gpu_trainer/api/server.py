@@ -2530,16 +2530,36 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
         if request.candles_4h and len(request.candles_4h) >= 20:
             tf_data["4h"] = candles_to_df(request.candles_4h)
         
-        # === Feature computation based on mode ===
-        logger.info(f"[/predict/ensemble/candles] Mode: {mode.upper()}, Model training mode: {model_manager.training_mode}")
+        # === Feature mode validation and computation ===
+        # Normalize mode to lowercase for comparison
+        mode_lower = mode.lower()
+        training_mode_lower = model_manager.training_mode.lower() if model_manager.training_mode else "stf"
         
-        if mode == "stf":
+        # CRITICAL: Validate mode matches model's training mode
+        if mode_lower != training_mode_lower:
+            logger.warning(f"[MODE MISMATCH] Requested mode={mode_lower}, but model trained as {training_mode_lower}")
+            # Allow override but log warning - user may know what they're doing
+            # For strict mode, uncomment:
+            # raise HTTPException(
+            #     status_code=400,
+            #     detail=f"Mode mismatch: requested '{mode_lower}' but model expects '{training_mode_lower}'. "
+            #            f"Use ?mode={training_mode_lower} or load a different model."
+            # )
+        
+        logger.info(f"[/predict/ensemble/candles] Mode: {mode_lower.upper()}, Model training mode: {training_mode_lower.upper()}")
+        
+        if mode_lower == "stf":
             # STF mode: Use compute_technical_features (41 features)
             # Same pipeline used during training on 15m-only data
             from data.pipeline import FeatureEngineer
             fe = FeatureEngineer()
             features_df = fe.compute_technical_features(tf_data["15m"])
-            logger.info(f"STF features computed using compute_technical_features")
+            computed_feature_count = len([c for c in features_df.columns if c not in ["datetime", "timestamp"]])
+            logger.info(f"STF features computed using compute_technical_features: {computed_feature_count} features")
+            
+            # Validate STF feature count
+            if computed_feature_count != ModelManager.STF_FEATURE_COUNT:
+                logger.warning(f"STF feature count mismatch: computed {computed_feature_count}, expected {ModelManager.STF_FEATURE_COUNT}")
         else:
             # MTF mode: Use MTF fusion (66 features)
             # Only use if model was trained on MTF data
@@ -2549,7 +2569,12 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
             if fused_df is None or len(fused_df) == 0:
                 raise HTTPException(status_code=400, detail="MTF fusion returned no data")
             features_df = fused_df
-            logger.info(f"MTF features computed using MTFFeatureFusion")
+            computed_feature_count = len([c for c in features_df.columns if c not in ["datetime", "timestamp"]])
+            logger.info(f"MTF features computed using MTFFeatureFusion: {computed_feature_count} features")
+            
+            # Validate MTF feature count
+            if computed_feature_count != ModelManager.MTF_FEATURE_COUNT:
+                logger.warning(f"MTF feature count mismatch: computed {computed_feature_count}, expected {ModelManager.MTF_FEATURE_COUNT}")
         
         # === Selective NaN handling ===
         if "close" in features_df.columns:
@@ -2638,9 +2663,12 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
                     "ensemble_probs": {"SHORT": 0.0, "HOLD": 1.0, "LONG": 0.0},
                     "reasons": [
                         f"FEATURE MISMATCH: computed {actual_feature_count}, model expects {expected_feature_count}",
-                        "No feature_config available for schema enforcement"
+                        "No feature_config available for schema enforcement",
+                        f"inference_mode={mode_lower}, training_mode={training_mode_lower}"
                     ],
-                    "mtf_mode": mode == "mtf",
+                    "inference_mode": mode_lower,
+                    "training_mode": training_mode_lower,
+                    "mtf_mode": mode_lower == "mtf",
                     "feature_count": actual_feature_count,
                     "expected_feature_count": expected_feature_count,
                     "feature_mismatch": True
@@ -2673,8 +2701,10 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
                     "HOLD": float(result["probabilities"][1]),
                     "LONG": float(result["probabilities"][2])
                 },
-                "reasons": [f"MTF features: {features_seq.shape[1]}, used basic prediction"],
-                "mtf_mode": mode == "mtf",
+                "reasons": [f"{mode_lower.upper()} features: {features_seq.shape[1]}, used basic prediction"],
+                "inference_mode": mode_lower,
+                "training_mode": training_mode_lower,
+                "mtf_mode": mode_lower == "mtf",
                 "feature_count": int(features_seq.shape[1])
             }
         
@@ -2730,8 +2760,10 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
             "regime_adjustment": signal.regime_adjustment,
             "model_votes": signal.model_votes,
             "ensemble_probs": convert_probs(signal.ensemble_probs),
-            "reasons": signal.reasons + schema_info + [f"Mode: {mode.upper()}, features: {features_seq.shape[1]}"],
-            "mtf_mode": mode == "mtf",
+            "reasons": signal.reasons + schema_info + [f"Mode: {mode_lower.upper()}, training_mode: {training_mode_lower.upper()}, features: {features_seq.shape[1]}"],
+            "inference_mode": mode_lower,
+            "training_mode": training_mode_lower,
+            "mtf_mode": mode_lower == "mtf",
             "feature_count": int(features_seq.shape[1]),
             "schema_enforced": schema_stats is not None,
             "schema_stats": schema_stats,
@@ -2748,7 +2780,7 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
         raise
     except Exception as e:
         import traceback
-        logger.error(f"MTF ensemble prediction error: {e}")
+        logger.error(f"Ensemble prediction error (mode={mode}): {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
