@@ -1152,9 +1152,9 @@ export async function registerRoutes(
         const result = await db.select()
           .from(candles)
           .where(and(eq(candles.symbol, "BTCUSDT"), eq(candles.timeframe, timeframe)))
-          .orderBy(asc(candles.timestamp))
+          .orderBy(desc(candles.timestamp))  // Get most recent first
           .limit(limit);
-        return result.slice(-limit); // Get most recent
+        return result.reverse();  // Reverse to chronological order (oldest to newest)
       };
       
       // Common candle type for both sources
@@ -1265,9 +1265,9 @@ export async function registerRoutes(
         const result = await db.select()
           .from(candles)
           .where(and(eq(candles.symbol, "BTCUSDT"), eq(candles.timeframe, timeframe)))
-          .orderBy(asc(candles.timestamp))
+          .orderBy(desc(candles.timestamp))  // Get most recent first
           .limit(limit);
-        return result.slice(-limit);
+        return result.reverse();  // Reverse to chronological order (oldest to newest)
       };
       
       type CandleData = { timestamp: number; open: number; high: number; low: number; close: number; volume: number };
