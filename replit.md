@@ -59,6 +59,15 @@ Preferred communication style: Simple, everyday language.
 - **Unified Learning Controller**: Synchronizes Strategy Learner, Pattern Memory, and GPU Trainer for consistent historical data processing.
 - **Dual Decision Display**: Separate outputs for Combined Learning (Strategy Learner + Pattern Memory) and GPU Neural Network decisions with confidence levels.
 - **Edge Tracker**: File-based persistence for monitoring actual signal performance (avg net return, hit rate, expectancy, Sharpe ratio, monthly stability scores).
+- **Training Configuration**: BTCUSDT only, 15m timeframe only, 105,120 candles (3 years), prediction horizon = 16 bars (4 hours).
+
+#### Regime-Balanced Training
+- **Regime Labeler**: 4-regime classification (BULL=0, BEAR=1, HIGH_VOL=2, LOW_VOL_CHOP=3) using candle-only features.
+- **Classification Logic**: Uses rolling 96-bar return, drawdown from rolling high, volatility ratio vs median, BB width, and ATR.
+- **Priority Rules**: HIGH_VOL takes precedence (vol_ratio > 1.5x), then BULL (return > 1.5%, small drawdown), BEAR (return < -1.5% or drawdown > 2%), default LOW_VOL_CHOP.
+- **Balanced Sampling**: WeightedRandomSampler targets ~25% per regime in each training batch using inverse frequency weights (clipped 0.25-4.0x).
+- **Per-Regime Validation**: Training tracks expectancy, hit-rate, and trade counts separately for BULL, BEAR, HIGH_VOL, and LOW_VOL_CHOP to monitor performance across market conditions.
+- **Data Alignment**: Regime labels computed before feature engineering, sliced with valid indices, and filtered during NaN cleanup to maintain alignment.
 
 #### Multi-Head Model Architecture (Institutional Upgrade)
 - **Three Output Heads**: Classification (Direction probabilities), Regression (Expected return μ and uncertainty σ), and Quantile (q10, q25, q50, q75, q90).

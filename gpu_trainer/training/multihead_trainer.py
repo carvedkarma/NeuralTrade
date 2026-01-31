@@ -11,7 +11,7 @@ Uses combined loss with configurable weights.
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler, SequentialSampler, RandomSampler
 from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import OneCycleLR
 from typing import Dict, List, Tuple, Optional, Callable
@@ -567,6 +567,10 @@ class MultiHeadTrainer:
         - HIGH_VOL (2): High volatility periods
         - LOW_VOL_CHOP (3): Low volatility ranging
         
+        IMPORTANT: This method assumes val_loader iterates in sequential order
+        (shuffle=False, no random sampler). This is enforced by the training
+        pipeline which only uses balanced sampling for train_loader, not val_loader.
+        
         Returns:
             Dictionary mapping regime name to metrics dict
         """
@@ -577,14 +581,29 @@ class MultiHeadTrainer:
         if not hasattr(val_dataset, 'regime_ids') or val_dataset.regime_ids is None:
             return {}  # No regime data available
         
+        # CRITICAL: Verify val_loader uses sequential ordering (not shuffled/random sampler)
+        # Regime ID alignment depends on deterministic sequential iteration
+        sampler = self.val_loader.sampler
+        
+        # STRICT CHECK: Require SequentialSampler for regime ID alignment
+        # Any non-sequential sampler will cause misalignment between predictions and regime IDs
+        if not isinstance(sampler, SequentialSampler):
+            sampler_name = type(sampler).__name__
+            logger.info(f"val_loader uses {sampler_name} (not SequentialSampler) - skipping per-regime metrics for alignment safety")
+            return {}
+        
+        # Pre-compute full regime IDs array for all valid indices (sequential order)
+        all_regime_ids_precomputed = val_dataset.get_regime_ids_for_valid_indices()
+        expected_samples = len(val_dataset)
+        
         all_predictions = []
         all_returns = []
-        all_regime_ids = []
+        total_processed = 0
         
         cost = 0.001  # 0.1% round-trip cost
         
         with torch.no_grad():
-            for batch_idx, batch in enumerate(self.val_loader):
+            for batch in self.val_loader:
                 features, class_labels, returns, trading, candle_tgt = batch
                 features = features.to(self.device)
                 output = self.model.forward_multihead(features)
@@ -592,18 +611,35 @@ class MultiHeadTrainer:
                 probs = torch.softmax(output.class_logits, dim=-1)
                 preds = probs.argmax(dim=-1)
                 
+                batch_size = len(returns)
                 all_predictions.extend(preds.cpu().numpy())
                 all_returns.extend(returns.cpu().numpy())
-                
-                # Get regime IDs for this batch
-                start_idx = batch_idx * self.val_loader.batch_size
-                end_idx = start_idx + len(returns)
-                batch_regime_ids = val_dataset.get_regime_ids_for_valid_indices()[start_idx:end_idx]
-                all_regime_ids.extend(batch_regime_ids)
+                total_processed += batch_size
         
         preds = np.array(all_predictions)
         returns = np.array(all_returns)
-        regime_ids = np.array(all_regime_ids)
+        
+        # STRICT ALIGNMENT: Processed samples must match available regime IDs
+        if total_processed != len(all_regime_ids_precomputed):
+            # Allow for drop_last=True which drops incomplete final batch
+            batch_size = self.val_loader.batch_size or 1
+            tolerance = batch_size  # At most one batch can be dropped
+            difference = abs(total_processed - len(all_regime_ids_precomputed))
+            
+            if difference > tolerance:
+                logger.error(f"Regime ID mismatch: processed {total_processed} samples but "
+                            f"{len(all_regime_ids_precomputed)} regime IDs available (diff={difference})")
+                return {}
+            else:
+                logger.info(f"Minor sample count difference ({difference}) likely from drop_last, proceeding")
+        
+        # Use precomputed regime IDs, sliced to match number of processed samples
+        regime_ids = all_regime_ids_precomputed[:len(preds)]
+        
+        # Final strict length check
+        if len(preds) != len(regime_ids):
+            logger.error(f"Length mismatch after slicing: {len(preds)} predictions vs {len(regime_ids)} regime IDs")
+            return {}
         
         regime_metrics = {}
         
