@@ -225,7 +225,11 @@ class MultiHeadTrainer:
         device: str = "cuda",
         loss_config: Optional[MultiHeadLossConfig] = None,
         class_weights: Optional[torch.Tensor] = None,
-        gui_mode: bool = False
+        gui_mode: bool = False,
+        feature_scaler = None,
+        feature_columns: Optional[List[str]] = None,
+        training_mode: str = "stf",
+        horizon_periods: int = 16
     ):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -233,6 +237,12 @@ class MultiHeadTrainer:
         self.config = config
         self.device = device
         self.gui_mode = gui_mode
+        
+        # Store training config for checkpoint saving
+        self.feature_scaler = feature_scaler  # sklearn StandardScaler, not AMP GradScaler
+        self.feature_columns = feature_columns
+        self.training_mode = training_mode
+        self.horizon_periods = horizon_periods
         
         # Setup loss
         if loss_config is None:
@@ -807,24 +817,29 @@ class MultiHeadTrainer:
             'input_dim': self.model.input_dim,
             'model_type': 'multihead',
             'feature_engineer_version': fe_version,
-            'training_mode': 'stf',  # Default to STF for 15m only training
-            'horizon_periods': 16,   # Default 4h at 15m
+            'training_mode': self.training_mode,  # Use actual training mode
+            'horizon_periods': self.horizon_periods,  # Use actual horizon
         }
         
-        # Include scaler if available
-        if hasattr(self, 'scaler') and self.scaler is not None:
-            checkpoint['scaler_state'] = self.scaler.get_params() if hasattr(self.scaler, 'get_params') else None
-            checkpoint['scaler_mean'] = self.scaler.mean_.tolist() if hasattr(self.scaler, 'mean_') else None
-            checkpoint['scaler_scale'] = self.scaler.scale_.tolist() if hasattr(self.scaler, 'scale_') else None
+        # Include sklearn feature scaler if available (not AMP GradScaler)
+        if self.feature_scaler is not None:
+            try:
+                # Save sklearn StandardScaler parameters
+                checkpoint['scaler_mean'] = self.feature_scaler.mean_.tolist()
+                checkpoint['scaler_scale'] = self.feature_scaler.scale_.tolist()
+                checkpoint['scaler_var'] = self.feature_scaler.var_.tolist() if hasattr(self.feature_scaler, 'var_') else None
+                checkpoint['scaler_n_features'] = self.feature_scaler.n_features_in_ if hasattr(self.feature_scaler, 'n_features_in_') else None
+            except Exception as e:
+                logger.warning(f"Could not save scaler state: {e}")
         
-        # Include feature columns if available
-        if hasattr(self, 'feature_columns') and self.feature_columns is not None:
+        # Include feature columns for validation at inference
+        if self.feature_columns is not None:
             checkpoint['feature_columns'] = self.feature_columns
         
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(checkpoint, path)
-        logger.info(f"Saved checkpoint to {path} (FE version: {fe_version})")
+        logger.info(f"Saved checkpoint to {path} (FE: {fe_version}, mode: {self.training_mode}, horizon: {self.horizon_periods})")
 
 
 def create_multihead_dataloaders(

@@ -27,7 +27,11 @@ class Trainer:
         device: str = "cuda",
         mixed_precision: bool = False,  # Disabled by default - FP16 can cause NaN with class weights
         gui_mode: bool = False,
-        class_weights: Optional[torch.Tensor] = None
+        class_weights: Optional[torch.Tensor] = None,
+        feature_scaler = None,
+        feature_columns: Optional[list] = None,
+        training_mode: str = "stf",
+        horizon_periods: int = 16
     ):
         self.gui_mode = gui_mode  # Disable tqdm in GUI mode to prevent UI freeze
         self.model = model.to(device)
@@ -36,6 +40,12 @@ class Trainer:
         self.config = config
         self.device = device
         self.mixed_precision = mixed_precision
+        
+        # Store training config for checkpoint saving
+        self.feature_scaler = feature_scaler  # sklearn StandardScaler for features
+        self.feature_columns = feature_columns
+        self.training_mode = training_mode
+        self.horizon_periods = horizon_periods
         
         self.optimizer = torch.optim.AdamW(
             model.parameters(),
@@ -372,22 +382,27 @@ class Trainer:
             "config": self.config,
             "model_config": model_config,  # Model-specific config with input_dim
             "feature_engineer_version": fe_version,
-            "training_mode": "stf",  # Default to STF for 15m only
-            "horizon_periods": 16,   # Default 4h at 15m
+            "training_mode": self.training_mode,  # Use actual training mode
+            "horizon_periods": self.horizon_periods,  # Use actual horizon
         }
         
-        # Include scaler if available
-        if hasattr(self, 'scaler') and self.scaler is not None:
-            checkpoint['scaler_mean'] = self.scaler.mean_.tolist() if hasattr(self.scaler, 'mean_') else None
-            checkpoint['scaler_scale'] = self.scaler.scale_.tolist() if hasattr(self.scaler, 'scale_') else None
+        # Include sklearn feature scaler if available (not AMP GradScaler)
+        if self.feature_scaler is not None:
+            try:
+                checkpoint['scaler_mean'] = self.feature_scaler.mean_.tolist()
+                checkpoint['scaler_scale'] = self.feature_scaler.scale_.tolist()
+                checkpoint['scaler_var'] = self.feature_scaler.var_.tolist() if hasattr(self.feature_scaler, 'var_') else None
+                checkpoint['scaler_n_features'] = self.feature_scaler.n_features_in_ if hasattr(self.feature_scaler, 'n_features_in_') else None
+            except Exception as e:
+                logger.warning(f"Could not save scaler state: {e}")
         
-        # Include feature columns if available
-        if hasattr(self, 'feature_columns') and self.feature_columns is not None:
+        # Include feature columns for validation at inference
+        if self.feature_columns is not None:
             checkpoint['feature_columns'] = self.feature_columns
             
         torch.save(checkpoint, path)
         if not self.gui_mode:
-            logger.info(f"Saved checkpoint to {path} (FE version: {fe_version})")
+            logger.info(f"Saved checkpoint to {path} (FE: {fe_version}, mode: {self.training_mode}, horizon: {self.horizon_periods})")
         
     def load_checkpoint(self, filename: str):
         path = Path(self.config.training.checkpoint_dir) / filename

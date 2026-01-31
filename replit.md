@@ -187,5 +187,18 @@ The following institutional-grade features are **enabled by default**:
   - Known version match: OK log, proceed normally
   - Known version mismatch: Hard error, prevents silent degradation
 
+### Centralized Timeframe Configuration (Added Jan 2026)
+- **Single Source of Truth**: `gpu_trainer/config/timeframe_config.py`
+- **Default Timeframe**: BTCUSDT 15m (production setting)
+- **Horizon Standardization**: 
+  - 15m timeframe: 16 bars = 4 hours (production default)
+  - 5m timeframe: 48 bars = 4 hours
+  - 1h timeframe: 4 bars = 4 hours
+- **Config-Driven Defaults**:
+  - CLI arguments now default to horizon=16 (not 48 or 5)
+  - `RegressionTargetGenerator` defaults to horizon_periods=16
+  - All lookback periods = 2x horizon for volatility calculation
+- **Bundled Checkpoints**: Model + scaler + feature_config saved together with shared version
+
 ### GUI Configuration
 - Fixed to BTCUSDT 15m timeframe only (no multi-timeframe/multi-asset options)
