@@ -536,8 +536,9 @@ class MultiHeadTrainer:
         SPREAD_MULTIPLIER = 3.0  # K: require spread >= K * cost
         COOLDOWN = 8  # Bars to wait after a trade (horizon/2)
         
-        # Confidence thresholds to sweep
-        CONFIDENCE_THRESHOLDS = [0.3, 0.5, 0.7, 0.9, 1.1]
+        # Confidence thresholds to sweep - matched to actual distribution
+        # (confidence max ~0.43, mean ~0.16, so old [0.3-1.1] was too high)
+        CONFIDENCE_THRESHOLDS = [0.10, 0.15, 0.20, 0.25, 0.30, 0.35]
         
         # Collect all model outputs
         all_predictions = []
