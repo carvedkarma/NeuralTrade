@@ -1045,16 +1045,30 @@ class MultiHeadTrainer:
     def train(
         self,
         num_epochs: Optional[int] = None,
-        early_stopping_patience: int = 10,
+        early_stopping_patience: int = 30,
+        min_epochs: int = 40,
         save_best: bool = True,
         checkpoint_path: Optional[str] = None
     ) -> Dict[str, List[float]]:
         """
-        Full training loop.
+        Full training loop with min_epochs protection.
+        
+        Args:
+            num_epochs: Total epochs to train
+            early_stopping_patience: Epochs without improvement before stopping (default 30)
+            min_epochs: Minimum epochs before early stopping can trigger (default 40)
+            save_best: Whether to save best checkpoint
+            checkpoint_path: Path to save checkpoint
         
         Returns history of metrics per epoch.
+        
+        IMPORTANT: Early stopping uses val_loss ONLY (not monitoring sweep expectancy).
+        PolicySelector handles policy selection post-training.
         """
         epochs = num_epochs or self.config.training.epochs
+        
+        logger.info(f"[TRAINING CONFIG] epochs={epochs}, min_epochs={min_epochs}, patience={early_stopping_patience}")
+        logger.info(f"[TRAINING CONFIG] Early stopping uses val_loss only - PolicySelector handles policy post-training")
         
         history = {
             'train_loss': [], 'val_loss': [],
@@ -1111,19 +1125,25 @@ class MultiHeadTrainer:
                     f"Val: {val_metrics['total']:.4f} (acc: {val_metrics['accuracy']:.3f})"
                 )
             
-            # Early stopping check
+            # Early stopping check - uses val_loss ONLY (not monitoring sweep expectancy)
             if val_metrics['total'] < self.best_val_loss:
                 self.best_val_loss = val_metrics['total']
                 self.patience_counter = 0
                 
                 if save_best and checkpoint_path:
                     self._save_checkpoint(checkpoint_path, val_metrics)
+                    logger.info(f"[CHECKPOINT] Saved best model at epoch {epoch+1} with val_loss={val_metrics['total']:.4f}")
             else:
                 self.patience_counter += 1
-                
-            if self.patience_counter >= early_stopping_patience:
-                logger.info(f"Early stopping at epoch {epoch+1}")
+            
+            # CRITICAL: Early stopping ONLY after min_epochs reached
+            # This ensures multihead quantiles/vol_state/accel have enough epochs to converge
+            if epoch + 1 >= min_epochs and self.patience_counter >= early_stopping_patience:
+                logger.info(f"[EARLY STOPPING] Triggered at epoch {epoch+1} (min_epochs={min_epochs} reached, no improvement for {early_stopping_patience} epochs)")
                 break
+            elif epoch + 1 < min_epochs and self.patience_counter >= early_stopping_patience:
+                # Log but DO NOT break - keep training until min_epochs
+                logger.info(f"[MIN_EPOCHS PROTECTION] Epoch {epoch+1}/{epochs} - patience exhausted but min_epochs={min_epochs} not reached, continuing...")
         
         self.writer.close()
         return history

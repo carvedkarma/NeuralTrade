@@ -3376,8 +3376,22 @@ async def run_training(request: TrainingRequest):
         class_weights = np.clip(class_weights, 1.0, MAX_CLASS_WEIGHT)
         class_weights_tensor = torch.FloatTensor(class_weights)
         
-        logger.info(f"Class distribution: SHORT={class_counts[0]:,}, HOLD={class_counts[1]:,}, LONG={class_counts[2]:,}")
-        logger.info(f"Class weights: [{class_weights[0]:.2f}, {class_weights[1]:.2f}, {class_weights[2]:.2f}]")
+        # ============== LABEL DISTRIBUTION DIAGNOSTIC ==============
+        hold_pct = class_counts[1] / total_samples * 100
+        short_pct = class_counts[0] / total_samples * 100
+        long_pct = class_counts[2] / total_samples * 100
+        
+        logger.info(f"[LABEL DIST] Class distribution: SHORT={class_counts[0]:,} ({short_pct:.1f}%), HOLD={class_counts[1]:,} ({hold_pct:.1f}%), LONG={class_counts[2]:,} ({long_pct:.1f}%)")
+        logger.info(f"[LABEL DIST] Class weights: [{class_weights[0]:.2f}, {class_weights[1]:.2f}, {class_weights[2]:.2f}]")
+        
+        # CRITICAL WARNING: If HOLD > 80%, model may learn to always predict HOLD
+        if hold_pct > 80:
+            logger.warning(f"[LABEL DIST] ⚠️ WARNING: HOLD class is {hold_pct:.1f}% of samples!")
+            logger.warning(f"[LABEL DIST] This may cause model to always predict HOLD. Consider adjusting threshold or trading_cost in create_labels()")
+        elif hold_pct > 60:
+            logger.info(f"[LABEL DIST] Note: HOLD class is {hold_pct:.1f}% - class weights should help balance")
+        else:
+            logger.info(f"[LABEL DIST] ✓ Label distribution looks balanced")
         
         # Split data
         split_idx = int(len(features_np) * 0.8)
@@ -3545,7 +3559,16 @@ async def run_training(request: TrainingRequest):
                 checkpoint_exists_before = os.path.exists(checkpoint_path)
                 checkpoint_mtime_before = os.path.getmtime(checkpoint_path) if checkpoint_exists_before else 0
                 
-                trainer.train(num_epochs=request.epochs, checkpoint_path=checkpoint_path, save_best=True)
+                # CRITICAL: min_epochs=40 ensures multihead quantiles/vol_state/accel have enough epochs
+                # patience=30 allows sufficient exploration after min_epochs reached
+                # Early stopping uses val_loss ONLY - PolicySelector handles policy post-training
+                trainer.train(
+                    num_epochs=request.epochs,
+                    early_stopping_patience=30,
+                    min_epochs=40,
+                    checkpoint_path=checkpoint_path,
+                    save_best=True
+                )
                 
                 # ============== GUARDRAIL: Verify checkpoint was saved ==============
                 checkpoint_exists_after = os.path.exists(checkpoint_path)
