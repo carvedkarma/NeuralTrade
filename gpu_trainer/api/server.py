@@ -3078,6 +3078,127 @@ async def get_debug_feature_config():
     }
 
 
+@app.get("/debug/model-sensitivity")
+async def debug_model_sensitivity():
+    """
+    Diagnostic endpoint to test if models respond to different inputs.
+    
+    Tests each model with 3 different random inputs and checks if outputs vary.
+    Low variance suggests model has collapsed to constant output (training issue).
+    """
+    if not model_manager.model_instances:
+        return {"error": "No models loaded", "diagnosis": "Cannot test model sensitivity"}
+    
+    device = model_manager.device
+    seq_len = model_manager.sequence_length
+    input_dim = model_manager.input_dim
+    
+    results = {}
+    diagnosis = []
+    
+    for name, model in model_manager.model_instances.items():
+        model.eval()
+        model_probs = []
+        
+        for seed in [42, 123, 999]:
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            
+            test_input = torch.randn(1, seq_len, input_dim).to(device)
+            
+            with torch.no_grad():
+                try:
+                    if hasattr(model, 'forward_multihead'):
+                        output = model.forward_multihead(test_input)
+                        if isinstance(output, dict):
+                            logits = output.get('logits', output.get('direction', None))
+                        else:
+                            logits = output
+                    else:
+                        logits = model(test_input)
+                    
+                    if logits is not None and isinstance(logits, torch.Tensor):
+                        probs = torch.softmax(logits, dim=-1)
+                        model_probs.append(probs[0].cpu().numpy().tolist())
+                except Exception as e:
+                    model_probs.append(f"ERROR: {str(e)}")
+        
+        if len(model_probs) >= 2 and all(isinstance(p, list) for p in model_probs):
+            variance = np.var(model_probs, axis=0).tolist()
+            max_var = max(variance) if variance else 0
+            is_collapsed = max_var < 0.001
+            
+            results[name] = {
+                "predictions": model_probs,
+                "variance_per_class": variance,
+                "max_variance": max_var,
+                "collapsed": is_collapsed
+            }
+            
+            if is_collapsed:
+                diagnosis.append(f"⚠️ {name}: LOW VARIANCE ({max_var:.6f}) - Model may have collapsed to constant output")
+        else:
+            results[name] = {"predictions": model_probs, "error": "Could not compute variance"}
+    
+    all_collapsed = all(r.get("collapsed", False) for r in results.values() if "collapsed" in r)
+    
+    return {
+        "models_tested": list(results.keys()),
+        "results": results,
+        "diagnosis": diagnosis,
+        "overall_status": "CRITICAL: All models collapsed" if all_collapsed else "SOME MODELS HEALTHY" if diagnosis else "ALL MODELS HEALTHY",
+        "recommendation": "Models need retraining with balanced labels and proper loss configuration" if all_collapsed else None
+    }
+
+
+@app.get("/debug/label-distribution")
+async def debug_label_distribution():
+    """
+    Check the label distribution that would be generated from typical price data.
+    
+    Returns distribution stats to diagnose if training labels are imbalanced.
+    """
+    import pandas as pd
+    from data.pipeline import create_labels
+    
+    n = 10000
+    np.random.seed(42)
+    base_price = 80000
+    
+    returns = np.random.normal(0, 0.002, n)
+    returns[1000:1500] = np.random.normal(0.004, 0.003, 500)
+    returns[3000:3500] = np.random.normal(-0.004, 0.003, 500)
+    returns[6000:6500] = np.random.normal(0.005, 0.004, 500)
+    
+    prices = base_price * np.cumprod(1 + returns)
+    df = pd.DataFrame({'close': prices})
+    
+    labels = create_labels(df, horizon=16, threshold=0.001, trading_cost=0.0009)
+    valid_labels = labels[~np.isnan(labels)]
+    
+    unique, counts = np.unique(valid_labels, return_counts=True)
+    total = counts.sum()
+    
+    distribution = {}
+    for label, count in zip(unique, counts):
+        label_name = {-1: "SHORT", 0: "HOLD", 1: "LONG"}.get(int(label), str(int(label)))
+        distribution[label_name] = {
+            "count": int(count),
+            "percentage": round(100 * count / total, 2)
+        }
+    
+    hold_pct = distribution.get("HOLD", {}).get("percentage", 0)
+    
+    return {
+        "total_labels": int(total),
+        "distribution": distribution,
+        "is_imbalanced": hold_pct > 70,
+        "hold_percentage": hold_pct,
+        "diagnosis": f"⚠️ HIGH HOLD RATIO ({hold_pct}%) - Training will bias toward HOLD predictions" if hold_pct > 70 else "Label distribution looks reasonable",
+        "recommendation": "Use class weights or reduce threshold to balance training" if hold_pct > 70 else None
+    }
+
+
 @app.get("/training/status", response_model=TrainingStatusResponse)
 async def get_training_status():
     return TrainingStatusResponse(**model_manager.training_status)
@@ -3165,35 +3286,228 @@ async def get_performance_metrics():
     }
 
 async def run_training(request: TrainingRequest):
+    """
+    Actual training implementation using MultiHeadTrainer.
+    
+    This replaces the placeholder with real model training.
+    """
+    import threading
+    import pandas as pd
+    from torch.utils.data import DataLoader
+    
     try:
-        logger.info(f"Starting training for {request.model_type}")
+        logger.info(f"Starting REAL training for {request.model_type}")
+        logger.info(f"  Epochs: {request.epochs}, Batch size: {request.batch_size}, LR: {request.learning_rate}")
         
-        for epoch in range(1, request.epochs + 1):
-            if not model_manager.training_status["is_training"]:
-                logger.info("Training stopped by user")
-                break
+        # Set training status fields at start
+        # Normalize model name to match MODEL_TYPE_PATTERNS (e.g., multihead_transformer)
+        model_type_raw = request.model_type.lower().replace("_multihead", "").replace("multihead_", "")
+        model_type_normalized = f"multihead_{model_type_raw}"
+        model_manager.update_training_status(
+            is_training=True,
+            current_epoch=0,
+            progress=0,
+            current_model=model_type_normalized,
+            total_epochs=request.epochs
+        )
+        
+        # Import training dependencies
+        try:
+            from training.multihead_trainer import MultiHeadTrainer, MultiHeadDataset
+            from training.multihead_loss import MultiHeadLossConfig
+            from data.pipeline import FeatureEngineer, create_labels
+            from config.training_config import TrainingConfig
+        except ImportError as ie:
+            logger.error(f"Failed to import training modules: {ie}")
+            model_manager.update_training_status(is_training=False)
+            return
+        
+        # Load candle data from parquet or database
+        checkpoint_dir = Path(__file__).parent.parent / "checkpoints"
+        parquet_files = list((Path(__file__).parent.parent / "data").glob("*.parquet"))
+        
+        if not parquet_files:
+            # Try to load from database via API (if server can access it)
+            logger.warning("No parquet files found - training requires data files")
+            model_manager.update_training_status(is_training=False)
+            return
+        
+        # Load data from parquet
+        logger.info(f"Loading data from {len(parquet_files)} parquet files...")
+        df = pd.concat([pd.read_parquet(f) for f in parquet_files], ignore_index=True)
+        df = df.sort_values('timestamp').drop_duplicates(subset=['timestamp']).reset_index(drop=True)
+        logger.info(f"Loaded {len(df):,} candles")
+        
+        # Create feature engineer and compute features
+        engineer = FeatureEngineer(mode="STF")
+        features_df = engineer.compute_technical_features(df)
+        
+        # Create labels with class balancing (aligned to original df index)
+        labels = create_labels(df, horizon=16, threshold=0.001, trading_cost=0.0009)
+        
+        # Compute forward returns for regression (aligned to original df index)
+        forward_returns = df['close'].pct_change(16).shift(-16).values
+        
+        # Get valid indices from features (after dropna)
+        features_valid_mask = ~features_df.isna().any(axis=1)
+        valid_indices = features_valid_mask[features_valid_mask].index.tolist()
+        
+        # Further filter by valid labels AND valid forward_returns (not NaN or inf)
+        final_valid_indices = []
+        for i in valid_indices:
+            if i >= len(labels) or i >= len(forward_returns):
+                continue
+            if np.isnan(labels[i]) or np.isnan(forward_returns[i]) or np.isinf(forward_returns[i]):
+                continue
+            final_valid_indices.append(i)
+        
+        # Extract aligned data using explicit indices (all arrays now have same length with valid data)
+        features_np = features_df.loc[final_valid_indices].values.astype(np.float32)
+        labels_np = (np.array([labels[i] for i in final_valid_indices]) + 1).astype(np.int64)  # Convert -1,0,1 to 0,1,2
+        forward_returns_np = np.array([forward_returns[i] for i in final_valid_indices]).astype(np.float32)
+        
+        logger.info(f"Feature shape: {features_np.shape}, Labels: {len(labels_np)}")
+        
+        # Compute class weights
+        class_counts = np.bincount(labels_np, minlength=3)
+        total_samples = len(labels_np)
+        MAX_CLASS_WEIGHT = 10.0
+        class_weights = total_samples / (3 * class_counts + 1e-6)
+        class_weights = np.clip(class_weights, 1.0, MAX_CLASS_WEIGHT)
+        class_weights_tensor = torch.FloatTensor(class_weights)
+        
+        logger.info(f"Class distribution: SHORT={class_counts[0]:,}, HOLD={class_counts[1]:,}, LONG={class_counts[2]:,}")
+        logger.info(f"Class weights: [{class_weights[0]:.2f}, {class_weights[1]:.2f}, {class_weights[2]:.2f}]")
+        
+        # Split data
+        split_idx = int(len(features_np) * 0.8)
+        train_features = features_np[:split_idx]
+        train_labels = labels_np[:split_idx]
+        train_returns = forward_returns_np[:split_idx]
+        val_features = features_np[split_idx:]
+        val_labels = labels_np[split_idx:]
+        val_returns = forward_returns_np[split_idx:]
+        
+        # Create datasets
+        sequence_length = 100
+        train_dataset = MultiHeadDataset(
+            train_features, train_labels, train_returns,
+            sequence_length=sequence_length
+        )
+        val_dataset = MultiHeadDataset(
+            val_features, val_labels, val_returns,
+            sequence_length=sequence_length
+        )
+        
+        train_loader = DataLoader(train_dataset, batch_size=request.batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=request.batch_size, shuffle=False)
+        
+        logger.info(f"Train samples: {len(train_dataset):,}, Val samples: {len(val_dataset):,}")
+        
+        # Create model
+        input_dim = features_np.shape[1]
+        model_type = request.model_type.lower().replace("_multihead", "").replace("multihead_", "")
+        
+        if model_type == "transformer":
+            from models.transformer import TransformerPriceModel
+            model = TransformerPriceModel(input_dim=input_dim, d_model=128, nhead=4, num_layers=4)
+        elif model_type == "tft":
+            from models.transformer import TemporalFusionTransformer
+            model = TemporalFusionTransformer(input_dim=input_dim, d_model=128, nhead=4)
+        elif model_type == "lstm":
+            from models.lstm import BidirectionalLSTM
+            model = BidirectionalLSTM(input_dim=input_dim, hidden_dim=128, num_layers=2)
+        elif model_type == "cnn":
+            from models.cnn import ResNetPrice
+            model = ResNetPrice(input_dim=input_dim, channels=64)
+        else:
+            logger.warning(f"Unknown model type: {model_type}, defaulting to transformer")
+            from models.transformer import TransformerPriceModel
+            model = TransformerPriceModel(input_dim=input_dim, d_model=128, nhead=4, num_layers=4)
+        
+        logger.info(f"Created {model_type} model with {model.count_parameters():,} parameters")
+        
+        # Create training config
+        config = TrainingConfig()
+        config.device = model_manager.device
+        config.training.epochs = request.epochs
+        config.training.learning_rate = request.learning_rate
+        config.training.checkpoint_dir = str(checkpoint_dir)
+        
+        # Create trainer with class weights
+        loss_config = MultiHeadLossConfig(class_weights=class_weights_tensor.to(config.device))
+        trainer = MultiHeadTrainer(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            config=config,
+            device=config.device,
+            loss_config=loss_config
+        )
+        
+        logger.info("Starting training loop...")
+        
+        # Run training in a separate thread to allow async status updates
+        def train_thread():
+            try:
+                def progress_callback(epoch, total_epochs, train_metrics, val_metrics):
+                    if isinstance(train_metrics, dict):
+                        train_loss = train_metrics.get('total', 0.0)
+                    else:
+                        train_loss = float(train_metrics)
+                    if isinstance(val_metrics, dict):
+                        val_loss = val_metrics.get('total', 0.0)
+                    else:
+                        val_loss = float(val_metrics)
+                    
+                    model_manager.update_training_status(
+                        current_epoch=epoch + 1,
+                        progress=(epoch + 1) / total_epochs * 100,
+                        metrics={
+                            "train_loss": float(train_loss),
+                            "val_loss": float(val_loss)
+                        }
+                    )
                 
-            await asyncio.sleep(0.1)
-            
-            train_loss = np.random.uniform(0.3, 0.7) * (1 - epoch / request.epochs)
-            val_loss = train_loss + np.random.uniform(0.05, 0.15)
-            accuracy = 50 + 30 * (epoch / request.epochs) + np.random.uniform(-5, 5)
-            
-            model_manager.update_training_status(
-                current_epoch=epoch,
-                progress=epoch / request.epochs * 100,
-                metrics={
-                    "train_loss": train_loss,
-                    "val_loss": val_loss,
-                    "accuracy": accuracy
-                }
-            )
-            
-        model_manager.update_training_status(is_training=False)
+                trainer.epoch_callback = progress_callback
+                
+                # Configure checkpoint path for trainer
+                checkpoint_path = str(checkpoint_dir / f"best_{model_type}_multihead.pt")
+                trainer.train(num_epochs=request.epochs, checkpoint_path=checkpoint_path, save_best=True)
+                
+                logger.info(f"Training complete - model checkpoint saved via trainer to {checkpoint_path}")
+                
+                # Also save scaler for inference alignment
+                try:
+                    scaler_path = checkpoint_dir / "scaler.joblib"
+                    engineer.save_scalers(str(scaler_path))
+                    logger.info(f"Saved scalers to {scaler_path}")
+                except Exception as se:
+                    logger.warning(f"Failed to save scalers: {se}")
+                
+                # Reload models to include newly trained model
+                model_manager.load_best_models()
+                
+            except Exception as e:
+                logger.error(f"Training thread error: {e}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                model_manager.update_training_status(is_training=False)
+        
+        thread = threading.Thread(target=train_thread, daemon=True)
+        thread.start()
+        
+        # Wait for training to complete (but allow async status updates)
+        while thread.is_alive():
+            await asyncio.sleep(1.0)
+        
         logger.info(f"Training completed for {request.model_type}")
         
     except Exception as e:
         logger.error(f"Training error: {e}")
+        import traceback
+        traceback.print_exc()
         model_manager.update_training_status(is_training=False)
 
 @app.on_event("startup")

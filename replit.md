@@ -94,6 +94,18 @@ Preferred communication style: Simple, everyday language.
 - **Server Health Polling**: Logs all health fields with `[GPU HEALTH]` prefix and explicitly logs disconnect reasons.
 - **UI Console Logging**: Logs `[FLOW FORECAST UI]` with forecastMode, volState, acceleration, path lengths, and whether NO_FORECAST or QUANTILE_PATHS rendering occurs.
 
+### Model Debugging Endpoints
+- **`/api/gpu/diagnostics/model-sensitivity`**: Tests if models respond differently to varied inputs (sanity check for model training).
+- **`/api/gpu/diagnostics/label-distribution`**: Checks training label balance (detects HOLD-heavy distributions).
+- **`/api/gpu/diagnostics/full`**: Runs complete diagnostic suite including sensitivity, label distribution, and training configuration checks.
+- **`/debug/model-sensitivity`** (GPU Trainer): Direct endpoint for testing model input sensitivity.
+- **`/debug/label-distribution`** (GPU Trainer): Direct endpoint for analyzing label distribution in training data.
+
+### GPU Training API
+- **`/training/start`**: Triggers real MultiHeadTrainer training with parquet data, class weights, and 6-head loss configuration.
+- **`/api/retrain/daily`**: Daily retrain endpoint - syncs candles, validates freshness, starts multihead training (100 epochs).
+- **Training Configuration**: Uses inverse frequency class weights (capped at 10x), 80/20 train/val split, 100-step sequences.
+
 ### Training, Monitoring, and Policy Architecture
 
 The system separates model training from policy selection to ensure consistent live trading behavior.

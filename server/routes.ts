@@ -1328,6 +1328,107 @@ export async function registerRoutes(
     });
   });
 
+  // ============ GPU DIAGNOSTIC ENDPOINTS ============
+  
+  // Test if GPU models respond to different inputs
+  app.get("/api/gpu/diagnostics/model-sensitivity", async (req, res) => {
+    try {
+      const gpuUrl = process.env.GPU_TRAINER_URL || "http://localhost:8000";
+      const response = await fetch(`${gpuUrl}/debug/model-sensitivity`);
+      if (!response.ok) {
+        throw new Error(`GPU trainer returned ${response.status}`);
+      }
+      const data = await response.json();
+      res.json(data);
+    } catch (error) {
+      console.error("[GPU Diagnostics] Model sensitivity test failed:", error);
+      res.status(503).json({ 
+        error: "GPU trainer not available for diagnostics",
+        message: String(error)
+      });
+    }
+  });
+  
+  // Check training label distribution
+  app.get("/api/gpu/diagnostics/label-distribution", async (req, res) => {
+    try {
+      const gpuUrl = process.env.GPU_TRAINER_URL || "http://localhost:8000";
+      const response = await fetch(`${gpuUrl}/debug/label-distribution`);
+      if (!response.ok) {
+        throw new Error(`GPU trainer returned ${response.status}`);
+      }
+      const data = await response.json();
+      res.json(data);
+    } catch (error) {
+      console.error("[GPU Diagnostics] Label distribution check failed:", error);
+      res.status(503).json({ 
+        error: "GPU trainer not available for diagnostics",
+        message: String(error)
+      });
+    }
+  });
+  
+  // Run full diagnostic suite
+  app.get("/api/gpu/diagnostics/full", async (req, res) => {
+    const gpuUrl = process.env.GPU_TRAINER_URL || "http://localhost:8000";
+    const results: Record<string, unknown> = {
+      timestamp: new Date().toISOString(),
+      gpuUrl
+    };
+    
+    // Test health
+    try {
+      const healthRes = await fetch(`${gpuUrl}/health`);
+      results.health = healthRes.ok ? await healthRes.json() : { error: `Status ${healthRes.status}` };
+    } catch (e) {
+      results.health = { error: String(e) };
+    }
+    
+    // Test model sensitivity
+    try {
+      const sensRes = await fetch(`${gpuUrl}/debug/model-sensitivity`);
+      results.modelSensitivity = sensRes.ok ? await sensRes.json() : { error: `Status ${sensRes.status}` };
+    } catch (e) {
+      results.modelSensitivity = { error: String(e) };
+    }
+    
+    // Test label distribution
+    try {
+      const labelRes = await fetch(`${gpuUrl}/debug/label-distribution`);
+      results.labelDistribution = labelRes.ok ? await labelRes.json() : { error: `Status ${labelRes.status}` };
+    } catch (e) {
+      results.labelDistribution = { error: String(e) };
+    }
+    
+    // Overall diagnosis
+    const issues: string[] = [];
+    if (results.health && typeof results.health === 'object' && 'error' in results.health) {
+      issues.push("GPU trainer health check failed");
+    }
+    if (results.modelSensitivity && typeof results.modelSensitivity === 'object' && 'overall_status' in results.modelSensitivity) {
+      const sens = results.modelSensitivity as { overall_status?: string };
+      if (sens.overall_status?.includes("CRITICAL")) {
+        issues.push("Models have collapsed to constant output - need retraining");
+      }
+    }
+    if (results.labelDistribution && typeof results.labelDistribution === 'object' && 'is_imbalanced' in results.labelDistribution) {
+      const labels = results.labelDistribution as { is_imbalanced?: boolean };
+      if (labels.is_imbalanced) {
+        issues.push("Training labels are heavily imbalanced toward HOLD");
+      }
+    }
+    
+    results.diagnosis = {
+      issues,
+      needsRetraining: issues.some(i => i.includes("collapsed") || i.includes("imbalanced")),
+      recommendation: issues.length > 0 
+        ? "Run fresh training with balanced class weights: POST /api/retrain/daily"
+        : "Models appear healthy"
+    };
+    
+    res.json(results);
+  });
+
   // ============ LIVE CANDLE SYNC ENDPOINTS ============
   
   // Get live sync status
