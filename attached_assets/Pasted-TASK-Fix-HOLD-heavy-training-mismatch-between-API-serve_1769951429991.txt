@@ -1,0 +1,46 @@
+TASK: Fix HOLD-heavy training mismatch between API server training and CLI training.
+
+ROOT CAUSE:
+- api/server.py training endpoint uses pipeline.py:create_labels() which has NO HOLD-fix options.
+- Correct label generator is RegressionTargetGenerator.generate_multihead_targets() in data/regression_targets.py.
+
+REQUIRED CHANGES:
+
+1) Replace label creation in api/server.py:
+- Remove/stop using create_labels() from pipeline.py in the server training flow.
+- Use RegressionTargetGenerator.generate_multihead_targets() instead, so server training supports:
+  - min_confidence (Stage 1)
+  - pure directional mode (Stage 2)
+  - regime-based labels (Stage 3, ADX)
+
+2) Add API/GUI parameters to control label mode:
+- Add training request fields:
+  - label_mode: "cost_aware" | "pure_directional" | "regime"  (default = "regime")
+  - min_confidence (default 0.40)
+  - directional_threshold (default 0.0020)
+  - adx_period (default 14), adx_trend=25, adx_range=20
+  - trend_threshold=0.0015, range_threshold=0.0030
+- Enforce: if both pure_directional and regime are set, regime wins + log warning.
+
+3) Update GUI:
+- When starting training from GUI, send label_mode + parameters above.
+- Add toggles/dropdowns for label_mode and thresholds.
+
+4) Add labeling metadata + prevent silent overwrites:
+- Every training run write checkpoints/labeling_meta.json (or embed in model_weights.json) containing:
+  label_mode, thresholds, horizon, timeframe, run_id timestamp.
+- Save weights per run with unique filename:
+  checkpoints/weights_history/model_weights_<run_id>.json
+- Keep checkpoints/model_weights.json as the "selected" pointer (latest OR best; choose one and document it).
+
+5) Add verification logs (must be visible in server logs):
+- Print label distribution after generating targets used for training (SHORT/HOLD/LONG %).
+- Print OOS trades count per confidence sweep (conf>=0.10..0.35) to confirm it’s no longer zero.
+
+DELIVERABLES:
+- List exact files + functions modified.
+- Show example server log output proving:
+  - label_mode=regime
+  - label distribution within target (HOLD 50–70%, LONG/SHORT 15–25%)
+  - OOS trades > 0 for multiple confidence thresholds
+  - weights saved with run_id + metadata
