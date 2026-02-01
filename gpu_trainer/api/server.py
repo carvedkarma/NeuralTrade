@@ -13,7 +13,7 @@ import joblib
 import glob as glob_module
 
 # Walk-forward evaluation for ensemble weights
-from training.walk_forward import save_walk_forward_weights
+from training.walk_forward import save_walk_forward_weights, save_labeling_metadata
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1439,6 +1439,13 @@ class TrainingRequest(BaseModel):
     epochs: int = 100
     batch_size: int = 64
     learning_rate: float = 1e-4
+    # Label generation mode: "cost_aware" | "pure_directional" | "regime"
+    label_mode: str = "regime"  # Default to regime-based for best label distribution
+    min_confidence: float = 0.40  # Stage 1: lowered from 0.7
+    directional_threshold: float = 0.0020  # Stage 2: 0.20% for pure directional
+    trend_threshold: float = 0.0015  # Stage 3: threshold for trending regime
+    range_threshold: float = 0.0030  # Stage 3: threshold for ranging regime
+    horizon: int = 16  # Forward prediction horizon in bars
     
 class TrainingStatusResponse(BaseModel):
     is_training: bool
@@ -3492,7 +3499,8 @@ async def run_training(request: TrainingRequest):
         try:
             from training.multihead_trainer import MultiHeadTrainer, MultiHeadDataset
             from training.multihead_loss import MultiHeadLossConfig
-            from data.pipeline import FeatureEngineer, create_labels
+            from data.pipeline import FeatureEngineer
+            from data.regression_targets import RegressionTargetGenerator
             from config.training_config import TrainingConfig
         except ImportError as ie:
             logger.error(f"Failed to import training modules: {ie}")
@@ -3504,7 +3512,6 @@ async def run_training(request: TrainingRequest):
         parquet_files = list((Path(__file__).parent.parent / "data").glob("*.parquet"))
         
         if not parquet_files:
-            # Try to load from database via API (if server can access it)
             logger.warning("No parquet files found - training requires data files")
             model_manager.update_training_status(is_training=False)
             return
@@ -3519,17 +3526,48 @@ async def run_training(request: TrainingRequest):
         engineer = FeatureEngineer(mode="STF")
         features_df = engineer.compute_technical_features(df)
         
-        # Create labels with class balancing (aligned to original df index)
-        labels = create_labels(df, horizon=16, threshold=0.001, trading_cost=0.0009)
+        # ============== LABEL GENERATION WITH HOLD-FIX ==============
+        # Parse label_mode from request (default: "regime" for best distribution)
+        label_mode = getattr(request, 'label_mode', 'regime')
+        use_pure_directional = (label_mode == "pure_directional")
+        use_regime_labels = (label_mode == "regime")
         
-        # Compute forward returns for regression (aligned to original df index)
-        forward_returns = df['close'].pct_change(16).shift(-16).values
+        logger.info("=" * 70)
+        logger.info(f"[LABEL CONFIG] Mode: {label_mode.upper()}")
+        logger.info(f"  use_pure_directional: {use_pure_directional}")
+        logger.info(f"  use_regime_labels: {use_regime_labels}")
+        logger.info(f"  min_confidence: {request.min_confidence}")
+        logger.info(f"  directional_threshold: {request.directional_threshold:.4%}")
+        logger.info(f"  trend_threshold: {request.trend_threshold:.4%}")
+        logger.info(f"  range_threshold: {request.range_threshold:.4%}")
+        logger.info(f"  horizon: {request.horizon} bars")
+        logger.info("=" * 70)
+        
+        # Use RegressionTargetGenerator for proper HOLD-fix labels
+        target_gen = RegressionTargetGenerator(horizon_periods=request.horizon)
+        targets_df = target_gen.generate_multihead_targets(
+            df,
+            n_future_candles=5,
+            min_net_edge=0.0,
+            min_confidence=request.min_confidence,
+            use_volatility_cost=False,
+            fixed_cost=0.0009,
+            use_pure_directional=use_pure_directional,
+            directional_threshold=request.directional_threshold,
+            use_regime_labels=use_regime_labels,
+            trend_threshold=request.trend_threshold,
+            range_threshold=request.range_threshold
+        )
+        
+        # Extract labels (already 0=SHORT, 1=HOLD, 2=LONG from RegressionTargetGenerator)
+        labels = targets_df['class_label'].values
+        forward_returns = targets_df['mu'].values  # mu = forward return
         
         # Get valid indices from features (after dropna)
         features_valid_mask = ~features_df.isna().any(axis=1)
         valid_indices = features_valid_mask[features_valid_mask].index.tolist()
         
-        # Further filter by valid labels AND valid forward_returns (not NaN or inf)
+        # Filter by valid labels AND valid forward_returns (not NaN or inf)
         final_valid_indices = []
         for i in valid_indices:
             if i >= len(labels) or i >= len(forward_returns):
@@ -3538,9 +3576,9 @@ async def run_training(request: TrainingRequest):
                 continue
             final_valid_indices.append(i)
         
-        # Extract aligned data using explicit indices (all arrays now have same length with valid data)
+        # Extract aligned data using explicit indices
         features_np = features_df.loc[final_valid_indices].values.astype(np.float32)
-        labels_np = (np.array([labels[i] for i in final_valid_indices]) + 1).astype(np.int64)  # Convert -1,0,1 to 0,1,2
+        labels_np = np.array([labels[i] for i in final_valid_indices]).astype(np.int64)  # Already 0,1,2
         forward_returns_np = np.array([forward_returns[i] for i in final_valid_indices]).astype(np.float32)
         
         logger.info(f"Feature shape: {features_np.shape}, Labels: {len(labels_np)}")
@@ -3564,11 +3602,33 @@ async def run_training(request: TrainingRequest):
         # CRITICAL WARNING: If HOLD > 80%, model may learn to always predict HOLD
         if hold_pct > 80:
             logger.warning(f"[LABEL DIST] ⚠️ WARNING: HOLD class is {hold_pct:.1f}% of samples!")
-            logger.warning(f"[LABEL DIST] This may cause model to always predict HOLD. Consider adjusting threshold or trading_cost in create_labels()")
+            logger.warning(f"[LABEL DIST] Model may always predict HOLD. Try label_mode='regime' or 'pure_directional'")
         elif hold_pct > 60:
             logger.info(f"[LABEL DIST] Note: HOLD class is {hold_pct:.1f}% - class weights should help balance")
         else:
             logger.info(f"[LABEL DIST] ✓ Label distribution looks balanced")
+        
+        # Save labeling metadata for auditability
+        label_distribution = {
+            "short": short_pct,
+            "hold": hold_pct,
+            "long": long_pct,
+            "short_count": int(class_counts[0]),
+            "hold_count": int(class_counts[1]),
+            "long_count": int(class_counts[2]),
+            "total": total_samples
+        }
+        save_labeling_metadata(
+            weights_dir="checkpoints",
+            label_mode=request.label_mode,
+            horizon=request.horizon,
+            min_confidence=request.min_confidence,
+            directional_threshold=request.directional_threshold,
+            trend_threshold=request.trend_threshold,
+            range_threshold=request.range_threshold,
+            timeframe="15m",
+            label_distribution=label_distribution
+        )
         
         # Split data
         split_idx = int(len(features_np) * 0.8)

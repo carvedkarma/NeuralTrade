@@ -89,9 +89,15 @@ class GPUTrainerGUI:
         # Live trade count tracking
         self.live_trade_count = {"total": 0, "long": 0, "short": 0, "session_start": None}
         
-        # Label mode config (Stage 2 HOLD fix)
-        self.use_pure_directional = False
-        self.directional_threshold = 0.0020
+        # Label mode config (HOLD fix - 3 stages)
+        # Options: "cost_aware" (Stage 1), "pure_directional" (Stage 2), "regime" (Stage 3)
+        self.label_mode = "regime"  # Default to regime for best label distribution
+        self.use_pure_directional = False  # Legacy: computed from label_mode
+        self.use_regime_labels = True  # Legacy: computed from label_mode
+        self.directional_threshold = 0.0020  # 0.20% for pure_directional mode
+        self.trend_threshold = 0.0015  # 0.15% for trending regime
+        self.range_threshold = 0.0030  # 0.30% for ranging regime
+        self.min_confidence = 0.40  # Stage 1 min_confidence
         
         # Per-model training status for dashboard sync
         self.model_status = {
@@ -422,6 +428,25 @@ class GPUTrainerGUI:
                                    font=('Segoe UI', 9))
         multihead_info.pack(side=tk.LEFT, padx=(8, 0))
         
+        # Label Mode selection (HOLD fix stages)
+        label_frame = ttk.Frame(frame)
+        label_frame.pack(fill=tk.X, pady=(0, 8))
+        
+        ttk.Label(label_frame, text="Label Mode:", style='Card.TLabel').pack(side=tk.LEFT)
+        
+        self.label_mode_var = tk.StringVar(value="regime")
+        label_combo = ttk.Combobox(label_frame, textvariable=self.label_mode_var,
+                                    values=["cost_aware", "pure_directional", "regime"], 
+                                    width=15, state='readonly')
+        label_combo.pack(side=tk.LEFT, padx=(10, 0))
+        label_combo.bind('<<ComboboxSelected>>', self.on_label_mode_changed)
+        
+        # Label mode description
+        self.label_desc_label = tk.Label(frame, text="Regime: ADX-based adaptive thresholds (best for label balance)",
+                                          bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
+                                          font=('Segoe UI', 9), wraplength=340, justify=tk.LEFT)
+        self.label_desc_label.pack(anchor=tk.W, pady=(0, 8))
+        
         # Auto-settings display
         settings_frame = tk.Frame(frame, bg=self.colors['bg_tertiary'], padx=10, pady=8)
         settings_frame.pack(fill=tk.X, pady=(0, 12))
@@ -602,6 +627,23 @@ class GPUTrainerGUI:
         }
         display, _ = cost_map.get(mode, ("0.09%", 0.0009))
         self.cost_display.config(text=f"({display} round-trip)")
+    
+    def on_label_mode_changed(self, event=None):
+        """Handle label mode dropdown change."""
+        mode = self.label_mode_var.get()
+        self.label_mode = mode
+        
+        # Update computed legacy flags
+        self.use_pure_directional = (mode == "pure_directional")
+        self.use_regime_labels = (mode == "regime")
+        
+        # Update description
+        desc_map = {
+            "cost_aware": "Stage 1: min_confidence=0.40 gating (may still be HOLD-heavy)",
+            "pure_directional": "Stage 2: Simple return threshold (0.20% default)",
+            "regime": "Stage 3: ADX-based adaptive thresholds (best for label balance)"
+        }
+        self.label_desc_label.config(text=desc_map.get(mode, ""))
     
     def on_timeframe_changed(self, event=None):
         # Timeframe is now fixed to 15m only
@@ -1443,35 +1485,51 @@ class GPUTrainerGUI:
                     
                     if use_multihead:
                         # Multi-head mode: generate class_labels and forward_returns
-                        # Stage 1: min_confidence lowered from 0.7 to 0.40
-                        # Stage 2: pure_directional mode uses simple return threshold
-                        use_pure_directional = getattr(self, 'use_pure_directional', False)
+                        # Label mode selection (HOLD fix):
+                        #   - "cost_aware" (Stage 1): min_confidence gating
+                        #   - "pure_directional" (Stage 2): simple return threshold
+                        #   - "regime" (Stage 3): ADX-based adaptive thresholds
+                        label_mode = getattr(self, 'label_mode', 'regime')
+                        use_pure_directional = (label_mode == "pure_directional")
+                        use_regime_labels = (label_mode == "regime")
                         directional_threshold = getattr(self, 'directional_threshold', 0.0020)
+                        trend_threshold = getattr(self, 'trend_threshold', 0.0015)
+                        range_threshold = getattr(self, 'range_threshold', 0.0030)
+                        min_confidence = getattr(self, 'min_confidence', 0.40)
                         
-                        if use_pure_directional:
+                        self.log(f"  Label mode: {label_mode.upper()}")
+                        if use_regime_labels:
+                            self.log(f"  Using REGIME mode (trend={trend_threshold:.4%}, range={range_threshold:.4%})")
+                        elif use_pure_directional:
                             self.log(f"  Using PURE DIRECTIONAL mode (threshold={directional_threshold:.4%})")
                         else:
-                            self.log(f"  Using COST-AWARE mode (min_confidence=0.40)")
+                            self.log(f"  Using COST-AWARE mode (min_confidence={min_confidence})")
                         
                         train_targets = generate_multihead_targets(
                             train_combined, 
                             horizon_periods=prediction_horizon_bars,
                             min_net_edge=0.0,  # No edge filter for debugging
-                            min_confidence=0.40,  # Stage 1: lowered from 0.7
+                            min_confidence=min_confidence,  # Stage 1
                             use_volatility_cost=False,
                             fixed_cost=0.0009,  # 0.09% taker/taker
-                            use_pure_directional=use_pure_directional,  # Stage 2 option
-                            directional_threshold=directional_threshold
+                            use_pure_directional=use_pure_directional,  # Stage 2
+                            directional_threshold=directional_threshold,
+                            use_regime_labels=use_regime_labels,  # Stage 3
+                            trend_threshold=trend_threshold,
+                            range_threshold=range_threshold
                         )
                         val_targets = generate_multihead_targets(
                             val_combined, 
                             horizon_periods=prediction_horizon_bars,
                             min_net_edge=0.0,
-                            min_confidence=0.40,  # Stage 1: lowered from 0.7
+                            min_confidence=min_confidence,  # Stage 1
                             use_volatility_cost=False,
                             fixed_cost=0.0009,
-                            use_pure_directional=use_pure_directional,  # Stage 2 option
-                            directional_threshold=directional_threshold
+                            use_pure_directional=use_pure_directional,  # Stage 2
+                            directional_threshold=directional_threshold,
+                            use_regime_labels=use_regime_labels,  # Stage 3
+                            trend_threshold=trend_threshold,
+                            range_threshold=range_threshold
                         )
                         
                         train_labels = train_targets['class_label']

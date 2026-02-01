@@ -703,8 +703,18 @@ def save_walk_forward_weights(
     # Update weights
     existing_weights[model_name] = weight_entry
     
-    # Save
+    # Save to main model_weights.json (the "selected" pointer)
     with open(weights_path, 'w') as f:
+        json.dump(existing_weights, f, indent=2)
+    
+    # Also save to weights_history with unique run_id for auditability
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    history_dir = Path(weights_dir) / "weights_history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    history_file = history_dir / f"model_weights_{run_id}.json"
+    
+    # Save full snapshot to history
+    with open(history_file, 'w') as f:
         json.dump(existing_weights, f, indent=2)
     
     logger.info(f"Saved walk-forward weights for {model_name}:")
@@ -713,8 +723,78 @@ def save_walk_forward_weights(
     logger.info(f"  Profit Factor: {weight_entry['profit_factor']:.2f}")
     logger.info(f"  Sharpe: {weight_entry['sharpe']:.2f}")
     logger.info(f"  Total Trades: {total_trades}")
+    logger.info(f"  History saved to: {history_file}")
     
     return weight_entry
+
+
+def save_labeling_metadata(
+    weights_dir: str,
+    label_mode: str,
+    horizon: int,
+    min_confidence: float = 0.40,
+    directional_threshold: float = 0.0020,
+    trend_threshold: float = 0.0015,
+    range_threshold: float = 0.0030,
+    timeframe: str = "15m",
+    label_distribution: dict = None,
+    run_id: str = None
+) -> dict:
+    """
+    Save labeling metadata to labeling_meta.json.
+    
+    This documents the exact label generation config used for training,
+    enabling reproducibility and debugging of HOLD-heavy issues.
+    
+    Args:
+        weights_dir: Directory to save metadata
+        label_mode: "cost_aware" | "pure_directional" | "regime"
+        horizon: Forward prediction horizon in bars
+        min_confidence: Stage 1 min_confidence threshold
+        directional_threshold: Stage 2 pure directional threshold
+        trend_threshold: Stage 3 trending regime threshold
+        range_threshold: Stage 3 ranging regime threshold
+        timeframe: Training timeframe (e.g., "15m")
+        label_distribution: Dict with SHORT/HOLD/LONG percentages
+        run_id: Unique run identifier (auto-generated if None)
+        
+    Returns:
+        Dict with the saved metadata
+    """
+    if run_id is None:
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    metadata = {
+        "run_id": run_id,
+        "created_at": datetime.now().isoformat(),
+        "label_mode": label_mode,
+        "horizon": horizon,
+        "timeframe": timeframe,
+        "config": {
+            "min_confidence": min_confidence,
+            "directional_threshold": directional_threshold,
+            "trend_threshold": trend_threshold,
+            "range_threshold": range_threshold
+        },
+        "label_distribution": label_distribution or {}
+    }
+    
+    meta_path = Path(weights_dir) / "labeling_meta.json"
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(meta_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    logger.info(f"[LABELING META] Saved to {meta_path}")
+    logger.info(f"  Run ID: {run_id}")
+    logger.info(f"  Mode: {label_mode}")
+    logger.info(f"  Horizon: {horizon} bars ({timeframe})")
+    if label_distribution:
+        logger.info(f"  Distribution: SHORT={label_distribution.get('short', 0):.1f}%, "
+                   f"HOLD={label_distribution.get('hold', 0):.1f}%, "
+                   f"LONG={label_distribution.get('long', 0):.1f}%")
+    
+    return metadata
 
 
 def evaluate_and_save_model_weights(
