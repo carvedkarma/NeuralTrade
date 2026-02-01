@@ -3447,10 +3447,51 @@ async def run_training(request: TrainingRequest):
         
         logger.info("Starting training loop...")
         
+        # ============== HARD GUARDRAILS FOR REAL TRAINING ==============
+        def compute_weight_hash(model) -> str:
+            """Compute hash of model weights to verify they change."""
+            import hashlib
+            weight_bytes = b''
+            for param in model.parameters():
+                weight_bytes += param.data.cpu().numpy().tobytes()
+            return hashlib.md5(weight_bytes).hexdigest()
+        
+        def compute_weight_l2(model) -> float:
+            """Compute L2 norm of weights to track changes."""
+            total_norm = 0.0
+            for param in model.parameters():
+                total_norm += param.data.norm(2).item() ** 2
+            return total_norm ** 0.5
+        
+        def check_gradients_nonzero(model) -> bool:
+            """Verify gradients are non-zero (training is actually happening)."""
+            has_nonzero_grad = False
+            for param in model.parameters():
+                if param.grad is not None:
+                    grad_norm = param.grad.norm().item()
+                    if grad_norm > 1e-10:
+                        has_nonzero_grad = True
+                        break
+            return has_nonzero_grad
+        
+        initial_weight_hash = compute_weight_hash(model)
+        initial_weight_l2 = compute_weight_l2(model)
+        logger.info(f"[GUARDRAIL] Initial weight hash: {initial_weight_hash[:16]}...")
+        logger.info(f"[GUARDRAIL] Initial weight L2 norm: {initial_weight_l2:.6f}")
+        
         # Run training in a separate thread to allow async status updates
         def train_thread():
+            nonlocal initial_weight_hash, initial_weight_l2
+            training_verified = False
+            gradient_check_passed = False
+            weight_change_verified = False
+            
             try:
+                epoch_weight_hashes = [initial_weight_hash]
+                
                 def progress_callback(epoch, total_epochs, train_metrics, val_metrics):
+                    nonlocal gradient_check_passed, weight_change_verified
+                    
                     if isinstance(train_metrics, dict):
                         train_loss = train_metrics.get('total', 0.0)
                     else:
@@ -3460,12 +3501,37 @@ async def run_training(request: TrainingRequest):
                     else:
                         val_loss = float(val_metrics)
                     
+                    # ============== GUARDRAIL: Check gradient flow ==============
+                    if epoch == 0:
+                        has_grad = check_gradients_nonzero(model)
+                        if has_grad:
+                            gradient_check_passed = True
+                            logger.info(f"[GUARDRAIL] ✓ Gradients are non-zero - training is real")
+                        else:
+                            logger.error(f"[GUARDRAIL] ✗ CRITICAL: Gradients are ZERO - training may not be happening!")
+                    
+                    # ============== GUARDRAIL: Check weight changes ==============
+                    current_hash = compute_weight_hash(model)
+                    current_l2 = compute_weight_l2(model)
+                    
+                    if current_hash != epoch_weight_hashes[-1]:
+                        weight_change_verified = True
+                        l2_delta = abs(current_l2 - initial_weight_l2)
+                        logger.info(f"[GUARDRAIL] ✓ Epoch {epoch+1}: Weights changed (L2 delta: {l2_delta:.6f})")
+                    else:
+                        logger.warning(f"[GUARDRAIL] ✗ Epoch {epoch+1}: Weights unchanged - possible training issue!")
+                    
+                    epoch_weight_hashes.append(current_hash)
+                    
                     model_manager.update_training_status(
                         current_epoch=epoch + 1,
                         progress=(epoch + 1) / total_epochs * 100,
                         metrics={
                             "train_loss": float(train_loss),
-                            "val_loss": float(val_loss)
+                            "val_loss": float(val_loss),
+                            "weight_l2": float(current_l2),
+                            "gradient_check": gradient_check_passed,
+                            "weight_change": weight_change_verified
                         }
                     )
                 
@@ -3473,7 +3539,41 @@ async def run_training(request: TrainingRequest):
                 
                 # Configure checkpoint path for trainer
                 checkpoint_path = str(checkpoint_dir / f"best_{model_type}_multihead.pt")
+                
+                # Record checkpoint timestamp before training
+                import os
+                checkpoint_exists_before = os.path.exists(checkpoint_path)
+                checkpoint_mtime_before = os.path.getmtime(checkpoint_path) if checkpoint_exists_before else 0
+                
                 trainer.train(num_epochs=request.epochs, checkpoint_path=checkpoint_path, save_best=True)
+                
+                # ============== GUARDRAIL: Verify checkpoint was saved ==============
+                checkpoint_exists_after = os.path.exists(checkpoint_path)
+                if checkpoint_exists_after:
+                    checkpoint_mtime_after = os.path.getmtime(checkpoint_path)
+                    if checkpoint_mtime_after > checkpoint_mtime_before:
+                        logger.info(f"[GUARDRAIL] ✓ Checkpoint file updated: {checkpoint_path}")
+                        
+                        # Verify state_dict hash changed
+                        final_hash = compute_weight_hash(model)
+                        if final_hash != initial_weight_hash:
+                            logger.info(f"[GUARDRAIL] ✓ Final weight hash: {final_hash[:16]}... (changed from initial)")
+                            training_verified = True
+                        else:
+                            logger.error(f"[GUARDRAIL] ✗ CRITICAL: Weight hash unchanged after training!")
+                    else:
+                        logger.error(f"[GUARDRAIL] ✗ Checkpoint file NOT updated during training!")
+                else:
+                    logger.error(f"[GUARDRAIL] ✗ Checkpoint file does not exist after training!")
+                
+                # Final summary
+                if training_verified and gradient_check_passed and weight_change_verified:
+                    logger.info(f"[GUARDRAIL] ✓✓✓ ALL CHECKS PASSED - Training was REAL")
+                else:
+                    logger.error(f"[GUARDRAIL] TRAINING VERIFICATION FAILED:")
+                    logger.error(f"  - Training verified: {training_verified}")
+                    logger.error(f"  - Gradient check: {gradient_check_passed}")
+                    logger.error(f"  - Weight change: {weight_change_verified}")
                 
                 logger.info(f"Training complete - model checkpoint saved via trainer to {checkpoint_path}")
                 
