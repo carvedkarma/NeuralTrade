@@ -472,34 +472,35 @@ class GPUTrainerGUI:
                                     font=('Segoe UI', 9))
         self.best_label.pack(side=tk.RIGHT)
         
-        # Live Trade Count Display
+        # OOS Trade Count Display (shown during training monitoring sweeps)
         self.trade_count_frame = tk.Frame(frame, bg=self.colors['bg_card'])
         self.trade_count_frame.pack(fill=tk.X, pady=(0, 10))
         
-        self.trade_count_title = tk.Label(self.trade_count_frame, text="Live Trades: ", 
+        self.trade_count_title = tk.Label(self.trade_count_frame, text="OOS Trades: ", 
                                           bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
                                           font=('Segoe UI', 9))
         self.trade_count_title.pack(side=tk.LEFT)
         
-        self.trade_total_label = tk.Label(self.trade_count_frame, text="0", 
+        self.trade_total_label = tk.Label(self.trade_count_frame, text="--", 
                                           bg=self.colors['bg_card'], fg=self.colors['accent'],
                                           font=('Segoe UI', 9, 'bold'))
         self.trade_total_label.pack(side=tk.LEFT)
         
-        self.trade_long_label = tk.Label(self.trade_count_frame, text="  LONG: 0", 
-                                          bg=self.colors['bg_card'], fg=self.colors['success'],
-                                          font=('Segoe UI', 9))
-        self.trade_long_label.pack(side=tk.LEFT, padx=(10, 0))
+        # MIN_TRADES threshold indicator (30 required for policy eligibility)
+        self.trade_threshold_label = tk.Label(self.trade_count_frame, text=" / 30 min", 
+                                              bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
+                                              font=('Segoe UI', 8))
+        self.trade_threshold_label.pack(side=tk.LEFT)
         
-        self.trade_short_label = tk.Label(self.trade_count_frame, text="  SHORT: 0", 
-                                          bg=self.colors['bg_card'], fg=self.colors['error'],
-                                          font=('Segoe UI', 9))
-        self.trade_short_label.pack(side=tk.LEFT, padx=(5, 0))
+        self.trade_status_label = tk.Label(self.trade_count_frame, text="", 
+                                           bg=self.colors['bg_card'], fg=self.colors['warning'],
+                                           font=('Segoe UI', 8, 'bold'))
+        self.trade_status_label.pack(side=tk.LEFT, padx=(5, 0))
         
-        self.trade_session_label = tk.Label(self.trade_count_frame, text="", 
-                                            bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
-                                            font=('Segoe UI', 8))
-        self.trade_session_label.pack(side=tk.RIGHT)
+        self.trade_epoch_label = tk.Label(self.trade_count_frame, text="", 
+                                          bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
+                                          font=('Segoe UI', 8))
+        self.trade_epoch_label.pack(side=tk.RIGHT)
         
         # Buttons
         btn_frame = ttk.Frame(frame)
@@ -1064,27 +1065,45 @@ class GPUTrainerGUI:
         self.root.after(0, self._refresh_trade_count_display)
     
     def _refresh_trade_count_display(self):
-        """Refresh the trade count UI elements."""
+        """Refresh the trade count UI elements (legacy - now uses OOS trade count)."""
+        pass  # No longer used - OOS trade count updated via _update_oos_trade_count
+    
+    def _update_oos_trade_count(self, oos_trades: int, epoch: int, was_skipped: bool = False):
+        """Update OOS (out-of-sample) trade count during training monitoring sweeps.
+        
+        Args:
+            oos_trades: Number of simulated trades from monitoring sweep
+            epoch: Current training epoch
+            was_skipped: True if monitoring sweep was skipped this epoch
+        """
         try:
-            total = self.live_trade_count["total"]
-            longs = self.live_trade_count["long"]
-            shorts = self.live_trade_count["short"]
+            MIN_TRADES = 30  # Policy eligibility threshold (matches multihead_trainer.py)
             
-            self.trade_total_label.config(text=str(total))
-            self.trade_long_label.config(text=f"  LONG: {longs}")
-            self.trade_short_label.config(text=f"  SHORT: {shorts}")
+            if was_skipped:
+                # Monitoring sweep was skipped this epoch (runs every 5 epochs)
+                # Show stale indicator but keep last known trade count
+                self.trade_epoch_label.config(text=f"(sweep @epoch {epoch - (epoch % 5) if epoch % 5 != 0 else epoch})")
+                return
             
-            # Session duration
-            if self.live_trade_count["session_start"]:
-                duration = datetime.now() - self.live_trade_count["session_start"]
-                hours = duration.seconds // 3600
-                mins = (duration.seconds % 3600) // 60
-                if hours > 0:
-                    self.trade_session_label.config(text=f"Session: {hours}h {mins}m")
-                else:
-                    self.trade_session_label.config(text=f"Session: {mins}m")
+            # Update trade count
+            self.trade_total_label.config(text=str(oos_trades))
+            
+            # Update epoch indicator
+            self.trade_epoch_label.config(text=f"(epoch {epoch})")
+            
+            # Update eligibility status with color coding
+            if oos_trades >= MIN_TRADES:
+                self.trade_status_label.config(
+                    text="✓ ELIGIBLE", 
+                    fg=self.colors['success']
+                )
+                self.trade_total_label.config(fg=self.colors['success'])
             else:
-                self.trade_session_label.config(text="")
+                self.trade_status_label.config(
+                    text="✗ INELIGIBLE", 
+                    fg=self.colors['error']
+                )
+                self.trade_total_label.config(fg=self.colors['error'])
         except Exception:
             pass
             
@@ -1812,6 +1831,12 @@ class GPUTrainerGUI:
                         train_loss = float(train_metrics)
                     if isinstance(val_metrics, dict):
                         val_loss = val_metrics.get('total', val_metrics.get('total_loss', val_metrics.get('loss', 0.0)))
+                        # Extract OOS trade count from monitoring sweep (runs every 5 epochs)
+                        oos_trades = val_metrics.get('num_trades', 0)
+                        was_skipped = val_metrics.get('_skipped', False)
+                        # Always update the OOS trade count display
+                        self.root.after(0, lambda t=oos_trades, e=epoch+1, skip=was_skipped: 
+                                       self._update_oos_trade_count(t, e, skip))
                     else:
                         val_loss = float(val_metrics)
                     
