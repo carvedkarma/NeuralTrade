@@ -97,6 +97,25 @@ const formatPercent = (val: number | string | null, decimals = 2) => {
 };
 
 function FlowForecastChart({ flowForecast, entryPrice }: { flowForecast: FlowForecast; entryPrice: number }) {
+  // === FLOW FORECAST CONSOLE LOGGING ===
+  console.log("[FLOW FORECAST UI] Received:", {
+    forecastMode: flowForecast.forecastMode,
+    volState: flowForecast.volState,
+    acceleration: flowForecast.acceleration,
+    hasQuantilePaths: !!flowForecast.quantilePaths,
+    pathLengths: flowForecast.quantilePaths ? {
+      q10: flowForecast.quantilePaths.q10?.length,
+      q50: flowForecast.quantilePaths.q50?.length,
+      q90: flowForecast.quantilePaths.q90?.length,
+    } : null
+  });
+  
+  if (flowForecast.forecastMode === "NO_FORECAST") {
+    console.log("[FLOW FORECAST UI] Rendering NO_FORECAST state - hiding projection");
+  } else if (flowForecast.quantilePaths) {
+    console.log("[FLOW FORECAST UI] Rendering QUANTILE_PATHS - drawing paths (triangle HIDDEN)");
+  }
+  
   if (flowForecast.forecastMode === "NO_FORECAST" || !flowForecast.quantilePaths) {
     return (
       <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4" data-testid="flow-forecast-gated">

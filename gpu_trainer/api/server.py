@@ -961,6 +961,43 @@ class ModelManager:
                 
         logger.info(f"Loaded {len(self.models)} checkpoints, {len(self.model_instances)} instantiated")
         logger.info(f"Model type mapping: {self.model_type_map}")
+        
+        # === FLOW FORECAST CAPABILITY CHECK ===
+        # Assert that loaded models have vol_state_head and acceleration_head
+        self.flow_forecast_capable = False
+        self.model_capabilities = {}
+        
+        for model_name, model_instance in self.model_instances.items():
+            has_vol_state = hasattr(model_instance, 'vol_state_head')
+            has_accel = hasattr(model_instance, 'acceleration_head')
+            has_quantile = hasattr(model_instance, 'quantile_head')
+            
+            self.model_capabilities[model_name] = {
+                "vol_state_head": has_vol_state,
+                "acceleration_head": has_accel,
+                "quantile_head": has_quantile,
+                "flow_forecast_ready": has_vol_state and has_accel and has_quantile
+            }
+            
+            if has_vol_state and has_accel:
+                self.flow_forecast_capable = True
+                logger.info(f"✓ FLOW FORECAST: {model_name} has vol_state_head + acceleration_head")
+            else:
+                missing = []
+                if not has_vol_state:
+                    missing.append("vol_state_head")
+                if not has_accel:
+                    missing.append("acceleration_head")
+                if not has_quantile:
+                    missing.append("quantile_head")
+                logger.warning(f"✗ FLOW FORECAST: {model_name} MISSING: {missing} (old checkpoint?)")
+        
+        if not self.flow_forecast_capable:
+            logger.critical("=" * 60)
+            logger.critical("FLOW FORECAST UNAVAILABLE: No models have vol_state + accel heads")
+            logger.critical("This means checkpoints are from OLD training without flow forecast")
+            logger.critical("FIX: Retrain models with multihead_trainer to add flow forecast heads")
+            logger.critical("=" * 60)
     
     def get_model_status_by_type(self) -> Dict[str, Dict]:
         """Get model status organized by standardized model type for dashboard display."""
@@ -2951,6 +2988,20 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
             } if signal.quantile_paths else None
         }
         
+        # === FLOW FORECAST RESPONSE LOGGING ===
+        flow_keys = ["forecast_mode", "vol_state", "vol_state_probs", "acceleration", "quantile_paths"]
+        flow_present = {k: response.get(k) is not None for k in flow_keys}
+        logger.info(f"[FLOW FORECAST RESPONSE] Keys present: {flow_present}")
+        
+        if response.get("forecast_mode"):
+            logger.info(f"[FLOW FORECAST] mode={response['forecast_mode']}, vol_state={response.get('vol_state')}, "
+                       f"accel={response.get('acceleration'):.4f if response.get('acceleration') else 'None'}, "
+                       f"paths={'YES' if response.get('quantile_paths') else 'NO'}")
+        else:
+            logger.warning("[FLOW FORECAST] forecast_mode is None - model may not support flow forecast")
+        
+        return response
+        
     except HTTPException:
         raise
     except Exception as e:
@@ -3184,6 +3235,86 @@ async def startup_event():
         logger.info(f"STF validation passed: mode={model_manager.training_mode}, input_dim={model_manager.input_dim}")
     
     logger.info(f"Startup complete. Device: {model_manager.device}, Models: {len(model_manager.models)}, STF Serving: {model_manager.stf_serving_enabled}")
+
+
+@app.get("/health")
+async def health_check():
+    """
+    Health endpoint with detailed capability information.
+    
+    Returns supports[] array listing all available features.
+    Server must poll this to understand exact disconnect reason.
+    """
+    supports = []
+    disconnect_reasons = []
+    
+    # Check basic GPU availability
+    gpu_available = torch.cuda.is_available()
+    if gpu_available:
+        supports.append("gpu")
+    else:
+        disconnect_reasons.append("GPU not available (CUDA not found)")
+    
+    # Check models loaded
+    models_loaded = len(model_manager.model_instances) > 0
+    if models_loaded:
+        supports.append("models")
+        supports.append(f"models:{len(model_manager.model_instances)}")
+    else:
+        disconnect_reasons.append("No model instances loaded")
+    
+    # Check STF serving
+    if getattr(model_manager, 'stf_serving_enabled', False):
+        supports.append("stf")
+    else:
+        disconnect_reasons.append("STF serving disabled (mode mismatch)")
+    
+    # Check ensemble predictor
+    try:
+        predictor = get_ensemble_predictor()
+        if predictor is not None:
+            supports.append("ensemble")
+        else:
+            disconnect_reasons.append("Ensemble predictor not initialized")
+    except:
+        disconnect_reasons.append("Ensemble predictor error")
+    
+    # Check flow forecast capability
+    flow_capable = getattr(model_manager, 'flow_forecast_capable', False)
+    if flow_capable:
+        supports.append("flow_forecast")
+        supports.append("vol_state")
+        supports.append("acceleration")
+        supports.append("quantile_paths")
+    else:
+        disconnect_reasons.append("Flow forecast not available (models missing vol_state_head/acceleration_head)")
+    
+    # Model-specific capabilities
+    model_caps = getattr(model_manager, 'model_capabilities', {})
+    for model_name, caps in model_caps.items():
+        if caps.get("flow_forecast_ready"):
+            supports.append(f"flow:{model_name}")
+    
+    # Scaler loaded
+    if model_manager.scaler is not None:
+        supports.append("scaler")
+    else:
+        disconnect_reasons.append("Scaler not loaded")
+    
+    healthy = len(disconnect_reasons) == 0 or (models_loaded and flow_capable)
+    
+    return {
+        "status": "healthy" if healthy else "degraded",
+        "gpu": gpu_available,
+        "gpu_name": torch.cuda.get_device_name(0) if gpu_available else None,
+        "models_loaded": len(model_manager.model_instances),
+        "flow_forecast_capable": flow_capable,
+        "stf_serving": getattr(model_manager, 'stf_serving_enabled', False),
+        "supports": supports,
+        "disconnect_reasons": disconnect_reasons,
+        "model_capabilities": model_caps
+    }
+
 
 @app.post("/models/load")
 async def load_model_endpoint(model_path: str):

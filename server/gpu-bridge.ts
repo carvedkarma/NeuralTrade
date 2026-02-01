@@ -356,6 +356,7 @@ class GPUTrainerBridge {
   
   /**
    * Check if the GPU trainer is available
+   * Now with detailed capability logging - NO SILENT FALLBACK
    */
   async checkHealth(): Promise<GPUHealthResponse | null> {
     try {
@@ -366,19 +367,59 @@ class GPUTrainerBridge {
       });
       
       if (response.ok) {
-        const health = await response.json() as GPUHealthResponse;
+        const health = await response.json();
         this.isAvailable = true;
         this.lastHealthCheck = Date.now();
-        return health;
+        
+        // === DETAILED HEALTH LOGGING - NO SILENT FALLBACK ===
+        console.log("[GPU HEALTH] Status:", health.status);
+        console.log("[GPU HEALTH] GPU:", health.gpu ? health.gpu_name : "NOT AVAILABLE");
+        console.log("[GPU HEALTH] Models loaded:", health.models_loaded);
+        console.log("[GPU HEALTH] Flow Forecast capable:", health.flow_forecast_capable);
+        console.log("[GPU HEALTH] STF Serving:", health.stf_serving);
+        console.log("[GPU HEALTH] Supports:", health.supports?.join(", ") || "none");
+        
+        // Log disconnect reasons if any
+        if (health.disconnect_reasons && health.disconnect_reasons.length > 0) {
+          console.warn("[GPU HEALTH] === DISCONNECT REASONS ===");
+          for (const reason of health.disconnect_reasons) {
+            console.warn(`[GPU HEALTH]   - ${reason}`);
+          }
+          console.warn("[GPU HEALTH] ===========================");
+        }
+        
+        // Log model capabilities
+        if (health.model_capabilities) {
+          console.log("[GPU HEALTH] Model capabilities:");
+          for (const [model, caps] of Object.entries(health.model_capabilities)) {
+            const c = caps as { vol_state_head: boolean; acceleration_head: boolean; flow_forecast_ready: boolean };
+            console.log(`[GPU HEALTH]   ${model}: vol_state=${c.vol_state_head}, accel=${c.acceleration_head}, flow_ready=${c.flow_forecast_ready}`);
+          }
+        }
+        
+        // Store flow forecast capability
+        this.flowForecastCapable = health.flow_forecast_capable || false;
+        
+        return health as GPUHealthResponse;
       }
       
       this.isAvailable = false;
+      console.warn("[GPU HEALTH] Health check failed - response not OK");
       return null;
     } catch (error) {
       this.isAvailable = false;
-      console.log("GPU trainer not available, using fallback ML predictor");
+      this.flowForecastCapable = false;
+      console.warn("[GPU HEALTH] GPU trainer not available:", (error as Error).message);
+      console.warn("[GPU HEALTH] Using fallback ML predictor - NO flow forecast");
       return null;
     }
+  }
+  
+  // Track flow forecast capability
+  private flowForecastCapable: boolean = false;
+  
+  isFlowForecastCapable(): boolean {
+    return this.flowForecastCapable;
   }
   
   /**
