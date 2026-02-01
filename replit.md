@@ -1,7 +1,7 @@
 # BTC Futures Signal Dashboard
 
 ## Overview
-This project is an institutional-grade, AI-driven dashboard designed to generate sophisticated BTCUSDT futures trading signals. It integrates machine learning, real-time market data, and sentiment analysis to provide AI-powered trade plans. The system features a continuous learning loop with ongoing data refreshing and model retraining, aiming to deliver a robust, selective trading system that leverages advanced AI and comprehensive market insights for high-confidence trading opportunities.
+This project is an institutional-grade, AI-driven dashboard designed to generate sophisticated BTCUSDT futures trading signals. It integrates machine learning, real-time market data, and sentiment analysis to provide AI-powered trade plans. The system features a continuous learning loop with ongoing data refreshing and model retraining, aiming to deliver a robust, selective trading system that leverages advanced AI and comprehensive market insights for high-confidence trading opportunities. The project's vision is to deliver a cutting-edge platform for futures trading, capitalizing on market potential through AI-driven precision and continuous adaptation.
 
 ## User Preferences
 Preferred communication style: Simple, everyday language.
@@ -15,7 +15,7 @@ Preferred communication style: Simple, everyday language.
 - **UI Components**: shadcn/ui (Radix UI, Tailwind CSS).
 - **Charts**: Recharts.
 - **Animations**: Framer Motion.
-- **Navigation**: Tabbed interface including Overview, Signal, Neural Network (displaying quantile-based predictions and predicted price bands), Paper Trading, and various learning/analysis sections.
+- **Navigation**: Tabbed interface including Overview, Signal, Neural Network (displaying quantile-based predictions and predicted price bands), and Paper Trading.
 
 ### Backend
 - **Runtime**: Node.js with Express.js (TypeScript, ESM).
@@ -41,8 +41,8 @@ Preferred communication style: Simple, everyday language.
 
 #### Regime Detection & Mixture-of-Experts (MoE)
 - **Regime Types**: Identifies TRENDING, MEAN_REVERTING, HIGH_VOLATILITY, LOW_VOLATILITY, TRANSITION, UNKNOWN.
-- **MoE Architecture**: Employs a gating network and four specialized expert models (trend, mean-reversion, volatility, chaos) that adapt to the detected market regime.
-- **Self-Supervised Pretraining**: Utilizes techniques like Masked Time-Series, Next-Step Distribution prediction, Contrastive Learning, and Deep clustering for regime discovery, pre-trained on extensive datasets.
+- **MoE Architecture**: Employs a gating network and four specialized expert models that adapt to the detected market regime.
+- **Self-Supervised Pretraining**: Utilizes techniques like Masked Time-Series, Next-Step Distribution prediction, Contrastive Learning, and Deep clustering for regime discovery.
 
 #### GPU Neural Network Training
 - **Architectures**: Supports 12+ deep learning architectures (Transformers, LSTMs, CNNs, VAEs, GNNs, Ensembles) with local GPU training.
@@ -52,50 +52,47 @@ Preferred communication style: Simple, everyday language.
 - **Regime-Balanced Training**: Utilizes a 4-regime classification (BULL, BEAR, HIGH_VOL, LOW_VOL_CHOP) with balanced sampling and per-regime validation.
 
 #### Multi-Head Model Architecture
-- **Output Heads**: Five distinct head types:
-  - Classification: Direction probabilities (LONG/SHORT/HOLD)
-  - Regression: Expected return μ and uncertainty σ
-  - Quantile: q10, q25, q50, q75, q90 price projections
-  - VolState: 3-class volatility state (contraction/neutral/expansion)
-  - Acceleration: Scalar momentum change prediction
-- **Loss Function**: Combines CrossEntropyLoss (classification + vol_state), HuberLoss (regression + acceleration), GaussianNLLLoss, and Pinball loss.
+- **Output Heads**: Five distinct head types: Classification (Direction probabilities), Regression (Expected return μ and uncertainty σ), Quantile (price projections), VolState (3-class volatility state), Acceleration (Scalar momentum change prediction).
+- **Loss Function**: Combines CrossEntropyLoss, HuberLoss, GaussianNLLLoss, and Pinball loss.
 
-#### Flow Forecast System (NEW - Jan 2026)
-- **Purpose**: Replace triangle probability cones with regime-conditioned quantile path projections
-- **Vol_State Classification**: Predicts forward volatility regime based on forward_vol/current_vol ratio
-  - Contraction (0): ratio < 0.9 - volatility expected to decrease
-  - Neutral (1): ratio 0.9-1.1 - stable volatility
-  - Expansion (2): ratio > 1.1 - volatility expected to increase
-- **Acceleration Prediction**: Momentum change = momentum_forward - momentum_now (4-bar returns)
-- **Quantile Path Generation**:
-  - Alpha shaping: expansion=1.5 (fast growth), neutral=1.0 (linear), contraction=0.7 (concave)
-  - Path formula: `path[k] = close * exp((k/h)^α * quantile)` for 16-bar horizon
-  - Three paths rendered: q10 (bearish), q50 (median), q90 (bullish)
-- **Volatility Gate**: NO_FORECAST mode triggered when:
-  - vol_state == contraction (compression regime)
-  - OR (q75-q25) < 3×cost (insufficient expected spread)
-- **Frontend Rendering**: Recharts LineChart with color-coded paths; "No Tradeable Flow" message when gated
-- **Training Targets**: Vol_state uses CrossEntropy with 0.05 label smoothing; acceleration uses Huber with delta=0.02
+#### Flow Forecast System
+- **Purpose**: Replaces triangle probability cones with regime-conditioned quantile path projections.
+- **Vol_State Classification**: Predicts forward volatility regime based on forward_vol/current_vol ratio.
+- **Acceleration Prediction**: Predicts momentum change.
+- **Quantile Path Generation**: Generates three paths (q10, q50, q90) using alpha shaping based on volatility state for a 16-bar horizon.
+- **Volatility Gate**: Triggers "NO_FORECAST" mode when volatility is contracting or expected spread is insufficient.
 
 #### Advanced Labeling and Prediction
 - **Cost-Aware Labeling**: Signals generated only when net edge (accounting for trading costs) exceeds a minimum threshold and confidence is sufficient.
-- **Gaussian NLL with Log-Sigma**: Predicts `log_sigma` to ensure properly calibrated uncertainty estimates.
-- **Constrained Candle Parameterization**: Predicts `delta_close`, `log_range`, and `skew` to guarantee valid candle predictions where high >= low.
-- **Quantile-Based SL/TP Derivation**: Stop-loss and take-profit levels are derived directly from predicted quantiles for consistency.
+- **Gaussian NLL with Log-Sigma**: Predicts `log_sigma` for calibrated uncertainty estimates.
+- **Constrained Candle Parameterization**: Predicts `delta_close`, `log_range`, and `skew` to guarantee valid candle predictions.
+- **Quantile-Based SL/TP Derivation**: Stop-loss and take-profit levels are derived directly from predicted quantiles.
 
 #### Model Management and Monitoring
 - **Walk-Forward Weight Saving**: Saves real trading metrics for ensemble model weighting.
-- **Feature Version Locking**: Ensures feature consistency between training and inference, returning HOLD on mismatch.
+- **Feature Version Locking**: Ensures feature consistency between training and inference.
 - **Prediction Drift Monitoring**: Utilizes PSI, KL Divergence, and ECE to detect and report feature distribution shifts and prediction calibration changes.
 
 #### Professional Ensemble Predictor
 - **Ensemble Voting**: Combines predictions from Transformer, TFT, LSTM, and CNN models with confidence-based voting.
 - **Regime & Risk Gating**: Incorporates VAE for market regime detection and GNN for risk regime detection to adjust thresholds and position sizing.
-- **Metric Weighting**: Models are weighted based on actual trading metrics (expectancy, precision, profit factor, F1, Sharpe).
+- **Metric Weighting**: Models are weighted based on actual trading metrics.
 
 ### Build System
 - **Client Build**: Vite bundles React app to `dist/public`.
 - **Server Build**: esbuild bundles server to `dist/index.cjs`.
+
+### Data Architecture
+- **Dashboard**: Uses 35K+ database candles + 1 live Binance candle.
+- **GPU Trainer**: Uses 140K+ parquet candles for training (separate data flow).
+- **Feature Pipeline Alignment**: Explicit STF/MTF mode routing with mode auto-detection from saved feature config.
+- **FeatureEngineer Version Tracking**: Prevents silent signal degradation from train/inference feature computation mismatch.
+- **Centralized Timeframe Configuration**: Uses `gpu_trainer/config/timeframe_config.py` as a single source of truth for timeframes and horizons, defaulting to BTCUSDT 15m.
+
+### Runtime Diagnostic System
+- **GPU Trainer /health Endpoint**: Provides comprehensive capability information, including available features and disconnect reasons.
+- **Server Health Polling**: Logs all health fields with `[GPU HEALTH]` prefix and explicitly logs disconnect reasons.
+- **UI Console Logging**: Logs `[FLOW FORECAST UI]` with forecastMode, volState, acceleration, path lengths, and whether NO_FORECAST or QUANTILE_PATHS rendering occurs.
 
 ## External Dependencies
 
@@ -117,110 +114,3 @@ Preferred communication style: Simple, everyday language.
 ### Development Tools
 - Replit-specific plugins for dev banner and error overlay.
 - TypeScript.
-
-## Enabled Institutional Features (Phase Summary)
-
-The following institutional-grade features are **enabled by default**:
-
-### Phase 1a: Cost-Aware Labeling
-- Trading costs computed from volatility + 4h hold time (fees, slippage, funding)
-- `net_edge = |μ| - cost` for proper edge calculation
-- Signals only generated when net edge exceeds minimum threshold
-
-### Phase 1b: Log-Sigma NLL
-- `RegressionHead` defaults to `use_log_sigma=True`
-- All multi-head models (Transformer, LSTM, CNN, GNN, VAE, TFT) use log_sigma
-- `MultiHeadLossConfig.use_log_sigma=True` by default
-- Prevents σ from being "gamed" and couples uncertainty to prediction error
-
-### Phase 1c: Quantile-Derived SL/TP
-- API derives SL/TP from quantiles at inference (not separate learned heads)
-- LONG: SL from q10/q25 (downside), TP from q75/q90 (upside)
-- SHORT: SL from q75/q90 (upside risk), TP from q10/q25 (downside)
-- Ensures internal consistency with quantile distribution
-
-### Phase 2: Constrained Candle Parameterization
-- `ConstrainedCandleHead` class available (experimental, not wired into models by default)
-- Predicts (Δclose, log_range, skew) and reconstructs valid candles
-- **Guarantees** high >= low for all predictions
-
-### Phase 3: Mandatory Ensemble Weights
-- `model_weights.json` required for production ensemble predictions
-- **LOUD WARNINGS** logged if missing (uses placeholder defaults)
-- `using_default_weights` property tracks if real weights are loaded
-
-### Phase 4b: Drift Monitoring
-- PSI, KL Divergence, ECE tracking available via `DriftMonitor`
-- History saved to `checkpoints/drift_history/drift_history.json`
-
-### Phase 5: Configurable Label Generation (NEW)
-- **Removed hardcoded thresholds** that caused 99% HOLD signals
-- `generate_multihead_targets()` now accepts:
-  - `min_net_edge`: Minimum net edge after costs (default 0.0 for debugging)
-  - `min_confidence`: Minimum mu/sigma ratio (default 0.3 for debugging)
-  - `use_volatility_cost`: Use volatility-based vs fixed cost
-  - `fixed_cost`: Fixed round-trip cost (default 0.09% = 0.0009)
-- **Label Density Debug Report**: Logs BEFORE training:
-  - Total samples, mean |mu|, mean sigma, mean cost
-  - Gate pass rates (edge gate %, confidence gate %, BOTH gates %)
-  - Class distribution (SHORT %, HOLD %, LONG %)
-- **CLI arguments**: `--cost`, `--min-net-edge`, `--min-confidence`, `--volatility-cost`
-- Target class distribution: SHORT 7-15%, HOLD 70-85%, LONG 7-15%
-
-### Data Architecture
-- **Dashboard**: Uses 35K+ database candles + 1 live Binance candle (display only)
-- **GPU Trainer**: Uses 140K+ parquet candles for training (separate data flow)
-- **Training is NOT affected by live candle fetch** - completely separate data paths
-
-### Feature Pipeline Alignment (Critical Fix - Jan 2026)
-- **Root Cause Fixed**: Model trained on `compute_technical_features` (41 features) but inference used MTF fusion (66 features with different names)
-- **Training Feature Names**: `return_50`, `bb_upper`, `ema_5`, `rsi_14`, `atr_14`, etc.
-- **MTF Fusion Names (incompatible)**: `ret_1_15m`, `rolling_vol_20_4h`, `ema_slope_26_1h`, etc.
-- **Solution**: Explicit STF/MTF mode routing with mode auto-detection from saved feature config
-- **Impact**: Resolves 100% missing features issue and silent HOLD fallback during predictions
-
-### STF/MTF Mode System (Added Jan 2026)
-- **Training Mode Detection**: Automatically detected from feature_config.json (41 features = STF, 66 = MTF)
-- **Endpoints**:
-  - `/predict/stf` - Dedicated STF endpoint, always uses compute_technical_features
-  - `/predict/ensemble/candles?mode=stf` - Explicit STF mode (default)
-  - `/predict/ensemble/candles?mode=mtf` - Explicit MTF mode
-  - `/predict/mode` - Check model's detected training mode
-- **Mode Validation**: Logs warning if inference mode doesn't match training mode
-- **Schema Enforcement**: ERRORs on >15% missing features (indicates pipeline mismatch)
-- **STF Feature Count**: 41 features from compute_technical_features
-- **MTF Feature Count**: 66 features from MTFFeatureFusion
-
-### FeatureEngineer Version Tracking (Added Jan 2026)
-- **Purpose**: Prevent silent signal degradation from train/inference feature computation mismatch
-- **Version String**: `FeatureEngineer.VERSION = "v1.0.0-stf-pctreturns"` captures computation details
-- **Saved During Training**: Version stored in `feature_config.json` alongside model checkpoints
-- **Validated At Inference**: Hard error if version mismatch (different version = different features)
-- **Legacy Compatibility**:
-  - Models without version tracking marked as `legacy-unknown`
-  - Legacy models get warning but inference proceeds (lenient)
-  - Mode auto-inferred from timeframes/feature count for legacy configs
-- **FeatureConfig Fields**:
-  - `feature_engineer_version`: Version string at training time
-  - `mode`: "stf" or "mtf" - which pipeline was used
-  - `is_legacy()`: Method to check if model predates version tracking
-- **Validation Logic**:
-  - Legacy models: Warning only, inference allowed
-  - Known version match: OK log, proceed normally
-  - Known version mismatch: Hard error, prevents silent degradation
-
-### Centralized Timeframe Configuration (Added Jan 2026)
-- **Single Source of Truth**: `gpu_trainer/config/timeframe_config.py`
-- **Default Timeframe**: BTCUSDT 15m (production setting)
-- **Horizon Standardization**: 
-  - 15m timeframe: 16 bars = 4 hours (production default)
-  - 5m timeframe: 48 bars = 4 hours
-  - 1h timeframe: 4 bars = 4 hours
-- **Config-Driven Defaults**:
-  - CLI arguments now default to horizon=16 (not 48 or 5)
-  - `RegressionTargetGenerator` defaults to horizon_periods=16
-  - All lookback periods = 2x horizon for volatility calculation
-- **Bundled Checkpoints**: Model + scaler + feature_config saved together with shared version
-
-### GUI Configuration
-- Fixed to BTCUSDT 15m timeframe only (no multi-timeframe/multi-asset options)
