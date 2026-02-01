@@ -613,44 +613,40 @@ class GPUTrainerBridge {
   }
   
   /**
-   * Get professional ensemble prediction from raw multi-timeframe candle data.
+   * Get professional ensemble prediction from raw 15m candle data (STF-only).
    * 
-   * This endpoint computes MTF features (same as training) server-side,
-   * ensuring feature alignment between training and inference.
+   * FORCED STF MODE: This endpoint ONLY uses 15m candles and STF features.
+   * MTF candles (5m/1h/4h) are ignored to prevent train/inference mismatch.
    * 
-   * Features computed: ~66 MTF features (5m/15m/1h/4h)
+   * Features computed: 41 STF features from compute_technical_features
    */
   async predictEnsembleFromCandles(
     candles15m: { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[],
-    candles5m?: { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[],
-    candles1h?: { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[],
-    candles4h?: { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[],
+    _candles5m?: { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[],
+    _candles1h?: { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[],
+    _candles4h?: { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[],
     symbol: string = "BTCUSDT"
   ): Promise<EnsemblePredictionResponse | null> {
     if (!await this.isGPUAvailable()) {
       return null;
     }
     
+    // Validate 15m candles (required, minimum 100)
+    if (!candles15m || candles15m.length < 100) {
+      console.error(`[GPU Bridge] STF mode requires >= 100 15m candles, got ${candles15m?.length || 0}`);
+      return null;
+    }
+    
     try {
-      const requestBody: any = {
-        candles_15m: candles15m,
+      // STF-ONLY: Only send 15m candles, ignore all MTF data
+      const requestBody = {
+        candles_15m: candles15m.slice(-100), // Use exactly last 100 candles
         symbol: symbol
       };
       
-      if (candles5m && candles5m.length >= 50) {
-        requestBody.candles_5m = candles5m;
-      }
-      if (candles1h && candles1h.length >= 50) {
-        requestBody.candles_1h = candles1h;
-      }
-      if (candles4h && candles4h.length >= 20) {
-        requestBody.candles_4h = candles4h;
-      }
-      
-      // Use the configured prediction mode
-      const mode = this.predictionMode;
-      const url = `${this.baseUrl}/predict/ensemble/candles?mode=${mode}`;
-      console.log(`[GPU Bridge] Prediction request using mode: ${mode.toUpperCase()}`);
+      // FORCED STF MODE - no MTF candles, always mode=stf
+      const url = `${this.baseUrl}/predict/ensemble/candles?mode=stf`;
+      console.log(`[GPU Bridge] STF prediction request with ${candles15m.length} 15m candles`);
       
       const response = await fetch(url, {
         method: "POST",
@@ -663,10 +659,10 @@ class GPUTrainerBridge {
         return await response.json() as EnsemblePredictionResponse;
       }
       
-      console.error(`${mode.toUpperCase()} Ensemble prediction failed:`, await response.text());
+      console.error(`[GPU Bridge] STF Ensemble prediction failed:`, await response.text());
       return null;
     } catch (error) {
-      console.error(`${this.predictionMode.toUpperCase()} Ensemble prediction error:`, error);
+      console.error(`[GPU Bridge] STF Ensemble prediction error:`, error);
       return null;
     }
   }

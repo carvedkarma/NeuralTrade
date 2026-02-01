@@ -1683,21 +1683,34 @@ export async function registerRoutes(
       const confidence = ensembleResult.confidence;
       const probs = ensembleResult.ensemble_probs || { LONG: 0.33, SHORT: 0.33, HOLD: 0.34 };
       
-      // Generate predicted candles for visualization (16 bars = 4h horizon for 15m bars)
-      const predictedCandles = [];
+      // Generate predicted candles using multi-step band (upgraded from simple cone)
+      // Uses model's candle head for near-term (1-5), quantile cone for far-term (6-16)
       const intervalMs = 15 * 60 * 1000; // 15 minutes
       
-      for (let i = 1; i <= 16; i++) {
-        const t = i / 16; // Progress through 4h horizon
+      // Use multi-step band generator for more accurate forecasts
+      // Alpha-shaping: expansion=1.5, neutral=1.0, contraction=0.7
+      const volState = ensembleResult?.vol_state || "neutral";
+      
+      const bandPaths = coneSignalGenerator.generateMultiStepBand(
+        currentPrice,
+        sanitizedQuantiles,
+        undefined,  // Candle head predictions not yet in API response
+        volState as "contraction" | "neutral" | "expansion"
+      );
+      
+      // Build predictedCandles array with multi-step band values
+      const predictedCandles = [];
+      for (let i = 0; i < 16; i++) {
+        const q10 = bandPaths.q10[i];
+        const q50 = bandPaths.q50[i];
+        const q90 = bandPaths.q90[i];
         
-        const q10 = currentPrice * (1 + sanitizedQuantiles.q10 * t);
-        const q25 = currentPrice * (1 + sanitizedQuantiles.q25 * t);
-        const q50 = currentPrice * (1 + sanitizedQuantiles.q50 * t);
-        const q75 = currentPrice * (1 + sanitizedQuantiles.q75 * t);
-        const q90 = currentPrice * (1 + sanitizedQuantiles.q90 * t);
+        // Interpolate q25/q75 from q10/q50/q90
+        const q25 = q10 + (q50 - q10) * 0.4;
+        const q75 = q50 + (q90 - q50) * 0.6;
         
         predictedCandles.push({
-          timestamp: lastTimestamp + (i * intervalMs),
+          timestamp: lastTimestamp + ((i + 1) * intervalMs),
           q10,
           q25,
           q50,

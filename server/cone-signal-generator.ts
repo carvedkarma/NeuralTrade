@@ -47,6 +47,13 @@ export interface FlowForecast {
   };
 }
 
+export interface PredictedCandle {
+  step: number;
+  close_delta: number;  // Delta from current close
+  high_delta?: number;
+  low_delta?: number;
+}
+
 export interface ConeInput {
   currentPrice: number;
   quantiles: QuantilePrediction;
@@ -55,6 +62,7 @@ export interface ConeInput {
   sigma?: number;   // Uncertainty (decimal)
   timestamp: number;
   flowForecast?: FlowForecast;  // Optional flow forecast from GPU trainer
+  predictedCandles?: PredictedCandle[];  // Model's candle head output (first 5 bars)
 }
 
 interface EdgeHistoryEntry {
@@ -370,6 +378,69 @@ class ConeSignalGenerator {
         targetTradesPerDay: this.TARGET_TRADES_PER_DAY,
       },
     };
+  }
+  
+  /**
+   * Generate multi-step band forecast (upgraded from simple cone)
+   * 
+   * Uses two data sources blended together:
+   * 1. Near-term (steps 1-5): Use predicted candles from model's candle head
+   * 2. Far-term (steps 6-16): Use quantile cone with alpha shaping based on vol_state
+   * 
+   * Alpha shaping:
+   * - expansion: 1.5 (fast growth)
+   * - neutral: 1.0 (linear)
+   * - contraction: 0.7 (concave, slower growth)
+   */
+  generateMultiStepBand(
+    currentPrice: number,
+    quantiles: QuantilePrediction,
+    predictedCandles?: PredictedCandle[],
+    volState: "contraction" | "neutral" | "expansion" = "neutral"
+  ): { q10: number[]; q50: number[]; q90: number[] } {
+    const horizon = this.HORIZON_BARS;
+    const nearTermSteps = 5;  // First 5 bars from candle head
+    
+    // Alpha shaping based on vol_state
+    const alphaMap = {
+      expansion: 1.5,    // Fast growth curve
+      neutral: 1.0,      // Linear
+      contraction: 0.7,  // Concave, slower growth
+    };
+    const alpha = alphaMap[volState] || 1.0;
+    
+    const q10Path: number[] = [];
+    const q50Path: number[] = [];
+    const q90Path: number[] = [];
+    
+    for (let k = 1; k <= horizon; k++) {
+      const t = k / horizon;  // 0 to 1
+      
+      if (k <= nearTermSteps && predictedCandles && predictedCandles.length >= k) {
+        // Near-term: Use predicted candle head output
+        const candle = predictedCandles[k - 1];
+        const closeDelta = candle.close_delta;
+        
+        // Use high/low deltas if available, otherwise estimate from quantile width
+        const highDelta = candle.high_delta ?? closeDelta + Math.abs(quantiles.q90 - quantiles.q50) * t;
+        const lowDelta = candle.low_delta ?? closeDelta - Math.abs(quantiles.q50 - quantiles.q10) * t;
+        
+        q10Path.push(currentPrice * (1 + lowDelta));
+        q50Path.push(currentPrice * (1 + closeDelta));
+        q90Path.push(currentPrice * (1 + highDelta));
+      } else {
+        // Far-term: Use quantile cone with alpha shaping
+        // path[k] = close * exp((k/h)^α * quantile)
+        const shapedT = Math.pow(t, alpha);
+        
+        // Apply alpha-shaped projection
+        q10Path.push(currentPrice * Math.exp(shapedT * quantiles.q10));
+        q50Path.push(currentPrice * Math.exp(shapedT * quantiles.q50));
+        q90Path.push(currentPrice * Math.exp(shapedT * quantiles.q90));
+      }
+    }
+    
+    return { q10: q10Path, q50: q50Path, q90: q90Path };
   }
 }
 

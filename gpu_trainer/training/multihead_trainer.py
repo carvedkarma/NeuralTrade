@@ -26,10 +26,18 @@ from torch.utils.tensorboard import SummaryWriter
 try:
     from .multihead_loss import MultiHeadLoss, MultiHeadLossConfig
     from ..models.multihead import MultiHeadOutput
+    from ..utils.trade_gating import (
+        TradeGateConfig, compute_trade_gate, apply_cooldown, 
+        log_gate_statistics, GateFailure, DEFAULT_GATE_CONFIG
+    )
 except ImportError:
     # Fallback for direct script execution
     from training.multihead_loss import MultiHeadLoss, MultiHeadLossConfig
     from models.multihead import MultiHeadOutput
+    from utils.trade_gating import (
+        TradeGateConfig, compute_trade_gate, apply_cooldown,
+        log_gate_statistics, GateFailure, DEFAULT_GATE_CONFIG
+    )
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

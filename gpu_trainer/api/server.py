@@ -85,6 +85,8 @@ class ModelManager:
         self.scaler_columns = None  # Column names for the scaler dict
         self.feature_config = None  # Feature configuration
         self.training_mode = "STF"  # Default to STF (15m only) - safer for 15m-trained models
+        self.stf_serving_enabled = True  # Set to False if MTF config detected for STF deployment
+        self.feature_engineer_version = None  # Version string from FeatureEngineer
         self.training_status = {
             "is_training": False,
             "current_epoch": 0,
@@ -2593,6 +2595,15 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
     if mode not in ["stf", "mtf"]:
         raise HTTPException(status_code=400, detail=f"Invalid mode '{mode}'. Use 'stf' or 'mtf'.")
     
+    # ENFORCE STF SERVING: Refuse to serve STF requests if MTF config was loaded
+    if mode == "stf" and not model_manager.stf_serving_enabled:
+        logger.error("STF serving disabled due to MTF config mismatch. Cannot serve STF predictions.")
+        raise HTTPException(
+            status_code=503, 
+            detail="STF serving disabled. Model was trained on MTF but STF mode requested. "
+                   "Retrain model with STF features or use MTF mode."
+        )
+    
     # Check model training mode matches request mode
     if model_manager.training_mode == "STF" and mode == "mtf":
         logger.warning(f"Mode mismatch: model trained on STF but request mode is MTF. Using STF.")
@@ -2969,6 +2980,37 @@ async def get_prediction_mode():
     }
 
 
+@app.get("/debug/feature-config")
+async def get_debug_feature_config():
+    """
+    Debug endpoint for feature configuration inspection.
+    
+    Returns detailed feature config info to diagnose train/inference mismatch issues:
+    - training_mode: STF or MTF
+    - input_dim: Expected feature count from model
+    - expected_features[0..5]: First 5 feature names for quick verification
+    - feature_engineer_version: Version string from FeatureEngineer at training time
+    - stf_serving_enabled: Whether STF endpoints will work
+    """
+    return {
+        "training_mode": model_manager.training_mode,
+        "input_dim": model_manager.input_dim,
+        "expected_features_first_5": model_manager.expected_features[:5] if model_manager.expected_features else [],
+        "expected_features_count": len(model_manager.expected_features) if model_manager.expected_features else 0,
+        "feature_engineer_version": model_manager.feature_engineer_version,
+        "stf_serving_enabled": model_manager.stf_serving_enabled,
+        "stf_feature_count": ModelManager.STF_FEATURE_COUNT,
+        "mtf_feature_count": ModelManager.MTF_FEATURE_COUNT,
+        "feature_config_raw": {
+            k: v for k, v in (model_manager.feature_config or {}).items() 
+            if k not in ["feature_columns"]  # Exclude large arrays
+        } if model_manager.feature_config else None,
+        "scaler_loaded": model_manager.scaler is not None,
+        "models_loaded": list(model_manager.models.keys())[:5],
+        "device": model_manager.device
+    }
+
+
 @app.get("/training/status", response_model=TrainingStatusResponse)
 async def get_training_status():
     return TrainingStatusResponse(**model_manager.training_status)
@@ -3089,10 +3131,43 @@ async def run_training(request: TrainingRequest):
 
 @app.on_event("startup")
 async def startup_event():
-    """Load models at server startup."""
+    """Load models at server startup with STF validation."""
     logger.info("Loading models at startup...")
     model_manager.load_best_models()
-    logger.info(f"Startup complete. Device: {model_manager.device}, Models: {len(model_manager.models)}")
+    
+    # STF DEPLOYMENT VALIDATION: Refuse to serve if MTF config loaded
+    # This prevents "silent wrong config from old runs" issue
+    stf_validation_ok = True
+    validation_errors = []
+    
+    if model_manager.training_mode == "MTF":
+        validation_errors.append(f"CRITICAL: Model trained in MTF mode but STF deployment expected")
+        stf_validation_ok = False
+    
+    if model_manager.input_dim and model_manager.input_dim != ModelManager.STF_FEATURE_COUNT:
+        if model_manager.input_dim == ModelManager.MTF_FEATURE_COUNT:
+            validation_errors.append(f"CRITICAL: input_dim={model_manager.input_dim} (MTF) but STF deployment requires {ModelManager.STF_FEATURE_COUNT}")
+            stf_validation_ok = False
+        elif model_manager.input_dim > ModelManager.STF_FEATURE_COUNT:
+            validation_errors.append(f"WARNING: input_dim={model_manager.input_dim} > STF expected {ModelManager.STF_FEATURE_COUNT}")
+    
+    if not stf_validation_ok:
+        logger.critical("=" * 60)
+        logger.critical("STF DEPLOYMENT VALIDATION FAILED")
+        logger.critical("=" * 60)
+        for err in validation_errors:
+            logger.critical(err)
+        logger.critical("")
+        logger.critical("FIX: Retrain model with 15m STF features, or fix feature_config.json")
+        logger.critical("STF endpoints will return errors until this is fixed.")
+        logger.critical("=" * 60)
+        # Mark as not serving STF
+        model_manager.stf_serving_enabled = False
+    else:
+        model_manager.stf_serving_enabled = True
+        logger.info(f"STF validation passed: mode={model_manager.training_mode}, input_dim={model_manager.input_dim}")
+    
+    logger.info(f"Startup complete. Device: {model_manager.device}, Models: {len(model_manager.models)}, STF Serving: {model_manager.stf_serving_enabled}")
 
 @app.post("/models/load")
 async def load_model_endpoint(model_path: str):
