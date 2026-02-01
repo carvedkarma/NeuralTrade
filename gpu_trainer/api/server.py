@@ -3862,7 +3862,13 @@ async def run_training(request: TrainingRequest):
                     
                     # Filter to trades (non-HOLD predictions)
                     trade_mask = predictions != 1
-                    if trade_mask.sum() > 10:
+                    n_trades_raw = trade_mask.sum()
+                    
+                    # ALWAYS save weights, even with 0 trades (user requirement)
+                    # Warn if < 30 trades (HOLD-heavy model) but still save
+                    MIN_TRADES_WARNING = 30
+                    
+                    if n_trades_raw > 0:
                         trade_returns = oos_returns[trade_mask]
                         trade_directions = pred_directions[trade_mask]
                         
@@ -3891,29 +3897,39 @@ async def run_training(request: TrainingRequest):
                         max_drawdown = drawdown.max() if len(drawdown) > 0 else 0
                         
                         expectancy = mean_pnl
-                        
-                        # Create walk-forward summary
-                        wf_summary = {
-                            "total_trades": int(n_trades),
-                            "avg_trades_per_fold": int(n_trades),  # Single OOS fold
-                            "overall_win_rate": float(win_rate),
-                            "overall_expectancy": float(expectancy),
-                            "overall_profit_factor": float(min(3.0, profit_factor)),  # Cap at 3
-                            "overall_sharpe": float(min(3.0, sharpe)),  # Cap at 3
-                            "worst_drawdown": float(max_drawdown),
-                            "n_folds": 1
-                        }
-                        
-                        # Save to model_weights.json
-                        save_walk_forward_weights(model_type, wf_summary, str(checkpoint_dir))
-                        
-                        logger.info(f"[WALK-FORWARD] ✓ Saved weights for {model_type}:")
-                        logger.info(f"  Trades: {n_trades}, Win Rate: {win_rate:.1%}")
-                        logger.info(f"  Expectancy: {expectancy:.4f}, Sharpe: {sharpe:.2f}")
-                        logger.info(f"  Profit Factor: {profit_factor:.2f}, Max DD: {max_drawdown:.4f}")
                     else:
-                        logger.warning(f"[WALK-FORWARD] ⚠️ Only {trade_mask.sum()} trades in OOS - not enough for reliable metrics")
+                        # Zero trades - use defaults
+                        n_trades = 0
+                        win_rate = 0.5
+                        expectancy = 0.0
+                        profit_factor = 1.0
+                        sharpe = 0.0
+                        max_drawdown = 0.0
+                    
+                    # Create walk-forward summary (ALWAYS)
+                    wf_summary = {
+                        "total_trades": int(n_trades),
+                        "avg_trades_per_fold": int(n_trades),  # Single OOS fold
+                        "overall_win_rate": float(win_rate),
+                        "overall_expectancy": float(expectancy),
+                        "overall_profit_factor": float(min(3.0, profit_factor)),  # Cap at 3
+                        "overall_sharpe": float(min(3.0, sharpe)),  # Cap at 3
+                        "worst_drawdown": float(max_drawdown),
+                        "n_folds": 1
+                    }
+                    
+                    # ALWAYS save to model_weights.json (regardless of trade count)
+                    save_walk_forward_weights(model_type, wf_summary, str(checkpoint_dir))
+                    
+                    if n_trades < MIN_TRADES_WARNING:
+                        logger.warning(f"[WALK-FORWARD] ⚠️ Only {n_trades} trades in OOS (< {MIN_TRADES_WARNING})")
                         logger.warning(f"  Model may be too conservative (HOLD-heavy)")
+                        logger.warning(f"  Weights saved anyway - consider using --regime-labels or --pure-directional")
+                    
+                    logger.info(f"[WALK-FORWARD] ✓ Saved weights for {model_type}:")
+                    logger.info(f"  Trades: {n_trades}, Win Rate: {win_rate:.1%}")
+                    logger.info(f"  Expectancy: {expectancy:.4f}, Sharpe: {sharpe:.2f}")
+                    logger.info(f"  Profit Factor: {profit_factor:.2f}, Max DD: {max_drawdown:.4f}")
                         
                 except Exception as wf_err:
                     logger.error(f"[WALK-FORWARD] Failed to compute walk-forward metrics: {wf_err}")
