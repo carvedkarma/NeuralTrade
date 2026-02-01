@@ -112,11 +112,14 @@ class RegressionTargetGenerator:
         
         return volatility_annualized
     
-    def compute_forward_volatility(self, prices: pd.Series) -> pd.Series:
+    def compute_forward_volatility(self, prices: pd.Series, bars_per_day: int = 96) -> pd.Series:
         """
         Compute forward realized volatility (uncertainty of the prediction).
         
         This is the actual volatility that will occur during the holding period.
+        
+        Args:
+            bars_per_day: Number of bars per day for annualization (96 for 15m, 288 for 5m)
         """
         log_returns = np.log(prices / prices.shift(1))
         
@@ -126,7 +129,8 @@ class RegressionTargetGenerator:
         
         forward_vol = forward_vol.shift(self.horizon_periods)
         
-        annualization = np.sqrt(288)
+        # FIXED: Use correct annualization for 15m bars (was hardcoded to 288 for 5m)
+        annualization = np.sqrt(bars_per_day)  # 96 for 15m, 288 for 5m
         
         return forward_vol * annualization
     
