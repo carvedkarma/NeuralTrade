@@ -189,6 +189,9 @@ class ModelManager:
         
         The scaler is a dict of per-column sklearn scalers, NOT a single scaler.
         This matches how FeatureEngineer.save_scalers/load_scalers works.
+        
+        CRITICAL: Also enforces feature ordering via FeatureValidator.enforce_schema
+        to prevent silent prediction errors from column reordering.
         """
         if self.scaler is None:
             logger.warning("No scaler loaded - returning raw features")
@@ -207,7 +210,39 @@ class ModelManager:
                     except Exception as e:
                         logger.warning(f"Failed to scale column {col}: {e}")
         
-        return transformed.values.astype(np.float32)
+        raw_features = transformed.values.astype(np.float32)
+        
+        # === ENFORCE FEATURE ORDERING via FeatureValidator ===
+        # This ensures features are in the correct order expected by the model
+        if hasattr(self, 'feature_config') and self.feature_config is not None:
+            try:
+                from training.feature_registry import FeatureValidator
+                validator = FeatureValidator(self.feature_config)
+                
+                # Get column names from transformed dataframe
+                feature_names = list(transformed.columns)
+                
+                # Enforce schema - reorders, fills missing, drops extras
+                enforced_features, stats = validator.enforce_schema(
+                    feature_names=feature_names,
+                    features=raw_features,
+                    fill_value=0.0,
+                    max_missing_pct=0.15
+                )
+                
+                if stats.get('missing_count', 0) > 0:
+                    logger.warning(f"[SCHEMA] Filled {stats['missing_count']} missing features")
+                if stats.get('extra_count', 0) > 0:
+                    logger.info(f"[SCHEMA] Dropped {stats['extra_count']} extra features")
+                
+                logger.info(f"[SCHEMA] Enforced: {stats.get('incoming_features', 0)} -> {stats.get('expected_features', 0)} features")
+                return enforced_features
+                
+            except Exception as e:
+                logger.warning(f"[SCHEMA] Could not enforce schema, using raw order: {e}")
+                return raw_features
+        
+        return raw_features
         
     def _create_model_instance(self, model_type: str, config: dict):
         """Create model instance with correct constructor args for each model type.
@@ -562,16 +597,23 @@ class ModelManager:
                     
             # === CNN MODELS ===
             # ResNetPrice: input_conv.0.weight [channels[0], input_dim, kernel_size]
-            # ResNetPrice uses channels: List[int] = [64, 128, 256, 512]
+            # MultiHeadCNN: input_conv.weight [hidden_channels, input_dim, kernel_size]
             elif "resnet" in model_type_lower or "cnn" in model_type_lower or "inception" in model_type_lower:
-                shape = get_param_shape("input_conv.0.weight")
+                # Try MultiHeadCNN format first (more common after migration)
+                shape = get_param_shape("input_conv.weight")
                 if shape:
                     inferred["input_dim"] = shape[1]  # Conv1d: [out_channels, in_channels, kernel]
-                    first_channels = shape[0]
-                    # For ResNetPrice, infer the full channels list from the residual blocks
-                    # Default pattern is [64, 128, 256, 512] but could be different
-                    # For now, use the first channel and assume standard progression
-                    inferred["channels"] = [first_channels, first_channels*2, first_channels*4, first_channels*8]
+                    inferred["hidden_channels"] = shape[0]
+                    logger.info(f"CNN: inferred input_dim={shape[1]} from input_conv.weight")
+                else:
+                    # Fallback to ResNetPrice format
+                    shape = get_param_shape("input_conv.0.weight")
+                    if shape:
+                        inferred["input_dim"] = shape[1]  # Conv1d: [out_channels, in_channels, kernel]
+                        first_channels = shape[0]
+                        # For ResNetPrice, infer the full channels list from the residual blocks
+                        inferred["channels"] = [first_channels, first_channels*2, first_channels*4, first_channels*8]
+                        logger.info(f"CNN: inferred input_dim={shape[1]} from input_conv.0.weight")
                     
             # WaveNet: input_conv.weight [residual_channels, input_dim, 1]
             elif "wavenet" in model_type_lower:
@@ -672,8 +714,12 @@ class ModelManager:
             
         return inferred
     
-    def _instantiate_model(self, checkpoint: dict, model_name: str):
-        """Instantiate a model from checkpoint config and state_dict."""
+    def _instantiate_model(self, checkpoint: dict, model_name: str, checkpoint_path: str = None):
+        """Instantiate a model from checkpoint config and state_dict.
+        
+        CRITICAL: Derives input_dim from checkpoint metadata to prevent schema drift.
+        Priority: state_dict weights > .features.json > checkpoint config > default
+        """
         raw_config = checkpoint.get("config", {})
         # Convert Config object to dict if needed
         config = self._config_to_dict(raw_config)
@@ -692,6 +738,19 @@ class ModelManager:
         if not state_dict:
             logger.warning(f"No state_dict in checkpoint for {model_name}")
             return None
+        
+        # === CRITICAL: Load per-checkpoint feature config (.features.json) ===
+        feature_config = None
+        if checkpoint_path:
+            try:
+                from training.feature_registry import load_feature_config_for_checkpoint
+                feature_config = load_feature_config_for_checkpoint(checkpoint_path)
+                if feature_config:
+                    logger.info(f"[SCHEMA] Loaded feature config for {model_name}: input_dim={feature_config.input_dim}, mode={feature_config.mode}")
+                    config["input_dim"] = feature_config.input_dim
+                    config["sequence_length"] = feature_config.sequence_length
+            except Exception as e:
+                logger.warning(f"[SCHEMA] Failed to load feature config for {model_name}: {e}")
         
         # Detect multi-head model from state_dict keys (reliable detection method)
         state_keys = list(state_dict.keys())
@@ -729,6 +788,23 @@ class ModelManager:
             d_model = config.get("d_model", 256)
             sequence_length = config.get("sequence_length", 100)
             
+            # === CRITICAL ASSERTION: Verify input_dim matches STF expectation ===
+            # If inferred from state_dict, the input_dim is authoritative
+            # Refuse to serve if computed features would mismatch
+            inferred_input_dim = inferred_dims.get("input_dim")
+            if inferred_input_dim is not None:
+                if inferred_input_dim != input_dim:
+                    logger.error(f"[SCHEMA MISMATCH] {model_name}: inferred input_dim={inferred_input_dim} != config input_dim={input_dim}")
+                    # Use the inferred dimension (from actual weights)
+                    input_dim = inferred_input_dim
+                    config["input_dim"] = input_dim
+                
+                # Check if this is STF (41 features) vs MTF (66+ features)
+                if inferred_input_dim <= 45:  # STF: typically 41 features
+                    logger.info(f"[SCHEMA] {model_name}: STF checkpoint detected (input_dim={inferred_input_dim})")
+                elif inferred_input_dim > 50:  # MTF: 66+ features
+                    logger.warning(f"[SCHEMA] {model_name}: MTF checkpoint detected (input_dim={inferred_input_dim}) - may not work with STF-only serving")
+            
             logger.info(f"Creating model {model_type} with: input_dim={input_dim}, hidden_dim={hidden_dim}, d_model={d_model}")
             
             # Create model with proper constructor
@@ -738,12 +814,23 @@ class ModelManager:
                 logger.warning(f"Could not create model instance for {model_name}")
                 return None
             
-            # Load state dict with strict=False to handle minor mismatches
+            # Load state dict STRICT - refuse to serve on size mismatch
             try:
-                model.load_state_dict(state_dict)
+                model.load_state_dict(state_dict, strict=True)
+                logger.info(f"[SCHEMA] {model_name}: Strict state_dict load SUCCESS - no size mismatches")
             except RuntimeError as e:
-                logger.warning(f"Strict load failed for {model_name}, trying non-strict: {e}")
-                model.load_state_dict(state_dict, strict=False)
+                error_msg = str(e)
+                if "size mismatch" in error_msg.lower():
+                    # This is a critical schema drift error - DO NOT load with strict=False
+                    logger.error(f"[SCHEMA FATAL] {model_name}: Size mismatch - refusing to load model!")
+                    logger.error(f"[SCHEMA FATAL] Error: {error_msg}")
+                    logger.error(f"[SCHEMA FATAL] This indicates training/inference feature schema drift.")
+                    logger.error(f"[SCHEMA FATAL] Checkpoint input_dim: inferred={inferred_input_dim}, expected for STF=41")
+                    return None  # DO NOT serve this model
+                else:
+                    # Non-size-mismatch error - try non-strict as fallback
+                    logger.warning(f"Strict load failed for {model_name} (non-size error), trying non-strict: {e}")
+                    model.load_state_dict(state_dict, strict=False)
             
             model.to(self.device)
             model.eval()
@@ -949,7 +1036,7 @@ class ModelManager:
                 
                 # Try to instantiate model if state_dict present
                 if "model_state_dict" in checkpoint:
-                    model_instance = self._instantiate_model(checkpoint, model_name)
+                    model_instance = self._instantiate_model(checkpoint, model_name, checkpoint_path=str(ckpt_path))
                     if model_instance is not None:
                         self.model_instances[model_name] = model_instance
                         self.models[model_name]["loaded"] = True
@@ -1601,6 +1688,18 @@ async def predict(request: PredictionRequest):
                 detail=f"Feature dimension mismatch: Expected {model_manager.input_dim}, got {n_features}. Use /predict/candles or /predict/ensemble/candles for proper feature alignment."
             )
         
+        # === STF/MTF VALIDATION ===
+        # Warn if client is likely using wrong feature schema
+        if model_manager.training_mode == "STF" and n_features > 50:
+            logger.error(f"[SCHEMA FATAL] /predict: Model trained with STF ({model_manager.input_dim}) but client sent {n_features} features (likely MTF)")
+            raise HTTPException(
+                status_code=422,
+                detail=f"Schema mismatch: Model expects STF ({model_manager.input_dim} features) but received {n_features}. "
+                       f"Use /predict/candles or /predict/ensemble/candles for proper feature computation."
+            )
+        
+        logger.info(f"[/predict] Received {n_features} features, model expects {model_manager.input_dim} ({model_manager.training_mode} mode)")
+        
         result = model_manager.predict(features)
         
         # CORRECT mapping: index 0=SHORT, 1=HOLD, 2=LONG
@@ -1700,6 +1799,20 @@ async def predict_from_candles(request: CandlePredictionRequest):
                     status_code=400,
                     detail="No valid features after computation (all NaN)"
                 )
+            
+            # === STF-ONLY ENFORCEMENT ===
+            # This endpoint uses compute_technical_features() which produces STF (41 features)
+            computed_feature_count = len([c for c in features_df.columns if c not in ["datetime", "timestamp", "close", "open", "high", "low", "volume"]])
+            
+            if model_manager.training_mode == "MTF":
+                logger.error(f"[SCHEMA FATAL] /predict/candles uses STF pipeline but model expects MTF ({model_manager.input_dim} features)")
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Model trained with MTF ({model_manager.input_dim} features) but /predict/candles only supports STF. "
+                           f"Use /predict/ensemble/candles?mode=mtf instead."
+                )
+            
+            logger.info(f"[STF-ONLY] /predict/candles: computed {computed_feature_count} features for STF model")
             
             # Scale features using the per-column scaler dict (via transform_features helper)
             features_np = model_manager.transform_features(features_df)
@@ -1835,6 +1948,20 @@ async def predict_multihead_from_candles(request: CandlePredictionRequest):
             # These are metadata columns that shouldn't be included in model input
             ohlcv_cols = ["datetime", "timestamp", "close", "open", "high", "low", "volume", "symbol"]
             feature_cols = [c for c in features_df.columns if c not in ohlcv_cols]
+            
+            # === STF-ONLY ENFORCEMENT ===
+            # This endpoint uses compute_technical_features() which produces STF (41 features)
+            computed_feature_count = len(feature_cols)
+            
+            if model_manager.training_mode == "MTF":
+                logger.error(f"[SCHEMA FATAL] /predict/multihead/candles uses STF pipeline but model expects MTF ({model_manager.input_dim} features)")
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Model trained with MTF ({model_manager.input_dim} features) but this endpoint only supports STF. "
+                           f"Use /predict/ensemble/candles?mode=mtf instead."
+                )
+            
+            logger.info(f"[STF-ONLY] /predict/multihead/candles: computed {computed_feature_count} features for STF model")
             
             # Handle NaNs with forward-fill then zero-fill (FIX #2)
             if len(feature_cols) > 0:
@@ -3965,7 +4092,7 @@ async def load_model_endpoint(model_path: str):
         
         # Instantiate model
         if "model_state_dict" in checkpoint:
-            model_instance = model_manager._instantiate_model(checkpoint, model_name)
+            model_instance = model_manager._instantiate_model(checkpoint, model_name, checkpoint_path=str(path))
             if model_instance is not None:
                 model_manager.model_instances[model_name] = model_instance
                 model_manager.models[model_name]["loaded"] = True

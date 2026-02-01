@@ -73,6 +73,14 @@ Preferred communication style: Simple, everyday language.
 - **Feature Version Locking**: Ensures feature consistency between training and inference.
 - **Prediction Drift Monitoring**: Utilizes PSI, KL Divergence, and ECE to detect and report feature distribution shifts and prediction calibration changes.
 
+#### Feature Schema Enforcement (Critical for Model Accuracy)
+- **Dimension Inference from Checkpoints**: Model input_dim is inferred from state_dict weights (`input_conv.weight` for CNN, `input_layer.weight` for others).
+- **Per-Checkpoint Feature Config**: `.features.json` files alongside checkpoints store feature_columns and input_dim; loaded with strict priority.
+- **Strict State Dict Loading**: Models refuse to load if weight sizes don't match configured input_dim, preventing silent schema drift.
+- **FeatureValidator.enforce_schema**: Reorders features to match training config order, fills missing features with 0.0, drops extra features.
+- **STF-Only Mode Enforcement**: Prediction endpoints validate that STF models (41 features) don't receive MTF payloads (66+ features).
+- **15% Missing Threshold**: HTTP 422 returned if >15% of expected features are missing, preventing garbage predictions.
+
 #### Professional Ensemble Predictor
 - **Ensemble Voting**: Combines predictions from Transformer, TFT, LSTM, and CNN models with confidence-based voting.
 - **Regime & Risk Gating**: Incorporates VAE for market regime detection and GNN for risk regime detection to adjust thresholds and position sizing.
