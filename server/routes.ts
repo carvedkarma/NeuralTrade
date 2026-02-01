@@ -8,6 +8,7 @@ import { and, eq, gte, lte, asc, desc } from "drizzle-orm";
 import { z } from "zod";
 import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes, clearNNData, cancelNNDownload, getResumableStatus, resumeNNDataDownload, getDownloadETA, streamNNDataBulk } from "./historical-data";
 import zlib from "zlib";
+import * as crypto from "crypto";
 import { getMultiTimeframeKlines } from "./binance";
 import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
@@ -1556,8 +1557,16 @@ export async function registerRoutes(
     }
   });
 
+  // Track last closed candle timestamp for cache invalidation
+  let lastClosedCandleTs: number | null = null;
+  let lastInputHash: string | null = null;
+  
   // Neural Network Quantile Prediction endpoint - returns Entry/SL/TP derived from quantiles
   app.get("/api/gpu/nn-prediction", async (req, res) => {
+    const startTime = Date.now();
+    const predictionId = crypto.randomUUID();
+    const serverTs = new Date().toISOString();
+    
     try {
       // Import cone signal generator for multi-step band generation
       const { coneSignalGenerator } = await import("./cone-signal-generator");
@@ -1569,7 +1578,8 @@ export async function registerRoutes(
           available: false, 
           prediction: null,
           predictedCandles: [],
-          error: "GPU trainer not connected"
+          error: "GPU trainer not connected",
+          trace: { prediction_id: predictionId, server_ts: serverTs }
         });
       }
       
@@ -1619,16 +1629,49 @@ export async function registerRoutes(
           available: false, 
           prediction: null,
           predictedCandles: [],
-          error: "Not enough candle data available"
+          error: "Not enough candle data available",
+          trace: { prediction_id: predictionId, server_ts: serverTs }
         });
       }
       
+      // Determine last CLOSED 15m candle (exclude current incomplete candle)
+      // A candle is closed if its timestamp + 15min <= current time
+      const now = Date.now();
+      const candleInterval = 15 * 60 * 1000;
+      const closedCandles = mtfCandles.m15.filter(c => c.timestamp + candleInterval <= now);
+      
+      if (closedCandles.length < 50) {
+        return res.json({ 
+          available: false, 
+          prediction: null,
+          predictedCandles: [],
+          error: "Not enough closed candles available",
+          trace: { prediction_id: predictionId, server_ts: serverTs }
+        });
+      }
+      
+      // Use only closed candles for prediction
+      const inputCandles = closedCandles.slice(-200);
+      const currentClosedTs = inputCandles[inputCandles.length - 1].timestamp;
+      
+      // Compute input hash for cache detection
+      const inputData = inputCandles.map(c => `${c.timestamp},${c.open},${c.high},${c.low},${c.close},${c.volume}`).join("|");
+      const inputHash = crypto.createHash("sha1").update(inputData).digest("hex").substring(0, 12);
+      
+      // Check if this is the same closed candle as last request
+      const cacheHit = lastClosedCandleTs === currentClosedTs && lastInputHash === inputHash;
+      const candleUnchanged = lastClosedCandleTs === currentClosedTs;
+      
+      // Update tracking
+      lastClosedCandleTs = currentClosedTs;
+      lastInputHash = inputHash;
+      
       // Call ensemble predictor via GPU bridge
       const ensembleResult = await gpuBridge.predictEnsembleFromCandles(
-        mtfCandles.m15,
-        mtfCandles.m5,
-        mtfCandles.h1,
-        mtfCandles.h4,
+        inputCandles,
+        mtfCandles.m5.filter(c => c.timestamp + 5 * 60 * 1000 <= now).slice(-300),
+        mtfCandles.h1.filter(c => c.timestamp + 60 * 60 * 1000 <= now).slice(-100),
+        mtfCandles.h4.filter(c => c.timestamp + 4 * 60 * 60 * 1000 <= now).slice(-50),
         "BTCUSDT"
       );
       
@@ -1637,13 +1680,14 @@ export async function registerRoutes(
           available: false, 
           prediction: null,
           predictedCandles: [],
-          error: "Neural network prediction failed - no quantiles available"
+          error: "Neural network prediction failed - no quantiles available",
+          trace: { prediction_id: predictionId, server_ts: serverTs, input_hash: inputHash }
         });
       }
       
-      // Get current price from most recent candle
-      const currentPrice = mtfCandles.m15[mtfCandles.m15.length - 1].close;
-      const lastTimestamp = mtfCandles.m15[mtfCandles.m15.length - 1].timestamp;
+      // Get current price from most recent closed candle
+      const currentPrice = inputCandles[inputCandles.length - 1].close;
+      const lastTimestamp = inputCandles[inputCandles.length - 1].timestamp;
       
       // Extract direction and confidence from ensemble
       const direction = ensembleResult.action as "LONG" | "SHORT" | "HOLD";
@@ -1723,6 +1767,12 @@ export async function registerRoutes(
         });
       }
       
+      // Compute output hash for tracking
+      const outputData = `${sanitizedQuantiles.q10},${sanitizedQuantiles.q50},${sanitizedQuantiles.q90},${direction},${volState}`;
+      const outputHash = crypto.createHash("sha1").update(outputData).digest("hex").substring(0, 12);
+      
+      const modelRunMs = Date.now() - startTime;
+      
       const prediction = {
         action: direction,
         confidence,
@@ -1742,16 +1792,32 @@ export async function registerRoutes(
         derived_high_price: currentPrice * (1 + sanitizedQuantiles.q90),
       };
       
-      console.log(`[GPU NN] Prediction: ${direction} @ ${confidence.toFixed(2)} conf, q50=${(sanitizedQuantiles.q50 * 100).toFixed(2)}%`);
+      // Trace fields for debugging refresh/cache issues
+      const trace = {
+        prediction_id: predictionId,
+        server_ts: serverTs,
+        last_closed_candle_ts: new Date(currentClosedTs).toISOString(),
+        window_start_ts: new Date(inputCandles[0].timestamp).toISOString(),
+        window_end_ts: new Date(currentClosedTs).toISOString(),
+        input_hash: inputHash,
+        output_hash: outputHash,
+        cache_hit: cacheHit,
+        candle_unchanged: candleUnchanged,
+        model_run_ms: modelRunMs,
+        message: candleUnchanged ? "No new closed candle yet; prediction unchanged." : "New candle processed."
+      };
       
-      res.json({ available: true, prediction, predictedCandles });
+      console.log(`[GPU NN] Prediction: ${direction} @ ${confidence.toFixed(2)} conf, q50=${(sanitizedQuantiles.q50 * 100).toFixed(2)}% | hash=${inputHash} cache=${cacheHit}`);
+      
+      res.json({ available: true, prediction, predictedCandles, trace });
     } catch (error) {
       console.error("[GPU NN] Prediction error:", error);
       res.json({ 
         available: false, 
         prediction: null,
         predictedCandles: [],
-        error: error instanceof Error ? error.message : "Unknown error"
+        error: error instanceof Error ? error.message : "Unknown error",
+        trace: { prediction_id: predictionId, server_ts: serverTs }
       });
     }
   });

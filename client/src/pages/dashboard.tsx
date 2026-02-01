@@ -50,7 +50,7 @@ import {
 import { StrategyLearnerTab } from "@/components/strategy-learner-card";
 import { DataManagementCard } from "@/components/data-management-card";
 import { NeuralNetworkDataCard } from "@/components/nn-data-card";
-import { NeuralNetworkPredictionCard, TrainingModeBadge, type QuantilePrediction } from "@/components/neural-network-prediction";
+import { NeuralNetworkPredictionCard, TrainingModeBadge, type QuantilePrediction, type PredictionTrace } from "@/components/neural-network-prediction";
 import { QuantileFanChart, DerivedTradeLevels } from "@/components/quantile-fan-chart";
 import { PremiumCandlestickChart } from "@/components/premium-candlestick-chart";
 import { ConeSignalCard } from "@/components/cone-signal-card";
@@ -231,9 +231,18 @@ export default function Dashboard() {
       q90: number;
       direction: "up" | "down";
     }>;
+    trace?: PredictionTrace;
     error?: string;
   }>({
     queryKey: ["/api/gpu/nn-prediction"],
+    queryFn: async () => {
+      // Use cache-busting to ensure fresh request
+      const res = await fetch(`/api/gpu/nn-prediction?_t=${Date.now()}`, { 
+        cache: "no-store" 
+      });
+      if (!res.ok) throw new Error("Failed to fetch NN prediction");
+      return res.json();
+    },
     refetchInterval: 30000,
     enabled: gpuStatus?.connected === true,
   });
@@ -598,6 +607,7 @@ export default function Dashboard() {
                 <div className="lg:col-span-6 space-y-4">
                   <NeuralNetworkPredictionCard 
                     prediction={nnPrediction?.prediction || null}
+                    trace={nnPrediction?.trace || null}
                     isLoading={nnPredictionLoading}
                     onRefresh={() => refetchNnPrediction()}
                   />

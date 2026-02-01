@@ -33,8 +33,23 @@ export interface QuantilePrediction {
   derived_high_price?: number; // Backend-computed high price for verification
 }
 
+export interface PredictionTrace {
+  prediction_id: string;
+  server_ts: string;
+  last_closed_candle_ts?: string;
+  window_start_ts?: string;
+  window_end_ts?: string;
+  input_hash?: string;
+  output_hash?: string;
+  cache_hit?: boolean;
+  candle_unchanged?: boolean;
+  model_run_ms?: number;
+  message?: string;
+}
+
 interface NeuralNetworkPredictionCardProps {
   prediction: QuantilePrediction | null;
+  trace?: PredictionTrace | null;
   isLoading?: boolean;
   onRefresh?: () => void;
   showDebug?: boolean;
@@ -42,11 +57,18 @@ interface NeuralNetworkPredictionCardProps {
 
 export function NeuralNetworkPredictionCard({ 
   prediction, 
+  trace,
   isLoading = false,
   onRefresh,
   showDebug: initialShowDebug = false
 }: NeuralNetworkPredictionCardProps) {
   const [showDebug, setShowDebug] = useState(initialShowDebug);
+  
+  // Handle refresh with console logging
+  const handleRefresh = () => {
+    console.log(`[NN REFRESH] clicked @ ${new Date().toISOString()} (${Date.now()})`);
+    onRefresh?.();
+  };
 
   if (isLoading) {
     return (
@@ -306,11 +328,42 @@ export function NeuralNetworkPredictionCard({
           </div>
         )}
 
+        {/* Trace Info Line - always show if trace available */}
+        {trace && (
+          <div className="bg-muted/30 rounded-lg px-3 py-2 text-[10px] font-mono text-muted-foreground space-y-1" data-testid="trace-info">
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
+              <span>
+                <span className="text-muted-foreground/70">server:</span>{" "}
+                {trace.server_ts ? new Date(trace.server_ts).toLocaleTimeString() : "N/A"}
+              </span>
+              <span>
+                <span className="text-muted-foreground/70">candle:</span>{" "}
+                {trace.last_closed_candle_ts ? new Date(trace.last_closed_candle_ts).toLocaleTimeString() : "N/A"}
+              </span>
+              <span>
+                <span className="text-muted-foreground/70">hash:</span>{" "}
+                <span className="text-cyan-400">{trace.input_hash || "N/A"}</span>
+              </span>
+              <span>
+                <span className="text-muted-foreground/70">cache:</span>{" "}
+                <span className={trace.cache_hit ? "text-amber-400" : "text-emerald-400"}>
+                  {trace.cache_hit ? "hit" : "miss"}
+                </span>
+              </span>
+            </div>
+            {trace.candle_unchanged && (
+              <div className="text-amber-400/80">
+                {trace.message || "No new closed candle yet; prediction unchanged."}
+              </div>
+            )}
+          </div>
+        )}
+
         {onRefresh && (
           <Button 
             variant="outline" 
             size="sm" 
-            onClick={onRefresh} 
+            onClick={handleRefresh} 
             className="w-full"
             data-testid="button-refresh-nn-prediction"
           >
