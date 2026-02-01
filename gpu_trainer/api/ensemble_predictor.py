@@ -130,9 +130,20 @@ class EnsemblePredictor:
     REGIME_MODELS = ['vae', 'market_vae', 'conditional_vae', 'cvae']
     RISK_MODELS = ['gnn', 'cross_asset', 'temporal_gnn', 'crossasset']
     
-    def __init__(self, model_instances: Dict[str, torch.nn.Module], device: str = "cuda"):
+    def __init__(self, model_instances: Dict[str, torch.nn.Module], device: str = "cuda", 
+                 strict_weights: bool = True):
+        """
+        Initialize EnsemblePredictor.
+        
+        Args:
+            model_instances: Dict of model name -> model instance
+            device: Device to run on (cuda/cpu)
+            strict_weights: If True, fails hard if model_weights.json is missing.
+                           Set to False only for development/testing.
+        """
         self.device = device
         self.model_instances = model_instances
+        self.strict_weights = strict_weights
         
         # Classify models by role
         self.direction_models = {}
@@ -148,7 +159,7 @@ class EnsemblePredictor:
             else:
                 self.direction_models[name] = model
         
-        # Default model weights (will be updated from walk-forward metrics)
+        # Load model weights (will fail hard in strict mode if missing)
         self.model_weights = self._load_or_create_weights()
         
         # Base thresholds
@@ -189,23 +200,45 @@ class EnsemblePredictor:
                 logger.error(f"  Path: {weights_path}")
         
         # =========================================================================
-        # PHASE 3: LOUD WARNING - Using default weights is NOT recommended
+        # PHASE 3: FAIL HARD - Missing weights means untrained/broken ensemble
         # =========================================================================
         self._using_default_weights = True
         
+        error_msg = """
+================================================================================
+CRITICAL ERROR: model_weights.json NOT FOUND
+================================================================================
+
+Ensemble predictions CANNOT proceed without real walk-forward metrics.
+Using default weights produces HOLD-heavy, unresponsive predictions.
+
+To fix this:
+  1. Run training with walk-forward evaluation enabled
+  2. Training will auto-save weights to: checkpoints/model_weights.json
+  3. Restart the server after training completes
+
+The walk-forward evaluation computes:
+  - Expectancy (expected PnL per trade)
+  - Sharpe ratio
+  - Profit factor
+  - Win rate
+
+These metrics determine how much weight each model gets in ensemble voting.
+Without real weights, all models vote equally which is NOT useful.
+
+================================================================================
+"""
+        
+        if self.strict_weights:
+            logger.error(error_msg)
+            raise RuntimeError("model_weights.json is REQUIRED. Run training first.")
+        
+        # Non-strict mode: warn and continue with defaults (development only)
         logger.warning("=" * 80)
-        logger.warning("CRITICAL: model_weights.json NOT FOUND - USING DEFAULT WEIGHTS")
+        logger.warning("WARNING: model_weights.json NOT FOUND - USING DEFAULT WEIGHTS")
         logger.warning("=" * 80)
-        logger.warning("")
-        logger.warning("  This means ensemble predictions are NOT using real walk-forward metrics!")
-        logger.warning("  Models are weighted equally with placeholder values.")
-        logger.warning("")
-        logger.warning("  To fix this:")
-        logger.warning("    1. Run walk-forward training: evaluate_and_save_model_weights()")
-        logger.warning("    2. This computes real expectancy, Sharpe, profit factor per model")
-        logger.warning("    3. Weights saved to: checkpoints/model_weights.json")
-        logger.warning("")
-        logger.warning("  Production systems MUST have real weights for proper model voting.")
+        logger.warning("  strict_weights=False allows this for development only.")
+        logger.warning("  Production MUST have real walk-forward weights!")
         logger.warning("=" * 80)
         
         # Create default weights for all models (PLACEHOLDER - NOT RECOMMENDED)

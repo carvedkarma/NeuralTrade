@@ -12,6 +12,9 @@ from pathlib import Path
 import joblib
 import glob as glob_module
 
+# Walk-forward evaluation for ensemble weights
+from training.walk_forward import save_walk_forward_weights
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -1372,6 +1375,9 @@ class HealthResponse(BaseModel):
     gpu_memory_total: Optional[float]
     models_loaded: List[str]
     uptime_seconds: float
+    ensemble_weights_loaded: bool = False
+    ensemble_using_defaults: bool = True
+    ensemble_weight_count: int = 0
 
 class RegressionPredictionRequest(BaseModel):
     """Request for regression-based prediction (mu, sigma)."""
@@ -1531,6 +1537,25 @@ async def health_check():
         
     uptime = (datetime.now() - start_time).total_seconds()
     
+    # Check ensemble weights status
+    ensemble_weights_loaded = False
+    ensemble_using_defaults = True
+    ensemble_weight_count = 0
+    
+    weights_path = Path(__file__).parent.parent / "checkpoints" / "model_weights.json"
+    if weights_path.exists():
+        try:
+            with open(weights_path) as f:
+                weights_data = json.load(f)
+            ensemble_weights_loaded = True
+            ensemble_weight_count = len(weights_data)
+            ensemble_using_defaults = False
+            logger.info(f"[HEALTH] Ensemble weights: {ensemble_weight_count} models with real walk-forward metrics")
+        except Exception as e:
+            logger.warning(f"[HEALTH] Failed to load ensemble weights: {e}")
+    else:
+        logger.warning(f"[HEALTH] ⚠️ model_weights.json NOT FOUND - ensemble using defaults")
+    
     return HealthResponse(
         status="healthy",
         gpu_available=gpu_available,
@@ -1538,7 +1563,10 @@ async def health_check():
         gpu_memory_used=gpu_memory_used,
         gpu_memory_total=gpu_memory_total,
         models_loaded=list(model_manager.models.keys()),
-        uptime_seconds=uptime
+        uptime_seconds=uptime,
+        ensemble_weights_loaded=ensemble_weights_loaded,
+        ensemble_using_defaults=ensemble_using_defaults,
+        ensemble_weight_count=ensemble_weight_count
     )
 
 @app.post("/predict", response_model=PredictionResponse)
@@ -2443,10 +2471,32 @@ def get_ensemble_predictor():
     if _ensemble_predictor is None and model_manager.model_instances:
         try:
             from .ensemble_predictor import EnsemblePredictor
+            
+            # Check if model_weights.json exists to determine strict mode
+            # During development/first run, weights don't exist yet
+            weights_path = Path(__file__).parent.parent / "checkpoints" / "model_weights.json"
+            weights_exist = weights_path.exists()
+            
+            if weights_exist:
+                logger.info(f"[ENSEMBLE] Found model_weights.json - using strict_weights=True")
+                strict_weights = True
+            else:
+                logger.warning(f"[ENSEMBLE] model_weights.json NOT FOUND")
+                logger.warning(f"[ENSEMBLE] Using strict_weights=False for development")
+                logger.warning(f"[ENSEMBLE] Run training to generate real walk-forward weights!")
+                strict_weights = False
+            
             _ensemble_predictor = EnsemblePredictor(
                 model_instances=model_manager.model_instances,
-                device=model_manager.device
+                device=model_manager.device,
+                strict_weights=strict_weights
             )
+            
+            if _ensemble_predictor.using_default_weights:
+                logger.warning("[ENSEMBLE] ⚠️ USING DEFAULT WEIGHTS - predictions will be HOLD-heavy!")
+            else:
+                logger.info("[ENSEMBLE] ✓ Using real walk-forward weights for ensemble voting")
+                
             logger.info("Initialized ensemble predictor")
         except Exception as e:
             logger.error(f"Failed to initialize ensemble predictor: {e}")
@@ -3607,6 +3657,141 @@ async def run_training(request: TrainingRequest):
                     logger.info(f"Saved scalers to {scaler_path}")
                 except Exception as se:
                     logger.warning(f"Failed to save scalers: {se}")
+                
+                # ============== WALK-FORWARD EVALUATION FOR ENSEMBLE WEIGHTS ==============
+                # CRITICAL: Ensemble uses model_weights.json for voting. Without this, all models
+                # are weighted equally which produces HOLD-heavy, unresponsive predictions.
+                try:
+                    logger.info(f"[WALK-FORWARD] Running OOS evaluation for {model_type}...")
+                    
+                    # Use last 20% of data for OOS evaluation (same split as validation)
+                    oos_start = int(len(features_np) * 0.8)
+                    oos_features = features_np[oos_start:]
+                    oos_labels = labels_np[oos_start:]
+                    oos_returns = forward_returns_np[oos_start:]
+                    
+                    # Run OOS predictions using SLIDING WINDOWS
+                    # Each window of SEQUENCE_LENGTH candles produces ONE prediction for the last timestep
+                    model.eval()
+                    predictions = []
+                    aligned_labels = []
+                    aligned_returns = []
+                    
+                    SEQ_LEN = sequence_length  # 100 (from training config)
+                    
+                    with torch.no_grad():
+                        for i in range(SEQ_LEN, len(oos_features)):
+                            # Extract window [i-SEQ_LEN : i]
+                            window = oos_features[i-SEQ_LEN:i]
+                            window_tensor = torch.FloatTensor(window).unsqueeze(0).to(device)  # [1, seq_len, features]
+                            
+                            # Get prediction for the last timestep
+                            if hasattr(model, 'forward_multihead'):
+                                outputs = model.forward_multihead(window_tensor)
+                                class_logits = outputs['class_logits']
+                            else:
+                                outputs = model(window_tensor)
+                                if isinstance(outputs, dict):
+                                    class_logits = outputs.get('class_logits', outputs.get('logits'))
+                                else:
+                                    class_logits = outputs
+                            
+                            # Get prediction for last timestep only
+                            if class_logits.dim() == 3:
+                                # [batch, seq, classes] -> take last timestep
+                                last_logits = class_logits[0, -1, :]
+                            else:
+                                # [batch, classes]
+                                last_logits = class_logits[0]
+                            
+                            pred = last_logits.argmax().item()
+                            predictions.append(pred)
+                            
+                            # Align with corresponding label and forward return
+                            # Window [i-SEQ_LEN:i] ends at position i-1, so:
+                            # - The prediction is for what happens AFTER position i-1
+                            # - Label[i-1] and forward_return[i-1] are the targets for position i-1
+                            # - forward_return is computed as close.pct_change(16).shift(-16)
+                            #   meaning forward_return[j] = return from j to j+16
+                            # Therefore we compare prediction with label/return at i-1 (the last feature position)
+                            # But labels are shifted by horizon, so we need label[i] (predicting the outcome)
+                            # 
+                            # CRITICAL: Since labels are created with shift(-horizon), label[j] corresponds
+                            # to the direction from j to j+horizon. Window ending at i-1 predicts
+                            # what happens starting at i-1, so we use label[i-1] and return[i-1]
+                            aligned_labels.append(oos_labels[i-1])
+                            aligned_returns.append(oos_returns[i-1])
+                    
+                    predictions = np.array(predictions)
+                    oos_labels = np.array(aligned_labels)
+                    oos_returns = np.array(aligned_returns)
+                    
+                    logger.info(f"[WALK-FORWARD] Generated {len(predictions)} sliding-window predictions")
+                    
+                    # Compute trading metrics for OOS data
+                    # Direction: 0=SHORT, 1=HOLD, 2=LONG -> map to -1, 0, +1
+                    direction_map = np.array([-1, 0, 1])
+                    pred_directions = direction_map[predictions]
+                    
+                    # Filter to trades (non-HOLD predictions)
+                    trade_mask = predictions != 1
+                    if trade_mask.sum() > 10:
+                        trade_returns = oos_returns[trade_mask]
+                        trade_directions = pred_directions[trade_mask]
+                        
+                        # PnL per trade (direction * return - costs)
+                        COST_PER_TRADE = 0.0009
+                        trade_pnl = trade_directions * trade_returns - COST_PER_TRADE
+                        
+                        # Metrics
+                        n_trades = len(trade_pnl)
+                        wins = (trade_pnl > 0).sum()
+                        win_rate = wins / n_trades if n_trades > 0 else 0.5
+                        
+                        mean_pnl = trade_pnl.mean() if n_trades > 0 else 0
+                        std_pnl = trade_pnl.std() if n_trades > 1 else 1
+                        sharpe = (mean_pnl / std_pnl * np.sqrt(252 * 4)) if std_pnl > 0 else 0  # Annualized (4 trades/day)
+                        
+                        avg_win = trade_pnl[trade_pnl > 0].mean() if wins > 0 else 0
+                        losses = n_trades - wins
+                        avg_loss = abs(trade_pnl[trade_pnl < 0].mean()) if losses > 0 else 0.0001
+                        profit_factor = avg_win / avg_loss if avg_loss > 0 else 1.0
+                        
+                        # Max drawdown
+                        cumulative = np.cumsum(trade_pnl)
+                        running_max = np.maximum.accumulate(cumulative)
+                        drawdown = running_max - cumulative
+                        max_drawdown = drawdown.max() if len(drawdown) > 0 else 0
+                        
+                        expectancy = mean_pnl
+                        
+                        # Create walk-forward summary
+                        wf_summary = {
+                            "total_trades": int(n_trades),
+                            "avg_trades_per_fold": int(n_trades),  # Single OOS fold
+                            "overall_win_rate": float(win_rate),
+                            "overall_expectancy": float(expectancy),
+                            "overall_profit_factor": float(min(3.0, profit_factor)),  # Cap at 3
+                            "overall_sharpe": float(min(3.0, sharpe)),  # Cap at 3
+                            "worst_drawdown": float(max_drawdown),
+                            "n_folds": 1
+                        }
+                        
+                        # Save to model_weights.json
+                        save_walk_forward_weights(model_type, wf_summary, str(checkpoint_dir))
+                        
+                        logger.info(f"[WALK-FORWARD] ✓ Saved weights for {model_type}:")
+                        logger.info(f"  Trades: {n_trades}, Win Rate: {win_rate:.1%}")
+                        logger.info(f"  Expectancy: {expectancy:.4f}, Sharpe: {sharpe:.2f}")
+                        logger.info(f"  Profit Factor: {profit_factor:.2f}, Max DD: {max_drawdown:.4f}")
+                    else:
+                        logger.warning(f"[WALK-FORWARD] ⚠️ Only {trade_mask.sum()} trades in OOS - not enough for reliable metrics")
+                        logger.warning(f"  Model may be too conservative (HOLD-heavy)")
+                        
+                except Exception as wf_err:
+                    logger.error(f"[WALK-FORWARD] Failed to compute walk-forward metrics: {wf_err}")
+                    import traceback
+                    traceback.print_exc()
                 
                 # Reload models to include newly trained model
                 model_manager.load_best_models()
