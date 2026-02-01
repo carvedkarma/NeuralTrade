@@ -627,18 +627,23 @@ class MultiHeadTrainer:
                    100 * directional_signal.sum() / len(directional_signal))
         
         # === SWEEP CONFIDENCE THRESHOLDS TO FIND BEST POLICY ===
+        MIN_TRADES = 30  # Minimum trades for policy eligibility
+        
         best_metrics = None
-        best_expectancy = float('-inf')
+        best_score = float('-inf')
         best_threshold = 0.5
+        prev_trade_count = float('inf')  # For monotonicity check
         
         sweep_results = []
         
         for min_conf in CONFIDENCE_THRESHOLDS:
-            # Apply gates:
-            # 1. Spread gate: spread >= K * cost
+            # === GATE ORDER: spread -> confidence -> direction -> cooldown -> trade ===
+            # Gate 1: Spread gate - sufficient price movement opportunity
             spread_gate = spread >= (SPREAD_MULTIPLIER * FIXED_COST)
-            # 2. Confidence gate: confidence >= threshold
+            # Gate 2: Confidence gate - sufficient signal strength
             conf_gate = confidence >= min_conf
+            # Gate 3: Direction gate - model predicts LONG or SHORT (not HOLD)
+            # (directional_signal already computed above)
             
             # === CONF_DEBUG: Per-threshold logging ===
             n_spread_pass = spread_gate.sum()
@@ -652,13 +657,19 @@ class MultiHeadTrainer:
                        min_conf, n_spread_pass, n_conf_pass, 
                        n_directional, n_dir_and_spread, n_dir_and_conf)
             
-            # Combined gate
-            trade_allowed = directional_signal & spread_gate & conf_gate
+            # Combined gates (order: spread -> confidence -> direction)
+            trade_allowed = spread_gate & conf_gate & directional_signal
             n_trade_allowed = trade_allowed.sum()
             
-            # Apply cooldown
+            # Gate 4: Cooldown - prevent overtrading
             final_trades = self._apply_cooldown(trade_allowed, COOLDOWN)
             n_final = final_trades.sum()
+            
+            # Validate monotonicity: trades should decrease as threshold increases
+            if n_final > prev_trade_count:
+                logger.warning("MONOTONICITY VIOLATION: threshold=%.2f has %d trades > prev %d",
+                             min_conf, n_final, prev_trade_count)
+            prev_trade_count = n_final
             
             logger.info("CONF_DEBUG | threshold=%.2f | trade_allowed=%d, after_cooldown=%d | %s",
                        min_conf, n_trade_allowed, n_final,
@@ -673,42 +684,59 @@ class MultiHeadTrainer:
             metrics['spread_multiplier'] = SPREAD_MULTIPLIER
             metrics['cooldown'] = COOLDOWN
             
+            # Compute risk-adjusted score:
+            # score = expectancy - 0.5*max_drawdown (or -0.25*abs(avg_loss) if no DD)
+            max_dd = metrics.get('max_drawdown', 0.0)
+            avg_loss = metrics.get('avg_loss', 0.0)
+            if max_dd > 0:
+                risk_penalty = 0.5 * max_dd
+            else:
+                risk_penalty = 0.25 * abs(avg_loss)
+            
+            risk_adjusted_score = metrics['expectancy'] - risk_penalty
+            metrics['risk_adjusted_score'] = risk_adjusted_score
+            
             sweep_results.append(metrics)
             
-            # Track best
-            if metrics['expectancy'] > best_expectancy and metrics['num_trades'] >= 10:
-                best_expectancy = metrics['expectancy']
+            # Track best - require MIN_TRADES and use risk-adjusted score
+            if metrics['num_trades'] >= MIN_TRADES and risk_adjusted_score > best_score:
+                best_score = risk_adjusted_score
                 best_metrics = metrics
                 best_threshold = min_conf
         
         # Log policy sweep report
         logger.info("=" * 60)
-        logger.info("POLICY SWEEP REPORT (spread_K=%.1f, cooldown=%d)", 
-                   SPREAD_MULTIPLIER, COOLDOWN)
+        logger.info("POLICY SWEEP REPORT (spread_K=%.1f, cooldown=%d, min_trades=%d)", 
+                   SPREAD_MULTIPLIER, COOLDOWN, MIN_TRADES)
         logger.info("-" * 60)
         for m in sweep_results:
-            status = "★ BEST" if m['min_confidence'] == best_threshold and m['expectancy'] > 0 else ""
+            eligible = m['num_trades'] >= MIN_TRADES
+            is_best = m['min_confidence'] == best_threshold and eligible and best_score > float('-inf')
+            status = "★ BEST" if is_best else ("" if eligible else "(ineligible)")
             logger.info(
-                f"conf>={m['min_confidence']:.1f}: Trades={m['num_trades']:4d}, "
-                f"Exp={m['expectancy']:+.4f}, Hit={m['hit_rate']:.1%}, "
-                f"AvgWin={m['avg_win']:+.4f}, AvgLoss={m['avg_loss']:+.4f}, "
+                f"conf>={m['min_confidence']:.2f}: Trades={m['num_trades']:4d}, "
+                f"Exp={m['expectancy']:+.4f}, Score={m['risk_adjusted_score']:+.4f}, "
+                f"Hit={m['hit_rate']:.1%}, MaxDD={m['max_drawdown']:.4f}, "
                 f"Sharpe={m['sharpe']:+.2f} {status}"
             )
         logger.info("=" * 60)
         
-        # Return best metrics (or last if none positive)
+        # Return best metrics (or last if none eligible)
         if best_metrics is None:
+            logger.warning("No policy met MIN_TRADES=%d threshold - using last policy as fallback", MIN_TRADES)
             best_metrics = sweep_results[-1] if sweep_results else {
                 'expectancy': 0.0, 'hit_rate': 0.0, 'profit_factor': 0.0,
                 'sharpe': 0.0, 'max_drawdown': 0.0, 'num_trades': 0,
                 'avg_win': 0.0, 'avg_loss': 0.0, 'win_loss_ratio': 0.0,
+                'risk_adjusted_score': 0.0,
                 'min_confidence': 0.5, 'spread_multiplier': 3.0, 'cooldown': 8
             }
         
-        logger.info(f"Trading Metrics (best policy) - Expectancy: {best_metrics['expectancy']:.4f}, "
-                   f"Hit Rate: {best_metrics['hit_rate']:.2%}, "
-                   f"Sharpe: {best_metrics['sharpe']:.2f}, "
-                   f"Trades: {best_metrics['num_trades']}")
+        logger.info(f"Trading Metrics (best policy) - Score: {best_metrics.get('risk_adjusted_score', 0):.4f}, "
+                   f"Expectancy: {best_metrics['expectancy']:.4f}, "
+                   f"MaxDD: {best_metrics['max_drawdown']:.4f}, "
+                   f"Trades: {best_metrics['num_trades']}, "
+                   f"Threshold: {best_metrics['min_confidence']:.2f}")
         
         return best_metrics
     
