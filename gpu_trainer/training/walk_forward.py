@@ -302,12 +302,22 @@ class TradeSimulator:
         if entry_idx + holding_periods >= len(candles):
             return None
         
-        cost = self.costs.taker_fee * 2 + self.costs.base_slippage * 2
-        edge = abs(predicted_mu) - cost
-        confidence = edge / max(predicted_sigma, 0.001)
+        # === FIXED: Correct confidence calculation ===
+        # Confidence = |mu| / sigma (NOT edge / sigma)
+        # If sigma is log_sigma, convert: sigma = exp(log_sigma)
+        sigma = predicted_sigma
+        if predicted_sigma < 0:  # Likely log_sigma (typical values are negative)
+            import math
+            sigma = math.exp(max(predicted_sigma, -10))  # Convert log_sigma to sigma
+        
+        confidence = abs(predicted_mu) / max(sigma, 0.001)
         
         if confidence < self.min_confidence:
             return None
+        
+        # Also compute edge for position sizing
+        cost = self.costs.taker_fee * 2 + self.costs.base_slippage * 2
+        edge = abs(predicted_mu) - cost
         
         entry_candle = candles.iloc[entry_idx]
         entry_price = entry_candle["close"]

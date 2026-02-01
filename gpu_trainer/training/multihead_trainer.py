@@ -575,7 +575,19 @@ class MultiHeadTrainer:
         preds = np.array(all_predictions)
         returns = np.array(all_returns)
         mus = np.array(all_mus)
-        sigmas = np.array(all_sigmas)
+        raw_sigmas = np.array(all_sigmas)
+        
+        # === CRITICAL FIX: Convert log_sigma to sigma ===
+        # Model outputs log_sigma when use_log_sigma=True (default)
+        # sigma = exp(log_sigma)
+        # If log_sigma is negative (typical), exp() gives values in (0, 1)
+        if hasattr(self.model, 'use_log_sigma') and self.model.use_log_sigma:
+            logger.info("CONF_DEBUG | Converting log_sigma to sigma (exp)")
+            sigmas = np.exp(np.clip(raw_sigmas, -10, 10))  # Clip to prevent overflow
+            logger.info("CONF_DEBUG | log_sigma range: [%.4f, %.4f], sigma range: [%.6f, %.6f]",
+                       raw_sigmas.min(), raw_sigmas.max(), sigmas.min(), sigmas.max())
+        else:
+            sigmas = raw_sigmas
         
         # Handle quantiles (use mu-based fallback if not available)
         if len(all_q10) > 0:
@@ -594,10 +606,24 @@ class MultiHeadTrainer:
         spread = q75 - q25  # Distribution width
         confidence = np.abs(mus) / np.maximum(sigmas, 1e-6)  # |mu| / sigma
         
+        # === CONF_DEBUG: Log confidence distribution ===
+        logger.info("CONF_DEBUG | Confidence stats: min=%.4f, max=%.4f, mean=%.4f, median=%.4f",
+                   confidence.min(), confidence.max(), confidence.mean(), np.median(confidence))
+        logger.info("CONF_DEBUG | Sigma stats: min=%.6f, max=%.6f, mean=%.6f", 
+                   sigmas.min(), sigmas.max(), sigmas.mean())
+        logger.info("CONF_DEBUG | Mu stats: min=%.6f, max=%.6f, mean=%.6f",
+                   mus.min(), mus.max(), mus.mean())
+        logger.info("CONF_DEBUG | Spread stats: min=%.6f, max=%.6f, mean=%.6f",
+                   spread.min(), spread.max(), spread.mean())
+        
         # Base trade signals (LONG=2, SHORT=0)
         long_signal = preds == 2
         short_signal = preds == 0
         directional_signal = long_signal | short_signal
+        
+        logger.info("CONF_DEBUG | Base directional signals: %d / %d samples (%.1f%%)",
+                   directional_signal.sum(), len(directional_signal), 
+                   100 * directional_signal.sum() / len(directional_signal))
         
         # === SWEEP CONFIDENCE THRESHOLDS TO FIND BEST POLICY ===
         best_metrics = None
@@ -613,11 +639,29 @@ class MultiHeadTrainer:
             # 2. Confidence gate: confidence >= threshold
             conf_gate = confidence >= min_conf
             
+            # === CONF_DEBUG: Per-threshold logging ===
+            n_spread_pass = spread_gate.sum()
+            n_conf_pass = conf_gate.sum()
+            n_directional = directional_signal.sum()
+            n_dir_and_spread = (directional_signal & spread_gate).sum()
+            n_dir_and_conf = (directional_signal & conf_gate).sum()
+            
+            logger.info("CONF_DEBUG | threshold=%.2f | spread_pass=%d, conf_pass=%d, "
+                       "dir=%d, dir&spread=%d, dir&conf=%d",
+                       min_conf, n_spread_pass, n_conf_pass, 
+                       n_directional, n_dir_and_spread, n_dir_and_conf)
+            
             # Combined gate
             trade_allowed = directional_signal & spread_gate & conf_gate
+            n_trade_allowed = trade_allowed.sum()
             
             # Apply cooldown
             final_trades = self._apply_cooldown(trade_allowed, COOLDOWN)
+            n_final = final_trades.sum()
+            
+            logger.info("CONF_DEBUG | threshold=%.2f | trade_allowed=%d, after_cooldown=%d | %s",
+                       min_conf, n_trade_allowed, n_final,
+                       "PASS" if n_final > 0 else "FAIL (no trades)")
             
             # Compute PnL with asymmetric SL/TP using quantiles
             metrics = self._compute_pnl_with_quantile_exits(

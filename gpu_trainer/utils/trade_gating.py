@@ -106,14 +106,23 @@ def compute_trade_gate(
     if config is None:
         config = DEFAULT_GATE_CONFIG
     
+    # === FIXED: Handle log_sigma if passed (log_sigma is typically negative) ===
+    # If sigma looks like log_sigma (negative), convert to sigma = exp(log_sigma)
+    import math
+    actual_sigma = sigma
+    if sigma < 0:  # Likely log_sigma
+        actual_sigma = math.exp(max(sigma, -10))  # Convert log_sigma to sigma
+        logger.debug(f"Converted log_sigma={sigma:.4f} to sigma={actual_sigma:.6f}")
+    
     # Compute gate metrics
     edge = abs(mu) - config.fixed_cost
-    confidence = abs(mu) / max(sigma, 1e-8)
+    confidence = abs(mu) / max(actual_sigma, 1e-8)
     spread = (q75 - q25) if (q25 is not None and q75 is not None) else None
     
     details = {
         "mu": mu,
-        "sigma": sigma,
+        "sigma": actual_sigma,  # Use converted sigma, not raw log_sigma
+        "raw_sigma": sigma,  # Keep original for debugging
         "edge": edge,
         "confidence": confidence,
         "cost": config.fixed_cost,
