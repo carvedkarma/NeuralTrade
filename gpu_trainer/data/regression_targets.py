@@ -348,9 +348,13 @@ class RegressionTargetGenerator:
             trans_long = is_transition & (mu > trans_threshold)
             trans_short = is_transition & (mu < -trans_threshold)
             
+            # Combine masks for consistency with other modes
+            long_mask = trend_long | range_long | trans_long
+            short_mask = trend_short | range_short | trans_short
+            
             # Apply labels
-            class_label[trend_long | range_long | trans_long] = 2  # LONG
-            class_label[trend_short | range_short | trans_short] = 0  # SHORT
+            class_label[long_mask] = 2  # LONG
+            class_label[short_mask] = 0  # SHORT
             
             # Log per-regime stats
             n_trend_trades = (trend_long.sum() + trend_short.sum())
