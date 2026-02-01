@@ -76,9 +76,16 @@ Preferred communication style: Simple, everyday language.
 - **Quantile-Based SL/TP Derivation**: Stop-loss and take-profit levels are derived directly from predicted quantiles.
 
 #### Model Management and Monitoring
-- **Walk-Forward Weight Saving**: Saves real trading metrics for ensemble model weighting.
+- **Walk-Forward Weight Saving**: Saves real trading metrics for ensemble model weighting with smart save logic (protects good runs from regression).
 - **Feature Version Locking**: Ensures feature consistency between training and inference.
 - **Prediction Drift Monitoring**: Utilizes PSI, KL Divergence, and ECE to detect and report feature distribution shifts and prediction calibration changes.
+- **Labeling Metadata Tracking**: Saves `labeling_meta.json` with label_mode, thresholds, and distribution for reproducibility.
+- **Weights History Audit Trail**: Saves unique snapshots to `weights_history/model_weights_{run_id}.json` for full auditability.
+
+#### GUI Label Mode Selection
+- **Label Mode Dropdown**: GUI provides cost_aware/pure_directional/regime mode selection for training.
+- **Real-time Description**: Shows mode description (Stage 1/2/3) and expected behavior.
+- **Threshold Configuration**: Configurable min_confidence, directional_threshold, trend_threshold, range_threshold.
 
 #### Feature Schema Enforcement (Critical for Model Accuracy)
 - **Dimension Inference from Checkpoints**: Model input_dim is inferred from state_dict weights (`input_conv.weight` for CNN, `input_layer.weight` for others).
