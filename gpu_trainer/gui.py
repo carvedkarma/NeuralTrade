@@ -1937,14 +1937,15 @@ class GPUTrainerGUI:
                         train_loss = float(train_metrics)
                     if isinstance(val_metrics, dict):
                         val_loss = val_metrics.get('total', val_metrics.get('total_loss', val_metrics.get('loss', 0.0)))
-                        # Extract OOS trade count from monitoring sweep (runs every 5 epochs)
-                        oos_trades = val_metrics.get('num_trades', 0)
-                        was_skipped = val_metrics.get('_skipped', False)
-                        # Always update the OOS trade count display with current model name
-                        # Capture current_training_model at callback time to ensure per-model tracking
-                        current_model = self.current_training_model
-                        self.root.after(0, lambda t=oos_trades, e=epoch+1, skip=was_skipped, m=current_model: 
-                                       self._update_oos_trade_count(t, e, skip, m))
+                        # Only update OOS trade count when monitoring sweep actually ran
+                        # (num_trades key exists in val_metrics - sweeps run every 5 epochs)
+                        if 'num_trades' in val_metrics:
+                            oos_trades = val_metrics['num_trades']
+                            was_skipped = val_metrics.get('_skipped', False)
+                            # Capture current_training_model at callback time to ensure per-model tracking
+                            current_model = self.current_training_model
+                            self.root.after(0, lambda t=oos_trades, e=epoch+1, skip=was_skipped, m=current_model: 
+                                           self._update_oos_trade_count(t, e, skip, m))
                     else:
                         val_loss = float(val_metrics)
                     
