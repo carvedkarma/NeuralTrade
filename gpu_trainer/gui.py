@@ -100,14 +100,18 @@ class GPUTrainerGUI:
         self.min_confidence = 0.40  # Stage 1 min_confidence
         
         # Per-model training status for dashboard sync
+        # Each model has its own oos_trades count that won't be overwritten by other models
         self.model_status = {
-            "transformer": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0},
-            "tft": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0},
-            "lstm": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0},
-            "cnn": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0},
-            "vae": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0},
-            "gnn": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0},
+            "transformer": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0, "oos_trades": 0, "oos_epoch": 0},
+            "tft": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0, "oos_trades": 0, "oos_epoch": 0},
+            "lstm": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0, "oos_trades": 0, "oos_epoch": 0},
+            "cnn": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0, "oos_trades": 0, "oos_epoch": 0},
+            "vae": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0, "oos_trades": 0, "oos_epoch": 0},
+            "gnn": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0, "oos_trades": 0, "oos_epoch": 0},
         }
+        
+        # Current model being trained (for OOS trade tracking)
+        self.current_training_model = None
         
         # Mapping from checkpoint filename patterns to standardized model types
         self.model_type_patterns = {
@@ -814,12 +818,17 @@ class GPUTrainerGUI:
                         epoch = checkpoint.get('epoch', 0)
                         loss = checkpoint.get('val_loss', None)
                         
+                        # Preserve oos_trades when updating status from checkpoint scan
+                        existing_oos_trades = self.model_status.get(model_type, {}).get("oos_trades", 0)
+                        existing_oos_epoch = self.model_status.get(model_type, {}).get("oos_epoch", 0)
                         self.model_status[model_type] = {
                             "status": "complete",
                             "accuracy": accuracy,
                             "loss": loss,
                             "epochs": epoch,
-                            "best_epoch": epoch
+                            "best_epoch": epoch,
+                            "oos_trades": existing_oos_trades,
+                            "oos_epoch": existing_oos_epoch
                         }
                         
                         if model_type not in self.models_completed:
@@ -1110,16 +1119,32 @@ class GPUTrainerGUI:
         """Refresh the trade count UI elements (legacy - now uses OOS trade count)."""
         pass  # No longer used - OOS trade count updated via _update_oos_trade_count
     
-    def _update_oos_trade_count(self, oos_trades: int, epoch: int, was_skipped: bool = False):
+    def _update_oos_trade_count(self, oos_trades: int, epoch: int, was_skipped: bool = False, model_name: str = None):
         """Update OOS (out-of-sample) trade count during training monitoring sweeps.
         
         Args:
             oos_trades: Number of simulated trades from monitoring sweep
             epoch: Current training epoch
             was_skipped: True if monitoring sweep was skipped this epoch
+            model_name: Name of the model being trained (e.g., "transformer", "lstm")
+                        If None, uses self.current_training_model
         """
         try:
             MIN_TRADES = 30  # Policy eligibility threshold (matches multihead_trainer.py)
+            
+            # Determine which model we're tracking
+            target_model = model_name.lower() if model_name else self.current_training_model
+            
+            # Safeguard: log warning if no model is being tracked
+            if not target_model:
+                self.log(f"[OOS WARNING] No model specified for OOS trade count (epoch {epoch})")
+            
+            # Update per-model OOS trade count in model_status (won't be overwritten by other models)
+            if target_model and target_model in self.model_status:
+                if not was_skipped:
+                    self.model_status[target_model]["oos_trades"] = oos_trades
+                    self.model_status[target_model]["oos_epoch"] = epoch
+                    self.log(f"[OOS] {target_model.upper()}: {oos_trades} trades @ epoch {epoch}")
             
             if was_skipped:
                 # Monitoring sweep was skipped this epoch (runs every 5 epochs)
@@ -1127,11 +1152,12 @@ class GPUTrainerGUI:
                 self.trade_epoch_label.config(text=f"(sweep @epoch {epoch - (epoch % 5) if epoch % 5 != 0 else epoch})")
                 return
             
-            # Update trade count
+            # Update UI trade count display (shows current model being trained)
+            model_display = target_model.upper() if target_model else "MODEL"
             self.trade_total_label.config(text=str(oos_trades))
             
-            # Update epoch indicator
-            self.trade_epoch_label.config(text=f"(epoch {epoch})")
+            # Update epoch indicator with model name
+            self.trade_epoch_label.config(text=f"({model_display} epoch {epoch})")
             
             # Update eligibility status with color coding
             if oos_trades >= MIN_TRADES:
@@ -1349,6 +1375,9 @@ class GPUTrainerGUI:
         self.epoch_times = []
         self.best_val_loss = float('inf')
         self.best_epoch = 0
+        
+        # Track which model is being trained (for per-model OOS trade tracking)
+        self.current_training_model = model_type.lower()
         
         epochs = defaults["epochs"]
         batch_size = defaults["batch_size"]
@@ -1911,9 +1940,11 @@ class GPUTrainerGUI:
                         # Extract OOS trade count from monitoring sweep (runs every 5 epochs)
                         oos_trades = val_metrics.get('num_trades', 0)
                         was_skipped = val_metrics.get('_skipped', False)
-                        # Always update the OOS trade count display
-                        self.root.after(0, lambda t=oos_trades, e=epoch+1, skip=was_skipped: 
-                                       self._update_oos_trade_count(t, e, skip))
+                        # Always update the OOS trade count display with current model name
+                        # Capture current_training_model at callback time to ensure per-model tracking
+                        current_model = self.current_training_model
+                        self.root.after(0, lambda t=oos_trades, e=epoch+1, skip=was_skipped, m=current_model: 
+                                       self._update_oos_trade_count(t, e, skip, m))
                     else:
                         val_loss = float(val_metrics)
                     
@@ -2029,6 +2060,7 @@ class GPUTrainerGUI:
         
     def training_complete(self):
         self.is_training = False
+        self.current_training_model = None  # Clear current training model
         self.train_btn.config(state=tk.NORMAL)
         self.stop_train_btn.config(state=tk.DISABLED)
         self.train_pct_label.config(text="Ready")
