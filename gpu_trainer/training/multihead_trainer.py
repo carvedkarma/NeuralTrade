@@ -654,13 +654,18 @@ class MultiHeadTrainer:
                    100 * directional_signal.sum() / len(directional_signal))
         
         # === NEW: Minimum predicted-move filter ===
-        # If abs(mu) < 0.5 × sigma (ATR proxy) → no trade (insufficient edge)
-        MIN_MOVE_FACTOR = 0.5
+        # If abs(mu) < MIN_MOVE_FACTOR × sigma → no trade (insufficient edge)
+        # NOTE: mu values are typically much smaller than sigma (mu~0.001, sigma~0.01)
+        # Use a low factor (0.10) to filter only the weakest predictions
+        MIN_MOVE_FACTOR = 0.10
         move_gate = np.abs(mus) >= (MIN_MOVE_FACTOR * sigmas)
         n_move_pass = move_gate.sum()
-        logger.info("MOVE_GATE | abs(mu) >= %.1f×sigma: %d / %d pass (%.1f%%)",
+        logger.info("MOVE_GATE | abs(mu) >= %.2f×sigma: %d / %d pass (%.1f%%)",
                    MIN_MOVE_FACTOR, n_move_pass, len(move_gate), 
                    100 * n_move_pass / len(move_gate) if len(move_gate) > 0 else 0)
+        logger.info("MOVE_GATE | mu_range=[%.6f, %.6f], sigma_range=[%.6f, %.6f], threshold=%.6f",
+                   mus.min(), mus.max(), sigmas.min(), sigmas.max(), 
+                   MIN_MOVE_FACTOR * sigmas.mean())
         
         # === SWEEP CONFIDENCE THRESHOLDS TO FIND BEST POLICY ===
         MIN_TRADES = 30  # Minimum trades for policy eligibility
