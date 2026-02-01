@@ -86,6 +86,13 @@ class GPUTrainerGUI:
         self.best_epoch = 0
         self.models_completed = []
         
+        # Live trade count tracking
+        self.live_trade_count = {"total": 0, "long": 0, "short": 0, "session_start": None}
+        
+        # Label mode config (Stage 2 HOLD fix)
+        self.use_pure_directional = False
+        self.directional_threshold = 0.0020
+        
         # Per-model training status for dashboard sync
         self.model_status = {
             "transformer": {"status": "pending", "accuracy": None, "loss": None, "epochs": 0, "best_epoch": 0},
@@ -464,6 +471,35 @@ class GPUTrainerGUI:
                                     bg=self.colors['bg_card'], fg=self.colors['success'],
                                     font=('Segoe UI', 9))
         self.best_label.pack(side=tk.RIGHT)
+        
+        # Live Trade Count Display
+        self.trade_count_frame = tk.Frame(frame, bg=self.colors['bg_card'])
+        self.trade_count_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.trade_count_title = tk.Label(self.trade_count_frame, text="Live Trades: ", 
+                                          bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
+                                          font=('Segoe UI', 9))
+        self.trade_count_title.pack(side=tk.LEFT)
+        
+        self.trade_total_label = tk.Label(self.trade_count_frame, text="0", 
+                                          bg=self.colors['bg_card'], fg=self.colors['accent'],
+                                          font=('Segoe UI', 9, 'bold'))
+        self.trade_total_label.pack(side=tk.LEFT)
+        
+        self.trade_long_label = tk.Label(self.trade_count_frame, text="  LONG: 0", 
+                                          bg=self.colors['bg_card'], fg=self.colors['success'],
+                                          font=('Segoe UI', 9))
+        self.trade_long_label.pack(side=tk.LEFT, padx=(10, 0))
+        
+        self.trade_short_label = tk.Label(self.trade_count_frame, text="  SHORT: 0", 
+                                          bg=self.colors['bg_card'], fg=self.colors['error'],
+                                          font=('Segoe UI', 9))
+        self.trade_short_label.pack(side=tk.LEFT, padx=(5, 0))
+        
+        self.trade_session_label = tk.Label(self.trade_count_frame, text="", 
+                                            bg=self.colors['bg_card'], fg=self.colors['text_tertiary'],
+                                            font=('Segoe UI', 8))
+        self.trade_session_label.pack(side=tk.RIGHT)
         
         # Buttons
         btn_frame = ttk.Frame(frame)
@@ -1003,6 +1039,54 @@ class GPUTrainerGUI:
                 ms["epochs"] = epochs
             if best_epoch is not None:
                 ms["best_epoch"] = best_epoch
+    
+    def update_trade_count(self, direction: str = None, reset: bool = False):
+        """Update live trade count display.
+        
+        Args:
+            direction: "long" or "short" to increment trade count
+            reset: If True, reset all counts to 0
+        """
+        if reset:
+            self.live_trade_count = {
+                "total": 0, "long": 0, "short": 0, 
+                "session_start": datetime.now()
+            }
+        elif direction:
+            direction = direction.lower()
+            if direction in ["long", "short"]:
+                self.live_trade_count[direction] += 1
+                self.live_trade_count["total"] += 1
+                if self.live_trade_count["session_start"] is None:
+                    self.live_trade_count["session_start"] = datetime.now()
+        
+        # Update UI (must be called from main thread)
+        self.root.after(0, self._refresh_trade_count_display)
+    
+    def _refresh_trade_count_display(self):
+        """Refresh the trade count UI elements."""
+        try:
+            total = self.live_trade_count["total"]
+            longs = self.live_trade_count["long"]
+            shorts = self.live_trade_count["short"]
+            
+            self.trade_total_label.config(text=str(total))
+            self.trade_long_label.config(text=f"  LONG: {longs}")
+            self.trade_short_label.config(text=f"  SHORT: {shorts}")
+            
+            # Session duration
+            if self.live_trade_count["session_start"]:
+                duration = datetime.now() - self.live_trade_count["session_start"]
+                hours = duration.seconds // 3600
+                mins = (duration.seconds % 3600) // 60
+                if hours > 0:
+                    self.trade_session_label.config(text=f"Session: {hours}h {mins}m")
+                else:
+                    self.trade_session_label.config(text=f"Session: {mins}m")
+            else:
+                self.trade_session_label.config(text="")
+        except Exception:
+            pass
             
     def start_fetch(self):
         if self.is_fetching:
@@ -1340,22 +1424,35 @@ class GPUTrainerGUI:
                     
                     if use_multihead:
                         # Multi-head mode: generate class_labels and forward_returns
-                        # Use relaxed thresholds for better label density
+                        # Stage 1: min_confidence lowered from 0.7 to 0.40
+                        # Stage 2: pure_directional mode uses simple return threshold
+                        use_pure_directional = getattr(self, 'use_pure_directional', False)
+                        directional_threshold = getattr(self, 'directional_threshold', 0.0020)
+                        
+                        if use_pure_directional:
+                            self.log(f"  Using PURE DIRECTIONAL mode (threshold={directional_threshold:.4%})")
+                        else:
+                            self.log(f"  Using COST-AWARE mode (min_confidence=0.40)")
+                        
                         train_targets = generate_multihead_targets(
                             train_combined, 
                             horizon_periods=prediction_horizon_bars,
                             min_net_edge=0.0,  # No edge filter for debugging
-                            min_confidence=0.7,  # Higher confidence threshold
+                            min_confidence=0.40,  # Stage 1: lowered from 0.7
                             use_volatility_cost=False,
-                            fixed_cost=0.0009  # 0.09% taker/taker
+                            fixed_cost=0.0009,  # 0.09% taker/taker
+                            use_pure_directional=use_pure_directional,  # Stage 2 option
+                            directional_threshold=directional_threshold
                         )
                         val_targets = generate_multihead_targets(
                             val_combined, 
                             horizon_periods=prediction_horizon_bars,
                             min_net_edge=0.0,
-                            min_confidence=0.7,
+                            min_confidence=0.40,  # Stage 1: lowered from 0.7
                             use_volatility_cost=False,
-                            fixed_cost=0.0009
+                            fixed_cost=0.0009,
+                            use_pure_directional=use_pure_directional,  # Stage 2 option
+                            directional_threshold=directional_threshold
                         )
                         
                         train_labels = train_targets['class_label']

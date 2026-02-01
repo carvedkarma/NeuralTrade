@@ -169,13 +169,27 @@ def train(args):
         n_future_candles = getattr(args, 'n_future_candles', 5)
         
         # Get cost/threshold config from args or config
+        # Stage 1 fix: lowered min_confidence from 0.7 to 0.40 to reduce HOLD-heavy labels
+        # Stage 2: pure_directional mode uses simple return threshold instead of cost-aware gating
         min_net_edge = getattr(args, 'min_net_edge', 0.0)  # Default: no edge filter for debugging
-        min_confidence = getattr(args, 'min_confidence', 0.7)  # Default: 0.7 for quality signals
+        min_confidence = getattr(args, 'min_confidence', 0.40)  # Default: 0.40 (lowered from 0.7)
         fixed_cost = getattr(args, 'cost', config.institution.cost_mode.get_cost())
         use_volatility_cost = getattr(args, 'volatility_cost', False)
+        use_pure_directional = getattr(args, 'pure_directional', False)
+        directional_threshold = getattr(args, 'directional_threshold', 0.0020)
         
-        logger.info(f"Label config: horizon={horizon}, cost={fixed_cost:.4%}, "
+        # Stage 3: regime-based labeling with ADX-adaptive thresholds
+        use_regime_labels = getattr(args, 'regime_labels', False)
+        trend_threshold = getattr(args, 'trend_threshold', 0.0015)
+        range_threshold = getattr(args, 'range_threshold', 0.0030)
+        
+        mode = "REGIME_BASED" if use_regime_labels else ("PURE_DIRECTIONAL" if use_pure_directional else "COST_AWARE")
+        logger.info(f"Label config: mode={mode}, horizon={horizon}, cost={fixed_cost:.4%}, "
                    f"min_net_edge={min_net_edge:.4%}, min_confidence={min_confidence:.2f}")
+        if use_pure_directional:
+            logger.info(f"  Pure directional threshold: {directional_threshold:.4%}")
+        if use_regime_labels:
+            logger.info(f"  Regime thresholds: trend={trend_threshold:.4%}, range={range_threshold:.4%}")
         
         targets_df = generate_multihead_targets(
             df, 
@@ -184,7 +198,12 @@ def train(args):
             min_net_edge=min_net_edge,
             min_confidence=min_confidence,
             use_volatility_cost=use_volatility_cost,
-            fixed_cost=fixed_cost
+            fixed_cost=fixed_cost,
+            use_pure_directional=use_pure_directional,
+            directional_threshold=directional_threshold,
+            use_regime_labels=use_regime_labels,
+            trend_threshold=trend_threshold,
+            range_threshold=range_threshold
         )
         
         # Classification and regression targets
@@ -1304,10 +1323,20 @@ def main():
                              help="Fixed round-trip trading cost (default: 0.09%% = 0.0009)")
     train_parser.add_argument("--min-net-edge", type=float, default=0.0, dest="min_net_edge",
                              help="Minimum net edge after costs for trade signals (default: 0.0 = no filter)")
-    train_parser.add_argument("--min-confidence", type=float, default=0.7, dest="min_confidence",
-                             help="Minimum mu/sigma ratio for trade signals (default: 0.7)")
+    train_parser.add_argument("--min-confidence", type=float, default=0.40, dest="min_confidence",
+                             help="Minimum mu/sigma ratio for trade signals (default: 0.40, lowered from 0.7)")
     train_parser.add_argument("--volatility-cost", action="store_true", dest="volatility_cost",
                              help="Use volatility-based cost instead of fixed cost")
+    train_parser.add_argument("--pure-directional", action="store_true", dest="pure_directional",
+                             help="Stage 2: Use simple return threshold instead of cost-aware gating")
+    train_parser.add_argument("--directional-threshold", type=float, default=0.0020, dest="directional_threshold",
+                             help="Return threshold for pure directional mode (default: 0.20%% = 0.0020)")
+    train_parser.add_argument("--regime-labels", action="store_true", dest="regime_labels",
+                             help="Stage 3: Use ADX-based adaptive thresholds for different regimes")
+    train_parser.add_argument("--trend-threshold", type=float, default=0.0015, dest="trend_threshold",
+                             help="Return threshold for trending regime (default: 0.15%% = 0.0015)")
+    train_parser.add_argument("--range-threshold", type=float, default=0.0030, dest="range_threshold",
+                             help="Return threshold for ranging regime (default: 0.30%% = 0.0030)")
     train_parser.add_argument("--resume", type=str, help="Resume from checkpoint")
     train_parser.add_argument("--multihead", action="store_true", 
                              help="Use multi-head training with combined loss (Classification + Regression + Quantile)")
@@ -1324,8 +1353,18 @@ def main():
                                   help="Fixed round-trip trading cost (default: 0.09%%)")
     train_all_parser.add_argument("--min-net-edge", type=float, default=0.0, dest="min_net_edge",
                                   help="Minimum net edge after costs (default: 0.0)")
-    train_all_parser.add_argument("--min-confidence", type=float, default=0.7, dest="min_confidence",
-                                  help="Minimum mu/sigma ratio (default: 0.7)")
+    train_all_parser.add_argument("--min-confidence", type=float, default=0.40, dest="min_confidence",
+                                  help="Minimum mu/sigma ratio (default: 0.40, lowered from 0.7)")
+    train_all_parser.add_argument("--pure-directional", action="store_true", dest="pure_directional",
+                                  help="Stage 2: Use simple return threshold instead of cost-aware gating")
+    train_all_parser.add_argument("--directional-threshold", type=float, default=0.0020, dest="directional_threshold",
+                                  help="Return threshold for pure directional mode (default: 0.20%%)")
+    train_all_parser.add_argument("--regime-labels", action="store_true", dest="regime_labels",
+                                  help="Stage 3: Use ADX-based adaptive thresholds for different regimes")
+    train_all_parser.add_argument("--trend-threshold", type=float, default=0.0015, dest="trend_threshold",
+                                  help="Return threshold for trending regime (default: 0.15%%)")
+    train_all_parser.add_argument("--range-threshold", type=float, default=0.0030, dest="range_threshold",
+                                  help="Return threshold for pure directional mode (default: 0.20%%)")
     
     rl_parser = subparsers.add_parser("train-rl", help="Train reinforcement learning agent")
     rl_parser.add_argument("--episodes", type=int, default=1000, help="Number of episodes")

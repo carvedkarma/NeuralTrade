@@ -63,7 +63,14 @@ Preferred communication style: Simple, everyday language.
 - **Volatility Gate**: Triggers "NO_FORECAST" mode when volatility is contracting or expected spread is insufficient.
 
 #### Advanced Labeling and Prediction
-- **Cost-Aware Labeling**: Signals generated only when net edge (accounting for trading costs) exceeds a minimum threshold and confidence is sufficient.
+- **3-Stage HOLD Fix**: Addresses HOLD-heavy label distribution (target: HOLD 50-70%, LONG 15-25%, SHORT 15-25%):
+  - **Stage 1**: `min_confidence` lowered from 0.7 to 0.40 (cost-aware mode)
+  - **Stage 2**: Pure directional mode (`--pure-directional`) bypasses gates, uses simple return threshold (default 0.20%)
+  - **Stage 3**: Regime-based labeling (`--regime-labels`) with ADX-adaptive thresholds:
+    - Trending regime (ADX>25): 0.15% threshold
+    - Ranging regime (ADX<20): 0.30% threshold
+    - Transition zone (20-25): middle threshold (0.20%)
+- **Cost-Aware Labeling**: Signals generated only when net edge (accounting for trading costs) exceeds a minimum threshold and confidence is sufficient. Gates apply to live execution only, not label generation.
 - **Gaussian NLL with Log-Sigma**: Predicts `log_sigma` for calibrated uncertainty estimates.
 - **Constrained Candle Parameterization**: Predicts `delta_close`, `log_range`, and `skew` to guarantee valid candle predictions.
 - **Quantile-Based SL/TP Derivation**: Stop-loss and take-profit levels are derived directly from predicted quantiles.
