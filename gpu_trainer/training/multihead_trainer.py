@@ -524,8 +524,10 @@ class MultiHeadTrainer:
         cost = 0.001  # 0.1% round-trip cost
         
         with torch.no_grad():
-            for features, class_labels, returns, trading, candle_tgt in self.val_loader:
-                features = features.to(self.device)
+            for batch in self.val_loader:
+                # Handle both old (5 values) and new (7 values with vol_state, accel) formats
+                features = batch[0].to(self.device)
+                returns = batch[2]
                 output = self.model.forward_multihead(features)
                 
                 probs = torch.softmax(output.class_logits, dim=-1)
@@ -667,8 +669,9 @@ class MultiHeadTrainer:
         
         with torch.no_grad():
             for batch in self.val_loader:
-                features, class_labels, returns, trading, candle_tgt = batch
-                features = features.to(self.device)
+                # Handle both 5-item (legacy) and 7-item (with flow forecast) batches
+                features = batch[0].to(self.device)
+                returns = batch[2]  # returns is always at index 2
                 output = self.model.forward_multihead(features)
                 
                 probs = torch.softmax(output.class_logits, dim=-1)
