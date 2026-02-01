@@ -653,6 +653,15 @@ class MultiHeadTrainer:
                    directional_signal.sum(), len(directional_signal), 
                    100 * directional_signal.sum() / len(directional_signal))
         
+        # === NEW: Minimum predicted-move filter ===
+        # If abs(mu) < 0.5 × sigma (ATR proxy) → no trade (insufficient edge)
+        MIN_MOVE_FACTOR = 0.5
+        move_gate = np.abs(mus) >= (MIN_MOVE_FACTOR * sigmas)
+        n_move_pass = move_gate.sum()
+        logger.info("MOVE_GATE | abs(mu) >= %.1f×sigma: %d / %d pass (%.1f%%)",
+                   MIN_MOVE_FACTOR, n_move_pass, len(move_gate), 
+                   100 * n_move_pass / len(move_gate) if len(move_gate) > 0 else 0)
+        
         # === SWEEP CONFIDENCE THRESHOLDS TO FIND BEST POLICY ===
         MIN_TRADES = 30  # Minimum trades for policy eligibility
         
@@ -678,14 +687,16 @@ class MultiHeadTrainer:
             n_directional = directional_signal.sum()
             n_dir_and_spread = (directional_signal & spread_gate).sum()
             n_dir_and_conf = (directional_signal & conf_gate).sum()
+            n_move_and_dir = (move_gate & directional_signal).sum()
             
-            logger.info("CONF_DEBUG | threshold=%.2f | spread_pass=%d, conf_pass=%d, "
-                       "dir=%d, dir&spread=%d, dir&conf=%d",
-                       min_conf, n_spread_pass, n_conf_pass, 
-                       n_directional, n_dir_and_spread, n_dir_and_conf)
+            logger.info("CONF_DEBUG | threshold=%.2f | spread_pass=%d, conf_pass=%d, move_pass=%d, "
+                       "dir=%d, dir&spread=%d, dir&conf=%d, dir&move=%d",
+                       min_conf, n_spread_pass, n_conf_pass, n_move_pass,
+                       n_directional, n_dir_and_spread, n_dir_and_conf, n_move_and_dir)
             
-            # Combined gates (order: spread -> confidence -> direction)
-            trade_allowed = spread_gate & conf_gate & directional_signal
+            # Combined gates (order: spread -> confidence -> direction -> move_filter)
+            # move_gate: abs(mu) >= 0.5 × sigma (minimum predicted move)
+            trade_allowed = spread_gate & conf_gate & directional_signal & move_gate
             n_trade_allowed = trade_allowed.sum()
             
             # Gate 4: Cooldown - prevent overtrading
@@ -702,10 +713,11 @@ class MultiHeadTrainer:
                        min_conf, n_trade_allowed, n_final,
                        "PASS" if n_final > 0 else "FAIL (no trades)")
             
-            # Compute PnL with asymmetric SL/TP using quantiles
-            metrics = self._compute_pnl_with_quantile_exits(
+            # Compute PnL with ATR-based asymmetric SL/TP
+            # SL = 1.5 × sigma, TP = 2.2 × sigma, min RR >= 1.5
+            metrics = self._compute_pnl_with_atr_exits(
                 final_trades, long_signal, short_signal, returns, 
-                q10, q25, q75, q90, FIXED_COST
+                mus, sigmas, FIXED_COST
             )
             metrics['min_confidence'] = min_conf
             metrics['spread_multiplier'] = SPREAD_MULTIPLIER
@@ -860,6 +872,143 @@ class MultiHeadTrainer:
                     pnl = -tp_level - cost  # Take profit hit
                 else:
                     pnl = -actual_ret - cost  # Normal exit
+                trade_pnl[i] = pnl
+        
+        # Filter to actual trades
+        trade_returns = trade_pnl[trade_mask]
+        num_trades = len(trade_returns)
+        
+        # Expectancy
+        metrics['expectancy'] = float(np.mean(trade_returns)) if num_trades > 0 else 0.0
+        
+        # Hit rate
+        wins = (trade_returns > 0).sum()
+        metrics['hit_rate'] = float(wins / num_trades) if num_trades > 0 else 0.0
+        
+        # Profit factor
+        gross_profits = trade_returns[trade_returns > 0].sum()
+        gross_losses = abs(trade_returns[trade_returns < 0].sum())
+        metrics['profit_factor'] = float(gross_profits / gross_losses) if gross_losses > 0 else 0.0
+        
+        # Sharpe ratio
+        if num_trades > 1 and np.std(trade_returns) > 0:
+            annual_factor = np.sqrt(2190)  # ~6 trades/day
+            sharpe = (np.mean(trade_returns) / np.std(trade_returns)) * annual_factor
+            metrics['sharpe'] = float(sharpe)
+        else:
+            metrics['sharpe'] = 0.0
+        
+        # Max drawdown
+        cumulative = np.cumsum(trade_returns)
+        running_max = np.maximum.accumulate(cumulative)
+        drawdown = running_max - cumulative
+        metrics['max_drawdown'] = float(np.max(drawdown)) if len(drawdown) > 0 else 0.0
+        
+        # Number of trades
+        metrics['num_trades'] = int(num_trades)
+        
+        # Average win / loss
+        if wins > 0:
+            metrics['avg_win'] = float(np.mean(trade_returns[trade_returns > 0]))
+        else:
+            metrics['avg_win'] = 0.0
+        
+        losses_count = (trade_returns < 0).sum()
+        if losses_count > 0:
+            metrics['avg_loss'] = float(np.mean(trade_returns[trade_returns < 0]))
+        else:
+            metrics['avg_loss'] = 0.0
+        
+        # Win/loss ratio
+        if metrics['avg_loss'] != 0:
+            metrics['win_loss_ratio'] = abs(metrics['avg_win'] / metrics['avg_loss'])
+        else:
+            metrics['win_loss_ratio'] = 0.0
+        
+        return metrics
+    
+    def _compute_pnl_with_atr_exits(
+        self, 
+        final_trades: np.ndarray,
+        long_signal: np.ndarray,
+        short_signal: np.ndarray,
+        returns: np.ndarray,
+        mus: np.ndarray,
+        sigmas: np.ndarray,
+        cost: float
+    ) -> Dict[str, float]:
+        """
+        Compute PnL using ATR-based asymmetric SL/TP.
+        
+        Uses sigma (predicted volatility) as ATR proxy:
+        - SL = 1.5 × sigma (stop loss distance)
+        - TP = 2.2 × sigma (take profit distance)
+        - Enforces minimum RR >= 1.5
+        
+        This provides proper risk:reward asymmetry based on volatility.
+        """
+        # ATR-based exit parameters
+        SL_ATR_MULT = 1.5   # Stop loss = 1.5 × ATR (sigma)
+        TP_ATR_MULT = 2.2   # Take profit = 2.2 × ATR (sigma)
+        MIN_RR = 1.5        # Minimum risk:reward ratio
+        
+        metrics = {}
+        
+        # Get trades
+        long_trades = final_trades & long_signal
+        short_trades = final_trades & short_signal
+        trade_mask = long_trades | short_trades
+        
+        num_trades = trade_mask.sum()
+        if num_trades == 0:
+            return {
+                'expectancy': 0.0, 'hit_rate': 0.0, 'profit_factor': 0.0,
+                'sharpe': 0.0, 'max_drawdown': 0.0, 'num_trades': 0,
+                'avg_win': 0.0, 'avg_loss': 0.0, 'win_loss_ratio': 0.0
+            }
+        
+        # Compute PnL with ATR-based asymmetric exits
+        trade_pnl = np.zeros(len(returns))
+        
+        for i in range(len(returns)):
+            if not (long_trades[i] or short_trades[i]):
+                continue
+                
+            # Use sigma as ATR proxy (represents volatility/uncertainty)
+            atr = max(sigmas[i], 1e-6)  # Prevent division by zero
+            
+            # Compute SL and TP distances
+            sl_distance = SL_ATR_MULT * atr
+            tp_distance = TP_ATR_MULT * atr
+            
+            # Enforce minimum RR ratio
+            if tp_distance < MIN_RR * sl_distance:
+                tp_distance = MIN_RR * sl_distance
+            
+            actual_ret = returns[i]
+            
+            if long_trades[i]:
+                # LONG trade: profit if price goes up
+                # SL triggers if return goes below -sl_distance
+                # TP triggers if return goes above +tp_distance
+                if actual_ret <= -sl_distance:
+                    pnl = -sl_distance - cost  # Stopped out (loss)
+                elif actual_ret >= tp_distance:
+                    pnl = tp_distance - cost   # Take profit hit (win)
+                else:
+                    pnl = actual_ret - cost    # Normal exit
+                trade_pnl[i] = pnl
+                
+            elif short_trades[i]:
+                # SHORT trade: profit if price goes down
+                # SL triggers if return goes above +sl_distance (price up = bad)
+                # TP triggers if return goes below -tp_distance (price down = good)
+                if actual_ret >= sl_distance:
+                    pnl = -sl_distance - cost  # Stopped out (loss)
+                elif actual_ret <= -tp_distance:
+                    pnl = tp_distance - cost   # Take profit hit (win)
+                else:
+                    pnl = -actual_ret - cost   # Normal exit (profit when price down)
                 trade_pnl[i] = pnl
         
         # Filter to actual trades
