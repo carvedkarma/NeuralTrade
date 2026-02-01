@@ -17,6 +17,13 @@ import { getLatestFeatures } from "./feature-engine";
 import { recalculatePatternLabels } from "./pattern-memory";
 import { edgeTracker } from "./edge-tracker";
 import { 
+  syncLatest15mCandles, 
+  startLiveCandleSync, 
+  stopLiveCandleSync, 
+  getSyncStatus, 
+  checkDataFreshness 
+} from "./live-candle-sync";
+import { 
   getAvailableTimeframes, 
   getDataRange, 
   exportMultiTFCandles, 
@@ -65,6 +72,10 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // Start live candle sync service automatically
+  console.log("[Server] Starting live 15m candle sync service...");
+  startLiveCandleSync();
+  
   app.use("/api/paper", paperRoutes);
   app.get("/api/dashboard", async (req, res) => {
     try {
@@ -1315,6 +1326,156 @@ export async function registerRoutes(
       trainingModeDescription,
       inputDim
     });
+  });
+
+  // ============ LIVE CANDLE SYNC ENDPOINTS ============
+  
+  // Get live sync status
+  app.get("/api/sync/status", async (req, res) => {
+    try {
+      const status = getSyncStatus();
+      const freshness = await checkDataFreshness();
+      res.json({
+        ...status,
+        ...freshness,
+      });
+    } catch (error) {
+      console.error("[Sync API] Error getting status:", error);
+      res.status(500).json({ error: "Failed to get sync status" });
+    }
+  });
+  
+  // Manually trigger sync
+  app.post("/api/sync/trigger", async (req, res) => {
+    try {
+      console.log("[Sync API] Manual sync triggered");
+      const result = await syncLatest15mCandles();
+      res.json(result);
+    } catch (error) {
+      console.error("[Sync API] Error triggering sync:", error);
+      res.status(500).json({ error: "Failed to trigger sync" });
+    }
+  });
+  
+  // Start continuous live sync
+  app.post("/api/sync/start", (req, res) => {
+    try {
+      startLiveCandleSync();
+      res.json({ success: true, message: "Live sync started" });
+    } catch (error) {
+      console.error("[Sync API] Error starting sync:", error);
+      res.status(500).json({ error: "Failed to start sync" });
+    }
+  });
+  
+  // Stop continuous live sync
+  app.post("/api/sync/stop", (req, res) => {
+    try {
+      stopLiveCandleSync();
+      res.json({ success: true, message: "Live sync stopped" });
+    } catch (error) {
+      console.error("[Sync API] Error stopping sync:", error);
+      res.status(500).json({ error: "Failed to stop sync" });
+    }
+  });
+  
+  // ============ DAILY RETRAINING ENDPOINTS ============
+  
+  // Trigger daily retraining pipeline
+  app.post("/api/retrain/daily", async (req, res) => {
+    try {
+      console.log("[Daily Retrain] Starting daily retraining pipeline...");
+      
+      // Step 1: Sync latest candles
+      console.log("[Daily Retrain] Step 1: Syncing latest candles...");
+      const syncResult = await syncLatest15mCandles();
+      if (!syncResult.success) {
+        return res.status(500).json({ 
+          error: "Data sync failed", 
+          step: "sync",
+          details: syncResult.message 
+        });
+      }
+      
+      // Step 2: Check data freshness
+      const freshness = await checkDataFreshness();
+      if (!freshness.isFresh) {
+        return res.status(400).json({
+          error: "Data not fresh enough for training",
+          step: "freshness_check",
+          details: freshness.message,
+          lastCandleAge: freshness.lastCandleAge
+        });
+      }
+      
+      // Step 3: Trigger GPU training via GPU bridge
+      console.log("[Daily Retrain] Step 2: Triggering GPU training...");
+      const gpuHealth = await gpuBridge.checkHealth();
+      if (!gpuHealth) {
+        return res.status(503).json({
+          error: "GPU trainer not available",
+          step: "gpu_check",
+          details: "Cannot reach GPU trainer. Make sure it's running."
+        });
+      }
+      
+      // Trigger multihead training
+      const trainingStarted = await gpuBridge.startTraining("multihead", 100);
+      if (!trainingStarted) {
+        return res.status(500).json({
+          error: "Failed to start training",
+          step: "training_start",
+          details: "GPU trainer rejected training request"
+        });
+      }
+      
+      res.json({
+        success: true,
+        message: "Daily retraining pipeline started",
+        steps: {
+          sync: { success: true, candlesSynced: syncResult.candlesInserted },
+          freshness: { success: true, lastCandleAge: freshness.lastCandleAge },
+          training: { success: true, status: "started" }
+        }
+      });
+    } catch (error) {
+      console.error("[Daily Retrain] Error:", error);
+      res.status(500).json({ 
+        error: "Daily retraining failed",
+        details: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+  
+  // Get retraining status
+  app.get("/api/retrain/status", async (req, res) => {
+    try {
+      const syncStatus = getSyncStatus();
+      const freshness = await checkDataFreshness();
+      const gpuHealth = await gpuBridge.checkHealth();
+      const gpuStatus = gpuBridge.getPushedStatus();
+      
+      res.json({
+        dataSync: {
+          isRunning: syncStatus.isRunning,
+          lastSyncTs: syncStatus.lastSyncTs,
+          dataFreshness: syncStatus.dataFreshness,
+          staleDurationMinutes: syncStatus.staleDurationMinutes,
+        },
+        gpuTrainer: {
+          connected: gpuHealth !== null,
+          isTraining: gpuStatus.isTraining || false,
+          trainingProgress: gpuStatus.trainingProgress || 0,
+          currentModel: gpuStatus.currentModel || null,
+        },
+        readyForTraining: freshness.isFresh && gpuHealth !== null && !gpuStatus.isTraining,
+        lastRetrainTs: null, // Could track this in DB
+        nextScheduledRetrain: null, // Could implement scheduler
+      });
+    } catch (error) {
+      console.error("[Retrain API] Error:", error);
+      res.status(500).json({ error: "Failed to get retrain status" });
+    }
   });
 
   // Get GPU trainer connection settings

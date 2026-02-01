@@ -6,6 +6,7 @@ import {
 } from "@shared/schema";
 import { eq, desc, lt, sql, and, gte, lte } from "drizzle-orm";
 import { getKlines, getMarkPrice } from "./binance";
+import { getBTCCandlesBinanceVision, getBTCPriceBinanceVision } from "./binance-vision";
 
 const FIFTEEN_MIN_MS = 15 * 60 * 1000;
 const HORIZON_BARS = 16;
@@ -148,8 +149,16 @@ interface GapFillResult {
 }
 
 async function gapFillCandles(): Promise<GapFillResult> {
-  const markPriceResult = await getMarkPrice();
-  const tickerPrice = markPriceResult ? parseFloat(markPriceResult.markPrice) : 0;
+  // Use Binance Vision (works from restricted regions) instead of Binance Futures API
+  let tickerPrice = 0;
+  try {
+    const visionPrice = await getBTCPriceBinanceVision();
+    tickerPrice = visionPrice || 0;
+  } catch (e) {
+    // Fallback to original method
+    const markPriceResult = await getMarkPrice();
+    tickerPrice = markPriceResult ? parseFloat(markPriceResult.markPrice) : 0;
+  }
   
   const lastCandle = await db.select()
     .from(candles)
@@ -175,9 +184,16 @@ async function gapFillCandles(): Promise<GapFillResult> {
   let candlesFilled = 0;
   
   if (gapBars > 0 && gapBars < 1000) {
-    console.log(`[Gap Fill] Detected ${gapBars} missing 15m bars, fetching...`);
+    console.log(`[Gap Fill] Detected ${gapBars} missing 15m bars, fetching from Binance Vision...`);
     
-    const newCandles = await getKlines("BTCUSDT", "15m", Math.min(gapBars + 5, 500));
+    // Use Binance Vision API (works from restricted regions)
+    let newCandles = await getBTCCandlesBinanceVision("15m", Math.min(gapBars + 10, 500));
+    
+    // Fallback to original if Vision fails
+    if (newCandles.length === 0) {
+      console.log(`[Gap Fill] Binance Vision failed, trying original API...`);
+      newCandles = await getKlines("BTCUSDT", "15m", Math.min(gapBars + 5, 500));
+    }
     
     for (const candle of newCandles) {
       if (candle.timestamp > lastCandleTs) {
@@ -199,7 +215,7 @@ async function gapFillCandles(): Promise<GapFillResult> {
     }
     
     if (candlesFilled > 0) {
-      console.log(`[Gap Fill] Inserted ${candlesFilled} new candles`);
+      console.log(`[Gap Fill] Inserted ${candlesFilled} new candles via Binance Vision`);
     }
   }
   
