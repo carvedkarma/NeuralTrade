@@ -1631,21 +1631,40 @@ class GPUTrainerGUI:
                         val_features = engineer.compute_technical_features(val_df).fillna(0)
                         
                         if use_multihead:
+                            # Use same label_mode settings as STF path
+                            label_mode = getattr(self, 'label_mode', 'regime')
+                            use_pure_directional = (label_mode == "pure_directional")
+                            use_regime_labels = (label_mode == "regime")
+                            directional_threshold = getattr(self, 'directional_threshold', 0.0020)
+                            trend_threshold = getattr(self, 'trend_threshold', 0.0015)
+                            range_threshold = getattr(self, 'range_threshold', 0.0030)
+                            min_confidence = getattr(self, 'min_confidence', 0.40)
+                            
                             train_targets = generate_multihead_targets(
                                 train_df, 
                                 horizon_periods=horizon,
                                 min_net_edge=0.0,
-                                min_confidence=0.7,
+                                min_confidence=min_confidence,  # Stage 1: 0.40
                                 use_volatility_cost=False,
-                                fixed_cost=0.0009
+                                fixed_cost=0.0009,
+                                use_pure_directional=use_pure_directional,  # Stage 2
+                                directional_threshold=directional_threshold,
+                                use_regime_labels=use_regime_labels,  # Stage 3
+                                trend_threshold=trend_threshold,
+                                range_threshold=range_threshold
                             )
                             val_targets = generate_multihead_targets(
                                 val_df, 
                                 horizon_periods=horizon,
                                 min_net_edge=0.0,
-                                min_confidence=0.7,
+                                min_confidence=min_confidence,  # Stage 1: 0.40
                                 use_volatility_cost=False,
-                                fixed_cost=0.0009
+                                fixed_cost=0.0009,
+                                use_pure_directional=use_pure_directional,  # Stage 2
+                                directional_threshold=directional_threshold,
+                                use_regime_labels=use_regime_labels,  # Stage 3
+                                trend_threshold=trend_threshold,
+                                range_threshold=range_threshold
                             )
                             
                             train_labels_arr = train_targets['class_label'].values
