@@ -30,6 +30,7 @@ try:
         TradeGateConfig, compute_trade_gate, apply_cooldown, 
         log_gate_statistics, GateFailure, DEFAULT_GATE_CONFIG
     )
+    from .walk_forward import save_walk_forward_weights
 except ImportError:
     # Fallback for direct script execution
     from training.multihead_loss import MultiHeadLoss, MultiHeadLossConfig
@@ -38,6 +39,7 @@ except ImportError:
         TradeGateConfig, compute_trade_gate, apply_cooldown,
         log_gate_statistics, GateFailure, DEFAULT_GATE_CONFIG
     )
+    from training.walk_forward import save_walk_forward_weights
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1272,6 +1274,10 @@ class MultiHeadTrainer:
             'quantile_loss': []
         }
         
+        # Track best trading metrics for model_weights.json save
+        best_trading_metrics = None
+        best_trading_score = float('-inf')
+        
         for epoch in range(epochs):
             train_metrics = self.train_epoch(epoch)
             val_metrics = self.validate(epoch=epoch)
@@ -1307,6 +1313,26 @@ class MultiHeadTrainer:
                 self.writer.add_scalar('Trading/profit_factor', val_metrics['profit_factor'], epoch)
                 self.writer.add_scalar('Trading/max_drawdown', val_metrics['max_drawdown'], epoch)
                 self.writer.add_scalar('Trading/num_trades', val_metrics['num_trades'], epoch)
+                
+                # Track best trading metrics for model_weights.json
+                # Always track, but prefer runs with more trades
+                current_score = val_metrics.get('risk_adjusted_score', val_metrics['expectancy'])
+                num_trades = val_metrics.get('num_trades', 0)
+                
+                # Update best if: (a) more trades OR (b) same/more trades with better score
+                should_update = False
+                if best_trading_metrics is None:
+                    should_update = True  # First observation
+                elif num_trades > best_trading_metrics.get('num_trades', 0):
+                    should_update = True  # More trades = better sample
+                elif num_trades == best_trading_metrics.get('num_trades', 0) and current_score > best_trading_score:
+                    should_update = True  # Same trades, better score
+                
+                if should_update:
+                    best_trading_score = current_score
+                    best_trading_metrics = val_metrics.copy()
+                    best_trading_metrics['best_epoch'] = epoch + 1
+                    logger.info(f"[BEST TRADING] Updated at epoch {epoch+1}: score={current_score:.4f}, trades={num_trades}")
             
             # Progress callback
             if self.epoch_callback:
@@ -1341,6 +1367,59 @@ class MultiHeadTrainer:
                 logger.info(f"[MIN_EPOCHS PROTECTION] Epoch {epoch+1}/{epochs} - patience exhausted but min_epochs={min_epochs} not reached, continuing...")
         
         self.writer.close()
+        
+        # === SAVE WALK-FORWARD WEIGHTS TO model_weights.json ===
+        if best_trading_metrics is not None:
+            try:
+                total_trades = best_trading_metrics.get('num_trades', 0)
+                
+                # Convert to format expected by save_walk_forward_weights
+                wf_summary = {
+                    'total_trades': total_trades,
+                    'overall_win_rate': best_trading_metrics.get('hit_rate', 0.5),
+                    'overall_expectancy': best_trading_metrics.get('expectancy', 0.0),
+                    'overall_profit_factor': best_trading_metrics.get('profit_factor', 1.0),
+                    'overall_sharpe': best_trading_metrics.get('sharpe', 0.0),
+                    'worst_drawdown': best_trading_metrics.get('max_drawdown', 0.0),
+                    'n_folds': 1,  # Single validation split (not true walk-forward)
+                    'avg_trades_per_fold': total_trades,
+                    'best_epoch': best_trading_metrics.get('best_epoch', epochs),
+                    'source': 'validation_sweep'  # Mark as val-derived, not full walk-forward
+                }
+                
+                # Determine model name from model attribute or default
+                model_name = getattr(self.model, 'name', 'unknown').lower()
+                
+                # Save to checkpoints directory
+                weights_dir = str(Path(__file__).parent.parent / "checkpoints")
+                
+                logger.info("=" * 70)
+                logger.info("SAVING WALK-FORWARD WEIGHTS TO model_weights.json")
+                logger.info(f"  Model: {model_name}")
+                logger.info(f"  Trades: {total_trades}")
+                logger.info(f"  Expectancy: {wf_summary['overall_expectancy']:.4f}")
+                logger.info(f"  Win Rate: {wf_summary['overall_win_rate']:.2%}")
+                logger.info(f"  Sharpe: {wf_summary['overall_sharpe']:.2f}")
+                
+                if total_trades < 30:
+                    logger.warning(f"  ⚠️ LOW TRADE COUNT ({total_trades} < 30) - metrics may be unreliable")
+                    
+                logger.info("=" * 70)
+                
+                save_walk_forward_weights(model_name, wf_summary, weights_dir, force_save=True)
+                logger.info(f"[SUCCESS] Saved weights to {weights_dir}/model_weights.json")
+                
+            except Exception as e:
+                logger.error(f"[ERROR] Failed to save walk-forward weights: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            logger.warning("=" * 70)
+            logger.warning("NO WALK-FORWARD WEIGHTS SAVED - No eligible trading metrics found")
+            logger.warning("  Requires: num_trades >= 30 from monitoring sweeps")
+            logger.warning("  Check: MIN_MOVE_FACTOR, confidence thresholds, spread filter")
+            logger.warning("=" * 70)
+        
         return history
     
     def _save_checkpoint(self, path: str, metrics: Dict[str, float]):
