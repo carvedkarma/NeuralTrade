@@ -542,17 +542,91 @@ class WalkForwardEvaluator:
 # PHASE 3: WALK-FORWARD MODEL WEIGHT SAVER
 # ============================================================
 # Saves real walk-forward metrics to model_weights.json for ensemble weighting
+# Smart save: Only overwrites if new metrics are better than existing
 
 import json
 from pathlib import Path
 
+# Minimum trades threshold for "reliable" metrics
+MIN_TRADES_RELIABLE = 30
+
+
+def is_new_weights_better(
+    new_entry: Dict,
+    existing_entry: Dict,
+    min_trades: int = MIN_TRADES_RELIABLE
+) -> tuple[bool, str]:
+    """
+    Compare new weights against existing to determine if we should overwrite.
+    
+    Rules:
+    1. If no existing entry -> always save (new is better)
+    2. If both unreliable (< min_trades): new must have >= trades to overwrite
+    3. If new is unreliable but existing is reliable -> don't overwrite
+    4. If existing is unreliable but new is reliable -> overwrite
+    5. Both reliable: new must have >= expectancy AND trades >= 50% of existing
+    
+    Args:
+        new_entry: New weight entry to potentially save
+        existing_entry: Existing weight entry (or None)
+        min_trades: Minimum trades for reliable metrics
+        
+    Returns:
+        Tuple of (should_save: bool, reason: str)
+    """
+    if existing_entry is None:
+        return True, "No existing weights - saving new"
+    
+    new_trades = new_entry.get("total_trades", 0)
+    existing_trades = existing_entry.get("total_trades", 0)
+    new_expectancy = new_entry.get("expectancy", 0)
+    existing_expectancy = existing_entry.get("expectancy", 0)
+    
+    new_reliable = new_trades >= min_trades
+    existing_reliable = existing_trades >= min_trades
+    
+    # Rule 2: Both unreliable - require new to have more trades OR better expectancy
+    if not existing_reliable and not new_reliable:
+        if new_trades > existing_trades:
+            return True, f"Both unreliable, new has more trades: {new_trades} > {existing_trades}"
+        if new_trades == existing_trades and new_expectancy > existing_expectancy:
+            return True, f"Both unreliable, same trades but better expectancy: {new_expectancy:.4f} > {existing_expectancy:.4f}"
+        return False, f"Both unreliable, new not better: trades {new_trades} vs {existing_trades}, exp {new_expectancy:.4f} vs {existing_expectancy:.4f}"
+    
+    # Rule 3: New is unreliable but existing is reliable -> don't overwrite
+    if not new_reliable and existing_reliable:
+        return False, f"New has {new_trades} trades (< {min_trades}) but existing has {existing_trades} - keeping existing"
+    
+    # Rule 4: Existing is unreliable but new is reliable -> overwrite
+    if new_reliable and not existing_reliable:
+        return True, f"New is reliable ({new_trades} trades) replacing unreliable existing ({existing_trades} trades)"
+    
+    # Rule 5: Both reliable - compare quality
+    # New must have >= expectancy AND trades >= 50% of existing
+    trades_ratio = new_trades / existing_trades if existing_trades > 0 else 1.0
+    
+    if new_expectancy >= existing_expectancy and trades_ratio >= 0.5:
+        return True, f"New is better: expectancy {new_expectancy:.4f} >= {existing_expectancy:.4f}, trades ratio {trades_ratio:.1%}"
+    
+    if new_expectancy > existing_expectancy * 1.5:
+        # Much better expectancy can compensate for fewer trades
+        return True, f"New has much better expectancy: {new_expectancy:.4f} vs {existing_expectancy:.4f}"
+    
+    # Default: keep existing
+    return False, f"Keeping existing: trades {existing_trades} vs {new_trades}, expectancy {existing_expectancy:.4f} vs {new_expectancy:.4f}"
+
+
 def save_walk_forward_weights(
     model_name: str,
     summary: Dict,
-    weights_dir: str = "checkpoints"
+    weights_dir: str = "checkpoints",
+    force_save: bool = False
 ) -> Dict:
     """
     PHASE 3: Save walk-forward evaluation metrics as model weights.
+    
+    Smart save: Only overwrites if new metrics are better than existing,
+    unless force_save=True.
     
     This replaces the placeholder defaults with real trading metrics.
     The ensemble predictor will load these to weight model votes.
@@ -561,9 +635,10 @@ def save_walk_forward_weights(
         model_name: Name of the model (e.g., "transformer", "lstm")
         summary: Walk-forward summary dict from WalkForwardEvaluator.summarize_results()
         weights_dir: Directory to save model_weights.json
+        force_save: If True, always save regardless of comparison
         
     Returns:
-        Dict with the saved weight configuration
+        Dict with the saved weight configuration (new or existing)
     """
     weights_path = Path(weights_dir) / "model_weights.json"
     weights_path.parent.mkdir(parents=True, exist_ok=True)
@@ -605,6 +680,25 @@ def save_walk_forward_weights(
         "evaluation_date": datetime.now().isoformat(),
         "n_folds": summary.get("n_folds", 0)
     }
+    
+    # Get existing entry for this model (if any)
+    existing_entry = existing_weights.get(model_name)
+    
+    # Smart save: Check if new is better than existing
+    if not force_save:
+        should_save, reason = is_new_weights_better(weight_entry, existing_entry)
+        
+        if not should_save:
+            logger.warning(f"[SMART SAVE] Skipping save for {model_name}: {reason}")
+            logger.warning(f"  New run: {total_trades} trades, expectancy={weight_entry['expectancy']:.4f}")
+            if existing_entry:
+                logger.warning(f"  Existing: {existing_entry.get('total_trades', 0)} trades, expectancy={existing_entry.get('expectancy', 0):.4f}")
+            logger.info(f"  Use force_save=True to override this check")
+            return existing_entry if existing_entry else weight_entry
+        else:
+            logger.info(f"[SMART SAVE] Updating weights for {model_name}: {reason}")
+    else:
+        logger.info(f"[SMART SAVE] Force saving weights for {model_name}")
     
     # Update weights
     existing_weights[model_name] = weight_entry
