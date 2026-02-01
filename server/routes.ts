@@ -1559,6 +1559,9 @@ export async function registerRoutes(
   // Neural Network Quantile Prediction endpoint - returns Entry/SL/TP derived from quantiles
   app.get("/api/gpu/nn-prediction", async (req, res) => {
     try {
+      // Import cone signal generator for multi-step band generation
+      const { coneSignalGenerator } = await import("./cone-signal-generator");
+      
       // Check if GPU is available
       const health = await gpuBridge.checkHealth();
       if (!health) {
