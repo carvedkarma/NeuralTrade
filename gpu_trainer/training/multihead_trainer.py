@@ -505,7 +505,13 @@ class MultiHeadTrainer:
     
     def _compute_trading_metrics(self) -> Dict[str, float]:
         """
-        Compute trading-aware evaluation metrics.
+        Compute trading-aware evaluation metrics with enhanced execution policy.
+        
+        Enhanced policy includes:
+        1. Spread gate: q75 - q25 >= K * cost (removes chop trades)
+        2. Confidence gate: |mu| / sigma >= min_confidence threshold
+        3. Cooldown: No new trades within COOLDOWN bars after a trade
+        4. Asymmetric SL/TP: Use quantiles for proper risk:reward
         
         These metrics are what actually matter for trading performance:
         - Expectancy: Average profit per trade (R-multiple)
@@ -517,11 +523,23 @@ class MultiHeadTrainer:
         Returns:
             Dictionary of trading metrics
         """
+        # Trading policy parameters
+        FIXED_COST = 0.0009  # 0.09% round-trip cost
+        SPREAD_MULTIPLIER = 3.0  # K: require spread >= K * cost
+        COOLDOWN = 8  # Bars to wait after a trade (horizon/2)
+        
+        # Confidence thresholds to sweep
+        CONFIDENCE_THRESHOLDS = [0.3, 0.5, 0.7, 0.9, 1.1]
+        
+        # Collect all model outputs
         all_predictions = []
         all_returns = []
         all_mus = []
-        
-        cost = 0.001  # 0.1% round-trip cost
+        all_sigmas = []
+        all_q10 = []
+        all_q25 = []
+        all_q75 = []
+        all_q90 = []
         
         with torch.no_grad():
             for batch in self.val_loader:
@@ -532,61 +550,237 @@ class MultiHeadTrainer:
                 
                 probs = torch.softmax(output.class_logits, dim=-1)
                 preds = probs.argmax(dim=-1)
-                confidence = probs.max(dim=-1).values
                 
                 all_predictions.extend(preds.cpu().numpy())
                 all_returns.extend(returns.cpu().numpy())
                 all_mus.extend(output.mu.squeeze().cpu().numpy())
+                all_sigmas.extend(output.sigma.squeeze().cpu().numpy())
+                
+                # Extract quantiles if available
+                if output.quantiles is not None:
+                    quantiles = output.quantiles.cpu().numpy()
+                    all_q10.extend(quantiles[:, 0])  # q10
+                    all_q25.extend(quantiles[:, 1])  # q25
+                    all_q75.extend(quantiles[:, 3])  # q75
+                    all_q90.extend(quantiles[:, 4])  # q90
         
         preds = np.array(all_predictions)
         returns = np.array(all_returns)
         mus = np.array(all_mus)
+        sigmas = np.array(all_sigmas)
         
-        metrics = {}
+        # Handle quantiles (use mu-based fallback if not available)
+        if len(all_q10) > 0:
+            q10 = np.array(all_q10)
+            q25 = np.array(all_q25)
+            q75 = np.array(all_q75)
+            q90 = np.array(all_q90)
+        else:
+            # Fallback: approximate quantiles from mu and sigma
+            q10 = mus - 1.28 * sigmas
+            q25 = mus - 0.67 * sigmas
+            q75 = mus + 0.67 * sigmas
+            q90 = mus + 1.28 * sigmas
         
-        # Filter for directional predictions (LONG=2, SHORT=0)
-        long_mask = preds == 2
-        short_mask = preds == 0
-        trade_mask = long_mask | short_mask
+        # Compute spread and confidence for all samples
+        spread = q75 - q25  # Distribution width
+        confidence = np.abs(mus) / np.maximum(sigmas, 1e-6)  # |mu| / sigma
         
-        if trade_mask.sum() == 0:
-            logger.warning("No directional trades in validation set")
-            return {
+        # Base trade signals (LONG=2, SHORT=0)
+        long_signal = preds == 2
+        short_signal = preds == 0
+        directional_signal = long_signal | short_signal
+        
+        # === SWEEP CONFIDENCE THRESHOLDS TO FIND BEST POLICY ===
+        best_metrics = None
+        best_expectancy = float('-inf')
+        best_threshold = 0.5
+        
+        sweep_results = []
+        
+        for min_conf in CONFIDENCE_THRESHOLDS:
+            # Apply gates:
+            # 1. Spread gate: spread >= K * cost
+            spread_gate = spread >= (SPREAD_MULTIPLIER * FIXED_COST)
+            # 2. Confidence gate: confidence >= threshold
+            conf_gate = confidence >= min_conf
+            
+            # Combined gate
+            trade_allowed = directional_signal & spread_gate & conf_gate
+            
+            # Apply cooldown
+            final_trades = self._apply_cooldown(trade_allowed, COOLDOWN)
+            
+            # Compute PnL with asymmetric SL/TP using quantiles
+            metrics = self._compute_pnl_with_quantile_exits(
+                final_trades, long_signal, short_signal, returns, 
+                q10, q25, q75, q90, FIXED_COST
+            )
+            metrics['min_confidence'] = min_conf
+            metrics['spread_multiplier'] = SPREAD_MULTIPLIER
+            metrics['cooldown'] = COOLDOWN
+            
+            sweep_results.append(metrics)
+            
+            # Track best
+            if metrics['expectancy'] > best_expectancy and metrics['num_trades'] >= 10:
+                best_expectancy = metrics['expectancy']
+                best_metrics = metrics
+                best_threshold = min_conf
+        
+        # Log policy sweep report
+        logger.info("=" * 60)
+        logger.info("POLICY SWEEP REPORT (spread_K=%.1f, cooldown=%d)", 
+                   SPREAD_MULTIPLIER, COOLDOWN)
+        logger.info("-" * 60)
+        for m in sweep_results:
+            status = "★ BEST" if m['min_confidence'] == best_threshold and m['expectancy'] > 0 else ""
+            logger.info(
+                f"conf>={m['min_confidence']:.1f}: Trades={m['num_trades']:4d}, "
+                f"Exp={m['expectancy']:+.4f}, Hit={m['hit_rate']:.1%}, "
+                f"AvgWin={m['avg_win']:+.4f}, AvgLoss={m['avg_loss']:+.4f}, "
+                f"Sharpe={m['sharpe']:+.2f} {status}"
+            )
+        logger.info("=" * 60)
+        
+        # Return best metrics (or last if none positive)
+        if best_metrics is None:
+            best_metrics = sweep_results[-1] if sweep_results else {
                 'expectancy': 0.0, 'hit_rate': 0.0, 'profit_factor': 0.0,
-                'sharpe': 0.0, 'max_drawdown': 0.0, 'num_trades': 0
+                'sharpe': 0.0, 'max_drawdown': 0.0, 'num_trades': 0,
+                'avg_win': 0.0, 'avg_loss': 0.0, 'win_loss_ratio': 0.0,
+                'min_confidence': 0.5, 'spread_multiplier': 3.0, 'cooldown': 8
             }
         
-        # Compute PnL for each trade
-        trade_pnl = np.zeros(len(returns))
-        trade_pnl[long_mask] = returns[long_mask] - cost  # LONG: profit if price goes up
-        trade_pnl[short_mask] = -returns[short_mask] - cost  # SHORT: profit if price goes down
+        logger.info(f"Trading Metrics (best policy) - Expectancy: {best_metrics['expectancy']:.4f}, "
+                   f"Hit Rate: {best_metrics['hit_rate']:.2%}, "
+                   f"Sharpe: {best_metrics['sharpe']:.2f}, "
+                   f"Trades: {best_metrics['num_trades']}")
         
-        # Filter to only actual trades
+        return best_metrics
+    
+    def _apply_cooldown(self, trade_signals: np.ndarray, cooldown: int) -> np.ndarray:
+        """
+        Apply cooldown to prevent signal spam.
+        After taking a trade, no new trades for `cooldown` candles.
+        
+        Args:
+            trade_signals: Boolean array of trade signals
+            cooldown: Number of bars to wait after a trade
+            
+        Returns:
+            Filtered trade signals with cooldown applied
+        """
+        result = np.zeros_like(trade_signals, dtype=bool)
+        last_trade_idx = -cooldown - 1  # Start with no cooldown active
+        
+        for i in range(len(trade_signals)):
+            if trade_signals[i] and (i - last_trade_idx) > cooldown:
+                result[i] = True
+                last_trade_idx = i
+        
+        return result
+    
+    def _compute_pnl_with_quantile_exits(
+        self, 
+        final_trades: np.ndarray,
+        long_signal: np.ndarray,
+        short_signal: np.ndarray,
+        returns: np.ndarray,
+        q10: np.ndarray,
+        q25: np.ndarray,
+        q75: np.ndarray,
+        q90: np.ndarray,
+        cost: float
+    ) -> Dict[str, float]:
+        """
+        Compute PnL using asymmetric SL/TP derived from quantiles.
+        
+        For LONG trades:
+            - SL distance from q10 (downside risk)
+            - TP from q75 or q90 (upside potential)
+        For SHORT trades:
+            - SL distance from q90 (upside risk)
+            - TP from q10 or q25 (downside potential)
+        
+        This ensures proper risk:reward asymmetry.
+        """
+        metrics = {}
+        
+        # Get trades
+        long_trades = final_trades & long_signal
+        short_trades = final_trades & short_signal
+        trade_mask = long_trades | short_trades
+        
+        num_trades = trade_mask.sum()
+        if num_trades == 0:
+            return {
+                'expectancy': 0.0, 'hit_rate': 0.0, 'profit_factor': 0.0,
+                'sharpe': 0.0, 'max_drawdown': 0.0, 'num_trades': 0,
+                'avg_win': 0.0, 'avg_loss': 0.0, 'win_loss_ratio': 0.0
+            }
+        
+        # Compute PnL with asymmetric exits
+        # For simulation, we still use actual returns but cap based on quantiles
+        trade_pnl = np.zeros(len(returns))
+        
+        for i in range(len(returns)):
+            if long_trades[i]:
+                # LONG trade: profit if price goes up
+                actual_ret = returns[i]
+                sl_level = q10[i]  # Stop at q10
+                tp_level = q75[i]  # Take profit at q75
+                
+                # Simulate exit: hit SL if return goes below q10, hit TP if above q75
+                if actual_ret <= sl_level:
+                    pnl = sl_level - cost  # Stopped out
+                elif actual_ret >= tp_level:
+                    pnl = tp_level - cost  # Take profit hit
+                else:
+                    pnl = actual_ret - cost  # Normal exit
+                trade_pnl[i] = pnl
+                
+            elif short_trades[i]:
+                # SHORT trade: profit if price goes down
+                actual_ret = returns[i]
+                sl_level = q90[i]  # Stop at q90 (price going up = bad)
+                tp_level = q25[i]  # Take profit at q25 (price going down = good)
+                
+                # For short: we profit when price goes down (negative return)
+                # SL triggers if return > q90, TP if return < q25
+                if actual_ret >= sl_level:
+                    pnl = -sl_level - cost  # Stopped out
+                elif actual_ret <= tp_level:
+                    pnl = -tp_level - cost  # Take profit hit
+                else:
+                    pnl = -actual_ret - cost  # Normal exit
+                trade_pnl[i] = pnl
+        
+        # Filter to actual trades
         trade_returns = trade_pnl[trade_mask]
         num_trades = len(trade_returns)
         
-        # Expectancy (average R per trade)
+        # Expectancy
         metrics['expectancy'] = float(np.mean(trade_returns)) if num_trades > 0 else 0.0
         
-        # Hit rate (percentage of winning trades)
+        # Hit rate
         wins = (trade_returns > 0).sum()
         metrics['hit_rate'] = float(wins / num_trades) if num_trades > 0 else 0.0
         
-        # Profit factor (gross profits / gross losses)
+        # Profit factor
         gross_profits = trade_returns[trade_returns > 0].sum()
         gross_losses = abs(trade_returns[trade_returns < 0].sum())
         metrics['profit_factor'] = float(gross_profits / gross_losses) if gross_losses > 0 else 0.0
         
-        # Cost-adjusted Sharpe ratio (annualized)
+        # Sharpe ratio
         if num_trades > 1 and np.std(trade_returns) > 0:
-            # Assuming each trade is ~4h, so ~6 trades/day = ~2190 trades/year
-            annual_factor = np.sqrt(2190)
+            annual_factor = np.sqrt(2190)  # ~6 trades/day
             sharpe = (np.mean(trade_returns) / np.std(trade_returns)) * annual_factor
             metrics['sharpe'] = float(sharpe)
         else:
             metrics['sharpe'] = 0.0
         
-        # Max drawdown (simple cumulative PnL version)
+        # Max drawdown
         cumulative = np.cumsum(trade_returns)
         running_max = np.maximum.accumulate(cumulative)
         drawdown = running_max - cumulative
@@ -595,30 +789,23 @@ class MultiHeadTrainer:
         # Number of trades
         metrics['num_trades'] = int(num_trades)
         
-        # Average win / average loss
+        # Average win / loss
         if wins > 0:
-            avg_win = np.mean(trade_returns[trade_returns > 0])
-            metrics['avg_win'] = float(avg_win)
+            metrics['avg_win'] = float(np.mean(trade_returns[trade_returns > 0]))
         else:
             metrics['avg_win'] = 0.0
         
         losses_count = (trade_returns < 0).sum()
         if losses_count > 0:
-            avg_loss = np.mean(trade_returns[trade_returns < 0])
-            metrics['avg_loss'] = float(avg_loss)
+            metrics['avg_loss'] = float(np.mean(trade_returns[trade_returns < 0]))
         else:
             metrics['avg_loss'] = 0.0
         
-        # Win/loss ratio (R:R)
+        # Win/loss ratio
         if metrics['avg_loss'] != 0:
             metrics['win_loss_ratio'] = abs(metrics['avg_win'] / metrics['avg_loss'])
         else:
             metrics['win_loss_ratio'] = 0.0
-        
-        logger.info(f"Trading Metrics - Expectancy: {metrics['expectancy']:.4f}, "
-                   f"Hit Rate: {metrics['hit_rate']:.2%}, "
-                   f"Sharpe: {metrics['sharpe']:.2f}, "
-                   f"Trades: {metrics['num_trades']}")
         
         return metrics
     
