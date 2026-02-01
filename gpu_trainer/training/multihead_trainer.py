@@ -588,6 +588,23 @@ class MultiHeadTrainer:
         mus = np.array(all_mus)
         raw_sigmas = np.array(all_sigmas)
         
+        # === DIAGNOSTIC: Class prediction distribution ===
+        n_total = len(preds)
+        n_short = (preds == 0).sum()  # SHORT
+        n_hold = (preds == 1).sum()   # HOLD
+        n_long = (preds == 2).sum()   # LONG
+        logger.info("=" * 70)
+        logger.info("PREDICTION DISTRIBUTION (epoch %d):", epoch)
+        logger.info("  SHORT (0): %5d / %d (%.1f%%)", n_short, n_total, 100*n_short/n_total if n_total > 0 else 0)
+        logger.info("  HOLD  (1): %5d / %d (%.1f%%)", n_hold, n_total, 100*n_hold/n_total if n_total > 0 else 0)
+        logger.info("  LONG  (2): %5d / %d (%.1f%%)", n_long, n_total, 100*n_long/n_total if n_total > 0 else 0)
+        if n_short + n_long == 0:
+            logger.warning(">>> MODEL PREDICTS 100%% HOLD - NO TRADES POSSIBLE <<<")
+        elif (n_short + n_long) / n_total < 0.05:
+            logger.warning(">>> MODEL PREDICTS %.1f%% DIRECTIONAL - VERY FEW TRADES <<<", 
+                          100*(n_short + n_long)/n_total)
+        logger.info("=" * 70)
+        
         # === CRITICAL FIX: Convert log_sigma to sigma ===
         # Model outputs log_sigma when use_log_sigma=True (default)
         # sigma = exp(log_sigma)
@@ -1069,6 +1086,30 @@ class MultiHeadTrainer:
         
         logger.info(f"[TRAINING CONFIG] epochs={epochs}, min_epochs={min_epochs}, patience={early_stopping_patience}")
         logger.info(f"[TRAINING CONFIG] Early stopping uses val_loss only - PolicySelector handles policy post-training")
+        
+        # === DIAGNOSTIC: Log training label distribution at start ===
+        try:
+            all_labels = []
+            for batch in self.train_loader:
+                labels = batch[1]  # labels are second element
+                all_labels.extend(labels.cpu().numpy())
+            all_labels = np.array(all_labels)
+            n_total = len(all_labels)
+            n_short = (all_labels == 0).sum()
+            n_hold = (all_labels == 1).sum()
+            n_long = (all_labels == 2).sum()
+            logger.info("=" * 70)
+            logger.info("TRAINING LABEL DISTRIBUTION:")
+            logger.info("  SHORT (0): %5d / %d (%.1f%%)", n_short, n_total, 100*n_short/n_total if n_total > 0 else 0)
+            logger.info("  HOLD  (1): %5d / %d (%.1f%%)", n_hold, n_total, 100*n_hold/n_total if n_total > 0 else 0)
+            logger.info("  LONG  (2): %5d / %d (%.1f%%)", n_long, n_total, 100*n_long/n_total if n_total > 0 else 0)
+            if n_hold / n_total > 0.90:
+                logger.warning(">>> TRAINING DATA IS %.1f%% HOLD - MODEL WILL LEARN TO PREDICT HOLD <<<", 
+                              100*n_hold/n_total)
+                logger.warning(">>> CONSIDER: Use pure_directional or regime label mode to balance labels <<<")
+            logger.info("=" * 70)
+        except Exception as e:
+            logger.warning(f"Could not compute label distribution: {e}")
         
         history = {
             'train_loss': [], 'val_loss': [],
