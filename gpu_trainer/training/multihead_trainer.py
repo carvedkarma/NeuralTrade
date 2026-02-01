@@ -390,8 +390,12 @@ class MultiHeadTrainer:
         
         return avg_losses
     
-    def validate(self) -> Dict[str, float]:
-        """Validate with all heads (8 heads)."""
+    def validate(self, epoch: int = 0) -> Dict[str, float]:
+        """Validate with all heads (8 heads).
+        
+        Args:
+            epoch: Current training epoch (used for monitoring sweep interval)
+        """
         self.model.eval()
         
         total_losses = {
@@ -500,8 +504,8 @@ class MultiHeadTrainer:
             avg_losses['q75_cal'] = calibration[3].item()
             avg_losses['q90_cal'] = calibration[4].item()
         
-        # Compute trading-aware metrics
-        trading_metrics = self._compute_trading_metrics()
+        # Compute trading-aware metrics (monitoring only, runs every N epochs)
+        trading_metrics = self._compute_trading_metrics(epoch=epoch)
         avg_losses.update(trading_metrics)
         
         # Compute per-regime metrics (if regime_ids available)
@@ -511,26 +515,32 @@ class MultiHeadTrainer:
         
         return avg_losses
     
-    def _compute_trading_metrics(self) -> Dict[str, float]:
+    def _compute_trading_metrics(self, epoch: int = 0) -> Dict[str, float]:
         """
-        Compute trading-aware evaluation metrics with enhanced execution policy.
+        MONITORING SWEEP: Compute trading metrics for training observability.
         
-        Enhanced policy includes:
-        1. Spread gate: q75 - q25 >= K * cost (removes chop trades)
-        2. Confidence gate: |mu| / sigma >= min_confidence threshold
-        3. Cooldown: No new trades within COOLDOWN bars after a trade
-        4. Asymmetric SL/TP: Use quantiles for proper risk:reward
+        NOTE: This is for MONITORING ONLY during training.
+        - Does NOT save or freeze any policy
+        - Does NOT alter training behavior
+        - Runs every MONITORING_EPOCH_INTERVAL epochs to save time
         
-        These metrics are what actually matter for trading performance:
-        - Expectancy: Average profit per trade (R-multiple)
-        - Hit rate: Percentage of winning trades
-        - Cost-adjusted Sharpe: Risk-adjusted returns after costs
-        - Max drawdown: Largest peak-to-trough decline
-        - Profit factor: Gross profits / gross losses
+        For the actual frozen execution policy, use the dedicated
+        post-training PolicySelector class after training completes.
         
         Returns:
-            Dictionary of trading metrics
+            Dictionary of trading metrics (informational only)
         """
+        # Only run monitoring sweep every N epochs to save time
+        MONITORING_EPOCH_INTERVAL = 5
+        if epoch > 0 and epoch % MONITORING_EPOCH_INTERVAL != 0:
+            return {
+                'expectancy': 0.0, 'hit_rate': 0.0, 'profit_factor': 0.0,
+                'sharpe': 0.0, 'max_drawdown': 0.0, 'num_trades': 0,
+                'avg_win': 0.0, 'avg_loss': 0.0, 'win_loss_ratio': 0.0,
+                'risk_adjusted_score': 0.0,
+                'min_confidence': 0.0, 'spread_multiplier': 0.0, 'cooldown': 0,
+                '_skipped': True
+            }
         # Trading policy parameters
         FIXED_COST = 0.0009  # 0.09% round-trip cost
         SPREAD_MULTIPLIER = 3.0  # K: require spread >= K * cost
@@ -704,15 +714,16 @@ class MultiHeadTrainer:
                 best_metrics = metrics
                 best_threshold = min_conf
         
-        # Log policy sweep report
+        # Log MONITORING sweep report (informational only - not for live trading)
         logger.info("=" * 60)
-        logger.info("POLICY SWEEP REPORT (spread_K=%.1f, cooldown=%d, min_trades=%d)", 
-                   SPREAD_MULTIPLIER, COOLDOWN, MIN_TRADES)
+        logger.info("MONITORING SWEEP (epoch %d) - spread_K=%.1f, cooldown=%d, min_trades=%d", 
+                   epoch, SPREAD_MULTIPLIER, COOLDOWN, MIN_TRADES)
+        logger.info("NOTE: This is for MONITORING ONLY. Use PolicySelector for frozen live policy.")
         logger.info("-" * 60)
         for m in sweep_results:
             eligible = m['num_trades'] >= MIN_TRADES
             is_best = m['min_confidence'] == best_threshold and eligible and best_score > float('-inf')
-            status = "★ BEST" if is_best else ("" if eligible else "(ineligible)")
+            status = "★ MONITORING BEST" if is_best else ("" if eligible else "(ineligible)")
             logger.info(
                 f"conf>={m['min_confidence']:.2f}: Trades={m['num_trades']:4d}, "
                 f"Exp={m['expectancy']:+.4f}, Score={m['risk_adjusted_score']:+.4f}, "
@@ -721,9 +732,8 @@ class MultiHeadTrainer:
             )
         logger.info("=" * 60)
         
-        # Return best metrics (or last if none eligible)
+        # Return best metrics for monitoring (NOT saved as policy)
         if best_metrics is None:
-            logger.warning("No policy met MIN_TRADES=%d threshold - using last policy as fallback", MIN_TRADES)
             best_metrics = sweep_results[-1] if sweep_results else {
                 'expectancy': 0.0, 'hit_rate': 0.0, 'profit_factor': 0.0,
                 'sharpe': 0.0, 'max_drawdown': 0.0, 'num_trades': 0,
@@ -732,11 +742,9 @@ class MultiHeadTrainer:
                 'min_confidence': 0.5, 'spread_multiplier': 3.0, 'cooldown': 8
             }
         
-        logger.info(f"Trading Metrics (best policy) - Score: {best_metrics.get('risk_adjusted_score', 0):.4f}, "
-                   f"Expectancy: {best_metrics['expectancy']:.4f}, "
-                   f"MaxDD: {best_metrics['max_drawdown']:.4f}, "
-                   f"Trades: {best_metrics['num_trades']}, "
-                   f"Threshold: {best_metrics['min_confidence']:.2f}")
+        logger.info(f"MONITORING: Best observed - Score: {best_metrics.get('risk_adjusted_score', 0):.4f}, "
+                   f"Exp: {best_metrics['expectancy']:.4f}, "
+                   f"Trades: {best_metrics['num_trades']}")
         
         return best_metrics
     
@@ -1057,7 +1065,7 @@ class MultiHeadTrainer:
         
         for epoch in range(epochs):
             train_metrics = self.train_epoch(epoch)
-            val_metrics = self.validate()
+            val_metrics = self.validate(epoch=epoch)
             
             # Log metrics
             history['train_loss'].append(train_metrics['total'])

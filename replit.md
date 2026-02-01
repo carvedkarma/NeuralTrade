@@ -94,6 +94,63 @@ Preferred communication style: Simple, everyday language.
 - **Server Health Polling**: Logs all health fields with `[GPU HEALTH]` prefix and explicitly logs disconnect reasons.
 - **UI Console Logging**: Logs `[FLOW FORECAST UI]` with forecastMode, volState, acceleration, path lengths, and whether NO_FORECAST or QUANTILE_PATHS rendering occurs.
 
+### Training, Monitoring, and Policy Architecture
+
+The system separates model training from policy selection to ensure consistent live trading behavior.
+
+#### 1. Neural Network Training (MultiheadTrainer.train)
+- **Purpose**: Learns model weights via gradient descent.
+- **No policy logic**: Training does NOT save or freeze any execution policy.
+- **Outputs**: Model checkpoints saved to disk.
+
+#### 2. Monitoring Sweep (during training)
+- **Purpose**: Informational only - tracks training quality.
+- **Location**: `_compute_trading_metrics()` in multihead_trainer.py.
+- **Runs**: Every 5 epochs (configurable via MONITORING_EPOCH_INTERVAL).
+- **Logs**: Prefixed with "MONITORING SWEEP" - clearly marked as NOT for live trading.
+- **Does NOT**: Save policies, alter training, or affect live trading.
+
+#### 3. Post-Training Policy Selection (PolicySelector)
+- **Purpose**: The ONLY source of truth for live execution policy.
+- **Location**: `gpu_trainer/training/policy_selector.py`.
+- **Flow**:
+  1. Load best model checkpoint.
+  2. Run sequential out-of-sample (OOS) evaluation (>=5 time folds).
+     - NOTE: Model is NOT retrained per fold - tests fixed model across time periods.
+  3. Sweep confidence thresholds with Pareto selection.
+  4. Filter by MIN_TRADES=30 eligibility.
+  5. Select best by risk-adjusted score (expectancy - 0.5*max_drawdown).
+  6. Save frozen policy to `execution_policy.json`.
+  7. Print "FROZEN POLICY" summary.
+
+#### 4. Live Trading
+- **Uses**: Frozen policy from `execution_policy.json`.
+- **Gate order**: spread → confidence → direction → cooldown → trade.
+- **No adaptation**: Policy is static until next retrain cycle.
+- **Retraining trigger**: Walk-forward instability detection.
+
+#### Execution Policy Fields (execution_policy.json)
+```json
+{
+  "min_confidence": 0.15,
+  "spread_multiplier": 3.0,
+  "cooldown": 8,
+  "fixed_cost": 0.0009,
+  "tp_quantile": "q75",
+  "sl_quantile": "q10",
+  "min_trades": 30,
+  "expectancy": 0.0023,
+  "risk_adjusted_score": 0.0015,
+  "hit_rate": 0.542,
+  "max_drawdown": 0.0016,
+  "sharpe": 1.23,
+  "num_trades": 142,
+  "created_at": "2026-02-01T12:00:00",
+  "checkpoint_path": "models/best_multihead.pt",
+  "walk_forward_folds": 5
+}
+```
+
 ## External Dependencies
 
 ### Database
