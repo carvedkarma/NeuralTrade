@@ -108,6 +108,13 @@ class EnsembleSignal:
     entry_offset: Optional[float] = None  # Entry price offset
     sl_distance: Optional[float] = None  # Stop loss distance (%)
     tp_distance: Optional[float] = None  # Take profit distance (%)
+    
+    # === Flow Forecast outputs (from VolStateHead and AccelerationHead) ===
+    vol_state: Optional[str] = None  # "contraction", "neutral", "expansion"
+    vol_state_probs: Optional[Dict[str, float]] = None  # P(contraction), P(neutral), P(expansion)
+    acceleration: Optional[float] = None  # momentum change prediction
+    forecast_mode: Optional[str] = None  # "QUANTILE_PATHS" or "NO_FORECAST"
+    quantile_paths: Optional[Dict[str, List[float]]] = None  # {q10: [...], q50: [...], q90: [...]}
 
 class EnsemblePredictor:
     """
@@ -306,6 +313,25 @@ class EnsemblePredictor:
                     entry_offset = float(output.entry_offset.cpu().numpy().mean()) if output.entry_offset is not None else None
                     sl_distance = float(output.sl_distance.cpu().numpy().mean()) if output.sl_distance is not None else None
                     tp_distance = float(output.tp_distance.cpu().numpy().mean()) if output.tp_distance is not None else None
+                    
+                    # === Flow Forecast outputs (vol_state, acceleration) ===
+                    vol_state_probs = None
+                    vol_state = None
+                    if output.vol_state_logits is not None:
+                        vs_probs = F.softmax(output.vol_state_logits, dim=-1).cpu().numpy()
+                        if len(vs_probs.shape) == 2:
+                            vs_probs = vs_probs.mean(axis=0)  # Average across batch
+                        vol_state_probs = {
+                            "contraction": float(vs_probs[0]),
+                            "neutral": float(vs_probs[1]),
+                            "expansion": float(vs_probs[2])
+                        }
+                        vol_state_idx = int(vs_probs.argmax())
+                        vol_state = ["contraction", "neutral", "expansion"][vol_state_idx]
+                    
+                    acceleration = None
+                    if output.acceleration is not None:
+                        acceleration = float(output.acceleration.cpu().numpy().mean())
                 else:
                     # Fallback: standard forward() returns just class logits
                     output = model(features)
@@ -316,6 +342,9 @@ class EnsemblePredictor:
                     entry_offset = None
                     sl_distance = None
                     tp_distance = None
+                    vol_state = None
+                    vol_state_probs = None
+                    acceleration = None
                 
                 # Calibrate probabilities
                 probs = self._calibrate_probs(probs, model_name)
@@ -345,6 +374,10 @@ class EnsemblePredictor:
                     "entry_offset": entry_offset,
                     "sl_distance": sl_distance,
                     "tp_distance": tp_distance,
+                    # Flow Forecast outputs
+                    "vol_state": vol_state,
+                    "vol_state_probs": vol_state_probs,
+                    "acceleration": acceleration,
                     "has_multihead": has_multihead
                 }
                 
@@ -648,6 +681,84 @@ class EnsemblePredictor:
                 
                 reasons.append(f"Multi-head: {len(multihead_preds)} models contributed quantiles (q50={aggregated_quantiles['q50']:.4f})")
         
+        # === Step 6c: Aggregate Flow Forecast outputs (vol_state, acceleration) ===
+        flow_preds = [p for p in direction_predictions if p.get("has_multihead") and p.get("vol_state")]
+        
+        aggregated_vol_state = None
+        aggregated_vol_state_probs = None
+        aggregated_acceleration = None
+        aggregated_forecast_mode = None
+        aggregated_quantile_paths = None
+        
+        if flow_preds:
+            # Vote-based vol_state (majority wins)
+            vs_counts = {"contraction": 0, "neutral": 0, "expansion": 0}
+            vs_prob_sum = {"contraction": 0.0, "neutral": 0.0, "expansion": 0.0}
+            accel_sum = 0.0
+            flow_weight = 0.0
+            
+            for pred in flow_preds:
+                w = self.model_weights.get(pred["model"], ModelWeight(
+                    model_name=pred["model"],
+                    expectancy=0, precision_on_trade=0.5,
+                    profit_factor=1.0, f1_directional=0.4, sharpe=0
+                )).composite_weight
+                flow_weight += w
+                
+                vs = pred.get("vol_state")
+                if vs:
+                    vs_counts[vs] += 1
+                    
+                vs_probs = pred.get("vol_state_probs")
+                if vs_probs:
+                    for k in vs_prob_sum:
+                        vs_prob_sum[k] += vs_probs.get(k, 0) * w
+                
+                if pred.get("acceleration") is not None:
+                    accel_sum += pred["acceleration"] * w
+            
+            if flow_weight > 0:
+                aggregated_vol_state_probs = {k: v / flow_weight for k, v in vs_prob_sum.items()}
+                aggregated_vol_state = max(vs_counts.keys(), key=lambda k: aggregated_vol_state_probs[k])
+                aggregated_acceleration = accel_sum / flow_weight
+                
+                # === Compute forecast_mode and quantile_paths ===
+                if aggregated_quantiles:
+                    q10 = aggregated_quantiles.get("q10", -0.01)
+                    q25 = aggregated_quantiles.get("q25", -0.005)
+                    q50 = aggregated_quantiles.get("q50", 0.0)
+                    q75 = aggregated_quantiles.get("q75", 0.005)
+                    q90 = aggregated_quantiles.get("q90", 0.01)
+                    
+                    # Volatility gate: NO_FORECAST when vol_state==contraction OR spread too narrow
+                    spread = q75 - q25  # IQR as percentage return
+                    cost = 0.001  # ~0.1% round-trip
+                    min_spread = 3 * cost  # Must exceed 3x trading cost
+                    
+                    if aggregated_vol_state == "contraction" or spread < min_spread:
+                        aggregated_forecast_mode = "NO_FORECAST"
+                        aggregated_quantile_paths = None
+                        reasons.append(f"Flow Forecast: NO_FORECAST (vol={aggregated_vol_state}, spread={spread*100:.3f}% < {min_spread*100:.3f}%)")
+                    else:
+                        aggregated_forecast_mode = "QUANTILE_PATHS"
+                        
+                        # Alpha-shaping based on vol_state: contraction=0.7, neutral=1.0, expansion=1.5
+                        ALPHA_MAP = {"contraction": 0.7, "neutral": 1.0, "expansion": 1.5}
+                        alpha = ALPHA_MAP.get(aggregated_vol_state, 1.0)
+                        
+                        # Generate paths: path[k] = 1 + ((k/h)^α * quantile)
+                        # Note: paths are relative multipliers, not absolute prices (computed in API)
+                        horizon = 16  # 16 bars = 4 hours at 15m
+                        steps = list(range(1, horizon + 1))
+                        
+                        aggregated_quantile_paths = {
+                            "q10": [float(np.exp((k / horizon) ** alpha * q10)) for k in steps],
+                            "q50": [float(np.exp((k / horizon) ** alpha * q50)) for k in steps],
+                            "q90": [float(np.exp((k / horizon) ** alpha * q90)) for k in steps],
+                        }
+                        
+                        reasons.append(f"Flow Forecast: QUANTILE_PATHS (vol={aggregated_vol_state}, α={alpha:.1f}, accel={aggregated_acceleration:.4f})")
+        
         confidence = float(ensemble_probs.max())
         sorted_probs = np.sort(ensemble_probs)[::-1]
         final_margin = float(sorted_probs[0] - sorted_probs[1])
@@ -733,6 +844,12 @@ class EnsemblePredictor:
             entry_offset=aggregated_entry_offset,
             sl_distance=aggregated_sl_distance,
             tp_distance=aggregated_tp_distance,
+            # Flow Forecast outputs
+            vol_state=aggregated_vol_state,
+            vol_state_probs=aggregated_vol_state_probs,
+            acceleration=aggregated_acceleration,
+            forecast_mode=aggregated_forecast_mode,
+            quantile_paths=aggregated_quantile_paths,
             ensemble_probs={
                 "SHORT": float(ensemble_probs[0]),
                 "HOLD": float(ensemble_probs[1]),

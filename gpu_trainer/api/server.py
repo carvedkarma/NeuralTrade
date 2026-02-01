@@ -2864,7 +2864,13 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
                 "inference_mode": mode_lower,
                 "training_mode": training_mode_lower,
                 "mtf_mode": mode_lower == "mtf",
-                "feature_count": int(features_seq.shape[1])
+                "feature_count": int(features_seq.shape[1]),
+                # Flow Forecast not available in fallback mode
+                "vol_state": None,
+                "vol_state_probs": None,
+                "acceleration": None,
+                "forecast_mode": None,
+                "quantile_paths": None
             }
         
         signal = predictor.predict(features_seq)
@@ -2932,7 +2938,17 @@ async def predict_ensemble_from_candles(request: MTFCandleData, mode: str = "stf
             "sigma": to_float(signal.sigma),
             "entry_offset": to_float(signal.entry_offset),
             "sl_distance": to_float(signal.sl_distance),
-            "tp_distance": to_float(signal.tp_distance)
+            "tp_distance": to_float(signal.tp_distance),
+            # === Flow Forecast outputs (vol_state, acceleration, quantile_paths) ===
+            "vol_state": signal.vol_state,
+            "vol_state_probs": signal.vol_state_probs,
+            "acceleration": to_float(signal.acceleration),
+            "forecast_mode": signal.forecast_mode,
+            # Convert relative paths (multipliers) to absolute prices
+            "quantile_paths": {
+                k: [float(tf_data["15m"]["close"].iloc[-1] * v) for v in vals]
+                for k, vals in signal.quantile_paths.items()
+            } if signal.quantile_paths else None
         }
         
     except HTTPException:
