@@ -1,9 +1,10 @@
 import torch
 import numpy as np
+import time
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Callable
 import asyncio
 from datetime import datetime
 import logging
@@ -309,7 +310,17 @@ class ModelManager:
             "total_epochs": 0,
             "current_model": None,
             "progress": 0.0,
-            "metrics": {}
+            "metrics": {},
+            # Enhanced training progress tracking
+            "epoch_history": [],  # List of per-epoch metrics
+            "start_time": None,  # Training start timestamp
+            "eta_seconds": None,  # Estimated time remaining
+            "health_warnings": [],  # Warnings from TrainingHealthMonitor
+            "last_update": None,  # Last status update timestamp
+            "per_head_losses": {},  # Per-head loss values
+            "learning_rate": None,  # Current learning rate
+            "best_val_loss": None,  # Best validation loss so far
+            "early_stop_counter": 0  # Epochs since last improvement
         }
         self.prediction_history = []
         # Primary checkpoint directory (new location)
@@ -1667,6 +1678,16 @@ class TrainingStatusResponse(BaseModel):
     current_model: Optional[str]
     progress: float
     metrics: Dict[str, Any]
+    # Enhanced fields for real-time progress tracking
+    epoch_history: List[Dict[str, Any]] = []
+    start_time: Optional[str] = None
+    eta_seconds: Optional[float] = None
+    health_warnings: List[str] = []
+    last_update: Optional[str] = None
+    per_head_losses: Dict[str, float] = {}
+    learning_rate: Optional[float] = None
+    best_val_loss: Optional[float] = None
+    early_stop_counter: int = 0
     
 class ModelInfoResponse(BaseModel):
     name: str
@@ -3739,6 +3760,226 @@ async def reset_drift_monitor():
     return {"status": "reset", "message": "Drift monitor cleared"}
 
 
+class WalkForwardRequest(BaseModel):
+    n_folds: int = 5
+    test_periods: int = 500
+    train_periods: int = 2000
+    purge_periods: int = 50
+    min_confidence: float = 0.4
+
+
+@app.post("/api/walk-forward/evaluate")
+async def run_walk_forward_evaluation(request: WalkForwardRequest):
+    """
+    Run comprehensive walk-forward validation on loaded models.
+    
+    Returns detailed performance metrics across time folds including:
+    - Per-fold Sharpe, expectancy, max drawdown
+    - Per-regime performance breakdown
+    - Overall summary statistics
+    - Fold stability analysis
+    
+    2024 Best Practice: Walk-forward validation is essential for detecting
+    overfitting and estimating real-world performance with proper time splits.
+    """
+    import pandas as pd
+    from pathlib import Path
+    
+    try:
+        # Check if models are loaded
+        if not model_manager.models:
+            return {
+                "status": "error",
+                "error": "No models loaded. Train or load models first.",
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Import walk-forward evaluator
+        try:
+            from training.walk_forward import WalkForwardSplitter, WalkForwardEvaluator
+            from data.pipeline import FeatureEngineer
+        except ImportError as ie:
+            return {
+                "status": "error",
+                "error": f"Failed to import walk-forward modules: {ie}",
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Load candle data from parquet
+        parquet_files = list((Path(__file__).parent.parent / "data").glob("*.parquet"))
+        if not parquet_files:
+            return {
+                "status": "error",
+                "error": "No parquet data files found for evaluation",
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Load most recent parquet file
+        latest_parquet = max(parquet_files, key=lambda p: p.stat().st_mtime)
+        logger.info(f"[Walk-Forward] Loading data from {latest_parquet}")
+        
+        df = pd.read_parquet(latest_parquet)
+        if len(df) < request.train_periods + request.test_periods + request.purge_periods:
+            return {
+                "status": "error",
+                "error": f"Insufficient data: {len(df)} rows, need at least {request.train_periods + request.test_periods + request.purge_periods}",
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Engineer features
+        try:
+            feature_engineer = FeatureEngineer()
+            features = feature_engineer.compute_features(df)
+        except Exception as fe:
+            logger.error(f"[Walk-Forward] Feature engineering failed: {fe}")
+            return {
+                "status": "error",
+                "error": f"Feature engineering failed: {fe}",
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Create splitter and evaluator
+        splitter = WalkForwardSplitter(
+            n_splits=request.n_folds,
+            train_periods=request.train_periods,
+            test_periods=request.test_periods,
+            purge_periods=request.purge_periods,
+            embargo_periods=10
+        )
+        
+        evaluator = WalkForwardEvaluator(splitter=splitter)
+        
+        # Run evaluation for each loaded model
+        model_results = {}
+        
+        for model_name, model_data in model_manager.models.items():
+            try:
+                model = model_data.get("model")
+                if model is None:
+                    logger.warning(f"[Walk-Forward] Skipping {model_name} - no model object")
+                    continue
+                
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                logger.info(f"[Walk-Forward] Evaluating {model_name} on {device}...")
+                
+                results = evaluator.run_full_evaluation(
+                    model=model,
+                    candles=df,
+                    features=features,
+                    device=device
+                )
+                
+                summary = evaluator.summarize_results(results)
+                
+                # Add per-fold details
+                fold_details = []
+                for r in results:
+                    fold_details.append({
+                        "fold_id": r.fold_id,
+                        "n_trades": r.n_trades,
+                        "win_rate": round(r.win_rate, 4),
+                        "sharpe_ratio": round(r.sharpe_ratio, 4),
+                        "expectancy": round(r.expectancy, 6),
+                        "profit_factor": round(r.profit_factor, 4),
+                        "max_drawdown": round(r.max_drawdown, 6),
+                        "total_return": round(r.total_return, 6),
+                        "regime_results": r.regime_results
+                    })
+                
+                model_results[model_name] = {
+                    "summary": {
+                        "n_folds": summary["n_folds"],
+                        "total_trades": summary["total_trades"],
+                        "overall_win_rate": round(summary["overall_win_rate"], 4),
+                        "overall_sharpe": round(summary["overall_sharpe"], 4),
+                        "overall_expectancy": round(summary["overall_expectancy"], 6),
+                        "overall_profit_factor": round(summary["overall_profit_factor"], 4),
+                        "avg_trades_per_fold": round(summary["avg_trades_per_fold"], 2),
+                        "worst_drawdown": round(summary["worst_drawdown"], 6),
+                        "tail_risk": round(summary.get("tail_risk", 0), 6),
+                        "sharpe_stability": round(np.std(summary["per_fold_sharpe"]), 4) if len(summary["per_fold_sharpe"]) > 1 else 0,
+                        "expectancy_stability": round(np.std(summary["per_fold_expectancy"]), 6) if len(summary["per_fold_expectancy"]) > 1 else 0
+                    },
+                    "folds": fold_details,
+                    "status": "success"
+                }
+                
+                logger.info(f"[Walk-Forward] {model_name}: {summary['total_trades']} trades, "
+                          f"sharpe={summary['overall_sharpe']:.3f}, "
+                          f"expectancy={summary['overall_expectancy']:.5f}")
+                
+            except Exception as me:
+                logger.error(f"[Walk-Forward] Error evaluating {model_name}: {me}")
+                model_results[model_name] = {
+                    "status": "error",
+                    "error": str(me)
+                }
+        
+        # Calculate overall summary across all models
+        successful_models = [m for m, r in model_results.items() if r.get("status") == "success"]
+        
+        overall_summary = {
+            "models_evaluated": len(successful_models),
+            "best_sharpe_model": None,
+            "best_expectancy_model": None,
+            "recommendations": []
+        }
+        
+        if successful_models:
+            sharpe_rankings = sorted(
+                [(m, model_results[m]["summary"]["overall_sharpe"]) for m in successful_models],
+                key=lambda x: x[1], reverse=True
+            )
+            expectancy_rankings = sorted(
+                [(m, model_results[m]["summary"]["overall_expectancy"]) for m in successful_models],
+                key=lambda x: x[1], reverse=True
+            )
+            
+            overall_summary["best_sharpe_model"] = sharpe_rankings[0][0] if sharpe_rankings else None
+            overall_summary["best_expectancy_model"] = expectancy_rankings[0][0] if expectancy_rankings else None
+            overall_summary["model_rankings_by_sharpe"] = sharpe_rankings
+            overall_summary["model_rankings_by_expectancy"] = expectancy_rankings
+            
+            # Add recommendations
+            for model, sharpe in sharpe_rankings:
+                if sharpe < 0:
+                    overall_summary["recommendations"].append(
+                        f"{model}: Negative Sharpe ({sharpe:.3f}) - consider retraining or removing from ensemble"
+                    )
+                elif model_results[model]["summary"]["total_trades"] < 30:
+                    overall_summary["recommendations"].append(
+                        f"{model}: Low trade count ({model_results[model]['summary']['total_trades']}) - results may not be statistically significant"
+                    )
+        
+        return {
+            "status": "success",
+            "timestamp": datetime.now().isoformat(),
+            "config": {
+                "n_folds": request.n_folds,
+                "train_periods": request.train_periods,
+                "test_periods": request.test_periods,
+                "purge_periods": request.purge_periods
+            },
+            "data_info": {
+                "source": str(latest_parquet.name),
+                "total_rows": len(df),
+                "features": features.shape[1] if features is not None else 0
+            },
+            "model_results": model_results,
+            "overall_summary": overall_summary
+        }
+        
+    except Exception as e:
+        logger.error(f"[Walk-Forward] Evaluation failed: {e}")
+        import traceback
+        return {
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "timestamp": datetime.now().isoformat()
+        }
+
+
 async def run_training(request: TrainingRequest):
     """
     Actual training implementation using MultiHeadTrainer.
@@ -3762,7 +4003,16 @@ async def run_training(request: TrainingRequest):
             current_epoch=0,
             progress=0,
             current_model=model_type_normalized,
-            total_epochs=request.epochs
+            total_epochs=request.epochs,
+            epoch_history=[],
+            start_time=datetime.now().isoformat(),
+            eta_seconds=None,
+            health_warnings=[],
+            last_update=datetime.now().isoformat(),
+            per_head_losses={},
+            learning_rate=None,
+            best_val_loss=None,
+            early_stop_counter=0
         )
         
         # Import training dependencies
@@ -4010,19 +4260,28 @@ async def run_training(request: TrainingRequest):
             try:
                 epoch_weight_hashes = [initial_weight_hash]
                 
+                # Track epoch history for loss curves
+                epoch_history = []
+                training_start_time = time.time()
+                
                 def progress_callback(epoch, total_epochs, train_metrics, val_metrics):
                     nonlocal gradient_check_passed, weight_change_verified
                     
                     if isinstance(train_metrics, dict):
                         train_loss = train_metrics.get('total', 0.0)
+                        train_acc = train_metrics.get('accuracy', 0.0)
                     else:
                         train_loss = float(train_metrics)
+                        train_acc = 0.0
                     if isinstance(val_metrics, dict):
                         val_loss = val_metrics.get('total', 0.0)
+                        val_acc = val_metrics.get('accuracy', 0.0)
                     else:
                         val_loss = float(val_metrics)
+                        val_acc = 0.0
                     
                     # ============== GUARDRAIL: Check gradient flow ==============
+                    health_warnings = []
                     if epoch == 0:
                         has_grad = check_gradients_nonzero(model)
                         if has_grad:
@@ -4030,6 +4289,7 @@ async def run_training(request: TrainingRequest):
                             logger.info(f"[GUARDRAIL] ✓ Gradients are non-zero - training is real")
                         else:
                             logger.error(f"[GUARDRAIL] ✗ CRITICAL: Gradients are ZERO - training may not be happening!")
+                            health_warnings.append("CRITICAL: Gradients are ZERO")
                     
                     # ============== GUARDRAIL: Check weight changes ==============
                     current_hash = compute_weight_hash(model)
@@ -4041,8 +4301,55 @@ async def run_training(request: TrainingRequest):
                         logger.info(f"[GUARDRAIL] ✓ Epoch {epoch+1}: Weights changed (L2 delta: {l2_delta:.6f})")
                     else:
                         logger.warning(f"[GUARDRAIL] ✗ Epoch {epoch+1}: Weights unchanged - possible training issue!")
+                        health_warnings.append(f"Epoch {epoch+1}: Weights unchanged")
                     
                     epoch_weight_hashes.append(current_hash)
+                    
+                    # ============== ETA CALCULATION ==============
+                    elapsed_seconds = time.time() - training_start_time
+                    epochs_completed = epoch + 1
+                    epochs_remaining = total_epochs - epochs_completed
+                    if epochs_completed > 0:
+                        seconds_per_epoch = elapsed_seconds / epochs_completed
+                        eta_seconds = seconds_per_epoch * epochs_remaining
+                    else:
+                        eta_seconds = None
+                    
+                    # ============== PER-HEAD LOSSES ==============
+                    per_head_losses = {}
+                    if isinstance(val_metrics, dict):
+                        for key in ['class', 'mu', 'sigma', 'quantile', 'trading', 'candle', 'vol_state', 'acceleration']:
+                            if key in val_metrics:
+                                per_head_losses[key] = float(val_metrics[key])
+                    
+                    # ============== EPOCH HISTORY (capped at last 50 epochs) ==============
+                    epoch_entry = {
+                        "epoch": epoch + 1,
+                        "train_loss": float(train_loss),
+                        "val_loss": float(val_loss),
+                        "train_acc": float(train_acc),
+                        "val_acc": float(val_acc),
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    epoch_history.append(epoch_entry)
+                    # Keep only last 50 epochs to prevent memory bloat
+                    if len(epoch_history) > 50:
+                        epoch_history.pop(0)
+                    
+                    # ============== BEST VAL LOSS TRACKING ==============
+                    current_best = model_manager.training_status.get("best_val_loss")
+                    if current_best is None or val_loss < current_best:
+                        best_val_loss = float(val_loss)
+                        early_stop_counter = 0
+                    else:
+                        best_val_loss = current_best
+                        early_stop_counter = model_manager.training_status.get("early_stop_counter", 0) + 1
+                    
+                    # ============== LEARNING RATE (from scheduler) ==============
+                    try:
+                        current_lr = trainer.optimizer.param_groups[0]['lr']
+                    except:
+                        current_lr = None
                     
                     model_manager.update_training_status(
                         current_epoch=epoch + 1,
@@ -4053,7 +4360,15 @@ async def run_training(request: TrainingRequest):
                             "weight_l2": float(current_l2),
                             "gradient_check": gradient_check_passed,
                             "weight_change": weight_change_verified
-                        }
+                        },
+                        epoch_history=list(epoch_history),
+                        eta_seconds=eta_seconds,
+                        health_warnings=health_warnings,
+                        per_head_losses=per_head_losses,
+                        learning_rate=current_lr,
+                        best_val_loss=best_val_loss,
+                        early_stop_counter=early_stop_counter,
+                        last_update=datetime.now().isoformat()
                     )
                 
                 trainer.epoch_callback = progress_callback

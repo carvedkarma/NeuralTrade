@@ -1648,6 +1648,133 @@ export async function registerRoutes(
     
     res.json(results);
   });
+  
+  // Get prediction drift report from GPU trainer
+  app.get("/api/gpu/diagnostics/drift-report", async (req, res) => {
+    const gpuUrl = process.env.GPU_TRAINER_URL || "http://localhost:8000";
+    try {
+      const response = await fetch(`${gpuUrl}/api/drift-report`);
+      if (!response.ok) {
+        return res.status(response.status).json({ 
+          error: `GPU trainer returned ${response.status}`,
+          psi: { SHORT: 0, HOLD: 0, LONG: 0, average: 0 },
+          ece: 0,
+          n_predictions: 0,
+          status: "error"
+        });
+      }
+      const data = await response.json();
+      res.json(data);
+    } catch (error) {
+      console.error("[Drift Report] Error fetching from GPU trainer:", error);
+      res.json({ 
+        error: String(error),
+        psi: { SHORT: 0, HOLD: 0, LONG: 0, average: 0 },
+        ece: 0,
+        n_predictions: 0,
+        status: "disconnected"
+      });
+    }
+  });
+
+  // Get comprehensive neural network diagnostics for dashboard
+  app.get("/api/gpu/diagnostics/dashboard", async (req, res) => {
+    const gpuUrl = process.env.GPU_TRAINER_URL || "http://localhost:8000";
+    const diagnostics: Record<string, unknown> = {
+      timestamp: new Date().toISOString(),
+      gpuConnected: false,
+      predictionDistribution: { SHORT: 0, HOLD: 0, LONG: 0 },
+      calibration: { ece: 0, bins: [] as { confidence: number; accuracy: number; count: number }[] },
+      uncertainty: { mean: 0, std: 0, histogram: [] as { bin: string; count: number }[] },
+      trainingHealth: { status: "unknown", alerts: [] as string[], lastCheck: null as string | null },
+      driftStatus: { psi: 0, ece: 0, alert: false, status: "unknown" },
+      recentPredictions: [] as { timestamp: string; action: string; confidence: number; outcome?: string }[]
+    };
+
+    try {
+      // Check GPU health first
+      const healthRes = await fetch(`${gpuUrl}/health`, { signal: AbortSignal.timeout(3000) });
+      if (healthRes.ok) {
+        diagnostics.gpuConnected = true;
+        const healthData = await healthRes.json();
+        diagnostics.gpuHealth = healthData;
+      }
+    } catch (e) {
+      diagnostics.gpuConnected = false;
+    }
+
+    // Get drift report
+    try {
+      const driftRes = await fetch(`${gpuUrl}/api/drift-report`, { signal: AbortSignal.timeout(3000) });
+      if (driftRes.ok) {
+        const driftData = await driftRes.json();
+        diagnostics.driftStatus = {
+          psi: driftData.psi?.average ?? 0,
+          ece: driftData.ece ?? 0,
+          alert: (driftData.psi?.average ?? 0) > 0.25 || (driftData.ece ?? 0) > 0.15,
+          status: driftData.status ?? "ok",
+          nPredictions: driftData.n_predictions ?? 0,
+          psiPerClass: driftData.psi ?? {}
+        };
+        if (driftData.prediction_distribution) {
+          diagnostics.predictionDistribution = driftData.prediction_distribution;
+        }
+        if (driftData.calibration_bins) {
+          diagnostics.calibration = {
+            ece: driftData.ece ?? 0,
+            bins: driftData.calibration_bins
+          };
+        }
+      }
+    } catch (e) {
+      // Drift endpoint unavailable
+    }
+
+    // Get label distribution (proxy for training health)
+    try {
+      const labelRes = await fetch(`${gpuUrl}/debug/label-distribution`, { signal: AbortSignal.timeout(3000) });
+      if (labelRes.ok) {
+        const labelData = await labelRes.json();
+        const alerts: string[] = [];
+        if (labelData.is_imbalanced) {
+          alerts.push("Training labels heavily skewed toward HOLD");
+        }
+        if (labelData.distribution) {
+          const holdPct = (labelData.distribution.HOLD ?? 0) * 100;
+          if (holdPct > 80) {
+            alerts.push(`HOLD class at ${holdPct.toFixed(1)}% - models may not learn direction`);
+          }
+        }
+        diagnostics.trainingHealth = {
+          status: alerts.length > 0 ? "warning" : "healthy",
+          alerts,
+          lastCheck: new Date().toISOString(),
+          labelDistribution: labelData.distribution ?? {}
+        };
+      }
+    } catch (e) {
+      // Label distribution unavailable
+    }
+
+    // Get model sensitivity
+    try {
+      const sensRes = await fetch(`${gpuUrl}/debug/model-sensitivity`, { signal: AbortSignal.timeout(5000) });
+      if (sensRes.ok) {
+        const sensData = await sensRes.json();
+        diagnostics.modelSensitivity = sensData;
+        if (sensData.overall_status?.includes("CRITICAL")) {
+          const alerts = (diagnostics.trainingHealth as { alerts: string[] }).alerts ?? [];
+          alerts.push("Models collapsed to constant output - retraining required");
+          (diagnostics.trainingHealth as { status: string; alerts: string[] }).status = "critical";
+          (diagnostics.trainingHealth as { alerts: string[] }).alerts = alerts;
+        }
+      }
+    } catch (e) {
+      // Sensitivity check unavailable
+    }
+
+    res.json(diagnostics);
+  });
 
   // ============ LIVE CANDLE SYNC ENDPOINTS ============
   
@@ -1796,6 +1923,136 @@ export async function registerRoutes(
     } catch (error) {
       console.error("[Retrain API] Error:", error);
       res.status(500).json({ error: "Failed to get retrain status" });
+    }
+  });
+  
+  // Run walk-forward validation on GPU trainer
+  app.post("/api/walk-forward/evaluate", async (req, res) => {
+    const gpuUrl = process.env.GPU_TRAINER_URL || "http://localhost:8000";
+    try {
+      const { nFolds = 5, testPeriods = 500, trainPeriods = 2000, purgePeriods = 50 } = req.body;
+      
+      const response = await fetch(`${gpuUrl}/api/walk-forward/evaluate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          n_folds: nFolds,
+          test_periods: testPeriods,
+          train_periods: trainPeriods,
+          purge_periods: purgePeriods,
+          min_confidence: 0.4
+        }),
+        signal: AbortSignal.timeout(300000) // 5 minute timeout for full evaluation
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        return res.status(response.status).json({ 
+          status: "error",
+          error: `GPU trainer returned ${response.status}: ${errorText}`,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      const data = await response.json();
+      res.json(data);
+    } catch (error) {
+      console.error("[Walk-Forward] Error:", error);
+      res.status(500).json({ 
+        status: "error",
+        error: String(error),
+        timestamp: new Date().toISOString()
+      });
+    }
+  });
+  
+  // Get walk-forward report (cached or generate new)
+  app.get("/api/walk-forward/report", async (req, res) => {
+    const gpuUrl = process.env.GPU_TRAINER_URL || "http://localhost:8000";
+    
+    // Check if GPU trainer is available
+    try {
+      const healthRes = await fetch(`${gpuUrl}/health`, { signal: AbortSignal.timeout(3000) });
+      if (!healthRes.ok) {
+        return res.json({
+          status: "gpu_unavailable",
+          message: "GPU trainer is not connected",
+          timestamp: new Date().toISOString()
+        });
+      }
+    } catch (e) {
+      return res.json({
+        status: "gpu_unavailable",
+        message: "GPU trainer is not responding",
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    // Return instructions for running evaluation
+    res.json({
+      status: "ready",
+      message: "Use POST /api/walk-forward/evaluate to run walk-forward validation",
+      defaultConfig: {
+        nFolds: 5,
+        testPeriods: 500,
+        trainPeriods: 2000,
+        purgePeriods: 50
+      },
+      estimatedDuration: "2-5 minutes depending on model count",
+      timestamp: new Date().toISOString()
+    });
+  });
+  
+  // Get detailed training progress from GPU trainer (real-time during training)
+  app.get("/api/gpu/training/status", async (req, res) => {
+    const gpuUrl = process.env.GPU_TRAINER_URL || "http://localhost:8000";
+    try {
+      const response = await fetch(`${gpuUrl}/training/status`, { 
+        signal: AbortSignal.timeout(3000) 
+      });
+      if (!response.ok) {
+        return res.json({
+          is_training: false,
+          current_epoch: 0,
+          total_epochs: 0,
+          current_model: null,
+          progress: 0,
+          metrics: {},
+          epoch_history: [],
+          start_time: null,
+          eta_seconds: null,
+          health_warnings: [],
+          last_update: null,
+          per_head_losses: {},
+          learning_rate: null,
+          best_val_loss: null,
+          early_stop_counter: 0,
+          connected: false,
+          error: `GPU trainer returned ${response.status}`
+        });
+      }
+      const data = await response.json();
+      res.json({ ...data, connected: true });
+    } catch (error) {
+      res.json({
+        is_training: false,
+        current_epoch: 0,
+        total_epochs: 0,
+        current_model: null,
+        progress: 0,
+        metrics: {},
+        epoch_history: [],
+        start_time: null,
+        eta_seconds: null,
+        health_warnings: [],
+        last_update: null,
+        per_head_losses: {},
+        learning_rate: null,
+        best_val_loss: null,
+        early_stop_counter: 0,
+        connected: false,
+        error: "GPU trainer not connected"
+      });
     }
   });
 

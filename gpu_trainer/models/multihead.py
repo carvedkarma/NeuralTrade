@@ -16,7 +16,190 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Dict, Tuple, NamedTuple, List
 from dataclasses import dataclass, field
+import math
 from .base import BaseModel, PositionalEncoding, AttentionBlock
+
+
+class MultiScaleTemporalEmbedding(nn.Module):
+    """
+    Multi-Scale Temporal Embedding for capturing patterns at different resolutions.
+    
+    2024 SOTA: Instead of using a single fixed positional encoding, this learns
+    separate temporal patterns at multiple scales (15m, 1h, 4h equivalents).
+    
+    Implementation based on:
+    - "Multi-Scale Temporal Attention for Time Series" (2024)
+    - "Temporal Fusion Transformers" temporal embedding approach
+    """
+    
+    def __init__(self, d_model: int, max_seq_len: int = 200, scales: List[int] = None):
+        super().__init__()
+        self.d_model = d_model
+        self.max_seq_len = max_seq_len
+        self.scales = scales or [1, 4, 16]  # 15m, 1h, 4h in 15m candle counts
+        self.n_scales = len(self.scales)
+        
+        # Learned temporal embeddings per scale
+        self.scale_embeddings = nn.ModuleList([
+            nn.Embedding(max_seq_len, d_model // self.n_scales)
+            for _ in self.scales
+        ])
+        
+        # Scale fusion weights (learned)
+        self.scale_weights = nn.Parameter(torch.ones(self.n_scales) / self.n_scales)
+        
+        # Project concatenated scale embeddings to d_model
+        self.projection = nn.Linear(d_model, d_model)
+        
+    def forward(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        """
+        Generate multi-scale temporal embeddings.
+        
+        Returns: [seq_len, d_model] temporal embeddings
+        """
+        embeddings = []
+        
+        for scale_idx, scale in enumerate(self.scales):
+            # Create scaled position indices
+            positions = torch.arange(seq_len, device=device)
+            scaled_positions = (positions // scale) % self.max_seq_len
+            
+            # Get embeddings for this scale
+            scale_emb = self.scale_embeddings[scale_idx](scaled_positions)
+            embeddings.append(scale_emb * self.scale_weights[scale_idx])
+        
+        # Concatenate and project
+        combined = torch.cat(embeddings, dim=-1)
+        return self.projection(combined)
+
+
+class MultiScaleAttentionBlock(nn.Module):
+    """
+    Multi-Head Multi-Scale Attention (MHMSA) block.
+    
+    2024 SOTA: Extends standard attention to process information at multiple
+    temporal resolutions simultaneously, then fuses the results.
+    
+    Key innovations:
+    1. Separate attention heads for each temporal scale
+    2. Cross-scale attention for capturing inter-scale dependencies
+    3. Gated fusion for adaptive scale combination
+    """
+    
+    def __init__(
+        self, 
+        embed_dim: int, 
+        num_heads: int, 
+        ff_dim: int, 
+        scales: List[int] = None,
+        dropout: float = 0.1
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.scales = scales or [1, 4, 16]
+        self.n_scales = len(self.scales)
+        
+        # Ensure even distribution of heads across scales
+        heads_per_scale = max(1, num_heads // self.n_scales)
+        
+        # Per-scale attention
+        self.scale_attentions = nn.ModuleList([
+            nn.MultiheadAttention(embed_dim, heads_per_scale, dropout=dropout, batch_first=True)
+            for _ in self.scales
+        ])
+        
+        # Cross-scale attention (global to combine scales)
+        self.cross_scale_attention = nn.MultiheadAttention(
+            embed_dim, num_heads, dropout=dropout, batch_first=True
+        )
+        
+        # Layer norms
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.norm_cross = nn.LayerNorm(embed_dim)
+        
+        # Gated fusion for combining scale outputs
+        self.gate = nn.Sequential(
+            nn.Linear(embed_dim * self.n_scales, embed_dim),
+            nn.Sigmoid()
+        )
+        
+        # Feed-forward network
+        self.ff = nn.Sequential(
+            nn.Linear(embed_dim, ff_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_dim, embed_dim),
+            nn.Dropout(dropout)
+        )
+        
+        self.dropout = nn.Dropout(dropout)
+        
+    def _downsample_for_scale(self, x: torch.Tensor, scale: int) -> torch.Tensor:
+        """Downsample sequence by taking every nth element (average pooling)."""
+        if scale == 1:
+            return x
+        
+        batch_size, seq_len, embed_dim = x.shape
+        
+        # Pad sequence to be divisible by scale
+        pad_len = (scale - seq_len % scale) % scale
+        if pad_len > 0:
+            x = F.pad(x, (0, 0, 0, pad_len))
+        
+        # Reshape and average pool
+        new_len = (seq_len + pad_len) // scale
+        x = x.view(batch_size, new_len, scale, embed_dim)
+        return x.mean(dim=2)
+    
+    def _upsample_to_original(self, x: torch.Tensor, target_len: int, scale: int) -> torch.Tensor:
+        """Upsample back to original sequence length by repeating."""
+        if scale == 1:
+            return x[:, :target_len]
+        
+        # Repeat each element 'scale' times
+        x = x.repeat_interleave(scale, dim=1)
+        return x[:, :target_len]
+    
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        batch_size, seq_len, _ = x.shape
+        
+        # Process at each scale
+        scale_outputs = []
+        
+        for scale_idx, scale in enumerate(self.scales):
+            # Downsample for this scale
+            x_scaled = self._downsample_for_scale(x, scale)
+            
+            # Apply attention at this scale
+            attn_out, _ = self.scale_attentions[scale_idx](x_scaled, x_scaled, x_scaled)
+            
+            # Upsample back to original length
+            attn_out = self._upsample_to_original(attn_out, seq_len, scale)
+            scale_outputs.append(attn_out)
+        
+        # Gated fusion of scale outputs
+        scale_concat = torch.cat(scale_outputs, dim=-1)
+        gate_weights = self.gate(scale_concat)
+        
+        # Weighted combination (use first scale as base, gate the rest)
+        fused = scale_outputs[0]
+        for i in range(1, self.n_scales):
+            fused = fused + gate_weights * scale_outputs[i]
+        
+        # Residual connection and norm
+        x = self.norm1(x + self.dropout(fused))
+        
+        # Cross-scale attention for global context
+        cross_out, _ = self.cross_scale_attention(x, x, x, attn_mask=mask)
+        x = self.norm_cross(x + self.dropout(cross_out))
+        
+        # Feed-forward
+        ff_out = self.ff(x)
+        x = self.norm2(x + ff_out)
+        
+        return x
 
 
 @dataclass
@@ -728,6 +911,161 @@ class MultiHeadTransformer(BaseModel):
         - trading: {entry_offset, sl_distance, tp_distance}
         - candle_deltas: future candle predictions
         """
+        self.eval()
+        with torch.no_grad():
+            output = self.forward_multihead(x)
+            
+            probs = F.softmax(output.class_logits, dim=-1)
+            direction = torch.argmax(probs, dim=-1)
+            
+            return {
+                'probabilities': probs,
+                'direction': direction,
+                'mu': output.mu,
+                'sigma': output.sigma,
+                'q10': output.quantiles[:, 0:1],
+                'q25': output.quantiles[:, 1:2],
+                'q50': output.quantiles[:, 2:3],
+                'q75': output.quantiles[:, 3:4],
+                'q90': output.quantiles[:, 4:5],
+                'entry_offset': output.entry_offset,
+                'sl_distance': output.sl_distance,
+                'tp_distance': output.tp_distance,
+                'candle_deltas': output.candle_deltas,
+            }
+
+
+class MultiScaleTransformer(BaseModel):
+    """
+    Multi-Scale Temporal Transformer with MHMSA for Institutional Trading.
+    
+    2024 SOTA Architecture: Extends the standard transformer with multi-scale
+    temporal attention that captures patterns at 15m, 1h, and 4h resolutions
+    simultaneously using learned temporal embeddings and gated fusion.
+    
+    Key improvements over standard transformer:
+    1. Multi-scale temporal embeddings instead of fixed positional encoding
+    2. MHMSA blocks that process at multiple resolutions with cross-scale attention
+    3. Better capture of both short-term momentum and longer-term trends
+    
+    Use this when you have single-timeframe data but want to capture
+    multi-resolution patterns implicitly.
+    """
+    
+    def __init__(
+        self,
+        input_dim: int,
+        d_model: int = 256,
+        nhead: int = 8,
+        num_layers: int = 4,  # Fewer layers since MHMSA is more expressive
+        dim_feedforward: int = 1024,
+        dropout: float = 0.1,
+        max_seq_len: int = 200,
+        num_classes: int = 3,
+        num_quantiles: int = 5,
+        n_future_candles: int = 5,
+        scales: List[int] = None,
+        use_log_sigma: bool = True
+    ):
+        super().__init__("multihead_multiscale", input_dim, num_classes)
+        
+        self.d_model = d_model
+        self.nhead = nhead
+        self.num_layers = num_layers
+        self.num_quantiles = num_quantiles
+        self.n_future_candles = n_future_candles
+        self.use_log_sigma = use_log_sigma
+        self.scales = scales or [1, 4, 16]  # 15m, 1h, 4h equivalents
+        
+        # Input projection
+        self.input_projection = nn.Linear(input_dim, d_model)
+        
+        # Multi-scale temporal embedding (replaces standard pos encoding)
+        self.temporal_embedding = MultiScaleTemporalEmbedding(
+            d_model, max_seq_len, self.scales
+        )
+        
+        # Multi-Scale Attention blocks
+        self.msa_blocks = nn.ModuleList([
+            MultiScaleAttentionBlock(d_model, nhead, dim_feedforward, self.scales, dropout)
+            for _ in range(num_layers)
+        ])
+        
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+        
+        # Multi-head outputs (same as standard transformer)
+        self.class_head = ClassificationHead(d_model, d_model // 2, num_classes, dropout)
+        self.regression_head = RegressionHead(d_model, d_model // 2, dropout, use_log_sigma=use_log_sigma)
+        self.quantile_head = QuantileHead(d_model, d_model // 2, dropout)
+        self.trading_head = TradingHead(d_model, d_model // 2, dropout)
+        self.candle_head = CandlePredictionHead(d_model, d_model // 2, n_future_candles, dropout)
+        
+        # Flow Forecast heads
+        self.vol_state_head = VolStateHead(d_model, d_model // 2, 3, dropout)
+        self.acceleration_head = AccelerationHead(d_model, d_model // 2, dropout)
+        
+        self._init_weights()
+        
+    def _init_weights(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+                
+    def encode(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Shared encoder with multi-scale attention."""
+        batch_size, seq_len, _ = x.shape
+        
+        # Project input
+        x = self.input_projection(x)
+        
+        # Add multi-scale temporal embeddings
+        temporal_emb = self.temporal_embedding(seq_len, x.device)
+        x = x + temporal_emb.unsqueeze(0).expand(batch_size, -1, -1)
+        
+        # Apply multi-scale attention blocks
+        for block in self.msa_blocks:
+            x = block(x, mask)
+            
+        # Global pooling
+        x = x.transpose(1, 2)
+        x = self.global_pool(x).squeeze(-1)
+        
+        return x
+    
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Forward pass - returns class logits for backward compatibility."""
+        features = self.encode(x, mask)
+        return self.class_head(features)
+    
+    def forward_multihead(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> MultiHeadOutput:
+        """Full multi-head forward pass with all prediction heads."""
+        features = self.encode(x, mask)
+        
+        class_logits = self.class_head(features)
+        mu, sigma = self.regression_head(features)
+        quantiles = self.quantile_head(features)
+        entry_offset, sl_distance, tp_distance = self.trading_head(features)
+        candle_deltas = self.candle_head(features)
+        
+        # Flow Forecast heads
+        vol_state_logits = self.vol_state_head(features)
+        acceleration = self.acceleration_head(features)
+        
+        return MultiHeadOutput(
+            class_logits=class_logits,
+            mu=mu,
+            quantiles=quantiles,
+            sigma=sigma,
+            entry_offset=entry_offset,
+            sl_distance=sl_distance,
+            tp_distance=tp_distance,
+            candle_deltas=candle_deltas,
+            vol_state_logits=vol_state_logits,
+            acceleration=acceleration
+        )
+    
+    def predict_with_quantiles(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Convenience method for inference with full trading output."""
         self.eval()
         with torch.no_grad():
             output = self.forward_multihead(x)
@@ -1488,6 +1826,8 @@ def get_multihead_model(
     """
     models = {
         'transformer': MultiHeadTransformer,
+        'multiscale': MultiScaleTransformer,
+        'multiscale_transformer': MultiScaleTransformer,
         'tft': MultiHeadTFT,
         'lstm': MultiHeadLSTM,
         'cnn': MultiHeadCNN,

@@ -10,12 +10,9 @@ Preferred communication style: Simple, everyday language.
 
 ### Frontend
 - **Framework**: React with TypeScript (Vite).
-- **Routing**: Wouter.
-- **State Management**: TanStack React Query for real-time data.
 - **UI Components**: shadcn/ui (Radix UI, Tailwind CSS).
 - **Charts**: Recharts.
-- **Animations**: Framer Motion.
-- **Navigation**: Tabbed interface including Overview, Signal, Neural Network (displaying quantile-based predictions and predicted price bands), and Paper Trading.
+- **Navigation**: Tabbed interface including Overview, Signal, Neural Network, and Paper Trading.
 
 ### Backend
 - **Runtime**: Node.js with Express.js (TypeScript, ESM).
@@ -28,77 +25,19 @@ Preferred communication style: Simple, everyday language.
 - **ORM**: Drizzle ORM for PostgreSQL.
 - **Schema**: Zod for type-safe validation.
 - **Data Separation**: Live sentiment data is separated from historical price/volume data.
-- **Key Data Models**: Covers Candles, Signals, Futures Data, Technical Indicators, AI Analysis, Trading, and Paper Trading entities.
 - **Persistence**: All learning states, including pattern clusters and social media statistics, are persisted in a database.
 
 ### Machine Learning and Signal Generation
-
-#### Regression-Based Signal System
-- **Output**: Comprehensive signals including action, confidence, expected_move, uncertainty, edge, cost_estimate, suggested_order_type, urgency, position_size_pct, stop_loss_pct, take_profit_pct, regime, and expert_weights.
-- **Regression Targets**: Focuses on μ (4h forward return), σ (uncertainty), P(move>cost), quantiles (p10/p50/p90), MFE/MAE.
-- **Market Microstructure**: Incorporates funding rates, open interest, liquidations, order book depth, and taker buy/sell volume.
-- **Evaluation**: Uses purged time-series splits with walk-forward evaluation, after-cost PnL, Sharpe ratio, and maximum drawdown.
-
-#### Regime Detection & Mixture-of-Experts (MoE)
-- **Regime Types**: Identifies TRENDING, MEAN_REVERTING, HIGH_VOLATILITY, LOW_VOLATILITY, TRANSITION, UNKNOWN.
-- **MoE Architecture**: Employs a gating network and four specialized expert models that adapt to the detected market regime.
-- **Self-Supervised Pretraining**: Utilizes techniques like Masked Time-Series, Next-Step Distribution prediction, Contrastive Learning, and Deep clustering for regime discovery.
-
-#### GPU Neural Network Training
-- **Architectures**: Supports 12+ deep learning architectures (Transformers, LSTMs, CNNs, VAEs, GNNs, Ensembles) with local GPU training.
-- **GPU Trainer API**: FastAPI server for predictions (including regression and multihead) and model management.
-- **Advanced Exit Logic**: Implements dynamic take-profit targets, MFE tracking, and failure stop detection.
-- **Unified Learning Controller**: Synchronizes Strategy Learner, Pattern Memory, and GPU Trainer for consistent data processing.
-- **Regime-Balanced Training**: Utilizes a 4-regime classification (BULL, BEAR, HIGH_VOL, LOW_VOL_CHOP) with balanced sampling and per-regime validation.
-
-#### Multi-Head Model Architecture
-- **Output Heads**: Five distinct head types: Classification (Direction probabilities), Regression (Expected return μ and uncertainty σ), Quantile (price projections), VolState (3-class volatility state), Acceleration (Scalar momentum change prediction).
-- **Loss Function**: Combines CrossEntropyLoss, HuberLoss, GaussianNLLLoss, and Pinball loss.
-
-#### Flow Forecast System
-- **Purpose**: Replaces triangle probability cones with regime-conditioned quantile path projections.
-- **Vol_State Classification**: Predicts forward volatility regime based on forward_vol/current_vol ratio.
-- **Acceleration Prediction**: Predicts momentum change.
-- **Quantile Path Generation**: Generates three paths (q10, q50, q90) using alpha shaping based on volatility state for a 16-bar horizon.
-- **Volatility Gate**: Triggers "NO_FORECAST" mode when volatility is contracting or expected spread is insufficient.
-
-#### Advanced Labeling and Prediction
-- **3-Stage HOLD Fix**: Addresses HOLD-heavy label distribution (target: HOLD 50-70%, LONG 15-25%, SHORT 15-25%):
-  - **Stage 1**: `min_confidence` lowered from 0.7 to 0.40 (cost-aware mode)
-  - **Stage 2**: Pure directional mode (`--pure-directional`) bypasses gates, uses simple return threshold (default 0.20%)
-  - **Stage 3**: Regime-based labeling (`--regime-labels`) with ADX-adaptive thresholds:
-    - Trending regime (ADX>25): 0.15% threshold
-    - Ranging regime (ADX<20): 0.30% threshold
-    - Transition zone (20-25): middle threshold (0.20%)
-- **Cost-Aware Labeling**: Signals generated only when net edge (accounting for trading costs) exceeds a minimum threshold and confidence is sufficient. Gates apply to live execution only, not label generation.
-- **Gaussian NLL with Log-Sigma**: Predicts `log_sigma` for calibrated uncertainty estimates.
-- **Constrained Candle Parameterization**: Predicts `delta_close`, `log_range`, and `skew` to guarantee valid candle predictions.
-- **Quantile-Based SL/TP Derivation**: Stop-loss and take-profit levels are derived directly from predicted quantiles.
-
-#### Model Management and Monitoring
-- **Walk-Forward Weight Saving**: Saves real trading metrics for ensemble model weighting with smart save logic (protects good runs from regression).
-- **Feature Version Locking**: Ensures feature consistency between training and inference.
-- **Prediction Drift Monitoring**: Utilizes PSI, KL Divergence, and ECE to detect and report feature distribution shifts and prediction calibration changes.
-- **Labeling Metadata Tracking**: Saves `labeling_meta.json` with label_mode, thresholds, and distribution for reproducibility.
-- **Weights History Audit Trail**: Saves unique snapshots to `weights_history/model_weights_{run_id}.json` for full auditability.
-
-#### GUI Label Mode Selection
-- **Label Mode Dropdown**: GUI provides cost_aware/pure_directional/regime mode selection for training.
-- **Real-time Description**: Shows mode description (Stage 1/2/3) and expected behavior.
-- **Threshold Configuration**: Configurable min_confidence, directional_threshold, trend_threshold, range_threshold.
-
-#### Feature Schema Enforcement (Critical for Model Accuracy)
-- **Dimension Inference from Checkpoints**: Model input_dim is inferred from state_dict weights (`input_conv.weight` for CNN, `input_layer.weight` for others).
-- **Per-Checkpoint Feature Config**: `.features.json` files alongside checkpoints store feature_columns and input_dim; loaded with strict priority.
-- **Strict State Dict Loading**: Models refuse to load if weight sizes don't match configured input_dim, preventing silent schema drift.
-- **FeatureValidator.enforce_schema**: Reorders features to match training config order, fills missing features with 0.0, drops extra features.
-- **STF-Only Mode Enforcement**: Prediction endpoints validate that STF models (41 features) don't receive MTF payloads (66+ features).
-- **15% Missing Threshold**: HTTP 422 returned if >15% of expected features are missing, preventing garbage predictions.
-
-#### Professional Ensemble Predictor
-- **Ensemble Voting**: Combines predictions from Transformer, TFT, LSTM, and CNN models with confidence-based voting.
-- **Regime & Risk Gating**: Incorporates VAE for market regime detection and GNN for risk regime detection to adjust thresholds and position sizing.
-- **Metric Weighting**: Models are weighted based on actual trading metrics.
+- **Regression-Based Signal System**: Generates comprehensive signals including action, confidence, expected_move, uncertainty, and position sizing. Targets μ (4h forward return), σ (uncertainty), P(move>cost), quantiles, MFE/MAE.
+- **Regime Detection & Mixture-of-Experts (MoE)**: Identifies market regimes (TRENDING, MEAN_REVERTING, HIGH_VOLATILITY, LOW_VOLATILITY, TRANSITION, UNKNOWN) and employs a gating network with specialized expert models.
+- **GPU Neural Network Training**: Supports 12+ deep learning architectures (Transformers, LSTMs, CNNs, VAEs, GNNs, Ensembles) with local GPU training. Implements dynamic take-profit targets and failure stop detection.
+- **Multi-Head Model Architecture**: Uses five distinct output heads: Classification, Regression, Quantile, VolState, and Acceleration, with combined loss functions.
+- **Flow Forecast System**: Replaces triangle probability cones with regime-conditioned quantile path projections (q10, q50, q90) for a 16-bar horizon.
+- **Advanced Labeling and Prediction**: Addresses HOLD-heavy label distribution with a 3-stage HOLD fix, cost-aware labeling, Gaussian NLL with Log-Sigma for uncertainty, and constrained candle parameterization.
+- **Model Management and Monitoring**: Includes walk-forward weight saving, feature version locking, prediction drift monitoring (PSI, KL Divergence, ECE), and label metadata tracking.
+- **Feature Schema Enforcement**: Ensures strict consistency of features between training and inference using `.features.json` files and `FeatureValidator.enforce_schema`.
+- **Professional Ensemble Predictor**: Combines predictions from multiple models (Transformer, TFT, LSTM, CNN) with confidence-based voting, regime, and risk gating.
+- **Training, Monitoring, and Policy Architecture**: Separates model training (weights learning) from policy selection (live execution rules). Post-training, a `PolicySelector` performs sequential out-of-sample evaluation to select and save a frozen `execution_policy.json` for live trading.
 
 ### Build System
 - **Client Build**: Vite bundles React app to `dist/public`.
@@ -107,90 +46,24 @@ Preferred communication style: Simple, everyday language.
 ### Data Architecture
 - **Dashboard**: Uses 35K+ database candles + 1 live Binance candle.
 - **GPU Trainer**: Uses 140K+ parquet candles for training (separate data flow).
-- **Feature Pipeline Alignment**: Explicit STF/MTF mode routing with mode auto-detection from saved feature config.
-- **FeatureEngineer Version Tracking**: Prevents silent signal degradation from train/inference feature computation mismatch.
-- **Centralized Timeframe Configuration**: Uses `gpu_trainer/config/timeframe_config.py` as a single source of truth for timeframes and horizons, defaulting to BTCUSDT 15m.
+- **Feature Pipeline Alignment**: Explicit STF/MTF mode routing with auto-detection.
+- **Centralized Timeframe Configuration**: Uses `gpu_trainer/config/timeframe_config.py` as a single source of truth.
 
 ### Runtime Diagnostic System
-- **GPU Trainer /health Endpoint**: Provides comprehensive capability information, including available features and disconnect reasons.
-- **Server Health Polling**: Logs all health fields with `[GPU HEALTH]` prefix and explicitly logs disconnect reasons.
-- **UI Console Logging**: Logs `[FLOW FORECAST UI]` with forecastMode, volState, acceleration, path lengths, and whether NO_FORECAST or QUANTILE_PATHS rendering occurs.
-
-### Model Debugging Endpoints
-- **`/api/gpu/diagnostics/model-sensitivity`**: Tests if models respond differently to varied inputs (sanity check for model training).
-- **`/api/gpu/diagnostics/label-distribution`**: Checks training label balance (detects HOLD-heavy distributions).
-- **`/api/gpu/diagnostics/full`**: Runs complete diagnostic suite including sensitivity, label distribution, and training configuration checks.
-- **`/debug/model-sensitivity`** (GPU Trainer): Direct endpoint for testing model input sensitivity.
-- **`/debug/label-distribution`** (GPU Trainer): Direct endpoint for analyzing label distribution in training data.
+- **GPU Trainer /health Endpoint**: Provides comprehensive capability information and disconnect reasons.
+- **UI Console Logging**: Logs `[FLOW FORECAST UI]` with forecastMode, volState, acceleration, and path lengths.
 
 ### GPU Training API
-- **`/training/start`**: Triggers real MultiHeadTrainer training with parquet data, class weights, and 6-head loss configuration.
-- **`/api/retrain/daily`**: Daily retrain endpoint - syncs candles, validates freshness, starts multihead training (100 epochs).
-- **Training Configuration**: Uses inverse frequency class weights (capped at 10x), 80/20 train/val split, 100-step sequences.
-
-### Training, Monitoring, and Policy Architecture
-
-The system separates model training from policy selection to ensure consistent live trading behavior.
-
-#### 1. Neural Network Training (MultiheadTrainer.train)
-- **Purpose**: Learns model weights via gradient descent.
-- **No policy logic**: Training does NOT save or freeze any execution policy.
-- **Outputs**: Model checkpoints saved to disk.
-
-#### 2. Monitoring Sweep (during training)
-- **Purpose**: Informational only - tracks training quality.
-- **Location**: `_compute_trading_metrics()` in multihead_trainer.py.
-- **Runs**: Every 5 epochs (configurable via MONITORING_EPOCH_INTERVAL).
-- **Logs**: Prefixed with "MONITORING SWEEP" - clearly marked as NOT for live trading.
-- **Does NOT**: Save policies, alter training, or affect live trading.
-
-#### 3. Post-Training Policy Selection (PolicySelector)
-- **Purpose**: The ONLY source of truth for live execution policy.
-- **Location**: `gpu_trainer/training/policy_selector.py`.
-- **Flow**:
-  1. Load best model checkpoint.
-  2. Run sequential out-of-sample (OOS) evaluation (>=5 time folds).
-     - NOTE: Model is NOT retrained per fold - tests fixed model across time periods.
-  3. Sweep confidence thresholds with Pareto selection.
-  4. Filter by MIN_TRADES=30 eligibility.
-  5. Select best by risk-adjusted score (expectancy - 0.5*max_drawdown).
-  6. Save frozen policy to `execution_policy.json`.
-  7. Print "FROZEN POLICY" summary.
-
-#### 4. Live Trading
-- **Uses**: Frozen policy from `execution_policy.json`.
-- **Gate order**: spread → confidence → direction → cooldown → trade.
-- **No adaptation**: Policy is static until next retrain cycle.
-- **Retraining trigger**: Walk-forward instability detection.
-
-#### Execution Policy Fields (execution_policy.json)
-```json
-{
-  "min_confidence": 0.15,
-  "spread_multiplier": 3.0,
-  "cooldown": 8,
-  "fixed_cost": 0.0009,
-  "tp_quantile": "q75",
-  "sl_quantile": "q10",
-  "min_trades": 30,
-  "expectancy": 0.0023,
-  "risk_adjusted_score": 0.0015,
-  "hit_rate": 0.542,
-  "max_drawdown": 0.0016,
-  "sharpe": 1.23,
-  "num_trades": 142,
-  "created_at": "2026-02-01T12:00:00",
-  "checkpoint_path": "models/best_multihead.pt",
-  "walk_forward_folds": 5
-}
-```
+- **`/training/start`**: Triggers MultiHeadTrainer training.
+- **`/training/status`**: Provides real-time training progress, epoch_history, ETA, per-head losses, and health warnings.
+- **`/api/retrain/daily`**: Daily retraining endpoint.
+- **Training Configuration**: Uses inverse frequency class weights, 80/20 train/val split, 100-step sequences.
 
 ## External Dependencies
 
 ### Database
 - PostgreSQL (via `DATABASE_URL`).
 - Drizzle Kit for schema migrations.
-- connect-pg-simple for session storage.
 
 ### UI Framework
 - Radix UI primitives.
@@ -201,7 +74,3 @@ The system separates model training from policy selection to ensure consistent l
 - Zod for runtime schema validation.
 - drizzle-zod for database schema to Zod type generation.
 - date-fns for date formatting.
-
-### Development Tools
-- Replit-specific plugins for dev banner and error overlay.
-- TypeScript.

@@ -54,6 +54,9 @@ import { NeuralNetworkPredictionCard, TrainingModeBadge, type QuantilePrediction
 import { QuantileFanChart, DerivedTradeLevels } from "@/components/quantile-fan-chart";
 import { PremiumCandlestickChart } from "@/components/premium-candlestick-chart";
 import { ConeSignalCard } from "@/components/cone-signal-card";
+import { NNDiagnosticsCard } from "@/components/nn-diagnostics-card";
+import { WalkForwardCard } from "@/components/walk-forward-card";
+import { TrainingProgressCard } from "@/components/training-progress-card";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff, Brain, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -409,6 +412,7 @@ export default function Dashboard() {
             <TabsTrigger value="learning" data-testid="tab-learning">Learning</TabsTrigger>
             <TabsTrigger value="analysis" data-testid="tab-analysis">AI Analysis</TabsTrigger>
             <TabsTrigger value="indicators" data-testid="tab-indicators">Indicators</TabsTrigger>
+            <TabsTrigger value="diagnostics" data-testid="tab-diagnostics">Diagnostics</TabsTrigger>
             <TabsTrigger value="performance" data-testid="tab-performance">Performance</TabsTrigger>
           </TabsList>
 
@@ -851,6 +855,20 @@ export default function Dashboard() {
                 <WhaleActivityCard whaleActivity={data.whaleActivity} />
                 <FuturesMetricsCard data={data.futuresData} />
               </div>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="diagnostics" className="mt-0">
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                <div className="lg:col-span-2">
+                  <NNDiagnosticsCard />
+                </div>
+                <div>
+                  <TrainingProgressCard />
+                </div>
+              </div>
+              <WalkForwardCard />
             </div>
           </TabsContent>
 
