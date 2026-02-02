@@ -46,7 +46,7 @@ class ModelConfig:
 class TrainingConfig:
     batch_size: int = 64
     learning_rate: float = 1e-4
-    weight_decay: float = 1e-5
+    weight_decay: float = 1e-4  # Increased from 1e-5 to 1e-4 for better regularization
     epochs: int = 100
     patience: int = 25  # Increased from 10 to allow model recovery from temporary val_loss spikes
     gradient_clip: float = 1.0  # Standard gradient clipping

@@ -471,13 +471,14 @@ class MultiHeadTrainer:
         self.criterion = MultiHeadLoss(loss_config).to(device)
         
         # TRAINING HEALTH MONITOR - 2024 Best Practice
-        # Detects training issues in real-time and sends alerts to GUI
+        # Raised gradient_explosion_threshold from 10.0 to 20.0 - with gradient clipping
+        # at 1.0, pre-clip norms up to 15-20 are normal and clipping handles them
         self.health_monitor = TrainingHealthMonitor(
             window_size=10,
             loss_divergence_threshold=0.5,
             accuracy_drop_threshold=0.15,
             class_skew_threshold=0.85,
-            gradient_explosion_threshold=10.0,
+            gradient_explosion_threshold=20.0,  # Was 10.0, raised to reduce false alarms
             alert_callback=health_alert_callback
         )
         
@@ -488,10 +489,11 @@ class MultiHeadTrainer:
             weight_decay=config.training.weight_decay
         )
         
-        # Scheduler
+        # Scheduler - reduced max_lr multiplier from 10x to 3x to prevent gradient explosion
+        # Original: 10x caused gradient norms of 30-40 which destabilized training
         self.scheduler = OneCycleLR(
             self.optimizer,
-            max_lr=config.training.learning_rate * 10,
+            max_lr=config.training.learning_rate * 3,  # Was 10x, reduced to 3x
             epochs=config.training.epochs,
             steps_per_epoch=len(train_loader)
         )
