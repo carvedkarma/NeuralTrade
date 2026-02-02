@@ -642,6 +642,226 @@ export async function registerRoutes(
     }
   });
 
+  // Production Signal API with full gating pipeline (2024 State-of-the-Art)
+  // Gate order: spread → confidence → uncertainty → cooldown → kelly_position_sizing → final
+  app.get("/api/signal/production", async (req, res) => {
+    try {
+      const { gpuBridge } = await import("./gpu-bridge");
+      
+      // Get latest candles
+      const candles = storage.getCandles();
+      if (candles.length < 100) {
+        res.json({ 
+          trade: false, 
+          reason: "INSUFFICIENT_DATA",
+          message: `Only ${candles.length} candles available, need 100`,
+          gates_passed: []
+        });
+        return;
+      }
+      
+      const lastCandle = candles[candles.length - 1];
+      const currentPrice = lastCandle.close;
+      
+      // Check GPU connection
+      const gpuStatus = gpuBridge.getPushedStatus();
+      if (!gpuStatus.connected || gpuStatus.modelsLoaded.length === 0) {
+        res.json({ 
+          trade: false, 
+          reason: "GPU_DISCONNECTED",
+          message: "GPU trainer not connected or no models loaded",
+          gates_passed: []
+        });
+        return;
+      }
+      
+      // Get ensemble prediction
+      const prediction = await gpuBridge.predictEnsembleFromCandles(candles.slice(-100));
+      if (!prediction) {
+        res.json({ 
+          trade: false, 
+          reason: "PREDICTION_FAILED",
+          message: "Failed to get prediction from GPU trainer",
+          gates_passed: []
+        });
+        return;
+      }
+      
+      const gatesPassed: string[] = [];
+      const gatesFailed: { gate: string; reason: string }[] = [];
+      
+      // === GATE 1: Spread Check ===
+      const spreadPct = 0.0005; // 0.05% assumed spread
+      const expectedMove = prediction.mu || 0;
+      const spreadMultiplier = 3.0;
+      
+      if (Math.abs(expectedMove) < spreadPct * spreadMultiplier) {
+        gatesFailed.push({ gate: "SPREAD", reason: `Expected move ${(expectedMove*100).toFixed(3)}% < ${(spreadPct*spreadMultiplier*100).toFixed(3)}% threshold` });
+      } else {
+        gatesPassed.push("SPREAD");
+      }
+      
+      // === GATE 2: Confidence Threshold ===
+      const confidence = prediction.confidence || 0;
+      const minConfidence = 0.15;
+      
+      if (confidence < minConfidence) {
+        gatesFailed.push({ gate: "CONFIDENCE", reason: `Confidence ${(confidence*100).toFixed(1)}% < ${(minConfidence*100).toFixed(1)}% threshold` });
+      } else {
+        gatesPassed.push("CONFIDENCE");
+      }
+      
+      // === GATE 3: Direction Check (not HOLD) ===
+      const action = prediction.action;
+      
+      if (action === "HOLD") {
+        gatesFailed.push({ gate: "DIRECTION", reason: "Signal is HOLD - no trade" });
+      } else {
+        gatesPassed.push("DIRECTION");
+      }
+      
+      // === GATE 4: Uncertainty Check (MC Dropout) ===
+      // Cast prediction to any to access optional epistemic_uncertainty field
+      const epistemic = (prediction as any).epistemic_uncertainty as number | undefined;
+      const maxUncertainty = 0.02;
+      
+      // MANDATORY GATE: If uncertainty unavailable, assume worst case (0.5)
+      const effectiveUncertainty = epistemic ?? 0.5; // Default to high uncertainty if missing
+      
+      if (effectiveUncertainty > maxUncertainty) {
+        const reason = epistemic === undefined 
+          ? `Uncertainty data unavailable (assumed ${effectiveUncertainty}) > ${maxUncertainty} threshold`
+          : `Epistemic uncertainty ${effectiveUncertainty.toFixed(4)} > ${maxUncertainty} threshold`;
+        gatesFailed.push({ gate: "UNCERTAINTY", reason });
+      } else {
+        gatesPassed.push("UNCERTAINTY");
+      }
+      
+      // === GATE 5: Cooldown Check ===
+      // Use storage-based cooldown tracker for persistence across restarts
+      const cooldownState = storage.getCooldownState ? storage.getCooldownState() : null;
+      const lastTradeTime = cooldownState?.lastTradeTime ?? 0;
+      const cooldownBars = 8;
+      const barDurationMs = 15 * 60 * 1000; // 15 minutes
+      const cooldownMs = cooldownBars * barDurationMs;
+      const timeSinceLastTrade = Date.now() - lastTradeTime;
+      
+      if (lastTradeTime > 0 && timeSinceLastTrade < cooldownMs) {
+        const barsRemaining = Math.ceil((cooldownMs - timeSinceLastTrade) / barDurationMs);
+        gatesFailed.push({ gate: "COOLDOWN", reason: `${barsRemaining} bars cooldown remaining` });
+      } else {
+        gatesPassed.push("COOLDOWN");
+      }
+      
+      // Update last trade time if all gates pass (done at the end)
+      
+      // === Kelly Criterion Position Sizing ===
+      const winProb = action === "LONG" ? (prediction.ensemble_probs?.LONG || 0.5) : 
+                      action === "SHORT" ? (prediction.ensemble_probs?.SHORT || 0.5) : 0.5;
+      
+      // Expected win/loss from quantiles
+      const quantiles = prediction.quantiles || { q10: -0.01, q25: -0.005, q50: 0, q75: 0.005, q90: 0.01 };
+      const expectedWin = action === "LONG" ? (quantiles.q75 - 0) : (0 - quantiles.q25);
+      const expectedLoss = action === "LONG" ? (0 - quantiles.q25) : (quantiles.q75 - 0);
+      
+      // Kelly formula: f* = (p * b - q) / b where b = expected_win / expected_loss
+      const odds = expectedWin / Math.max(expectedLoss, 0.001);
+      const lossProb = 1 - winProb;
+      const fullKelly = odds > 0 ? (winProb * odds - lossProb) / odds : 0;
+      const halfKelly = fullKelly * 0.5; // Conservative Half-Kelly
+      const maxPosition = 0.25; // 25% max
+      const positionSize = Math.max(0, Math.min(maxPosition, halfKelly));
+      
+      // Calculate edge
+      const fixedCost = 0.0009; // 9 bps total costs
+      const grossEdge = winProb * expectedWin - lossProb * expectedLoss;
+      const netEdge = grossEdge - fixedCost;
+      
+      // === GATE 6: Edge Check ===
+      const minEdge = 0.001; // 0.1% minimum edge
+      
+      if (netEdge < minEdge) {
+        gatesFailed.push({ gate: "EDGE", reason: `Net edge ${(netEdge*100).toFixed(3)}% < ${(minEdge*100).toFixed(3)}% minimum` });
+      } else {
+        gatesPassed.push("EDGE");
+      }
+      
+      // === Final Decision ===
+      const allGatesPassed = gatesFailed.length === 0;
+      
+      // Update cooldown tracker if trade is triggered (persisted via storage)
+      if (allGatesPassed && storage.setCooldownState) {
+        storage.setCooldownState({ lastTradeTime: Date.now() });
+      }
+      
+      // Derive SL/TP from quantiles
+      const slDistance = action === "LONG" ? Math.abs(quantiles.q10) : quantiles.q90;
+      const tpDistance = action === "LONG" ? quantiles.q90 : Math.abs(quantiles.q10);
+      
+      const stopLossPrice = action === "LONG" ? currentPrice * (1 - slDistance) : currentPrice * (1 + slDistance);
+      const takeProfitPrice = action === "LONG" ? currentPrice * (1 + tpDistance) : currentPrice * (1 - tpDistance);
+      
+      res.json({
+        trade: allGatesPassed,
+        action: allGatesPassed ? action : null,
+        confidence,
+        
+        // Position sizing
+        position_size_pct: allGatesPassed ? positionSize * 100 : 0,
+        kelly_fraction: halfKelly,
+        full_kelly: fullKelly,
+        
+        // Entry/Exit prices
+        entry_price: currentPrice,
+        stop_loss_price: stopLossPrice,
+        take_profit_price: takeProfitPrice,
+        sl_distance_pct: slDistance * 100,
+        tp_distance_pct: tpDistance * 100,
+        
+        // Edge and costs
+        gross_edge_pct: grossEdge * 100,
+        net_edge_pct: netEdge * 100,
+        fixed_cost_pct: fixedCost * 100,
+        
+        // Probabilities
+        win_probability: winProb,
+        odds_ratio: odds,
+        
+        // Quantiles
+        quantiles: {
+          q10: quantiles.q10 * 100,
+          q25: quantiles.q25 * 100,
+          q50: quantiles.q50 * 100,
+          q75: quantiles.q75 * 100,
+          q90: quantiles.q90 * 100,
+        },
+        
+        // Uncertainty
+        epistemic_uncertainty: epistemic,
+        
+        // Regime
+        market_regime: prediction.market_regime,
+        risk_regime: prediction.risk_regime,
+        
+        // Flow forecast
+        vol_state: prediction.vol_state,
+        forecast_mode: prediction.forecast_mode,
+        
+        // Gate results
+        gates_passed: gatesPassed,
+        gates_failed: gatesFailed,
+        reason: allGatesPassed ? "ALL_GATES_PASSED" : gatesFailed[0]?.gate,
+        
+        // Metadata
+        timestamp: Date.now(),
+        source: "GPU_ENSEMBLE"
+      });
+    } catch (error) {
+      console.error("Error getting production signal:", error);
+      res.status(500).json({ error: "Failed to get production signal" });
+    }
+  });
+
   // Neural Network multi-timeframe data endpoints
   app.get("/api/nn-data/summary", async (req, res) => {
     try {

@@ -57,6 +57,9 @@ export interface IStorage {
   requestAIAnalysis(): Promise<void>;
   reloadHistoricalCandles(): Promise<void>;
   getCandles(): Candle[];
+  // Production signal cooldown methods
+  getCooldownState(): { lastTradeTime: number };
+  setCooldownState(state: { lastTradeTime: number }): void;
   // Shot plan history methods
   getShotPlanHistory(limit?: number): Promise<ShotPlanHistoryEntry[]>;
   recordShotPlan(entry: InsertShotPlanHistory): Promise<ShotPlanHistoryEntry>;
@@ -147,6 +150,9 @@ export class MemStorage implements IStorage {
   private cachedSentiment: Sentiment | null = null;
   private lastShotPlanUpdate = 0;
   private lastSentimentUpdate = 0;
+  
+  // Production signal cooldown state (persisted across refreshes)
+  private cooldownState: { lastTradeTime: number } = { lastTradeTime: 0 };
   
   private learningStats = {
     binanceAttempts: 0,
@@ -700,6 +706,15 @@ export class MemStorage implements IStorage {
 
   getCandles(): Candle[] {
     return this.candles;
+  }
+  
+  // Production signal cooldown state management
+  getCooldownState(): { lastTradeTime: number } {
+    return this.cooldownState;
+  }
+  
+  setCooldownState(state: { lastTradeTime: number }): void {
+    this.cooldownState = state;
   }
 
   // Data refresh loop - fetches market data but does NOT train unless manually enabled
