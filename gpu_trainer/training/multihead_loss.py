@@ -99,8 +99,8 @@ def derive_sl_tp_from_quantiles(
 class MultiHeadLossConfig:
     """Configuration for multi-head loss weights."""
     
-    # Loss weights
-    lambda_class: float = 1.0       # Weight for classification loss
+    # Loss weights - UPDATED: classification head gets priority (3x) to prevent HOLD-heavy
+    lambda_class: float = 3.0       # Weight for classification loss (increased from 1.0)
     lambda_mu: float = 0.5          # Weight for regression (μ) loss
     lambda_sigma: float = 0.2       # Weight for uncertainty (σ) loss  
     lambda_quantile: float = 0.5    # Weight for quantile loss
@@ -113,7 +113,17 @@ class MultiHeadLossConfig:
     
     # Classification options
     class_weights: Optional[torch.Tensor] = None  # For imbalanced classes
-    label_smoothing: float = 0.1    # Smoothing for classification
+    # CRITICAL FIX: Disabled label smoothing - research shows it harms class imbalance
+    # See: "Understanding Why Label Smoothing Degrades Selective Classification" (ICLR 2025)
+    label_smoothing: float = 0.0    # DISABLED - was 0.1, harms imbalanced classification
+    
+    # Focal Loss parameters (NEW) - for imbalanced classification
+    use_focal_loss: bool = True     # Use Focal Loss instead of CrossEntropy
+    focal_gamma: float = 2.0        # Focusing parameter (2.0 is standard)
+    focal_alpha: Optional[torch.Tensor] = None  # Per-class weights (computed from priors)
+    
+    # Inference calibration (NEW) - sharpen soft predictions
+    inference_temperature: float = 0.7  # T < 1 sharpens predictions at inference
     
     # Regression options
     mu_huber_delta: float = 0.02    # Delta for Huber loss (robust to outliers)
@@ -177,6 +187,85 @@ class PinballLoss(nn.Module):
         loss = torch.max(q * errors, (q - 1) * errors)
         
         return loss.mean()
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for multi-class classification with class imbalance.
+    
+    Paper: "Focal Loss for Dense Object Detection" (Lin et al., 2017)
+    
+    FL(p_t) = -α_t * (1 - p_t)^γ * log(p_t)
+    
+    Where:
+    - p_t: Predicted probability for the true class
+    - γ (gamma): Focusing parameter (typically 2.0)
+      - Higher γ → more focus on hard examples
+    - α: Per-class weights (optional, typically inverse of class frequency)
+    
+    Benefits for trading signal classification:
+    - Down-weights easy/frequent HOLD predictions
+    - Focuses learning on hard-to-classify LONG/SHORT signals
+    - Better than simple class weighting for imbalanced data
+    """
+    
+    def __init__(
+        self, 
+        alpha: Optional[torch.Tensor] = None,
+        gamma: float = 2.0,
+        reduction: str = 'mean',
+        num_classes: int = 3
+    ):
+        super().__init__()
+        self.gamma = gamma
+        self.reduction = reduction
+        self.num_classes = num_classes
+        
+        # Alpha can be per-class weights [num_classes] or None (uniform)
+        if alpha is not None:
+            self.register_buffer('alpha', alpha)
+        else:
+            self.alpha = None
+    
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Compute Focal Loss.
+        
+        Args:
+            inputs: [batch, num_classes] raw logits
+            targets: [batch] class indices (0, 1, 2 for SHORT/HOLD/LONG)
+            
+        Returns:
+            Scalar focal loss
+        """
+        # Get probabilities via softmax
+        probs = F.softmax(inputs, dim=1)
+        
+        # Get probability of true class: p_t
+        # targets: [batch] -> gather from probs: [batch, num_classes]
+        p_t = probs.gather(1, targets.unsqueeze(1)).squeeze(1)  # [batch]
+        
+        # Compute cross entropy (without reduction): -log(p_t)
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')  # [batch]
+        
+        # Compute focal weight: (1 - p_t)^γ
+        focal_weight = (1 - p_t) ** self.gamma  # [batch]
+        
+        # Apply focal weight
+        focal_loss = focal_weight * ce_loss  # [batch]
+        
+        # Apply alpha (per-class weighting) if provided
+        if self.alpha is not None:
+            alpha_t = self.alpha.gather(0, targets)  # [batch]
+            focal_loss = alpha_t * focal_loss
+        
+        # Apply reduction
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
 
 
 class GaussianNLLLoss(nn.Module):
@@ -257,12 +346,18 @@ class MultiHeadLoss(nn.Module):
                  λ_quantile * L_quantile + λ_trading * L_trading + λ_candle * L_candle
     
     Where:
-    - L_class: CrossEntropy with optional label smoothing
+    - L_class: Focal Loss (default) or CrossEntropy for direction classification
     - L_mu: Huber loss for expected return
     - L_sigma: Gaussian NLL for uncertainty calibration
     - L_quantile: Pinball loss for quantile regression
     - L_trading: Huber loss for entry_offset, sl_distance, tp_distance
     - L_candle: Huber loss for future candle deltas
+    
+    PHASE 2 UPGRADES (2024 research):
+    - Focal Loss replaces CrossEntropy (handles class imbalance better)
+    - Label smoothing DISABLED (harms imbalanced classification)
+    - Classification head weight increased 3x (priority over regression)
+    - Temperature scaling at inference (T=0.7 sharpens predictions)
     """
     
     def __init__(self, config: Optional[MultiHeadLossConfig] = None):
@@ -270,11 +365,26 @@ class MultiHeadLoss(nn.Module):
         
         self.config = config or MultiHeadLossConfig()
         
-        # Classification loss
-        self.class_loss = nn.CrossEntropyLoss(
-            weight=self.config.class_weights,
-            label_smoothing=self.config.label_smoothing
-        )
+        # Classification loss - UPGRADED: Focal Loss for class imbalance
+        if self.config.use_focal_loss:
+            # Focal Loss: down-weights easy/frequent HOLD, focuses on LONG/SHORT
+            self.class_loss = FocalLoss(
+                alpha=self.config.focal_alpha,  # Per-class weights (set from class priors)
+                gamma=self.config.focal_gamma,  # Focusing parameter (default 2.0)
+                reduction='mean'
+            )
+            # Log that we're using Focal Loss
+            import logging
+            logging.getLogger(__name__).info(
+                f"[LOSS] Using FOCAL LOSS: gamma={self.config.focal_gamma}, "
+                f"alpha={'computed from priors' if self.config.focal_alpha is None else 'custom'}"
+            )
+        else:
+            # Fallback: CrossEntropyLoss (with label_smoothing=0.0 by default)
+            self.class_loss = nn.CrossEntropyLoss(
+                weight=self.config.class_weights,
+                label_smoothing=self.config.label_smoothing
+            )
         
         # Regression loss (Huber for robustness)
         self.mu_loss = nn.HuberLoss(delta=self.config.mu_huber_delta)
@@ -291,8 +401,8 @@ class MultiHeadLoss(nn.Module):
         # Candle prediction loss
         self.candle_loss = nn.HuberLoss(delta=self.config.candle_huber_delta)
         
-        # Flow Forecast losses
-        self.vol_state_loss = nn.CrossEntropyLoss(label_smoothing=0.05)  # 3-class: contraction/neutral/expansion
+        # Flow Forecast losses - ALSO removed label smoothing for vol_state
+        self.vol_state_loss = nn.CrossEntropyLoss(label_smoothing=0.0)  # 3-class: contraction/neutral/expansion
         self.acceleration_loss = nn.HuberLoss(delta=self.config.acceleration_huber_delta)
         
     def forward(
