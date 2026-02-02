@@ -15,11 +15,15 @@ Instead of predicting SL/TP as separate targets, derive them from quantiles:
 This ensures internal consistency and uses the distribution we already train.
 """
 
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
+
+# Module-level logger for loss functions
+logger = logging.getLogger(__name__)
 
 
 def derive_sl_tp_from_quantiles(
