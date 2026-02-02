@@ -228,6 +228,20 @@ class OHEMLoss(nn.Module):
         self.base_loss = base_loss
         self.keep_ratio = keep_ratio
         self.min_keep = min_keep
+    
+    def set_alpha(self, alpha: torch.Tensor):
+        """
+        Pass-through to set alpha weights on underlying FocalLoss.
+        
+        BUG FIX: Previously, when OHEM wrapped FocalLoss, the set_alpha call
+        would fail because OHEMLoss didn't have this method. This caused
+        class weights to never be applied, contributing to mode collapse.
+        """
+        if hasattr(self.base_loss, 'set_alpha'):
+            self.base_loss.set_alpha(alpha)
+            logger.info(f"[OHEM] Passed alpha weights to underlying FocalLoss: {alpha.tolist()}")
+        else:
+            logger.warning("[OHEM] base_loss does not support set_alpha - weights not applied")
         
     def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
@@ -292,21 +306,36 @@ class ConfidencePenaltyLoss(nn.Module):
         
     def forward(self, logits: torch.Tensor) -> torch.Tensor:
         """
-        Compute entropy penalty (to be SUBTRACTED from total loss).
+        Compute confidence penalty to prevent OVERCONFIDENT predictions.
+        
+        BUG FIX: Previously returned negative entropy, which when ADDED to loss
+        would REDUCE total loss for uniform predictions - actively encouraging
+        mode collapse! Now returns POSITIVE penalty for LOW entropy (overconfidence).
         
         Args:
             logits: [batch, num_classes] raw logits
             
         Returns:
-            Negative entropy (subtract this from loss to maximize entropy)
+            Positive penalty for overconfident (low-entropy) predictions.
+            Higher penalty when model is very confident (low entropy).
         """
         probs = F.softmax(logits, dim=1)
         # Entropy: H = -Σ p * log(p)
         # Add small epsilon for numerical stability
         entropy = -(probs * torch.log(probs + 1e-10)).sum(dim=1)
         
-        # Return negative entropy so that subtracting it = adding entropy bonus
-        return -self.beta * entropy.mean()
+        # Max entropy for 3 classes is log(3) ≈ 1.099
+        # We want to PENALIZE low entropy (overconfidence)
+        # Penalty = beta * (max_entropy - actual_entropy)
+        # When predictions are uniform: entropy ≈ 1.099, penalty ≈ 0
+        # When predictions are confident: entropy ≈ 0, penalty ≈ beta * 1.099
+        num_classes = probs.size(1)
+        max_entropy = torch.log(torch.tensor(num_classes, dtype=probs.dtype, device=probs.device))
+        
+        # Penalty increases when entropy is LOW (model is overconfident)
+        confidence_penalty = self.beta * (max_entropy - entropy).mean()
+        
+        return confidence_penalty
 
 
 class FocalLoss(nn.Module):

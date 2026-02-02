@@ -4101,6 +4101,24 @@ async def run_training(request: TrainingRequest):
         labels_np = np.array([labels[i] for i in final_valid_indices]).astype(np.int64)  # Already 0,1,2
         forward_returns_np = np.array([forward_returns[i] for i in final_valid_indices]).astype(np.float32)
         
+        # ============== BUG FIX: FEATURE SCALING ==============
+        # Previously features were used RAW without scaling, causing:
+        # - RSI: 0-100, MACD: arbitrary, ATR: varies, Returns: -0.1 to 0.1
+        # - Gradient instability due to vastly different feature scales
+        # - Model learning dominated by high-magnitude features
+        from sklearn.preprocessing import RobustScaler
+        
+        logger.info(f"[SCALING] Applying RobustScaler to {features_np.shape[1]} features...")
+        feature_scaler = RobustScaler()
+        features_np = feature_scaler.fit_transform(features_np).astype(np.float32)
+        
+        # Log feature statistics after scaling
+        feature_min = np.min(features_np)
+        feature_max = np.max(features_np)
+        feature_mean = np.mean(features_np)
+        feature_std = np.std(features_np)
+        logger.info(f"[SCALING] Post-scaling stats: min={feature_min:.3f}, max={feature_max:.3f}, mean={feature_mean:.3f}, std={feature_std:.3f}")
+        
         logger.info(f"Feature shape: {features_np.shape}, Labels: {len(labels_np)}")
         
         # Compute class weights

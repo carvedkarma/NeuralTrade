@@ -1531,9 +1531,29 @@ class MultiHeadTrainer:
                 
                 # Update the FocalLoss with computed alpha if using focal loss
                 # Use buffer-safe set_alpha method to avoid device/state issues
+                # BUG FIX: Now works through OHEM wrapper via pass-through set_alpha()
                 if hasattr(self.criterion, 'class_loss') and hasattr(self.criterion.class_loss, 'set_alpha'):
                     self.criterion.class_loss.set_alpha(focal_alpha.to(self.device))
-                    logger.info("  -> Updated FocalLoss alpha weights (buffer-safe)")
+                    logger.info("  -> ✓ Updated FocalLoss alpha weights (buffer-safe)")
+                    
+                    # VALIDATION: Verify alpha was actually applied
+                    class_loss = self.criterion.class_loss
+                    if hasattr(class_loss, 'base_loss'):
+                        # OHEM wrapper - check underlying FocalLoss
+                        inner_loss = class_loss.base_loss
+                        if hasattr(inner_loss, 'alpha') and hasattr(inner_loss, '_alpha_initialized'):
+                            if inner_loss._alpha_initialized:
+                                logger.info(f"  -> ✓ VERIFIED: FocalLoss alpha = {inner_loss.alpha.tolist()}")
+                            else:
+                                logger.warning("  -> ✗ WARNING: FocalLoss alpha NOT initialized!")
+                    elif hasattr(class_loss, 'alpha') and hasattr(class_loss, '_alpha_initialized'):
+                        # Direct FocalLoss
+                        if class_loss._alpha_initialized:
+                            logger.info(f"  -> ✓ VERIFIED: FocalLoss alpha = {class_loss.alpha.tolist()}")
+                        else:
+                            logger.warning("  -> ✗ WARNING: FocalLoss alpha NOT initialized!")
+                else:
+                    logger.warning("  -> ✗ WARNING: Could not set FocalLoss alpha - class_loss missing set_alpha method")
                 
                 # Set prior biases in classification head if model supports it
                 if hasattr(self.model, 'class_head') and hasattr(self.model.class_head, 'set_class_priors'):

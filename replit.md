@@ -59,6 +59,17 @@ Preferred communication style: Simple, everyday language.
 - **`/api/retrain/daily`**: Daily retraining endpoint.
 - **Training Configuration**: Uses inverse frequency class weights, 80/20 train/val split, 100-step sequences.
 
+### Critical Bug Fixes (February 2026)
+Six critical bugs were identified and fixed that were causing mode collapse and uniform predictions:
+
+1. **Bug #1-4: Class Weight Propagation** - OHEMLoss now has `set_alpha()` pass-through method to forward alpha weights to underlying FocalLoss. Previously, class weights were never applied when OHEM+Focal was enabled.
+
+2. **Bug #5: Confidence Penalty Direction** - Fixed ConfidencePenaltyLoss to return POSITIVE penalty for overconfidence. Previously returned negative entropy which REDUCED loss for uniform predictions, actively encouraging mode collapse.
+
+3. **Bug #6: Feature Scaling** - Added RobustScaler to training path. Previously raw features (RSI 0-100, MACD arbitrary, returns -0.1 to 0.1) caused gradient instability.
+
+**Validation Logging**: Training now logs verification that FocalLoss alpha weights were successfully applied through OHEM wrapper.
+
 ## External Dependencies
 
 ### Database
