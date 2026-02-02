@@ -131,7 +131,7 @@ class EnsemblePredictor:
     RISK_MODELS = ['gnn', 'cross_asset', 'temporal_gnn', 'crossasset']
     
     def __init__(self, model_instances: Dict[str, torch.nn.Module], device: str = "cuda", 
-                 strict_weights: bool = True):
+                 strict_weights: bool = True, config: Optional[Dict[str, Any]] = None):
         """
         Initialize EnsemblePredictor.
         
@@ -140,10 +140,20 @@ class EnsemblePredictor:
             device: Device to run on (cuda/cpu)
             strict_weights: If True, fails hard if model_weights.json is missing.
                            Set to False only for development/testing.
+            config: Optional configuration dict with:
+                - inference_temperature: float (default 0.7) - T < 1 sharpens predictions
         """
         self.device = device
         self.model_instances = model_instances
         self.strict_weights = strict_weights
+        
+        # Configuration with defaults for PHASE 2 improvements
+        self.config = config or {}
+        if 'inference_temperature' not in self.config:
+            # T=0.7 sharpens soft predictions - helps combat uniform 33/33/33 outputs
+            self.config['inference_temperature'] = 0.7
+        
+        logger.info(f"[EnsemblePredictor] Config: inference_temperature={self.config['inference_temperature']}")
         
         # Classify models by role
         self.direction_models = {}
@@ -349,7 +359,12 @@ Without real weights, all models vote equally which is NOT useful.
                 if has_multihead:
                     # Use forward_multihead for full multi-head output
                     output = model.forward_multihead(features)
-                    probs = F.softmax(output.class_logits, dim=-1).cpu().numpy()
+                    
+                    # Apply inference temperature scaling (T < 1 sharpens predictions)
+                    # Default T=0.7 sharpens soft/uniform predictions toward confident ones
+                    inference_temp = self.config.get('inference_temperature', 0.7)
+                    scaled_logits = output.class_logits / inference_temp
+                    probs = F.softmax(scaled_logits, dim=-1).cpu().numpy()
                     
                     # Handle batch dimension
                     if len(probs.shape) == 2 and probs.shape[0] == 1:

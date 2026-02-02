@@ -177,25 +177,96 @@ class RegressionHead(nn.Module):
 class ClassificationHead(nn.Module):
     """
     Classification head for direction (SHORT/HOLD/LONG).
+    
+    PHASE 2 UPGRADE: Prior probability bias initialization.
+    
+    Problem: With imbalanced data (e.g., 60% HOLD, 20% LONG, 20% SHORT),
+    the model starts with uniform probabilities (33% each), wasting early
+    training epochs re-learning the prior distribution.
+    
+    Solution: Initialize output layer bias = log(prior_prob), so initial
+    outputs match the training label distribution. The model then focuses
+    on learning deviations from prior rather than the prior itself.
+    
+    Reference: "Deep Learning - Goodfellow et al." Chapter 8.4
     """
     
     def __init__(self, input_dim: int, hidden_dim: int = 128, 
-                 num_classes: int = 3, dropout: float = 0.1):
+                 num_classes: int = 3, dropout: float = 0.1,
+                 class_priors: Optional[torch.Tensor] = None):
+        """
+        Args:
+            input_dim: Input feature dimension
+            hidden_dim: Hidden layer dimension
+            num_classes: Number of output classes (3 for SHORT/HOLD/LONG)
+            dropout: Dropout rate
+            class_priors: Optional [num_classes] tensor of prior probabilities
+                          e.g., [0.20, 0.60, 0.20] for SHORT/HOLD/LONG
+                          If provided, initializes output bias = log(prior)
+        """
         super().__init__()
+        self.num_classes = num_classes
         
-        self.classifier = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, num_classes)
+        # Build layers individually for bias initialization access
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.act1 = nn.GELU()
+        self.drop1 = nn.Dropout(dropout)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.act2 = nn.GELU()
+        self.drop2 = nn.Dropout(dropout)
+        self.output = nn.Linear(hidden_dim // 2, num_classes)
+        
+        # Apply prior probability bias initialization
+        if class_priors is not None:
+            self._init_prior_bias(class_priors)
+    
+    def _init_prior_bias(self, priors: torch.Tensor):
+        """
+        Initialize output layer bias based on class priors.
+        
+        For softmax, if we want initial P(class_i) = prior_i, we set:
+            bias_i = log(prior_i)
+        
+        This ensures the model starts by predicting the marginal distribution,
+        then learns to adjust based on features.
+        """
+        # Clamp priors to avoid log(0)
+        priors = priors.clamp(min=1e-6)
+        # Normalize to ensure they sum to 1
+        priors = priors / priors.sum()
+        # Compute log-prior biases
+        log_prior_bias = torch.log(priors)
+        
+        # Set the output layer bias
+        with torch.no_grad():
+            self.output.bias.copy_(log_prior_bias)
+        
+        # Zero the output weights to start neutral
+        nn.init.zeros_(self.output.weight)
+        
+        import logging
+        logging.getLogger(__name__).info(
+            f"[ClassificationHead] Prior bias initialized: "
+            f"priors={priors.tolist()}, bias={log_prior_bias.tolist()}"
         )
+    
+    def set_class_priors(self, priors: torch.Tensor):
+        """
+        Update output bias based on new class priors (e.g., after computing from dataset).
+        
+        Call this before training to set biases from actual label distribution.
+        """
+        self._init_prior_bias(priors)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Returns logits [batch, num_classes]."""
-        return self.classifier(x)
+        x = self.fc1(x)
+        x = self.act1(x)
+        x = self.drop1(x)
+        x = self.fc2(x)
+        x = self.act2(x)
+        x = self.drop2(x)
+        return self.output(x)
 
 
 class TradingHead(nn.Module):
