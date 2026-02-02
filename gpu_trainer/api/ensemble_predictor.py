@@ -181,10 +181,38 @@ class EnsemblePredictor:
         - Using default weights produces LOUD WARNINGS
         - Call save_walk_forward_weights() after training to populate
         """
-        weights_path = Path(__file__).parent.parent / "checkpoints" / "model_weights.json"
         self._using_default_weights = False  # Track if we're using defaults
         
-        if weights_path.exists():
+        # Try multiple path resolution strategies
+        import os
+        candidate_paths = [
+            # Strategy 1: Relative to this file
+            Path(__file__).parent.parent / "checkpoints" / "model_weights.json",
+            # Strategy 2: Relative to current working directory
+            Path(os.getcwd()) / "checkpoints" / "model_weights.json",
+            # Strategy 3: Relative to gpu_trainer in cwd
+            Path(os.getcwd()) / "gpu_trainer" / "checkpoints" / "model_weights.json",
+            # Strategy 4: Absolute path from __file__ resolved
+            Path(__file__).resolve().parent.parent / "checkpoints" / "model_weights.json",
+        ]
+        
+        logger.info("=" * 70)
+        logger.info("[MODEL WEIGHTS] Searching for model_weights.json...")
+        logger.info(f"  __file__ = {__file__}")
+        logger.info(f"  cwd = {os.getcwd()}")
+        
+        weights_path = None
+        for i, path in enumerate(candidate_paths):
+            exists = path.exists()
+            logger.info(f"  Path {i+1}: {path}")
+            logger.info(f"         exists={exists}")
+            if exists and weights_path is None:
+                weights_path = path
+                logger.info(f"  >>> FOUND at path {i+1}")
+        
+        logger.info("=" * 70)
+        
+        if weights_path is not None and weights_path.exists():
             try:
                 with open(weights_path) as f:
                     data = json.load(f)
