@@ -216,9 +216,14 @@ class EnsemblePredictor:
             try:
                 with open(weights_path) as f:
                     data = json.load(f)
-                loaded_weights = {
-                    name: ModelWeight(**w) for name, w in data.items()
-                }
+                
+                # Filter to only ModelWeight fields (ignore extra fields like total_trades)
+                model_weight_fields = {'model_name', 'expectancy', 'precision_on_trade', 
+                                      'profit_factor', 'f1_directional', 'sharpe', 'calibration_temp'}
+                loaded_weights = {}
+                for name, w in data.items():
+                    filtered_w = {k: v for k, v in w.items() if k in model_weight_fields}
+                    loaded_weights[name] = ModelWeight(**filtered_w)
                 logger.info(f"Loaded {len(loaded_weights)} model weights from {weights_path}")
                 for name, w in loaded_weights.items():
                     logger.info(f"  {name}: expectancy={w.expectancy:.4f}, sharpe={w.sharpe:.2f}")
