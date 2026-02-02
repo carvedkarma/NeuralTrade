@@ -115,6 +115,12 @@ class EnsembleSignal:
     acceleration: Optional[float] = None  # momentum change prediction
     forecast_mode: Optional[str] = None  # "QUANTILE_PATHS" or "NO_FORECAST"
     quantile_paths: Optional[Dict[str, List[float]]] = None  # {q10: [...], q50: [...], q90: [...]}
+    
+    # === Kelly Criterion Position Sizing (2024 Advanced Feature) ===
+    kelly_fraction: Optional[float] = None  # Optimal position size from Kelly formula
+    kelly_adjusted_size: Optional[float] = None  # Kelly fraction with safety cap (25% max)
+    epistemic_uncertainty: Optional[float] = None  # MC Dropout uncertainty
+    should_trade_uncertainty: Optional[bool] = None  # True if uncertainty is low enough
 
 class EnsemblePredictor:
     """
@@ -483,6 +489,226 @@ Without real weights, all models vote equally which is NOT useful.
             import traceback
             logger.error(traceback.format_exc())
             return None
+    
+    def get_mc_dropout_uncertainty(
+        self, 
+        model: torch.nn.Module, 
+        features: torch.Tensor, 
+        model_name: str,
+        n_samples: int = 10
+    ) -> Dict[str, float]:
+        """
+        Monte Carlo Dropout for epistemic uncertainty estimation.
+        
+        Runs N forward passes with dropout ENABLED during inference.
+        The variance of predictions indicates model uncertainty about this input.
+        
+        Paper: "Dropout as a Bayesian Approximation: Representing Model Uncertainty in Deep Learning"
+               (Gal & Ghahramani, 2016)
+        
+        High variance = model is uncertain (avoid trading)
+        Low variance = model is confident (consider trading)
+        
+        2024 Research: MC Dropout is the most practical uncertainty quantification
+        technique for deep learning, especially in financial applications.
+        
+        Args:
+            model: Neural network model with dropout layers
+            features: Input features tensor
+            model_name: Name of the model
+            n_samples: Number of forward passes (10 is typical)
+            
+        Returns:
+            Dict with:
+            - epistemic_uncertainty: Variance of predictions (higher = more uncertain)
+            - predictive_entropy: Entropy of mean predictions
+            - sample_probs: List of probability arrays from each sample
+            - mean_probs: Mean probabilities across samples
+            - action_agreement: Fraction of samples that agree on action
+        """
+        try:
+            # Enable dropout during inference (key for MC Dropout)
+            def enable_dropout(m):
+                if isinstance(m, torch.nn.Dropout):
+                    m.train()
+            
+            model.apply(enable_dropout)
+            
+            all_probs = []
+            all_actions = []
+            inference_temp = self.config.get('inference_temperature', 0.7)
+            
+            for _ in range(n_samples):
+                with torch.no_grad():
+                    if hasattr(model, 'forward_multihead'):
+                        output = model.forward_multihead(features)
+                        scaled_logits = output.class_logits / inference_temp
+                        probs = F.softmax(scaled_logits, dim=-1).cpu().numpy()
+                    else:
+                        output = model(features)
+                        probs = F.softmax(output, dim=-1).cpu().numpy()
+                    
+                    # Handle batch dimension
+                    if len(probs.shape) == 2 and probs.shape[0] == 1:
+                        probs = probs[0]
+                    elif len(probs.shape) == 2:
+                        probs = probs.mean(axis=0)
+                    
+                    all_probs.append(probs)
+                    all_actions.append(int(np.argmax(probs)))
+            
+            # Restore eval mode
+            model.eval()
+            
+            # Stack all samples
+            prob_array = np.stack(all_probs)  # [n_samples, 3]
+            
+            # Compute mean probabilities
+            mean_probs = prob_array.mean(axis=0)
+            
+            # Epistemic uncertainty: variance of predictions
+            epistemic_uncertainty = prob_array.var(axis=0).mean()
+            
+            # Per-class uncertainty
+            per_class_var = prob_array.var(axis=0).tolist()
+            
+            # Predictive entropy of mean predictions
+            predictive_entropy = -np.sum(mean_probs * np.log(mean_probs + 1e-10))
+            
+            # Action agreement: what fraction of samples agree on the action
+            action_counts = np.bincount(all_actions, minlength=3)
+            action_agreement = action_counts.max() / n_samples
+            
+            # Determine most likely action from mean probs
+            mean_action_idx = int(np.argmax(mean_probs))
+            action_map = {0: "SHORT", 1: "HOLD", 2: "LONG"}
+            
+            return {
+                "epistemic_uncertainty": float(epistemic_uncertainty),
+                "per_class_uncertainty": per_class_var,
+                "predictive_entropy": float(predictive_entropy),
+                "mean_probs": mean_probs.tolist(),
+                "mean_action": action_map[mean_action_idx],
+                "action_agreement": float(action_agreement),
+                "n_samples": n_samples,
+                "should_trade": epistemic_uncertainty < 0.02 and action_agreement > 0.7
+            }
+            
+        except Exception as e:
+            logger.error(f"MC Dropout error for {model_name}: {e}")
+            return {
+                "epistemic_uncertainty": 1.0,
+                "per_class_uncertainty": [0.33, 0.33, 0.33],
+                "predictive_entropy": np.log(3),  # Max entropy for 3 classes
+                "mean_probs": [0.33, 0.33, 0.33],
+                "mean_action": "HOLD",
+                "action_agreement": 0.33,
+                "n_samples": 0,
+                "should_trade": False
+            }
+    
+    def calculate_kelly_position_size(
+        self,
+        win_probability: float,
+        expected_win: float,
+        expected_loss: float,
+        max_position_pct: float = 0.25,
+        kelly_fraction: float = 0.5,
+        min_edge_threshold: float = 0.01
+    ) -> Dict[str, float]:
+        """
+        Kelly Criterion for optimal position sizing.
+        
+        The Kelly Criterion determines the optimal fraction of capital to risk
+        to maximize long-term growth while avoiding ruin.
+        
+        Formula: f* = (p * b - q) / b
+        Where:
+        - f* = optimal fraction to bet
+        - p = probability of winning
+        - q = probability of losing (1 - p)
+        - b = odds received on the wager (win/loss ratio)
+        
+        Paper: "A New Interpretation of Information Rate" (Kelly, 1956)
+        
+        2024 Research: Half-Kelly (kelly_fraction=0.5) is commonly used in practice
+        to reduce variance while maintaining most of the growth benefit.
+        
+        Args:
+            win_probability: Probability of winning trade (from calibrated model)
+            expected_win: Expected profit if win (from quantiles, e.g., q75 - entry)
+            expected_loss: Expected loss if lose (from quantiles, e.g., entry - q25)
+            max_position_pct: Maximum position size cap (default 25%)
+            kelly_fraction: Fraction of full Kelly to use (default 0.5 = Half-Kelly)
+            min_edge_threshold: Minimum edge required to trade (default 1%)
+            
+        Returns:
+            Dict with:
+            - full_kelly: Uncapped Kelly fraction
+            - adjusted_kelly: Half-Kelly (or custom fraction)
+            - capped_position: Final position size after max cap
+            - edge: Expected edge (expected_value / expected_loss)
+            - should_bet: True if edge exceeds threshold
+        """
+        try:
+            # Input validation
+            win_probability = max(0.001, min(0.999, win_probability))  # Clamp to valid range
+            expected_loss = max(0.001, expected_loss)  # Prevent division by zero
+            expected_win = max(0.0, expected_win)
+            
+            # Calculate loss probability
+            loss_probability = 1.0 - win_probability
+            
+            # Calculate odds (b = win amount / loss amount)
+            odds = expected_win / expected_loss if expected_loss > 0 else 0
+            
+            # Kelly formula: f* = (p * b - q) / b
+            # Rearranged: f* = p - q/b = p - (1-p)/b
+            if odds > 0:
+                full_kelly = (win_probability * odds - loss_probability) / odds
+            else:
+                full_kelly = 0.0
+            
+            # Apply Kelly fraction (Half-Kelly is common in practice)
+            adjusted_kelly = full_kelly * kelly_fraction
+            
+            # Cap at maximum position size
+            capped_position = max(0.0, min(max_position_pct, adjusted_kelly))
+            
+            # Calculate expected edge
+            expected_value = (win_probability * expected_win) - (loss_probability * expected_loss)
+            edge = expected_value / expected_loss if expected_loss > 0 else 0
+            
+            # Determine if we should bet
+            should_bet = edge > min_edge_threshold and capped_position > 0.01
+            
+            return {
+                "full_kelly": float(full_kelly),
+                "adjusted_kelly": float(adjusted_kelly),
+                "capped_position": float(capped_position),
+                "edge": float(edge),
+                "expected_value": float(expected_value),
+                "win_probability": float(win_probability),
+                "odds_ratio": float(odds),
+                "should_bet": should_bet,
+                "kelly_fraction_used": kelly_fraction,
+                "max_cap_applied": capped_position < adjusted_kelly
+            }
+            
+        except Exception as e:
+            logger.error(f"Kelly calculation error: {e}")
+            return {
+                "full_kelly": 0.0,
+                "adjusted_kelly": 0.0,
+                "capped_position": 0.0,
+                "edge": 0.0,
+                "expected_value": 0.0,
+                "win_probability": 0.5,
+                "odds_ratio": 1.0,
+                "should_bet": False,
+                "kelly_fraction_used": kelly_fraction,
+                "max_cap_applied": False
+            }
     
     def _detect_regime_from_vae(self, model: torch.nn.Module, features: torch.Tensor, model_name: str) -> Tuple[MarketRegime, float]:
         """Use VAE latent space for regime detection."""

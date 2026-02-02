@@ -28,6 +28,219 @@ ACTION_NAMES = ["SHORT", "HOLD", "LONG"]  # Index-aligned with training labels
 # Never dynamically resize - always require exactly this many candles
 SEQUENCE_LENGTH_LOCKED = 100
 
+
+class PredictionDriftMonitor:
+    """
+    Monitor for detecting prediction drift and model degradation.
+    
+    Tracks:
+    1. PSI (Population Stability Index) - Detects distribution shift
+    2. ECE (Expected Calibration Error) - Detects calibration degradation
+    3. Prediction entropy trends - Detects confidence collapse
+    
+    2024 Research: Early drift detection is critical for production ML systems.
+    Models degrade over time as market regimes shift.
+    """
+    
+    def __init__(self, window_size: int = 100, alert_threshold_psi: float = 0.25, alert_threshold_ece: float = 0.15):
+        """
+        Args:
+            window_size: Number of predictions to track
+            alert_threshold_psi: PSI threshold for drift alert (0.25 is industry standard)
+            alert_threshold_ece: ECE threshold for calibration alert
+        """
+        self.window_size = window_size
+        self.alert_threshold_psi = alert_threshold_psi
+        self.alert_threshold_ece = alert_threshold_ece
+        
+        # Historical predictions
+        self.prediction_probs: List[List[float]] = []  # [[p_short, p_hold, p_long], ...]
+        self.prediction_outcomes: List[int] = []  # Actual outcomes (0, 1, 2)
+        self.prediction_timestamps: List[str] = []
+        
+        # Baseline distribution (from training or first N predictions)
+        self.baseline_distribution: Optional[np.ndarray] = None
+        self.baseline_set = False
+        
+        # Alert history
+        self.alerts: List[Dict] = []
+        
+    def add_prediction(self, probs: List[float], predicted_action: int, actual_outcome: Optional[int] = None):
+        """Add a new prediction to the monitor."""
+        self.prediction_probs.append(probs)
+        self.prediction_timestamps.append(datetime.now().isoformat())
+        
+        if actual_outcome is not None:
+            self.prediction_outcomes.append(actual_outcome)
+        
+        # Maintain window size
+        if len(self.prediction_probs) > self.window_size * 2:
+            self.prediction_probs = self.prediction_probs[-self.window_size:]
+            self.prediction_timestamps = self.prediction_timestamps[-self.window_size:]
+            if len(self.prediction_outcomes) > self.window_size:
+                self.prediction_outcomes = self.prediction_outcomes[-self.window_size:]
+        
+        # Set baseline if not set and we have enough data
+        if not self.baseline_set and len(self.prediction_probs) >= self.window_size // 2:
+            self._set_baseline()
+    
+    def _set_baseline(self):
+        """Set baseline distribution from initial predictions."""
+        probs_array = np.array(self.prediction_probs)
+        # Get mean probability per class
+        self.baseline_distribution = probs_array.mean(axis=0)
+        self.baseline_set = True
+        logger.info(f"[DRIFT MONITOR] Baseline set: SHORT={self.baseline_distribution[0]:.3f}, "
+                   f"HOLD={self.baseline_distribution[1]:.3f}, LONG={self.baseline_distribution[2]:.3f}")
+    
+    def compute_psi(self, n_bins: int = 10) -> Optional[float]:
+        """
+        Compute Population Stability Index (PSI) using binned probability distributions.
+        
+        PSI measures how much the prediction distribution has shifted from baseline.
+        PSI < 0.1: No significant shift
+        0.1 <= PSI < 0.25: Moderate shift, investigation needed
+        PSI >= 0.25: Significant shift, action required
+        
+        Formula: PSI = Σ (Actual% - Expected%) * ln(Actual% / Expected%)
+        
+        This implementation uses proper binning of confidence scores per class
+        rather than simple mean comparison, per industry standards.
+        """
+        if not self.baseline_set or len(self.prediction_probs) < 20:
+            return None
+        
+        # Compute PSI for each class using binned max-class probability distribution
+        baseline_probs = np.array(self.prediction_probs[:self.window_size//2])
+        recent_probs = np.array(self.prediction_probs[-self.window_size//2:])
+        
+        total_psi = 0.0
+        eps = 1e-10
+        
+        # For each class, bin the probabilities and compute PSI
+        for class_idx in range(3):  # SHORT, HOLD, LONG
+            baseline_class_probs = baseline_probs[:, class_idx]
+            recent_class_probs = recent_probs[:, class_idx]
+            
+            # Create histogram bins from 0 to 1
+            bin_edges = np.linspace(0, 1, n_bins + 1)
+            
+            # Count samples in each bin
+            baseline_counts, _ = np.histogram(baseline_class_probs, bins=bin_edges)
+            recent_counts, _ = np.histogram(recent_class_probs, bins=bin_edges)
+            
+            # Convert to proportions
+            baseline_pct = (baseline_counts + eps) / (baseline_counts.sum() + n_bins * eps)
+            recent_pct = (recent_counts + eps) / (recent_counts.sum() + n_bins * eps)
+            
+            # PSI formula for this class
+            class_psi = np.sum((recent_pct - baseline_pct) * np.log(recent_pct / baseline_pct))
+            total_psi += class_psi
+        
+        # Average across classes
+        avg_psi = total_psi / 3.0
+        
+        return float(avg_psi)
+    
+    def compute_ece(self, n_bins: int = 10) -> Optional[float]:
+        """
+        Compute Expected Calibration Error (ECE).
+        
+        ECE measures how well confidence scores match actual accuracy.
+        A well-calibrated model should have 60% accuracy when it predicts with 60% confidence.
+        
+        Lower is better. ECE > 0.15 indicates poor calibration.
+        """
+        if len(self.prediction_probs) < 30 or len(self.prediction_outcomes) < 30:
+            return None
+        
+        # Use only predictions where we have outcomes
+        n_with_outcomes = min(len(self.prediction_probs), len(self.prediction_outcomes))
+        probs = np.array(self.prediction_probs[-n_with_outcomes:])
+        outcomes = np.array(self.prediction_outcomes[-n_with_outcomes:])
+        
+        # Get max confidence and predicted class
+        confidences = probs.max(axis=1)
+        predictions = probs.argmax(axis=1)
+        
+        # Bin by confidence
+        bin_boundaries = np.linspace(0, 1, n_bins + 1)
+        ece = 0.0
+        total_samples = len(confidences)
+        
+        for i in range(n_bins):
+            bin_lower, bin_upper = bin_boundaries[i], bin_boundaries[i + 1]
+            in_bin = (confidences > bin_lower) & (confidences <= bin_upper)
+            
+            if in_bin.sum() > 0:
+                bin_accuracy = (predictions[in_bin] == outcomes[in_bin]).mean()
+                bin_confidence = confidences[in_bin].mean()
+                bin_size = in_bin.sum()
+                
+                ece += (bin_size / total_samples) * abs(bin_accuracy - bin_confidence)
+        
+        return float(ece)
+    
+    def get_drift_report(self) -> Dict:
+        """Generate a comprehensive drift report."""
+        psi = self.compute_psi()
+        ece = self.compute_ece()
+        
+        # Compute entropy trend
+        if len(self.prediction_probs) >= 20:
+            recent_probs = np.array(self.prediction_probs[-20:])
+            entropies = -np.sum(recent_probs * np.log(recent_probs + 1e-10), axis=1)
+            avg_entropy = float(entropies.mean())
+            max_entropy = float(np.log(3))  # Max for 3 classes
+            entropy_ratio = avg_entropy / max_entropy
+        else:
+            avg_entropy = None
+            entropy_ratio = None
+        
+        # Check for alerts
+        alerts = []
+        if psi is not None and psi >= self.alert_threshold_psi:
+            alerts.append({
+                "type": "PSI_DRIFT",
+                "message": f"Significant prediction distribution shift detected (PSI={psi:.3f})",
+                "severity": "WARNING" if psi < 0.5 else "CRITICAL"
+            })
+        
+        if ece is not None and ece >= self.alert_threshold_ece:
+            alerts.append({
+                "type": "CALIBRATION_DEGRADED",
+                "message": f"Model calibration has degraded (ECE={ece:.3f})",
+                "severity": "WARNING"
+            })
+        
+        if entropy_ratio is not None and entropy_ratio > 0.9:
+            alerts.append({
+                "type": "CONFIDENCE_COLLAPSE",
+                "message": f"Model predicting near-uniform distribution (entropy ratio={entropy_ratio:.2f})",
+                "severity": "CRITICAL"
+            })
+        
+        return {
+            "psi": psi,
+            "psi_threshold": self.alert_threshold_psi,
+            "psi_status": "OK" if psi is None or psi < self.alert_threshold_psi else "DRIFT_DETECTED",
+            "ece": ece,
+            "ece_threshold": self.alert_threshold_ece,
+            "ece_status": "OK" if ece is None or ece < self.alert_threshold_ece else "CALIBRATION_ISSUE",
+            "avg_entropy": avg_entropy,
+            "entropy_ratio": entropy_ratio,
+            "n_predictions_tracked": len(self.prediction_probs),
+            "n_outcomes_tracked": len(self.prediction_outcomes),
+            "baseline_set": self.baseline_set,
+            "alerts": alerts,
+            "overall_status": "HEALTHY" if not alerts else "ISSUES_DETECTED",
+            "timestamp": datetime.now().isoformat()
+        }
+
+
+# Global drift monitor instance
+drift_monitor = PredictionDriftMonitor(window_size=100)
+
 app = FastAPI(title="BTC Trading GPU Trainer API", version="1.0.0")
 
 app.add_middleware(
@@ -2701,6 +2914,18 @@ async def predict_ensemble(request: EnsemblePredictionRequest):
         
         signal = predictor.predict(features)
         
+        # === INTEGRATION: Add prediction to drift monitor ===
+        # Extract probabilities as list [P(SHORT), P(HOLD), P(LONG)]
+        probs_list = [
+            signal.ensemble_probs.get("SHORT", 0.33),
+            signal.ensemble_probs.get("HOLD", 0.34),
+            signal.ensemble_probs.get("LONG", 0.33)
+        ]
+        action_to_idx = {"SHORT": 0, "HOLD": 1, "LONG": 2}
+        predicted_action_idx = action_to_idx.get(signal.action, 1)
+        drift_monitor.add_prediction(probs_list, predicted_action_idx)
+        logger.debug(f"[DRIFT MONITOR] Added prediction: {signal.action} conf={signal.confidence:.3f}")
+        
         return EnsemblePredictionResponse(
             action=signal.action,
             confidence=signal.confidence,
@@ -3468,6 +3693,51 @@ async def get_performance_metrics():
         "action_distribution": action_counts,
         "hold_rate": action_counts.get("HOLD", 0) / len(history) * 100
     }
+
+
+@app.get("/api/drift-report")
+async def get_drift_report():
+    """
+    Get prediction drift monitoring report.
+    
+    Returns PSI (Population Stability Index), ECE (Expected Calibration Error),
+    and alerts for model degradation detection.
+    
+    2024 Best Practice: Monitor model drift in production to detect when
+    retraining is needed before performance degrades significantly.
+    """
+    return drift_monitor.get_drift_report()
+
+
+@app.post("/api/drift-report/add-prediction")
+async def add_prediction_to_drift_monitor(probs: List[float], predicted_action: int, actual_outcome: Optional[int] = None):
+    """
+    Add a new prediction to the drift monitor.
+    
+    This is called automatically after each prediction in production.
+    """
+    drift_monitor.add_prediction(probs, predicted_action, actual_outcome)
+    return {"status": "ok", "n_predictions": len(drift_monitor.prediction_probs)}
+
+
+@app.post("/api/drift-report/add-outcome")
+async def add_outcome_to_drift_monitor(outcome: int):
+    """
+    Add actual outcome for the most recent prediction (for ECE calculation).
+    
+    Call this when a trade is closed and we know the actual result.
+    """
+    drift_monitor.prediction_outcomes.append(outcome)
+    return {"status": "ok", "n_outcomes": len(drift_monitor.prediction_outcomes)}
+
+
+@app.post("/api/drift-report/reset")
+async def reset_drift_monitor():
+    """Reset the drift monitor (e.g., after retraining)."""
+    global drift_monitor
+    drift_monitor = PredictionDriftMonitor(window_size=100)
+    return {"status": "reset", "message": "Drift monitor cleared"}
+
 
 async def run_training(request: TrainingRequest):
     """

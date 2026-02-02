@@ -229,6 +229,201 @@ def create_regime_balanced_loader(
     )
 
 
+class TrainingHealthMonitor:
+    """
+    Real-time Training Health Monitor for detecting training issues.
+    
+    Monitors for:
+    1. Loss divergence (loss increasing over rolling window)
+    2. Accuracy collapse (accuracy dropping significantly)
+    3. Class distribution skew (model predicting only one class)
+    4. Gradient explosion (large gradient norms)
+    5. NaN/Inf values in loss or gradients
+    
+    Sends alerts to GUI via callback when issues detected.
+    
+    2024 Research: Early detection of training issues saves compute and prevents bad models.
+    """
+    
+    def __init__(
+        self, 
+        window_size: int = 10,
+        loss_divergence_threshold: float = 0.5,
+        accuracy_drop_threshold: float = 0.15,
+        class_skew_threshold: float = 0.85,
+        gradient_explosion_threshold: float = 10.0,
+        alert_callback: Optional[Callable[[str, str, Dict], None]] = None
+    ):
+        """
+        Args:
+            window_size: Rolling window for trend detection
+            loss_divergence_threshold: Alert if loss increases by this fraction
+            accuracy_drop_threshold: Alert if accuracy drops by this absolute amount
+            class_skew_threshold: Alert if one class > this fraction of predictions
+            gradient_explosion_threshold: Alert if gradient norm exceeds this
+            alert_callback: Function(alert_type, message, details) to call on alerts
+        """
+        self.window_size = window_size
+        self.loss_divergence_threshold = loss_divergence_threshold
+        self.accuracy_drop_threshold = accuracy_drop_threshold
+        self.class_skew_threshold = class_skew_threshold
+        self.gradient_explosion_threshold = gradient_explosion_threshold
+        self.alert_callback = alert_callback
+        
+        # History tracking
+        self.loss_history: List[float] = []
+        self.accuracy_history: List[float] = []
+        self.class_distribution_history: List[Dict[int, float]] = []
+        self.gradient_norm_history: List[float] = []
+        
+        # Alert state (prevent spam)
+        self.alerts_sent: Dict[str, int] = {}
+        self.alert_cooldown = 5  # epochs between same alert type
+        
+        # Best values for comparison
+        self.best_loss = float('inf')
+        self.best_accuracy = 0.0
+        
+    def update(
+        self,
+        epoch: int,
+        train_loss: float,
+        train_accuracy: float,
+        class_predictions: Optional[np.ndarray] = None,
+        gradient_norm: Optional[float] = None
+    ) -> List[Dict]:
+        """
+        Update monitor with epoch metrics and check for issues.
+        
+        Returns list of alert dictionaries if issues detected.
+        """
+        alerts = []
+        
+        # Check for NaN/Inf
+        if np.isnan(train_loss) or np.isinf(train_loss):
+            alerts.append(self._create_alert(
+                epoch, "CRITICAL", "nan_loss",
+                "Training loss is NaN/Inf! Training has diverged.",
+                {"loss": train_loss}
+            ))
+        
+        # Update histories
+        self.loss_history.append(train_loss)
+        self.accuracy_history.append(train_accuracy)
+        
+        # Track best values
+        if train_loss < self.best_loss:
+            self.best_loss = train_loss
+        if train_accuracy > self.best_accuracy:
+            self.best_accuracy = train_accuracy
+        
+        # Check loss divergence (loss increasing trend)
+        if len(self.loss_history) >= self.window_size:
+            recent_losses = self.loss_history[-self.window_size:]
+            early_avg = np.mean(recent_losses[:self.window_size//2])
+            late_avg = np.mean(recent_losses[self.window_size//2:])
+            
+            if early_avg > 0 and (late_avg - early_avg) / early_avg > self.loss_divergence_threshold:
+                alerts.append(self._create_alert(
+                    epoch, "WARNING", "loss_divergence",
+                    f"Loss increasing: {early_avg:.4f} → {late_avg:.4f} (+{((late_avg-early_avg)/early_avg)*100:.1f}%)",
+                    {"early_avg": early_avg, "late_avg": late_avg}
+                ))
+        
+        # Check accuracy collapse
+        if len(self.accuracy_history) >= self.window_size:
+            peak_accuracy = max(self.accuracy_history[:-self.window_size//2]) if len(self.accuracy_history) > self.window_size else self.best_accuracy
+            recent_accuracy = np.mean(self.accuracy_history[-self.window_size//2:])
+            
+            if peak_accuracy - recent_accuracy > self.accuracy_drop_threshold:
+                alerts.append(self._create_alert(
+                    epoch, "WARNING", "accuracy_drop",
+                    f"Accuracy dropped: {peak_accuracy*100:.1f}% → {recent_accuracy*100:.1f}%",
+                    {"peak": peak_accuracy, "current": recent_accuracy}
+                ))
+        
+        # Check class distribution skew
+        if class_predictions is not None:
+            unique, counts = np.unique(class_predictions, return_counts=True)
+            total = len(class_predictions)
+            distribution = {int(u): c/total for u, c in zip(unique, counts)}
+            self.class_distribution_history.append(distribution)
+            
+            max_class_ratio = max(distribution.values()) if distribution else 0
+            if max_class_ratio > self.class_skew_threshold:
+                majority_class = max(distribution, key=distribution.get)
+                class_names = {0: "SHORT", 1: "HOLD", 2: "LONG"}
+                alerts.append(self._create_alert(
+                    epoch, "WARNING", "class_skew",
+                    f"Model predicting mostly {class_names.get(majority_class, majority_class)}: {max_class_ratio*100:.1f}%",
+                    {"distribution": distribution}
+                ))
+        
+        # Check gradient explosion
+        if gradient_norm is not None:
+            self.gradient_norm_history.append(gradient_norm)
+            if gradient_norm > self.gradient_explosion_threshold:
+                alerts.append(self._create_alert(
+                    epoch, "WARNING", "gradient_explosion",
+                    f"Large gradient norm: {gradient_norm:.2f} (threshold: {self.gradient_explosion_threshold})",
+                    {"gradient_norm": gradient_norm}
+                ))
+        
+        # Send alerts via callback
+        for alert in alerts:
+            if self.alert_callback and self._should_send_alert(epoch, alert['type']):
+                self.alert_callback(alert['severity'], alert['message'], alert)
+        
+        return alerts
+    
+    def _create_alert(self, epoch: int, severity: str, alert_type: str, message: str, details: Dict) -> Dict:
+        """Create alert dictionary."""
+        return {
+            "epoch": epoch,
+            "severity": severity,  # CRITICAL, WARNING, INFO
+            "type": alert_type,
+            "message": message,
+            "details": details,
+            "timestamp": datetime.now().isoformat()
+        }
+    
+    def _should_send_alert(self, epoch: int, alert_type: str) -> bool:
+        """Check if we should send this alert (cooldown logic)."""
+        last_sent = self.alerts_sent.get(alert_type, -999)
+        if epoch - last_sent >= self.alert_cooldown:
+            self.alerts_sent[alert_type] = epoch
+            return True
+        return False
+    
+    def get_health_summary(self) -> Dict:
+        """Get overall health summary."""
+        issues = []
+        
+        if len(self.loss_history) >= 3:
+            recent_loss = np.mean(self.loss_history[-3:])
+            if recent_loss > self.best_loss * 1.5:
+                issues.append("loss_elevated")
+        
+        if len(self.accuracy_history) >= 3:
+            recent_acc = np.mean(self.accuracy_history[-3:])
+            if recent_acc < self.best_accuracy * 0.8:
+                issues.append("accuracy_degraded")
+        
+        if len(self.class_distribution_history) >= 1:
+            recent_dist = self.class_distribution_history[-1]
+            if max(recent_dist.values()) > self.class_skew_threshold:
+                issues.append("class_imbalanced")
+        
+        return {
+            "status": "HEALTHY" if not issues else "ISSUES_DETECTED",
+            "issues": issues,
+            "best_loss": self.best_loss,
+            "best_accuracy": self.best_accuracy,
+            "current_loss": self.loss_history[-1] if self.loss_history else None,
+            "current_accuracy": self.accuracy_history[-1] if self.accuracy_history else None
+        }
+
+
 class MultiHeadTrainer:
     """
     Trainer for multi-head models.
@@ -238,6 +433,7 @@ class MultiHeadTrainer:
     - Class weighting for imbalanced data
     - Per-head metric tracking
     - Walk-forward validation
+    - Training health monitoring with real-time alerts
     """
     
     def __init__(
@@ -253,7 +449,8 @@ class MultiHeadTrainer:
         feature_scaler = None,
         feature_columns: Optional[List[str]] = None,
         training_mode: str = "stf",
-        horizon_periods: int = 16
+        horizon_periods: int = 16,
+        health_alert_callback: Optional[Callable[[str, str, Dict], None]] = None
     ):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -272,6 +469,17 @@ class MultiHeadTrainer:
         if loss_config is None:
             loss_config = MultiHeadLossConfig(class_weights=class_weights)
         self.criterion = MultiHeadLoss(loss_config).to(device)
+        
+        # TRAINING HEALTH MONITOR - 2024 Best Practice
+        # Detects training issues in real-time and sends alerts to GUI
+        self.health_monitor = TrainingHealthMonitor(
+            window_size=10,
+            loss_divergence_threshold=0.5,
+            accuracy_drop_threshold=0.15,
+            class_skew_threshold=0.85,
+            gradient_explosion_threshold=10.0,
+            alert_callback=health_alert_callback
+        )
         
         # Optimizer
         self.optimizer = torch.optim.AdamW(
@@ -305,10 +513,14 @@ class MultiHeadTrainer:
         total_losses = {
             'total': 0.0, 'class': 0.0, 'mu': 0.0, 
             'sigma': 0.0, 'quantile': 0.0, 'trading': 0.0, 'candle': 0.0,
-            'vol_state': 0.0, 'acceleration': 0.0
+            'vol_state': 0.0, 'acceleration': 0.0, 'confidence_penalty': 0.0
         }
         correct = 0
         total = 0
+        
+        # Track gradient norms and predictions for health monitoring
+        gradient_norms = []
+        all_predictions = []
         
         for batch_idx, batch_data in enumerate(self.train_loader):
             # Handle both 5-item (legacy) and 7-item (with flow forecast) batches
@@ -367,6 +579,14 @@ class MultiHeadTrainer:
             loss = losses['total']
             loss.backward()
             
+            # Track gradient norm BEFORE clipping (for health monitoring)
+            total_norm = 0.0
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    total_norm += p.grad.data.norm(2).item() ** 2
+            grad_norm = total_norm ** 0.5
+            gradient_norms.append(grad_norm)
+            
             # Gradient clipping
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             
@@ -378,10 +598,11 @@ class MultiHeadTrainer:
                 if key in losses:
                     total_losses[key] += losses[key].item()
             
-            # Track accuracy
+            # Track accuracy and predictions for health monitoring
             preds = output.class_logits.argmax(dim=-1)
             correct += (preds == class_labels).sum().item()
             total += len(class_labels)
+            all_predictions.extend(preds.cpu().numpy().tolist())
             
             self.global_step += 1
             
@@ -389,6 +610,26 @@ class MultiHeadTrainer:
         n_batches = len(self.train_loader)
         avg_losses = {k: v / n_batches for k, v in total_losses.items()}
         avg_losses['accuracy'] = correct / total
+        
+        # Compute average gradient norm for this epoch
+        avg_grad_norm = np.mean(gradient_norms) if gradient_norms else 0.0
+        avg_losses['gradient_norm'] = avg_grad_norm
+        
+        # HEALTH MONITORING: Check for training issues
+        alerts = self.health_monitor.update(
+            epoch=epoch,
+            train_loss=avg_losses['total'],
+            train_accuracy=avg_losses['accuracy'],
+            class_predictions=np.array(all_predictions) if all_predictions else None,
+            gradient_norm=avg_grad_norm
+        )
+        
+        # Log any alerts
+        for alert in alerts:
+            if alert['severity'] == 'CRITICAL':
+                logger.error(f"[HEALTH CRITICAL] {alert['message']}")
+            else:
+                logger.warning(f"[HEALTH WARNING] {alert['message']}")
         
         return avg_losses
     

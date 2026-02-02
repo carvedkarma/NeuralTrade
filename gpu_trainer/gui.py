@@ -251,6 +251,32 @@ class GPUTrainerGUI:
                                           font=('Segoe UI', 9))
         self.gpu_status_label.pack()
         
+        # TRAINING HEALTH ALERT BANNER - Shows when training issues detected
+        # Hidden by default, shown when health monitor detects problems
+        self.alert_banner_frame = tk.Frame(main_container, bg='#ff4757', padx=12, pady=8)
+        # Don't pack yet - will be shown when alerts occur
+        
+        self.alert_icon_label = tk.Label(self.alert_banner_frame, text="⚠", 
+                                          bg='#ff4757', fg='#ffffff',
+                                          font=('Segoe UI', 14, 'bold'))
+        self.alert_icon_label.pack(side=tk.LEFT, padx=(0, 8))
+        
+        self.alert_message_label = tk.Label(self.alert_banner_frame, text="Training issue detected!",
+                                             bg='#ff4757', fg='#ffffff',
+                                             font=('Segoe UI', 10, 'bold'), anchor=tk.W)
+        self.alert_message_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        self.alert_dismiss_btn = tk.Button(self.alert_banner_frame, text="✕", 
+                                            bg='#ff4757', fg='#ffffff',
+                                            font=('Segoe UI', 10, 'bold'),
+                                            relief=tk.FLAT, cursor='hand2',
+                                            command=self.dismiss_alert)
+        self.alert_dismiss_btn.pack(side=tk.RIGHT)
+        
+        # Track alert state
+        self.current_alerts = []
+        self.alert_visible = False
+        
         # Content area - two columns
         content_frame = ttk.Frame(main_container)
         content_frame.pack(fill=tk.BOTH, expand=True)
@@ -771,6 +797,75 @@ class GPUTrainerGUI:
         
     def clear_log(self):
         self.log_text.delete(1.0, tk.END)
+    
+    def show_training_alert(self, severity: str, message: str, details: dict = None):
+        """
+        Show a training health alert banner.
+        
+        Called by the training health monitor when issues are detected.
+        
+        Args:
+            severity: 'CRITICAL', 'WARNING', or 'INFO'
+            message: Alert message to display
+            details: Optional dict with additional details
+        """
+        # Set colors based on severity
+        if severity == 'CRITICAL':
+            bg_color = '#ff4757'  # Red
+            icon = "⛔"
+        elif severity == 'WARNING':
+            bg_color = '#ffa502'  # Orange
+            icon = "⚠"
+        else:
+            bg_color = '#3498db'  # Blue
+            icon = "ℹ"
+        
+        # Update banner appearance
+        self.alert_banner_frame.config(bg=bg_color)
+        self.alert_icon_label.config(bg=bg_color, text=icon)
+        self.alert_message_label.config(bg=bg_color, text=message)
+        self.alert_dismiss_btn.config(bg=bg_color)
+        
+        # Track the alert
+        alert_info = {
+            'severity': severity,
+            'message': message,
+            'details': details or {},
+            'timestamp': datetime.now().isoformat()
+        }
+        self.current_alerts.append(alert_info)
+        
+        # Show the banner if not already visible
+        if not self.alert_visible:
+            self.alert_banner_frame.pack(fill=tk.X, pady=(0, 10), before=self.alert_banner_frame.master.winfo_children()[2])
+            self.alert_visible = True
+        
+        # Log the alert
+        self.log(f"[HEALTH {severity}] {message}")
+        
+        # Play alert sound for critical issues
+        if severity == 'CRITICAL':
+            try:
+                self.root.bell()
+            except:
+                pass
+    
+    def dismiss_alert(self):
+        """Dismiss the current alert banner."""
+        if self.alert_visible:
+            self.alert_banner_frame.pack_forget()
+            self.alert_visible = False
+            self.current_alerts.clear()
+    
+    def handle_health_alert_callback(self, severity: str, message: str, details: dict):
+        """
+        Callback for the TrainingHealthMonitor to send alerts to GUI.
+        
+        This is passed to the trainer and called when training issues are detected.
+        Thread-safe: schedules update on main thread.
+        """
+        # Schedule on main thread since this may be called from training thread
+        self.root.after(0, lambda: self.show_training_alert(severity, message, details))
         
     def save_log(self):
         from tkinter import filedialog
