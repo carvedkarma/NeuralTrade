@@ -1287,9 +1287,10 @@ class MultiHeadTrainer:
                            focal_alpha[0], focal_alpha[1], focal_alpha[2])
                 
                 # Update the FocalLoss with computed alpha if using focal loss
-                if hasattr(self.criterion, 'class_loss') and hasattr(self.criterion.class_loss, 'alpha'):
-                    self.criterion.class_loss.alpha = focal_alpha.to(self.device)
-                    logger.info("  -> Updated FocalLoss alpha weights")
+                # Use buffer-safe set_alpha method to avoid device/state issues
+                if hasattr(self.criterion, 'class_loss') and hasattr(self.criterion.class_loss, 'set_alpha'):
+                    self.criterion.class_loss.set_alpha(focal_alpha.to(self.device))
+                    logger.info("  -> Updated FocalLoss alpha weights (buffer-safe)")
                 
                 # Set prior biases in classification head if model supports it
                 if hasattr(self.model, 'class_head') and hasattr(self.model.class_head, 'set_class_priors'):

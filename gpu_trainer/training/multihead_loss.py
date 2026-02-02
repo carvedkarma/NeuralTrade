@@ -221,11 +221,26 @@ class FocalLoss(nn.Module):
         self.reduction = reduction
         self.num_classes = num_classes
         
-        # Alpha can be per-class weights [num_classes] or None (uniform)
+        # Register alpha as a buffer for proper device handling and state_dict persistence
         if alpha is not None:
             self.register_buffer('alpha', alpha)
         else:
-            self.alpha = None
+            # Register a placeholder buffer that can be updated later
+            self.register_buffer('alpha', torch.ones(num_classes))
+            self._alpha_initialized = False
+    
+    def set_alpha(self, alpha: torch.Tensor):
+        """
+        Update alpha weights (buffer-safe method).
+        
+        Call this after computing class priors from training data.
+        Uses in-place copy to maintain device and buffer registration.
+        """
+        if self.alpha is None:
+            self.register_buffer('alpha', alpha.clone())
+        else:
+            self.alpha.copy_(alpha.to(self.alpha.device))
+        self._alpha_initialized = True
     
     def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
@@ -254,8 +269,13 @@ class FocalLoss(nn.Module):
         # Apply focal weight
         focal_loss = focal_weight * ce_loss  # [batch]
         
-        # Apply alpha (per-class weighting) if provided
-        if self.alpha is not None:
+        # Apply alpha (per-class weighting) if initialized
+        # Note: alpha is always registered as buffer, but only apply if actually set
+        if hasattr(self, '_alpha_initialized') and self._alpha_initialized:
+            alpha_t = self.alpha.gather(0, targets)  # [batch]
+            focal_loss = alpha_t * focal_loss
+        elif self.alpha is not None and not hasattr(self, '_alpha_initialized'):
+            # Legacy path: alpha was passed to constructor
             alpha_t = self.alpha.gather(0, targets)  # [batch]
             focal_loss = alpha_t * focal_loss
         

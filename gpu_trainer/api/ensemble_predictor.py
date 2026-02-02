@@ -325,7 +325,22 @@ Without real weights, all models vote equally which is NOT useful.
         logger.info(f"Saved model weights to {weights_path}")
     
     def _calibrate_probs(self, probs: np.ndarray, model_name: str) -> np.ndarray:
-        """Apply temperature scaling for probability calibration."""
+        """Apply per-model temperature scaling for probability calibration.
+        
+        NOTE: If global inference_temperature is applied at logit level (in _get_model_prediction),
+        this per-model calibration is skipped to avoid double temperature scaling.
+        The inference_temperature parameter is meant to sharpen ALL model predictions uniformly,
+        while calibration_temp (per-model) was for fine-tuning individual model confidence.
+        
+        Current design: Use inference_temperature globally, skip per-model calibration.
+        """
+        # Skip per-model calibration if global inference temperature is applied
+        inference_temp = self.config.get('inference_temperature', 0.7)
+        if inference_temp != 1.0:
+            # Global temperature already applied at logit level - skip per-model
+            return probs
+        
+        # Only apply per-model calibration if no global temperature
         temp = self.model_weights.get(model_name, ModelWeight(
             model_name=model_name,
             expectancy=0, precision_on_trade=0.5,
@@ -335,7 +350,7 @@ Without real weights, all models vote equally which is NOT useful.
         if temp == 1.0:
             return probs
         
-        # Apply temperature scaling
+        # Apply temperature scaling on probabilities (legacy path)
         logits = np.log(probs + 1e-8)
         scaled_logits = logits / temp
         calibrated = np.exp(scaled_logits) / np.sum(np.exp(scaled_logits))
