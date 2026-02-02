@@ -1244,6 +1244,7 @@ class MultiHeadTrainer:
         logger.info(f"[TRAINING CONFIG] Early stopping uses val_loss only - PolicySelector handles policy post-training")
         
         # === DIAGNOSTIC: Log training label distribution at start ===
+        # PHASE 2: Also compute focal alpha and set prior biases
         try:
             all_labels = []
             for batch in self.train_loader:
@@ -1264,6 +1265,39 @@ class MultiHeadTrainer:
                               100*n_hold/n_total)
                 logger.warning(">>> CONSIDER: Use pure_directional or regime label mode to balance labels <<<")
             logger.info("=" * 70)
+            
+            # === PHASE 2: Compute class priors and focal alpha ===
+            if n_total > 0:
+                class_priors = torch.tensor([
+                    n_short / n_total,
+                    n_hold / n_total, 
+                    n_long / n_total
+                ], dtype=torch.float32)
+                
+                # Focal Loss alpha = inverse frequency (higher weight for rare classes)
+                # Normalize so they sum to num_classes (3.0)
+                inv_freq = 1.0 / (class_priors + 1e-6)
+                focal_alpha = inv_freq / inv_freq.sum() * 3.0
+                focal_alpha = torch.clamp(focal_alpha, max=10.0)  # Cap to prevent instability
+                
+                logger.info("PHASE 2 - FOCAL LOSS CONFIGURATION:")
+                logger.info("  Class priors: SHORT=%.3f, HOLD=%.3f, LONG=%.3f", 
+                           class_priors[0], class_priors[1], class_priors[2])
+                logger.info("  Focal alpha:  SHORT=%.3f, HOLD=%.3f, LONG=%.3f",
+                           focal_alpha[0], focal_alpha[1], focal_alpha[2])
+                
+                # Update the FocalLoss with computed alpha if using focal loss
+                if hasattr(self.criterion, 'class_loss') and hasattr(self.criterion.class_loss, 'alpha'):
+                    self.criterion.class_loss.alpha = focal_alpha.to(self.device)
+                    logger.info("  -> Updated FocalLoss alpha weights")
+                
+                # Set prior biases in classification head if model supports it
+                if hasattr(self.model, 'class_head') and hasattr(self.model.class_head, 'set_class_priors'):
+                    self.model.class_head.set_class_priors(class_priors.to(self.device))
+                    logger.info("  -> Initialized classification head with prior biases")
+                
+                logger.info("=" * 70)
+                
         except Exception as e:
             logger.warning(f"Could not compute label distribution: {e}")
         
