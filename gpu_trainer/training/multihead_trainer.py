@@ -532,11 +532,40 @@ class MultiHeadTrainer:
         logger.info("  warmup_steps: %d (10%% of total)", warmup_steps)
         logger.info("  anneal_strategy: cosine")
         
-        # Loss config - check what's enabled
-        loss_cfg = config.loss
-        focal_enabled = getattr(loss_cfg, 'use_focal_loss', False)
-        ohem_enabled = getattr(loss_cfg, 'use_ohem', False)
-        conf_penalty_enabled = getattr(loss_cfg, 'use_confidence_penalty', False)
+        # Loss config - get from criterion (MultiHeadLoss has a config attribute)
+        # Safe access with fallbacks in case config structure varies
+        loss_cfg = getattr(self.criterion, 'config', None)
+        if loss_cfg is None:
+            # Fallback: try to get from config.loss if it exists
+            loss_cfg = getattr(config, 'loss', None)
+        
+        if loss_cfg is not None:
+            focal_enabled = getattr(loss_cfg, 'use_focal_loss', False)
+            ohem_enabled = getattr(loss_cfg, 'use_ohem', False)
+            conf_penalty_enabled = getattr(loss_cfg, 'use_confidence_penalty', False)
+            lambda_class = getattr(loss_cfg, 'lambda_class', 1.0)
+            lambda_mu = getattr(loss_cfg, 'lambda_mu', 0.2)
+            lambda_sigma = getattr(loss_cfg, 'lambda_sigma', 0.1)
+            lambda_quantile = getattr(loss_cfg, 'lambda_quantile', 0.2)
+            lambda_trading = getattr(loss_cfg, 'lambda_trading', 0.1)
+            lambda_candle = getattr(loss_cfg, 'lambda_candle', 0.1)
+            lambda_vol_state = getattr(loss_cfg, 'lambda_vol_state', 0.2)
+            lambda_acceleration = getattr(loss_cfg, 'lambda_acceleration', 0.1)
+        else:
+            # Default values if config not found
+            focal_enabled = False
+            ohem_enabled = False
+            conf_penalty_enabled = False
+            lambda_class = 1.0
+            lambda_mu = 0.2
+            lambda_sigma = 0.1
+            lambda_quantile = 0.2
+            lambda_trading = 0.1
+            lambda_candle = 0.1
+            lambda_vol_state = 0.2
+            lambda_acceleration = 0.1
+            logger.warning("[STABILITY PROOF] Could not find loss config, using defaults")
+        
         prior_bias_enabled = False  # Explicitly disabled in train()
         
         logger.info("[STABILITY PROOF] Classification Tricks:")
@@ -547,14 +576,14 @@ class MultiHeadTrainer:
         
         # Loss weights
         logger.info("[STABILITY PROOF] Loss Weights:")
-        logger.info("  lambda_class: %.2f", getattr(loss_cfg, 'lambda_class', 1.0))
-        logger.info("  lambda_mu: %.2f", getattr(loss_cfg, 'lambda_mu', 0.2))
-        logger.info("  lambda_sigma: %.2f", getattr(loss_cfg, 'lambda_sigma', 0.1))
-        logger.info("  lambda_quantile: %.2f", getattr(loss_cfg, 'lambda_quantile', 0.2))
-        logger.info("  lambda_trading: %.2f", getattr(loss_cfg, 'lambda_trading', 0.1))
-        logger.info("  lambda_candle: %.2f", getattr(loss_cfg, 'lambda_candle', 0.1))
-        logger.info("  lambda_vol_state: %.2f", getattr(loss_cfg, 'lambda_vol_state', 0.2))
-        logger.info("  lambda_acceleration: %.2f", getattr(loss_cfg, 'lambda_acceleration', 0.1))
+        logger.info("  lambda_class: %.2f", lambda_class)
+        logger.info("  lambda_mu: %.2f", lambda_mu)
+        logger.info("  lambda_sigma: %.2f", lambda_sigma)
+        logger.info("  lambda_quantile: %.2f", lambda_quantile)
+        logger.info("  lambda_trading: %.2f", lambda_trading)
+        logger.info("  lambda_candle: %.2f", lambda_candle)
+        logger.info("  lambda_vol_state: %.2f", lambda_vol_state)
+        logger.info("  lambda_acceleration: %.2f", lambda_acceleration)
         logger.info("=" * 70)
         
         # Tracking
