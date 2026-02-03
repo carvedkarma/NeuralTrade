@@ -18,6 +18,13 @@ interface EpochMetrics {
   timestamp: string;
 }
 
+interface PredictionDistribution {
+  short: number;
+  hold: number;
+  long: number;
+  total: number;
+}
+
 interface TrainingStatus {
   is_training: boolean;
   current_epoch: number;
@@ -36,6 +43,8 @@ interface TrainingStatus {
   early_stop_counter: number;
   connected?: boolean;
   error?: string;
+  prediction_distribution?: PredictionDistribution;
+  gradient_norm?: number;
 }
 
 function formatDuration(seconds: number): string {
@@ -186,6 +195,64 @@ export function TrainingProgressCard() {
                     </div>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {/* Live Prediction Distribution - Shows what model is learning */}
+            {data.prediction_distribution && data.prediction_distribution.total > 0 && (
+              <div className="space-y-2" data-testid="live-prediction-display">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground font-medium">Live Predictions</span>
+                  {data.gradient_norm !== undefined && (
+                    <span 
+                      className={`text-xs font-mono ${data.gradient_norm > 10 ? 'text-amber-500' : 'text-green-500'}`}
+                      data-testid="text-gradient-norm"
+                    >
+                      grad: {data.gradient_norm.toFixed(2)}
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="relative p-3 rounded bg-red-500/10 border border-red-500/20 text-center" data-testid="prediction-short">
+                    <div className="absolute bottom-0 left-0 right-0 bg-red-500/30 rounded-b" 
+                         style={{ height: `${(data.prediction_distribution.short / data.prediction_distribution.total) * 100}%` }} />
+                    <span className="relative z-10 text-xs text-muted-foreground block">SHORT</span>
+                    <span className="relative z-10 font-mono text-lg font-bold text-red-500" data-testid="text-short-percent">
+                      {((data.prediction_distribution.short / data.prediction_distribution.total) * 100).toFixed(1)}%
+                    </span>
+                    <span className="relative z-10 text-xs text-muted-foreground block" data-testid="text-short-count">
+                      {data.prediction_distribution.short}
+                    </span>
+                  </div>
+                  <div className="relative p-3 rounded bg-gray-500/10 border border-gray-500/20 text-center" data-testid="prediction-hold">
+                    <div className="absolute bottom-0 left-0 right-0 bg-gray-500/30 rounded-b" 
+                         style={{ height: `${(data.prediction_distribution.hold / data.prediction_distribution.total) * 100}%` }} />
+                    <span className="relative z-10 text-xs text-muted-foreground block">HOLD</span>
+                    <span className="relative z-10 font-mono text-lg font-bold text-gray-400" data-testid="text-hold-percent">
+                      {((data.prediction_distribution.hold / data.prediction_distribution.total) * 100).toFixed(1)}%
+                    </span>
+                    <span className="relative z-10 text-xs text-muted-foreground block" data-testid="text-hold-count">
+                      {data.prediction_distribution.hold}
+                    </span>
+                  </div>
+                  <div className="relative p-3 rounded bg-green-500/10 border border-green-500/20 text-center" data-testid="prediction-long">
+                    <div className="absolute bottom-0 left-0 right-0 bg-green-500/30 rounded-b" 
+                         style={{ height: `${(data.prediction_distribution.long / data.prediction_distribution.total) * 100}%` }} />
+                    <span className="relative z-10 text-xs text-muted-foreground block">LONG</span>
+                    <span className="relative z-10 font-mono text-lg font-bold text-green-500" data-testid="text-long-percent">
+                      {((data.prediction_distribution.long / data.prediction_distribution.total) * 100).toFixed(1)}%
+                    </span>
+                    <span className="relative z-10 text-xs text-muted-foreground block" data-testid="text-long-count">
+                      {data.prediction_distribution.long}
+                    </span>
+                  </div>
+                </div>
+                {data.prediction_distribution.hold / data.prediction_distribution.total > 0.95 && (
+                  <div className="flex items-center gap-2 p-2 rounded bg-red-500/10 border border-red-500/20" data-testid="warning-mode-collapse">
+                    <AlertTriangle className="h-4 w-4 text-red-500" />
+                    <span className="text-xs text-red-500">Mode Collapse: {'>'}95% HOLD predictions</span>
+                  </div>
+                )}
               </div>
             )}
 

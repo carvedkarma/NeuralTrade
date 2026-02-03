@@ -320,7 +320,10 @@ class ModelManager:
             "per_head_losses": {},  # Per-head loss values
             "learning_rate": None,  # Current learning rate
             "best_val_loss": None,  # Best validation loss so far
-            "early_stop_counter": 0  # Epochs since last improvement
+            "early_stop_counter": 0,  # Epochs since last improvement
+            # Live prediction distribution for GUI display
+            "prediction_distribution": {"short": 0, "hold": 0, "long": 0, "total": 0},
+            "gradient_norm": None
         }
         self.prediction_history = []
         # Primary checkpoint directory (new location)
@@ -1671,6 +1674,13 @@ class TrainingRequest(BaseModel):
     range_threshold: float = 0.0030  # Stage 3: threshold for ranging regime
     horizon: int = 16  # Forward prediction horizon in bars
     
+class PredictionDistribution(BaseModel):
+    """Live prediction distribution during training."""
+    short: int = 0
+    hold: int = 0
+    long: int = 0
+    total: int = 0
+
 class TrainingStatusResponse(BaseModel):
     is_training: bool
     current_epoch: int
@@ -1688,6 +1698,9 @@ class TrainingStatusResponse(BaseModel):
     learning_rate: Optional[float] = None
     best_val_loss: Optional[float] = None
     early_stop_counter: int = 0
+    # Live prediction distribution for GUI display
+    prediction_distribution: Optional[PredictionDistribution] = None
+    gradient_norm: Optional[float] = None
     
 class ModelInfoResponse(BaseModel):
     name: str
@@ -4369,6 +4382,22 @@ async def run_training(request: TrainingRequest):
                     except:
                         current_lr = None
                     
+                    # ============== LIVE PREDICTION DISTRIBUTION ==============
+                    # Get actual model prediction counts from health_monitor (NOT label distribution)
+                    pred_dist = {"short": 0, "hold": 0, "long": 0, "total": 0}
+                    if hasattr(trainer, 'health_monitor') and trainer.health_monitor.class_counts_history:
+                        # Use actual counts from latest epoch's predictions
+                        latest_counts = trainer.health_monitor.class_counts_history[-1]
+                        pred_dist = {
+                            "short": latest_counts.get(0, 0),  # Class 0 = SHORT
+                            "hold": latest_counts.get(1, 0),   # Class 1 = HOLD  
+                            "long": latest_counts.get(2, 0),   # Class 2 = LONG
+                            "total": latest_counts.get('total', 0)
+                        }
+                    
+                    # ============== GRADIENT NORM ==============
+                    grad_norm = train_metrics.get('gradient_norm', None) if isinstance(train_metrics, dict) else None
+                    
                     model_manager.update_training_status(
                         current_epoch=epoch + 1,
                         progress=(epoch + 1) / total_epochs * 100,
@@ -4386,6 +4415,8 @@ async def run_training(request: TrainingRequest):
                         learning_rate=current_lr,
                         best_val_loss=best_val_loss,
                         early_stop_counter=early_stop_counter,
+                        prediction_distribution=pred_dist,
+                        gradient_norm=float(grad_norm) if grad_norm is not None else None,
                         last_update=datetime.now().isoformat()
                     )
                 

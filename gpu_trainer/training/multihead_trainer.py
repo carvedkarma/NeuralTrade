@@ -273,7 +273,8 @@ class TrainingHealthMonitor:
         # History tracking
         self.loss_history: List[float] = []
         self.accuracy_history: List[float] = []
-        self.class_distribution_history: List[Dict[int, float]] = []
+        self.class_distribution_history: List[Dict[int, float]] = []  # Percentages
+        self.class_counts_history: List[Dict[int, int]] = []  # Actual counts
         self.gradient_norm_history: List[float] = []
         
         # Alert state (prevent spam)
@@ -347,7 +348,10 @@ class TrainingHealthMonitor:
             unique, counts = np.unique(class_predictions, return_counts=True)
             total = len(class_predictions)
             distribution = {int(u): c/total for u, c in zip(unique, counts)}
+            count_dict = {int(u): int(c) for u, c in zip(unique, counts)}
+            count_dict['total'] = int(total)  # Add total for GUI display
             self.class_distribution_history.append(distribution)
+            self.class_counts_history.append(count_dict)
             
             max_class_ratio = max(distribution.values()) if distribution else 0
             if max_class_ratio > self.class_skew_threshold:
@@ -574,16 +578,21 @@ class MultiHeadTrainer:
         logger.info("  use_confidence_penalty: %s", "ENABLED" if conf_penalty_enabled else "DISABLED")
         logger.info("  prior_bias_init: %s", "ENABLED" if prior_bias_enabled else "DISABLED")
         
-        # Loss weights
-        logger.info("[STABILITY PROOF] Loss Weights:")
-        logger.info("  lambda_class: %.2f", lambda_class)
-        logger.info("  lambda_mu: %.2f", lambda_mu)
-        logger.info("  lambda_sigma: %.2f", lambda_sigma)
-        logger.info("  lambda_quantile: %.2f", lambda_quantile)
-        logger.info("  lambda_trading: %.2f", lambda_trading)
-        logger.info("  lambda_candle: %.2f", lambda_candle)
-        logger.info("  lambda_vol_state: %.2f", lambda_vol_state)
-        logger.info("  lambda_acceleration: %.2f", lambda_acceleration)
+        # Loss weights - show which heads are ENABLED vs DISABLED
+        logger.info("[STABILITY PROOF] Loss Weights (0.0 = DISABLED):")
+        logger.info("  lambda_class: %.2f %s", lambda_class, "✓ ENABLED" if lambda_class > 0 else "✗ DISABLED")
+        logger.info("  lambda_mu: %.2f %s", lambda_mu, "✓ ENABLED" if lambda_mu > 0 else "✗ DISABLED")
+        logger.info("  lambda_sigma: %.2f %s", lambda_sigma, "✓ ENABLED" if lambda_sigma > 0 else "✗ DISABLED")
+        logger.info("  lambda_quantile: %.2f %s", lambda_quantile, "✓ ENABLED" if lambda_quantile > 0 else "✗ DISABLED")
+        logger.info("  lambda_trading: %.2f %s", lambda_trading, "✓ ENABLED" if lambda_trading > 0 else "✗ DISABLED")
+        logger.info("  lambda_candle: %.2f %s", lambda_candle, "✓ ENABLED" if lambda_candle > 0 else "✗ DISABLED")
+        logger.info("  lambda_vol_state: %.2f %s", lambda_vol_state, "✓ ENABLED" if lambda_vol_state > 0 else "✗ DISABLED")
+        logger.info("  lambda_acceleration: %.2f %s", lambda_acceleration, "✓ ENABLED" if lambda_acceleration > 0 else "✗ DISABLED")
+        
+        # Count enabled heads
+        enabled_count = sum(1 for l in [lambda_class, lambda_mu, lambda_sigma, lambda_quantile, 
+                                         lambda_trading, lambda_candle, lambda_vol_state, lambda_acceleration] if l > 0)
+        logger.info("  TOTAL ENABLED HEADS: %d/8", enabled_count)
         logger.info("=" * 70)
         
         # Tracking
@@ -680,8 +689,8 @@ class MultiHeadTrainer:
             gradient_norms.append(grad_norm_pre)
             gradient_norms_pre_clip.append(grad_norm_pre)
             
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            # Gradient clipping - STABILITY FIX: reduced from 1.0 to 0.7
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.7)
             
             # Track gradient norm AFTER clipping
             total_norm_post = 0.0

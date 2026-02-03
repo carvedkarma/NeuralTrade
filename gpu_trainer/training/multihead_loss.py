@@ -103,18 +103,30 @@ def derive_sl_tp_from_quantiles(
 class MultiHeadLossConfig:
     """Configuration for multi-head loss weights."""
     
-    # Loss weights - STABILITY FIX: reduced to baseline values
-    # Goal: stable training first, then re-enable features one at a time
-    lambda_class: float = 1.0       # Reduced from 3.0 - was too aggressive
-    lambda_mu: float = 0.2          # Reduced from 0.5 - start low
-    lambda_sigma: float = 0.1       # Reduced from 0.2
-    lambda_quantile: float = 0.2    # Reduced from 0.5
-    lambda_trading: float = 0.1     # Reduced from 0.3
-    lambda_candle: float = 0.1      # Reduced from 0.3
+    # === FINAL STABILIZATION: DISABLE ALL AUXILIARY HEADS ===
+    # Only train Classification + Regression (mu/sigma)
+    # Set lambda to 0 for ALL other heads
     
-    # Flow Forecast loss weights - reduced for stability
-    lambda_vol_state: float = 0.2   # Reduced from 0.4
-    lambda_acceleration: float = 0.1  # Reduced from 0.3
+    # ENABLED heads - keep these
+    lambda_class: float = 1.0       # Classification - ENABLED
+    lambda_mu: float = 0.3          # Regression mu - ENABLED
+    lambda_sigma: float = 0.2       # Regression sigma - ENABLED
+    
+    # DISABLED heads - set to 0 to completely skip backward pass
+    lambda_quantile: float = 0.0    # DISABLED - set to 0
+    lambda_trading: float = 0.0     # DISABLED - set to 0
+    lambda_candle: float = 0.0      # DISABLED - set to 0
+    
+    # Flow Forecast heads - DISABLED
+    lambda_vol_state: float = 0.0   # DISABLED - set to 0
+    lambda_acceleration: float = 0.0  # DISABLED - set to 0
+    
+    # Head enable flags - for skipping forward computation entirely
+    head_enabled_quantile: bool = False      # Skip quantile forward
+    head_enabled_trading: bool = False       # Skip trading forward
+    head_enabled_candle: bool = False        # Skip candle forward
+    head_enabled_vol_state: bool = False     # Skip vol_state forward
+    head_enabled_acceleration: bool = False  # Skip acceleration forward
     
     # Classification options
     class_weights: Optional[torch.Tensor] = None  # For imbalanced classes

@@ -2027,6 +2027,8 @@ export async function registerRoutes(
           learning_rate: null,
           best_val_loss: null,
           early_stop_counter: 0,
+          prediction_distribution: { short: 0, hold: 0, long: 0, total: 0 },
+          gradient_norm: null,
           connected: false,
           error: `GPU trainer returned ${response.status}`
         });
@@ -2050,6 +2052,8 @@ export async function registerRoutes(
         learning_rate: null,
         best_val_loss: null,
         early_stop_counter: 0,
+        prediction_distribution: { short: 0, hold: 0, long: 0, total: 0 },
+        gradient_norm: null,
         connected: false,
         error: "GPU trainer not connected"
       });
