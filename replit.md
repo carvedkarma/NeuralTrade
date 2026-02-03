@@ -89,6 +89,28 @@ Following persistent mode collapse (100% HOLD predictions) despite bug fixes, ag
 
 **Re-enablement Strategy:** Once stable training is achieved (no mode collapse, gradient norms < 20), re-enable features ONE AT A TIME in this order: (1) Focal Loss, (2) OHEM, (3) Confidence Penalty.
 
+### Final Stabilization - Survival Mode (February 2026)
+After continued gradient explosions at epoch 14+ despite all previous fixes, the system was reduced to bare-minimum training:
+
+**Disabled Auxiliary Heads:**
+- lambda_quantile=0.0, lambda_trading=0.0, lambda_candle=0.0, lambda_vol_state=0.0, lambda_acceleration=0.0
+- Only 3 heads active: Classification (1.0), Regression μ (0.3), Regression σ (0.2)
+- Total enabled heads: 3/8
+
+**Additional Stability Measures:**
+- Gradient clip reduced from 1.0 to 0.7
+- Stability proof logging shows enabled/disabled heads at training start
+
+**Live Prediction Display:**
+- Neural Network tab shows real-time SHORT/HOLD/LONG prediction distribution
+- Color-coded bars with actual counts and percentages
+- Mode collapse warning when HOLD > 95%
+- Gradient norm display (green < 10, amber > 10)
+
+**TrainingHealthMonitor Enhancements:**
+- Now tracks actual prediction counts in `class_counts_history` (not just percentages)
+- Provides real argmax counts from model predictions per epoch
+
 ## External Dependencies
 
 ### Database
