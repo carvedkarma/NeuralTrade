@@ -514,6 +514,49 @@ class MultiHeadTrainer:
         self.grad_norm_threshold = 20.0
         self.lr_reduction_factor = 0.5
         
+        # === STABILITY PROOF LOGS ===
+        logger.info("=" * 70)
+        logger.info("[STABILITY PROOF] TRAINING CONFIGURATION")
+        logger.info("=" * 70)
+        
+        # Scheduler config
+        scheduler_max_lr = base_lr * 1.2
+        scheduler_base_lr = scheduler_max_lr / 10.0  # div_factor=10
+        scheduler_final_lr = scheduler_max_lr / 100.0  # final_div_factor=100
+        warmup_steps = int(len(train_loader) * config.training.epochs * 0.1)
+        logger.info("[STABILITY PROOF] Scheduler:")
+        logger.info("  Type: OneCycleLR")
+        logger.info("  base_lr: %.2e (max_lr / div_factor)", scheduler_base_lr)
+        logger.info("  max_lr: %.2e (base_lr * 1.2)", scheduler_max_lr)
+        logger.info("  final_lr: %.2e", scheduler_final_lr)
+        logger.info("  warmup_steps: %d (10%% of total)", warmup_steps)
+        logger.info("  anneal_strategy: cosine")
+        
+        # Loss config - check what's enabled
+        loss_cfg = config.loss
+        focal_enabled = getattr(loss_cfg, 'use_focal_loss', False)
+        ohem_enabled = getattr(loss_cfg, 'use_ohem', False)
+        conf_penalty_enabled = getattr(loss_cfg, 'use_confidence_penalty', False)
+        prior_bias_enabled = False  # Explicitly disabled in train()
+        
+        logger.info("[STABILITY PROOF] Classification Tricks:")
+        logger.info("  use_focal_loss: %s", "ENABLED" if focal_enabled else "DISABLED")
+        logger.info("  use_ohem: %s", "ENABLED" if ohem_enabled else "DISABLED")
+        logger.info("  use_confidence_penalty: %s", "ENABLED" if conf_penalty_enabled else "DISABLED")
+        logger.info("  prior_bias_init: %s", "ENABLED" if prior_bias_enabled else "DISABLED")
+        
+        # Loss weights
+        logger.info("[STABILITY PROOF] Loss Weights:")
+        logger.info("  lambda_class: %.2f", getattr(loss_cfg, 'lambda_class', 1.0))
+        logger.info("  lambda_mu: %.2f", getattr(loss_cfg, 'lambda_mu', 0.2))
+        logger.info("  lambda_sigma: %.2f", getattr(loss_cfg, 'lambda_sigma', 0.1))
+        logger.info("  lambda_quantile: %.2f", getattr(loss_cfg, 'lambda_quantile', 0.2))
+        logger.info("  lambda_trading: %.2f", getattr(loss_cfg, 'lambda_trading', 0.1))
+        logger.info("  lambda_candle: %.2f", getattr(loss_cfg, 'lambda_candle', 0.1))
+        logger.info("  lambda_vol_state: %.2f", getattr(loss_cfg, 'lambda_vol_state', 0.2))
+        logger.info("  lambda_acceleration: %.2f", getattr(loss_cfg, 'lambda_acceleration', 0.1))
+        logger.info("=" * 70)
+        
         # Tracking
         self.best_val_loss = float('inf')
         self.patience_counter = 0
@@ -538,6 +581,8 @@ class MultiHeadTrainer:
         
         # Track gradient norms and predictions for health monitoring
         gradient_norms = []
+        gradient_norms_pre_clip = []
+        gradient_norms_post_clip = []
         all_predictions = []
         
         for batch_idx, batch_data in enumerate(self.train_loader):
@@ -598,15 +643,51 @@ class MultiHeadTrainer:
             loss.backward()
             
             # Track gradient norm BEFORE clipping (for health monitoring)
-            total_norm = 0.0
+            total_norm_pre = 0.0
             for p in self.model.parameters():
                 if p.grad is not None:
-                    total_norm += p.grad.data.norm(2).item() ** 2
-            grad_norm = total_norm ** 0.5
-            gradient_norms.append(grad_norm)
+                    total_norm_pre += p.grad.data.norm(2).item() ** 2
+            grad_norm_pre = total_norm_pre ** 0.5
+            gradient_norms.append(grad_norm_pre)
+            gradient_norms_pre_clip.append(grad_norm_pre)
             
             # Gradient clipping
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            
+            # Track gradient norm AFTER clipping
+            total_norm_post = 0.0
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    total_norm_post += p.grad.data.norm(2).item() ** 2
+            grad_norm_post = total_norm_post ** 0.5
+            gradient_norms_post_clip.append(grad_norm_post)
+            
+            # === STABILITY PROOF: Epoch 0 First Batch Diagnostics ===
+            if epoch == 0 and batch_idx == 0:
+                logger.info("=" * 70)
+                logger.info("[STABILITY PROOF] EPOCH 0 FIRST BATCH DIAGNOSTICS")
+                logger.info("=" * 70)
+                
+                # Label bincount for this batch
+                label_bincount = torch.bincount(class_labels, minlength=3)
+                logger.info("  Label bincount: SHORT=%d, HOLD=%d, LONG=%d", 
+                           label_bincount[0].item(), label_bincount[1].item(), label_bincount[2].item())
+                
+                # Mean logits per class
+                mean_logits = output.class_logits.mean(dim=0)
+                logger.info("  Mean logits: SHORT=%.4f, HOLD=%.4f, LONG=%.4f",
+                           mean_logits[0].item(), mean_logits[1].item(), mean_logits[2].item())
+                
+                # Argmax prediction bincount
+                preds_batch = output.class_logits.argmax(dim=-1)
+                pred_bincount = torch.bincount(preds_batch, minlength=3)
+                logger.info("  Pred bincount: SHORT=%d, HOLD=%d, LONG=%d",
+                           pred_bincount[0].item(), pred_bincount[1].item(), pred_bincount[2].item())
+                
+                # Initial gradient norm
+                logger.info("  First batch grad_norm (pre-clip): %.4f", grad_norm_pre)
+                logger.info("  First batch grad_norm (post-clip): %.4f", grad_norm_post)
+                logger.info("=" * 70)
             
             self.optimizer.step()
             self.scheduler.step()
@@ -629,9 +710,20 @@ class MultiHeadTrainer:
         avg_losses = {k: v / n_batches for k, v in total_losses.items()}
         avg_losses['accuracy'] = correct / total
         
-        # Compute average gradient norm for this epoch
-        avg_grad_norm = np.mean(gradient_norms) if gradient_norms else 0.0
-        avg_losses['gradient_norm'] = avg_grad_norm
+        # Compute average gradient norms for this epoch (pre and post clip)
+        avg_grad_norm_pre = np.mean(gradient_norms_pre_clip) if gradient_norms_pre_clip else 0.0
+        avg_grad_norm_post = np.mean(gradient_norms_post_clip) if gradient_norms_post_clip else 0.0
+        max_grad_norm_pre = np.max(gradient_norms_pre_clip) if gradient_norms_pre_clip else 0.0
+        
+        # Use pre-clip for backward compatibility with health monitor
+        avg_losses['gradient_norm'] = avg_grad_norm_pre
+        avg_losses['gradient_norm_pre_clip'] = avg_grad_norm_pre
+        avg_losses['gradient_norm_post_clip'] = avg_grad_norm_post
+        avg_losses['gradient_norm_max'] = max_grad_norm_pre
+        
+        # === STABILITY PROOF: Per-Epoch Gradient Summary ===
+        logger.info("[STABILITY PROOF] Epoch %d grad_norm: avg_pre=%.4f, max_pre=%.4f, avg_post=%.4f",
+                   epoch, avg_grad_norm_pre, max_grad_norm_pre, avg_grad_norm_post)
         
         # HEALTH MONITORING: Check for training issues
         alerts = self.health_monitor.update(
@@ -639,7 +731,7 @@ class MultiHeadTrainer:
             train_loss=avg_losses['total'],
             train_accuracy=avg_losses['accuracy'],
             class_predictions=np.array(all_predictions) if all_predictions else None,
-            gradient_norm=avg_grad_norm
+            gradient_norm=avg_grad_norm_pre
         )
         
         # Log any alerts
