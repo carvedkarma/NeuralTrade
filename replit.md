@@ -70,6 +70,25 @@ Six critical bugs were identified and fixed that were causing mode collapse and 
 
 **Validation Logging**: Training now logs verification that FocalLoss alpha weights were successfully applied through OHEM wrapper.
 
+### Training Stability Fixes (February 2026)
+Following persistent mode collapse (100% HOLD predictions) despite bug fixes, aggressive stability measures were implemented:
+
+**Scheduler Changes:**
+- OneCycleLR max_lr reduced from 3x to 1.2x (was causing gradient explosion)
+- Base LR clamped to max 1e-4 for stability
+- Added 10% warmup period with cosine annealing
+
+**Loss Configuration - Stability Mode:**
+- All aggressive classification tricks DISABLED: use_focal_loss=False, use_ohem=False, use_confidence_penalty=False
+- Loss weights reduced: lambda_class=1.0 (was 3.0), other heads=0.1-0.2 (was 0.3-0.5)
+- Prior bias initialization DISABLED (was causing early collapse)
+
+**Stability Guardrails:**
+- HOLD Collapse Guardrail: Aborts training if HOLD predictions > 95% for 3 consecutive epochs
+- Auto LR Reduction: If gradient norm > 20 for 3 consecutive epochs, scheduler is reinitialized with 50% reduced max_lr
+
+**Re-enablement Strategy:** Once stable training is achieved (no mode collapse, gradient norms < 20), re-enable features ONE AT A TIME in this order: (1) Focal Loss, (2) OHEM, (3) Confidence Penalty.
+
 ## External Dependencies
 
 ### Database

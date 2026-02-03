@@ -399,9 +399,15 @@ class ClassificationHead(nn.Module):
         self.drop2 = nn.Dropout(dropout)
         self.output = nn.Linear(hidden_dim // 2, num_classes)
         
-        # Apply prior probability bias initialization
-        if class_priors is not None:
-            self._init_prior_bias(class_priors)
+        # STABILITY FIX: Prior bias initialization DISABLED
+        # Was causing model to collapse to one class early in training
+        # Re-enable after stable training is achieved
+        # if class_priors is not None:
+        #     self._init_prior_bias(class_priors)
+        
+        # Use default Xavier initialization instead
+        nn.init.xavier_uniform_(self.output.weight)
+        nn.init.zeros_(self.output.bias)
     
     def _init_prior_bias(self, priors: torch.Tensor):
         """

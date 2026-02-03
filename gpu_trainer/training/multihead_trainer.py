@@ -489,14 +489,30 @@ class MultiHeadTrainer:
             weight_decay=config.training.weight_decay
         )
         
-        # Scheduler - reduced max_lr multiplier from 10x to 3x to prevent gradient explosion
-        # Original: 10x caused gradient norms of 30-40 which destabilized training
+        # Scheduler - STABILITY FIX: reduced max_lr to 1.2x, added warmup
+        # 3x was still causing gradient explosion (norms 23-26)
+        # Base LR should be 1e-4, max_lr = 1.2e-4
+        base_lr = config.training.learning_rate
+        # Clamp base LR to 1e-4 max for stability
+        if base_lr > 1e-4:
+            base_lr = 1e-4
+            logger.info(f"[SCHEDULER] Clamped base_lr to 1e-4 for stability")
+        
         self.scheduler = OneCycleLR(
             self.optimizer,
-            max_lr=config.training.learning_rate * 3,  # Was 10x, reduced to 3x
+            max_lr=base_lr * 1.2,  # Was 3x, reduced to 1.2x for stability
             epochs=config.training.epochs,
-            steps_per_epoch=len(train_loader)
+            steps_per_epoch=len(train_loader),
+            pct_start=0.1,  # 10% warmup period
+            anneal_strategy='cos',  # Cosine annealing
+            div_factor=10.0,  # Initial LR = max_lr/10
+            final_div_factor=100.0  # Final LR = max_lr/100
         )
+        
+        # Gradient explosion tracking for auto LR reduction
+        self.high_grad_norm_count = 0
+        self.grad_norm_threshold = 20.0
+        self.lr_reduction_factor = 0.5
         
         # Tracking
         self.best_val_loss = float('inf')
@@ -1027,6 +1043,33 @@ class MultiHeadTrainer:
         
         return best_metrics
     
+    def _compute_hold_rate(self, val_metrics: Dict) -> Optional[float]:
+        """
+        Compute the HOLD prediction rate from health monitor class distribution.
+        
+        Used by stability guardrail to detect mode collapse.
+        Uses existing training predictions from health_monitor, avoiding 
+        redundant validation passes.
+        
+        Args:
+            val_metrics: Validation metrics dictionary (not used, kept for API compat)
+            
+        Returns:
+            Float in [0, 1] representing fraction of HOLD predictions,
+            or None if not computable
+        """
+        try:
+            # Use class distribution from health monitor (from training predictions)
+            # This avoids a redundant validation pass
+            if hasattr(self, 'health_monitor') and self.health_monitor.class_distribution_history:
+                latest_dist = self.health_monitor.class_distribution_history[-1]
+                return latest_dist.get(1, 0.0)  # Class 1 = HOLD
+            
+            return None
+        except Exception as e:
+            logger.warning(f"Could not compute HOLD rate: {e}")
+            return None
+    
     def _apply_cooldown(self, trade_signals: np.ndarray, cooldown: int) -> np.ndarray:
         """
         Apply cooldown to prevent signal spam.
@@ -1555,10 +1598,12 @@ class MultiHeadTrainer:
                 else:
                     logger.warning("  -> ✗ WARNING: Could not set FocalLoss alpha - class_loss missing set_alpha method")
                 
-                # Set prior biases in classification head if model supports it
-                if hasattr(self.model, 'class_head') and hasattr(self.model.class_head, 'set_class_priors'):
-                    self.model.class_head.set_class_priors(class_priors.to(self.device))
-                    logger.info("  -> Initialized classification head with prior biases")
+                # STABILITY FIX: Prior bias initialization DISABLED
+                # Was causing model to collapse to one class early in training
+                # if hasattr(self.model, 'class_head') and hasattr(self.model.class_head, 'set_class_priors'):
+                #     self.model.class_head.set_class_priors(class_priors.to(self.device))
+                #     logger.info("  -> Initialized classification head with prior biases")
+                logger.info("  -> Prior bias initialization DISABLED for stability")
                 
                 logger.info("=" * 70)
                 
@@ -1576,9 +1621,70 @@ class MultiHeadTrainer:
         best_trading_metrics = None
         best_trading_score = float('-inf')
         
+        # === STABILITY GUARDRAILS ===
+        # Track consecutive HOLD collapse and gradient explosion epochs
+        consecutive_hold_collapse = 0
+        consecutive_high_grad_norm = 0
+        HOLD_COLLAPSE_THRESHOLD = 0.95  # >95% HOLD predictions
+        HOLD_COLLAPSE_MAX_EPOCHS = 3  # Abort after 3 consecutive collapse epochs
+        GRAD_NORM_THRESHOLD = 20.0
+        GRAD_NORM_MAX_EPOCHS = 3  # Reduce LR after 3 consecutive high grad epochs
+        last_good_state = None  # For potential rollback
+        
         for epoch in range(epochs):
             train_metrics = self.train_epoch(epoch)
             val_metrics = self.validate(epoch=epoch)
+            
+            # === STABILITY CHECK: HOLD Collapse Guardrail ===
+            hold_rate = self._compute_hold_rate(val_metrics)
+            if hold_rate is not None and hold_rate > HOLD_COLLAPSE_THRESHOLD:
+                consecutive_hold_collapse += 1
+                logger.warning(f"[GUARDRAIL] HOLD collapse detected: {hold_rate*100:.1f}% ({consecutive_hold_collapse}/{HOLD_COLLAPSE_MAX_EPOCHS} epochs)")
+                
+                if consecutive_hold_collapse >= HOLD_COLLAPSE_MAX_EPOCHS:
+                    logger.error(f"[GUARDRAIL] TRAINING ABORTED: HOLD collapse for {HOLD_COLLAPSE_MAX_EPOCHS} consecutive epochs")
+                    logger.error(f"[GUARDRAIL] Model is not learning to differentiate - check data/loss/LR")
+                    # Clean up resources
+                    self.writer.close()
+                    # Return early with failure indication
+                    history['aborted'] = True
+                    history['abort_reason'] = 'hold_collapse'
+                    history['abort_epoch'] = epoch + 1
+                    return history
+            else:
+                consecutive_hold_collapse = 0  # Reset if predictions diversify
+            
+            # === STABILITY CHECK: Gradient Explosion Auto-LR Reduction ===
+            grad_norm = train_metrics.get('gradient_norm', 0.0)
+            if grad_norm > GRAD_NORM_THRESHOLD:
+                consecutive_high_grad_norm += 1
+                logger.warning(f"[GUARDRAIL] High gradient norm: {grad_norm:.2f} > {GRAD_NORM_THRESHOLD} ({consecutive_high_grad_norm}/{GRAD_NORM_MAX_EPOCHS} epochs)")
+                
+                if consecutive_high_grad_norm >= GRAD_NORM_MAX_EPOCHS:
+                    # Reduce learning rate by 50% - must reinitialize scheduler!
+                    # OneCycleLR overwrites param_group['lr'] each step, so we must
+                    # create a new scheduler with reduced max_lr
+                    current_max_lr = self.scheduler.max_lrs[0] if hasattr(self.scheduler, 'max_lrs') else 1e-4
+                    new_max_lr = current_max_lr * 0.5
+                    remaining_epochs = epochs - epoch
+                    
+                    logger.info(f"[GUARDRAIL] Reinitializing scheduler with max_lr={new_max_lr:.2e} (was {current_max_lr:.2e})")
+                    
+                    # Reinitialize OneCycleLR with reduced max_lr
+                    self.scheduler = OneCycleLR(
+                        self.optimizer,
+                        max_lr=new_max_lr,
+                        epochs=remaining_epochs,
+                        steps_per_epoch=len(self.train_loader),
+                        pct_start=0.05,  # Short warmup since already mid-training
+                        anneal_strategy='cos',
+                        div_factor=5.0,
+                        final_div_factor=50.0
+                    )
+                    
+                    consecutive_high_grad_norm = 0  # Reset counter
+            else:
+                consecutive_high_grad_norm = 0  # Reset if gradients stabilize
             
             # Log metrics
             history['train_loss'].append(train_metrics['total'])

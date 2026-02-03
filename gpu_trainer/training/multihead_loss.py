@@ -103,37 +103,37 @@ def derive_sl_tp_from_quantiles(
 class MultiHeadLossConfig:
     """Configuration for multi-head loss weights."""
     
-    # Loss weights - UPDATED: classification head gets priority (3x) to prevent HOLD-heavy
-    lambda_class: float = 3.0       # Weight for classification loss (increased from 1.0)
-    lambda_mu: float = 0.5          # Weight for regression (μ) loss
-    lambda_sigma: float = 0.2       # Weight for uncertainty (σ) loss  
-    lambda_quantile: float = 0.5    # Weight for quantile loss
-    lambda_trading: float = 0.3     # Weight for trading (entry/SL/TP) loss
-    lambda_candle: float = 0.3      # Weight for candle prediction loss
+    # Loss weights - STABILITY FIX: reduced to baseline values
+    # Goal: stable training first, then re-enable features one at a time
+    lambda_class: float = 1.0       # Reduced from 3.0 - was too aggressive
+    lambda_mu: float = 0.2          # Reduced from 0.5 - start low
+    lambda_sigma: float = 0.1       # Reduced from 0.2
+    lambda_quantile: float = 0.2    # Reduced from 0.5
+    lambda_trading: float = 0.1     # Reduced from 0.3
+    lambda_candle: float = 0.1      # Reduced from 0.3
     
-    # Flow Forecast loss weights
-    lambda_vol_state: float = 0.4   # Weight for volatility state classification
-    lambda_acceleration: float = 0.3  # Weight for acceleration (momentum change) regression
+    # Flow Forecast loss weights - reduced for stability
+    lambda_vol_state: float = 0.2   # Reduced from 0.4
+    lambda_acceleration: float = 0.1  # Reduced from 0.3
     
     # Classification options
     class_weights: Optional[torch.Tensor] = None  # For imbalanced classes
-    # CRITICAL FIX: Disabled label smoothing - research shows it harms class imbalance
-    # See: "Understanding Why Label Smoothing Degrades Selective Classification" (ICLR 2025)
-    label_smoothing: float = 0.0    # DISABLED - was 0.1, harms imbalanced classification
+    label_smoothing: float = 0.0    # DISABLED - harms imbalanced classification
     
-    # Focal Loss parameters (NEW) - for imbalanced classification
-    use_focal_loss: bool = True     # Use Focal Loss instead of CrossEntropy
-    focal_gamma: float = 2.0        # Focusing parameter (2.0 is standard)
-    focal_alpha: Optional[torch.Tensor] = None  # Per-class weights (computed from priors)
+    # STABILITY FIX: Disable all aggressive classification tricks
+    # Re-enable ONE AT A TIME after stable training is achieved
+    use_focal_loss: bool = False    # DISABLED - use plain CrossEntropy first
+    focal_gamma: float = 2.0        # Not used when focal loss disabled
+    focal_alpha: Optional[torch.Tensor] = None
     
-    # OHEM (Online Hard Example Mining) - 2024 State-of-the-Art
-    use_ohem: bool = True           # Use OHEM wrapper on classification loss
-    ohem_keep_ratio: float = 0.3    # Keep top 30% hardest examples (research-backed)
-    ohem_min_keep: int = 8          # Minimum examples to keep per batch
+    # OHEM disabled for stability
+    use_ohem: bool = False          # DISABLED - can destabilize early training
+    ohem_keep_ratio: float = 0.3
+    ohem_min_keep: int = 8
     
-    # Confidence Penalty (Entropy Maximization) - 2024 Research
-    use_confidence_penalty: bool = True  # Add entropy bonus to prevent overconfidence
-    confidence_penalty_beta: float = 0.1  # Weight for entropy penalty
+    # Confidence Penalty disabled for stability
+    use_confidence_penalty: bool = False  # DISABLED - was interfering with learning
+    confidence_penalty_beta: float = 0.0  # Zero weight
     
     # Inference calibration (NEW) - sharpen soft predictions
     inference_temperature: float = 0.7  # T < 1 sharpens predictions at inference
