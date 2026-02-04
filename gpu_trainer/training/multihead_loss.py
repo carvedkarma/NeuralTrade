@@ -103,17 +103,19 @@ def derive_sl_tp_from_quantiles(
 class MultiHeadLossConfig:
     """Configuration for multi-head loss weights."""
     
-    # === CRITICAL STABILITY FIX: μ REGRESSION REMOVED (Feb 2026) ===
-    # Diagnostics showed μ regression causing gradient explosions (30-50 norm)
-    # while trunk (3-5) and classifier (~1) were healthy.
-    # Top-5 exploding params ALWAYS from regression_head.mu.*
+    # === CRITICAL STABILITY FIX: REGRESSION HEAD REMOVED ENTIRELY (Feb 2026) ===
+    # Diagnostics showed ENTIRE regression path causing gradient explosions:
+    # - regression_head.shared layers: 8-59 (exploding)
+    # - regression_head.sigma_head: 6-42 (exploding)
+    # - classifier: 0.68-1.71 (stable)
     # 
-    # FINAL ARCHITECTURE: Classification (direction) + Sigma (volatility sizing)
+    # FINAL ARCHITECTURE: Classification ONLY
+    # Use external ATR/rolling volatility for position sizing instead of learned σ
     
-    # ENABLED heads - keep these
-    lambda_class: float = 1.0       # Classification - ENABLED
-    lambda_mu: float = 0.0          # μ REGRESSION - PERMANENTLY DISABLED (causes explosion)
-    lambda_sigma: float = 0.3       # Regression sigma - ENABLED for volatility sizing
+    # ENABLED heads - ONLY classification
+    lambda_class: float = 1.0       # Classification - ONLY ENABLED HEAD
+    lambda_mu: float = 0.0          # μ REGRESSION - PERMANENTLY DISABLED
+    lambda_sigma: float = 0.0       # σ REGRESSION - PERMANENTLY DISABLED (shared layers explode)
     
     # DISABLED heads - set to 0 to completely skip backward pass
     lambda_quantile: float = 0.0    # DISABLED - set to 0
@@ -680,8 +682,13 @@ class MultiHeadLoss(nn.Module):
             # μ DISABLED - return zero tensor with no gradient
             l_mu = torch.tensor(0.0, device=class_logits.device)
         
-        # Uncertainty calibration loss
-        l_sigma = self.sigma_loss(mu, sigma, return_targets)
+        # Uncertainty calibration loss - SKIP if lambda_sigma is 0
+        # Sigma regression (and shared layers) were causing gradient explosions
+        if self.config.lambda_sigma > 0:
+            l_sigma = self.sigma_loss(mu, sigma, return_targets)
+        else:
+            # σ DISABLED - return zero tensor with no gradient
+            l_sigma = torch.tensor(0.0, device=class_logits.device)
         
         # Quantile loss
         l_quantile = self.quantile_loss(quantiles, return_targets)

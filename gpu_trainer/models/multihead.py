@@ -297,19 +297,20 @@ class QuantileHead(nn.Module):
 
 class RegressionHead(nn.Module):
     """
-    Regression head for uncertainty (σ) only.
+    Regression head - ENTIRELY DISABLED (Feb 2026).
     
-    CRITICAL STABILITY FIX (Feb 2026): μ regression head REMOVED entirely.
-    Diagnostics showed μ regression causing gradient explosions (30-50 norm)
-    while trunk (3-5) and classifier (~1) were healthy. Top-5 exploding params
-    were ALWAYS from regression_head.mu.*.
+    CRITICAL STABILITY FIX: ENTIRE regression path removed.
+    Diagnostics showed ALL regression layers causing gradient explosions:
+    - regression_head.shared layers: 8-59 (exploding)
+    - regression_head.sigma_head: 6-42 (exploding)
+    - classifier: 0.68-1.71 (stable)
     
-    Now outputs ONLY sigma for volatility-based position sizing.
-    Model focuses on direction classification + uncertainty quantification.
+    Model now outputs ONLY direction classification.
+    Use external ATR/rolling volatility for position sizing.
     """
     
     def __init__(self, input_dim: int, hidden_dim: int = 128, dropout: float = 0.1,
-                 use_log_sigma: bool = True, disable_mu: bool = True):
+                 use_log_sigma: bool = True, disable_mu: bool = True, disable_all: bool = True):
         """
         Args:
             input_dim: Input feature dimension
@@ -318,11 +319,13 @@ class RegressionHead(nn.Module):
             use_log_sigma: If True (default), output log(σ) directly for Phase 1b.
                           If False, use softplus for backward compatibility.
             disable_mu: If True (default), μ head is disabled - returns zeros
+            disable_all: If True (default), ENTIRE regression head is disabled - all frozen
         """
         super().__init__()
         
         self.use_log_sigma = use_log_sigma
         self.disable_mu = disable_mu
+        self.disable_all = disable_all
         
         self.shared = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -333,25 +336,36 @@ class RegressionHead(nn.Module):
             nn.Dropout(dropout)
         )
         
-        # Expected return - DISABLED by default (causes gradient explosion on BTC 15m)
-        # Keep the layer for checkpoint compatibility but FREEZE it to prevent gradient flow
+        # Expected return - DISABLED
         self.mu_head = nn.Linear(hidden_dim // 2, 1)
-        if self.disable_mu:
-            # Freeze mu_head parameters - no gradients will flow through
+        
+        # Uncertainty - DISABLED
+        self.sigma_head = nn.Linear(hidden_dim // 2, 1)
+        
+        # FREEZE ENTIRE REGRESSION HEAD - no gradients flow through ANY layer
+        if self.disable_all:
+            for param in self.parameters():
+                param.requires_grad = False
+        elif self.disable_mu:
+            # Legacy: only freeze mu_head
             for param in self.mu_head.parameters():
                 param.requires_grad = False
-        
-        # Uncertainty: log_sigma if use_log_sigma, else raw (transformed by softplus)
-        self.sigma_head = nn.Linear(hidden_dim // 2, 1)
         
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Returns (mu, sigma_or_log_sigma) tensors.
         
+        If disable_all=True: returns zeros for both (no computation, no gradients)
         If disable_mu=True: mu is zeros (no gradient flow)
         If use_log_sigma=True: returns (mu, log_sigma) where log_sigma is clamped
         If use_log_sigma=False: returns (mu, sigma) where sigma = softplus(raw) + eps
         """
+        # ENTIRE REGRESSION HEAD DISABLED - Return zeros with no gradient, skip all computation
+        if self.disable_all:
+            mu = torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
+            sigma = torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
+            return mu, sigma
+        
         h = self.shared(x)
         
         # μ HEAD DISABLED - Return zeros with no gradient
@@ -361,16 +375,10 @@ class RegressionHead(nn.Module):
             mu = self.mu_head(h)
         
         if self.use_log_sigma:
-            # PHASE 1b: Output log_sigma directly
-            # Loss function will handle: σ = exp(log_sigma)
-            # NLL = log_sigma + 0.5 * (y - μ)² * exp(-2 * log_sigma)
             log_sigma = self.sigma_head(h)
-            # STABILITY FIX: Clamp log_sigma to [-8, 2] to prevent gradient explosion
-            # exp(-8) ≈ 0.00034 (minimum σ), exp(2) ≈ 7.4 (maximum σ)
             log_sigma = log_sigma.clamp(min=-8, max=2)
             return mu, log_sigma
         else:
-            # Legacy: softplus ensures positive sigma
             sigma = F.softplus(self.sigma_head(h)) + 1e-6
             return mu, sigma
 
