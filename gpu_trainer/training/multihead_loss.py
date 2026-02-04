@@ -103,14 +103,17 @@ def derive_sl_tp_from_quantiles(
 class MultiHeadLossConfig:
     """Configuration for multi-head loss weights."""
     
-    # === FINAL STABILIZATION: DISABLE ALL AUXILIARY HEADS ===
-    # Only train Classification + Regression (mu/sigma)
-    # Set lambda to 0 for ALL other heads
+    # === CRITICAL STABILITY FIX: μ REGRESSION REMOVED (Feb 2026) ===
+    # Diagnostics showed μ regression causing gradient explosions (30-50 norm)
+    # while trunk (3-5) and classifier (~1) were healthy.
+    # Top-5 exploding params ALWAYS from regression_head.mu.*
+    # 
+    # FINAL ARCHITECTURE: Classification (direction) + Sigma (volatility sizing)
     
     # ENABLED heads - keep these
     lambda_class: float = 1.0       # Classification - ENABLED
-    lambda_mu: float = 0.3          # Regression mu - ENABLED
-    lambda_sigma: float = 0.2       # Regression sigma - ENABLED
+    lambda_mu: float = 0.0          # μ REGRESSION - PERMANENTLY DISABLED (causes explosion)
+    lambda_sigma: float = 0.3       # Regression sigma - ENABLED for volatility sizing
     
     # DISABLED heads - set to 0 to completely skip backward pass
     lambda_quantile: float = 0.0    # DISABLED - set to 0
@@ -667,10 +670,15 @@ class MultiHeadLoss(nn.Module):
         # Classification loss
         l_class = self.class_loss(class_logits, class_targets)
         
-        # Regression loss (expected return)
+        # Regression loss (expected return) - SKIP if lambda_mu is 0
+        # μ regression was identified as the source of gradient explosions
         if return_targets.dim() == 1:
             return_targets = return_targets.unsqueeze(-1)
-        l_mu = self.mu_loss(mu, return_targets)
+        if self.config.lambda_mu > 0:
+            l_mu = self.mu_loss(mu, return_targets)
+        else:
+            # μ DISABLED - return zero tensor with no gradient
+            l_mu = torch.tensor(0.0, device=class_logits.device)
         
         # Uncertainty calibration loss
         l_sigma = self.sigma_loss(mu, sigma, return_targets)

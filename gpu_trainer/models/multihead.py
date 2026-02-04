@@ -297,16 +297,19 @@ class QuantileHead(nn.Module):
 
 class RegressionHead(nn.Module):
     """
-    Regression head for expected return (μ) and uncertainty (σ).
+    Regression head for uncertainty (σ) only.
     
-    PHASE 1b: Supports log-sigma mode for proper Gaussian NLL calibration.
-    When use_log_sigma=True, outputs log(σ) directly (unbounded) instead of
-    using softplus. This prevents σ from being "gamed" and couples uncertainty
-    to actual prediction error.
+    CRITICAL STABILITY FIX (Feb 2026): μ regression head REMOVED entirely.
+    Diagnostics showed μ regression causing gradient explosions (30-50 norm)
+    while trunk (3-5) and classifier (~1) were healthy. Top-5 exploding params
+    were ALWAYS from regression_head.mu.*.
+    
+    Now outputs ONLY sigma for volatility-based position sizing.
+    Model focuses on direction classification + uncertainty quantification.
     """
     
     def __init__(self, input_dim: int, hidden_dim: int = 128, dropout: float = 0.1,
-                 use_log_sigma: bool = True):
+                 use_log_sigma: bool = True, disable_mu: bool = True):
         """
         Args:
             input_dim: Input feature dimension
@@ -314,10 +317,12 @@ class RegressionHead(nn.Module):
             dropout: Dropout rate
             use_log_sigma: If True (default), output log(σ) directly for Phase 1b.
                           If False, use softplus for backward compatibility.
+            disable_mu: If True (default), μ head is disabled - returns zeros
         """
         super().__init__()
         
         self.use_log_sigma = use_log_sigma
+        self.disable_mu = disable_mu
         
         self.shared = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -328,8 +333,13 @@ class RegressionHead(nn.Module):
             nn.Dropout(dropout)
         )
         
-        # Expected return (can be negative or positive)
+        # Expected return - DISABLED by default (causes gradient explosion on BTC 15m)
+        # Keep the layer for checkpoint compatibility but FREEZE it to prevent gradient flow
         self.mu_head = nn.Linear(hidden_dim // 2, 1)
+        if self.disable_mu:
+            # Freeze mu_head parameters - no gradients will flow through
+            for param in self.mu_head.parameters():
+                param.requires_grad = False
         
         # Uncertainty: log_sigma if use_log_sigma, else raw (transformed by softplus)
         self.sigma_head = nn.Linear(hidden_dim // 2, 1)
@@ -338,12 +348,17 @@ class RegressionHead(nn.Module):
         """
         Returns (mu, sigma_or_log_sigma) tensors.
         
-        If use_log_sigma=True: returns (mu, log_sigma) where log_sigma is unbounded
+        If disable_mu=True: mu is zeros (no gradient flow)
+        If use_log_sigma=True: returns (mu, log_sigma) where log_sigma is clamped
         If use_log_sigma=False: returns (mu, sigma) where sigma = softplus(raw) + eps
         """
         h = self.shared(x)
         
-        mu = self.mu_head(h)
+        # μ HEAD DISABLED - Return zeros with no gradient
+        if self.disable_mu:
+            mu = torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
+        else:
+            mu = self.mu_head(h)
         
         if self.use_log_sigma:
             # PHASE 1b: Output log_sigma directly
@@ -352,7 +367,6 @@ class RegressionHead(nn.Module):
             log_sigma = self.sigma_head(h)
             # STABILITY FIX: Clamp log_sigma to [-8, 2] to prevent gradient explosion
             # exp(-8) ≈ 0.00034 (minimum σ), exp(2) ≈ 7.4 (maximum σ)
-            # This prevents extreme uncertainty values that cause gradient instability
             log_sigma = log_sigma.clamp(min=-8, max=2)
             return mu, log_sigma
         else:

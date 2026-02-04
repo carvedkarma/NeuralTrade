@@ -131,6 +131,30 @@ After continued gradient explosions, the following aggressive measures were impl
 
 **Success Criteria:** After epoch 10, avg_pre_grad_norm < 10 and no guardrail resets
 
+### μ Regression Removal (February 2026)
+Based on diagnostic data showing μ regression (expected return prediction) was causing gradient explosions:
+- **trunk grad_norm**: 3-5 (healthy)
+- **classifier grad_norm**: ~1 (healthy)
+- **regression(mu) grad_norm**: 30-50 (EXPLODING)
+- **Top-5 params**: ALWAYS from `regression_head.mu.*`
+
+**Decision**: Remove μ regression entirely. The model now outputs:
+1. **Direction Classification** (SHORT/HOLD/LONG) - trade selection
+2. **Sigma (σ)** - volatility/uncertainty for position sizing
+
+**Rationale**:
+- μ prediction (expected return magnitude) is fundamentally unstable on BTC 15m data
+- Sigma alone provides sufficient info for volatility-based exits (ATR, σ-bands)
+- Model focuses on trade SELECTION (direction + confidence), not return magnitude
+
+**Implementation**:
+- `RegressionHead.disable_mu = True` by default
+- `lambda_mu = 0.0` in `MultiHeadLossConfig`
+- μ returns zeros (no gradient flow)
+- Sigma loss now trains σ to predict return spread (volatility)
+
+**Final Architecture**: Classification (λ=1.0) + Sigma (λ=0.3) only
+
 **Live Prediction Display:**
 - Neural Network tab shows real-time SHORT/HOLD/LONG prediction distribution
 - Color-coded bars with actual counts and percentages
