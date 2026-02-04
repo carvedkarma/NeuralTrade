@@ -346,10 +346,14 @@ class RegressionHead(nn.Module):
         mu = self.mu_head(h)
         
         if self.use_log_sigma:
-            # PHASE 1b: Output log_sigma directly (unbounded)
+            # PHASE 1b: Output log_sigma directly
             # Loss function will handle: σ = exp(log_sigma)
             # NLL = log_sigma + 0.5 * (y - μ)² * exp(-2 * log_sigma)
             log_sigma = self.sigma_head(h)
+            # STABILITY FIX: Clamp log_sigma to [-8, 2] to prevent gradient explosion
+            # exp(-8) ≈ 0.00034 (minimum σ), exp(2) ≈ 7.4 (maximum σ)
+            # This prevents extreme uncertainty values that cause gradient instability
+            log_sigma = log_sigma.clamp(min=-8, max=2)
             return mu, log_sigma
         else:
             # Legacy: softplus ensures positive sigma

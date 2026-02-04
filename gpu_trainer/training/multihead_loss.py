@@ -503,10 +503,11 @@ class GaussianNLLLoss(nn.Module):
         use_log = is_log_sigma if is_log_sigma is not None else self.use_log_sigma
         
         if use_log:
-            # Input is log_sigma (unbounded) - preferred approach
+            # Input is log_sigma - should already be clamped by RegressionHead
             log_sigma = sigma_or_log_sigma
-            # Clamp log_sigma to prevent extreme values
-            log_sigma = log_sigma.clamp(min=-10, max=5)  # exp(-10) ≈ 0, exp(5) ≈ 148
+            # STABILITY FIX: Tighter clamp consistent with RegressionHead [-8, 2]
+            # exp(-8) ≈ 0.00034, exp(2) ≈ 7.4
+            log_sigma = log_sigma.clamp(min=-8, max=2)
             
             # NLL = log_sigma + 0.5 * (y - μ)² / σ²
             #     = log_sigma + 0.5 * (y - μ)² * exp(-2 * log_sigma)

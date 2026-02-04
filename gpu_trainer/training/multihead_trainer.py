@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler, SequentialSampler, RandomSampler
 from torch.amp import GradScaler, autocast
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, SequentialLR
 from typing import Dict, List, Tuple, Optional, Callable
 import numpy as np
 from pathlib import Path
@@ -493,25 +493,45 @@ class MultiHeadTrainer:
             weight_decay=config.training.weight_decay
         )
         
-        # Scheduler - STABILITY FIX: reduced max_lr to 1.2x, added warmup
-        # 3x was still causing gradient explosion (norms 23-26)
-        # Base LR should be 1e-4, max_lr = 1.2e-4
+        # Scheduler - STABILITY FIX: Replace OneCycleLR with warmup + cosine decay
+        # OneCycleLR's cyclic nature was causing gradient spikes at epoch 14+
         base_lr = config.training.learning_rate
-        # Clamp base LR to 1e-4 max for stability
-        if base_lr > 1e-4:
-            base_lr = 1e-4
-            logger.info(f"[SCHEDULER] Clamped base_lr to 1e-4 for stability")
+        # Clamp base LR to 5e-5 max for stability (was 1e-4)
+        if base_lr > 5e-5:
+            base_lr = 5e-5
+            logger.info(f"[SCHEDULER] Clamped base_lr to 5e-5 for stability")
         
-        self.scheduler = OneCycleLR(
+        # Store base_lr for potential resets
+        self.base_lr = base_lr
+        
+        # Calculate total steps and warmup steps
+        total_steps = config.training.epochs * len(train_loader)
+        warmup_steps = int(total_steps * 0.1)  # 10% warmup
+        
+        # Warmup scheduler: linear ramp from 0 to base_lr
+        def warmup_lambda(step):
+            if step < warmup_steps:
+                return float(step) / float(max(1, warmup_steps))
+            return 1.0
+        
+        warmup_scheduler = LambdaLR(self.optimizer, lr_lambda=warmup_lambda)
+        
+        # Cosine decay scheduler: decays from base_lr to base_lr/100
+        cosine_scheduler = CosineAnnealingLR(
             self.optimizer,
-            max_lr=base_lr * 1.2,  # Was 3x, reduced to 1.2x for stability
-            epochs=config.training.epochs,
-            steps_per_epoch=len(train_loader),
-            pct_start=0.1,  # 10% warmup period
-            anneal_strategy='cos',  # Cosine annealing
-            div_factor=10.0,  # Initial LR = max_lr/10
-            final_div_factor=100.0  # Final LR = max_lr/100
+            T_max=total_steps - warmup_steps,
+            eta_min=base_lr / 100.0
         )
+        
+        # Combine: warmup first, then cosine decay
+        self.scheduler = SequentialLR(
+            self.optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_steps]
+        )
+        
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
         
         # Gradient explosion tracking for auto LR reduction
         self.high_grad_norm_count = 0
@@ -523,18 +543,15 @@ class MultiHeadTrainer:
         logger.info("[STABILITY PROOF] TRAINING CONFIGURATION")
         logger.info("=" * 70)
         
-        # Scheduler config
-        scheduler_max_lr = base_lr * 1.2
-        scheduler_base_lr = scheduler_max_lr / 10.0  # div_factor=10
-        scheduler_final_lr = scheduler_max_lr / 100.0  # final_div_factor=100
-        warmup_steps = int(len(train_loader) * config.training.epochs * 0.1)
+        # Scheduler config - now using warmup + cosine decay (NO cyclic LR)
+        scheduler_final_lr = base_lr / 100.0
         logger.info("[STABILITY PROOF] Scheduler:")
-        logger.info("  Type: OneCycleLR")
-        logger.info("  base_lr: %.2e (max_lr / div_factor)", scheduler_base_lr)
-        logger.info("  max_lr: %.2e (base_lr * 1.2)", scheduler_max_lr)
-        logger.info("  final_lr: %.2e", scheduler_final_lr)
-        logger.info("  warmup_steps: %d (10%% of total)", warmup_steps)
-        logger.info("  anneal_strategy: cosine")
+        logger.info("  Type: Warmup + Cosine Decay (NO OneCycleLR)")
+        logger.info("  base_lr: %.2e", base_lr)
+        logger.info("  final_lr: %.2e (base_lr / 100)", scheduler_final_lr)
+        logger.info("  warmup_steps: %d (10%% of total)", self.warmup_steps)
+        logger.info("  total_steps: %d", self.total_steps)
+        logger.info("  Strategy: Linear warmup -> Cosine decay to eta_min")
         
         # Loss config - get from criterion (MultiHeadLoss has a config attribute)
         # Safe access with fallbacks in case config structure varies
@@ -689,6 +706,41 @@ class MultiHeadTrainer:
             gradient_norms.append(grad_norm_pre)
             gradient_norms_pre_clip.append(grad_norm_pre)
             
+            # === DIAGNOSTICS: Per-layer gradient norms on explosion ===
+            if grad_norm_pre > 20.0:
+                # Compute per-layer grad norms to identify the exploding layer
+                layer_grad_norms = {}
+                param_grad_list = []
+                
+                for name, param in self.model.named_parameters():
+                    if param.grad is not None:
+                        norm = param.grad.data.norm(2).item()
+                        param_grad_list.append((name, norm))
+                        
+                        # Categorize by layer type
+                        if 'class' in name.lower() or 'classifier' in name.lower():
+                            layer_grad_norms['classifier'] = layer_grad_norms.get('classifier', 0.0) + norm**2
+                        elif 'regression' in name.lower() or 'mu_head' in name.lower() or 'sigma_head' in name.lower():
+                            layer_grad_norms['regression'] = layer_grad_norms.get('regression', 0.0) + norm**2
+                        else:
+                            layer_grad_norms['trunk'] = layer_grad_norms.get('trunk', 0.0) + norm**2
+                
+                # Take sqrt for L2 norm
+                for k in layer_grad_norms:
+                    layer_grad_norms[k] = layer_grad_norms[k] ** 0.5
+                
+                # Top-5 parameters by gradient norm
+                param_grad_list.sort(key=lambda x: x[1], reverse=True)
+                top5 = param_grad_list[:5]
+                
+                logger.warning(f"[GRAD EXPLOSION] Epoch {epoch}, Batch {batch_idx}: grad_norm={grad_norm_pre:.2f}")
+                logger.warning(f"  Per-layer norms: trunk={layer_grad_norms.get('trunk', 0.0):.2f}, "
+                             f"classifier={layer_grad_norms.get('classifier', 0.0):.2f}, "
+                             f"regression={layer_grad_norms.get('regression', 0.0):.2f}")
+                logger.warning(f"  Top-5 params by grad norm:")
+                for pname, pnorm in top5:
+                    logger.warning(f"    {pname}: {pnorm:.4f}")
+            
             # Gradient clipping - STABILITY FIX: reduced from 1.0 to 0.7
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.7)
             
@@ -762,6 +814,13 @@ class MultiHeadTrainer:
         # === STABILITY PROOF: Per-Epoch Gradient Summary ===
         logger.info("[STABILITY PROOF] Epoch %d grad_norm: avg_pre=%.4f, max_pre=%.4f, avg_post=%.4f",
                    epoch, avg_grad_norm_pre, max_grad_norm_pre, avg_grad_norm_post)
+        
+        # === DIAGNOSTICS: Per-loss means each epoch ===
+        logger.info("[DIAGNOSTICS] Epoch %d per-loss means: class=%.4f, mu=%.4f, sigma=%.4f, "
+                   "quantile=%.4f, trading=%.4f, candle=%.4f, vol_state=%.4f, accel=%.4f",
+                   epoch, avg_losses['class'], avg_losses['mu'], avg_losses['sigma'],
+                   avg_losses['quantile'], avg_losses['trading'], avg_losses['candle'],
+                   avg_losses['vol_state'], avg_losses['acceleration'])
         
         # HEALTH MONITORING: Check for training issues
         alerts = self.health_monitor.update(
@@ -1791,26 +1850,43 @@ class MultiHeadTrainer:
                 logger.warning(f"[GUARDRAIL] High gradient norm: {grad_norm:.2f} > {GRAD_NORM_THRESHOLD} ({consecutive_high_grad_norm}/{GRAD_NORM_MAX_EPOCHS} epochs)")
                 
                 if consecutive_high_grad_norm >= GRAD_NORM_MAX_EPOCHS:
-                    # Reduce learning rate by 50% - must reinitialize scheduler!
-                    # OneCycleLR overwrites param_group['lr'] each step, so we must
-                    # create a new scheduler with reduced max_lr
-                    current_max_lr = self.scheduler.max_lrs[0] if hasattr(self.scheduler, 'max_lrs') else 1e-4
-                    new_max_lr = current_max_lr * 0.5
-                    remaining_epochs = epochs - epoch
+                    # Reduce learning rate by 50% AND reset optimizer moments
+                    new_base_lr = self.base_lr * 0.5
+                    # Calculate remaining steps as batches, not epochs
+                    remaining_epochs = epochs - epoch - 1  # -1 because current epoch is done
+                    remaining_steps = max(remaining_epochs * len(self.train_loader), len(self.train_loader))
                     
-                    logger.info(f"[GUARDRAIL] Reinitializing scheduler with max_lr={new_max_lr:.2e} (was {current_max_lr:.2e})")
+                    logger.info(f"[GUARDRAIL] 3/3 triggered - Reinitializing optimizer + scheduler")
+                    logger.info(f"[GUARDRAIL] New base_lr={new_base_lr:.2e} (was {self.base_lr:.2e})")
+                    logger.info(f"[GUARDRAIL] Remaining epochs={remaining_epochs}, remaining_steps={remaining_steps}")
                     
-                    # Reinitialize OneCycleLR with reduced max_lr
-                    self.scheduler = OneCycleLR(
-                        self.optimizer,
-                        max_lr=new_max_lr,
-                        epochs=remaining_epochs,
-                        steps_per_epoch=len(self.train_loader),
-                        pct_start=0.05,  # Short warmup since already mid-training
-                        anneal_strategy='cos',
-                        div_factor=5.0,
-                        final_div_factor=50.0
+                    # CRITICAL: Recreate optimizer to reset momentum states (exp_avg, exp_avg_sq)
+                    # This prevents accumulated momentum from causing continued explosions
+                    self.optimizer = torch.optim.AdamW(
+                        self.model.parameters(),
+                        lr=new_base_lr,
+                        weight_decay=self.config.training.weight_decay
                     )
+                    logger.info(f"[GUARDRAIL] AdamW optimizer recreated - momentum states cleared")
+                    
+                    # Update stored base_lr for potential future resets
+                    self.base_lr = new_base_lr
+                    
+                    # Reinitialize scheduler with reduced LR (no warmup needed mid-training)
+                    # Guard against T_max <= 0 which would cause errors
+                    if remaining_steps > 0:
+                        self.scheduler = CosineAnnealingLR(
+                            self.optimizer,
+                            T_max=remaining_steps,
+                            eta_min=new_base_lr / 100.0
+                        )
+                        logger.info(f"[GUARDRAIL] Scheduler reset: CosineAnnealingLR T_max={remaining_steps}, "
+                                  f"current_lr={self.optimizer.param_groups[0]['lr']:.2e}")
+                    else:
+                        # Near end of training, just keep constant LR
+                        logger.info(f"[GUARDRAIL] Near end of training, using constant LR={new_base_lr:.2e}")
+                        # Use a dummy scheduler that doesn't change LR
+                        self.scheduler = LambdaLR(self.optimizer, lr_lambda=lambda x: 1.0)
                     
                     consecutive_high_grad_norm = 0  # Reset counter
             else:

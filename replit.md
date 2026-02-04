@@ -101,6 +101,36 @@ After continued gradient explosions at epoch 14+ despite all previous fixes, the
 - Gradient clip reduced from 1.0 to 0.7
 - Stability proof logging shows enabled/disabled heads at training start
 
+### Aggressive Stability Fixes (February 2026)
+After continued gradient explosions, the following aggressive measures were implemented:
+
+**1. Sigma Head Clamping:**
+- RegressionHead.forward() now clamps log_sigma to [-8, 2] before returning
+- exp(-8) ≈ 0.00034 (min σ), exp(2) ≈ 7.4 (max σ)
+- Prevents extreme uncertainty values from destabilizing gradients
+
+**2. Scheduler Replacement:**
+- OneCycleLR completely REMOVED (was causing cyclic gradient spikes)
+- Replaced with SequentialLR: Linear warmup (10% steps) + CosineAnnealingLR decay
+- No cyclic LR behavior - monotonic decay after warmup
+
+**3. Lower Learning Rate:**
+- Base LR clamped to 5e-5 (was 1e-4)
+- Final LR = base_lr / 100 = 5e-7
+
+**4. Enhanced Diagnostics:**
+- Per-loss means logged each epoch (class, mu, sigma, quantile, etc.)
+- On gradient explosion (>20): logs per-layer norms (trunk/classifier/regression)
+- Top-5 parameters by gradient norm printed on explosion
+
+**5. Guardrail 3/3 Reset (Optimizer Momentum Reset):**
+- When gradient norm exceeds 20 for 3 consecutive epochs:
+  - AdamW optimizer RECREATED (clears exp_avg/exp_avg_sq momentum states)
+  - Scheduler reinitialized with 50% reduced LR
+  - This prevents accumulated momentum from causing continued explosions
+
+**Success Criteria:** After epoch 10, avg_pre_grad_norm < 10 and no guardrail resets
+
 **Live Prediction Display:**
 - Neural Network tab shows real-time SHORT/HOLD/LONG prediction distribution
 - Color-coded bars with actual counts and percentages
