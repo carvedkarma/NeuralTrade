@@ -646,9 +646,43 @@ def train(args):
             model.name = "SimpleMLP"
             model.count_parameters = model.parameters_count  # Alias for compatibility
             logger.info(f"Using SimpleMLP (stable baseline): {model.parameters_count():,} parameters")
+        elif args.model == "multihead_simple_mlp":
+            # MultiHeadSimpleMLP: Progressive head re-enablement (legacy mode)
+            from models.simple_mlp import MultiHeadSimpleMLP, MultiHeadSimpleMLP_Config
+            
+            # Check which heads are enabled via CLI flags
+            enable_quantile = getattr(args, 'enable_quantile', False)
+            enable_vol_state = getattr(args, 'enable_vol_state', False)
+            enable_mu = getattr(args, 'enable_mu', False)
+            enable_sigma = getattr(args, 'enable_sigma', False)
+            
+            mlp_config = MultiHeadSimpleMLP_Config(
+                input_dim=input_dim,
+                hidden_dims=[256, 128, 64],
+                num_classes=3,
+                dropout=0.3,
+                use_layer_norm=True,
+                n_quantiles=5,
+                enable_quantile=enable_quantile,
+                enable_vol_state=enable_vol_state,
+                enable_mu=enable_mu,
+                enable_sigma=enable_sigma
+            )
+            model = MultiHeadSimpleMLP(mlp_config)
+            model.name = "MultiHeadSimpleMLP"
+            model.count_parameters = model.parameters_count  # Alias for compatibility
+            
+            # Log enabled heads
+            enabled = ["classification"]
+            if enable_quantile: enabled.append("quantile")
+            if enable_vol_state: enabled.append("vol_state")
+            if enable_mu: enabled.append("mu")
+            if enable_sigma: enabled.append("sigma")
+            logger.info(f"Using MultiHeadSimpleMLP: {model.parameters_count():,} parameters")
+            logger.info(f"Enabled heads: {', '.join(enabled)}")
         else:
             logger.error(f"Unknown model type: {args.model}")
-            logger.error("Supported models: transformer, tft, lstm, cnn, vae, gnn, simple_mlp")
+            logger.error("Supported models: transformer, tft, lstm, cnn, vae, gnn, simple_mlp, multihead_simple_mlp")
             return
         
     logger.info(f"Model parameters: {model.count_parameters():,}")
