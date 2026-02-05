@@ -164,6 +164,25 @@ Based on diagnostic data showing ENTIRE regression path causing gradient explosi
 - Now tracks actual prediction counts in `class_counts_history` (not just percentages)
 - Provides real argmax counts from model predictions per epoch
 
+### Data Diagnostics System (February 2026)
+To isolate root causes of gradient explosions, a comprehensive diagnostics toolkit was added:
+
+**Script**: `gpu_trainer/data_diagnostics.py`
+- `audit_raw_features()`: Checks for NaN/Inf, extreme outliers, min/max/mean/std per feature
+- `audit_scaled_features()`: Validates post-RobustScaler values, detects extreme values
+- `audit_labels()`: Analyzes class distribution and imbalance
+- `tiny_model_test()`: Tests both CLIPPED and UNCLIPPED paths with minimal 1-layer model
+- `per_batch_monitoring()`: Tracks feature/gradient stats per batch for first N batches
+- `run_full_audit()`: Orchestrates all audits, generates actionable recommendations
+
+**Feature Clipping**: `pipeline.py` now includes `transform_and_clip()` method:
+- Clips ALL scaled features to [-5, +5] range
+- Replaces NaN/Inf with 0 after clipping
+- Logs count of clipped extreme values
+- Used by default in `main.py` with `clip_range=5.0`
+
+**Run Diagnostics**: `python -m gpu_trainer.data_diagnostics`
+
 ## External Dependencies
 
 ### Database
