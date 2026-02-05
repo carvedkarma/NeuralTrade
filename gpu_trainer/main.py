@@ -663,10 +663,10 @@ def train(args):
                 dropout=0.3,
                 use_layer_norm=True,
                 n_quantiles=5,
-                enable_quantile=enable_quantile,
-                enable_vol_state=enable_vol_state,
-                enable_mu=enable_mu,
-                enable_sigma=enable_sigma
+                enable_quantile_head=enable_quantile,
+                enable_vol_state_head=enable_vol_state,
+                enable_mu_head=enable_mu,
+                enable_sigma_head=enable_sigma
             )
             model = MultiHeadSimpleMLP(mlp_config)
             model.name = "MultiHeadSimpleMLP"
