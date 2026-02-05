@@ -496,7 +496,7 @@ def train(args):
     if use_multihead:
         # Multi-head model variants with Classification + Regression + Quantile heads
         from models.multihead import MultiHeadTransformer, MultiHeadTFT, MultiHeadLSTM, MultiHeadCNN
-        from models.simple_mlp import SimpleMLP, SimpleMLP_Config
+        from models.simple_mlp import SimpleMLP, SimpleMLP_Config, MultiHeadSimpleMLP, MultiHeadSimpleMLP_Config
         
         if args.model == "simple_mlp":
             # SimpleMLP: Stable baseline classifier (no gradient explosions)
@@ -512,6 +512,48 @@ def train(args):
             model = SimpleMLP(mlp_config)
             model.name = "SimpleMLP"
             logger.info(f"Using SimpleMLP (stable baseline): {model.parameters_count():,} parameters")
+        elif args.model == "multihead_simple_mlp":
+            # MultiHeadSimpleMLP: Progressive head re-enablement
+            # Enable heads via CLI flags: --enable-quantile, --enable-vol-state, --enable-mu, --enable-sigma
+            enable_quantile = getattr(args, 'enable_quantile', False)
+            enable_vol_state = getattr(args, 'enable_vol_state', False)
+            enable_mu = getattr(args, 'enable_mu', False)
+            enable_sigma = getattr(args, 'enable_sigma', False)
+            
+            mlp_config = MultiHeadSimpleMLP_Config(
+                input_dim=input_dim,
+                hidden_dims=[256, 128, 64],
+                num_classes=3,
+                dropout=0.3,
+                use_layer_norm=True,
+                n_candle_steps=n_future_candles,
+                enable_quantile_head=enable_quantile,
+                enable_vol_state_head=enable_vol_state,
+                enable_mu_head=enable_mu,
+                enable_sigma_head=enable_sigma
+            )
+            model = MultiHeadSimpleMLP(mlp_config)
+            
+            # Log which heads are enabled
+            enabled_heads = ["classification"]
+            if enable_quantile:
+                enabled_heads.append("quantile")
+            if enable_vol_state:
+                enabled_heads.append("vol_state")
+            if enable_mu:
+                enabled_heads.append("mu")
+            if enable_sigma:
+                enabled_heads.append("sigma")
+            logger.info(f"Using MultiHeadSimpleMLP: {model.parameters_count():,} parameters")
+            logger.info(f"Enabled heads: {', '.join(enabled_heads)}")
+            
+            # Store head enablement for loss configuration
+            model.head_config = {
+                'enable_quantile': enable_quantile,
+                'enable_vol_state': enable_vol_state,
+                'enable_mu': enable_mu,
+                'enable_sigma': enable_sigma
+            }
         elif args.model == "transformer":
             model = MultiHeadTransformer(
                 input_dim=input_dim,
@@ -543,7 +585,7 @@ def train(args):
             )
         else:
             logger.error(f"Multi-head mode not supported for model type: {args.model}")
-            logger.error("Supported multi-head models: transformer, tft, lstm, cnn, simple_mlp")
+            logger.error("Supported multi-head models: transformer, tft, lstm, cnn, simple_mlp, multihead_simple_mlp")
             return
         logger.info(f"Using MULTI-HEAD model: {model.name}")
     else:
@@ -644,7 +686,33 @@ def train(args):
     # === STEP 8: Create trainer ===
     if use_multihead:
         # Multi-head trainer with combined loss
-        loss_config = MultiHeadLossConfig(class_weights=class_weights)
+        # Check if model has head_config (MultiHeadSimpleMLP progressive enablement)
+        if hasattr(model, 'head_config'):
+            head_cfg = model.head_config
+            # Configure loss based on enabled heads
+            loss_config = MultiHeadLossConfig(
+                class_weights=class_weights,
+                # Enable lambda for enabled heads only
+                lambda_quantile=0.3 if head_cfg.get('enable_quantile', False) else 0.0,
+                lambda_mu=0.3 if head_cfg.get('enable_mu', False) else 0.0,
+                lambda_sigma=0.2 if head_cfg.get('enable_sigma', False) else 0.0,
+                lambda_vol_state=0.2 if head_cfg.get('enable_vol_state', False) else 0.0,
+                # Set head enabled flags - all heads
+                head_enabled_quantile=head_cfg.get('enable_quantile', False),
+                head_enabled_vol_state=head_cfg.get('enable_vol_state', False),
+                head_enabled_mu=head_cfg.get('enable_mu', False),
+                head_enabled_sigma=head_cfg.get('enable_sigma', False),
+            )
+            logger.info(f"MultiHeadSimpleMLP loss config based on head_config:")
+            logger.info(f"  - Classification: λ={loss_config.lambda_class} (always enabled)")
+            logger.info(f"  - Quantile: λ={loss_config.lambda_quantile}")
+            logger.info(f"  - Vol State: λ={loss_config.lambda_vol_state}")
+            logger.info(f"  - Mu: λ={loss_config.lambda_mu}")
+            logger.info(f"  - Sigma: λ={loss_config.lambda_sigma}")
+        else:
+            # Default loss config for other multihead models
+            loss_config = MultiHeadLossConfig(class_weights=class_weights)
+        
         trainer = MultiHeadTrainer(
             model=model,
             train_loader=train_loader,
@@ -653,11 +721,12 @@ def train(args):
             device=config.device,
             loss_config=loss_config
         )
-        logger.info("Using MultiHeadTrainer with combined loss (6 heads):")
+        logger.info("Using MultiHeadTrainer with combined loss:")
         logger.info(f"  - CrossEntropyLoss for direction (λ={loss_config.lambda_class})")
         logger.info(f"  - HuberLoss for μ (λ={loss_config.lambda_mu})")
         logger.info(f"  - GaussianNLLLoss for σ (λ={loss_config.lambda_sigma})")
         logger.info(f"  - PinballLoss for quantiles (λ={loss_config.lambda_quantile})")
+        logger.info(f"  - CrossEntropyLoss for vol_state (λ={loss_config.lambda_vol_state})")
         logger.info(f"  - HuberLoss for trading entry/SL/TP (λ={loss_config.lambda_trading})")
         logger.info(f"  - HuberLoss for candle deltas (λ={loss_config.lambda_candle})")
     else:
@@ -1375,6 +1444,15 @@ def main():
     train_parser.add_argument("--resume", type=str, help="Resume from checkpoint")
     train_parser.add_argument("--multihead", action="store_true", 
                              help="Use multi-head training with combined loss (Classification + Regression + Quantile)")
+    # Progressive head enablement for MultiHeadSimpleMLP
+    train_parser.add_argument("--enable-quantile", action="store_true", dest="enable_quantile",
+                             help="Enable quantile head (MultiHeadSimpleMLP only)")
+    train_parser.add_argument("--enable-vol-state", action="store_true", dest="enable_vol_state",
+                             help="Enable volatility state head (MultiHeadSimpleMLP only)")
+    train_parser.add_argument("--enable-mu", action="store_true", dest="enable_mu",
+                             help="Enable mu/expected return head (MultiHeadSimpleMLP only)")
+    train_parser.add_argument("--enable-sigma", action="store_true", dest="enable_sigma",
+                             help="Enable sigma/uncertainty head - most unstable (MultiHeadSimpleMLP only)")
     
     train_all_parser = subparsers.add_parser("train-all", help="Retrain ALL models with MTF fusion (81 features)")
     train_all_parser.add_argument("--models", type=str, default="transformer,tft,lstm,cnn,vae,gnn",

@@ -132,6 +132,8 @@ class MultiHeadLossConfig:
     head_enabled_candle: bool = False        # Skip candle forward
     head_enabled_vol_state: bool = False     # Skip vol_state forward
     head_enabled_acceleration: bool = False  # Skip acceleration forward
+    head_enabled_mu: bool = False            # Skip mu forward (expected return)
+    head_enabled_sigma: bool = False         # Skip sigma forward (uncertainty)
     
     # Classification options
     class_weights: Optional[torch.Tensor] = None  # For imbalanced classes
@@ -690,8 +692,11 @@ class MultiHeadLoss(nn.Module):
             # σ DISABLED - return zero tensor with no gradient
             l_sigma = torch.tensor(0.0, device=class_logits.device)
         
-        # Quantile loss
-        l_quantile = self.quantile_loss(quantiles, return_targets)
+        # Quantile loss - SKIP if lambda_quantile is 0
+        if self.config.lambda_quantile > 0:
+            l_quantile = self.quantile_loss(quantiles, return_targets)
+        else:
+            l_quantile = torch.tensor(0.0, device=class_logits.device)
         
         # Trading loss (if targets provided)
         l_trading = torch.tensor(0.0, device=class_logits.device)
@@ -706,9 +711,9 @@ class MultiHeadLoss(nn.Module):
         if candle_targets is not None and candle_deltas is not None:
             l_candle = self.candle_loss(candle_deltas, candle_targets)
         
-        # Flow Forecast: Volatility state classification loss
+        # Flow Forecast: Volatility state classification loss - SKIP if lambda_vol_state is 0
         l_vol_state = torch.tensor(0.0, device=class_logits.device)
-        if vol_state_logits is not None and vol_state_targets is not None:
+        if self.config.lambda_vol_state > 0 and vol_state_logits is not None and vol_state_targets is not None:
             l_vol_state = self.vol_state_loss(vol_state_logits, vol_state_targets)
         
         # Flow Forecast: Acceleration (momentum change) regression loss
