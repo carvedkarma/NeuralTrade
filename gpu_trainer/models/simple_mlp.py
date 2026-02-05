@@ -491,3 +491,302 @@ if __name__ == "__main__":
             total_norm += p.grad.norm(2).item() ** 2
     grad_norm = total_norm ** 0.5
     print(f"Gradient norm: {grad_norm:.4f}")
+
+
+# =============================================================================
+# Enhanced MultiHeadMLP: Deeper architecture with residual connections
+# =============================================================================
+
+class ResidualBlock(nn.Module):
+    """Residual block for better gradient flow in deeper networks."""
+    
+    def __init__(self, in_dim: int, out_dim: int, dropout: float = 0.3, use_layer_norm: bool = True):
+        super().__init__()
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        
+        # Main path
+        self.linear = nn.Linear(in_dim, out_dim)
+        self.norm = nn.LayerNorm(out_dim) if use_layer_norm else nn.Identity()
+        self.activation = nn.GELU()
+        self.dropout = nn.Dropout(dropout)
+        
+        # Skip connection (project if dimensions differ)
+        if in_dim != out_dim:
+            self.skip = nn.Linear(in_dim, out_dim)
+        else:
+            self.skip = nn.Identity()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Main path
+        out = self.linear(x)
+        out = self.norm(out)
+        out = self.activation(out)
+        out = self.dropout(out)
+        
+        # Add skip connection
+        skip = self.skip(x)
+        return out + skip
+
+
+@dataclass  
+class EnhancedMultiHeadMLP_Config:
+    """Configuration for EnhancedMultiHeadMLP with deeper architecture."""
+    input_dim: int = 41
+    hidden_dims: list = None
+    num_classes: int = 3
+    dropout: float = 0.3
+    use_layer_norm: bool = True
+    use_residual: bool = True  # Enable residual connections
+    n_candle_steps: int = 5
+    n_quantiles: int = 5
+    
+    # Progressive head enablement
+    enable_quantile_head: bool = True
+    enable_vol_state_head: bool = True
+    enable_mu_head: bool = True
+    enable_sigma_head: bool = True
+    
+    def __post_init__(self):
+        if self.hidden_dims is None:
+            # Deeper architecture for more capacity
+            self.hidden_dims = [512, 256, 128, 64]
+
+
+class EnhancedMultiHeadMLP(nn.Module):
+    """
+    Enhanced Multi-head MLP with deeper architecture and residual connections.
+    
+    Improvements over MultiHeadSimpleMLP:
+    1. Deeper network: [512, 256, 128, 64] vs [256, 128, 64]
+    2. Residual/skip connections for better gradient flow
+    3. Larger head networks for more expressive power
+    
+    All stability features preserved:
+    - LayerNorm after each layer
+    - Orthogonal initialization (low gain)
+    - GELU activation
+    - Output clamping on all heads
+    - Moderate dropout
+    """
+    
+    def __init__(self, config: EnhancedMultiHeadMLP_Config):
+        super().__init__()
+        self.config = config
+        self.name = "EnhancedMultiHeadMLP"
+        
+        # Store attributes for trainer compatibility
+        self.input_dim = config.input_dim
+        self.output_dim = config.num_classes
+        self.hidden_dims = config.hidden_dims
+        
+        # Training metadata
+        self.created_at = datetime.now().isoformat()
+        self.training_history = []
+        self.best_val_loss = float('inf')
+        self.epochs_trained = 0
+        
+        # Build trunk with residual connections
+        trunk_layers = []
+        prev_dim = config.input_dim
+        
+        for hidden_dim in config.hidden_dims:
+            if config.use_residual:
+                trunk_layers.append(ResidualBlock(
+                    prev_dim, hidden_dim, 
+                    dropout=config.dropout, 
+                    use_layer_norm=config.use_layer_norm
+                ))
+            else:
+                trunk_layers.append(nn.Linear(prev_dim, hidden_dim))
+                if config.use_layer_norm:
+                    trunk_layers.append(nn.LayerNorm(hidden_dim))
+                trunk_layers.append(nn.GELU())
+                trunk_layers.append(nn.Dropout(config.dropout))
+            prev_dim = hidden_dim
+        
+        self.trunk = nn.Sequential(*trunk_layers)
+        self.trunk_dim = prev_dim
+        
+        # === HEAD 1: Classification (always enabled) ===
+        self.classifier = nn.Sequential(
+            nn.Linear(self.trunk_dim, 32),
+            nn.LayerNorm(32),
+            nn.GELU(),
+            nn.Linear(32, config.num_classes)
+        )
+        
+        # === HEAD 2: Quantile ===
+        if config.enable_quantile_head:
+            self.quantile_head = nn.Sequential(
+                nn.Linear(self.trunk_dim, 64),
+                nn.LayerNorm(64),
+                nn.GELU(),
+                nn.Dropout(0.2),
+                nn.Linear(64, config.n_quantiles)
+            )
+        else:
+            self.quantile_head = None
+            
+        # === HEAD 3: Volatility State ===
+        if config.enable_vol_state_head:
+            self.vol_state_head = nn.Sequential(
+                nn.Linear(self.trunk_dim, 32),
+                nn.LayerNorm(32),
+                nn.GELU(),
+                nn.Linear(32, 3)
+            )
+        else:
+            self.vol_state_head = None
+            
+        # === HEAD 4: Mu/Expected Return ===
+        if config.enable_mu_head:
+            self.mu_head = nn.Sequential(
+                nn.Linear(self.trunk_dim, 32),
+                nn.LayerNorm(32),
+                nn.GELU(),
+                nn.Dropout(0.2),
+                nn.Linear(32, 1)
+            )
+        else:
+            self.mu_head = None
+            
+        # === HEAD 5: Sigma/Uncertainty ===
+        if config.enable_sigma_head:
+            self.sigma_head = nn.Sequential(
+                nn.Linear(self.trunk_dim, 32),
+                nn.LayerNorm(32),
+                nn.GELU(),
+                nn.Dropout(0.2),
+                nn.Linear(32, 1)
+            )
+        else:
+            self.sigma_head = None
+        
+        self.n_candle_steps = config.n_candle_steps
+        self._init_weights()
+        
+        # Store head_config for loss wiring
+        self.head_config = {
+            'enable_quantile': config.enable_quantile_head,
+            'enable_vol_state': config.enable_vol_state_head,
+            'enable_mu': config.enable_mu_head,
+            'enable_sigma': config.enable_sigma_head,
+        }
+    
+    def _init_weights(self):
+        """Orthogonal initialization for stability."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, gain=0.5)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Simple forward for classification only (legacy trainer compatibility)."""
+        if x.dim() == 3:
+            x = x[:, -1, :]
+        features = self.trunk(x)
+        logits = self.classifier(features)
+        return torch.clamp(logits, -10, 10)
+    
+    def forward_multihead(self, x: torch.Tensor) -> MultiHeadOutput:
+        """Multi-head forward pass with output clamping."""
+        batch_size = x.size(0)
+        device = x.device
+        
+        if x.dim() == 3:
+            x = x[:, -1, :]
+        
+        # Shared trunk
+        features = self.trunk(x)
+        
+        # === Classification ===
+        class_logits = self.classifier(features)
+        class_logits = torch.clamp(class_logits, -10, 10)
+        
+        # === Quantile ===
+        if self.quantile_head is not None:
+            quantiles_raw = self.quantile_head(features)
+            quantiles_raw = torch.clamp(quantiles_raw, -0.5, 0.5)
+            # Enforce monotonicity with bounded output
+            quantiles = torch.cumsum(F.softplus(quantiles_raw * 0.1) + 1e-4, dim=-1)  # Scale down input
+            quantiles = quantiles - quantiles.mean(dim=-1, keepdim=True)
+            quantiles = torch.clamp(quantiles, -0.1, 0.1)  # Clamp to target scale
+        else:
+            quantiles = torch.zeros(batch_size, self.config.n_quantiles, device=device)
+        
+        # === Mu ===
+        if self.mu_head is not None:
+            mu = self.mu_head(features)
+            mu = torch.clamp(mu, -0.1, 0.1)
+        else:
+            mu = torch.zeros(batch_size, 1, device=device)
+        
+        # === Sigma ===
+        if self.sigma_head is not None:
+            log_sigma = self.sigma_head(features)
+            log_sigma = torch.clamp(log_sigma, -5, 2)
+            sigma = F.softplus(log_sigma) + 1e-6
+        else:
+            sigma = torch.ones(batch_size, 1, device=device) * 0.01
+        
+        # === Vol State ===
+        if self.vol_state_head is not None:
+            vol_state_logits = self.vol_state_head(features)
+            vol_state_logits = torch.clamp(vol_state_logits, -10, 10)
+        else:
+            vol_state_logits = torch.zeros(batch_size, 3, device=device)
+        
+        # Placeholders for unused heads
+        entry_offset = torch.zeros(batch_size, 1, device=device)
+        sl_distance = torch.ones(batch_size, 1, device=device) * 0.01
+        tp_distance = torch.ones(batch_size, 1, device=device) * 0.02
+        candle_deltas = torch.zeros(batch_size, self.n_candle_steps, 3, device=device)
+        acceleration = torch.zeros(batch_size, 1, device=device)
+        
+        return MultiHeadOutput(
+            class_logits=class_logits,
+            mu=mu,
+            sigma=sigma,
+            quantiles=quantiles,
+            entry_offset=entry_offset,
+            sl_distance=sl_distance,
+            tp_distance=tp_distance,
+            candle_deltas=candle_deltas,
+            vol_state_logits=vol_state_logits,
+            acceleration=acceleration
+        )
+    
+    def parameters_count(self) -> int:
+        """Count total trainable parameters."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+    
+    def save(self, path: str):
+        """Save model and config."""
+        save_dict = {
+            'model_state_dict': self.state_dict(),
+            'config': self.config,
+            'name': self.name,
+            'created_at': self.created_at,
+            'training_history': self.training_history,
+            'epochs_trained': self.epochs_trained,
+            'best_val_loss': self.best_val_loss,
+        }
+        torch.save(save_dict, path)
+    
+    @classmethod
+    def load(cls, path: str, device: str = 'cuda'):
+        """Load model from checkpoint."""
+        checkpoint = torch.load(path, map_location=device)
+        config = checkpoint['config']
+        model = cls(config)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.created_at = checkpoint.get('created_at', '')
+        model.training_history = checkpoint.get('training_history', [])
+        model.epochs_trained = checkpoint.get('epochs_trained', 0)
+        model.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        return model

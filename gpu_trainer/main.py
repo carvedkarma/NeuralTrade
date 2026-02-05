@@ -680,9 +680,44 @@ def train(args):
             if enable_sigma: enabled.append("sigma")
             logger.info(f"Using MultiHeadSimpleMLP: {model.parameters_count():,} parameters")
             logger.info(f"Enabled heads: {', '.join(enabled)}")
+        elif args.model == "enhanced_mlp":
+            # EnhancedMultiHeadMLP: Deeper architecture with residual connections
+            from models.simple_mlp import EnhancedMultiHeadMLP, EnhancedMultiHeadMLP_Config
+            
+            # Check which heads are enabled via CLI flags (reuse same flags)
+            enable_quantile = getattr(args, 'enable_quantile', False)
+            enable_vol_state = getattr(args, 'enable_vol_state', False)
+            enable_mu = getattr(args, 'enable_mu', False)
+            enable_sigma = getattr(args, 'enable_sigma', False)
+            
+            mlp_config = EnhancedMultiHeadMLP_Config(
+                input_dim=input_dim,
+                hidden_dims=[512, 256, 128, 64],  # Deeper architecture
+                num_classes=3,
+                dropout=0.3,
+                use_layer_norm=True,
+                use_residual=True,  # Enable residual connections
+                enable_quantile_head=enable_quantile,
+                enable_vol_state_head=enable_vol_state,
+                enable_mu_head=enable_mu,
+                enable_sigma_head=enable_sigma
+            )
+            model = EnhancedMultiHeadMLP(mlp_config)
+            model.name = "EnhancedMultiHeadMLP"
+            model.count_parameters = model.parameters_count
+            
+            # Log enabled heads
+            enabled = ["classification"]
+            if enable_quantile: enabled.append("quantile")
+            if enable_vol_state: enabled.append("vol_state")
+            if enable_mu: enabled.append("mu")
+            if enable_sigma: enabled.append("sigma")
+            logger.info(f"Using EnhancedMultiHeadMLP: {model.parameters_count():,} parameters")
+            logger.info(f"Architecture: {mlp_config.hidden_dims} with residual connections")
+            logger.info(f"Enabled heads: {', '.join(enabled)}")
         else:
             logger.error(f"Unknown model type: {args.model}")
-            logger.error("Supported models: transformer, tft, lstm, cnn, vae, gnn, simple_mlp, multihead_simple_mlp")
+            logger.error("Supported models: transformer, tft, lstm, cnn, vae, gnn, simple_mlp, multihead_simple_mlp, enhanced_mlp")
             return
         
     logger.info(f"Model parameters: {model.count_parameters():,}")
@@ -1450,8 +1485,8 @@ def main():
     
     train_parser = subparsers.add_parser("train", help="Train a neural network model")
     train_parser.add_argument("--model", type=str, required=True,
-                             choices=["transformer", "tft", "lstm", "cnn", "vae", "gnn", "simple_mlp", "multihead_simple_mlp"],
-                             help="Model type to train (use 'simple_mlp' for stable baseline, 'multihead_simple_mlp' for progressive head testing)")
+                             choices=["transformer", "tft", "lstm", "cnn", "vae", "gnn", "simple_mlp", "multihead_simple_mlp", "enhanced_mlp"],
+                             help="Model type to train (use 'simple_mlp' for stable baseline, 'multihead_simple_mlp' for progressive head testing, 'enhanced_mlp' for deeper architecture)")
     train_parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
     train_parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
     train_parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
