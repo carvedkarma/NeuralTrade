@@ -13,6 +13,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
 from dataclasses import dataclass
+from pathlib import Path
+from datetime import datetime
 import math
 
 # Import shared MultiHeadOutput from multihead.py for compatibility
@@ -57,6 +59,12 @@ class SimpleMLP(nn.Module):
         self.input_dim = config.input_dim
         self.output_dim = config.num_classes  # 3 for SHORT/HOLD/LONG
         self.hidden_dims = config.hidden_dims  # For checkpoint config
+        
+        # Training metadata (required by base model interface)
+        self.created_at = datetime.now().isoformat()
+        self.training_history = []
+        self.best_val_loss = float('inf')
+        self.epochs_trained = 0
         
         # Build layers
         layers = []
@@ -152,6 +160,32 @@ class SimpleMLP(nn.Module):
     def parameters_count(self) -> int:
         """Return total number of trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+    
+    def save(self, path: str):
+        """Save model checkpoint to file."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        checkpoint = {
+            'model_state_dict': self.state_dict(),
+            'name': self.name,
+            'input_dim': self.input_dim,
+            'output_dim': self.output_dim,
+            'hidden_dims': self.hidden_dims,
+            'created_at': self.created_at,
+            'training_history': self.training_history,
+            'best_val_loss': self.best_val_loss,
+            'epochs_trained': self.epochs_trained
+        }
+        torch.save(checkpoint, path)
+    
+    def load(self, path: str, device: str = 'cuda'):
+        """Load model checkpoint from file."""
+        checkpoint = torch.load(path, map_location=device)
+        self.load_state_dict(checkpoint['model_state_dict'])
+        self.training_history = checkpoint.get('training_history', [])
+        self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        self.epochs_trained = checkpoint.get('epochs_trained', 0)
 
 
 def create_simple_mlp(input_dim: int = 41, num_classes: int = 3) -> SimpleMLP:
