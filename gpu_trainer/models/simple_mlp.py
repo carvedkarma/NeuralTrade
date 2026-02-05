@@ -53,8 +53,10 @@ class SimpleMLP(nn.Module):
         super().__init__()
         self.config = config
         
-        # Store input_dim as attribute for trainer compatibility (checkpoint saving)
+        # Store attributes for trainer compatibility (checkpoint saving)
         self.input_dim = config.input_dim
+        self.output_dim = config.num_classes  # 3 for SHORT/HOLD/LONG
+        self.hidden_dims = config.hidden_dims  # For checkpoint config
         
         # Build layers
         layers = []
