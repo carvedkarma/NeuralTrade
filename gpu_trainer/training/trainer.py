@@ -326,7 +326,8 @@ class Trainer:
             "train_loss": [], "train_acc": [],
             "val_loss": [], "val_acc": [],
             "directional_acc": [], "macro_f1": [],
-            "short_f1": [], "hold_f1": [], "long_f1": []
+            "short_f1": [], "hold_f1": [], "long_f1": [],
+            "gradient_norm": [], "gradient_norm_max": [], "gradient_norm_post": []
         }
         
         for epoch in range(1, epochs + 1):
@@ -334,7 +335,8 @@ class Trainer:
             val_metrics = self.validate()
             
             for key, value in train_metrics.items():
-                history[key].append(value)
+                if key in history:
+                    history[key].append(value)
             for key, value in val_metrics.items():
                 if key in history:
                     history[key].append(value)
