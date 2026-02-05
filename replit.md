@@ -183,6 +183,23 @@ To isolate root causes of gradient explosions, a comprehensive diagnostics toolk
 
 **Run Diagnostics**: `python -m gpu_trainer.data_diagnostics`
 
+### SimpleMLP Stable Baseline (February 2026)
+After diagnostics confirmed data is NOT the issue (tiny model trains fine), a stable baseline model was created:
+
+**Model**: `gpu_trainer/models/simple_mlp.py`
+- 3-layer MLP (256 → 128 → 64 → 3)
+- LayerNorm after each layer for stability
+- Orthogonal weight initialization for better gradient flow
+- GELU activation (smoother than ReLU)
+- Dropout 0.3 for regularization
+- Gradient norms < 1 (vs 30+ with LSTM/Transformer)
+
+**Usage**:
+- CLI: `python -m gpu_trainer.main train --model simple_mlp`
+- API: POST `/training/start` with `model_type: "simple_mlp"`
+
+**Purpose**: Use as baseline when LSTM/Transformer training is unstable. Once SimpleMLP trains successfully, gradually add complexity.
+
 ## External Dependencies
 
 ### Database

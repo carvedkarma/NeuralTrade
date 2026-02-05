@@ -4210,24 +4210,52 @@ async def run_training(request: TrainingRequest):
         input_dim = features_np.shape[1]
         model_type = request.model_type.lower().replace("_multihead", "").replace("multihead_", "")
         
-        if model_type == "transformer":
+        if model_type == "simple_mlp":
+            # SimpleMLP: Stable baseline classifier (no gradient explosions)
+            from models.simple_mlp import SimpleMLP, SimpleMLP_Config
+            mlp_config = SimpleMLP_Config(
+                input_dim=input_dim,
+                hidden_dims=[256, 128, 64],
+                num_classes=3,
+                dropout=0.3,
+                use_layer_norm=True,
+                n_candle_steps=5
+            )
+            model = SimpleMLP(mlp_config)
+            model.name = "SimpleMLP"
+            model.count_parameters = model.parameters_count  # Alias for compatibility
+            logger.info(f"Created SimpleMLP (stable baseline) with {model.parameters_count():,} parameters")
+        elif model_type == "transformer":
             from models.transformer import TransformerPriceModel
             model = TransformerPriceModel(input_dim=input_dim, d_model=128, nhead=4, num_layers=4)
+            logger.info(f"Created {model_type} model with {model.count_parameters():,} parameters")
         elif model_type == "tft":
             from models.transformer import TemporalFusionTransformer
             model = TemporalFusionTransformer(input_dim=input_dim, d_model=128, nhead=4)
+            logger.info(f"Created {model_type} model with {model.count_parameters():,} parameters")
         elif model_type == "lstm":
             from models.lstm import BidirectionalLSTM
             model = BidirectionalLSTM(input_dim=input_dim, hidden_dim=128, num_layers=2)
+            logger.info(f"Created {model_type} model with {model.count_parameters():,} parameters")
         elif model_type == "cnn":
             from models.cnn import ResNetPrice
             model = ResNetPrice(input_dim=input_dim, channels=64)
+            logger.info(f"Created {model_type} model with {model.count_parameters():,} parameters")
         else:
-            logger.warning(f"Unknown model type: {model_type}, defaulting to transformer")
-            from models.transformer import TransformerPriceModel
-            model = TransformerPriceModel(input_dim=input_dim, d_model=128, nhead=4, num_layers=4)
-        
-        logger.info(f"Created {model_type} model with {model.count_parameters():,} parameters")
+            logger.warning(f"Unknown model type: {model_type}, defaulting to simple_mlp for stability")
+            from models.simple_mlp import SimpleMLP, SimpleMLP_Config
+            mlp_config = SimpleMLP_Config(
+                input_dim=input_dim,
+                hidden_dims=[256, 128, 64],
+                num_classes=3,
+                dropout=0.3,
+                use_layer_norm=True,
+                n_candle_steps=5
+            )
+            model = SimpleMLP(mlp_config)
+            model.name = "SimpleMLP"
+            model.count_parameters = model.parameters_count
+            logger.info(f"Created SimpleMLP (default stable) with {model.parameters_count():,} parameters")
         
         # Create training config
         config = TrainingConfig()

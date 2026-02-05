@@ -496,8 +496,23 @@ def train(args):
     if use_multihead:
         # Multi-head model variants with Classification + Regression + Quantile heads
         from models.multihead import MultiHeadTransformer, MultiHeadTFT, MultiHeadLSTM, MultiHeadCNN
+        from models.simple_mlp import SimpleMLP, SimpleMLP_Config
         
-        if args.model == "transformer":
+        if args.model == "simple_mlp":
+            # SimpleMLP: Stable baseline classifier (no gradient explosions)
+            # Use this when LSTM/Transformer training is unstable
+            mlp_config = SimpleMLP_Config(
+                input_dim=input_dim,
+                hidden_dims=[256, 128, 64],  # Deeper for more capacity
+                num_classes=3,
+                dropout=0.3,
+                use_layer_norm=True,
+                n_candle_steps=n_future_candles
+            )
+            model = SimpleMLP(mlp_config)
+            model.name = "SimpleMLP"
+            logger.info(f"Using SimpleMLP (stable baseline): {model.parameters_count():,} parameters")
+        elif args.model == "transformer":
             model = MultiHeadTransformer(
                 input_dim=input_dim,
                 d_model=config.model.transformer_dim,
@@ -528,7 +543,7 @@ def train(args):
             )
         else:
             logger.error(f"Multi-head mode not supported for model type: {args.model}")
-            logger.error("Supported multi-head models: transformer, tft, lstm, cnn")
+            logger.error("Supported multi-head models: transformer, tft, lstm, cnn, simple_mlp")
             return
         logger.info(f"Using MULTI-HEAD model: {model.name}")
     else:
@@ -1316,8 +1331,8 @@ def main():
     
     train_parser = subparsers.add_parser("train", help="Train a neural network model")
     train_parser.add_argument("--model", type=str, required=True,
-                             choices=["transformer", "tft", "lstm", "cnn", "vae", "gnn"],
-                             help="Model type to train")
+                             choices=["transformer", "tft", "lstm", "cnn", "vae", "gnn", "simple_mlp"],
+                             help="Model type to train (use 'simple_mlp' for stable baseline)")
     train_parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
     train_parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
     train_parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
