@@ -116,7 +116,8 @@ class SimpleMLP(nn.Module):
         """
         Multi-head forward pass matching the MultiHeadTransformer interface.
         
-        Only classification head is active. All other heads return zeros.
+        Only classification head is active. All other heads return None to
+        signal they should be skipped in loss computation.
         """
         batch_size = x.size(0)
         device = x.device
@@ -124,23 +125,23 @@ class SimpleMLP(nn.Module):
         # Get classification logits
         class_logits = self.forward(x)
         
-        # Create dummy outputs for other heads (all zeros)
+        # Required fields: class_logits and mu/quantiles (non-optional in MultiHeadOutput)
+        # Set required fields to zeros, optional fields to None
         zeros_1 = torch.zeros(batch_size, 1, device=device)
         zeros_5 = torch.zeros(batch_size, 5, device=device)
-        zeros_candle = torch.zeros(batch_size, self.n_candle_steps, 3, device=device)
-        zeros_vol = torch.zeros(batch_size, 3, device=device)  # 3 classes: CONTRACTION/NEUTRAL/EXPANSION
         
         return MultiHeadOutput(
             class_logits=class_logits,
-            mu=zeros_1,
-            sigma=zeros_1,
-            quantiles=zeros_5,
-            entry_offset=zeros_1,
-            sl_distance=zeros_1,
-            tp_distance=zeros_1,
-            candle_deltas=zeros_candle,
-            vol_state_logits=zeros_vol,
-            acceleration=zeros_1
+            mu=zeros_1,  # Required field
+            quantiles=zeros_5,  # Required field
+            # All optional fields set to None to skip in loss computation
+            sigma=None,
+            entry_offset=None,
+            sl_distance=None,
+            tp_distance=None,
+            candle_deltas=None,
+            vol_state_logits=None,
+            acceleration=None
         )
     
     def parameters_count(self) -> int:
