@@ -1416,8 +1416,8 @@ def main():
     
     train_parser = subparsers.add_parser("train", help="Train a neural network model")
     train_parser.add_argument("--model", type=str, required=True,
-                             choices=["transformer", "tft", "lstm", "cnn", "vae", "gnn", "simple_mlp"],
-                             help="Model type to train (use 'simple_mlp' for stable baseline)")
+                             choices=["transformer", "tft", "lstm", "cnn", "vae", "gnn", "simple_mlp", "multihead_simple_mlp"],
+                             help="Model type to train (use 'simple_mlp' for stable baseline, 'multihead_simple_mlp' for progressive head testing)")
     train_parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
     train_parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
     train_parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
