@@ -82,6 +82,10 @@ class Trainer:
         correct = 0
         total = 0
         
+        # Track gradient norms for stability monitoring
+        grad_norms_pre = []
+        grad_norms_post = []
+        
         # Use tqdm only in non-GUI mode (tqdm floods stdout and freezes GUI)
         if self.gui_mode:
             loader = self.train_loader
@@ -91,6 +95,10 @@ class Trainer:
         nan_batch_count = 0
         for batch_idx, (data, target) in enumerate(loader):
             data, target = data.to(self.device), target.to(self.device)
+            
+            # Initialize per-batch gradient norm tracking
+            grad_norm_pre = None
+            grad_norm_post = None
             
             self.optimizer.zero_grad()
             
@@ -118,7 +126,23 @@ class Trainer:
                     
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
+                
+                # Track gradient norm BEFORE clipping (mixed precision)
+                total_norm_pre = 0.0
+                for p in self.model.parameters():
+                    if p.grad is not None:
+                        total_norm_pre += p.grad.data.norm(2).item() ** 2
+                grad_norm_pre = total_norm_pre ** 0.5
+                
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.training.gradient_clip)
+                
+                # Track gradient norm AFTER clipping
+                total_norm_post = 0.0
+                for p in self.model.parameters():
+                    if p.grad is not None:
+                        total_norm_post += p.grad.data.norm(2).item() ** 2
+                grad_norm_post = total_norm_post ** 0.5
+                
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
@@ -143,10 +167,31 @@ class Trainer:
                     continue
                     
                 loss.backward()
+                
+                # Track gradient norm BEFORE clipping
+                total_norm_pre = 0.0
+                for p in self.model.parameters():
+                    if p.grad is not None:
+                        total_norm_pre += p.grad.data.norm(2).item() ** 2
+                grad_norm_pre = total_norm_pre ** 0.5
+                
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.training.gradient_clip)
+                
+                # Track gradient norm AFTER clipping
+                total_norm_post = 0.0
+                for p in self.model.parameters():
+                    if p.grad is not None:
+                        total_norm_post += p.grad.data.norm(2).item() ** 2
+                grad_norm_post = total_norm_post ** 0.5
+                
                 self.optimizer.step()
                 
             self.scheduler.step()
+            
+            # Accumulate gradient norms for epoch average (only if computed this batch)
+            if grad_norm_pre is not None:
+                grad_norms_pre.append(grad_norm_pre)
+                grad_norms_post.append(grad_norm_post)
             
             total_loss += loss.item()
             pred = output.argmax(dim=1)
@@ -155,21 +200,41 @@ class Trainer:
             
             self.writer.add_scalar("train/loss", loss.item(), self.global_step)
             self.writer.add_scalar("train/lr", self.scheduler.get_last_lr()[0], self.global_step)
+            if grad_norm_pre is not None:
+                self.writer.add_scalar("train/grad_norm_pre", grad_norm_pre, self.global_step)
+                self.writer.add_scalar("train/grad_norm_post", grad_norm_post, self.global_step)
             self.global_step += 1
             
             # Only update tqdm in non-GUI mode
             if not self.gui_mode:
                 loader.set_postfix({
                     "loss": f"{total_loss / (batch_idx + 1):.4f}",
-                    "acc": f"{100. * correct / total:.2f}%"
+                    "acc": f"{100. * correct / total:.2f}%",
+                    "grad": f"{grad_norm_pre:.2f}" if grad_norm_pre is not None else "N/A"
                 })
             
             # Yield to UI thread every batch to prevent GUI freeze
             time.sleep(0)
+        
+        # Compute epoch-level gradient norm statistics
+        if grad_norms_pre:
+            avg_grad_pre = sum(grad_norms_pre) / len(grad_norms_pre)
+            avg_grad_post = sum(grad_norms_post) / len(grad_norms_post) if grad_norms_post else 0.0
+            max_grad_pre = max(grad_norms_pre)
+            # Log gradient norm summary for this epoch
+            logger.info(f"[STABILITY] Epoch {epoch} grad_norm: avg_pre={avg_grad_pre:.4f}, max_pre={max_grad_pre:.4f}, avg_post={avg_grad_post:.4f}")
+        else:
+            avg_grad_pre = 0.0
+            avg_grad_post = 0.0
+            max_grad_pre = 0.0
+            logger.warning(f"[STABILITY] Epoch {epoch}: No gradient norms collected (all batches skipped?)")
             
         return {
             "train_loss": total_loss / len(self.train_loader),
-            "train_acc": 100. * correct / total
+            "train_acc": 100. * correct / total,
+            "gradient_norm": avg_grad_pre,
+            "gradient_norm_max": max_grad_pre,
+            "gradient_norm_post": avg_grad_post
         }
     
     @torch.no_grad()
