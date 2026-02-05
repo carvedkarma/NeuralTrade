@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 
 def load_training_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Load raw candle data and compute features."""
-    from data.pipeline import FeatureEngineer
-    from config import config
+    from gpu_trainer.data.pipeline import FeatureEngineer
+    from gpu_trainer.config import config
     
     data_path = config.data_dir / "BTCUSDT_15m.parquet"
     
@@ -151,7 +151,7 @@ def audit_raw_features(features_df: pd.DataFrame) -> Dict:
 
 def audit_scaled_features(features_df: pd.DataFrame) -> Dict:
     """Audit features after RobustScaler scaling."""
-    from data.pipeline import FeatureEngineer
+    from gpu_trainer.data.pipeline import FeatureEngineer
     
     logger.info("\n" + "="*80)
     logger.info("AUDIT 2: SCALED FEATURES (After RobustScaler)")
@@ -219,7 +219,7 @@ def audit_scaled_features(features_df: pd.DataFrame) -> Dict:
 
 def audit_labels(df: pd.DataFrame) -> Dict:
     """Audit label distribution."""
-    from data.regression_targets import generate_multihead_targets
+    from gpu_trainer.data.regression_targets import generate_multihead_targets
     
     logger.info("\n" + "="*80)
     logger.info("AUDIT 3: LABEL DISTRIBUTION")
@@ -299,8 +299,8 @@ def tiny_model_test(features_df: pd.DataFrame, df: pd.DataFrame, use_clipping: b
         df: Original candle DataFrame
         use_clipping: If True, test with clipped features. If False, test unclipped.
     """
-    from data.pipeline import FeatureEngineer
-    from data.regression_targets import generate_multihead_targets
+    from gpu_trainer.data.pipeline import FeatureEngineer
+    from gpu_trainer.data.regression_targets import generate_multihead_targets
     
     clip_status = "WITH CLIPPING" if use_clipping else "WITHOUT CLIPPING"
     logger.info("\n" + "="*80)
@@ -461,8 +461,8 @@ def tiny_model_test(features_df: pd.DataFrame, df: pd.DataFrame, use_clipping: b
 
 def per_batch_monitoring(features_df: pd.DataFrame, df: pd.DataFrame, n_batches: int = 20) -> Dict:
     """Run per-batch monitoring to detect when gradient explosion starts."""
-    from data.pipeline import FeatureEngineer
-    from data.regression_targets import generate_multihead_targets
+    from gpu_trainer.data.pipeline import FeatureEngineer
+    from gpu_trainer.data.regression_targets import generate_multihead_targets
     from torch.utils.data import DataLoader, TensorDataset
     
     logger.info("\n" + "="*80)
