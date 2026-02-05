@@ -841,6 +841,47 @@ class FeatureEngineer:
             
         return transformed
     
+    def transform_and_clip(self, features: pd.DataFrame, clip_range: float = 5.0) -> pd.DataFrame:
+        """Transform features and clip extreme values.
+        
+        STABILITY FIX (Feb 2026): Even after RobustScaler, some features can have
+        extreme outliers (>10σ) that cause gradient explosions in neural networks.
+        
+        This method:
+        1. Applies RobustScaler transformation
+        2. Clips ALL values to [-clip_range, +clip_range]
+        3. Replaces any NaN/Inf with 0
+        
+        Args:
+            features: DataFrame with feature columns
+            clip_range: Clip values to [-clip_range, +clip_range]. Default 5.0.
+        
+        Returns:
+            Cleaned, scaled, clipped DataFrame ready for training
+        """
+        transformed = self.transform(features)
+        
+        # Count extreme values before clipping
+        extreme_count = 0
+        for col in transformed.columns:
+            col_data = transformed[col].values
+            extreme_count += ((np.abs(col_data) > clip_range) & ~np.isnan(col_data)).sum()
+        
+        if extreme_count > 0:
+            logger.info(f"Clipping {extreme_count:,} extreme values to [-{clip_range}, +{clip_range}]")
+        
+        # Clip all values
+        transformed = transformed.clip(lower=-clip_range, upper=clip_range)
+        
+        # Replace any remaining NaN/Inf with 0
+        transformed = transformed.replace([np.inf, -np.inf], np.nan)
+        transformed = transformed.fillna(0)
+        
+        # Final validation
+        assert np.isfinite(transformed.values).all(), "Features still have non-finite values after clip!"
+        
+        return transformed
+    
     def save_scalers(self, path: str):
         joblib.dump(self.scalers, path)
         

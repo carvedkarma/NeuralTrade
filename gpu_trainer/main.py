@@ -365,9 +365,13 @@ def train(args):
     logger.info("Scaler fitted on TRAINING data only (no leakage)")
     
     # Transform both train and val with the train-fitted scaler
-    train_features_scaled = engineer.transform(train_features_df).values.astype(np.float32)
+    # STABILITY FIX (Feb 2026): Use transform_and_clip to handle extreme outliers
+    # that cause gradient explosions even after RobustScaler
+    clip_range = getattr(args, 'feature_clip', 5.0)
+    logger.info(f"Applying feature clipping to [-{clip_range}, +{clip_range}]")
+    train_features_scaled = engineer.transform_and_clip(train_features_df, clip_range=clip_range).values.astype(np.float32)
     val_features_df = pd.DataFrame(val_features_raw, columns=features_df.columns)
-    val_features_scaled = engineer.transform(val_features_df).values.astype(np.float32)
+    val_features_scaled = engineer.transform_and_clip(val_features_df, clip_range=clip_range).values.astype(np.float32)
     
     # === STEP 5.5: HARD DATA CLEANSING - Drop NaN/Inf rows ===
     # This is critical: NaN/Inf in features will cause NaN loss and corrupt training
