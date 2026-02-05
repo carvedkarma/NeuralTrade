@@ -589,8 +589,24 @@ def train(args):
                 input_dim=input_dim,
                 num_assets=len(config.data.symbols)
             )
+        elif args.model == "simple_mlp":
+            # SimpleMLP: Stable baseline classifier (works in legacy mode too)
+            from models.simple_mlp import SimpleMLP, SimpleMLP_Config
+            mlp_config = SimpleMLP_Config(
+                input_dim=input_dim,
+                hidden_dims=[256, 128, 64],
+                num_classes=3,
+                dropout=0.3,
+                use_layer_norm=True,
+                n_candle_steps=5
+            )
+            model = SimpleMLP(mlp_config)
+            model.name = "SimpleMLP"
+            model.count_parameters = model.parameters_count  # Alias for compatibility
+            logger.info(f"Using SimpleMLP (stable baseline): {model.parameters_count():,} parameters")
         else:
             logger.error(f"Unknown model type: {args.model}")
+            logger.error("Supported models: transformer, tft, lstm, cnn, vae, gnn, simple_mlp")
             return
         
     logger.info(f"Model parameters: {model.count_parameters():,}")
