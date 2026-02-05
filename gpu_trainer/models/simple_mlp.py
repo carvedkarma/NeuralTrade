@@ -53,6 +53,9 @@ class SimpleMLP(nn.Module):
         super().__init__()
         self.config = config
         
+        # Store input_dim as attribute for trainer compatibility (checkpoint saving)
+        self.input_dim = config.input_dim
+        
         # Build layers
         layers = []
         prev_dim = config.input_dim
