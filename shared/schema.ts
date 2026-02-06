@@ -85,7 +85,14 @@ export const signalSchema = z.object({
     lowDelta: z.number(),
   })).optional(),
   riskRewardRatio: z.number().optional(),
-  isLearnedLevels: z.boolean().optional(),  // True if SL/TP from training, not heuristic
+  isLearnedLevels: z.boolean().optional(),
+  volState: z.enum(["contraction", "neutral", "expansion"]).optional(),
+  volStateProbs: z.object({
+    contraction: z.number(),
+    neutral: z.number(),
+    expansion: z.number(),
+  }).optional(),
+  modelName: z.string().optional(),
 });
 export type Signal = z.infer<typeof signalSchema>;
 
@@ -1057,10 +1064,70 @@ export const coneSignals = pgTable("cone_signals", {
   maxFavorableExcursion: real("max_favorable_excursion"),
   maxAdverseExcursion: real("max_adverse_excursion"),
   
+  // Multi-head outputs (5-head model)
+  volState: varchar("vol_state", { length: 20 }),  // contraction, neutral, expansion
+  volStateProbs: jsonb("vol_state_probs"),  // { contraction: number, neutral: number, expansion: number }
+  positionSizePct: real("position_size_pct"),
+  isMultihead: boolean("is_multihead"),
+  modelName: varchar("model_name", { length: 100 }),
+  
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (table) => ({
   timestampIdx: index("cone_signals_timestamp_idx").on(table.timestamp),
   outcomeIdx: index("cone_signals_outcome_idx").on(table.outcome),
+}));
+
+export const multiheadPredictions = pgTable("multihead_predictions", {
+  id: serial("id").primaryKey(),
+  timestamp: bigint("timestamp", { mode: "number" }).notNull(),
+  
+  // Head 1: Classification
+  action: varchar("action", { length: 10 }).notNull(),
+  probLong: real("prob_long").notNull(),
+  probShort: real("prob_short").notNull(),
+  probHold: real("prob_hold").notNull(),
+  confidence: real("confidence").notNull(),
+  
+  // Head 2: Quantile
+  q10: real("q10"),
+  q25: real("q25"),
+  q50: real("q50"),
+  q75: real("q75"),
+  q90: real("q90"),
+  
+  // Head 3: Vol State
+  volState: varchar("vol_state", { length: 20 }),
+  volStateContraction: real("vol_state_contraction"),
+  volStateNeutral: real("vol_state_neutral"),
+  volStateExpansion: real("vol_state_expansion"),
+  
+  // Head 4: Mu (expected return)
+  mu: real("mu"),
+  
+  // Head 5: Sigma (uncertainty)
+  sigma: real("sigma"),
+  
+  // Derived trade levels
+  edge: real("edge"),
+  entryPrice: real("entry_price"),
+  stopLossPrice: real("stop_loss_price"),
+  takeProfitPrice: real("take_profit_price"),
+  stopLossPct: real("stop_loss_pct"),
+  takeProfitPct: real("take_profit_pct"),
+  riskRewardRatio: real("risk_reward_ratio"),
+  positionSizePct: real("position_size_pct"),
+  
+  // Metadata
+  currentPrice: real("current_price"),
+  modelName: varchar("model_name", { length: 100 }),
+  isMultihead: boolean("is_multihead").default(true),
+  urgency: varchar("urgency", { length: 10 }),
+  suggestedOrderType: varchar("suggested_order_type", { length: 10 }),
+  reasons: jsonb("reasons").$type<string[]>(),
+  
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (table) => ({
+  timestampIdx: index("multihead_predictions_timestamp_idx").on(table.timestamp),
 }));
 
 export const insertConeSignalSchema = createInsertSchema(coneSignals).omit({ id: true });
@@ -1132,6 +1199,7 @@ export const insertTrainingRunSchema = createInsertSchema(trainingRuns).omit({ i
 export const insertReplayBufferSchema = createInsertSchema(replayBuffer).omit({ id: true });
 export const insertLabeledSampleSchema = createInsertSchema(labeledSamples).omit({ id: true });
 export const insertLearningJobStatusSchema = createInsertSchema(learningJobStatus).omit({ id: true });
+export const insertMultiheadPredictionSchema = createInsertSchema(multiheadPredictions).omit({ id: true });
 
 export type InsertCandle = z.infer<typeof insertCandleSchema>;
 export type InsertFeature = z.infer<typeof insertFeatureSchema>;
@@ -1173,3 +1241,5 @@ export type InsertLabeledSample = z.infer<typeof insertLabeledSampleSchema>;
 export type LabeledSample = typeof labeledSamples.$inferSelect;
 export type InsertLearningJobStatus = z.infer<typeof insertLearningJobStatusSchema>;
 export type LearningJobStatus = typeof learningJobStatus.$inferSelect;
+export type InsertMultiheadPrediction = z.infer<typeof insertMultiheadPredictionSchema>;
+export type MultiheadPrediction = typeof multiheadPredictions.$inferSelect;

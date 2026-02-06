@@ -25,8 +25,10 @@ import type {
   ShotPlanHistoryEntry,
   InsertConeSignal,
   ConeSignal,
+  InsertMultiheadPrediction,
+  MultiheadPrediction,
 } from "@shared/schema";
-import { shotPlanHistory, coneSignals } from "@shared/schema";
+import { shotPlanHistory, coneSignals, multiheadPredictions } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { getKlines, getMultiTimeframeKlines, getFuturesData, detectLargeOrders } from "./binance";
 import { getAllIndicators, calculateMultiTimeframeScore, type TechnicalIndicators } from "./indicators";
@@ -70,6 +72,10 @@ export interface IStorage {
   getConeSignalByTimestamp(timestamp: number): Promise<ConeSignal | null>;
   recordConeSignal(signal: InsertConeSignal): Promise<ConeSignal>;
   updateConeSignalOutcome(id: number, update: Partial<ConeSignal>): Promise<void>;
+  // Multi-head prediction methods
+  getMultiheadPredictions(limit?: number): Promise<MultiheadPrediction[]>;
+  getLatestMultiheadPrediction(): Promise<MultiheadPrediction | null>;
+  recordMultiheadPrediction(prediction: InsertMultiheadPrediction): Promise<MultiheadPrediction>;
 }
 
 class KalmanFilter {
@@ -2768,6 +2774,28 @@ export class MemStorage implements IStorage {
     await db.update(coneSignals)
       .set(update)
       .where(eq(coneSignals.id, id));
+  }
+
+  async getMultiheadPredictions(limit: number = 50): Promise<MultiheadPrediction[]> {
+    return db.select()
+      .from(multiheadPredictions)
+      .orderBy(desc(multiheadPredictions.timestamp))
+      .limit(limit);
+  }
+
+  async getLatestMultiheadPrediction(): Promise<MultiheadPrediction | null> {
+    const results = await db.select()
+      .from(multiheadPredictions)
+      .orderBy(desc(multiheadPredictions.timestamp))
+      .limit(1);
+    return results[0] || null;
+  }
+
+  async recordMultiheadPrediction(prediction: InsertMultiheadPrediction): Promise<MultiheadPrediction> {
+    const [result] = await db.insert(multiheadPredictions)
+      .values(prediction)
+      .returning();
+    return result;
   }
 }
 

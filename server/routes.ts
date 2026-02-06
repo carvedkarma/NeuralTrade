@@ -1513,6 +1513,172 @@ export async function registerRoutes(
     }
   });
 
+  // Multi-head prediction push endpoint - Receives full 5-head predictions from local GPU trainer
+  app.post("/api/gpu/push-prediction", async (req, res) => {
+    try {
+      const pred = req.body;
+      
+      if (!pred || typeof pred !== "object") {
+        return res.status(400).json({ error: "Request body must be a JSON object" });
+      }
+      if (!pred.action || !["LONG", "SHORT", "HOLD"].includes(pred.action)) {
+        return res.status(400).json({ error: "action must be LONG, SHORT, or HOLD" });
+      }
+      if (pred.confidence === undefined || typeof pred.confidence !== "number" || pred.confidence < 0 || pred.confidence > 1) {
+        return res.status(400).json({ error: "confidence must be a number between 0 and 1" });
+      }
+      
+      const record = await storage.recordMultiheadPrediction({
+        timestamp: pred.timestamp || Date.now(),
+        action: pred.action,
+        probLong: pred.direction_probs?.LONG ?? pred.prob_long ?? 0.33,
+        probShort: pred.direction_probs?.SHORT ?? pred.prob_short ?? 0.33,
+        probHold: pred.direction_probs?.HOLD ?? pred.prob_hold ?? 0.34,
+        confidence: pred.confidence,
+        q10: pred.quantiles?.q10 ?? pred.q10 ?? null,
+        q25: pred.quantiles?.q25 ?? pred.q25 ?? null,
+        q50: pred.quantiles?.q50 ?? pred.q50 ?? null,
+        q75: pred.quantiles?.q75 ?? pred.q75 ?? null,
+        q90: pred.quantiles?.q90 ?? pred.q90 ?? null,
+        volState: pred.vol_state ?? pred.volState ?? null,
+        volStateContraction: pred.vol_state_probs?.contraction ?? null,
+        volStateNeutral: pred.vol_state_probs?.neutral ?? null,
+        volStateExpansion: pred.vol_state_probs?.expansion ?? null,
+        mu: pred.expected_return ?? pred.mu ?? null,
+        sigma: pred.uncertainty ?? pred.sigma ?? null,
+        edge: pred.edge ?? null,
+        entryPrice: pred.entry_price ?? pred.entryPrice ?? null,
+        stopLossPrice: pred.stop_loss_price ?? pred.stopLossPrice ?? null,
+        takeProfitPrice: pred.take_profit_price ?? pred.takeProfitPrice ?? null,
+        stopLossPct: pred.stop_loss_pct ?? pred.stopLossPct ?? null,
+        takeProfitPct: pred.take_profit_pct ?? pred.takeProfitPct ?? null,
+        riskRewardRatio: pred.risk_reward_ratio ?? pred.riskRewardRatio ?? null,
+        positionSizePct: pred.position_size_pct ?? pred.positionSizePct ?? null,
+        currentPrice: pred.current_price ?? pred.currentPrice ?? null,
+        modelName: pred.model_name ?? pred.modelName ?? "unknown",
+        isMultihead: pred.is_multihead ?? true,
+        urgency: pred.urgency ?? "low",
+        suggestedOrderType: pred.suggested_order_type ?? "limit",
+        reasons: pred.reasons ?? [],
+        createdAt: Date.now(),
+      });
+      
+      console.log(`[GPU Push] Received multi-head prediction: ${pred.action} confidence=${pred.confidence.toFixed(3)} vol_state=${pred.vol_state ?? 'N/A'}`);
+      res.json({ success: true, id: record.id, received: Date.now() });
+    } catch (error) {
+      console.error("[GPU Push] Error recording prediction:", error);
+      res.status(500).json({ error: "Failed to record prediction" });
+    }
+  });
+
+  // Get latest multi-head prediction (for dashboard)
+  app.get("/api/gpu/multihead/latest", async (req, res) => {
+    try {
+      const latest = await storage.getLatestMultiheadPrediction();
+      if (!latest) {
+        return res.json({ available: false, prediction: null });
+      }
+      
+      const isStale = Date.now() - (latest.createdAt ?? 0) > 300000;
+      
+      res.json({
+        available: !isStale,
+        isStale,
+        prediction: {
+          action: latest.action,
+          confidence: latest.confidence,
+          direction_probs: {
+            LONG: latest.probLong,
+            SHORT: latest.probShort,
+            HOLD: latest.probHold,
+          },
+          quantiles: latest.q10 != null ? {
+            q10: latest.q10,
+            q25: latest.q25,
+            q50: latest.q50,
+            q75: latest.q75,
+            q90: latest.q90,
+          } : null,
+          vol_state: latest.volState,
+          vol_state_probs: latest.volStateContraction != null ? {
+            contraction: latest.volStateContraction,
+            neutral: latest.volStateNeutral,
+            expansion: latest.volStateExpansion,
+          } : null,
+          mu: latest.mu,
+          sigma: latest.sigma,
+          edge: latest.edge,
+          entry_price: latest.entryPrice,
+          stop_loss_price: latest.stopLossPrice,
+          take_profit_price: latest.takeProfitPrice,
+          stop_loss_pct: latest.stopLossPct,
+          take_profit_pct: latest.takeProfitPct,
+          risk_reward_ratio: latest.riskRewardRatio,
+          position_size_pct: latest.positionSizePct,
+          current_price: latest.currentPrice,
+          model_name: latest.modelName,
+          is_multihead: latest.isMultihead,
+          urgency: latest.urgency,
+          suggested_order_type: latest.suggestedOrderType,
+          reasons: latest.reasons,
+          timestamp: latest.timestamp,
+          created_at: latest.createdAt,
+        },
+      });
+    } catch (error) {
+      console.error("[GPU Multihead] Error getting latest prediction:", error);
+      res.json({ available: false, prediction: null, error: "Failed to fetch" });
+    }
+  });
+
+  // Get multi-head prediction history
+  app.get("/api/gpu/multihead/history", async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 50;
+      const rawPredictions = await storage.getMultiheadPredictions(limit);
+      const predictions = rawPredictions.map(p => ({
+        action: p.action,
+        confidence: p.confidence,
+        direction_probs: {
+          LONG: p.probLong ?? 0,
+          SHORT: p.probShort ?? 0,
+          HOLD: p.probHold ?? 0,
+        },
+        quantiles: p.q10 != null ? {
+          q10: p.q10, q25: p.q25, q50: p.q50, q75: p.q75, q90: p.q90,
+        } : null,
+        vol_state: p.volState ?? null,
+        vol_state_probs: p.volStateContraction != null ? {
+          contraction: p.volStateContraction,
+          neutral: p.volStateNeutral,
+          expansion: p.volStateExpansion,
+        } : null,
+        mu: p.mu ?? null,
+        sigma: p.sigma ?? null,
+        edge: p.edge ?? null,
+        entry_price: p.entryPrice ?? null,
+        stop_loss_price: p.stopLossPrice ?? null,
+        take_profit_price: p.takeProfitPrice ?? null,
+        stop_loss_pct: p.stopLossPct ?? null,
+        take_profit_pct: p.takeProfitPct ?? null,
+        risk_reward_ratio: p.riskRewardRatio ?? null,
+        position_size_pct: p.positionSizePct ?? null,
+        current_price: p.currentPrice ?? null,
+        model_name: p.modelName ?? null,
+        is_multihead: p.isMultihead ?? null,
+        urgency: p.urgency ?? null,
+        suggested_order_type: p.suggestedOrderType ?? null,
+        reasons: p.reasons ?? null,
+        timestamp: p.timestamp ?? 0,
+        created_at: p.createdAt ?? 0,
+      }));
+      res.json({ predictions, total: predictions.length });
+    } catch (error) {
+      console.error("[GPU Multihead] Error getting history:", error);
+      res.json({ predictions: [], total: 0 });
+    }
+  });
+
   // Get pushed GPU status (for dashboard to poll)
   // Enriches with training mode from GPU trainer's /models/status if available
   app.get("/api/gpu/pushed-status", async (req, res) => {
@@ -2618,14 +2784,14 @@ export async function registerRoutes(
         signal: prediction.action,
         confidence: prediction.confidence,
         expectedMove: prediction.expected_return,
-        costs: 0.001,  // ~0.1% round-trip
+        costs: 0.001,
         edge: prediction.edge,
         regime: "unknown",
         riskMode: "normal",
         topFeatures: [],
         mu: prediction.expected_return,
         sigma: prediction.uncertainty,
-        positionSizePct: prediction.position_size_pct / 100,  // Convert to decimal
+        positionSizePct: prediction.position_size_pct / 100,
         stopLossPct: prediction.stop_loss_pct,
         takeProfitPct: prediction.take_profit_pct,
         urgency: prediction.urgency.toLowerCase() as "low" | "medium" | "high",
@@ -2638,10 +2804,47 @@ export async function registerRoutes(
         quantiles: prediction.quantiles,
         predictedCandles: prediction.predicted_candles,
         riskRewardRatio: prediction.risk_reward_ratio,
-        isLearnedLevels: prediction.is_multihead,  // If multihead, levels are learned
+        isLearnedLevels: prediction.is_multihead,
         modelName: prediction.model_name,
         reasons: prediction.reasons
       };
+      
+      // Auto-save multihead prediction to database
+      try {
+        const q = prediction.quantiles;
+        await storage.recordMultiheadPrediction({
+          timestamp: Date.now(),
+          action: prediction.action,
+          probLong: prediction.direction_probs?.LONG ?? 0,
+          probShort: prediction.direction_probs?.SHORT ?? 0,
+          probHold: prediction.direction_probs?.HOLD ?? 0,
+          confidence: prediction.confidence,
+          q10: q?.q10 ?? null,
+          q25: q?.q25 ?? null,
+          q50: q?.q50 ?? null,
+          q75: q?.q75 ?? null,
+          q90: q?.q90 ?? null,
+          mu: prediction.expected_return ?? null,
+          sigma: prediction.uncertainty ?? null,
+          edge: prediction.edge ?? null,
+          entryPrice: prediction.entry_price ?? null,
+          stopLossPrice: prediction.stop_loss_price ?? null,
+          takeProfitPrice: prediction.take_profit_price ?? null,
+          stopLossPct: prediction.stop_loss_pct ?? null,
+          takeProfitPct: prediction.take_profit_pct ?? null,
+          riskRewardRatio: prediction.risk_reward_ratio ?? null,
+          positionSizePct: prediction.position_size_pct != null ? prediction.position_size_pct / 100 : null,
+          currentPrice: prediction.current_price ?? null,
+          modelName: prediction.model_name ?? null,
+          isMultihead: prediction.is_multihead ?? false,
+          urgency: prediction.urgency?.toLowerCase() ?? null,
+          suggestedOrderType: prediction.suggested_order_type?.toLowerCase() ?? null,
+          reasons: prediction.reasons ?? null,
+          createdAt: Date.now(),
+        });
+      } catch (saveError) {
+        console.error("[GPU Multihead] Failed to auto-save prediction:", saveError);
+      }
       
       res.json({
         available: true,

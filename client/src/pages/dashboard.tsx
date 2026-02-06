@@ -57,6 +57,7 @@ import { ConeSignalCard } from "@/components/cone-signal-card";
 import { NNDiagnosticsCard } from "@/components/nn-diagnostics-card";
 import { WalkForwardCard } from "@/components/walk-forward-card";
 import { TrainingProgressCard } from "@/components/training-progress-card";
+import { MultiheadSignalCard, MultiheadPredictionHistory, type MultiheadPredictionData } from "@/components/multihead-signal-card";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff, Brain, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -248,6 +249,24 @@ export default function Dashboard() {
     },
     refetchInterval: 30000,
     enabled: gpuStatus?.connected === true,
+  });
+
+  // Multi-head prediction (latest from DB, pushed by GPU trainer)
+  const { data: multiheadLatest } = useQuery<{
+    available: boolean;
+    isStale?: boolean;
+    prediction: MultiheadPredictionData | null;
+  }>({
+    queryKey: ["/api/gpu/multihead/latest"],
+    refetchInterval: 10000,
+  });
+
+  const { data: multiheadHistory } = useQuery<{
+    predictions: MultiheadPredictionData[];
+    total: number;
+  }>({
+    queryKey: ["/api/gpu/multihead/history"],
+    refetchInterval: 30000,
   });
 
   // Check if historical data has been downloaded (minimum 1000 candles)
@@ -507,6 +526,10 @@ export default function Dashboard() {
                   <AIAnalysisCard analysis={data.aiAnalysis} />
                 </div>
                 <div className="lg:col-span-4 space-y-4">
+                  <MultiheadSignalCard 
+                    prediction={multiheadLatest?.prediction ?? null}
+                    isStale={multiheadLatest?.isStale}
+                  />
                   <EnhancedShotPlanCard shotPlan={data.shotPlan} />
                   <SentimentCard sentiment={data.sentiment} />
                   <EnsembleSignalCard 
@@ -602,18 +625,25 @@ export default function Dashboard() {
               )}
               
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-                {/* Cone Signal Generator */}
+                {/* 5-Head Multi-Head Signal */}
                 <div className="lg:col-span-6 space-y-4">
+                  <MultiheadSignalCard 
+                    prediction={multiheadLatest?.prediction ?? null}
+                    isStale={multiheadLatest?.isStale}
+                  />
                   <ConeSignalCard />
                 </div>
                 
-                {/* Neural Network Prediction */}
+                {/* Neural Network Prediction + History */}
                 <div className="lg:col-span-6 space-y-4">
                   <NeuralNetworkPredictionCard 
                     prediction={nnPrediction?.prediction || null}
                     trace={nnPrediction?.trace || null}
                     isLoading={nnPredictionLoading}
                     onRefresh={() => refetchNnPrediction()}
+                  />
+                  <MultiheadPredictionHistory 
+                    predictions={multiheadHistory?.predictions ?? []}
                   />
                 </div>
               </div>
