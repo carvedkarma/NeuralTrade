@@ -1383,6 +1383,51 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/data/export-csv", async (req, res) => {
+    try {
+      const symbol = (req.query.symbol as string || "BTCUSDT").toUpperCase();
+      const timeframe = (req.query.timeframe as string) || "15m";
+
+      const validSymbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"];
+      const validTimeframes = ["1m", "5m", "15m", "1h", "4h", "1d"];
+      if (!validSymbols.includes(symbol)) {
+        return res.status(400).json({ error: `Invalid symbol. Allowed: ${validSymbols.join(", ")}` });
+      }
+      if (!validTimeframes.includes(timeframe)) {
+        return res.status(400).json({ error: `Invalid timeframe. Allowed: ${validTimeframes.join(", ")}` });
+      }
+      
+      const rows = await db
+        .select({
+          timestamp: candles.timestamp,
+          open: candles.open,
+          high: candles.high,
+          low: candles.low,
+          close: candles.close,
+          volume: candles.volume,
+        })
+        .from(candles)
+        .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, timeframe)))
+        .orderBy(asc(candles.timestamp));
+
+      if (rows.length === 0) {
+        return res.status(404).json({ error: `No ${timeframe} data found for ${symbol}` });
+      }
+
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", `attachment; filename=${symbol}_${timeframe}.csv`);
+      
+      res.write("timestamp,open,high,low,close,volume\n");
+      for (const r of rows) {
+        res.write(`${r.timestamp},${r.open},${r.high},${r.low},${r.close},${r.volume}\n`);
+      }
+      res.end();
+    } catch (error) {
+      console.error("Error exporting CSV:", error);
+      res.status(500).json({ error: "Failed to export CSV data" });
+    }
+  });
+
   // GPU data export - returns all stored candles for training
   app.get("/api/data/export/:symbol", async (req, res) => {
     try {
