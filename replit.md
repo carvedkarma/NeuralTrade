@@ -40,6 +40,15 @@ Disabled/removed features:
 - Cross-asset features (can't compute at inference with BTC-only data)
 - Mixed precision FP16 (caused NaN with class weights)
 
+### Multi-Head Dashboard Integration
+The `multihead_predictions` table stores full 5-head prediction outputs from the GPU trainer. API endpoints:
+- `POST /api/gpu/push-prediction` - Receives predictions from local GPU trainer with validation (action must be LONG/SHORT/HOLD, confidence 0-1)
+- `GET /api/gpu/multihead/latest` - Returns latest prediction normalized for the dashboard (5-minute staleness threshold)
+- `GET /api/gpu/multihead/history` - Returns prediction history normalized to frontend shape
+- `GET /api/gpu/multihead/current` - Real-time prediction via GPU trainer with auto-save to DB
+
+The `MultiheadSignalCard` component (`client/src/components/multihead-signal-card.tsx`) displays all 5 heads unified: direction probabilities, quantile spread visualization (q10-q90), vol state regime badge (Contraction/Neutral/Expansion), mu (expected return), sigma (uncertainty level), edge, and derived trade levels (entry/SL/TP). It is integrated into both Signal tab (right column) and Neural Network tab (with prediction history).
+
 ### System Design Choices
 Data is managed with Drizzle ORM for PostgreSQL, using Zod for type-safe validation. Live sentiment data is separated from historical price/volume data, and all learning states are persisted. The client is bundled by Vite, and the server by esbuild. A centralized timeframe configuration ensures consistency. A runtime diagnostic system provides health endpoints for the GPU trainer and detailed UI console logging. The GPU training API includes endpoints for starting training, checking status, and daily retraining. Gradient clipping and learning rate adjustments are implemented for training stability. A data diagnostics system audits features and labels, while a stable `SimpleMLP` model serves as a baseline for complex model development. The system supports progressive re-enablement of multi-head models to identify sources of instability.
 
