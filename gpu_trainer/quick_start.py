@@ -299,7 +299,7 @@ def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: 
 
     log.info(f"Training for {epochs} epochs (lr={lr}, batch={batch_size})...")
     log.info("-" * 60)
-    history = trainer.train(epochs=epochs)
+    history = trainer.train(num_epochs=epochs)
 
     checkpoint_dir = Path("checkpoints")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
