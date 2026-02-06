@@ -735,7 +735,7 @@ def train(args):
     # Formula: weight[i] = total_samples / (num_classes * count[i])
     # CRITICAL: Cap weights to prevent gradient explosion (max 10x)
     num_classes = 3  # SHORT, HOLD, LONG
-    MAX_CLASS_WEIGHT = 10.0  # Prevent extreme weights causing NaN gradients
+    MAX_CLASS_WEIGHT = getattr(args, 'class_weight_cap', 10.0)  # CLI-configurable cap
     class_weights_list = []
     for class_idx in range(num_classes):
         if class_idx in unique_labels:
@@ -755,12 +755,16 @@ def train(args):
     # === STEP 8: Create trainer ===
     if use_multihead:
         # Multi-head trainer with combined loss
+        use_focal = getattr(args, 'focal_loss', False)
+        focal_gamma = getattr(args, 'focal_gamma', 2.0)
         # Check if model has head_config (MultiHeadSimpleMLP progressive enablement)
         if hasattr(model, 'head_config'):
             head_cfg = model.head_config
             # Configure loss based on enabled heads
             loss_config = MultiHeadLossConfig(
                 class_weights=class_weights,
+                use_focal_loss=use_focal,
+                focal_gamma=focal_gamma,
                 # Enable lambda for enabled heads only
                 lambda_quantile=0.3 if head_cfg.get('enable_quantile', False) else 0.0,
                 lambda_mu=0.3 if head_cfg.get('enable_mu', False) else 0.0,
@@ -780,7 +784,7 @@ def train(args):
             logger.info(f"  - Sigma: λ={loss_config.lambda_sigma}")
         else:
             # Default loss config for other multihead models
-            loss_config = MultiHeadLossConfig(class_weights=class_weights)
+            loss_config = MultiHeadLossConfig(class_weights=class_weights, use_focal_loss=use_focal, focal_gamma=focal_gamma)
         
         trainer = MultiHeadTrainer(
             model=model,
@@ -791,7 +795,10 @@ def train(args):
             loss_config=loss_config
         )
         logger.info("Using MultiHeadTrainer with combined loss:")
-        logger.info(f"  - CrossEntropyLoss for direction (λ={loss_config.lambda_class})")
+        if use_focal:
+            logger.info(f"  - FocalLoss for direction (λ={loss_config.lambda_class}, gamma={focal_gamma})")
+        else:
+            logger.info(f"  - CrossEntropyLoss for direction (λ={loss_config.lambda_class})")
         logger.info(f"  - HuberLoss for μ (λ={loss_config.lambda_mu})")
         logger.info(f"  - GaussianNLLLoss for σ (λ={loss_config.lambda_sigma})")
         logger.info(f"  - PinballLoss for quantiles (λ={loss_config.lambda_quantile})")
@@ -800,8 +807,13 @@ def train(args):
         logger.info(f"  - HuberLoss for candle deltas (λ={loss_config.lambda_candle})")
     else:
         # Legacy classification-only trainer
+        use_focal = getattr(args, 'focal_loss', False)
+        focal_gamma = getattr(args, 'focal_gamma', 2.0)
         trainer = Trainer(model, train_loader, val_loader, config, device=config.device, 
-                          class_weights=class_weights)
+                          class_weights=class_weights, use_focal_loss=use_focal, focal_gamma=focal_gamma)
+        if use_focal:
+            logger.info(f"[FOCAL] Focal Loss enabled with gamma={focal_gamma}")
+            logger.info(f"[FOCAL] This down-weights easy HOLD predictions, focusing on LONG/SHORT signals")
     
     if args.resume:
         trainer.load_checkpoint(args.resume)
@@ -1522,6 +1534,12 @@ def main():
                              help="Enable mu/expected return head (MultiHeadSimpleMLP only)")
     train_parser.add_argument("--enable-sigma", action="store_true", dest="enable_sigma",
                              help="Enable sigma/uncertainty head - most unstable (MultiHeadSimpleMLP only)")
+    train_parser.add_argument("--focal-loss", action="store_true", dest="focal_loss",
+                             help="Use Focal Loss instead of CrossEntropy (down-weights easy HOLD predictions)")
+    train_parser.add_argument("--focal-gamma", type=float, default=2.0, dest="focal_gamma",
+                             help="Focal loss gamma parameter (default: 2.0, higher = more focus on hard examples)")
+    train_parser.add_argument("--class-weight-cap", type=float, default=10.0, dest="class_weight_cap",
+                             help="Max class weight multiplier (default: 10.0, increase to boost LONG/SHORT)")
     
     train_all_parser = subparsers.add_parser("train-all", help="Retrain ALL models with MTF fusion (81 features)")
     train_all_parser.add_argument("--models", type=str, default="transformer,tft,lstm,cnn,vae,gnn",

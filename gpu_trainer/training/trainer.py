@@ -31,7 +31,9 @@ class Trainer:
         feature_scaler = None,
         feature_columns: Optional[list] = None,
         training_mode: str = "stf",
-        horizon_periods: int = 16
+        horizon_periods: int = 16,
+        use_focal_loss: bool = False,
+        focal_gamma: float = 2.0
     ):
         self.gui_mode = gui_mode  # Disable tqdm in GUI mode to prevent UI freeze
         self.model = model.to(device)
@@ -40,6 +42,7 @@ class Trainer:
         self.config = config
         self.device = device
         self.mixed_precision = mixed_precision
+        self.use_focal_loss = use_focal_loss
         
         # Store training config for checkpoint saving
         self.feature_scaler = feature_scaler  # sklearn StandardScaler for features
@@ -63,8 +66,14 @@ class Trainer:
         # Fixed: Use device-specific GradScaler to avoid deprecation warning
         self.scaler = GradScaler('cuda') if mixed_precision else None
         
-        # Use class weights if provided to handle imbalanced classes
-        if class_weights is not None:
+        # Use Focal Loss or CrossEntropy for classification
+        if use_focal_loss:
+            from training.multihead_loss import FocalLoss
+            self.criterion = FocalLoss(gamma=focal_gamma, num_classes=3)
+            if class_weights is not None:
+                self.criterion.set_alpha(class_weights.to(device))
+            logger.info(f"[FOCAL] Using FocalLoss: gamma={focal_gamma}, class_weights={'yes' if class_weights is not None else 'no'}")
+        elif class_weights is not None:
             self.criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
         else:
             self.criterion = nn.CrossEntropyLoss()
