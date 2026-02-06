@@ -391,11 +391,11 @@ def make_prediction(model, engineer, feature_columns, data_path, device):
 
     mu_val = 0.0
     if output.mu is not None:
-        mu_val = float(output.mu.cpu().numpy()[0])
+        mu_val = float(output.mu.cpu().item())
 
     sigma_val = 0.01
     if output.sigma is not None:
-        sigma_val = float(abs(output.sigma.cpu().numpy()[0]))
+        sigma_val = float(abs(output.sigma.cpu().item()))
         if sigma_val < 0.0001:
             sigma_val = 0.01
 
