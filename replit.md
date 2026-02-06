@@ -21,6 +21,19 @@ The system incorporates a regression-based signal system generating comprehensiv
 Current stable model: `enhanced_mlp` (EnhancedMultiHeadMLP)
 - Gradient norms: 0.35-0.63 (well under 10 threshold)
 - Prediction distribution with focal loss: SHORT ~13%, HOLD ~47%, LONG ~40%
+- Training data: 5 years of BTCUSDT 15m candles (~175k target, backfilled from Binance)
+- Quick start: `python quick_start.py --url https://APP.replit.app` (200 epochs default)
+
+Quick start training flags:
+- `--epochs 200` - Training epochs (default: 200)
+- `--batch-size 64` - Batch size (default: 64)
+- `--lr 0.0001` - Learning rate (default: 0.0001)
+- `--predict-only` - Skip training, just predict from saved model
+- `--no-push` - Train but don't push prediction to dashboard
+- `--min-confidence 0.55` - Minimum confidence to push trade signal (default: 0.55)
+- `--min-edge 0.2` - Minimum edge to push trade signal (default: 0.2)
+
+Position sizing: ATR-based with 2% account risk per trade, scaled by confidence/edge, hard capped at 0.5-5.0% of account. Trade signals below confidence/edge thresholds are automatically downgraded to HOLD.
 
 Progressive head enablement flags (add incrementally):
 1. `--enable-quantile` - Quantile head (PinballLoss, λ=0.3, output clamped ±0.1)

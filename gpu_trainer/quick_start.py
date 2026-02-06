@@ -402,13 +402,27 @@ def make_prediction(model, engineer, feature_columns, data_path, device):
     edge = abs(mu_val) / sigma_val if sigma_val > 0 else 0
     edge = min(edge, 1.0)
 
-    atr = float(df.iloc[-20:]['high'].max() - df.iloc[-20:]['low'].min()) / 20
+    atr_window = min(20, len(df) - 1)
+    if atr_window < 2:
+        atr = current_price * 0.005
+    else:
+        highs = df.iloc[-atr_window:]['high'].values
+        lows = df.iloc[-atr_window:]['low'].values
+        true_ranges = []
+        for i in range(1, len(highs)):
+            prev_close = float(df.iloc[-atr_window + i - 1]['close'])
+            tr = max(float(highs[i]) - float(lows[i]), 
+                     abs(float(highs[i]) - prev_close), 
+                     abs(float(lows[i]) - prev_close))
+            true_ranges.append(tr)
+        atr = float(np.mean(true_ranges))
+
     if action == "LONG":
-        sl_price = current_price - 2 * atr
-        tp_price = current_price + 3 * atr
+        sl_price = current_price - 2.0 * atr
+        tp_price = current_price + 3.0 * atr
     elif action == "SHORT":
-        sl_price = current_price + 2 * atr
-        tp_price = current_price - 3 * atr
+        sl_price = current_price + 2.0 * atr
+        tp_price = current_price - 3.0 * atr
     else:
         sl_price = current_price - 1.5 * atr
         tp_price = current_price + 1.5 * atr
@@ -417,7 +431,16 @@ def make_prediction(model, engineer, feature_columns, data_path, device):
     tp_pct = abs(tp_price - current_price) / current_price
     rr = tp_pct / sl_pct if sl_pct > 0 else 1.0
 
-    position_size = min(max(confidence * 20, 5), 25)
+    ACCOUNT_RISK_PER_TRADE = 0.02
+    if sl_pct > 0:
+        position_size = ACCOUNT_RISK_PER_TRADE / sl_pct * 100
+    else:
+        position_size = 1.0
+    if confidence > 0.7 and edge > 0.5:
+        position_size *= 1.25
+    elif confidence < 0.5:
+        position_size *= 0.5
+    position_size = min(max(position_size, 0.5), 5.0)
 
     prediction = {
         "action": action,
@@ -495,11 +518,13 @@ Examples:
         """
     )
     parser.add_argument("--url", required=True, help="Your Replit dashboard URL (e.g. https://your-app.replit.app)")
-    parser.add_argument("--epochs", type=int, default=50, help="Training epochs (default: 50)")
+    parser.add_argument("--epochs", type=int, default=200, help="Training epochs (default: 200)")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size (default: 64)")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 0.0001)")
     parser.add_argument("--predict-only", action="store_true", help="Skip training, just make a prediction from existing model")
     parser.add_argument("--no-push", action="store_true", help="Train but don't push prediction to dashboard")
+    parser.add_argument("--min-confidence", type=float, default=0.55, help="Minimum confidence to push signal (default: 0.55)")
+    parser.add_argument("--min-edge", type=float, default=0.2, help="Minimum edge to push signal (default: 0.2)")
 
     args = parser.parse_args()
 
@@ -569,16 +594,38 @@ Examples:
         prediction = make_prediction(model, engineer, feature_columns, data_path, device)
 
         print()
-        log.info("-" * 40)
-        log.info(f"PREDICTION: {prediction['action']} ({prediction['confidence']:.1%})")
+        log.info("=" * 50)
+        log.info(f"  PREDICTION: {prediction['action']} ({prediction['confidence']:.1%})")
         log.info(f"  Price: ${prediction['current_price']:,.2f}")
         log.info(f"  SL: ${prediction['stop_loss_price']:,.2f} | TP: ${prediction['take_profit_price']:,.2f}")
         log.info(f"  R:R = {prediction['risk_reward_ratio']:.1f}")
+        log.info(f"  Position Size: {prediction['position_size_pct']:.1f}%")
         log.info(f"  Vol State: {prediction['vol_state']}")
         log.info(f"  Edge: {prediction['edge']:.2f}")
-        log.info("-" * 40)
+        log.info(f"  Mu: {prediction['expected_return']:.6f} | Sigma: {prediction['uncertainty']:.6f}")
+        log.info("=" * 50)
 
-        push_prediction(args.url, prediction)
+        is_hold = prediction['action'] == "HOLD"
+        low_confidence = prediction['confidence'] < args.min_confidence
+        low_edge = prediction['edge'] < args.min_edge
+
+        if is_hold:
+            log.info("Signal: HOLD - pushing to dashboard (no trade recommended)")
+            push_prediction(args.url, prediction)
+        elif low_confidence or low_edge:
+            reasons = []
+            if low_confidence:
+                reasons.append(f"confidence {prediction['confidence']:.1%} < {args.min_confidence:.0%}")
+            if low_edge:
+                reasons.append(f"edge {prediction['edge']:.2f} < {args.min_edge:.1f}")
+            log.warning(f"Signal filtered: {', '.join(reasons)}")
+            log.warning("Downgrading to HOLD - not enough conviction for a trade")
+            prediction['action'] = "HOLD"
+            prediction['reasons'] = [f"Filtered: {', '.join(reasons)}"] + prediction.get('reasons', [])
+            push_prediction(args.url, prediction)
+        else:
+            log.info("Signal PASSED quality filter - pushing to dashboard")
+            push_prediction(args.url, prediction)
     else:
         log.info("Skipping prediction push (--no-push)")
 
