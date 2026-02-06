@@ -444,11 +444,13 @@ class FocalLoss(nn.Module):
         # Apply alpha (per-class weighting) if initialized
         # Note: alpha is always registered as buffer, but only apply if actually set
         if hasattr(self, '_alpha_initialized') and self._alpha_initialized:
-            alpha_t = self.alpha.gather(0, targets)  # [batch]
+            alpha = self.alpha.to(targets.device)
+            alpha_t = alpha.gather(0, targets)  # [batch]
             focal_loss = alpha_t * focal_loss
         elif self.alpha is not None and not hasattr(self, '_alpha_initialized'):
             # Legacy path: alpha was passed to constructor
-            alpha_t = self.alpha.gather(0, targets)  # [batch]
+            alpha = self.alpha.to(targets.device)
+            alpha_t = alpha.gather(0, targets)  # [batch]
             focal_loss = alpha_t * focal_loss
         
         # Apply reduction
