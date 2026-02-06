@@ -357,11 +357,11 @@ def make_prediction(model, engineer, feature_columns, data_path, device):
     model.eval()
     with torch.no_grad():
         x = torch.FloatTensor(last_scaled).to(device)
-        output = model(x)
+        output = model.forward_multihead(x)
 
     current_price = float(df.iloc[-1]['close'])
 
-    probs = torch.softmax(output.classification, dim=-1).cpu().numpy()[0]
+    probs = torch.softmax(output.class_logits, dim=-1).cpu().numpy()[0]
     action_idx = int(np.argmax(probs))
     action_map = {0: "SHORT", 1: "HOLD", 2: "LONG"}
     action = action_map[action_idx]
@@ -383,8 +383,8 @@ def make_prediction(model, engineer, feature_columns, data_path, device):
 
     vol_state = "neutral"
     vol_state_probs = {"contraction": 0.33, "neutral": 0.34, "expansion": 0.33}
-    if output.vol_state is not None:
-        vs_probs = torch.softmax(output.vol_state, dim=-1).cpu().numpy()[0]
+    if output.vol_state_logits is not None:
+        vs_probs = torch.softmax(output.vol_state_logits, dim=-1).cpu().numpy()[0]
         vol_states = ["contraction", "neutral", "expansion"]
         vol_state = vol_states[int(np.argmax(vs_probs))]
         vol_state_probs = {s: float(vs_probs[i]) for i, s in enumerate(vol_states)}
