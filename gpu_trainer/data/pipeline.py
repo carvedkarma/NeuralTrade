@@ -799,10 +799,10 @@ class FeatureEngineer:
             htf_indicators = htf_indicators.shift(1)
             
             htf_indicators = htf_indicators.reset_index()
-            htf_indicators.rename(columns={'index': 'htf_ts'}, inplace=True)
+            htf_indicators.columns = ['htf_ts'] + list(htf_indicators.columns[1:])
             
             ohlcv_reset = ohlcv.reset_index()
-            ohlcv_reset.rename(columns={'index': 'ts_15m'}, inplace=True)
+            ohlcv_reset.columns = ['ts_15m'] + list(ohlcv_reset.columns[1:])
             
             merged = pd.merge_asof(
                 ohlcv_reset[['ts_15m']],
