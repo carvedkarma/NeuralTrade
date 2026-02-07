@@ -632,18 +632,33 @@ class FeatureEngineer:
     # Version string documents the exact computation method
     # Format: major.minor.patch-mode-details
     # Increment when ANY computation changes (windows, formulas, normalization)
-    VERSION = "2.0.0-stf-enhanced"
+    VERSION = "3.0.0-stf47-htf10"
     
-    # Feature computation details for version tracking
+    STF_FEATURE_COUNT = 47
+    HTF_FEATURE_COUNT = 10
+    TOTAL_FEATURE_COUNT = 57
+    
+    HTF_FEATURE_NAMES = [
+        "h1_sma20_slope", "h1_trend_sign", "h1_rsi14", "h1_atr_ratio", "h1_range_pos",
+        "h4_sma20_slope", "h4_trend_sign", "h4_rsi14", "h4_atr_ratio", "h4_range_pos",
+    ]
+    
     VERSION_DETAILS = {
-        "return_type": "pct_change",  # df["close"].pct_change()
-        "log_return_type": "log_ratio",  # np.log(close / close.shift(1))
-        "ema_warmup": "full_history",  # ewm uses full available history
-        "rsi_method": "wilder_smoothing",  # Standard RSI with Wilder smoothing
-        "bb_window": 20,  # Bollinger Bands window
-        "bb_std": 2,  # Bollinger Bands std multiplier
-        "atr_window": 14,  # ATR window
-        "periods": [5, 10, 20, 50, 100],  # Rolling window periods
+        "return_type": "pct_change",
+        "log_return_type": "log_ratio",
+        "ema_warmup": "full_history",
+        "rsi_method": "wilder_smoothing",
+        "bb_window": 20,
+        "bb_std": 2,
+        "atr_window": 14,
+        "periods": [5, 10, 20, 50, 100],
+        "htf_timeframes": ["1H", "4H"],
+        "htf_sma_period": 20,
+        "htf_sma_slope_lookback": 3,
+        "htf_rsi_period": 14,
+        "htf_atr_period": 14,
+        "htf_leakage_prevention": "shift_by_1_htf_bar",
+        "htf_merge_method": "merge_asof_backward",
     }
     
     def __init__(self, wavelet: str = "db4", wavelet_level: int = 4):
@@ -718,6 +733,134 @@ class FeatureEngineer:
         features["volume_delta"] = df.get("taker_buy_base", pd.Series(0, index=df.index)) / df["volume"].clip(lower=1) - 0.5
         
         return features
+    
+    def compute_htf_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Compute Higher Timeframe (1H, 4H) context features from 15m candle data.
+        
+        Resamples 15m OHLCV into 1H and 4H bars, computes indicators on each,
+        then maps them back to every 15m row using only COMPLETED HTF bars
+        (shifted by 1 HTF bar to prevent lookahead leakage).
+        
+        Returns DataFrame with 10 HTF features aligned to the 15m index.
+        """
+        if 'timestamp' not in df.columns:
+            logger.warning("No 'timestamp' column found - cannot compute HTF features")
+            return pd.DataFrame(0, index=df.index, columns=self.HTF_FEATURE_NAMES)
+        
+        ts = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+        
+        ohlcv = pd.DataFrame({
+            'open': df['open'].values,
+            'high': df['high'].values,
+            'low': df['low'].values,
+            'close': df['close'].values,
+            'volume': df['volume'].values,
+        }, index=ts)
+        
+        atr_15m = self._compute_atr(df, 14)
+        
+        htf_features = pd.DataFrame(index=ohlcv.index)
+        
+        for tf_label, resample_rule in [("h1", "1h"), ("h4", "4h")]:
+            htf_bars = ohlcv.resample(resample_rule, label='left', closed='left').agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'volume': 'sum',
+            }).dropna(subset=['open'])
+            
+            if len(htf_bars) < 25:
+                logger.warning(f"Only {len(htf_bars)} {tf_label} bars - need at least 25 for indicators")
+                for col in [f"{tf_label}_sma20_slope", f"{tf_label}_trend_sign", 
+                            f"{tf_label}_rsi14", f"{tf_label}_atr_ratio", f"{tf_label}_range_pos"]:
+                    htf_features[col] = 0.0
+                continue
+            
+            sma20 = htf_bars['close'].rolling(20, min_periods=1).mean()
+            
+            htf_atr = self._compute_atr_from_ohlc(htf_bars, 14)
+            
+            sma20_slope = (sma20 - sma20.shift(3)) / (htf_atr.abs() + 1e-9)
+            
+            trend_sign = np.sign(sma20_slope)
+            
+            rsi14 = self._compute_rsi(htf_bars['close'], 14)
+            
+            htf_indicators = pd.DataFrame({
+                f'{tf_label}_sma20_slope': sma20_slope,
+                f'{tf_label}_trend_sign': trend_sign,
+                f'{tf_label}_rsi14': rsi14,
+                f'{tf_label}_atr': htf_atr,
+                f'{tf_label}_htf_high': htf_bars['high'],
+                f'{tf_label}_htf_low': htf_bars['low'],
+            }, index=htf_bars.index)
+            
+            htf_indicators = htf_indicators.shift(1)
+            
+            htf_indicators = htf_indicators.reset_index()
+            htf_indicators.rename(columns={'index': 'htf_ts'}, inplace=True)
+            
+            ohlcv_reset = ohlcv.reset_index()
+            ohlcv_reset.rename(columns={'index': 'ts_15m'}, inplace=True)
+            
+            merged = pd.merge_asof(
+                ohlcv_reset[['ts_15m']],
+                htf_indicators,
+                left_on='ts_15m',
+                right_on='htf_ts',
+                direction='backward'
+            )
+            
+            htf_features[f'{tf_label}_sma20_slope'] = merged[f'{tf_label}_sma20_slope'].values
+            htf_features[f'{tf_label}_trend_sign'] = merged[f'{tf_label}_trend_sign'].values
+            htf_features[f'{tf_label}_rsi14'] = merged[f'{tf_label}_rsi14'].values
+            
+            merged_htf_atr = merged[f'{tf_label}_atr'].values
+            htf_features[f'{tf_label}_atr_ratio'] = atr_15m.values / (merged_htf_atr + 1e-9)
+            
+            htf_high = merged[f'{tf_label}_htf_high'].values
+            htf_low = merged[f'{tf_label}_htf_low'].values
+            htf_features[f'{tf_label}_range_pos'] = np.clip(
+                (ohlcv['close'].values - htf_low) / (htf_high - htf_low + 1e-9),
+                0.0, 1.0
+            )
+        
+        result = htf_features[self.HTF_FEATURE_NAMES].copy()
+        result.index = df.index
+        
+        nan_counts = result.isna().sum()
+        total_nans = nan_counts.sum()
+        if total_nans > 0:
+            logger.info(f"HTF features: {total_nans} NaN values (expected for initial bars)")
+            for col in result.columns:
+                if nan_counts[col] > 0:
+                    logger.info(f"  {col}: {nan_counts[col]} NaN rows")
+        
+        return result
+    
+    def compute_all_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Compute all features: 47 STF + 10 HTF = 57 total.
+        
+        Returns a single DataFrame with deterministic column order.
+        """
+        stf = self.compute_technical_features(df)
+        htf = self.compute_htf_features(df)
+        
+        combined = pd.concat([stf, htf], axis=1)
+        
+        assert combined.shape[1] == self.TOTAL_FEATURE_COUNT, \
+            f"Expected {self.TOTAL_FEATURE_COUNT} features, got {combined.shape[1]}: {list(combined.columns)}"
+        
+        return combined
+    
+    def _compute_atr_from_ohlc(self, df: pd.DataFrame, period: int) -> pd.Series:
+        """ATR from a generic OHLC DataFrame (works for resampled HTF bars)."""
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift(1)).abs()
+        low_close = (df['low'] - df['close'].shift(1)).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        return tr.rolling(period, min_periods=1).mean()
     
     def compute_wavelet_features(self, prices: np.ndarray) -> Dict[str, np.ndarray]:
         coeffs = pywt.wavedec(prices, self.wavelet, level=self.wavelet_level)

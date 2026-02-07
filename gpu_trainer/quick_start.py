@@ -116,9 +116,10 @@ def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: 
 
     from data.pipeline import FeatureEngineer, create_labels
     engineer = FeatureEngineer()
-    features_df = engineer.compute_technical_features(df)
+    features_df = engineer.compute_all_features(df)
     features_df = features_df.fillna(0)
-    log.info(f"Computed {len(features_df.columns)} features")
+    log.info(f"Computed {len(features_df.columns)} features ({engineer.STF_FEATURE_COUNT} STF + {engineer.HTF_FEATURE_COUNT} HTF)")
+    log.info(f"Feature version: {engineer.VERSION}")
 
     horizon = 24
     from data.regression_targets import generate_multihead_targets
@@ -314,6 +315,7 @@ def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: 
     checkpoint_dir = Path("checkpoints")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     save_path = checkpoint_dir / "best_enhanced_mlp.pt"
+    feature_columns_ordered = list(features_df.columns)
     torch.save({
         'model_state_dict': model.state_dict(),
         'model_config': {
@@ -328,10 +330,12 @@ def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: 
             'enable_mu_head': True,
             'enable_sigma_head': True,
         },
-        'feature_columns': list(features_df.columns),
+        'feature_columns': feature_columns_ordered,
         'n_features': input_dim,
+        'feature_version': engineer.VERSION,
         'trained_at': datetime.now().isoformat(),
     }, save_path)
+    log.info(f"Feature columns saved: {len(feature_columns_ordered)} (order locked for inference)")
     log.info(f"Model saved to {save_path}")
 
     scaler_path = checkpoint_dir / "scaler.joblib"
@@ -352,9 +356,15 @@ def make_prediction(model, engineer, feature_columns, data_path, device):
     df = pd.read_parquet(data_path)
     from data.pipeline import FeatureEngineer
     feat_engineer = FeatureEngineer()
-    features_df = feat_engineer.compute_technical_features(df)
+    features_df = feat_engineer.compute_all_features(df)
     features_df = features_df.fillna(0)
 
+    features_df = features_df.reindex(columns=feature_columns, fill_value=0)
+    if list(features_df.columns) != feature_columns:
+        log.error(f"Feature column mismatch! Expected {len(feature_columns)}, got {len(features_df.columns)}")
+        log.error(f"Missing: {set(feature_columns) - set(features_df.columns)}")
+        log.error(f"Extra: {set(features_df.columns) - set(feature_columns)}")
+    
     last_features = features_df.iloc[-1:].copy()
     last_scaled = engineer.transform_and_clip(
         pd.DataFrame(last_features.values, columns=feature_columns),
@@ -618,6 +628,14 @@ Examples:
             log.warning("No saved scaler found - prediction quality may be reduced")
 
         feature_columns = checkpoint.get('feature_columns', [])
+        saved_version = checkpoint.get('feature_version', 'unknown')
+        current_version = engineer.VERSION
+        if saved_version != current_version:
+            log.warning(f"Feature version mismatch! Model trained with '{saved_version}', current is '{current_version}'")
+            log.warning("Prediction may be unreliable - consider retraining")
+        else:
+            log.info(f"Feature version: {current_version} (matches checkpoint)")
+        log.info(f"Feature columns: {len(feature_columns)} loaded from checkpoint")
 
     if not args.no_push:
         prediction = make_prediction(model, engineer, feature_columns, data_path, device)

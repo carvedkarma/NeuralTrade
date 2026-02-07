@@ -25,9 +25,22 @@ The Triple Barrier Method (Stage 4) is the recommended labeling approach:
 - Horizon: 24 bars (6 hours on 15m timeframe) for meaningful directional separation
 - Produces cleaner labels than simple return thresholds because labels reflect actual trade outcomes
 
-### Input Features (47 STF features, v2.0.0)
+### Input Features (57 total, v3.0.0)
+
+**STF features (47, Single-TimeFrame 15m):**
 Base features: returns, log_returns, SMA/EMA/std/return at 5/10/20/50/100 periods, RSI-14/7, MACD/signal/hist, Bollinger Bands (upper/middle/lower/width/position), ATR-14/7, volume SMA/ratio, ADX-14, Stochastic K/D, OBV/OBV-SMA.
-Enhanced features (v2.0.0): RSI divergence (price vs RSI slope mismatch), volume-weighted momentum (5/10 bar), VWAP deviation, close-to-high ratio (intra-bar position), volume delta (buy/sell pressure proxy).
+Enhanced features: RSI divergence (price vs RSI slope mismatch), volume-weighted momentum (5/10 bar), VWAP deviation, close-to-high ratio (intra-bar position), volume delta (buy/sell pressure proxy).
+
+**HTF features (10, Higher-TimeFrame context):**
+Resampled from 15m candles into 1H and 4H bars. Each 15m row receives features from the most recently COMPLETED HTF bar (shifted by 1 to prevent leakage). Merged via `merge_asof(direction="backward")`.
+For each HTF (1H and 4H):
+- `{h1,h4}_sma20_slope` - SMA(20) slope normalized by ATR: `(sma20 - sma20.shift(3)) / (atr14 + 1e-9)`
+- `{h1,h4}_trend_sign` - Sign of SMA slope (-1/0/+1), indicates HTF trend direction
+- `{h1,h4}_rsi14` - RSI(14) on HTF bar, overbought/oversold context
+- `{h1,h4}_atr_ratio` - Ratio of 15m ATR to HTF ATR: `atr_15m / (atr_htf + 1e-9)`, measures relative volatility
+- `{h1,h4}_range_pos` - Price position within HTF range: `(close - htf_low) / (htf_high - htf_low)`, clipped [0,1]
+
+Feature versioning: `VERSION = "3.0.0-stf47-htf10"`. Saved in checkpoint metadata. Inference verifies version match and warns on mismatch. Column order is locked at training time and enforced via `reindex()` at inference.
 
 ### GPU Training CLI Reference
 Current stable model: `enhanced_mlp` (EnhancedMultiHeadMLP)
