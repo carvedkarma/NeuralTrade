@@ -13,7 +13,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler, SequentialSampler, RandomSampler
 from torch.amp import GradScaler, autocast
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, SequentialLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, LambdaLR, SequentialLR
+import math
 from typing import Dict, List, Tuple, Optional, Callable
 import numpy as np
 from pathlib import Path
@@ -493,45 +494,45 @@ class MultiHeadTrainer:
             weight_decay=config.training.weight_decay
         )
         
-        # Scheduler - STABILITY FIX: Replace OneCycleLR with warmup + cosine decay
-        # OneCycleLR's cyclic nature was causing gradient spikes at epoch 14+
+        # Scheduler: Epoch-level warmup + cosine annealing
         base_lr = config.training.learning_rate
-        # Clamp base LR to 5e-5 max for stability (was 1e-4)
         if base_lr > 5e-5:
             base_lr = 5e-5
             logger.info(f"[SCHEDULER] Clamped base_lr to 5e-5 for stability")
         
-        # Store base_lr for potential resets
         self.base_lr = base_lr
         
-        # Calculate total steps and warmup steps
-        total_steps = config.training.epochs * len(train_loader)
-        warmup_steps = int(total_steps * 0.1)  # 10% warmup
+        warmup_epochs = getattr(config.training, 'warmup_epochs', 5)
+        total_epochs = config.training.epochs
+        config_min_lr = getattr(config.training, 'min_lr', 0.0)
+        eta_min = config_min_lr if config_min_lr > 0 else base_lr * 0.05
         
-        # Warmup scheduler: linear ramp from 0 to base_lr
-        def warmup_lambda(step):
-            if step < warmup_steps:
-                return float(step) / float(max(1, warmup_steps))
-            return 1.0
-        
-        warmup_scheduler = LambdaLR(self.optimizer, lr_lambda=warmup_lambda)
-        
-        # Cosine decay scheduler: decays from base_lr to base_lr/100
-        cosine_scheduler = CosineAnnealingLR(
+        warmup_scheduler = LinearLR(
             self.optimizer,
-            T_max=total_steps - warmup_steps,
-            eta_min=base_lr / 100.0
+            start_factor=1e-3,
+            end_factor=1.0,
+            total_iters=warmup_epochs
         )
         
-        # Combine: warmup first, then cosine decay
+        cosine_scheduler = CosineAnnealingLR(
+            self.optimizer,
+            T_max=max(total_epochs - warmup_epochs, 1),
+            eta_min=eta_min
+        )
+        
         self.scheduler = SequentialLR(
             self.optimizer,
             schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[warmup_steps]
+            milestones=[warmup_epochs]
         )
         
-        self.warmup_steps = warmup_steps
-        self.total_steps = total_steps
+        # Set initial LR to warmup start value so epoch 0 trains at low LR
+        for pg in self.optimizer.param_groups:
+            pg['lr'] = base_lr * 1e-3
+        
+        self.warmup_epochs = warmup_epochs
+        self.total_epochs = total_epochs
+        self.eta_min = eta_min
         
         # Gradient explosion tracking for auto LR reduction
         self.high_grad_norm_count = 0
@@ -543,15 +544,13 @@ class MultiHeadTrainer:
         logger.info("[STABILITY PROOF] TRAINING CONFIGURATION")
         logger.info("=" * 70)
         
-        # Scheduler config - now using warmup + cosine decay (NO cyclic LR)
-        scheduler_final_lr = base_lr / 100.0
         logger.info("[STABILITY PROOF] Scheduler:")
-        logger.info("  Type: Warmup + Cosine Decay (NO OneCycleLR)")
-        logger.info("  base_lr: %.2e", base_lr)
-        logger.info("  final_lr: %.2e (base_lr / 100)", scheduler_final_lr)
-        logger.info("  warmup_steps: %d (10%% of total)", self.warmup_steps)
-        logger.info("  total_steps: %d", self.total_steps)
-        logger.info("  Strategy: Linear warmup -> Cosine decay to eta_min")
+        logger.info("  Type: Epoch-level LinearLR warmup + CosineAnnealingLR")
+        logger.info("  base_lr: %.2e", self.base_lr)
+        logger.info("  eta_min: %.2e (lr * 0.05)", self.eta_min)
+        logger.info("  warmup_epochs: %d", self.warmup_epochs)
+        logger.info("  total_epochs: %d", self.total_epochs)
+        logger.info("  Strategy: Linear warmup %d epochs -> Cosine decay to eta_min", self.warmup_epochs)
         
         # Loss config - get from criterion (MultiHeadLoss has a config attribute)
         # Safe access with fallbacks in case config structure varies
@@ -780,7 +779,6 @@ class MultiHeadTrainer:
                 logger.info("=" * 70)
             
             self.optimizer.step()
-            self.scheduler.step()
             
             # Track losses
             for key in total_losses:
@@ -1694,7 +1692,7 @@ class MultiHeadTrainer:
     def train(
         self,
         num_epochs: Optional[int] = None,
-        early_stopping_patience: int = 30,
+        early_stopping_patience: int = 50,
         min_epochs: int = 40,
         save_best: bool = True,
         checkpoint_path: Optional[str] = None,
@@ -1704,8 +1702,8 @@ class MultiHeadTrainer:
         Full training loop with min_epochs protection.
         
         Args:
-            num_epochs: Total epochs to train
-            early_stopping_patience: Epochs without improvement before stopping (default 30)
+            num_epochs: Total epochs to train (default from config, typically 300)
+            early_stopping_patience: Epochs without improvement before stopping (default 50)
             min_epochs: Minimum epochs before early stopping can trigger (default 40)
             save_best: Whether to save best checkpoint
             checkpoint_path: Path to save checkpoint
@@ -1715,6 +1713,7 @@ class MultiHeadTrainer:
         
         IMPORTANT: Early stopping uses val_loss ONLY (not monitoring sweep expectancy).
         PolicySelector handles policy selection post-training.
+        Dual checkpoint saving: best_loss.pt (val loss) + best_trading.pt (trading score).
         """
         epochs = num_epochs or self.config.training.epochs
         
@@ -1814,6 +1813,11 @@ class MultiHeadTrainer:
         best_trading_score = float('-inf')
         best_val_epoch = 0
         
+        # Dual checkpoint: best by trading score
+        best_trading_checkpoint_score = float('-inf')
+        best_trading_checkpoint_epoch = 0
+        TRADING_MIN_TRADES = 150
+        
         # === STABILITY GUARDRAILS ===
         # Track consecutive HOLD collapse and gradient explosion epochs
         consecutive_hold_collapse = 0
@@ -1825,8 +1829,14 @@ class MultiHeadTrainer:
         last_good_state = None  # For potential rollback
         
         for epoch in range(epochs):
+            # Capture LR used for this epoch (before stepping)
+            epoch_lr = self.optimizer.param_groups[0]['lr']
+            
             train_metrics = self.train_epoch(epoch)
             val_metrics = self.validate(epoch=epoch)
+            
+            # Step epoch-level LR scheduler (after train+val)
+            self.scheduler.step()
             
             # === STABILITY CHECK: HOLD Collapse Guardrail ===
             hold_rate = self._compute_hold_rate(val_metrics)
@@ -1854,18 +1864,13 @@ class MultiHeadTrainer:
                 logger.warning(f"[GUARDRAIL] High gradient norm: {grad_norm:.2f} > {GRAD_NORM_THRESHOLD} ({consecutive_high_grad_norm}/{GRAD_NORM_MAX_EPOCHS} epochs)")
                 
                 if consecutive_high_grad_norm >= GRAD_NORM_MAX_EPOCHS:
-                    # Reduce learning rate by 50% AND reset optimizer moments
                     new_base_lr = self.base_lr * 0.5
-                    # Calculate remaining steps as batches, not epochs
-                    remaining_epochs = epochs - epoch - 1  # -1 because current epoch is done
-                    remaining_steps = max(remaining_epochs * len(self.train_loader), len(self.train_loader))
+                    remaining_epochs = epochs - epoch - 1
                     
                     logger.info(f"[GUARDRAIL] 3/3 triggered - Reinitializing optimizer + scheduler")
                     logger.info(f"[GUARDRAIL] New base_lr={new_base_lr:.2e} (was {self.base_lr:.2e})")
-                    logger.info(f"[GUARDRAIL] Remaining epochs={remaining_epochs}, remaining_steps={remaining_steps}")
+                    logger.info(f"[GUARDRAIL] Remaining epochs={remaining_epochs}")
                     
-                    # CRITICAL: Recreate optimizer to reset momentum states (exp_avg, exp_avg_sq)
-                    # This prevents accumulated momentum from causing continued explosions
                     self.optimizer = torch.optim.AdamW(
                         self.model.parameters(),
                         lr=new_base_lr,
@@ -1873,26 +1878,21 @@ class MultiHeadTrainer:
                     )
                     logger.info(f"[GUARDRAIL] AdamW optimizer recreated - momentum states cleared")
                     
-                    # Update stored base_lr for potential future resets
                     self.base_lr = new_base_lr
                     
-                    # Reinitialize scheduler with reduced LR (no warmup needed mid-training)
-                    # Guard against T_max <= 0 which would cause errors
-                    if remaining_steps > 0:
+                    if remaining_epochs > 0:
                         self.scheduler = CosineAnnealingLR(
                             self.optimizer,
-                            T_max=remaining_steps,
-                            eta_min=new_base_lr / 100.0
+                            T_max=remaining_epochs,
+                            eta_min=new_base_lr * 0.05
                         )
-                        logger.info(f"[GUARDRAIL] Scheduler reset: CosineAnnealingLR T_max={remaining_steps}, "
+                        logger.info(f"[GUARDRAIL] Scheduler reset: CosineAnnealingLR T_max={remaining_epochs} epochs, "
                                   f"current_lr={self.optimizer.param_groups[0]['lr']:.2e}")
                     else:
-                        # Near end of training, just keep constant LR
                         logger.info(f"[GUARDRAIL] Near end of training, using constant LR={new_base_lr:.2e}")
-                        # Use a dummy scheduler that doesn't change LR
                         self.scheduler = LambdaLR(self.optimizer, lr_lambda=lambda x: 1.0)
                     
-                    consecutive_high_grad_norm = 0  # Reset counter
+                    consecutive_high_grad_norm = 0
             else:
                 consecutive_high_grad_norm = 0  # Reset if gradients stabilize
             
@@ -1957,7 +1957,8 @@ class MultiHeadTrainer:
                 logger.info(
                     f"Epoch {epoch+1}/{epochs} - "
                     f"Train: {train_metrics['total']:.4f} (acc: {train_metrics['accuracy']:.3f}) - "
-                    f"Val: {val_metrics['total']:.4f} (acc: {val_metrics['accuracy']:.3f})"
+                    f"Val: {val_metrics['total']:.4f} (acc: {val_metrics['accuracy']:.3f}) - "
+                    f"LR: {epoch_lr:.2e}"
                 )
             
             # Early stopping check - uses val_loss ONLY (not monitoring sweep expectancy)
@@ -1966,11 +1967,32 @@ class MultiHeadTrainer:
                 self.patience_counter = 0
                 best_val_epoch = epoch + 1
                 
-                if save_best and checkpoint_path:
-                    self._save_checkpoint(checkpoint_path, val_metrics)
-                    logger.info(f"[CHECKPOINT] Saved best model at epoch {epoch+1} with val_loss={val_metrics['total']:.4f}")
+                if save_best:
+                    # Save best-by-loss checkpoint
+                    loss_path = str(Path(checkpoint_path).parent / "best_loss.pt") if checkpoint_path else "checkpoints/best_loss.pt"
+                    self._save_checkpoint(loss_path, val_metrics)
+                    logger.info(f"[BEST LOSS] Saved at epoch {epoch+1} | val_loss={val_metrics['total']:.4f} | LR={epoch_lr:.2e}")
             else:
                 self.patience_counter += 1
+            
+            # === DUAL CHECKPOINT: Save best-by-trading model ===
+            if not val_metrics.get('_skipped', False) and val_metrics.get('num_trades', 0) >= TRADING_MIN_TRADES:
+                expectancy = val_metrics.get('expectancy', 0.0)
+                sharpe = val_metrics.get('sharpe', 0.0)
+                pf = val_metrics.get('profit_factor', 0.0)
+                trading_score = expectancy + 0.1 * sharpe + 0.02 * math.log(max(pf, 1e-6))
+                
+                if trading_score > best_trading_checkpoint_score:
+                    best_trading_checkpoint_score = trading_score
+                    best_trading_checkpoint_epoch = epoch + 1
+                    
+                    trade_path = str(Path(checkpoint_path).parent / "best_trading.pt") if checkpoint_path else "checkpoints/best_trading.pt"
+                    self._save_checkpoint(trade_path, val_metrics)
+                    logger.info(
+                        f"[BEST TRADING] Saved at epoch {epoch+1} | "
+                        f"score={trading_score:+.4f} | trades={val_metrics['num_trades']} | "
+                        f"exp={expectancy:+.4f} | sharpe={sharpe:+.2f} | pf={pf:.2f}"
+                    )
             
             # CRITICAL: Early stopping ONLY after min_epochs reached
             # This ensures multihead quantiles/vol_state/accel have enough epochs to converge
@@ -1995,6 +2017,7 @@ class MultiHeadTrainer:
                 print(f"  Train Loss:    {train_metrics.get('total', 0):.4f}")
                 print(f"  Best Val Loss: {self.best_val_loss:.4f} (epoch {best_val_epoch})")
                 print(f"  Patience:      {self.patience_counter}/{early_stopping_patience}")
+                print(f"  Current LR:    {self.optimizer.param_groups[0]['lr']:.2e}")
                 print("-" * 60)
                 print(f"  Per-class Accuracy:")
                 print(f"    SHORT: {short_acc:.1f}%  |  HOLD: {hold_acc:.1f}%  |  LONG: {long_acc:.1f}%")
@@ -2025,6 +2048,17 @@ class MultiHeadTrainer:
                     print()
         
         self.writer.close()
+        
+        # === DUAL CHECKPOINT SUMMARY ===
+        logger.info("=" * 70)
+        logger.info("CHECKPOINT SUMMARY")
+        logger.info("-" * 70)
+        logger.info(f"  Best Loss:    epoch {best_val_epoch} | val_loss={self.best_val_loss:.4f}")
+        if best_trading_checkpoint_epoch > 0:
+            logger.info(f"  Best Trading: epoch {best_trading_checkpoint_epoch} | score={best_trading_checkpoint_score:+.4f}")
+        else:
+            logger.info(f"  Best Trading: No eligible checkpoint (needs >= {TRADING_MIN_TRADES} trades)")
+        logger.info("=" * 70)
         
         # === SAVE WALK-FORWARD WEIGHTS TO model_weights.json ===
         if best_trading_metrics is not None:

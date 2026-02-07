@@ -34,17 +34,26 @@ Current stable model: `enhanced_mlp` (EnhancedMultiHeadMLP)
 - Gradient norms: 0.35-0.63 (well under 10 threshold)
 - Prediction distribution with focal loss: SHORT ~13%, HOLD ~47%, LONG ~40%
 - Training data: 5 years of BTCUSDT 15m candles (~175k target, backfilled from Binance)
-- Quick start: `python quick_start.py --url https://APP.replit.app` (200 epochs default)
+- Quick start: `python quick_start.py --url https://APP.replit.app` (300 epochs default)
 
 Quick start training flags:
-- `--epochs 200` - Training epochs (default: 200)
+- `--epochs 300` - Training epochs (default: 300)
 - `--batch-size 64` - Batch size (default: 64)
 - `--lr 0.0001` - Learning rate (default: 0.0001)
+- `--warmup-epochs 5` - LR warmup epochs (default: 5)
+- `--min-lr` - Minimum LR for cosine annealing (default: lr * 0.05)
 - `--predict-only` - Skip training, just predict from saved model
 - `--no-push` - Train but don't push prediction to dashboard
 - `--min-confidence 0.40` - Minimum confidence to push trade signal (default: 0.40)
 - `--min-edge 0.10` - Minimum edge to push trade signal (default: 0.10)
 - `--checkpoint-interval 25` - Pause every N epochs to show results and wait for user to continue or stop (default: 25, use 0 to disable)
+
+Training improvements (v3):
+- LR schedule: 5-epoch linear warmup -> cosine annealing to eta_min (lr * 0.05)
+- Early stopping patience: 50 epochs (was 30), min_epochs: 40
+- Dual checkpoint saving: `best_loss.pt` (lowest val loss) + `best_trading.pt` (best trading score)
+- Trading score: expectancy + 0.1*sharpe + 0.02*log(profit_factor), requires >= 150 trades
+- Epoch-level scheduler stepping (was per-batch), current LR logged each epoch
 
 Position sizing: ATR-based with 2% account risk per trade, scaled by confidence/edge, hard capped at 0.5-5.0% of account. Trade signals below confidence/edge thresholds are automatically downgraded to HOLD.
 

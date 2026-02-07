@@ -101,7 +101,7 @@ def download_data(replit_url: str, data_dir: Path, force_fresh: bool = False):
     return parquet_path
 
 
-def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float, checkpoint_interval: int = 25):
+def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float, checkpoint_interval: int = 25, warmup_epochs: int = 5, min_lr: float = None):
     import torch
     import numpy as np
     import pandas as pd
@@ -287,6 +287,8 @@ def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: 
 
     config.training.epochs = epochs
     config.training.learning_rate = lr
+    config.training.warmup_epochs = warmup_epochs
+    config.training.min_lr = min_lr if min_lr is not None else lr * 0.05
 
     trainer = MultiHeadTrainer(
         model=model,
@@ -297,7 +299,11 @@ def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: 
         loss_config=loss_config,
     )
 
-    log.info(f"Training for {epochs} epochs (lr={lr}, batch={batch_size})...")
+    effective_min_lr = min_lr if min_lr is not None else lr * 0.05
+    log.info(f"Training for {epochs} epochs (lr={lr}, batch={batch_size})")
+    log.info(f"LR schedule: {warmup_epochs}-epoch warmup -> cosine annealing to {effective_min_lr:.2e}")
+    log.info(f"Early stopping: patience=50, min_epochs=40")
+    log.info(f"Dual checkpoints: best_loss.pt + best_trading.pt")
     if checkpoint_interval > 0:
         log.info(f"Interactive checkpoints every {checkpoint_interval} epochs (press 'n' to stop early)")
     log.info("-" * 60)
@@ -520,9 +526,11 @@ Examples:
         """
     )
     parser.add_argument("--url", required=True, help="Your Replit dashboard URL (e.g. https://your-app.replit.app)")
-    parser.add_argument("--epochs", type=int, default=200, help="Training epochs (default: 200)")
+    parser.add_argument("--epochs", type=int, default=300, help="Training epochs (default: 300)")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size (default: 64)")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 0.0001)")
+    parser.add_argument("--warmup-epochs", type=int, default=5, help="LR warmup epochs (default: 5)")
+    parser.add_argument("--min-lr", type=float, default=None, help="Minimum LR for cosine annealing (default: lr * 0.05)")
     parser.add_argument("--predict-only", action="store_true", help="Skip training, just make a prediction from existing model")
     parser.add_argument("--no-push", action="store_true", help="Train but don't push prediction to dashboard")
     parser.add_argument("--min-confidence", type=float, default=0.40, help="Minimum confidence to push signal (default: 0.40)")
@@ -544,7 +552,8 @@ Examples:
         data_path = download_data(args.url, data_dir)
 
         model, engineer, feature_columns, history = train_model(
-            data_path, device, args.epochs, args.batch_size, args.lr, args.checkpoint_interval
+            data_path, device, args.epochs, args.batch_size, args.lr, args.checkpoint_interval,
+            warmup_epochs=args.warmup_epochs, min_lr=args.min_lr
         )
 
         print()
