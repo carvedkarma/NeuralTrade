@@ -546,6 +546,7 @@ class EnhancedMultiHeadMLP_Config:
     enable_vol_state_head: bool = True
     enable_mu_head: bool = True
     enable_sigma_head: bool = True
+    enable_enter_head: bool = False  # Binary entry quality head
     
     def __post_init__(self):
         if self.hidden_dims is None:
@@ -663,6 +664,18 @@ class EnhancedMultiHeadMLP(nn.Module):
         else:
             self.sigma_head = None
         
+        # === HEAD 6: Entry Quality (binary) ===
+        if config.enable_enter_head:
+            self.enter_head = nn.Sequential(
+                nn.Linear(self.trunk_dim, 32),
+                nn.LayerNorm(32),
+                nn.GELU(),
+                nn.Dropout(0.2),
+                nn.Linear(32, 1)
+            )
+        else:
+            self.enter_head = None
+        
         self.n_candle_steps = config.n_candle_steps
         self._init_weights()
         
@@ -672,6 +685,7 @@ class EnhancedMultiHeadMLP(nn.Module):
             'enable_vol_state': config.enable_vol_state_head,
             'enable_mu': config.enable_mu_head,
             'enable_sigma': config.enable_sigma_head,
+            'enable_enter': config.enable_enter_head,
         }
     
     def _init_weights(self):
@@ -741,6 +755,13 @@ class EnhancedMultiHeadMLP(nn.Module):
         else:
             vol_state_logits = torch.zeros(batch_size, 3, device=device)
         
+        # === Enter Quality ===
+        if self.enter_head is not None:
+            enter_logits = self.enter_head(features)
+            enter_logits = torch.clamp(enter_logits, -10, 10)
+        else:
+            enter_logits = None
+        
         # Placeholders for unused heads
         entry_offset = torch.zeros(batch_size, 1, device=device)
         sl_distance = torch.ones(batch_size, 1, device=device) * 0.01
@@ -758,7 +779,8 @@ class EnhancedMultiHeadMLP(nn.Module):
             tp_distance=tp_distance,
             candle_deltas=candle_deltas,
             vol_state_logits=vol_state_logits,
-            acceleration=acceleration
+            acceleration=acceleration,
+            enter_logits=enter_logits
         )
     
     def parameters_count(self) -> int:

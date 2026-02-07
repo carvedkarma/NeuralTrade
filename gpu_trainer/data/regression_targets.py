@@ -269,6 +269,173 @@ class RegressionTargetGenerator:
         
         return pd.Series(labels, index=df.index)
 
+    def label_enter_quality(
+        self,
+        df: pd.DataFrame,
+        htf_features: pd.DataFrame,
+        tp_atr_mult: float = 2.0,
+        sl_atr_mult: float = 1.5,
+        horizon_bars: int = 24,
+        slope_eps: float = 0.05,
+    ) -> pd.DataFrame:
+        """
+        HTF-gated Triple Barrier labeling for ENTER quality model.
+        
+        Instead of predicting direction (SHORT/HOLD/LONG), this labels whether
+        a trend-following trade setup is worth taking (ENTER=1) or not (ENTER=0).
+        Direction comes from HTF trend, not from the model.
+        
+        Process:
+        1. Check HTF trend alignment (1H and 4H agree on direction)
+        2. Gate candidates by slope strength and range position
+        3. For candidates: run Triple Barrier with direction from HTF
+        4. TP hit first => ENTER=1, else ENTER=0
+        
+        Args:
+            df: OHLCV DataFrame with close/high/low columns
+            htf_features: DataFrame with HTF feature columns (h1_trend_sign, h4_trend_sign, etc.)
+            tp_atr_mult: ATR multiplier for take profit barrier
+            sl_atr_mult: ATR multiplier for stop loss barrier  
+            horizon_bars: Maximum bars to hold before time expiry
+            slope_eps: Minimum abs(h1_sma20_slope) to consider trend strong enough
+            
+        Returns:
+            DataFrame with columns:
+            - enter_label: 0 or 1
+            - side_hint: +1 (LONG), -1 (SHORT), or 0 (no candidate)
+            - outcome: "TP", "SL", "EXP", "NO_CANDIDATE"
+            - tp_price: take profit price level
+            - sl_price: stop loss price level
+        """
+        n = len(df)
+        prices = df['close'].values
+        highs = df['high'].values
+        lows = df['low'].values
+        
+        atr = self._compute_atr(df, period=14)
+        atr_vals = atr.values
+        
+        h1_trend = htf_features['h1_trend_sign'].values if 'h1_trend_sign' in htf_features.columns else np.zeros(n)
+        h4_trend = htf_features['h4_trend_sign'].values if 'h4_trend_sign' in htf_features.columns else np.zeros(n)
+        h1_slope = htf_features['h1_sma20_slope'].values if 'h1_sma20_slope' in htf_features.columns else np.zeros(n)
+        h1_range_pos = htf_features['h1_range_pos'].values if 'h1_range_pos' in htf_features.columns else np.full(n, 0.5)
+        
+        enter_labels = np.zeros(n, dtype=np.int64)
+        side_hints = np.zeros(n, dtype=np.int64)
+        outcomes = np.full(n, "NO_CANDIDATE", dtype=object)
+        tp_prices = np.full(n, np.nan)
+        sl_prices = np.full(n, np.nan)
+        
+        n_candidates = 0
+        n_tp = 0
+        n_sl = 0
+        n_exp = 0
+        
+        for i in range(n - horizon_bars):
+            if h1_trend[i] == 0 or h4_trend[i] == 0:
+                continue
+            if h1_trend[i] != h4_trend[i]:
+                continue
+            
+            if abs(h1_slope[i]) < slope_eps:
+                continue
+            
+            if h1_trend[i] > 0 and h1_range_pos[i] < 0.2:
+                continue
+            if h1_trend[i] < 0 and h1_range_pos[i] > 0.8:
+                continue
+            
+            n_candidates += 1
+            side = int(h1_trend[i])
+            side_hints[i] = side
+            
+            entry_price = prices[i]
+            a = atr_vals[i]
+            if np.isnan(a) or a <= 0:
+                a = entry_price * 0.005
+            
+            if side > 0:  # LONG
+                tp = entry_price + tp_atr_mult * a
+                sl = entry_price - sl_atr_mult * a
+            else:  # SHORT
+                tp = entry_price - tp_atr_mult * a
+                sl = entry_price + sl_atr_mult * a
+            
+            tp_prices[i] = tp
+            sl_prices[i] = sl
+            
+            hit = False
+            for j in range(1, horizon_bars + 1):
+                idx = i + j
+                if idx >= n:
+                    break
+                
+                if side > 0:  # LONG
+                    tp_hit = highs[idx] >= tp
+                    sl_hit = lows[idx] <= sl
+                else:  # SHORT
+                    tp_hit = lows[idx] <= tp
+                    sl_hit = highs[idx] >= sl
+                
+                if tp_hit and sl_hit:
+                    if side > 0:
+                        tp_dist = highs[idx] - entry_price
+                        sl_dist = entry_price - lows[idx]
+                    else:
+                        tp_dist = entry_price - lows[idx]
+                        sl_dist = highs[idx] - entry_price
+                    
+                    if tp_dist >= sl_dist:
+                        enter_labels[i] = 1
+                        outcomes[i] = "TP"
+                        n_tp += 1
+                    else:
+                        enter_labels[i] = 0
+                        outcomes[i] = "SL"
+                        n_sl += 1
+                    hit = True
+                    break
+                elif tp_hit:
+                    enter_labels[i] = 1
+                    outcomes[i] = "TP"
+                    n_tp += 1
+                    hit = True
+                    break
+                elif sl_hit:
+                    enter_labels[i] = 0
+                    outcomes[i] = "SL"
+                    n_sl += 1
+                    hit = True
+                    break
+            
+            if not hit:
+                enter_labels[i] = 0
+                outcomes[i] = "EXP"
+                n_exp += 1
+        
+        logger.info("=" * 70)
+        logger.info("ENTER QUALITY LABELING: HTF-Gated Triple Barrier")
+        logger.info("=" * 70)
+        logger.info(f"Config: horizon={horizon_bars}, TP={tp_atr_mult}x ATR, SL={sl_atr_mult}x ATR, slope_eps={slope_eps}")
+        logger.info(f"Total bars: {n:,}")
+        logger.info(f"Candidates (trend-aligned): {n_candidates:,} ({100*n_candidates/max(n,1):.1f}%)")
+        logger.info(f"  TP hits (ENTER=1): {n_tp:,} ({100*n_tp/max(n_candidates,1):.1f}% of candidates)")
+        logger.info(f"  SL hits (ENTER=0): {n_sl:,} ({100*n_sl/max(n_candidates,1):.1f}% of candidates)")
+        logger.info(f"  Expiry  (ENTER=0): {n_exp:,} ({100*n_exp/max(n_candidates,1):.1f}% of candidates)")
+        logger.info(f"Non-candidates (ENTER=0): {n - n_candidates:,}")
+        logger.info(f"ENTER=1 total: {enter_labels.sum():,} ({100*enter_labels.sum()/max(n,1):.1f}% of all bars)")
+        logger.info("=" * 70)
+        
+        result = pd.DataFrame({
+            'enter_label': enter_labels,
+            'side_hint': side_hints,
+            'outcome': outcomes,
+            'tp_price': tp_prices,
+            'sl_price': sl_prices,
+        }, index=df.index)
+        
+        return result
+
     def generate_multihead_targets(
         self, 
         df: pd.DataFrame, 
@@ -1070,4 +1237,23 @@ def generate_multihead_targets(
         use_triple_barrier=use_triple_barrier,
         tb_tp_mult=tb_tp_mult,
         tb_sl_mult=tb_sl_mult
+    )
+
+
+def generate_enter_quality_targets(
+    df: pd.DataFrame,
+    htf_features: pd.DataFrame,
+    horizon_periods: int = 24,
+    tp_atr_mult: float = 2.0,
+    sl_atr_mult: float = 1.5,
+    slope_eps: float = 0.05,
+) -> pd.DataFrame:
+    """Convenience function for ENTER quality labeling."""
+    generator = RegressionTargetGenerator(horizon_periods=horizon_periods)
+    return generator.label_enter_quality(
+        df, htf_features,
+        tp_atr_mult=tp_atr_mult,
+        sl_atr_mult=sl_atr_mult,
+        horizon_bars=horizon_periods,
+        slope_eps=slope_eps,
     )

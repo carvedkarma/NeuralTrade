@@ -15,15 +15,20 @@ The frontend is built with React and TypeScript using Vite, featuring a modern U
 The backend uses Node.js with Express.js (TypeScript, ESM) and follows a RESTful API pattern. AI integration is managed via OpenAI. Market data is sourced primarily from Binance Vision API, with fallbacks to CoinGecko and CryptoCompare, augmented by a Replit-hosted data proxy. Bi-directional communication with a local GPU trainer is established via dedicated API endpoints.
 
 ### Feature Specifications
-The system incorporates a regression-based signal system generating comprehensive signals including action, confidence, expected_move, uncertainty, and position sizing. It features regime detection with a Mixture-of-Experts (MoE) model, identifying market states like TRENDING or MEAN_REVERTING. GPU-accelerated training uses the stable EnhancedMultiHeadMLP architecture with [512, 256, 128, 64] residual blocks and progressive head enablement. A multi-head model architecture uses five distinct output heads (Classification, Quantile, VolState, Mu, Sigma) with combined loss functions. A flow forecast system provides regime-conditioned quantile path projections. Advanced labeling uses Triple Barrier Method (ATR-scaled TP/SL/time-expiry barriers) for clean, outcome-based training labels, with Focal Loss (gamma=2.0) and configurable class weight caps for class imbalance. Model management includes walk-forward weight saving, feature version locking, prediction drift monitoring, and label metadata tracking. A professional ensemble predictor combines multiple model predictions with confidence-based voting. A robust training, monitoring, and policy architecture separates model training from live execution policy selection.
+The system uses an ENTER QUALITY model (v3.1.0) that predicts WHETHER to enter a trend-following trade (binary 0/1), not WHICH direction. Direction comes from HTF (1H/4H) trend alignment. GPU-accelerated training uses the stable EnhancedMultiHeadMLP architecture with [512, 256, 128, 64] residual blocks and the enter_head (binary classifier with BCEWithLogitsLoss). The model uses 57 features (47 STF + 10 HTF) on 15m timeframe with 24-bar horizon (6 hours). Inference applies p_enter threshold (0.55) plus HTF alignment gates (h1_trend == h4_trend, slope > 0.05, range position check) to produce final LONG/SHORT/HOLD signals. Model management includes walk-forward weight saving, feature version locking (`v3.1.0_enter_quality_stf47_htf10`), and prediction drift monitoring.
 
-### Training Label Strategy
-The Triple Barrier Method (Stage 4) is the recommended labeling approach:
-- For each bar, three barriers are placed: TP (2.0x ATR above), SL (1.5x ATR below), time expiry (24 bars)
-- Whichever barrier gets hit first determines the label: TP hit = LONG, SL hit = SHORT, time expiry = HOLD
-- ATR-scaled barriers automatically adapt to current volatility regime
-- Horizon: 24 bars (6 hours on 15m timeframe) for meaningful directional separation
-- Produces cleaner labels than simple return thresholds because labels reflect actual trade outcomes
+### Training Label Strategy (ENTER QUALITY - v3.1.0)
+HTF-gated Triple Barrier labeling for binary entry quality:
+1. Check HTF trend alignment: h1_trend_sign == h4_trend_sign (both non-zero)
+2. Gate by slope strength: abs(h1_sma20_slope) > slope_eps (default 0.05)
+3. Gate by range position: LONG requires h1_range_pos >= 0.2, SHORT requires h1_range_pos <= 0.8
+4. For gated candidates: run Triple Barrier with direction from HTF trend
+5. TP hit first => ENTER=1 (good setup), SL hit or time expiry => ENTER=0 (skip)
+- Barriers: TP=2.0x ATR, SL=1.5x ATR, horizon=24 bars
+- Non-candidates (no HTF alignment) automatically get ENTER=0, side_hint=0
+- Labels are imbalanced (ENTER=1 is minority), handled via pos_weight in BCEWithLogitsLoss
+- Primary metric: PR-AUC (Precision-Recall Area Under Curve)
+- Previous approach: 3-class direction model (SHORT/HOLD/LONG) replaced by binary ENTER quality
 
 ### Input Features (57 total, v3.0.0)
 
@@ -57,10 +62,11 @@ Quick start training flags:
 - `--min-lr` - Minimum LR for cosine annealing (default: lr * 0.05)
 - `--predict-only` - Skip training, just predict from saved model
 - `--no-push` - Train but don't push prediction to dashboard
-- `--min-confidence 0.40` - Minimum confidence to push trade signal (default: 0.40)
-- `--min-edge 0.10` - Minimum edge to push trade signal (default: 0.10)
 - `--checkpoint-interval 25` - Pause every N epochs to show results and wait for user to continue or stop (default: 25, use 0 to disable)
-- `--stf-only` - A/B test mode: train with STF (47) features only, no HTF context. Use for baseline comparison
+- `--tp-mult 2.0` - TP ATR multiplier for triple barrier (default: 2.0)
+- `--sl-mult 1.5` - SL ATR multiplier for triple barrier (default: 1.5)
+- `--horizon 24` - Horizon bars for triple barrier (default: 24)
+- `--slope-eps 0.05` - Minimum slope for HTF trend gate (default: 0.05)
 
 Training improvements (v3):
 - LR schedule: 5-epoch linear warmup -> cosine annealing to eta_min (lr * 0.05)
@@ -86,6 +92,17 @@ Training improvements (v4 - classification focus):
   - Diagnostic logging only appears when relevant (gradient norms > 5, active auxiliary heads)
 - Checkpoint display includes prediction distribution and full trading metrics (PF, avg win/loss)
 
+Training improvements (v3.1.0 - ENTER QUALITY model):
+- Architectural pivot: 3-class direction model replaced by binary ENTER quality classifier
+- Model predicts WHETHER to enter (ENTER=0/1), direction comes from HTF trend alignment
+- enter_head: binary classifier using BCEWithLogitsLoss with pos_weight for class imbalance
+- All auxiliary heads (mu, sigma, quantile, vol_state) disabled during training
+- Per-epoch metrics: Precision, Recall, F1, PR-AUC, positive rate, prediction rate
+- Per-epoch log format: `Epoch N | Loss T:X V:X | P:X R:X F1:X | PR-AUC:X | Pos:X | Pred1:X | LR:X`
+- Trading sweep: enter_threshold 0.45-0.75, PnL computed with HTF-derived side + ATR barriers
+- Dual checkpoints: `best_enter_prauc.pt` (primary) + `best_enter_loss.pt` (fallback)
+- Inference: p_enter >= 0.55 + HTF alignment gates (h1_trend == h4_trend, slope > 0.05, range check)
+
 Position sizing: ATR-based with 2% account risk per trade, scaled by confidence/edge, hard capped at 0.5-5.0% of account. Trade signals below confidence/edge thresholds are automatically downgraded to HOLD.
 
 Progressive head enablement flags (add incrementally via main.py train, NOT quick_start.py):
@@ -93,11 +110,6 @@ Progressive head enablement flags (add incrementally via main.py train, NOT quic
 2. `--enable-vol-state` - Volatility state classification (CrossEntropy, λ=0.2, 3-class)
 3. `--enable-mu` - Expected return regression (HuberLoss, λ=0.3, clamped ±0.1)
 4. `--enable-sigma` - Uncertainty estimation (GaussianNLLLoss, λ=0.2, most unstable - enable last)
-
-Quick start loss tuning flags:
-- `--focal-loss` / `--no-focal-loss` - Enable/disable Focal Loss (default: enabled)
-- `--focal-gamma 2.0` - Focal focusing parameter (default 2.0)
-- `--class-weight-cap 10.0` - Max class weight multiplier (default 10.0)
 
 Disabled/removed features:
 - LSTM/Transformer architectures (caused gradient explosions)

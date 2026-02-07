@@ -228,6 +228,9 @@ class MultiHeadOutput:
     # Flow Forecast heads (for regime-conditioned path generation)
     vol_state_logits: Optional[torch.Tensor] = None  # [batch, 3] for CONTRACTION/NEUTRAL/EXPANSION
     acceleration: Optional[torch.Tensor] = None      # [batch, 1] momentum change over horizon
+    
+    # Entry quality head (binary: should we enter this trade?)
+    enter_logits: Optional[torch.Tensor] = None  # [batch, 1] raw logits for BCEWithLogitsLoss
 
 
 class QuantileHead(nn.Module):
