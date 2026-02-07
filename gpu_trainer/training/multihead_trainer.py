@@ -1983,29 +1983,29 @@ class MultiHeadTrainer:
             
             # === INTERACTIVE CHECKPOINT: Pause for user review ===
             if checkpoint_interval > 0 and (epoch + 1) % checkpoint_interval == 0 and (epoch + 1) < epochs:
-                
-                per_class = val_metrics.get('per_class', {})
-                short_acc = per_class.get(0, {}).get('accuracy', 0) * 100 if per_class.get(0) else 0
-                hold_acc = per_class.get(1, {}).get('accuracy', 0) * 100 if per_class.get(1) else 0
-                long_acc = per_class.get(2, {}).get('accuracy', 0) * 100 if per_class.get(2) else 0
+                short_acc = val_metrics.get('acc_short', 0) * 100
+                hold_acc = val_metrics.get('acc_hold', 0) * 100
+                long_acc = val_metrics.get('acc_long', 0) * 100
                 
                 print("\n" + "=" * 60)
                 print(f"  CHECKPOINT @ Epoch {epoch+1}/{epochs}")
                 print("=" * 60)
-                print(f"  Val Accuracy:  {val_metrics['accuracy']*100:.1f}%")
-                print(f"  Val Loss:      {val_metrics['total']:.4f}")
-                print(f"  Train Loss:    {train_metrics['total']:.4f}")
+                print(f"  Val Accuracy:  {val_metrics.get('accuracy', 0)*100:.1f}%")
+                print(f"  Val Loss:      {val_metrics.get('total', 0):.4f}")
+                print(f"  Train Loss:    {train_metrics.get('total', 0):.4f}")
                 print(f"  Best Val Loss: {self.best_val_loss:.4f} (epoch {best_val_epoch})")
                 print(f"  Patience:      {self.patience_counter}/{early_stopping_patience}")
                 print("-" * 60)
                 print(f"  Per-class Accuracy:")
                 print(f"    SHORT: {short_acc:.1f}%  |  HOLD: {hold_acc:.1f}%  |  LONG: {long_acc:.1f}%")
-                if 'expectancy' in val_metrics:
+                if val_metrics.get('num_trades', 0) > 0:
                     print(f"  Trading Metrics:")
                     print(f"    Expectancy:    {val_metrics.get('expectancy', 0):.4f}")
                     print(f"    Hit Rate:      {val_metrics.get('hit_rate', 0)*100:.1f}%")
                     print(f"    Sharpe:        {val_metrics.get('sharpe', 0):.2f}")
                     print(f"    Trades:        {val_metrics.get('num_trades', 0)}")
+                else:
+                    print(f"  Trading: No trades yet (monitoring sweep needs more epochs)")
                 print("=" * 60)
                 
                 try:
