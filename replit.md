@@ -55,16 +55,25 @@ Training improvements (v3):
 - Trading score: expectancy + 0.1*sharpe + 0.02*log(profit_factor), requires >= 150 trades
 - Epoch-level scheduler stepping (was per-batch), current LR logged each epoch
 
+Training improvements (v4 - classification focus):
+- CRITICAL FIX: Disabled all auxiliary heads (mu, sigma, quantile, vol_state) during training
+  - Previously these heads had combined lambda=1.0, meaning classification only got 50% of gradient signal
+  - Now classification gets 100% of learning capacity, dramatically improving directional accuracy
+  - Auxiliary heads still exist in the model for inference (prediction output uses all 5 heads)
+- Focal Loss enabled by default (gamma=2.0) with class weight caps
+- Per-class accuracy (SHORT/HOLD/LONG) logged every epoch for training visibility
+- CLI flags: --focal-loss/--no-focal-loss, --focal-gamma, --class-weight-cap
+
 Position sizing: ATR-based with 2% account risk per trade, scaled by confidence/edge, hard capped at 0.5-5.0% of account. Trade signals below confidence/edge thresholds are automatically downgraded to HOLD.
 
-Progressive head enablement flags (add incrementally):
+Progressive head enablement flags (add incrementally via main.py train, NOT quick_start.py):
 1. `--enable-quantile` - Quantile head (PinballLoss, λ=0.3, output clamped ±0.1)
 2. `--enable-vol-state` - Volatility state classification (CrossEntropy, λ=0.2, 3-class)
 3. `--enable-mu` - Expected return regression (HuberLoss, λ=0.3, clamped ±0.1)
 4. `--enable-sigma` - Uncertainty estimation (GaussianNLLLoss, λ=0.2, most unstable - enable last)
 
-Loss tuning flags:
-- `--focal-loss` - Enable Focal Loss (down-weights easy HOLD predictions)
+Quick start loss tuning flags:
+- `--focal-loss` / `--no-focal-loss` - Enable/disable Focal Loss (default: enabled)
 - `--focal-gamma 2.0` - Focal focusing parameter (default 2.0)
 - `--class-weight-cap 10.0` - Max class weight multiplier (default 10.0)
 

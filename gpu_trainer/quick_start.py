@@ -101,7 +101,7 @@ def download_data(replit_url: str, data_dir: Path, force_fresh: bool = False):
     return parquet_path
 
 
-def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float, checkpoint_interval: int = 25, warmup_epochs: int = 5, min_lr: float = None):
+def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float, checkpoint_interval: int = 25, warmup_epochs: int = 5, min_lr: float = None, focal_loss: bool = True, focal_gamma: float = 2.0, class_weight_cap: float = 10.0):
     import torch
     import numpy as np
     import pandas as pd
@@ -259,31 +259,33 @@ def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: 
 
     unique_labels, label_counts = np.unique(train_labels, return_counts=True)
     total = len(train_labels)
-    MAX_CLASS_WEIGHT = 10.0
     class_weights_list = []
     for c in range(3):
         if c in unique_labels:
             idx = np.where(unique_labels == c)[0][0]
-            w = min(total / (3 * label_counts[idx]), MAX_CLASS_WEIGHT)
+            w = min(total / (3 * label_counts[idx]), class_weight_cap)
         else:
             w = 1.0
         class_weights_list.append(w)
     class_weights = torch.FloatTensor(class_weights_list)
-    log.info(f"Class weights: {class_weights.numpy()}")
+    log.info(f"Class weights (cap={class_weight_cap}): {class_weights.numpy()}")
 
     loss_config = MultiHeadLossConfig(
         class_weights=class_weights,
-        use_focal_loss=True,
-        focal_gamma=2.0,
-        lambda_quantile=0.3,
-        lambda_mu=0.3,
-        lambda_sigma=0.2,
-        lambda_vol_state=0.2,
-        head_enabled_quantile=True,
-        head_enabled_vol_state=True,
-        head_enabled_mu=True,
-        head_enabled_sigma=True,
+        use_focal_loss=focal_loss,
+        focal_gamma=focal_gamma,
+        lambda_quantile=0.0,
+        lambda_mu=0.0,
+        lambda_sigma=0.0,
+        lambda_vol_state=0.0,
+        head_enabled_quantile=False,
+        head_enabled_vol_state=False,
+        head_enabled_mu=False,
+        head_enabled_sigma=False,
     )
+    if focal_loss:
+        log.info(f"Focal Loss: gamma={focal_gamma} (down-weights easy HOLD predictions)")
+    log.info(f"Training mode: CLASSIFICATION ONLY (all auxiliary heads disabled for maximum signal)")
 
     config.training.epochs = epochs
     config.training.learning_rate = lr
@@ -536,6 +538,10 @@ Examples:
     parser.add_argument("--min-confidence", type=float, default=0.40, help="Minimum confidence to push signal (default: 0.40)")
     parser.add_argument("--min-edge", type=float, default=0.10, help="Minimum edge to push signal (default: 0.10)")
     parser.add_argument("--checkpoint-interval", type=int, default=25, help="Pause every N epochs to show results and wait for continue/stop (default: 25, 0=no pausing)")
+    parser.add_argument("--focal-loss", action="store_true", default=True, dest="focal_loss", help="Use Focal Loss (default: enabled)")
+    parser.add_argument("--no-focal-loss", action="store_false", dest="focal_loss", help="Disable Focal Loss, use plain CrossEntropy")
+    parser.add_argument("--focal-gamma", type=float, default=2.0, help="Focal loss gamma (default: 2.0, higher = more focus on hard examples)")
+    parser.add_argument("--class-weight-cap", type=float, default=10.0, dest="class_weight_cap", help="Max class weight multiplier (default: 10.0)")
 
     args = parser.parse_args()
 
@@ -553,7 +559,9 @@ Examples:
 
         model, engineer, feature_columns, history = train_model(
             data_path, device, args.epochs, args.batch_size, args.lr, args.checkpoint_interval,
-            warmup_epochs=args.warmup_epochs, min_lr=args.min_lr
+            warmup_epochs=args.warmup_epochs, min_lr=args.min_lr,
+            focal_loss=args.focal_loss, focal_gamma=args.focal_gamma,
+            class_weight_cap=args.class_weight_cap
         )
 
         print()

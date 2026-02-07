@@ -1954,11 +1954,15 @@ class MultiHeadTrainer:
             
             # Logging
             if not self.gui_mode:
+                short_acc = val_metrics.get('acc_short', 0)
+                hold_acc = val_metrics.get('acc_hold', 0)
+                long_acc = val_metrics.get('acc_long', 0)
                 logger.info(
                     f"Epoch {epoch+1}/{epochs} - "
                     f"Train: {train_metrics['total']:.4f} (acc: {train_metrics['accuracy']:.3f}) - "
                     f"Val: {val_metrics['total']:.4f} (acc: {val_metrics['accuracy']:.3f}) - "
-                    f"LR: {epoch_lr:.2e}"
+                    f"LR: {epoch_lr:.2e} - "
+                    f"S:{short_acc:.0%} H:{hold_acc:.0%} L:{long_acc:.0%}"
                 )
             
             # Early stopping check - uses val_loss ONLY (not monitoring sweep expectancy)
