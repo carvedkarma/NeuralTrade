@@ -1,0 +1,123 @@
+GOAL:
+Increase trade frequency to ~5–6 trades/day WITHOUT lowering quality by adding ONE exogenous information layer: FUNDING + POSITIONING CONTEXT.
+Keep the existing ENTER Quality model intact. Do NOT loosen thresholds or gates.
+
+This task adds funding-rate-based features and retrains the existing ENTER model to create more high-confidence p_enter opportunities.
+
+================================================================================
+SCOPE (STRICT):
+- DO NOT change labeling logic (ENTER, EXP_WIN, triple barrier).
+- DO NOT change model architecture or loss.
+- DO NOT lower p_enter thresholds.
+- DO NOT add new heads.
+- ONLY add funding / positioning features and integrate cleanly.
+- Preserve leakage safety and feature versioning.
+
+================================================================================
+1) DATA INGESTION — FUNDING & POSITIONING
+================================================================================
+
+Add a new data fetch module:
+- Source: Binance Futures (or Bybit if already available)
+- Granularity: 8h funding intervals
+- Required fields:
+  - funding_rate
+  - funding_time
+
+Optional (only if easy):
+  - open_interest
+  - open_interest_change
+
+IMPORTANT:
+- Align funding timestamps strictly BACKWARD to 15m candles.
+- For a 15m candle at time t, use the most recent funding event with timestamp <= t.
+- NO forward fill beyond last known funding.
+
+================================================================================
+2) FEATURE ENGINEERING — FUNDING FEATURES
+================================================================================
+
+From funding data, compute and add these features:
+
+Mandatory:
+- funding_rate
+- funding_rate_delta_8h  (current - previous)
+- funding_rate_zscore_30d  (rolling z-score)
+
+Optional (if OI available):
+- open_interest_delta_1h
+- open_interest_zscore_7d
+
+Guidelines:
+- Normalize features (z-score or robust scaling).
+- Clip extreme values (±5).
+- All funding features must be computable using ONLY past data.
+
+================================================================================
+3) PIPELINE INTEGRATION
+================================================================================
+
+In compute_all_features():
+
+- Merge funding features into the existing 57-feature matrix.
+- Final feature count should be ~60–65.
+- Ensure merge_asof uses backward direction.
+- Log 10 random rows after merge to verify correct alignment.
+
+Bump feature version to:
+- v3.2.0_enter_quality_stf47_htf10_funding
+
+================================================================================
+4) TRAINING — KEEP MODEL IDENTICAL
+================================================================================
+
+- Retrain the SAME EnterQualityMLP.
+- SAME loss (BCEWithLogits + pos_weight).
+- SAME gates (HTF alignment, slope, range_pos).
+- SAME sweep logic (fixed + percentile).
+- SAME early stopping rules.
+
+Only difference: model now sees funding features.
+
+================================================================================
+5) EVALUATION — WHAT TO MEASURE
+================================================================================
+
+During sweeps (every 5 epochs), log:
+
+- p_enter distribution percentiles (50 / 75 / 90 / 95)
+- Trade count per percentile bucket
+- Expectancy, PF, Median R
+- TP / SL / EXP breakdown
+
+Explicitly compare:
+- STF+HTF model vs STF+HTF+Funding model
+
+================================================================================
+6) SUCCESS CRITERIA
+================================================================================
+
+This task is successful if ANY of the following occur on OOS walk-forward:
+
+- Top 20–25% percentile produces PF ≥ 1.05
+- Trade count increases toward ~5–6/day without PF collapse
+- p_enter right tail becomes fatter (more values > 0.55)
+
+If none occur, stop and report results honestly.
+
+================================================================================
+7) SAFETY & VERSIONING
+================================================================================
+
+- Save feature list + version in checkpoints.
+- In inference, HARD FAIL if feature version mismatches.
+- Do not silently degrade to candle-only mode.
+
+================================================================================
+DELIVERABLES:
+- Funding data loader
+- Funding feature engineering
+- Integrated feature pipeline
+- Retrained ENTER Quality model
+- Sweep comparison logs (before vs after funding)
+- Clear summary: did funding increase high-quality trade frequency or not?

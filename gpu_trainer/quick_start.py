@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BTC Futures GPU Trainer - Quick Start (v3.1.0 ENTER QUALITY)
+BTC Futures GPU Trainer - Quick Start (v3.2.0 ENTER QUALITY + Funding)
 =============================================================
 One-script setup: Downloads data from your Replit dashboard,
 trains the ENTER QUALITY model on your GPU, and pushes predictions back.
@@ -30,7 +30,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("QuickStart")
 
-FEATURE_VERSION = "v3.1.0_enter_quality_stf47_htf10"
+FEATURE_VERSION = "v3.2.0_enter_quality_stf47_htf10_funding3"
+
+FUNDING_FEATURE_NAMES = ["funding_rate", "funding_rate_delta_8h", "funding_rate_zscore_30d"]
+FUNDING_FEATURE_COUNT = len(FUNDING_FEATURE_NAMES)
 
 
 def check_gpu():
@@ -106,6 +109,163 @@ def download_data(replit_url: str, data_dir: Path, force_fresh: bool = False):
     return parquet_path
 
 
+def fetch_funding_rates(candle_df, data_dir: Path):
+    """Fetch historical funding rates from Binance Futures API, paginating to cover full candle range."""
+    import requests
+    import pandas as pd
+
+    cache_path = data_dir / "funding_rates.parquet"
+
+    candle_start_ms = int(candle_df['timestamp'].min())
+    candle_end_ms = int(candle_df['timestamp'].max())
+
+    if cache_path.exists():
+        existing = pd.read_parquet(cache_path)
+        if len(existing) > 0:
+            cached_start = existing['timestamp'].min()
+            cached_end = existing['timestamp'].max()
+            if cached_start <= candle_start_ms and cached_end >= candle_end_ms - 8 * 3600 * 1000:
+                log.info(f"Using cached funding rates: {len(existing)} records")
+                return existing
+
+    log.info("Fetching historical funding rates from Binance Futures...")
+    url = "https://fapi.binance.com/fapi/v1/fundingRate"
+    all_records = []
+    current_start = candle_start_ms
+    page = 0
+
+    while current_start < candle_end_ms:
+        params = {
+            "symbol": "BTCUSDT",
+            "startTime": current_start,
+            "endTime": candle_end_ms,
+            "limit": 1000,
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=30)
+            if resp.status_code == 429:
+                import time as _time
+                _time.sleep(2)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            log.warning(f"Funding rate fetch error (page {page}): {e}")
+            break
+
+        if not data:
+            break
+
+        for item in data:
+            all_records.append({
+                "timestamp": int(item["fundingTime"]),
+                "funding_rate": float(item["fundingRate"]),
+            })
+
+        last_ts = int(data[-1]["fundingTime"])
+        if last_ts <= current_start:
+            break
+        current_start = last_ts + 1
+        page += 1
+
+        if page % 5 == 0:
+            log.info(f"  Fetched {len(all_records)} funding records so far...")
+        import time as _time
+        _time.sleep(0.1)
+
+    if not all_records:
+        log.warning("No funding data fetched - funding features will be zero")
+        return pd.DataFrame(columns=["timestamp", "funding_rate"])
+
+    funding_df = pd.DataFrame(all_records)
+    funding_df = funding_df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
+    funding_start = funding_df['timestamp'].min()
+    funding_end = funding_df['timestamp'].max()
+    expected_records = (candle_end_ms - candle_start_ms) / (8 * 3600 * 1000)
+    coverage_pct = len(funding_df) / max(expected_records, 1) * 100
+    log.info(f"Funding coverage: {coverage_pct:.0f}% ({len(funding_df)} records for ~{expected_records:.0f} expected 8h intervals)")
+    if coverage_pct < 50:
+        log.warning(f"Low funding coverage ({coverage_pct:.0f}%) - some candles will have zero funding features")
+
+    funding_df.to_parquet(cache_path, index=False)
+    log.info(f"Fetched {len(funding_df)} funding rate records (cached to {cache_path})")
+
+    return funding_df
+
+
+def compute_funding_features(candle_df, funding_df):
+    """Compute funding features aligned to 15m candle timestamps via merge_asof backward.
+
+    Returns DataFrame with 3 columns: funding_rate, funding_rate_delta_8h, funding_rate_zscore_30d
+    All values are z-scored/normalized and clipped to ±5.
+    """
+    import pandas as pd
+    import numpy as np
+
+    n = len(candle_df)
+
+    if funding_df.empty:
+        log.warning("Empty funding data - returning zero features")
+        return pd.DataFrame(
+            np.zeros((n, FUNDING_FEATURE_COUNT)),
+            columns=FUNDING_FEATURE_NAMES,
+            index=candle_df.index,
+        )
+
+    candle_ts = candle_df[['timestamp']].copy()
+    candle_ts = candle_ts.reset_index(drop=True)
+    candle_ts['_candle_idx'] = candle_ts.index
+
+    funding_sorted = funding_df[['timestamp', 'funding_rate']].copy()
+    funding_sorted = funding_sorted.sort_values('timestamp').reset_index(drop=True)
+
+    funding_sorted['funding_rate_prev'] = funding_sorted['funding_rate'].shift(1)
+    funding_sorted['funding_rate_delta_8h'] = funding_sorted['funding_rate'] - funding_sorted['funding_rate_prev']
+
+    rolling_window = 90
+    rolling_mean = funding_sorted['funding_rate'].rolling(rolling_window, min_periods=1).mean()
+    rolling_std = funding_sorted['funding_rate'].rolling(rolling_window, min_periods=1).std().clip(lower=1e-8)
+    funding_sorted['funding_rate_zscore_30d'] = (funding_sorted['funding_rate'] - rolling_mean) / rolling_std
+
+    funding_sorted = funding_sorted.fillna(0)
+
+    merged = pd.merge_asof(
+        candle_ts.sort_values('timestamp'),
+        funding_sorted[['timestamp', 'funding_rate', 'funding_rate_delta_8h', 'funding_rate_zscore_30d']],
+        on='timestamp',
+        direction='backward',
+    )
+
+    merged = merged.sort_values('_candle_idx').reset_index(drop=True)
+
+    result = pd.DataFrame(index=candle_df.index)
+    result['funding_rate'] = merged['funding_rate'].values * 100
+    result['funding_rate_delta_8h'] = merged['funding_rate_delta_8h'].values * 100
+    result['funding_rate_zscore_30d'] = merged['funding_rate_zscore_30d'].values
+
+    result = result.fillna(0)
+    result = result.clip(lower=-5, upper=5)
+
+    n_nonzero = (result.abs() > 1e-8).any(axis=1).sum()
+    log.info(f"Funding features: {n_nonzero}/{n} rows with non-zero funding data")
+
+    import random
+    sample_indices = sorted(random.sample(range(min(100, n), n), min(10, max(1, n - 100))))
+    log.info("FUNDING ALIGNMENT CHECK (10 random rows):")
+    log.info(f"{'Row':>8} | {'Candle TS':>15} | {'FR':>10} | {'Delta8h':>10} | {'Z30d':>10}")
+    log.info("-" * 65)
+    for idx in sample_indices:
+        ts = candle_df.iloc[idx].get('timestamp', 0)
+        fr = result.iloc[idx]['funding_rate']
+        delta = result.iloc[idx]['funding_rate_delta_8h']
+        zscore = result.iloc[idx]['funding_rate_zscore_30d']
+        log.info(f"{idx:>8} | {int(ts):>15} | {fr:>+10.4f} | {delta:>+10.4f} | {zscore:>+10.4f}")
+    log.info("-" * 65)
+
+    return result
+
+
 def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float,
                       checkpoint_interval: int = 25, warmup_epochs: int = 5, min_lr: float = None,
                       tp_mult: float = 2.0, sl_mult: float = 1.5, horizon: int = 24, slope_eps: float = 0.05,
@@ -130,7 +290,15 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     engineer = FeatureEngineer()
     features_df = engineer.compute_all_features(df)
     features_df = features_df.fillna(0)
-    log.info(f"Computed {len(features_df.columns)} features ({engineer.STF_FEATURE_COUNT} STF + {engineer.HTF_FEATURE_COUNT} HTF)")
+    log.info(f"Computed {len(features_df.columns)} base features ({engineer.STF_FEATURE_COUNT} STF + {engineer.HTF_FEATURE_COUNT} HTF)")
+
+    data_dir = Path("data_cache")
+    funding_df = fetch_funding_rates(df, data_dir)
+    funding_features = compute_funding_features(df, funding_df)
+    features_df = pd.concat([features_df, funding_features], axis=1)
+    features_df = features_df.fillna(0)
+    total_features = engineer.STF_FEATURE_COUNT + engineer.HTF_FEATURE_COUNT + FUNDING_FEATURE_COUNT
+    log.info(f"Total features with funding: {len(features_df.columns)} ({engineer.STF_FEATURE_COUNT} STF + {engineer.HTF_FEATURE_COUNT} HTF + {FUNDING_FEATURE_COUNT} funding)")
 
     htf_cols = [c for c in features_df.columns if c.startswith('h1_') or c.startswith('h4_')]
     htf_features_df = features_df[htf_cols].copy()
@@ -628,13 +796,20 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
     from data.pipeline import FeatureEngineer
     feat_engineer = FeatureEngineer()
 
-    if len(feature_columns) != FeatureEngineer.TOTAL_FEATURE_COUNT:
+    expected_count = FeatureEngineer.TOTAL_FEATURE_COUNT + FUNDING_FEATURE_COUNT
+    if len(feature_columns) != expected_count:
         raise RuntimeError(
-            f"FATAL: feature_columns has {len(feature_columns)} cols, expected {FeatureEngineer.TOTAL_FEATURE_COUNT}. "
+            f"FATAL: feature_columns has {len(feature_columns)} cols, expected {expected_count}. "
             f"Checkpoint mismatch - retrain the model."
         )
 
     features_df = feat_engineer.compute_all_features(df)
+    features_df = features_df.fillna(0)
+
+    data_dir = Path("data_cache")
+    funding_df = fetch_funding_rates(df, data_dir)
+    funding_features = compute_funding_features(df, funding_df)
+    features_df = pd.concat([features_df, funding_features], axis=1)
     features_df = features_df.fillna(0)
 
     missing = set(feature_columns) - set(features_df.columns)
@@ -758,7 +933,7 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
         "risk_reward_ratio": round(rr, 2),
         "position_size_pct": round(position_size, 1),
         "current_price": round(current_price, 2),
-        "model_name": "enter_quality_v3.1",
+        "model_name": "enter_quality_v3.2_funding",
         "is_multihead": True,
         "urgency": "high" if p_enter > 0.7 and should_trade else ("medium" if should_trade else "low"),
         "suggested_order_type": "limit",
@@ -808,7 +983,7 @@ def push_prediction(replit_url: str, prediction: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="BTC Futures GPU Trainer - ENTER QUALITY Model (v3.1.0)",
+        description="BTC Futures GPU Trainer - ENTER QUALITY Model (v3.2.0 + Funding)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -836,7 +1011,7 @@ Examples:
 
     print()
     print("=" * 60)
-    print("  BTC FUTURES - ENTER QUALITY MODEL v3.1.0")
+    print("  BTC FUTURES - ENTER QUALITY MODEL v3.2.0 + FUNDING")
     print("=" * 60)
     print()
 
@@ -895,7 +1070,7 @@ Examples:
         from models.simple_mlp import EnhancedMultiHeadMLP, EnhancedMultiHeadMLP_Config
         cfg = checkpoint.get('model_config', {})
         mlp_config = EnhancedMultiHeadMLP_Config(
-            input_dim=cfg.get('input_dim', 57),
+            input_dim=cfg.get('input_dim', 60),
             hidden_dims=cfg.get('hidden_dims', [512, 256, 128, 64]),
             num_classes=3,
             dropout=0.3,

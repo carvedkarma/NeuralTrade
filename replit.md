@@ -15,7 +15,7 @@ The frontend is built with React and TypeScript using Vite, featuring a modern U
 The backend uses Node.js with Express.js (TypeScript, ESM) and follows a RESTful API pattern. AI integration is managed via OpenAI. Market data is sourced primarily from Binance Vision API, with fallbacks to CoinGecko and CryptoCompare, augmented by a Replit-hosted data proxy. Bi-directional communication with a local GPU trainer is established via dedicated API endpoints.
 
 ### Feature Specifications
-The system uses an ENTER QUALITY model (v3.1.0) that predicts WHETHER to enter a trend-following trade (binary 0/1), not WHICH direction. Direction comes from HTF (1H/4H) trend alignment. GPU-accelerated training uses the stable EnhancedMultiHeadMLP architecture with [512, 256, 128, 64] residual blocks and the enter_head (binary classifier with BCEWithLogitsLoss). The model uses 57 features (47 STF + 10 HTF) on 15m timeframe with 24-bar horizon (6 hours). Inference applies p_enter threshold (0.55) plus HTF alignment gates (h1_trend == h4_trend, slope > 0.05, range position check) to produce final LONG/SHORT/HOLD signals. Model management includes walk-forward weight saving, feature version locking (`v3.1.0_enter_quality_stf47_htf10`), and prediction drift monitoring.
+The system uses an ENTER QUALITY model (v3.2.0) that predicts WHETHER to enter a trend-following trade (binary 0/1), not WHICH direction. Direction comes from HTF (1H/4H) trend alignment. GPU-accelerated training uses the stable EnhancedMultiHeadMLP architecture with [512, 256, 128, 64] residual blocks and the enter_head (binary classifier with BCEWithLogitsLoss). The model uses 60 features (47 STF + 10 HTF + 3 Funding) on 15m timeframe with 24-bar horizon (6 hours). Inference applies p_enter threshold (0.55) plus HTF alignment gates (h1_trend == h4_trend, slope > 0.05, range position check) to produce final LONG/SHORT/HOLD signals. Model management includes walk-forward weight saving, feature version locking (`v3.2.0_enter_quality_stf47_htf10_funding3`), and prediction drift monitoring.
 
 ### Training Label Strategy (ENTER QUALITY - v3.1.0)
 HTF-gated Triple Barrier labeling for binary entry quality:
@@ -30,7 +30,7 @@ HTF-gated Triple Barrier labeling for binary entry quality:
 - Primary metric: PR-AUC (Precision-Recall Area Under Curve)
 - Previous approach: 3-class direction model (SHORT/HOLD/LONG) replaced by binary ENTER quality
 
-### Input Features (57 total, v3.0.0)
+### Input Features (60 total, v3.2.0)
 
 **STF features (47, Single-TimeFrame 15m):**
 Base features: returns, log_returns, SMA/EMA/std/return at 5/10/20/50/100 periods, RSI-14/7, MACD/signal/hist, Bollinger Bands (upper/middle/lower/width/position), ATR-14/7, volume SMA/ratio, ADX-14, Stochastic K/D, OBV/OBV-SMA.
@@ -45,7 +45,13 @@ For each HTF (1H and 4H):
 - `{h1,h4}_atr_ratio` - Ratio of 15m ATR to HTF ATR: `atr_15m / (atr_htf + 1e-9)`, measures relative volatility
 - `{h1,h4}_range_pos` - Price position within HTF range: `(close - htf_low) / (htf_high - htf_low)`, clipped [0,1]
 
-Feature versioning: `VERSION = "3.0.0-stf47-htf10"`. Saved in checkpoint metadata. Inference verifies version match and **hard-fails** on mismatch (sys.exit or RuntimeError). Column order is locked at training time and enforced via `reindex()` at inference. Missing or extra columns also trigger hard failure.
+**Funding features (3, Positioning Context):**
+Fetched from Binance Futures `fapi/v1/fundingRate` (8h intervals), paginated to cover full training range, cached to `data_cache/funding_rates.parquet`. Aligned to 15m candles via `merge_asof(direction="backward")` — each candle gets the most recent funding event with timestamp <= candle time.
+- `funding_rate` - Current funding rate × 100 (percentage scale)
+- `funding_rate_delta_8h` - Change from previous funding period × 100 (momentum)
+- `funding_rate_zscore_30d` - Rolling z-score over 90 funding periods (~30 days), measures deviation from recent norm
+
+Feature versioning: `VERSION = "v3.2.0_enter_quality_stf47_htf10_funding3"`. Saved in checkpoint metadata. Inference verifies version match and **hard-fails** on mismatch (sys.exit or RuntimeError). Column order is locked at training time and enforced via `reindex()` at inference. Missing or extra columns also trigger hard failure.
 
 ### GPU Training CLI Reference
 Current stable model: `enhanced_mlp` (EnhancedMultiHeadMLP)
