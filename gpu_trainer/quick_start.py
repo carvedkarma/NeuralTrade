@@ -108,7 +108,8 @@ def download_data(replit_url: str, data_dir: Path, force_fresh: bool = False):
 
 def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float,
                       checkpoint_interval: int = 25, warmup_epochs: int = 5, min_lr: float = None,
-                      tp_mult: float = 2.0, sl_mult: float = 1.5, horizon: int = 24, slope_eps: float = 0.05):
+                      tp_mult: float = 2.0, sl_mult: float = 1.5, horizon: int = 24, slope_eps: float = 0.05,
+                      r_min_expiry: float = 0.5):
     import torch
     import torch.nn as nn
     import numpy as np
@@ -141,6 +142,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         horizon_periods=horizon,
         tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
         slope_eps=slope_eps,
+        r_min_expiry=r_min_expiry,
     )
 
     enter_labels = label_df['enter_label'].values.astype(np.float32)
@@ -397,7 +399,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                 'n_features': input_dim,
                 'feature_version': FEATURE_VERSION,
                 'model_type': 'enter_quality',
-                'barrier_config': {'tp_mult': tp_mult, 'sl_mult': sl_mult, 'horizon': horizon, 'slope_eps': slope_eps},
+                'barrier_config': {'tp_mult': tp_mult, 'sl_mult': sl_mult, 'horizon': horizon, 'slope_eps': slope_eps, 'r_min_expiry': r_min_expiry},
                 'best_prauc': best_val_prauc,
                 'trained_at': datetime.now().isoformat(),
             }, checkpoint_dir / "best_enter_prauc.pt")
@@ -424,7 +426,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                 'n_features': input_dim,
                 'feature_version': FEATURE_VERSION,
                 'model_type': 'enter_quality',
-                'barrier_config': {'tp_mult': tp_mult, 'sl_mult': sl_mult, 'horizon': horizon, 'slope_eps': slope_eps},
+                'barrier_config': {'tp_mult': tp_mult, 'sl_mult': sl_mult, 'horizon': horizon, 'slope_eps': slope_eps, 'r_min_expiry': r_min_expiry},
                 'best_val_loss': best_val_loss,
                 'trained_at': datetime.now().isoformat(),
             }, checkpoint_dir / "best_enter_loss.pt")
@@ -468,90 +470,151 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     return model, engineer, list(features_df.columns), history
 
 
-def _run_enter_trading_sweep(probs, targets, sides, returns, epoch, tp_mult, sl_mult):
+def _simulate_trades(probs, sides, returns, threshold, tp_mult, sl_mult, cooldown, fixed_cost):
+    """Core trade simulation used by both fixed-threshold and percentile sweeps.
+    
+    Uses identical barrier config (tp_mult, sl_mult) as labeling to ensure parity.
+    Returns array of per-trade PnL and R-multiples.
+    """
     import numpy as np
-    THRESHOLDS = [0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75]
-    COOLDOWN = 4
-    FIXED_COST = 0.0009
-    MIN_TRADES = 30
-
+    
     rolling_window = 20
     data_atr = np.full_like(returns, max(np.std(returns), 1e-6))
     for i in range(rolling_window, len(returns)):
         data_atr[i] = max(np.std(returns[i - rolling_window:i]), 1e-6)
+    
+    trade_signal = (probs >= threshold) & (sides != 0)
+    
+    final_trades = np.zeros_like(trade_signal, dtype=bool)
+    last_trade = -cooldown - 1
+    for i in range(len(trade_signal)):
+        if trade_signal[i] and (i - last_trade) > cooldown:
+            final_trades[i] = True
+            last_trade = i
+    
+    trade_pnl = []
+    trade_r = []
+    trade_outcomes = []
+    
+    for i in range(len(returns)):
+        if not final_trades[i]:
+            continue
+        atr = max(data_atr[i], 1e-6)
+        sl_dist = sl_mult * atr
+        tp_dist = tp_mult * atr
+        actual_ret = returns[i]
+        side = sides[i]
+        
+        if side > 0:
+            directed_ret = actual_ret
+        else:
+            directed_ret = -actual_ret
+        
+        if directed_ret <= -sl_dist:
+            pnl = -sl_dist - fixed_cost
+            outcome = "SL"
+        elif directed_ret >= tp_dist:
+            pnl = tp_dist - fixed_cost
+            outcome = "TP"
+        else:
+            pnl = directed_ret - fixed_cost
+            outcome = "EXP"
+        
+        r_multiple = pnl / sl_dist if sl_dist > 0 else 0.0
+        trade_pnl.append(pnl)
+        trade_r.append(r_multiple)
+        trade_outcomes.append(outcome)
+    
+    return np.array(trade_pnl), np.array(trade_r), trade_outcomes
 
-    best_metrics = None
+
+def _compute_sweep_metrics(trade_pnl, trade_r, trade_outcomes):
+    """Compute full metrics including realized R distribution."""
+    import numpy as np
+    
+    n_trades = len(trade_pnl)
+    if n_trades == 0:
+        return {
+            'trades': 0, 'expect': 0, 'winrate': 0, 'sharpe': 0, 'pf': 0,
+            'avg_win_r': 0, 'avg_loss_r': 0, 'median_r': 0,
+            'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0,
+        }
+    
+    expect = float(np.mean(trade_pnl))
+    wins = (trade_pnl > 0).sum()
+    winrate = wins / n_trades
+    gross_profit = trade_pnl[trade_pnl > 0].sum()
+    gross_loss = abs(trade_pnl[trade_pnl < 0].sum())
+    pf = float(gross_profit / gross_loss) if gross_loss > 0 else 0.0
+    sharpe = float(np.mean(trade_pnl) / np.std(trade_pnl) * np.sqrt(252 * 96)) if np.std(trade_pnl) > 0 and n_trades > 1 else 0.0
+    
+    win_r = trade_r[trade_r > 0]
+    loss_r = trade_r[trade_r < 0]
+    avg_win_r = float(np.mean(win_r)) if len(win_r) > 0 else 0.0
+    avg_loss_r = float(np.mean(loss_r)) if len(loss_r) > 0 else 0.0
+    median_r = float(np.median(trade_r))
+    
+    outcomes_arr = np.array(trade_outcomes)
+    pct_tp = (outcomes_arr == "TP").sum() / n_trades
+    pct_sl = (outcomes_arr == "SL").sum() / n_trades
+    pct_exp = (outcomes_arr == "EXP").sum() / n_trades
+    
+    return {
+        'trades': n_trades, 'expect': expect, 'winrate': winrate, 'sharpe': sharpe, 'pf': pf,
+        'avg_win_r': avg_win_r, 'avg_loss_r': avg_loss_r, 'median_r': median_r,
+        'pct_tp': pct_tp, 'pct_sl': pct_sl, 'pct_exp': pct_exp,
+    }
+
+
+def _run_enter_trading_sweep(probs, targets, sides, returns, epoch, tp_mult, sl_mult):
+    import numpy as np
+    THRESHOLDS = [0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75]
+    PERCENTILES = [90, 85, 80, 75, 70]
+    COOLDOWN = 4
+    FIXED_COST = 0.0009
+    MIN_TRADES = 30
+
     best_score = float('-inf')
-    best_thresh = 0.5
+    best_label = ""
     sweep_results = []
 
     for thresh in THRESHOLDS:
-        trade_signal = (probs >= thresh) & (sides != 0)
-
-        final_trades = np.zeros_like(trade_signal, dtype=bool)
-        last_trade = -COOLDOWN - 1
-        for i in range(len(trade_signal)):
-            if trade_signal[i] and (i - last_trade) > COOLDOWN:
-                final_trades[i] = True
-                last_trade = i
-
-        trade_pnl = []
-        for i in range(len(returns)):
-            if not final_trades[i]:
-                continue
-            atr = max(data_atr[i], 1e-6)
-            sl_dist = sl_mult * atr
-            tp_dist = tp_mult * atr
-            actual_ret = returns[i]
-            side = sides[i]
-
-            if side > 0:
-                if actual_ret <= -sl_dist:
-                    pnl = -sl_dist - FIXED_COST
-                elif actual_ret >= tp_dist:
-                    pnl = tp_dist - FIXED_COST
-                else:
-                    pnl = actual_ret - FIXED_COST
-            else:
-                if actual_ret >= sl_dist:
-                    pnl = -sl_dist - FIXED_COST
-                elif actual_ret <= -tp_dist:
-                    pnl = tp_dist - FIXED_COST
-                else:
-                    pnl = -actual_ret - FIXED_COST
-            trade_pnl.append(pnl)
-
-        trade_pnl = np.array(trade_pnl)
-        n_trades = len(trade_pnl)
-        if n_trades == 0:
-            sweep_results.append({'thresh': thresh, 'trades': 0, 'expect': 0, 'winrate': 0, 'sharpe': 0, 'pf': 0})
-            continue
-
-        expect = float(np.mean(trade_pnl))
-        wins = (trade_pnl > 0).sum()
-        winrate = wins / n_trades
-        gross_profit = trade_pnl[trade_pnl > 0].sum()
-        gross_loss = abs(trade_pnl[trade_pnl < 0].sum())
-        pf = float(gross_profit / gross_loss) if gross_loss > 0 else 0.0
-        sharpe = float(np.mean(trade_pnl) / np.std(trade_pnl) * np.sqrt(252 * 96)) if np.std(trade_pnl) > 0 and n_trades > 1 else 0.0
-
-        m = {'thresh': thresh, 'trades': n_trades, 'expect': expect, 'winrate': winrate, 'sharpe': sharpe, 'pf': pf}
+        trade_pnl, trade_r, outcomes = _simulate_trades(probs, sides, returns, thresh, tp_mult, sl_mult, COOLDOWN, FIXED_COST)
+        m = _compute_sweep_metrics(trade_pnl, trade_r, outcomes)
+        m['label'] = f"{thresh*100:.0f}%"
+        m['thresh'] = thresh
         sweep_results.append(m)
+        if m['trades'] >= MIN_TRADES and m['expect'] > best_score:
+            best_score = m['expect']
+            best_label = m['label']
 
-        if n_trades >= MIN_TRADES and expect > best_score:
-            best_score = expect
-            best_metrics = m
-            best_thresh = thresh
+    active_probs = probs[sides != 0]
+    if len(active_probs) > 0:
+        for pct in PERCENTILES:
+            pct_thresh = float(np.percentile(active_probs, pct))
+            trade_pnl, trade_r, outcomes = _simulate_trades(probs, sides, returns, pct_thresh, tp_mult, sl_mult, COOLDOWN, FIXED_COST)
+            m = _compute_sweep_metrics(trade_pnl, trade_r, outcomes)
+            m['label'] = f"top{100-pct}%"
+            m['thresh'] = pct_thresh
+            sweep_results.append(m)
+            if m['trades'] >= MIN_TRADES and m['expect'] > best_score:
+                best_score = m['expect']
+                best_label = m['label']
 
-    log.info("-" * 70)
-    log.info("ENTER TRADING SWEEP (epoch %d) | cooldown=%d bars | p_enter threshold", epoch, COOLDOWN)
-    log.info("%-8s %6s %8s %7s %7s %8s", "Thresh", "Trades", "Expect", "WinRate", "Sharpe", "PF")
-    log.info("-" * 70)
+    log.info("-" * 90)
+    log.info("ENTER TRADING SWEEP (epoch %d) | cooldown=%d | TP=%.1fx SL=%.1fx ATR", epoch, COOLDOWN, tp_mult, sl_mult)
+    log.info("%-8s %5s %8s %6s %6s %5s | %6s %6s %6s | %4s %4s %4s",
+             "Select", "Trds", "Expect", "WR", "Shrpe", "PF",
+             "WinR", "LosR", "MedR", "%TP", "%SL", "%EX")
+    log.info("-" * 90)
     for m in sweep_results:
-        marker = " << BEST" if m['thresh'] == best_thresh and m['trades'] >= MIN_TRADES and best_score > float('-inf') else ""
-        log.info("%-8.0f%% %5d  %+.4f  %5.1f%%  %+5.2f   %5.2f%s",
-                 m['thresh'] * 100, m['trades'], m['expect'], m['winrate'] * 100, m['sharpe'], m['pf'], marker)
-    log.info("-" * 70)
+        marker = " << BEST" if m['label'] == best_label and m['trades'] >= MIN_TRADES and best_score > float('-inf') else ""
+        log.info("%-8s %5d %+.4f %5.1f%% %+5.2f %5.2f | %+5.2f %+5.2f %+5.2f | %3.0f%% %3.0f%% %3.0f%%%s",
+                 m['label'], m['trades'], m['expect'], m['winrate'] * 100, m['sharpe'], m['pf'],
+                 m['avg_win_r'], m['avg_loss_r'], m['median_r'],
+                 m['pct_tp'] * 100, m['pct_sl'] * 100, m['pct_exp'] * 100,
+                 marker)
+    log.info("-" * 90)
 
 
 def make_enter_prediction(model, engineer, feature_columns, data_path, device):
@@ -767,6 +830,7 @@ Examples:
     parser.add_argument("--sl-mult", type=float, default=1.5, help="SL ATR multiplier (default: 1.5)")
     parser.add_argument("--horizon", type=int, default=24, help="Horizon bars (default: 24)")
     parser.add_argument("--slope-eps", type=float, default=0.05, help="Min slope for trend gate (default: 0.05)")
+    parser.add_argument("--r-min-expiry", type=float, default=0.5, help="Min R-multiple at expiry for ENTER=1 (default: 0.5)")
 
     args = parser.parse_args()
 
@@ -788,6 +852,7 @@ Examples:
             warmup_epochs=args.warmup_epochs, min_lr=args.min_lr,
             tp_mult=args.tp_mult, sl_mult=args.sl_mult,
             horizon=args.horizon, slope_eps=args.slope_eps,
+            r_min_expiry=args.r_min_expiry,
         )
 
         print()

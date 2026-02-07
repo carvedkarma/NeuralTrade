@@ -67,6 +67,7 @@ Quick start training flags:
 - `--sl-mult 1.5` - SL ATR multiplier for triple barrier (default: 1.5)
 - `--horizon 24` - Horizon bars for triple barrier (default: 24)
 - `--slope-eps 0.05` - Minimum slope for HTF trend gate (default: 0.05)
+- `--r-min-expiry 0.5` - Minimum R-multiple at expiry for ENTER=1 (default: 0.5, allows "good but messy" trades)
 
 Training improvements (v3):
 - LR schedule: 5-epoch linear warmup -> cosine annealing to eta_min (lr * 0.05)

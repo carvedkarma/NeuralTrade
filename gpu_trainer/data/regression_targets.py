@@ -277,6 +277,7 @@ class RegressionTargetGenerator:
         sl_atr_mult: float = 1.5,
         horizon_bars: int = 24,
         slope_eps: float = 0.05,
+        r_min_expiry: float = 0.5,
     ) -> pd.DataFrame:
         """
         HTF-gated Triple Barrier labeling for ENTER quality model.
@@ -289,7 +290,9 @@ class RegressionTargetGenerator:
         1. Check HTF trend alignment (1H and 4H agree on direction)
         2. Gate candidates by slope strength and range position
         3. For candidates: run Triple Barrier with direction from HTF
-        4. TP hit first => ENTER=1, else ENTER=0
+        4. TP hit first => ENTER=1
+        5. Expiry with realized R >= r_min_expiry => ENTER=1 (good but messy)
+        6. SL hit or weak expiry => ENTER=0
         
         Args:
             df: OHLCV DataFrame with close/high/low columns
@@ -298,12 +301,14 @@ class RegressionTargetGenerator:
             sl_atr_mult: ATR multiplier for stop loss barrier  
             horizon_bars: Maximum bars to hold before time expiry
             slope_eps: Minimum abs(h1_sma20_slope) to consider trend strong enough
+            r_min_expiry: Minimum realized R-multiple at expiry to count as ENTER=1 (default 0.5)
             
         Returns:
             DataFrame with columns:
             - enter_label: 0 or 1
             - side_hint: +1 (LONG), -1 (SHORT), or 0 (no candidate)
-            - outcome: "TP", "SL", "EXP", "NO_CANDIDATE"
+            - outcome: "TP", "SL", "EXP_WIN", "EXP_LOSS", "NO_CANDIDATE"
+            - realized_r: realized R-multiple at exit (NaN for non-candidates)
             - tp_price: take profit price level
             - sl_price: stop loss price level
         """
@@ -323,13 +328,15 @@ class RegressionTargetGenerator:
         enter_labels = np.zeros(n, dtype=np.int64)
         side_hints = np.zeros(n, dtype=np.int64)
         outcomes = np.full(n, "NO_CANDIDATE", dtype=object)
+        realized_r = np.full(n, np.nan)
         tp_prices = np.full(n, np.nan)
         sl_prices = np.full(n, np.nan)
         
         n_candidates = 0
         n_tp = 0
         n_sl = 0
-        n_exp = 0
+        n_exp_win = 0
+        n_exp_loss = 0
         
         for i in range(n - horizon_bars):
             if h1_trend[i] == 0 or h4_trend[i] == 0:
@@ -353,6 +360,8 @@ class RegressionTargetGenerator:
             a = atr_vals[i]
             if np.isnan(a) or a <= 0:
                 a = entry_price * 0.005
+            
+            sl_dist_r = sl_atr_mult * a
             
             if side > 0:  # LONG
                 tp = entry_price + tp_atr_mult * a
@@ -380,61 +389,130 @@ class RegressionTargetGenerator:
                 if tp_hit and sl_hit:
                     if side > 0:
                         tp_dist = highs[idx] - entry_price
-                        sl_dist = entry_price - lows[idx]
+                        sl_dist_actual = entry_price - lows[idx]
                     else:
                         tp_dist = entry_price - lows[idx]
-                        sl_dist = highs[idx] - entry_price
+                        sl_dist_actual = highs[idx] - entry_price
                     
-                    if tp_dist >= sl_dist:
+                    if tp_dist >= sl_dist_actual:
                         enter_labels[i] = 1
                         outcomes[i] = "TP"
+                        realized_r[i] = tp_atr_mult / sl_atr_mult
                         n_tp += 1
                     else:
                         enter_labels[i] = 0
                         outcomes[i] = "SL"
+                        realized_r[i] = -1.0
                         n_sl += 1
                     hit = True
                     break
                 elif tp_hit:
                     enter_labels[i] = 1
                     outcomes[i] = "TP"
+                    realized_r[i] = tp_atr_mult / sl_atr_mult
                     n_tp += 1
                     hit = True
                     break
                 elif sl_hit:
                     enter_labels[i] = 0
                     outcomes[i] = "SL"
+                    realized_r[i] = -1.0
                     n_sl += 1
                     hit = True
                     break
             
             if not hit:
-                enter_labels[i] = 0
-                outcomes[i] = "EXP"
-                n_exp += 1
+                exit_price = prices[min(i + horizon_bars, n - 1)]
+                if side > 0:
+                    pnl = exit_price - entry_price
+                else:
+                    pnl = entry_price - exit_price
+                r_at_expiry = pnl / sl_dist_r if sl_dist_r > 0 else 0.0
+                realized_r[i] = r_at_expiry
+                
+                if r_at_expiry >= r_min_expiry:
+                    enter_labels[i] = 1
+                    outcomes[i] = "EXP_WIN"
+                    n_exp_win += 1
+                else:
+                    enter_labels[i] = 0
+                    outcomes[i] = "EXP_LOSS"
+                    n_exp_loss += 1
         
         logger.info("=" * 70)
-        logger.info("ENTER QUALITY LABELING: HTF-Gated Triple Barrier")
+        logger.info("ENTER QUALITY LABELING: HTF-Gated Triple Barrier + R_min Expiry")
         logger.info("=" * 70)
-        logger.info(f"Config: horizon={horizon_bars}, TP={tp_atr_mult}x ATR, SL={sl_atr_mult}x ATR, slope_eps={slope_eps}")
+        logger.info(f"Config: horizon={horizon_bars}, TP={tp_atr_mult}x ATR, SL={sl_atr_mult}x ATR, slope_eps={slope_eps}, r_min_expiry={r_min_expiry}")
         logger.info(f"Total bars: {n:,}")
         logger.info(f"Candidates (trend-aligned): {n_candidates:,} ({100*n_candidates/max(n,1):.1f}%)")
-        logger.info(f"  TP hits (ENTER=1): {n_tp:,} ({100*n_tp/max(n_candidates,1):.1f}% of candidates)")
-        logger.info(f"  SL hits (ENTER=0): {n_sl:,} ({100*n_sl/max(n_candidates,1):.1f}% of candidates)")
-        logger.info(f"  Expiry  (ENTER=0): {n_exp:,} ({100*n_exp/max(n_candidates,1):.1f}% of candidates)")
+        logger.info(f"  TP hits    (ENTER=1): {n_tp:,} ({100*n_tp/max(n_candidates,1):.1f}% of candidates)")
+        logger.info(f"  Expiry win (ENTER=1): {n_exp_win:,} ({100*n_exp_win/max(n_candidates,1):.1f}% of candidates, R>={r_min_expiry})")
+        logger.info(f"  SL hits    (ENTER=0): {n_sl:,} ({100*n_sl/max(n_candidates,1):.1f}% of candidates)")
+        logger.info(f"  Expiry loss(ENTER=0): {n_exp_loss:,} ({100*n_exp_loss/max(n_candidates,1):.1f}% of candidates)")
         logger.info(f"Non-candidates (ENTER=0): {n - n_candidates:,}")
         logger.info(f"ENTER=1 total: {enter_labels.sum():,} ({100*enter_labels.sum()/max(n,1):.1f}% of all bars)")
+        
+        valid_r = realized_r[~np.isnan(realized_r)]
+        if len(valid_r) > 0:
+            logger.info(f"Realized R distribution: mean={np.mean(valid_r):.2f}, median={np.median(valid_r):.2f}, "
+                       f"win_r={np.mean(valid_r[valid_r>0]):.2f}, loss_r={np.mean(valid_r[valid_r<0]):.2f}")
         logger.info("=" * 70)
+        
+        self._debug_htf_timestamps(df, htf_features, n_samples=10)
         
         result = pd.DataFrame({
             'enter_label': enter_labels,
             'side_hint': side_hints,
             'outcome': outcomes,
+            'realized_r': realized_r,
             'tp_price': tp_prices,
             'sl_price': sl_prices,
         }, index=df.index)
         
         return result
+    
+    def _debug_htf_timestamps(self, df: pd.DataFrame, htf_features: pd.DataFrame, n_samples: int = 10):
+        """Debug print: verify HTF features at candidate bars use only past data.
+        
+        For n_samples random candidate rows, print the 15m timestamp and the HTF
+        feature values to confirm they come from completed bars before time t.
+        """
+        import random
+        
+        candidates = []
+        h1_trend = htf_features.get('h1_trend_sign')
+        h4_trend = htf_features.get('h4_trend_sign')
+        if h1_trend is None or h4_trend is None:
+            return
+        
+        for i in range(len(df)):
+            if h1_trend.iloc[i] != 0 and h4_trend.iloc[i] != 0 and h1_trend.iloc[i] == h4_trend.iloc[i]:
+                candidates.append(i)
+        
+        if len(candidates) < n_samples:
+            return
+        
+        sample_indices = sorted(random.sample(candidates, min(n_samples, len(candidates))))
+        
+        logger.info("-" * 70)
+        logger.info("HTF TIMESTAMP AUDIT (%d random candidates)", len(sample_indices))
+        logger.info("%-22s | %6s %6s | %8s %8s | %s", "15m_time", "h1_trn", "h4_trn", "h1_slope", "h1_rpos", "status")
+        logger.info("-" * 70)
+        
+        has_ts = hasattr(df.index, 'tz') or df.index.dtype.kind == 'M'
+        
+        for idx in sample_indices:
+            t = df.index[idx] if has_ts else f"row_{idx}"
+            h1t = float(h1_trend.iloc[idx])
+            h4t = float(h4_trend.iloc[idx])
+            h1s = float(htf_features['h1_sma20_slope'].iloc[idx]) if 'h1_sma20_slope' in htf_features.columns else 0
+            h1r = float(htf_features['h1_range_pos'].iloc[idx]) if 'h1_range_pos' in htf_features.columns else 0.5
+            
+            status = "OK (aligned)" if h1t == h4t else "MISMATCH"
+            logger.info("%-22s | %+5.0f  %+5.0f  | %+7.3f  %7.3f  | %s",
+                       str(t)[:22], h1t, h4t, h1s, h1r, status)
+        
+        logger.info("-" * 70)
 
     def generate_multihead_targets(
         self, 
@@ -1247,6 +1325,7 @@ def generate_enter_quality_targets(
     tp_atr_mult: float = 2.0,
     sl_atr_mult: float = 1.5,
     slope_eps: float = 0.05,
+    r_min_expiry: float = 0.5,
 ) -> pd.DataFrame:
     """Convenience function for ENTER quality labeling."""
     generator = RegressionTargetGenerator(horizon_periods=horizon_periods)
@@ -1256,4 +1335,5 @@ def generate_enter_quality_targets(
         sl_atr_mult=sl_atr_mult,
         horizon_bars=horizon_periods,
         slope_eps=slope_eps,
+        r_min_expiry=r_min_expiry,
     )
