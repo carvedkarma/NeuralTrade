@@ -632,7 +632,7 @@ class FeatureEngineer:
     # Version string documents the exact computation method
     # Format: major.minor.patch-mode-details
     # Increment when ANY computation changes (windows, formulas, normalization)
-    VERSION = "1.0.0-stf-pctreturns"
+    VERSION = "2.0.0-stf-enhanced"
     
     # Feature computation details for version tracking
     VERSION_DETAILS = {
@@ -692,6 +692,30 @@ class FeatureEngineer:
         
         features["obv"] = self._compute_obv(df)
         features["obv_sma"] = features["obv"].rolling(20).mean()
+        
+        rsi_14 = features["rsi_14"]
+        price_slope_14 = df["close"].pct_change(14)
+        rsi_slope_14 = rsi_14.diff(14)
+        features["rsi_divergence"] = np.where(
+            (price_slope_14 > 0) & (rsi_slope_14 < 0), -1.0,
+            np.where((price_slope_14 < 0) & (rsi_slope_14 > 0), 1.0, 0.0)
+        )
+        
+        vol_mom_5 = df["close"].pct_change(5) * (df["volume"] / features["volume_sma_20"].clip(lower=1))
+        vol_mom_10 = df["close"].pct_change(10) * (df["volume"] / features["volume_sma_20"].clip(lower=1))
+        features["vol_weighted_mom_5"] = vol_mom_5
+        features["vol_weighted_mom_10"] = vol_mom_10
+        
+        typical_price = (df["high"] + df["low"] + df["close"]) / 3
+        vwap_window = 96
+        rolling_tp_vol = (typical_price * df["volume"]).rolling(vwap_window, min_periods=1).sum()
+        rolling_vol = df["volume"].rolling(vwap_window, min_periods=1).sum()
+        vwap = rolling_tp_vol / rolling_vol.clip(lower=1)
+        features["vwap_deviation"] = (df["close"] - vwap) / vwap.clip(lower=1e-8)
+        
+        features["close_to_high_ratio"] = (df["close"] - df["low"]) / (df["high"] - df["low"] + 1e-8)
+        
+        features["volume_delta"] = df.get("taker_buy_base", pd.Series(0, index=df.index)) / df["volume"].clip(lower=1) - 0.5
         
         return features
     

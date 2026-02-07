@@ -272,7 +272,7 @@ class ModelManager:
         "gnn": ["gnn_trained", "cross_asset_gnn", "temporal_gnn", "gnn", "best_gnn", "best_cross_asset"],
     }
     
-    # STF (Single-TimeFrame) feature names - 41 features from compute_technical_features
+    # STF (Single-TimeFrame) feature names - 47 features from compute_technical_features
     STF_FEATURE_NAMES = [
         "returns", "log_returns",
         "sma_5", "ema_5", "std_5", "return_5",
@@ -287,9 +287,14 @@ class ModelManager:
         "volume_sma_20", "volume_ratio",
         "adx_14",
         "stoch_k", "stoch_d",
-        "obv", "obv_sma"
+        "obv", "obv_sma",
+        "rsi_divergence",
+        "vol_weighted_mom_5", "vol_weighted_mom_10",
+        "vwap_deviation",
+        "close_to_high_ratio",
+        "volume_delta"
     ]
-    STF_FEATURE_COUNT = 41
+    STF_FEATURE_COUNT = 47
     MTF_FEATURE_COUNT = 66
     
     def __init__(self):
@@ -1026,8 +1031,8 @@ class ModelManager:
                     input_dim = inferred_input_dim
                     config["input_dim"] = input_dim
                 
-                # Check if this is STF (41 features) vs MTF (66+ features)
-                if inferred_input_dim <= 45:  # STF: typically 41 features
+                # Check if this is STF (41-47 features) vs MTF (66+ features)
+                if inferred_input_dim <= 50:  # STF: 41 (v1) or 47 (v2) features
                     logger.info(f"[SCHEMA] {model_name}: STF checkpoint detected (input_dim={inferred_input_dim})")
                 elif inferred_input_dim > 50:  # MTF: 66+ features
                     logger.warning(f"[SCHEMA] {model_name}: MTF checkpoint detected (input_dim={inferred_input_dim}) - may not work with STF-only serving")
@@ -1052,7 +1057,7 @@ class ModelManager:
                     logger.error(f"[SCHEMA FATAL] {model_name}: Size mismatch - refusing to load model!")
                     logger.error(f"[SCHEMA FATAL] Error: {error_msg}")
                     logger.error(f"[SCHEMA FATAL] This indicates training/inference feature schema drift.")
-                    logger.error(f"[SCHEMA FATAL] Checkpoint input_dim: inferred={inferred_input_dim}, expected for STF=41")
+                    logger.error(f"[SCHEMA FATAL] Checkpoint input_dim: inferred={inferred_input_dim}, expected for STF={self.STF_FEATURE_COUNT}")
                     return None  # DO NOT serve this model
                 else:
                     # Non-size-mismatch error - try non-strict as fallback
@@ -1182,7 +1187,7 @@ class ModelManager:
                 self.feature_config = FeatureConfig(
                     feature_columns=self.expected_features,
                     sequence_length=self.sequence_length,
-                    horizon_periods=16,
+                    horizon_periods=24,
                     timeframes=["15m"] if self.training_mode == "STF" else ["5m", "15m", "1h", "4h"],
                     input_dim=self.input_dim,
                     feature_engineer_version=FeatureEngineer.VERSION,
@@ -1195,27 +1200,41 @@ class ModelManager:
                 self.expected_features = None
         
         # === CRITICAL: Default to STF if no feature config found ===
-        # Most models are trained on 15m only, so use STF as safe default
+        # Detect whether loaded model expects v1 (41) or v2 (47) features
         if not feature_config_loaded:
-            logger.warning("No feature_config found - defaulting to STF mode (41 features)")
-            self.training_mode = "STF"
-            self.input_dim = self.STF_FEATURE_COUNT
-            self.expected_features = self.STF_FEATURE_NAMES.copy()
+            loaded_dim = None
+            for model_name, model_info in self.models.items():
+                if model_info and hasattr(model_info, 'get'):
+                    loaded_dim = model_info.get('input_dim')
+                    if loaded_dim:
+                        break
+            
+            if loaded_dim and loaded_dim <= 42:
+                STF_V1_NAMES = self.STF_FEATURE_NAMES[:41]
+                logger.warning(f"No feature_config found - legacy v1 model detected ({loaded_dim} features)")
+                self.training_mode = "STF"
+                self.input_dim = loaded_dim
+                self.expected_features = STF_V1_NAMES
+            else:
+                logger.warning(f"No feature_config found - defaulting to STF v2 mode ({self.STF_FEATURE_COUNT} features)")
+                self.training_mode = "STF"
+                self.input_dim = self.STF_FEATURE_COUNT
+                self.expected_features = self.STF_FEATURE_NAMES.copy()
             
             # Create STF FeatureConfig
             try:
                 from training.feature_registry import FeatureConfig
                 from data.pipeline import FeatureEngineer
                 self.feature_config = FeatureConfig(
-                    feature_columns=self.STF_FEATURE_NAMES,
+                    feature_columns=self.expected_features,
                     sequence_length=self.sequence_length,
-                    horizon_periods=16,
+                    horizon_periods=24,
                     timeframes=["15m"],
-                    input_dim=self.STF_FEATURE_COUNT,
+                    input_dim=self.input_dim,
                     feature_engineer_version=FeatureEngineer.VERSION,
                     mode="stf"
                 )
-                logger.info(f"Created STF FeatureConfig as default (hash: {self.feature_config.version_hash}, FE version: {FeatureEngineer.VERSION})")
+                logger.info(f"Created STF FeatureConfig as default (dim={self.input_dim}, hash: {self.feature_config.version_hash})")
             except Exception as e:
                 logger.warning(f"Failed to create STF FeatureConfig: {e}")
         

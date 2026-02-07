@@ -15,7 +15,19 @@ The frontend is built with React and TypeScript using Vite, featuring a modern U
 The backend uses Node.js with Express.js (TypeScript, ESM) and follows a RESTful API pattern. AI integration is managed via OpenAI. Market data is sourced primarily from Binance Vision API, with fallbacks to CoinGecko and CryptoCompare, augmented by a Replit-hosted data proxy. Bi-directional communication with a local GPU trainer is established via dedicated API endpoints.
 
 ### Feature Specifications
-The system incorporates a regression-based signal system generating comprehensive signals including action, confidence, expected_move, uncertainty, and position sizing. It features regime detection with a Mixture-of-Experts (MoE) model, identifying market states like TRENDING or MEAN_REVERTING. GPU-accelerated training uses the stable EnhancedMultiHeadMLP architecture with [512, 256, 128, 64] residual blocks and progressive head enablement. A multi-head model architecture uses five distinct output heads (Classification, Quantile, VolState, Mu, Sigma) with combined loss functions. A flow forecast system provides regime-conditioned quantile path projections. Advanced labeling addresses class imbalance with Focal Loss (gamma=2.0) and configurable class weight caps. Model management includes walk-forward weight saving, feature version locking, prediction drift monitoring, and label metadata tracking. A professional ensemble predictor combines multiple model predictions with confidence-based voting. A robust training, monitoring, and policy architecture separates model training from live execution policy selection.
+The system incorporates a regression-based signal system generating comprehensive signals including action, confidence, expected_move, uncertainty, and position sizing. It features regime detection with a Mixture-of-Experts (MoE) model, identifying market states like TRENDING or MEAN_REVERTING. GPU-accelerated training uses the stable EnhancedMultiHeadMLP architecture with [512, 256, 128, 64] residual blocks and progressive head enablement. A multi-head model architecture uses five distinct output heads (Classification, Quantile, VolState, Mu, Sigma) with combined loss functions. A flow forecast system provides regime-conditioned quantile path projections. Advanced labeling uses Triple Barrier Method (ATR-scaled TP/SL/time-expiry barriers) for clean, outcome-based training labels, with Focal Loss (gamma=2.0) and configurable class weight caps for class imbalance. Model management includes walk-forward weight saving, feature version locking, prediction drift monitoring, and label metadata tracking. A professional ensemble predictor combines multiple model predictions with confidence-based voting. A robust training, monitoring, and policy architecture separates model training from live execution policy selection.
+
+### Training Label Strategy
+The Triple Barrier Method (Stage 4) is the recommended labeling approach:
+- For each bar, three barriers are placed: TP (2.0x ATR above), SL (1.5x ATR below), time expiry (24 bars)
+- Whichever barrier gets hit first determines the label: TP hit = LONG, SL hit = SHORT, time expiry = HOLD
+- ATR-scaled barriers automatically adapt to current volatility regime
+- Horizon: 24 bars (6 hours on 15m timeframe) for meaningful directional separation
+- Produces cleaner labels than simple return thresholds because labels reflect actual trade outcomes
+
+### Input Features (47 STF features, v2.0.0)
+Base features: returns, log_returns, SMA/EMA/std/return at 5/10/20/50/100 periods, RSI-14/7, MACD/signal/hist, Bollinger Bands (upper/middle/lower/width/position), ATR-14/7, volume SMA/ratio, ADX-14, Stochastic K/D, OBV/OBV-SMA.
+Enhanced features (v2.0.0): RSI divergence (price vs RSI slope mismatch), volume-weighted momentum (5/10 bar), VWAP deviation, close-to-high ratio (intra-bar position), volume delta (buy/sell pressure proxy).
 
 ### GPU Training CLI Reference
 Current stable model: `enhanced_mlp` (EnhancedMultiHeadMLP)

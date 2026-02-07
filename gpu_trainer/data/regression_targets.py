@@ -75,8 +75,8 @@ class RegressionTargetGenerator:
     """
     
     def __init__(self, 
-                 horizon_periods: int = 16,  # 4 hours in 15-minute candles (production default)
-                 lookback_periods: int = 32,  # 8 hours = 2x horizon for volatility
+                 horizon_periods: int = 24,  # 6 hours in 15-minute candles (production default)
+                 lookback_periods: int = 48,  # 12 hours = 2x horizon for volatility
                  costs: Optional[TradingCosts] = None):
         self.horizon_periods = horizon_periods
         self.lookback_periods = lookback_periods
@@ -196,6 +196,79 @@ class RegressionTargetGenerator:
         
         return result
     
+    def _triple_barrier_labels(
+        self,
+        df: pd.DataFrame,
+        atr: pd.Series,
+        tp_atr_mult: float = 2.0,
+        sl_atr_mult: float = 1.5,
+        max_holding: int = None
+    ) -> pd.Series:
+        """
+        Triple Barrier Method for label generation.
+        
+        For each bar, simulate a trade and see which barrier gets hit first:
+        - Upper barrier (TP): price rises by tp_atr_mult * ATR -> LONG (2)
+        - Lower barrier (SL): price drops by sl_atr_mult * ATR -> SHORT (0)  
+        - Time barrier: neither hit within max_holding bars -> HOLD (1)
+        
+        This produces clean, outcome-based labels because they reflect
+        what actually happened in the price path, not just the endpoint.
+        
+        Args:
+            df: OHLCV DataFrame
+            atr: Pre-computed ATR series
+            tp_atr_mult: ATR multiplier for take profit barrier
+            sl_atr_mult: ATR multiplier for stop loss barrier
+            max_holding: Maximum bars to hold (defaults to horizon_periods)
+        
+        Returns:
+            Series with labels: 0=SHORT, 1=HOLD, 2=LONG
+        """
+        if max_holding is None:
+            max_holding = self.horizon_periods
+            
+        prices = df["close"].values
+        highs = df["high"].values
+        lows = df["low"].values
+        atr_vals = atr.values
+        n = len(prices)
+        
+        labels = np.ones(n, dtype=np.int64)  # Default HOLD
+        
+        for i in range(n - max_holding):
+            entry = prices[i]
+            a = atr_vals[i]
+            
+            if np.isnan(a) or a <= 0:
+                a = entry * 0.005
+            
+            upper = entry + tp_atr_mult * a
+            lower = entry - sl_atr_mult * a
+            
+            for j in range(1, max_holding + 1):
+                idx = i + j
+                if idx >= n:
+                    break
+                    
+                hit_upper = highs[idx] >= upper
+                hit_lower = lows[idx] <= lower
+                
+                if hit_upper and hit_lower:
+                    if (highs[idx] - entry) / a > (entry - lows[idx]) / a:
+                        labels[i] = 2  # LONG won
+                    else:
+                        labels[i] = 0  # SHORT won
+                    break
+                elif hit_upper:
+                    labels[i] = 2  # LONG
+                    break
+                elif hit_lower:
+                    labels[i] = 0  # SHORT
+                    break
+        
+        return pd.Series(labels, index=df.index)
+
     def generate_multihead_targets(
         self, 
         df: pd.DataFrame, 
@@ -208,69 +281,53 @@ class RegressionTargetGenerator:
         directional_threshold: float = 0.0020,
         use_regime_labels: bool = False,
         trend_threshold: float = 0.0015,
-        range_threshold: float = 0.0030
+        range_threshold: float = 0.0030,
+        use_triple_barrier: bool = False,
+        tb_tp_mult: float = 2.0,
+        tb_sl_mult: float = 1.5
     ) -> pd.DataFrame:
         """
         Generate targets specifically for multi-head model training.
         
-        HOLD Fix Stages:
-        - Stage 1: min_confidence lowered from 0.7 to 0.40 (cost-aware mode)
-        - Stage 2: use_pure_directional=True bypasses gates, uses simple return threshold
-        - Stage 3: use_regime_labels=True uses ADX-based adaptive thresholds
+        Label Modes (in priority order):
+        - Stage 4: use_triple_barrier=True - Triple Barrier Method (ATR-scaled, outcome-based)
+        - Stage 3: use_regime_labels=True - ADX-based adaptive thresholds
+        - Stage 2: use_pure_directional=True - simple return threshold
+        - Stage 1: Cost-aware mode (default) - net_edge & confidence gates
         
         Args:
             df: DataFrame with OHLCV data
             n_future_candles: Number of future candles to predict
-            min_net_edge: Minimum net edge after costs for trade signals (default 0.0 for debugging)
-            min_confidence: Minimum mu/sigma ratio for trade signals (default 0.40, lowered from 0.7)
-            use_volatility_cost: If True, use volatility-based cost calculation. If False, use fixed_cost
-            fixed_cost: Fixed round-trip trading cost when not using volatility-based (default 0.09%)
-            use_pure_directional: If True, use simple return threshold instead of cost-aware gating
-            directional_threshold: Return threshold for pure directional mode (default 0.20%)
+            min_net_edge: Minimum net edge after costs for trade signals
+            min_confidence: Minimum mu/sigma ratio for trade signals
+            use_volatility_cost: If True, use volatility-based cost calculation
+            fixed_cost: Fixed round-trip trading cost
+            use_pure_directional: If True, use simple return threshold
+            directional_threshold: Return threshold for pure directional mode
+            use_regime_labels: If True, use ADX-based adaptive thresholds
+            trend_threshold: Return threshold for trending regime
+            range_threshold: Return threshold for ranging regime
+            use_triple_barrier: If True, use Triple Barrier Method (recommended)
+            tb_tp_mult: ATR multiplier for TP barrier (default 2.0)
+            tb_sl_mult: ATR multiplier for SL barrier (default 1.5)
         
         Returns:
-            DataFrame with:
-            - mu: Actual forward return (regression target)
-            - sigma: Forward volatility (for uncertainty calibration)
-            - class_label: 0=SHORT, 1=HOLD, 2=LONG (for classification head)
-            - forward_return: The actual return to predict (same as mu, for quantile loss)
-            - entry_offset: Optimal entry offset based on volatility
-            - sl_distance: Optimal stop loss distance based on ATR
-            - tp_distance: Optimal take profit distance based on ATR
-            - candle_delta_close_N: Future close deltas for N steps
-            - candle_delta_high_N: Future high deltas for N steps  
-            - candle_delta_low_N: Future low deltas for N steps
-        
-        Note: The model predicts quantiles of the return distribution.
-        The target for quantile loss is the actual realized return.
-        Pinball loss naturally learns the correct quantiles from individual returns.
+            DataFrame with multihead targets
         """
         prices = df["close"]
         highs = df["high"]
         lows = df["low"]
         
-        # Actual forward return (the target we're predicting)
         mu = self.compute_forward_returns(prices)
         
-        # Forward volatility (uncertainty target)
         current_vol = self.compute_realized_volatility(prices)
         sigma = self.compute_forward_volatility(prices)
         sigma = sigma.fillna(current_vol)
         
-        # ============================================================
-        # PHASE 1a: COST-AWARE CLASS LABELS
-        # ============================================================
-        # Derive class labels from NET EDGE after trading costs
-        # edge_net = |mu| - cost(volatility, hold_hours)
-        # Trade only if edge_net > min_edge AND mu/sigma > confidence_min
-        # This eliminates garbage signals that don't beat costs
-        
-        # Compute trading cost
-        hold_hours = self.horizon_periods * 0.25  # 15-minute bars -> hours
+        hold_hours = self.horizon_periods * 0.25
         trading_costs = pd.Series(index=df.index, dtype=float)
         
         if use_volatility_cost:
-            # Volatility-based cost calculation (original behavior)
             for i in range(len(df)):
                 vol = current_vol.iloc[i] if not pd.isna(current_vol.iloc[i]) else 0.01
                 trading_costs.iloc[i] = self.costs.total_round_trip_cost(
@@ -279,47 +336,52 @@ class RegressionTargetGenerator:
                     hold_hours=hold_hours
                 )
         else:
-            # Fixed cost mode - uses the exact cost from config
             trading_costs[:] = fixed_cost
         
-        # Net edge = absolute expected return - trading costs
         net_edge = mu.abs() - trading_costs
         
-        # Confidence ratio: mu/sigma (signal-to-noise)
         sigma_safe = sigma.clip(lower=0.001)
         confidence_ratio = mu.abs() / sigma_safe
         
-        # ============================================================
-        # LABEL GENERATION - Two modes available:
-        # 1. Cost-aware mode (default): Uses net_edge & confidence gates
-        # 2. Pure directional mode: Uses simple return threshold
-        # ============================================================
-        
         valid_mu = mu.dropna()
-        valid_net_edge = net_edge.dropna()
-        valid_conf = confidence_ratio.dropna()
         total_samples = len(valid_mu)
         
-        # Handle conflicting flags - regime labels takes precedence
-        if use_regime_labels and use_pure_directional:
-            logger.warning("Both use_regime_labels and use_pure_directional are True!")
-            logger.warning("Regime-based labeling takes precedence over pure directional")
+        atr = self._compute_atr(df, period=14)
         
         logger.info("=" * 70)
-        if use_regime_labels:
-            # ============================================================
-            # STAGE 3: REGIME-BASED LABELS (ADX-adaptive thresholds)
-            # ============================================================
+        if use_triple_barrier:
+            logger.info("LABEL GENERATION: STAGE 4 - TRIPLE BARRIER METHOD")
+            logger.info("=" * 70)
+            logger.info(f"Config: horizon={self.horizon_periods} bars, TP={tb_tp_mult}x ATR, SL={tb_sl_mult}x ATR")
+            logger.info(f"Total samples: {total_samples:,}")
+            logger.info(f"ATR stats: mean={atr.mean():.2f}, median={atr.median():.2f}")
+            
+            class_label = self._triple_barrier_labels(
+                df, atr, tp_atr_mult=tb_tp_mult, sl_atr_mult=tb_sl_mult,
+                max_holding=self.horizon_periods
+            )
+            
+            long_mask = class_label == 2
+            short_mask = class_label == 0
+            
+            n_long = long_mask.sum()
+            n_short = short_mask.sum()
+            n_hold = (class_label == 1).sum()
+            logger.info(f"Barrier hits: TP(LONG)={n_long:,}, SL(SHORT)={n_short:,}, TIME(HOLD)={n_hold:,}")
+            logger.info("-" * 70)
+            logger.info("NOTE: Labels reflect actual price path outcomes, not just endpoint returns")
+            logger.info("NOTE: ATR-scaled barriers adapt to current volatility regime")
+            logger.info("-" * 70)
+            
+        elif use_regime_labels:
             logger.info("LABEL GENERATION: STAGE 3 - REGIME-BASED MODE")
             logger.info("=" * 70)
             logger.info(f"Config: horizon={self.horizon_periods} bars")
             logger.info(f"Thresholds: trend={trend_threshold:.4%}, range={range_threshold:.4%}")
             logger.info(f"Total samples: {total_samples:,}")
             
-            # Compute ADX for regime detection
             adx = self._compute_adx(df, period=14)
             
-            # Regime classification: ADX > 25 = trending, ADX < 20 = ranging
             is_trending = adx > 25
             is_ranging = adx < 20
             is_transition = ~is_trending & ~is_ranging
@@ -329,116 +391,75 @@ class RegressionTargetGenerator:
             pct_trans = is_transition.sum() / max(1, len(adx)) * 100
             logger.info(f"Regime distribution: TREND={pct_trend:.1f}%, RANGE={pct_range:.1f}%, TRANSITION={pct_trans:.1f}%")
             
-            # Adaptive threshold per regime:
-            # - Trending: lower threshold (0.15%) - trade momentum
-            # - Ranging: higher threshold (0.30%) - only take strong mean reversion
-            # - Transition: middle threshold (0.20%)
-            class_label = pd.Series(1, index=df.index)  # Default HOLD
+            class_label = pd.Series(1, index=df.index)
             
-            # In trending regime: lower bar, trade more
             trend_long = is_trending & (mu > trend_threshold)
             trend_short = is_trending & (mu < -trend_threshold)
             
-            # In ranging regime: higher bar, trade less
             range_long = is_ranging & (mu > range_threshold)
             range_short = is_ranging & (mu < -range_threshold)
             
-            # In transition: use middle threshold
             trans_threshold = (trend_threshold + range_threshold) / 2
             trans_long = is_transition & (mu > trans_threshold)
             trans_short = is_transition & (mu < -trans_threshold)
             
-            # Combine masks for consistency with other modes
             long_mask = trend_long | range_long | trans_long
             short_mask = trend_short | range_short | trans_short
             
-            # Apply labels
-            class_label[long_mask] = 2  # LONG
-            class_label[short_mask] = 0  # SHORT
+            class_label[long_mask] = 2
+            class_label[short_mask] = 0
             
-            # Log per-regime stats
             n_trend_trades = (trend_long.sum() + trend_short.sum())
             n_range_trades = (range_long.sum() + range_short.sum())
             n_trans_trades = (trans_long.sum() + trans_short.sum())
             logger.info(f"Trades by regime: TREND={n_trend_trades:,}, RANGE={n_range_trades:,}, TRANSITION={n_trans_trades:,}")
             logger.info("-" * 70)
-            logger.info("NOTE: Regime-based thresholds adapt to market conditions")
-            logger.info("NOTE: Lower threshold in trends (momentum), higher in range (mean reversion)")
-            logger.info("-" * 70)
             
         elif use_pure_directional:
-            # ============================================================
-            # STAGE 2: PURE DIRECTIONAL LABELS (simple return threshold)
-            # ============================================================
             logger.info("LABEL GENERATION: STAGE 2 - PURE DIRECTIONAL MODE")
             logger.info("=" * 70)
             logger.info(f"Config: horizon={self.horizon_periods} bars, directional_threshold={directional_threshold:.4%}")
             logger.info(f"Total samples: {total_samples:,}")
             logger.info(f"Stats: mean(|mu|)={valid_mu.abs().mean():.4%}, mean(sigma)={sigma_safe.dropna().mean():.4%}")
             
-            # Pure directional: trade signal based only on return threshold
-            # LONG if return > threshold, SHORT if return < -threshold, else HOLD
-            class_label = pd.Series(1, index=df.index)  # Default HOLD
+            class_label = pd.Series(1, index=df.index)
             
             long_mask = mu > directional_threshold
             short_mask = mu < -directional_threshold
             
-            class_label[long_mask] = 2  # LONG
-            class_label[short_mask] = 0  # SHORT
+            class_label[long_mask] = 2
+            class_label[short_mask] = 0
             
             pct_above_threshold = (mu.abs() > directional_threshold).sum() / max(1, total_samples) * 100
             logger.info(f"Trade density: {pct_above_threshold:.1f}% samples exceed threshold")
             logger.info("-" * 70)
-            logger.info("NOTE: Gates (net_edge/confidence) are BYPASSED in pure directional mode")
-            logger.info("NOTE: Gates still apply during LIVE EXECUTION - this is training only")
-            logger.info("-" * 70)
         else:
-            # ============================================================
-            # STAGE 1: COST-AWARE LABELS (with relaxed confidence)
-            # ============================================================
             logger.info("LABEL GENERATION: STAGE 1 - COST-AWARE MODE")
             logger.info("=" * 70)
+            
+            valid_net_edge = net_edge.dropna()
+            valid_conf = confidence_ratio.dropna()
             
             pct_positive_edge = (valid_net_edge > min_net_edge).sum() / max(1, total_samples) * 100
             pct_high_conf = (valid_conf > min_confidence).sum() / max(1, total_samples) * 100
             pct_both_gates = ((valid_net_edge > min_net_edge) & (valid_conf > min_confidence)).sum() / max(1, total_samples) * 100
             
-            # Calculate what OLD threshold (0.7) would have produced for comparison
-            old_threshold = 0.7
-            pct_high_conf_old = (valid_conf > old_threshold).sum() / max(1, total_samples) * 100
-            pct_both_gates_old = ((valid_net_edge > min_net_edge) & (valid_conf > old_threshold)).sum() / max(1, total_samples) * 100
-            
             logger.info(f"Config: horizon={self.horizon_periods} bars, cost_mode={'volatility' if use_volatility_cost else 'fixed'}, "
                        f"avg_cost={trading_costs.mean():.4%}")
             logger.info(f"Thresholds: min_net_edge={min_net_edge:.4%}, min_confidence={min_confidence:.2f}")
             logger.info(f"Total samples: {total_samples:,}")
-            logger.info(f"Stats: mean(|mu|)={valid_mu.abs().mean():.4%}, mean(sigma)={sigma_safe.dropna().mean():.4%}, "
-                       f"mean(|mu|/sigma)={valid_conf.mean():.2f}")
-            logger.info(f"Cost: mean(cost)={trading_costs.dropna().mean():.4%}, mean(net_edge)={valid_net_edge.mean():.4%}")
-            
-            # Before/After comparison
-            logger.info("-" * 70)
-            logger.info("BEFORE/AFTER COMPARISON (min_confidence threshold):")
-            logger.info(f"  OLD (0.70): confidence_gate={pct_high_conf_old:.1f}%, trade_density={pct_both_gates_old:.1f}%")
-            logger.info(f"  NEW ({min_confidence:.2f}): confidence_gate={pct_high_conf:.1f}%, trade_density={pct_both_gates:.1f}%")
-            improvement = pct_both_gates - pct_both_gates_old
-            logger.info(f"  IMPROVEMENT: +{improvement:.1f}% more samples will be labeled as trades")
-            logger.info("-" * 70)
             
             if pct_both_gates < 5.0:
                 logger.warning(f"!!! LOW TRADE DENSITY: Only {pct_both_gates:.2f}% samples pass both gates !!!")
-                logger.warning(f"!!! Try: use_pure_directional=True with directional_threshold=0.0020 !!!")
+                logger.warning(f"!!! Try: use_triple_barrier=True !!!")
             
-            # Generate class labels - only trade when net_edge AND confidence are sufficient
-            class_label = pd.Series(1, index=df.index)  # Default HOLD
+            class_label = pd.Series(1, index=df.index)
             
-            # LONG: positive return with sufficient NET edge and confidence
             long_mask = (mu > 0) & (net_edge > min_net_edge) & (confidence_ratio > min_confidence)
-            class_label[long_mask] = 2  # LONG
+            class_label[long_mask] = 2
             
-            # SHORT: negative return with sufficient NET edge and confidence
             short_mask = (mu < 0) & (net_edge > min_net_edge) & (confidence_ratio > min_confidence)
-            class_label[short_mask] = 0  # SHORT
+            class_label[short_mask] = 0
         
         # Log class distribution with target range validation
         n_long = (class_label == 2).sum()
@@ -998,50 +1019,40 @@ def create_regression_dataset(
 
 def generate_multihead_targets(
     df: pd.DataFrame, 
-    horizon_periods: int = 16,  # Default 16 bars = 4h at 15m timeframe
+    horizon_periods: int = 24,  # Default 24 bars = 6h at 15m timeframe
     n_future_candles: int = 5,
-    min_net_edge: float = 0.0,  # Default 0 for debugging (no edge filter)
-    min_confidence: float = 0.40,  # Default 0.40 (lowered from 0.7 to reduce HOLD-heavy labels)
-    use_volatility_cost: bool = False,  # Default to fixed cost mode
-    fixed_cost: float = 0.0009,  # Default 0.09% round-trip (taker/taker)
-    use_pure_directional: bool = False,  # Stage 2: bypass gates, use simple threshold
-    directional_threshold: float = 0.0020,  # 0.20% return threshold for Stage 2
-    use_regime_labels: bool = False,  # Stage 3: ADX-based adaptive thresholds
-    trend_threshold: float = 0.0015,  # 0.15% threshold in trending regime
-    range_threshold: float = 0.0030  # 0.30% threshold in ranging regime
+    min_net_edge: float = 0.0,
+    min_confidence: float = 0.40,
+    use_volatility_cost: bool = False,
+    fixed_cost: float = 0.0009,
+    use_pure_directional: bool = False,
+    directional_threshold: float = 0.0020,
+    use_regime_labels: bool = False,
+    trend_threshold: float = 0.0015,
+    range_threshold: float = 0.0030,
+    use_triple_barrier: bool = False,
+    tb_tp_mult: float = 2.0,
+    tb_sl_mult: float = 1.5
 ) -> pd.DataFrame:
     """
     Standalone function to generate multi-head training targets.
     
-    HOLD Fix Stages:
-    - Stage 1: min_confidence lowered from 0.7 to 0.40 (cost-aware mode)
-    - Stage 2: use_pure_directional=True bypasses gates, uses simple return threshold
-    - Stage 3: use_regime_labels=True uses ADX-based adaptive thresholds
-    
-    Target distribution: HOLD 50-70%, LONG 15-25%, SHORT 15-25%.
+    Label Modes (recommended order):
+    - Stage 4: use_triple_barrier=True - Triple Barrier (ATR-scaled, outcome-based) [RECOMMENDED]
+    - Stage 3: use_regime_labels=True - ADX-based adaptive thresholds
+    - Stage 2: use_pure_directional=True - simple return threshold
+    - Stage 1: Cost-aware mode (default) - net_edge & confidence gates
     
     Args:
-        df: DataFrame with OHLCV data (must have 'close' column)
-        horizon_periods: Prediction horizon in candle periods (default 16 = 4h in 15m candles)
-        n_future_candles: Number of future candles to predict (default 5)
-        min_net_edge: Minimum net edge after costs for trade signals (default 0.0 for debugging)
-        min_confidence: Minimum mu/sigma ratio for trade signals (default 0.40, lowered from 0.7)
-        use_volatility_cost: If True, use volatility-based cost. If False, use fixed_cost
-        fixed_cost: Fixed round-trip trading cost (default 0.09%)
-        use_pure_directional: If True, use simple return threshold instead of cost-aware gating
-        directional_threshold: Return threshold for pure directional mode (default 0.20%)
-        use_regime_labels: If True, use ADX-based adaptive thresholds (Stage 3)
-        trend_threshold: Return threshold for trending regime (default 0.15%)
-        range_threshold: Return threshold for ranging regime (default 0.30%)
+        df: DataFrame with OHLCV data
+        horizon_periods: Prediction horizon in candle periods (default 24 = 6h in 15m candles)
+        n_future_candles: Number of future candles to predict
+        use_triple_barrier: If True, use Triple Barrier Method (recommended)
+        tb_tp_mult: ATR multiplier for TP barrier (default 2.0)
+        tb_sl_mult: ATR multiplier for SL barrier (default 1.5)
         
     Returns:
-        DataFrame with:
-        - mu: Actual forward return (regression target)
-        - sigma: Forward volatility (for uncertainty calibration)
-        - class_label: 0=SHORT, 1=HOLD, 2=LONG (for classification head)
-        - forward_return: The actual return to predict (same as mu, for quantile loss)
-        - entry_offset, sl_distance, tp_distance: Trading head targets
-        - candle_delta_*: Future candle prediction targets
+        DataFrame with multihead targets
     """
     generator = RegressionTargetGenerator(horizon_periods=horizon_periods)
     return generator.generate_multihead_targets(
@@ -1055,5 +1066,8 @@ def generate_multihead_targets(
         directional_threshold=directional_threshold,
         use_regime_labels=use_regime_labels,
         trend_threshold=trend_threshold,
-        range_threshold=range_threshold
+        range_threshold=range_threshold,
+        use_triple_barrier=use_triple_barrier,
+        tb_tp_mult=tb_tp_mult,
+        tb_sl_mult=tb_sl_mult
     )

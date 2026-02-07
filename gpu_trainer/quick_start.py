@@ -120,11 +120,11 @@ def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: 
     features_df = features_df.fillna(0)
     log.info(f"Computed {len(features_df.columns)} features")
 
-    horizon = 16
+    horizon = 24
     from data.regression_targets import generate_multihead_targets
     targets_df = generate_multihead_targets(
         df, horizon_periods=horizon, n_future_candles=5,
-        use_pure_directional=True, directional_threshold=0.0010
+        use_triple_barrier=True, tb_tp_mult=2.0, tb_sl_mult=1.5
     )
 
     labels = targets_df['class_label'].values.astype(np.int64)
