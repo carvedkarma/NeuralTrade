@@ -44,6 +44,7 @@ Quick start training flags:
 - `--no-push` - Train but don't push prediction to dashboard
 - `--min-confidence 0.40` - Minimum confidence to push trade signal (default: 0.40)
 - `--min-edge 0.10` - Minimum edge to push trade signal (default: 0.10)
+- `--checkpoint-interval 25` - Pause every N epochs to show results and wait for user to continue or stop (default: 25, use 0 to disable)
 
 Position sizing: ATR-based with 2% account risk per trade, scaled by confidence/edge, hard capped at 0.5-5.0% of account. Trade signals below confidence/edge thresholds are automatically downgraded to HOLD.
 

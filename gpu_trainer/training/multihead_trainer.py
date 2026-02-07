@@ -1697,7 +1697,8 @@ class MultiHeadTrainer:
         early_stopping_patience: int = 30,
         min_epochs: int = 40,
         save_best: bool = True,
-        checkpoint_path: Optional[str] = None
+        checkpoint_path: Optional[str] = None,
+        checkpoint_interval: int = 0
     ) -> Dict[str, List[float]]:
         """
         Full training loop with min_epochs protection.
@@ -1708,6 +1709,7 @@ class MultiHeadTrainer:
             min_epochs: Minimum epochs before early stopping can trigger (default 40)
             save_best: Whether to save best checkpoint
             checkpoint_path: Path to save checkpoint
+            checkpoint_interval: Pause every N epochs for user review (0 = no pausing)
         
         Returns history of metrics per epoch.
         
@@ -1810,6 +1812,7 @@ class MultiHeadTrainer:
         # Track best trading metrics for model_weights.json save
         best_trading_metrics = None
         best_trading_score = float('-inf')
+        best_val_epoch = 0
         
         # === STABILITY GUARDRAILS ===
         # Track consecutive HOLD collapse and gradient explosion epochs
@@ -1961,6 +1964,7 @@ class MultiHeadTrainer:
             if val_metrics['total'] < self.best_val_loss:
                 self.best_val_loss = val_metrics['total']
                 self.patience_counter = 0
+                best_val_epoch = epoch + 1
                 
                 if save_best and checkpoint_path:
                     self._save_checkpoint(checkpoint_path, val_metrics)
@@ -1976,6 +1980,49 @@ class MultiHeadTrainer:
             elif epoch + 1 < min_epochs and self.patience_counter >= early_stopping_patience:
                 # Log but DO NOT break - keep training until min_epochs
                 logger.info(f"[MIN_EPOCHS PROTECTION] Epoch {epoch+1}/{epochs} - patience exhausted but min_epochs={min_epochs} not reached, continuing...")
+            
+            # === INTERACTIVE CHECKPOINT: Pause for user review ===
+            if checkpoint_interval > 0 and (epoch + 1) % checkpoint_interval == 0 and (epoch + 1) < epochs:
+                
+                per_class = val_metrics.get('per_class', {})
+                short_acc = per_class.get(0, {}).get('accuracy', 0) * 100 if per_class.get(0) else 0
+                hold_acc = per_class.get(1, {}).get('accuracy', 0) * 100 if per_class.get(1) else 0
+                long_acc = per_class.get(2, {}).get('accuracy', 0) * 100 if per_class.get(2) else 0
+                
+                print("\n" + "=" * 60)
+                print(f"  CHECKPOINT @ Epoch {epoch+1}/{epochs}")
+                print("=" * 60)
+                print(f"  Val Accuracy:  {val_metrics['accuracy']*100:.1f}%")
+                print(f"  Val Loss:      {val_metrics['total']:.4f}")
+                print(f"  Train Loss:    {train_metrics['total']:.4f}")
+                print(f"  Best Val Loss: {self.best_val_loss:.4f} (epoch {best_val_epoch})")
+                print(f"  Patience:      {self.patience_counter}/{early_stopping_patience}")
+                print("-" * 60)
+                print(f"  Per-class Accuracy:")
+                print(f"    SHORT: {short_acc:.1f}%  |  HOLD: {hold_acc:.1f}%  |  LONG: {long_acc:.1f}%")
+                if 'expectancy' in val_metrics:
+                    print(f"  Trading Metrics:")
+                    print(f"    Expectancy:    {val_metrics.get('expectancy', 0):.4f}")
+                    print(f"    Hit Rate:      {val_metrics.get('hit_rate', 0)*100:.1f}%")
+                    print(f"    Sharpe:        {val_metrics.get('sharpe', 0):.2f}")
+                    print(f"    Trades:        {val_metrics.get('num_trades', 0)}")
+                print("=" * 60)
+                
+                try:
+                    user_input = input("  Continue training? [y/n] (default: y): ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    user_input = 'n'
+                
+                if user_input == 'n':
+                    print(f"\n  Stopping early at epoch {epoch+1} (user requested)")
+                    print(f"  Best model saved from epoch {best_val_epoch}")
+                    history['user_stopped'] = True
+                    history['user_stopped_epoch'] = epoch + 1
+                    break
+                else:
+                    remaining = epochs - (epoch + 1)
+                    print(f"  Continuing... ({remaining} epochs remaining)")
+                    print()
         
         self.writer.close()
         

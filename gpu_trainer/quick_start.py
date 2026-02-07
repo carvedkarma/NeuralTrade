@@ -101,7 +101,7 @@ def download_data(replit_url: str, data_dir: Path, force_fresh: bool = False):
     return parquet_path
 
 
-def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float):
+def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float, checkpoint_interval: int = 25):
     import torch
     import numpy as np
     import pandas as pd
@@ -298,8 +298,10 @@ def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: 
     )
 
     log.info(f"Training for {epochs} epochs (lr={lr}, batch={batch_size})...")
+    if checkpoint_interval > 0:
+        log.info(f"Interactive checkpoints every {checkpoint_interval} epochs (press 'n' to stop early)")
     log.info("-" * 60)
-    history = trainer.train(num_epochs=epochs)
+    history = trainer.train(num_epochs=epochs, checkpoint_interval=checkpoint_interval)
 
     checkpoint_dir = Path("checkpoints")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -525,6 +527,7 @@ Examples:
     parser.add_argument("--no-push", action="store_true", help="Train but don't push prediction to dashboard")
     parser.add_argument("--min-confidence", type=float, default=0.40, help="Minimum confidence to push signal (default: 0.40)")
     parser.add_argument("--min-edge", type=float, default=0.10, help="Minimum edge to push signal (default: 0.10)")
+    parser.add_argument("--checkpoint-interval", type=int, default=25, help="Pause every N epochs to show results and wait for continue/stop (default: 25, 0=no pausing)")
 
     args = parser.parse_args()
 
@@ -541,7 +544,7 @@ Examples:
         data_path = download_data(args.url, data_dir)
 
         model, engineer, feature_columns, history = train_model(
-            data_path, device, args.epochs, args.batch_size, args.lr
+            data_path, device, args.epochs, args.batch_size, args.lr, args.checkpoint_interval
         )
 
         print()
