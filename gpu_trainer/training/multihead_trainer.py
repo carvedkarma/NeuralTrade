@@ -809,16 +809,17 @@ class MultiHeadTrainer:
         avg_losses['gradient_norm_post_clip'] = avg_grad_norm_post
         avg_losses['gradient_norm_max'] = max_grad_norm_pre
         
-        # === STABILITY PROOF: Per-Epoch Gradient Summary ===
-        logger.info("[STABILITY PROOF] Epoch %d grad_norm: avg_pre=%.4f, max_pre=%.4f, avg_post=%.4f",
-                   epoch, avg_grad_norm_pre, max_grad_norm_pre, avg_grad_norm_post)
+        # Gradient summary (compact - only log details when concerning)
+        if max_grad_norm_pre > 5.0:
+            logger.info("[GRAD] Epoch %d: avg=%.2f, max=%.2f (clipped to %.2f)",
+                       epoch, avg_grad_norm_pre, max_grad_norm_pre, avg_grad_norm_post)
         
-        # === DIAGNOSTICS: Per-loss means each epoch ===
-        logger.info("[DIAGNOSTICS] Epoch %d per-loss means: class=%.4f, mu=%.4f, sigma=%.4f, "
-                   "quantile=%.4f, trading=%.4f, candle=%.4f, vol_state=%.4f, accel=%.4f",
-                   epoch, avg_losses['class'], avg_losses['mu'], avg_losses['sigma'],
-                   avg_losses['quantile'], avg_losses['trading'], avg_losses['candle'],
-                   avg_losses['vol_state'], avg_losses['acceleration'])
+        # Per-loss means - only log non-zero auxiliary losses
+        aux_active = any(avg_losses.get(k, 0) > 0.0001 for k in ['mu', 'sigma', 'quantile', 'vol_state', 'acceleration'])
+        if aux_active:
+            logger.info("[LOSS] Epoch %d: class=%.4f, mu=%.4f, sigma=%.4f, quantile=%.4f, vol_state=%.4f",
+                       epoch, avg_losses['class'], avg_losses['mu'], avg_losses['sigma'],
+                       avg_losses['quantile'], avg_losses['vol_state'])
         
         # HEALTH MONITORING: Check for training issues
         alerts = self.health_monitor.update(
@@ -857,6 +858,7 @@ class MultiHeadTrainer:
         # Per-class tracking
         class_correct = {0: 0, 1: 0, 2: 0}
         class_total = {0: 0, 1: 0, 2: 0}
+        pred_counts = {0: 0, 1: 0, 2: 0}
         
         # Quantile calibration tracking
         quantile_below = torch.zeros(5)  # How often target < predicted quantile
@@ -921,11 +923,12 @@ class MultiHeadTrainer:
                 correct += (preds == class_labels).sum().item()
                 total += len(class_labels)
                 
-                # Per-class accuracy
+                # Per-class accuracy + prediction counts
                 for c in [0, 1, 2]:
                     mask = class_labels == c
                     class_correct[c] += (preds[mask] == c).sum().item()
                     class_total[c] += mask.sum().item()
+                    pred_counts[c] += (preds == c).sum().item()
                 
                 # Quantile calibration
                 returns_expanded = returns.unsqueeze(-1).expand_as(output.quantiles)
@@ -936,12 +939,23 @@ class MultiHeadTrainer:
         avg_losses = {k: v / n_batches for k, v in total_losses.items()}
         avg_losses['accuracy'] = correct / total
         
-        # Per-class metrics
+        # Per-class accuracy
         for c, name in [(0, 'short'), (1, 'hold'), (2, 'long')]:
             if class_total[c] > 0:
                 avg_losses[f'acc_{name}'] = class_correct[c] / class_total[c]
             else:
                 avg_losses[f'acc_{name}'] = 0.0
+        
+        # Prediction distribution (what % the model predicts as each class)
+        pred_total_count = sum(pred_counts.values())
+        if pred_total_count > 0:
+            avg_losses['pred_short_pct'] = pred_counts[0] / pred_total_count
+            avg_losses['pred_hold_pct'] = pred_counts[1] / pred_total_count
+            avg_losses['pred_long_pct'] = pred_counts[2] / pred_total_count
+        else:
+            avg_losses['pred_short_pct'] = 0
+            avg_losses['pred_hold_pct'] = 0
+            avg_losses['pred_long_pct'] = 0
         
         # Quantile calibration (should be ~[0.1, 0.25, 0.5, 0.75, 0.9])
         if quantile_count > 0:
@@ -994,23 +1008,19 @@ class MultiHeadTrainer:
         SPREAD_MULTIPLIER = 3.0  # K: require spread >= K * cost
         COOLDOWN = 4  # Bars to wait after a trade
         
-        # Confidence thresholds to sweep - matched to actual distribution
-        # (confidence max ~0.43, mean ~0.16, so old [0.3-1.1] was too high)
-        CONFIDENCE_THRESHOLDS = [0.10, 0.15, 0.20, 0.25, 0.30, 0.35]
+        # Confidence thresholds to sweep - softmax probability based
+        # For 3-class: random = 0.33, so sweep from 0.35 (barely above random) to 0.70 (high conviction)
+        CONFIDENCE_THRESHOLDS = [0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
         
         # Collect all model outputs
         all_predictions = []
+        all_probs = []
         all_returns = []
         all_mus = []
         all_sigmas = []
-        all_q10 = []
-        all_q25 = []
-        all_q75 = []
-        all_q90 = []
         
         with torch.no_grad():
             for batch in self.val_loader:
-                # Handle both old (5 values) and new (7 values with vol_state, accel) formats
                 features = batch[0].to(self.device)
                 returns = batch[2]
                 output = self.model.forward_multihead(features)
@@ -1019,158 +1029,64 @@ class MultiHeadTrainer:
                 preds = probs.argmax(dim=-1)
                 
                 all_predictions.extend(preds.cpu().numpy())
+                all_probs.extend(probs.cpu().numpy())
                 all_returns.extend(returns.cpu().numpy())
                 all_mus.extend(output.mu.squeeze().cpu().numpy())
                 all_sigmas.extend(output.sigma.squeeze().cpu().numpy())
-                
-                # Extract quantiles if available
-                if output.quantiles is not None:
-                    quantiles = output.quantiles.cpu().numpy()
-                    all_q10.extend(quantiles[:, 0])  # q10
-                    all_q25.extend(quantiles[:, 1])  # q25
-                    all_q75.extend(quantiles[:, 3])  # q75
-                    all_q90.extend(quantiles[:, 4])  # q90
         
         preds = np.array(all_predictions)
+        probs_arr = np.array(all_probs)
         returns = np.array(all_returns)
         mus = np.array(all_mus)
         raw_sigmas = np.array(all_sigmas)
         
-        # === DIAGNOSTIC: Class prediction distribution ===
+        # Prediction distribution
         n_total = len(preds)
-        n_short = (preds == 0).sum()  # SHORT
-        n_hold = (preds == 1).sum()   # HOLD
-        n_long = (preds == 2).sum()   # LONG
-        logger.info("=" * 70)
-        logger.info("PREDICTION DISTRIBUTION (epoch %d):", epoch)
-        logger.info("  SHORT (0): %5d / %d (%.1f%%)", n_short, n_total, 100*n_short/n_total if n_total > 0 else 0)
-        logger.info("  HOLD  (1): %5d / %d (%.1f%%)", n_hold, n_total, 100*n_hold/n_total if n_total > 0 else 0)
-        logger.info("  LONG  (2): %5d / %d (%.1f%%)", n_long, n_total, 100*n_long/n_total if n_total > 0 else 0)
+        n_short = (preds == 0).sum()
+        n_hold = (preds == 1).sum()
+        n_long = (preds == 2).sum()
+        logger.info("Predictions (epoch %d): S:%d(%.0f%%) H:%d(%.0f%%) L:%d(%.0f%%)",
+                   epoch, n_short, 100*n_short/n_total if n_total > 0 else 0,
+                   n_hold, 100*n_hold/n_total if n_total > 0 else 0,
+                   n_long, 100*n_long/n_total if n_total > 0 else 0)
         if n_short + n_long == 0:
             logger.warning(">>> MODEL PREDICTS 100%% HOLD - NO TRADES POSSIBLE <<<")
-        elif (n_short + n_long) / n_total < 0.05:
-            logger.warning(">>> MODEL PREDICTS %.1f%% DIRECTIONAL - VERY FEW TRADES <<<", 
-                          100*(n_short + n_long)/n_total)
-        logger.info("=" * 70)
         
-        # === CRITICAL FIX: Convert log_sigma to sigma ===
-        # Model outputs log_sigma when use_log_sigma=True (default)
-        # sigma = exp(log_sigma)
-        # If log_sigma is negative (typical), exp() gives values in (0, 1)
-        if hasattr(self.model, 'use_log_sigma') and self.model.use_log_sigma:
-            logger.info("CONF_DEBUG | Converting log_sigma to sigma (exp)")
-            sigmas = np.exp(np.clip(raw_sigmas, -10, 10))  # Clip to prevent overflow
-            logger.info("CONF_DEBUG | log_sigma range: [%.4f, %.4f], sigma range: [%.6f, %.6f]",
-                       raw_sigmas.min(), raw_sigmas.max(), sigmas.min(), sigmas.max())
-        else:
-            sigmas = raw_sigmas
+        # Use SOFTMAX PROBABILITY as confidence (not mu/sigma which may be untrained)
+        # For each sample, confidence = max(softmax prob) for the predicted class
+        confidence = probs_arr.max(axis=1)
         
-        # Handle quantiles (use mu-based fallback if not available)
-        if len(all_q10) > 0:
-            q10 = np.array(all_q10)
-            q25 = np.array(all_q25)
-            q75 = np.array(all_q75)
-            q90 = np.array(all_q90)
-        else:
-            # Fallback: approximate quantiles from mu and sigma
-            q10 = mus - 1.28 * sigmas
-            q25 = mus - 0.67 * sigmas
-            q75 = mus + 0.67 * sigmas
-            q90 = mus + 1.28 * sigmas
-        
-        # Compute spread and confidence for all samples
-        spread = q75 - q25  # Distribution width
-        confidence = np.abs(mus) / np.maximum(sigmas, 1e-6)  # |mu| / sigma
-        
-        # === CONF_DEBUG: Log confidence distribution ===
-        logger.info("CONF_DEBUG | Confidence stats: min=%.4f, max=%.4f, mean=%.4f, median=%.4f",
-                   confidence.min(), confidence.max(), confidence.mean(), np.median(confidence))
-        logger.info("CONF_DEBUG | Sigma stats: min=%.6f, max=%.6f, mean=%.6f", 
-                   sigmas.min(), sigmas.max(), sigmas.mean())
-        logger.info("CONF_DEBUG | Mu stats: min=%.6f, max=%.6f, mean=%.6f",
-                   mus.min(), mus.max(), mus.mean())
-        logger.info("CONF_DEBUG | Spread stats: min=%.6f, max=%.6f, mean=%.6f",
-                   spread.min(), spread.max(), spread.mean())
+        # Compute data-derived ATR from actual return volatility (rolling std)
+        # This replaces untrained sigma for trade exit calculations
+        rolling_window = 20
+        data_atr = np.full_like(returns, np.std(returns))  # Default: global std
+        for i in range(rolling_window, len(returns)):
+            data_atr[i] = np.std(returns[i-rolling_window:i])
+        data_atr = np.maximum(data_atr, 1e-6)  # Prevent zero
         
         # Base trade signals (LONG=2, SHORT=0)
         long_signal = preds == 2
         short_signal = preds == 0
         directional_signal = long_signal | short_signal
         
-        logger.info("CONF_DEBUG | Base directional signals: %d / %d samples (%.1f%%)",
-                   directional_signal.sum(), len(directional_signal), 
-                   100 * directional_signal.sum() / len(directional_signal))
-        
-        # === NEW: Minimum predicted-move filter ===
-        # If abs(mu) < MIN_MOVE_FACTOR × sigma → no trade (insufficient edge)
-        # NOTE: mu values are typically much smaller than sigma (mu~0.001, sigma~0.01)
-        # Use a low factor (0.10) to filter only the weakest predictions
-        MIN_MOVE_FACTOR = 0.05
-        move_gate = np.abs(mus) >= (MIN_MOVE_FACTOR * sigmas)
-        n_move_pass = move_gate.sum()
-        logger.info("MOVE_GATE | abs(mu) >= %.2f×sigma: %d / %d pass (%.1f%%)",
-                   MIN_MOVE_FACTOR, n_move_pass, len(move_gate), 
-                   100 * n_move_pass / len(move_gate) if len(move_gate) > 0 else 0)
-        logger.info("MOVE_GATE | mu_range=[%.6f, %.6f], sigma_range=[%.6f, %.6f], threshold=%.6f",
-                   mus.min(), mus.max(), sigmas.min(), sigmas.max(), 
-                   MIN_MOVE_FACTOR * sigmas.mean())
-        
         # === SWEEP CONFIDENCE THRESHOLDS TO FIND BEST POLICY ===
-        MIN_TRADES = 30  # Minimum trades for policy eligibility
+        MIN_TRADES = 30
         
         best_metrics = None
         best_score = float('-inf')
         best_threshold = 0.5
-        prev_trade_count = float('inf')  # For monotonicity check
         
         sweep_results = []
         
         for min_conf in CONFIDENCE_THRESHOLDS:
-            # === GATE ORDER: spread -> confidence -> direction -> cooldown -> trade ===
-            # Gate 1: Spread gate - sufficient price movement opportunity
-            spread_gate = spread >= (SPREAD_MULTIPLIER * FIXED_COST)
-            # Gate 2: Confidence gate - sufficient signal strength
             conf_gate = confidence >= min_conf
-            # Gate 3: Direction gate - model predicts LONG or SHORT (not HOLD)
-            # (directional_signal already computed above)
-            
-            # === CONF_DEBUG: Per-threshold logging ===
-            n_spread_pass = spread_gate.sum()
-            n_conf_pass = conf_gate.sum()
-            n_directional = directional_signal.sum()
-            n_dir_and_spread = (directional_signal & spread_gate).sum()
-            n_dir_and_conf = (directional_signal & conf_gate).sum()
-            n_move_and_dir = (move_gate & directional_signal).sum()
-            
-            logger.info("CONF_DEBUG | threshold=%.2f | spread_pass=%d, conf_pass=%d, move_pass=%d, "
-                       "dir=%d, dir&spread=%d, dir&conf=%d, dir&move=%d",
-                       min_conf, n_spread_pass, n_conf_pass, n_move_pass,
-                       n_directional, n_dir_and_spread, n_dir_and_conf, n_move_and_dir)
-            
-            # Combined gates (order: spread -> confidence -> direction -> move_filter)
-            # move_gate: abs(mu) >= 0.5 × sigma (minimum predicted move)
-            trade_allowed = spread_gate & conf_gate & directional_signal & move_gate
-            n_trade_allowed = trade_allowed.sum()
-            
-            # Gate 4: Cooldown - prevent overtrading
+            trade_allowed = conf_gate & directional_signal
             final_trades = self._apply_cooldown(trade_allowed, COOLDOWN)
-            n_final = final_trades.sum()
             
-            # Validate monotonicity: trades should decrease as threshold increases
-            if n_final > prev_trade_count:
-                logger.warning("MONOTONICITY VIOLATION: threshold=%.2f has %d trades > prev %d",
-                             min_conf, n_final, prev_trade_count)
-            prev_trade_count = n_final
-            
-            logger.info("CONF_DEBUG | threshold=%.2f | trade_allowed=%d, after_cooldown=%d | %s",
-                       min_conf, n_trade_allowed, n_final,
-                       "PASS" if n_final > 0 else "FAIL (no trades)")
-            
-            # Compute PnL with ATR-based asymmetric SL/TP
-            # SL = 1.5 × sigma, TP = 2.2 × sigma, min RR >= 1.5
+            # Compute PnL with data-derived ATR (not untrained model sigma)
             metrics = self._compute_pnl_with_atr_exits(
                 final_trades, long_signal, short_signal, returns, 
-                mus, sigmas, FIXED_COST
+                mus, data_atr, FIXED_COST
             )
             metrics['min_confidence'] = min_conf
             metrics['spread_multiplier'] = SPREAD_MULTIPLIER
@@ -1196,37 +1112,31 @@ class MultiHeadTrainer:
                 best_metrics = metrics
                 best_threshold = min_conf
         
-        # Log MONITORING sweep report (informational only - not for live trading)
-        logger.info("=" * 60)
-        logger.info("MONITORING SWEEP (epoch %d) - spread_K=%.1f, cooldown=%d, min_trades=%d", 
-                   epoch, SPREAD_MULTIPLIER, COOLDOWN, MIN_TRADES)
-        logger.info("NOTE: This is for MONITORING ONLY. Use PolicySelector for frozen live policy.")
-        logger.info("-" * 60)
+        # Compact sweep report
+        logger.info("-" * 70)
+        logger.info("TRADING SWEEP (epoch %d) | cooldown=%d bars | confidence=softmax prob", epoch, COOLDOWN)
+        logger.info("%-8s %6s %8s %7s %7s %8s %7s", "Conf>=", "Trades", "Expect", "WinRate", "Sharpe", "PF", "")
+        logger.info("-" * 70)
         for m in sweep_results:
             eligible = m['num_trades'] >= MIN_TRADES
             is_best = m['min_confidence'] == best_threshold and eligible and best_score > float('-inf')
-            status = "★ MONITORING BEST" if is_best else ("" if eligible else "(ineligible)")
+            marker = " << BEST" if is_best else ""
             logger.info(
-                f"conf>={m['min_confidence']:.2f}: Trades={m['num_trades']:4d}, "
-                f"Exp={m['expectancy']:+.4f}, Score={m['risk_adjusted_score']:+.4f}, "
-                f"Hit={m['hit_rate']:.1%}, MaxDD={m['max_drawdown']:.4f}, "
-                f"Sharpe={m['sharpe']:+.2f} {status}"
+                "%-8.0f%% %5d  %+.4f  %5.1f%%  %+5.2f   %5.2f%s",
+                m['min_confidence'] * 100, m['num_trades'],
+                m['expectancy'], m['hit_rate'] * 100,
+                m['sharpe'], m['profit_factor'], marker
             )
-        logger.info("=" * 60)
+        logger.info("-" * 70)
         
-        # Return best metrics for monitoring (NOT saved as policy)
         if best_metrics is None:
             best_metrics = sweep_results[-1] if sweep_results else {
                 'expectancy': 0.0, 'hit_rate': 0.0, 'profit_factor': 0.0,
                 'sharpe': 0.0, 'max_drawdown': 0.0, 'num_trades': 0,
                 'avg_win': 0.0, 'avg_loss': 0.0, 'win_loss_ratio': 0.0,
                 'risk_adjusted_score': 0.0,
-                'min_confidence': 0.5, 'spread_multiplier': 3.0, 'cooldown': 8
+                'min_confidence': 0.5, 'spread_multiplier': 3.0, 'cooldown': 4
             }
-        
-        logger.info(f"MONITORING: Best observed - Score: {best_metrics.get('risk_adjusted_score', 0):.4f}, "
-                   f"Exp: {best_metrics['expectancy']:.4f}, "
-                   f"Trades: {best_metrics['num_trades']}")
         
         return best_metrics
     
@@ -1957,12 +1867,15 @@ class MultiHeadTrainer:
                 short_acc = val_metrics.get('acc_short', 0)
                 hold_acc = val_metrics.get('acc_hold', 0)
                 long_acc = val_metrics.get('acc_long', 0)
+                pred_s = val_metrics.get('pred_short_pct', 0)
+                pred_h = val_metrics.get('pred_hold_pct', 0)
+                pred_l = val_metrics.get('pred_long_pct', 0)
                 logger.info(
-                    f"Epoch {epoch+1}/{epochs} - "
-                    f"Train: {train_metrics['total']:.4f} (acc: {train_metrics['accuracy']:.3f}) - "
-                    f"Val: {val_metrics['total']:.4f} (acc: {val_metrics['accuracy']:.3f}) - "
-                    f"LR: {epoch_lr:.2e} - "
-                    f"S:{short_acc:.0%} H:{hold_acc:.0%} L:{long_acc:.0%}"
+                    f"Epoch {epoch+1}/{epochs} | "
+                    f"Loss T:{train_metrics['total']:.4f} V:{val_metrics['total']:.4f} | "
+                    f"Acc:{val_metrics['accuracy']:.1%} S:{short_acc:.0%} H:{hold_acc:.0%} L:{long_acc:.0%} | "
+                    f"Pred S:{pred_s:.0%} H:{pred_h:.0%} L:{pred_l:.0%} | "
+                    f"LR:{epoch_lr:.1e}"
                 )
             
             # Early stopping check - uses val_loss ONLY (not monitoring sweep expectancy)
@@ -2012,6 +1925,9 @@ class MultiHeadTrainer:
                 short_acc = val_metrics.get('acc_short', 0) * 100
                 hold_acc = val_metrics.get('acc_hold', 0) * 100
                 long_acc = val_metrics.get('acc_long', 0) * 100
+                ps = val_metrics.get('pred_short_pct', 0) * 100
+                ph = val_metrics.get('pred_hold_pct', 0) * 100
+                pl = val_metrics.get('pred_long_pct', 0) * 100
                 
                 print("\n" + "=" * 60)
                 print(f"  CHECKPOINT @ Epoch {epoch+1}/{epochs}")
@@ -2023,16 +1939,20 @@ class MultiHeadTrainer:
                 print(f"  Patience:      {self.patience_counter}/{early_stopping_patience}")
                 print(f"  Current LR:    {self.optimizer.param_groups[0]['lr']:.2e}")
                 print("-" * 60)
-                print(f"  Per-class Accuracy:")
+                print(f"  Per-class Accuracy (recall):")
                 print(f"    SHORT: {short_acc:.1f}%  |  HOLD: {hold_acc:.1f}%  |  LONG: {long_acc:.1f}%")
+                print(f"  Prediction Distribution:")
+                print(f"    SHORT: {ps:.1f}%  |  HOLD: {ph:.1f}%  |  LONG: {pl:.1f}%")
                 if val_metrics.get('num_trades', 0) > 0:
                     print(f"  Trading Metrics:")
-                    print(f"    Expectancy:    {val_metrics.get('expectancy', 0):.4f}")
-                    print(f"    Hit Rate:      {val_metrics.get('hit_rate', 0)*100:.1f}%")
-                    print(f"    Sharpe:        {val_metrics.get('sharpe', 0):.2f}")
+                    print(f"    Expectancy:    {val_metrics.get('expectancy', 0):+.4f}")
+                    print(f"    Win Rate:      {val_metrics.get('hit_rate', 0)*100:.1f}%")
+                    print(f"    Sharpe:        {val_metrics.get('sharpe', 0):+.2f}")
+                    print(f"    Profit Factor: {val_metrics.get('profit_factor', 0):.2f}")
                     print(f"    Trades:        {val_metrics.get('num_trades', 0)}")
+                    print(f"    Avg Win/Loss:  {val_metrics.get('avg_win', 0):+.4f} / {val_metrics.get('avg_loss', 0):+.4f}")
                 else:
-                    print(f"  Trading: No trades yet (monitoring sweep needs more epochs)")
+                    print(f"  Trading: No trades yet (monitoring sweep runs every 5 epochs)")
                 print("=" * 60)
                 
                 try:

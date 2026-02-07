@@ -63,6 +63,14 @@ Training improvements (v4 - classification focus):
 - Focal Loss enabled by default (gamma=2.0) with class weight caps
 - Per-class accuracy (SHORT/HOLD/LONG) logged every epoch for training visibility
 - CLI flags: --focal-loss/--no-focal-loss, --focal-gamma, --class-weight-cap
+- Monitoring sweep now uses softmax probability as confidence (not mu/sigma which are untrained)
+  - Thresholds: 35%-70% (above 33% random baseline for 3-class)
+  - Removed spread gate and move gate that depended on untrained auxiliary heads
+  - Trading sweep output is compact tabular format with Trades/Expect/WinRate/Sharpe/PF columns
+- Per-epoch log format: `Epoch N | Loss T:X V:X | Acc:X S:X H:X L:X | Pred S:X H:X L:X | LR:X`
+  - Shows both per-class accuracy (recall) AND prediction distribution every epoch
+  - Diagnostic logging only appears when relevant (gradient norms > 5, active auxiliary heads)
+- Checkpoint display includes prediction distribution and full trading metrics (PF, avg win/loss)
 
 Position sizing: ATR-based with 2% account risk per trade, scaled by confidence/edge, hard capped at 0.5-5.0% of account. Trade signals below confidence/edge thresholds are automatically downgraded to HOLD.
 

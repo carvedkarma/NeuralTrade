@@ -568,6 +568,16 @@ Examples:
         log.info("=" * 60)
         log.info("  TRAINING COMPLETE")
         log.info("=" * 60)
+        
+        if history.get('aborted'):
+            log.warning(f"Training aborted at epoch {history.get('abort_epoch', '?')}: {history.get('abort_reason', 'unknown')}")
+        else:
+            final_val_loss = history['val_loss'][-1] if history['val_loss'] else 0
+            final_val_acc = history['val_acc'][-1] if history['val_acc'] else 0
+            best_val_loss = min(history['val_loss']) if history['val_loss'] else 0
+            log.info(f"  Final val loss: {final_val_loss:.4f} | Best: {best_val_loss:.4f}")
+            log.info(f"  Final val accuracy: {final_val_acc:.1%}")
+            log.info(f"  Epochs trained: {len(history['val_loss'])}")
     else:
         import torch
         checkpoint_path = Path("checkpoints/best_enhanced_mlp.pt")
@@ -613,16 +623,20 @@ Examples:
         prediction = make_prediction(model, engineer, feature_columns, data_path, device)
 
         print()
-        log.info("=" * 50)
-        log.info(f"  PREDICTION: {prediction['action']} ({prediction['confidence']:.1%})")
+        dp = prediction['direction_probs']
+        log.info("=" * 60)
+        log.info(f"  SIGNAL: {prediction['action']} | Confidence: {prediction['confidence']:.1%}")
+        log.info("=" * 60)
+        log.info(f"  Direction Probs: SHORT {dp['SHORT']:.1%} | HOLD {dp['HOLD']:.1%} | LONG {dp['LONG']:.1%}")
         log.info(f"  Price: ${prediction['current_price']:,.2f}")
-        log.info(f"  SL: ${prediction['stop_loss_price']:,.2f} | TP: ${prediction['take_profit_price']:,.2f}")
-        log.info(f"  R:R = {prediction['risk_reward_ratio']:.1f}")
-        log.info(f"  Position Size: {prediction['position_size_pct']:.1f}%")
-        log.info(f"  Vol State: {prediction['vol_state']}")
-        log.info(f"  Edge: {prediction['edge']:.2f}")
-        log.info(f"  Mu: {prediction['expected_return']:.6f} | Sigma: {prediction['uncertainty']:.6f}")
-        log.info("=" * 50)
+        log.info(f"  Entry: ${prediction['entry_price']:,.2f}")
+        log.info(f"  SL:    ${prediction['stop_loss_price']:,.2f} ({prediction['stop_loss_pct']:.2%})")
+        log.info(f"  TP:    ${prediction['take_profit_price']:,.2f} ({prediction['take_profit_pct']:.2%})")
+        log.info(f"  R:R = {prediction['risk_reward_ratio']:.1f} | Position: {prediction['position_size_pct']:.1f}%")
+        log.info(f"  Vol State: {prediction['vol_state']} | Edge: {prediction['edge']:.2f}")
+        if prediction.get('reasons'):
+            log.info(f"  Reasons: {', '.join(prediction['reasons'])}")
+        log.info("=" * 60)
 
         is_hold = prediction['action'] == "HOLD"
         low_confidence = prediction['confidence'] < args.min_confidence
