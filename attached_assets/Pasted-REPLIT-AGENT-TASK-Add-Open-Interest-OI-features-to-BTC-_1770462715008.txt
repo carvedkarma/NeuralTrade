@@ -1,0 +1,166 @@
+REPLIT AGENT TASK — Add Open Interest (OI) features to BTC ENTER Quality Model (v3.3.0)
+
+GOAL:
+Unlock 5–6 trades/day WITHOUT lowering thresholds by adding Open Interest (OI) features from Binance Futures.
+We already added funding features (v3.2.0). Now add OI using the SAME ingestion + caching + backward alignment pattern.
+Do NOT change labeling, model, gates, TP/SL, or thresholds.
+
+ABSOLUTE RULES:
+- DO NOT change ENTER labels (triple barrier / EXP_WIN / r_min_expiry).
+- DO NOT change model architecture, loss, or training loop.
+- DO NOT loosen HTF alignment gates or p_enter threshold.
+- ONLY add OI ingestion + 3 OI features and integrate into compute_all_features().
+- MUST be leak-free: all OI values aligned strictly from timestamps <= candle time.
+
+================================================================================
+1) BINANCE FUTURES OI DATA FETCH (HISTORICAL)
+================================================================================
+
+Implement: fetch_open_interest_hist(symbol="BTCUSDT", period="5m" or "15m" or "1h") from Binance Futures.
+
+Use Binance Futures data endpoint (Open Interest History):
+- Base: https://fapi.binance.com
+- Endpoint: /futures/data/openInterestHist
+- Params:
+  - symbol=BTCUSDT
+  - period=5m (preferred) or 15m if rate limits are an issue; 1h is acceptable as fallback
+  - limit=500
+  - startTime, endTime for pagination
+
+Pagination requirements:
+- Pull FULL range matching the candle dataset timeframe (5 years).
+- Loop with startTime increments until endTime reached.
+- Handle rate limits with sleep/backoff.
+- Deduplicate by timestamp.
+- Ensure records are strictly increasing by time.
+
+Cache:
+- Save to: data_cache/open_interest_hist.parquet
+- Store columns:
+  - oi_time_ms (timestamp)
+  - sumOpenInterest (float)
+  - symbol
+  - period
+
+Logging:
+- Print total fetched OI records
+- Print expected coverage estimate:
+  - if period=5m: expected_records ≈ (total_minutes/5)
+  - if period=15m: expected_records ≈ (total_minutes/15)
+  - if period=1h: expected_records ≈ (total_hours)
+- Print coverage % and warn if < 95%
+
+================================================================================
+2) OI FEATURE ENGINEERING (COMPUTE ON OI SERIES BEFORE ALIGNMENT)
+================================================================================
+
+Compute these 3 features on the OI event series (NOT after merging into candles):
+
+Mandatory features:
+1) open_interest
+   - from sumOpenInterest (float)
+
+2) oi_delta_1h
+   - If OI period is 5m/15m:
+       oi_delta_1h = OI_now - OI_12_steps_ago (for 5m) OR OI_4_steps_ago (for 15m)
+     If OI period is 1h:
+       oi_delta_1h = OI_now - OI_prev
+   - Also compute pct change optionally (not required)
+
+3) oi_zscore_30d
+   - Rolling z-score computed on oi_delta_1h (preferred) OR on open_interest (acceptable)
+   - Window should approximate 30 days:
+       For 5m: 30d * 24h * 12 = 8640
+       For 15m: 30d * 24h * 4 = 2880
+       For 1h: 30d * 24 = 720
+   - Use rolling mean/std; avoid lookahead.
+   - Fill early window NaNs safely (0 or forward valid only if strictly past)
+
+Scaling & clipping:
+- Robust scale (optional) OR keep raw then clip:
+  - Clip oi_zscore_30d to [-5, +5]
+  - Clip oi_delta_1h to a reasonable percentile-based cap or [-5σ, +5σ]
+- Ensure no inf/NaN in final feature columns.
+
+================================================================================
+3) ALIGNMENT TO 15m CANDLES (LEAK-FREE)
+================================================================================
+
+Align OI features to 15m candles using backward merge_asof:
+
+- left: 15m candles dataframe with candle_time_ms
+- right: oi dataframe with oi_time_ms
+- merge_asof(direction="backward")
+- For each candle time t, matched oi_time must satisfy oi_time <= t.
+
+Add an audit log exactly like funding:
+- Print 10 random candle rows:
+  - candle_time, matched_oi_time, open_interest, oi_delta_1h, oi_zscore_30d
+- Hard assert in debug mode that matched_oi_time <= candle_time.
+
+Coverage:
+- Log:
+  - % candles with non-null OI features
+  - % candidate rows (after HTF trend alignment filter) with non-null OI features
+- If coverage < 95%, warn and fall back to NaNs -> then fill with 0 ONLY AFTER merging
+  (but log loudly that this reduces signal).
+
+================================================================================
+4) PIPELINE INTEGRATION
+================================================================================
+
+In pipeline.py (or wherever compute_all_features lives):
+
+- Add a new function: compute_oi_features(candles_15m_df) -> df_with_oi
+- Call compute_oi_features inside compute_all_features AFTER HTF features, alongside funding.
+
+Total features should become:
+- 47 STF + 10 HTF + 3 Funding + 3 OI = 63 features
+
+Feature version bump:
+- v3.3.0_enter_quality_stf47_htf10_funding3_oi3
+
+Checkpoint compatibility:
+- Save feature_columns + feature_version in checkpoint metadata.
+- In inference: HARD FAIL (raise exception) if version mismatch (do not just warn).
+
+================================================================================
+5) TRAINING & EVALUATION (NO BEHAVIOR CHANGES)
+================================================================================
+
+Keep training command identical except version automatically changes.
+
+Continue:
+- BCEWithLogitsLoss with pos_weight
+- same LR warmup + cosine
+- same early stopping
+- same trading sweep every 5 epochs:
+  - fixed thresholds 45–75
+  - percentiles top10/15/20/25/30
+
+Add additional logging during sweeps:
+- p_enter percentiles on validation: p50/p75/p90/p95/p99
+- This is required to see if right-tail got fatter.
+
+================================================================================
+6) SUCCESS CRITERIA (MEASURABLE)
+================================================================================
+
+This OI addition is a success if ANY occurs on OOS walk-forward:
+- PR-AUC rises and stabilizes > 0.40 (ideally 0.45+)
+- top20–25% PF >= 1.05 with expectancy >= 0
+- trade frequency reaches ~5–6/day WITHOUT reducing p_enter threshold
+
+If not achieved by epoch ~30–50, report clearly that candles+HTF+funding+OI still doesn’t separate outcomes.
+
+================================================================================
+DELIVERABLES
+================================================================================
+- data_cache/open_interest_hist.parquet
+- compute_oi_features() implemented + integrated
+- Feature version bumped to v3.3.0...oi3
+- Alignment audit logs printed
+- Training run outputs showing sweeps and p_enter percentile stats
+- Clear comparison summary vs v3.2.0 (funding only)
+
+IMPLEMENT NOW.

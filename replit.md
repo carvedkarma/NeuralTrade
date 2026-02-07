@@ -15,7 +15,7 @@ The frontend is built with React and TypeScript using Vite, featuring a modern U
 The backend uses Node.js with Express.js (TypeScript, ESM) and follows a RESTful API pattern. AI integration is managed via OpenAI. Market data is sourced primarily from Binance Vision API, with fallbacks to CoinGecko and CryptoCompare, augmented by a Replit-hosted data proxy. Bi-directional communication with a local GPU trainer is established via dedicated API endpoints.
 
 ### Feature Specifications
-The system uses an ENTER QUALITY model (v3.2.0) that predicts WHETHER to enter a trend-following trade (binary 0/1), not WHICH direction. Direction comes from HTF (1H/4H) trend alignment. GPU-accelerated training uses the stable EnhancedMultiHeadMLP architecture with [512, 256, 128, 64] residual blocks and the enter_head (binary classifier with BCEWithLogitsLoss). The model uses 60 features (47 STF + 10 HTF + 3 Funding) on 15m timeframe with 24-bar horizon (6 hours). Inference applies p_enter threshold (0.55) plus HTF alignment gates (h1_trend == h4_trend, slope > 0.05, range position check) to produce final LONG/SHORT/HOLD signals. Model management includes walk-forward weight saving, feature version locking (`v3.2.0_enter_quality_stf47_htf10_funding3`), and prediction drift monitoring.
+The system uses an ENTER QUALITY model (v3.3.0) that predicts WHETHER to enter a trend-following trade (binary 0/1), not WHICH direction. Direction comes from HTF (1H/4H) trend alignment. GPU-accelerated training uses the stable EnhancedMultiHeadMLP architecture with [512, 256, 128, 64] residual blocks and the enter_head (binary classifier with BCEWithLogitsLoss). The model uses 63 features (47 STF + 10 HTF + 3 Funding + 3 OI) on 15m timeframe with 24-bar horizon (6 hours). Inference applies p_enter threshold (0.55) plus HTF alignment gates (h1_trend == h4_trend, slope > 0.05, range position check) to produce final LONG/SHORT/HOLD signals. Model management includes walk-forward weight saving, feature version locking (`v3.3.0_enter_quality_stf47_htf10_funding3_oi3`), and prediction drift monitoring.
 
 ### Training Label Strategy (ENTER QUALITY - v3.1.0)
 HTF-gated Triple Barrier labeling for binary entry quality:
@@ -30,7 +30,7 @@ HTF-gated Triple Barrier labeling for binary entry quality:
 - Primary metric: PR-AUC (Precision-Recall Area Under Curve)
 - Previous approach: 3-class direction model (SHORT/HOLD/LONG) replaced by binary ENTER quality
 
-### Input Features (60 total, v3.2.0)
+### Input Features (63 total, v3.3.0)
 
 **STF features (47, Single-TimeFrame 15m):**
 Base features: returns, log_returns, SMA/EMA/std/return at 5/10/20/50/100 periods, RSI-14/7, MACD/signal/hist, Bollinger Bands (upper/middle/lower/width/position), ATR-14/7, volume SMA/ratio, ADX-14, Stochastic K/D, OBV/OBV-SMA.
@@ -51,7 +51,13 @@ Fetched from Binance Futures `fapi/v1/fundingRate` (8h intervals), paginated to 
 - `funding_rate_delta_8h` - Change from previous funding period × 100 (momentum)
 - `funding_rate_zscore_30d` - Rolling z-score over 90 funding periods (~30 days), measures deviation from recent norm
 
-Feature versioning: `VERSION = "v3.2.0_enter_quality_stf47_htf10_funding3"`. Saved in checkpoint metadata. Inference verifies version match and **hard-fails** on mismatch (sys.exit or RuntimeError). Column order is locked at training time and enforced via `reindex()` at inference. Missing or extra columns also trigger hard failure.
+**OI features (3, Open Interest Context):**
+Fetched from Binance Futures `/futures/data/openInterestHist` (5m preferred, fallback to 15m/1h), paginated to cover full training range, cached to `data_cache/open_interest_hist.parquet`. Features computed on OI event series BEFORE alignment (leak-free), then aligned to 15m candles via `merge_asof(direction="backward")`.
+- `open_interest` - sumOpenInterest normalized by median (relative OI level)
+- `oi_delta_1h` - 1-hour OI change normalized by std (positioning momentum)
+- `oi_zscore_30d` - Rolling z-score of oi_delta_1h over ~30 days, measures deviation from recent norm
+
+Feature versioning: `VERSION = "v3.3.0_enter_quality_stf47_htf10_funding3_oi3"`. Saved in checkpoint metadata. Inference verifies version match and **hard-fails** on mismatch (sys.exit or RuntimeError). Column order is locked at training time and enforced via `reindex()` at inference. Missing or extra columns also trigger hard failure.
 
 ### GPU Training CLI Reference
 Current stable model: `enhanced_mlp` (EnhancedMultiHeadMLP)

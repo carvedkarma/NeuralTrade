@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BTC Futures GPU Trainer - Quick Start (v3.2.0 ENTER QUALITY + Funding)
+BTC Futures GPU Trainer - Quick Start (v3.3.0 ENTER QUALITY + Funding + OI)
 =============================================================
 One-script setup: Downloads data from your Replit dashboard,
 trains the ENTER QUALITY model on your GPU, and pushes predictions back.
@@ -30,10 +30,13 @@ logging.basicConfig(
 )
 log = logging.getLogger("QuickStart")
 
-FEATURE_VERSION = "v3.2.0_enter_quality_stf47_htf10_funding3"
+FEATURE_VERSION = "v3.3.0_enter_quality_stf47_htf10_funding3_oi3"
 
 FUNDING_FEATURE_NAMES = ["funding_rate", "funding_rate_delta_8h", "funding_rate_zscore_30d"]
 FUNDING_FEATURE_COUNT = len(FUNDING_FEATURE_NAMES)
+
+OI_FEATURE_NAMES = ["open_interest", "oi_delta_1h", "oi_zscore_30d"]
+OI_FEATURE_COUNT = len(OI_FEATURE_NAMES)
 
 
 def check_gpu():
@@ -266,6 +269,219 @@ def compute_funding_features(candle_df, funding_df):
     return result
 
 
+def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m"):
+    """Fetch historical Open Interest from Binance Futures API, paginating to cover full candle range."""
+    import requests
+    import pandas as pd
+
+    cache_path = data_dir / "open_interest_hist.parquet"
+
+    candle_start_ms = int(candle_df['timestamp'].min())
+    candle_end_ms = int(candle_df['timestamp'].max())
+
+    if cache_path.exists():
+        existing = pd.read_parquet(cache_path)
+        if len(existing) > 0:
+            cached_start = existing['oi_time_ms'].min()
+            cached_end = existing['oi_time_ms'].max()
+            cached_period = existing.iloc[0].get('period', 'unknown') if 'period' in existing.columns else 'unknown'
+            period_ms = {"5m": 5*60*1000, "15m": 15*60*1000, "1h": 3600*1000}.get(cached_period, 15*60*1000)
+            if cached_start <= candle_start_ms and cached_end >= candle_end_ms - period_ms:
+                if cached_period != period:
+                    log.info(f"Cached OI uses period={cached_period} (requested {period}) - using cached data as-is")
+                log.info(f"Using cached OI data: {len(existing)} records (period={cached_period})")
+                return existing
+
+    log.info(f"Fetching historical Open Interest from Binance Futures (period={period})...")
+    url = "https://fapi.binance.com/futures/data/openInterestHist"
+    all_records = []
+    current_start = candle_start_ms
+    page = 0
+
+    while current_start < candle_end_ms:
+        params = {
+            "symbol": "BTCUSDT",
+            "period": period,
+            "startTime": current_start,
+            "endTime": candle_end_ms,
+            "limit": 500,
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=30)
+            if resp.status_code == 429:
+                import time as _time
+                log.warning("OI rate limited - sleeping 3s")
+                _time.sleep(3)
+                continue
+            if resp.status_code == 403 or resp.status_code == 451:
+                if period == "5m":
+                    log.warning(f"OI period={period} not available (HTTP {resp.status_code}), falling back to 15m")
+                    return fetch_open_interest_hist(candle_df, data_dir, period="15m")
+                elif period == "15m":
+                    log.warning(f"OI period={period} not available (HTTP {resp.status_code}), falling back to 1h")
+                    return fetch_open_interest_hist(candle_df, data_dir, period="1h")
+                else:
+                    log.error(f"OI fetch failed for all periods (HTTP {resp.status_code})")
+                    return pd.DataFrame(columns=["oi_time_ms", "sumOpenInterest", "symbol", "period"])
+            resp.raise_for_status()
+            data = resp.json()
+        except requests.exceptions.HTTPError as e:
+            if period == "5m":
+                log.warning(f"OI period={period} error: {e}, falling back to 15m")
+                return fetch_open_interest_hist(candle_df, data_dir, period="15m")
+            elif period == "15m":
+                log.warning(f"OI period={period} error: {e}, falling back to 1h")
+                return fetch_open_interest_hist(candle_df, data_dir, period="1h")
+            log.warning(f"OI fetch error (page {page}): {e}")
+            break
+        except Exception as e:
+            log.warning(f"OI fetch error (page {page}): {e}")
+            break
+
+        if not data:
+            break
+
+        for item in data:
+            all_records.append({
+                "oi_time_ms": int(item["timestamp"]),
+                "sumOpenInterest": float(item["sumOpenInterest"]),
+                "symbol": item.get("symbol", "BTCUSDT"),
+                "period": period,
+            })
+
+        last_ts = int(data[-1]["timestamp"])
+        if last_ts <= current_start:
+            break
+        current_start = last_ts + 1
+        page += 1
+
+        if page % 10 == 0:
+            log.info(f"  Fetched {len(all_records)} OI records so far (page {page})...")
+        import time as _time
+        _time.sleep(0.2)
+
+    if not all_records:
+        log.warning("No OI data fetched - OI features will be zero")
+        return pd.DataFrame(columns=["oi_time_ms", "sumOpenInterest", "symbol", "period"])
+
+    oi_df = pd.DataFrame(all_records)
+    oi_df = oi_df.drop_duplicates(subset=["oi_time_ms"]).sort_values("oi_time_ms").reset_index(drop=True)
+
+    period_minutes = {"5m": 5, "15m": 15, "1h": 60}.get(period, 15)
+    total_minutes = (candle_end_ms - candle_start_ms) / (60 * 1000)
+    expected_records = total_minutes / period_minutes
+    coverage_pct = len(oi_df) / max(expected_records, 1) * 100
+    log.info(f"OI coverage: {coverage_pct:.0f}% ({len(oi_df)} records for ~{expected_records:.0f} expected {period} intervals)")
+    if coverage_pct < 95:
+        log.warning(f"Low OI coverage ({coverage_pct:.0f}%) - some candles may have zero OI features")
+
+    oi_df.to_parquet(cache_path, index=False)
+    log.info(f"Fetched {len(oi_df)} OI records (period={period}, cached to {cache_path})")
+
+    return oi_df
+
+
+def compute_oi_features(candle_df, oi_df):
+    """Compute OI features aligned to 15m candle timestamps via merge_asof backward.
+
+    Returns DataFrame with 3 columns: open_interest, oi_delta_1h, oi_zscore_30d
+    All features computed on OI event series BEFORE alignment (leak-free).
+    """
+    import pandas as pd
+    import numpy as np
+
+    n = len(candle_df)
+
+    if oi_df.empty or len(oi_df) < 2:
+        log.warning("Empty/insufficient OI data - returning zero features")
+        return pd.DataFrame(
+            np.zeros((n, OI_FEATURE_COUNT)),
+            columns=OI_FEATURE_NAMES,
+            index=candle_df.index,
+        )
+
+    oi_sorted = oi_df[['oi_time_ms', 'sumOpenInterest']].copy()
+    oi_sorted = oi_sorted.sort_values('oi_time_ms').reset_index(drop=True)
+
+    period = oi_df['period'].iloc[0] if 'period' in oi_df.columns else '15m'
+    if period == '5m':
+        delta_lookback = 12
+        zscore_window = 8640
+    elif period == '15m':
+        delta_lookback = 4
+        zscore_window = 2880
+    else:
+        delta_lookback = 1
+        zscore_window = 720
+
+    oi_sorted['oi_delta_1h'] = oi_sorted['sumOpenInterest'] - oi_sorted['sumOpenInterest'].shift(delta_lookback)
+
+    rolling_mean = oi_sorted['oi_delta_1h'].rolling(zscore_window, min_periods=max(delta_lookback + 1, 10)).mean()
+    rolling_std = oi_sorted['oi_delta_1h'].rolling(zscore_window, min_periods=max(delta_lookback + 1, 10)).std().clip(lower=1e-8)
+    oi_sorted['oi_zscore_30d'] = (oi_sorted['oi_delta_1h'] - rolling_mean) / rolling_std
+
+    oi_sorted = oi_sorted.fillna(0)
+
+    oi_median = oi_sorted['sumOpenInterest'].median()
+    if oi_median > 0:
+        oi_sorted['open_interest_scaled'] = oi_sorted['sumOpenInterest'] / oi_median
+    else:
+        oi_sorted['open_interest_scaled'] = oi_sorted['sumOpenInterest']
+
+    delta_std = oi_sorted['oi_delta_1h'].std()
+    if delta_std > 0:
+        oi_sorted['oi_delta_1h_scaled'] = oi_sorted['oi_delta_1h'] / delta_std
+    else:
+        oi_sorted['oi_delta_1h_scaled'] = oi_sorted['oi_delta_1h']
+
+    candle_ts = candle_df[['timestamp']].copy().reset_index(drop=True)
+    candle_ts['_candle_idx'] = candle_ts.index
+
+    oi_for_merge = oi_sorted[['oi_time_ms', 'open_interest_scaled', 'oi_delta_1h_scaled', 'oi_zscore_30d']].copy()
+    oi_for_merge = oi_for_merge.rename(columns={'oi_time_ms': 'timestamp'})
+
+    merged = pd.merge_asof(
+        candle_ts.sort_values('timestamp'),
+        oi_for_merge.sort_values('timestamp'),
+        on='timestamp',
+        direction='backward',
+    )
+
+    merged = merged.sort_values('_candle_idx').reset_index(drop=True)
+
+    result = pd.DataFrame(index=candle_df.index)
+    result['open_interest'] = merged['open_interest_scaled'].values
+    result['oi_delta_1h'] = merged['oi_delta_1h_scaled'].values
+    result['oi_zscore_30d'] = merged['oi_zscore_30d'].values
+
+    result = result.fillna(0)
+    result = result.clip(lower=-5, upper=5)
+
+    n_nonzero = (result.abs() > 1e-8).any(axis=1).sum()
+    log.info(f"OI features: {n_nonzero}/{n} rows with non-zero OI data")
+
+    import random
+    if n > 10:
+        start_idx = min(100, n - 1)
+        sample_pool = list(range(start_idx, n))
+        sample_size = min(10, len(sample_pool))
+        sample_indices = sorted(random.sample(sample_pool, sample_size)) if sample_size > 0 else []
+    else:
+        sample_indices = list(range(n))
+    log.info("OI ALIGNMENT CHECK (10 random rows):")
+    log.info(f"{'Row':>8} | {'Candle TS':>15} | {'OI':>10} | {'Delta1h':>10} | {'Z30d':>10}")
+    log.info("-" * 65)
+    for idx in sample_indices:
+        ts = candle_df.iloc[idx].get('timestamp', 0)
+        oi_val = result.iloc[idx]['open_interest']
+        delta = result.iloc[idx]['oi_delta_1h']
+        zscore = result.iloc[idx]['oi_zscore_30d']
+        log.info(f"{idx:>8} | {int(ts):>15} | {oi_val:>+10.4f} | {delta:>+10.4f} | {zscore:>+10.4f}")
+    log.info("-" * 65)
+
+    return result
+
+
 def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float,
                       checkpoint_interval: int = 25, warmup_epochs: int = 5, min_lr: float = None,
                       tp_mult: float = 2.0, sl_mult: float = 1.5, horizon: int = 24, slope_eps: float = 0.05,
@@ -297,8 +513,19 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     funding_features = compute_funding_features(df, funding_df)
     features_df = pd.concat([features_df, funding_features], axis=1)
     features_df = features_df.fillna(0)
-    total_features = engineer.STF_FEATURE_COUNT + engineer.HTF_FEATURE_COUNT + FUNDING_FEATURE_COUNT
-    log.info(f"Total features with funding: {len(features_df.columns)} ({engineer.STF_FEATURE_COUNT} STF + {engineer.HTF_FEATURE_COUNT} HTF + {FUNDING_FEATURE_COUNT} funding)")
+
+    oi_df = fetch_open_interest_hist(df, data_dir)
+    oi_features = compute_oi_features(df, oi_df)
+    features_df = pd.concat([features_df, oi_features], axis=1)
+    features_df = features_df.fillna(0)
+
+    total_features = engineer.STF_FEATURE_COUNT + engineer.HTF_FEATURE_COUNT + FUNDING_FEATURE_COUNT + OI_FEATURE_COUNT
+    actual_cols = len(features_df.columns)
+    log.info(f"Total features: {actual_cols} ({engineer.STF_FEATURE_COUNT} STF + {engineer.HTF_FEATURE_COUNT} HTF + {FUNDING_FEATURE_COUNT} funding + {OI_FEATURE_COUNT} OI)")
+    if actual_cols != total_features:
+        log.error(f"FATAL: Feature count mismatch! Expected {total_features}, got {actual_cols}")
+        log.error(f"Columns: {sorted(features_df.columns.tolist())}")
+        sys.exit(1)
 
     htf_cols = [c for c in features_df.columns if c.startswith('h1_') or c.startswith('h4_')]
     htf_features_df = features_df[htf_cols].copy()
@@ -769,7 +996,13 @@ def _run_enter_trading_sweep(probs, targets, sides, returns, epoch, tp_mult, sl_
                 best_score = m['expect']
                 best_label = m['label']
 
+    p50 = float(np.percentile(probs, 50))
+    p75 = float(np.percentile(probs, 75))
+    p90 = float(np.percentile(probs, 90))
+    p95 = float(np.percentile(probs, 95))
+    p99 = float(np.percentile(probs, 99))
     log.info("-" * 90)
+    log.info("p_enter percentiles (val): p50=%.3f p75=%.3f p90=%.3f p95=%.3f p99=%.3f", p50, p75, p90, p95, p99)
     log.info("ENTER TRADING SWEEP (epoch %d) | cooldown=%d | TP=%.1fx SL=%.1fx ATR", epoch, COOLDOWN, tp_mult, sl_mult)
     log.info("%-8s %5s %8s %6s %6s %5s | %6s %6s %6s | %4s %4s %4s",
              "Select", "Trds", "Expect", "WR", "Shrpe", "PF",
@@ -796,10 +1029,10 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
     from data.pipeline import FeatureEngineer
     feat_engineer = FeatureEngineer()
 
-    expected_count = FeatureEngineer.TOTAL_FEATURE_COUNT + FUNDING_FEATURE_COUNT
+    expected_count = FeatureEngineer.TOTAL_FEATURE_COUNT + FUNDING_FEATURE_COUNT + OI_FEATURE_COUNT
     if len(feature_columns) != expected_count:
         raise RuntimeError(
-            f"FATAL: feature_columns has {len(feature_columns)} cols, expected {expected_count}. "
+            f"FATAL: feature_columns has {len(feature_columns)} cols, expected {expected_count} (57 base + {FUNDING_FEATURE_COUNT} funding + {OI_FEATURE_COUNT} OI). "
             f"Checkpoint mismatch - retrain the model."
         )
 
@@ -810,6 +1043,11 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
     funding_df = fetch_funding_rates(df, data_dir)
     funding_features = compute_funding_features(df, funding_df)
     features_df = pd.concat([features_df, funding_features], axis=1)
+    features_df = features_df.fillna(0)
+
+    oi_df = fetch_open_interest_hist(df, data_dir)
+    oi_features = compute_oi_features(df, oi_df)
+    features_df = pd.concat([features_df, oi_features], axis=1)
     features_df = features_df.fillna(0)
 
     missing = set(feature_columns) - set(features_df.columns)
@@ -933,7 +1171,7 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
         "risk_reward_ratio": round(rr, 2),
         "position_size_pct": round(position_size, 1),
         "current_price": round(current_price, 2),
-        "model_name": "enter_quality_v3.2_funding",
+        "model_name": "enter_quality_v3.3_funding_oi",
         "is_multihead": True,
         "urgency": "high" if p_enter > 0.7 and should_trade else ("medium" if should_trade else "low"),
         "suggested_order_type": "limit",
@@ -983,7 +1221,7 @@ def push_prediction(replit_url: str, prediction: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="BTC Futures GPU Trainer - ENTER QUALITY Model (v3.2.0 + Funding)",
+        description="BTC Futures GPU Trainer - ENTER QUALITY Model (v3.3.0 + Funding + OI)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1011,7 +1249,7 @@ Examples:
 
     print()
     print("=" * 60)
-    print("  BTC FUTURES - ENTER QUALITY MODEL v3.2.0 + FUNDING")
+    print("  BTC FUTURES - ENTER QUALITY MODEL v3.3.0 + FUNDING + OI")
     print("=" * 60)
     print()
 
@@ -1070,7 +1308,7 @@ Examples:
         from models.simple_mlp import EnhancedMultiHeadMLP, EnhancedMultiHeadMLP_Config
         cfg = checkpoint.get('model_config', {})
         mlp_config = EnhancedMultiHeadMLP_Config(
-            input_dim=cfg.get('input_dim', 60),
+            input_dim=cfg.get('input_dim', 63),
             hidden_dims=cfg.get('hidden_dims', [512, 256, 128, 64]),
             num_classes=3,
             dropout=0.3,
