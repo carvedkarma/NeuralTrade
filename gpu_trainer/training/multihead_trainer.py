@@ -994,7 +994,7 @@ class MultiHeadTrainer:
         # Trading policy parameters
         FIXED_COST = 0.0009  # 0.09% round-trip cost
         SPREAD_MULTIPLIER = 3.0  # K: require spread >= K * cost
-        COOLDOWN = 8  # Bars to wait after a trade (horizon/2)
+        COOLDOWN = 4  # Bars to wait after a trade
         
         # Confidence thresholds to sweep - matched to actual distribution
         # (confidence max ~0.43, mean ~0.16, so old [0.3-1.1] was too high)
@@ -1107,7 +1107,7 @@ class MultiHeadTrainer:
         # If abs(mu) < MIN_MOVE_FACTOR × sigma → no trade (insufficient edge)
         # NOTE: mu values are typically much smaller than sigma (mu~0.001, sigma~0.01)
         # Use a low factor (0.10) to filter only the weakest predictions
-        MIN_MOVE_FACTOR = 0.10
+        MIN_MOVE_FACTOR = 0.05
         move_gate = np.abs(mus) >= (MIN_MOVE_FACTOR * sigmas)
         n_move_pass = move_gate.sum()
         logger.info("MOVE_GATE | abs(mu) >= %.2f×sigma: %d / %d pass (%.1f%%)",
@@ -1374,7 +1374,8 @@ class MultiHeadTrainer:
         
         # Sharpe ratio
         if num_trades > 1 and np.std(trade_returns) > 0:
-            annual_factor = np.sqrt(2190)  # ~6 trades/day
+            trades_per_year = num_trades * (35040 / max(len(returns), 1))
+            annual_factor = np.sqrt(max(trades_per_year, 1))
             sharpe = (np.mean(trade_returns) / np.std(trade_returns)) * annual_factor
             metrics['sharpe'] = float(sharpe)
         else:
@@ -1429,9 +1430,8 @@ class MultiHeadTrainer:
         
         This provides proper risk:reward asymmetry based on volatility.
         """
-        # ATR-based exit parameters
         SL_ATR_MULT = 1.5   # Stop loss = 1.5 × ATR (sigma)
-        TP_ATR_MULT = 2.2   # Take profit = 2.2 × ATR (sigma)
+        TP_ATR_MULT = 2.5   # Take profit = 2.5 × ATR (sigma)
         MIN_RR = 1.5        # Minimum risk:reward ratio
         
         metrics = {}
@@ -1509,9 +1509,10 @@ class MultiHeadTrainer:
         gross_losses = abs(trade_returns[trade_returns < 0].sum())
         metrics['profit_factor'] = float(gross_profits / gross_losses) if gross_losses > 0 else 0.0
         
-        # Sharpe ratio
+        # Sharpe ratio - annualize based on trade frequency relative to 15m bars
         if num_trades > 1 and np.std(trade_returns) > 0:
-            annual_factor = np.sqrt(2190)  # ~6 trades/day
+            trades_per_year = num_trades * (35040 / max(len(returns), 1))
+            annual_factor = np.sqrt(max(trades_per_year, 1))
             sharpe = (np.mean(trade_returns) / np.std(trade_returns)) * annual_factor
             metrics['sharpe'] = float(sharpe)
         else:

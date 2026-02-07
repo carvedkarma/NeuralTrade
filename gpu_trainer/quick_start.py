@@ -44,14 +44,14 @@ def check_gpu():
         sys.exit(1)
 
 
-def download_data(replit_url: str, data_dir: Path):
+def download_data(replit_url: str, data_dir: Path, force_fresh: bool = False):
     import requests
 
     data_dir.mkdir(parents=True, exist_ok=True)
     csv_path = data_dir / "BTCUSDT_15m.csv"
     parquet_path = data_dir / "BTCUSDT_15m.parquet"
 
-    if parquet_path.exists():
+    if parquet_path.exists() and not force_fresh:
         import pandas as pd
         existing = pd.read_parquet(parquet_path)
         log.info(f"Found existing data: {len(existing)} candles")
@@ -124,7 +124,7 @@ def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: 
     from data.regression_targets import generate_multihead_targets
     targets_df = generate_multihead_targets(
         df, horizon_periods=horizon, n_future_candles=5,
-        use_pure_directional=True, directional_threshold=0.0020
+        use_pure_directional=True, directional_threshold=0.0010
     )
 
     labels = targets_df['class_label'].values.astype(np.int64)
@@ -418,14 +418,14 @@ def make_prediction(model, engineer, feature_columns, data_path, device):
         atr = float(np.mean(true_ranges))
 
     if action == "LONG":
-        sl_price = current_price - 2.0 * atr
-        tp_price = current_price + 3.0 * atr
-    elif action == "SHORT":
-        sl_price = current_price + 2.0 * atr
-        tp_price = current_price - 3.0 * atr
-    else:
         sl_price = current_price - 1.5 * atr
-        tp_price = current_price + 1.5 * atr
+        tp_price = current_price + 2.5 * atr
+    elif action == "SHORT":
+        sl_price = current_price + 1.5 * atr
+        tp_price = current_price - 2.5 * atr
+    else:
+        sl_price = current_price - 1.0 * atr
+        tp_price = current_price + 1.0 * atr
 
     sl_pct = abs(current_price - sl_price) / current_price
     tp_pct = abs(tp_price - current_price) / current_price
@@ -523,8 +523,8 @@ Examples:
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 0.0001)")
     parser.add_argument("--predict-only", action="store_true", help="Skip training, just make a prediction from existing model")
     parser.add_argument("--no-push", action="store_true", help="Train but don't push prediction to dashboard")
-    parser.add_argument("--min-confidence", type=float, default=0.55, help="Minimum confidence to push signal (default: 0.55)")
-    parser.add_argument("--min-edge", type=float, default=0.2, help="Minimum edge to push signal (default: 0.2)")
+    parser.add_argument("--min-confidence", type=float, default=0.40, help="Minimum confidence to push signal (default: 0.40)")
+    parser.add_argument("--min-edge", type=float, default=0.10, help="Minimum edge to push signal (default: 0.10)")
 
     args = parser.parse_args()
 
@@ -555,9 +555,8 @@ Examples:
             log.error("No trained model found! Run without --predict-only first.")
             sys.exit(1)
 
-        data_path = data_dir / "BTCUSDT_15m.parquet"
-        if not data_path.exists():
-            data_path = download_data(args.url, data_dir)
+        log.info("Downloading fresh data for prediction...")
+        data_path = download_data(args.url, data_dir, force_fresh=True)
 
         log.info("Loading saved model...")
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
