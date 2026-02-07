@@ -101,7 +101,7 @@ def download_data(replit_url: str, data_dir: Path, force_fresh: bool = False):
     return parquet_path
 
 
-def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float, checkpoint_interval: int = 25, warmup_epochs: int = 5, min_lr: float = None, focal_loss: bool = True, focal_gamma: float = 2.0, class_weight_cap: float = 10.0):
+def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float, checkpoint_interval: int = 25, warmup_epochs: int = 5, min_lr: float = None, focal_loss: bool = True, focal_gamma: float = 2.0, class_weight_cap: float = 10.0, stf_only: bool = False):
     import torch
     import numpy as np
     import pandas as pd
@@ -116,10 +116,16 @@ def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: 
 
     from data.pipeline import FeatureEngineer, create_labels
     engineer = FeatureEngineer()
-    features_df = engineer.compute_all_features(df)
-    features_df = features_df.fillna(0)
-    log.info(f"Computed {len(features_df.columns)} features ({engineer.STF_FEATURE_COUNT} STF + {engineer.HTF_FEATURE_COUNT} HTF)")
-    log.info(f"Feature version: {engineer.VERSION}")
+    if stf_only:
+        features_df = engineer.compute_technical_features(df)
+        features_df = features_df.fillna(0)
+        log.info(f"[A/B MODE: STF-ONLY] Computed {len(features_df.columns)} STF features (HTF disabled)")
+        log.info(f"Feature version: {engineer.VERSION} (STF-only subset)")
+    else:
+        features_df = engineer.compute_all_features(df)
+        features_df = features_df.fillna(0)
+        log.info(f"Computed {len(features_df.columns)} features ({engineer.STF_FEATURE_COUNT} STF + {engineer.HTF_FEATURE_COUNT} HTF)")
+        log.info(f"Feature version: {engineer.VERSION}")
 
     horizon = 24
     from data.regression_targets import generate_multihead_targets
@@ -332,7 +338,8 @@ def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: 
         },
         'feature_columns': feature_columns_ordered,
         'n_features': input_dim,
-        'feature_version': engineer.VERSION,
+        'feature_version': engineer.VERSION if not stf_only else f"{engineer.VERSION}-stf_only",
+        'stf_only': stf_only,
         'trained_at': datetime.now().isoformat(),
     }, save_path)
     log.info(f"Feature columns saved: {len(feature_columns_ordered)} (order locked for inference)")
@@ -345,7 +352,7 @@ def train_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: 
     return model, engineer, features_df.columns.tolist(), history
 
 
-def make_prediction(model, engineer, feature_columns, data_path, device):
+def make_prediction(model, engineer, feature_columns, data_path, device, stf_only: bool = False):
     import torch
     import numpy as np
     import pandas as pd
@@ -356,14 +363,30 @@ def make_prediction(model, engineer, feature_columns, data_path, device):
     df = pd.read_parquet(data_path)
     from data.pipeline import FeatureEngineer
     feat_engineer = FeatureEngineer()
-    features_df = feat_engineer.compute_all_features(df)
+
+    expected_n = FeatureEngineer.STF_FEATURE_COUNT if stf_only else FeatureEngineer.TOTAL_FEATURE_COUNT
+    if len(feature_columns) != expected_n:
+        raise RuntimeError(
+            f"FATAL: feature_columns has {len(feature_columns)} cols but stf_only={stf_only} expects {expected_n}. "
+            f"Checkpoint/mode mismatch - retrain the model."
+        )
+    if stf_only:
+        features_df = feat_engineer.compute_technical_features(df)
+    else:
+        features_df = feat_engineer.compute_all_features(df)
     features_df = features_df.fillna(0)
 
+    missing = set(feature_columns) - set(features_df.columns)
+    extra = set(features_df.columns) - set(feature_columns)
+    if missing or extra:
+        log.error(f"FATAL: Feature column mismatch!")
+        if missing:
+            log.error(f"  Missing columns (in checkpoint but not computed): {sorted(missing)}")
+        if extra:
+            log.error(f"  Extra columns (computed but not in checkpoint): {sorted(extra)}")
+        raise RuntimeError(f"Feature column mismatch: {len(missing)} missing, {len(extra)} extra. Retrain the model.")
+    
     features_df = features_df.reindex(columns=feature_columns, fill_value=0)
-    if list(features_df.columns) != feature_columns:
-        log.error(f"Feature column mismatch! Expected {len(feature_columns)}, got {len(features_df.columns)}")
-        log.error(f"Missing: {set(feature_columns) - set(features_df.columns)}")
-        log.error(f"Extra: {set(features_df.columns) - set(feature_columns)}")
     
     last_features = features_df.iloc[-1:].copy()
     last_scaled = engineer.transform_and_clip(
@@ -552,6 +575,7 @@ Examples:
     parser.add_argument("--no-focal-loss", action="store_false", dest="focal_loss", help="Disable Focal Loss, use plain CrossEntropy")
     parser.add_argument("--focal-gamma", type=float, default=2.0, help="Focal loss gamma (default: 2.0, higher = more focus on hard examples)")
     parser.add_argument("--class-weight-cap", type=float, default=10.0, dest="class_weight_cap", help="Max class weight multiplier (default: 10.0)")
+    parser.add_argument("--stf-only", action="store_true", default=False, help="A/B test: train with STF (47) features only, no HTF. Compare against default STF+HTF (57) run")
 
     args = parser.parse_args()
 
@@ -564,6 +588,12 @@ Examples:
     device = check_gpu()
     data_dir = Path("data_cache")
 
+    stf_only = args.stf_only
+    if stf_only:
+        log.info("A/B TEST MODE: --stf-only enabled (47 STF features, no HTF)")
+        log.info("Run A: python quick_start.py --stf-only --url ... (old baseline)")
+        log.info("Run B: python quick_start.py --url ...            (new STF+HTF)")
+
     if not args.predict_only:
         data_path = download_data(args.url, data_dir)
 
@@ -571,7 +601,8 @@ Examples:
             data_path, device, args.epochs, args.batch_size, args.lr, args.checkpoint_interval,
             warmup_epochs=args.warmup_epochs, min_lr=args.min_lr,
             focal_loss=args.focal_loss, focal_gamma=args.focal_gamma,
-            class_weight_cap=args.class_weight_cap
+            class_weight_cap=args.class_weight_cap,
+            stf_only=stf_only
         )
 
         print()
@@ -629,16 +660,28 @@ Examples:
 
         feature_columns = checkpoint.get('feature_columns', [])
         saved_version = checkpoint.get('feature_version', 'unknown')
-        current_version = engineer.VERSION
-        if saved_version != current_version:
-            log.warning(f"Feature version mismatch! Model trained with '{saved_version}', current is '{current_version}'")
-            log.warning("Prediction may be unreliable - consider retraining")
+        stf_only = checkpoint.get('stf_only', False)
+        
+        if stf_only:
+            expected_version = f"{engineer.VERSION}-stf_only"
         else:
-            log.info(f"Feature version: {current_version} (matches checkpoint)")
+            expected_version = engineer.VERSION
+        
+        if saved_version != expected_version:
+            log.error(f"FATAL: Feature version mismatch! Model trained with '{saved_version}', current expects '{expected_version}'")
+            log.error("Cannot predict with mismatched features - retrain the model first.")
+            sys.exit(1)
+        log.info(f"Feature version: {saved_version} (matches checkpoint)")
+        if stf_only:
+            log.info(f"Model was trained in STF-only mode ({len(feature_columns)} features)")
+        
+        if not feature_columns:
+            log.error("FATAL: No feature_columns saved in checkpoint - retrain the model.")
+            sys.exit(1)
         log.info(f"Feature columns: {len(feature_columns)} loaded from checkpoint")
 
     if not args.no_push:
-        prediction = make_prediction(model, engineer, feature_columns, data_path, device)
+        prediction = make_prediction(model, engineer, feature_columns, data_path, device, stf_only=stf_only)
 
         print()
         dp = prediction['direction_probs']

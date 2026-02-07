@@ -837,7 +837,79 @@ class FeatureEngineer:
                 if nan_counts[col] > 0:
                     logger.info(f"  {col}: {nan_counts[col]} NaN rows")
         
+        self._sanity_check_htf_leakage(ohlcv, df)
+        
         return result
+    
+    def _sanity_check_htf_leakage(self, ohlcv: pd.DataFrame, original_df: pd.DataFrame, n_samples: int = 20):
+        """One-time diagnostic: verify HTF bars are strictly in the past for each 15m row.
+        
+        For 20 random rows, prints: 15m timestamp t, matched 1H timestamp t1h, matched 4H timestamp t4h.
+        Asserts: t1h <= t, t4h <= t, and t1h is the last COMPLETED 1H bar (not the current forming one).
+        """
+        import random
+        
+        valid_start = max(20, len(ohlcv) // 10)
+        if len(ohlcv) < valid_start + n_samples:
+            return
+        
+        sample_indices = sorted(random.sample(range(valid_start, len(ohlcv)), n_samples))
+        
+        h1_bars = ohlcv.resample('1h', label='left', closed='left').agg({
+            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
+        }).dropna(subset=['open'])
+        h4_bars = ohlcv.resample('4h', label='left', closed='left').agg({
+            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
+        }).dropna(subset=['open'])
+        
+        h1_shifted = h1_bars.shift(1).dropna()
+        h4_shifted = h4_bars.shift(1).dropna()
+        
+        logger.info("=" * 70)
+        logger.info("HTF LEAKAGE SANITY CHECK (20 random rows)")
+        logger.info(f"{'15m timestamp t':>25} | {'matched 1H t1h':>25} | {'matched 4H t4h':>25}")
+        logger.info("-" * 70)
+        
+        violations = 0
+        for idx in sample_indices:
+            t = ohlcv.index[idx]
+            
+            h1_match_candidates = h1_shifted.index[h1_shifted.index <= t]
+            h4_match_candidates = h4_shifted.index[h4_shifted.index <= t]
+            
+            t1h = h1_match_candidates[-1] if len(h1_match_candidates) > 0 else None
+            t4h = h4_match_candidates[-1] if len(h4_match_candidates) > 0 else None
+            
+            t_str = str(t)[:19]
+            t1h_str = str(t1h)[:19] if t1h is not None else "N/A"
+            t4h_str = str(t4h)[:19] if t4h is not None else "N/A"
+            
+            ok = True
+            if t1h is not None and t1h > t:
+                ok = False
+            if t4h is not None and t4h > t:
+                ok = False
+            if t1h is not None:
+                next_h1 = t1h + pd.Timedelta(hours=1)
+                if next_h1 <= t and next_h1 in h1_shifted.index:
+                    ok = False
+            
+            status = "OK" if ok else "LEAK!"
+            if not ok:
+                violations += 1
+            
+            logger.info(f"{t_str:>25} | {t1h_str:>25} | {t4h_str:>25}  {status}")
+        
+        logger.info("-" * 70)
+        if violations == 0:
+            logger.info("PASS: All 20 rows use strictly past HTF bars. No leakage detected.")
+        else:
+            logger.error(f"FAIL: {violations}/{n_samples} rows have potential leakage!")
+            raise RuntimeError(
+                f"HTF leakage detected in {violations}/{n_samples} sampled rows. "
+                f"This means future HTF data is visible to the model. Aborting."
+            )
+        logger.info("=" * 70)
     
     def compute_all_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Compute all features: 47 STF + 10 HTF = 57 total.

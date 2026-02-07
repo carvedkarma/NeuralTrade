@@ -40,7 +40,7 @@ For each HTF (1H and 4H):
 - `{h1,h4}_atr_ratio` - Ratio of 15m ATR to HTF ATR: `atr_15m / (atr_htf + 1e-9)`, measures relative volatility
 - `{h1,h4}_range_pos` - Price position within HTF range: `(close - htf_low) / (htf_high - htf_low)`, clipped [0,1]
 
-Feature versioning: `VERSION = "3.0.0-stf47-htf10"`. Saved in checkpoint metadata. Inference verifies version match and warns on mismatch. Column order is locked at training time and enforced via `reindex()` at inference.
+Feature versioning: `VERSION = "3.0.0-stf47-htf10"`. Saved in checkpoint metadata. Inference verifies version match and **hard-fails** on mismatch (sys.exit or RuntimeError). Column order is locked at training time and enforced via `reindex()` at inference. Missing or extra columns also trigger hard failure.
 
 ### GPU Training CLI Reference
 Current stable model: `enhanced_mlp` (EnhancedMultiHeadMLP)
@@ -60,6 +60,7 @@ Quick start training flags:
 - `--min-confidence 0.40` - Minimum confidence to push trade signal (default: 0.40)
 - `--min-edge 0.10` - Minimum edge to push trade signal (default: 0.10)
 - `--checkpoint-interval 25` - Pause every N epochs to show results and wait for user to continue or stop (default: 25, use 0 to disable)
+- `--stf-only` - A/B test mode: train with STF (47) features only, no HTF context. Use for baseline comparison
 
 Training improvements (v3):
 - LR schedule: 5-epoch linear warmup -> cosine annealing to eta_min (lr * 0.05)
