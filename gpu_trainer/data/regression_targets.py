@@ -282,9 +282,7 @@ class RegressionTargetGenerator:
         """
         HTF-gated Triple Barrier labeling for ENTER quality model.
         
-        Instead of predicting direction (SHORT/HOLD/LONG), this labels whether
-        a trend-following trade setup is worth taking (ENTER=1) or not (ENTER=0).
-        Direction comes from HTF trend, not from the model.
+        Uses training.triple_barrier as single source of truth for barrier simulation.
         
         Process:
         1. Check HTF trend alignment (1H and 4H agree on direction)
@@ -312,13 +310,14 @@ class RegressionTargetGenerator:
             - tp_price: take profit price level
             - sl_price: stop loss price level
         """
+        from training.triple_barrier import compute_atr_14, triple_barrier_outcome_for_index
+        
         n = len(df)
         prices = df['close'].values
         highs = df['high'].values
         lows = df['low'].values
         
-        atr = self._compute_atr(df, period=14)
-        atr_vals = atr.values
+        atr_vals = compute_atr_14(df)
         
         h1_trend = htf_features['h1_trend_sign'].values if 'h1_trend_sign' in htf_features.columns else np.zeros(n)
         h4_trend = htf_features['h4_trend_sign'].values if 'h4_trend_sign' in htf_features.columns else np.zeros(n)
@@ -356,88 +355,37 @@ class RegressionTargetGenerator:
             side = int(h1_trend[i])
             side_hints[i] = side
             
-            entry_price = prices[i]
-            a = atr_vals[i]
+            a = float(atr_vals[i])
             if np.isnan(a) or a <= 0:
-                a = entry_price * 0.005
+                a = prices[i] * 0.005
             
-            sl_dist_r = sl_atr_mult * a
+            if side > 0:
+                tp_prices[i] = prices[i] + tp_atr_mult * a
+                sl_prices[i] = prices[i] - sl_atr_mult * a
+            else:
+                tp_prices[i] = prices[i] - tp_atr_mult * a
+                sl_prices[i] = prices[i] + sl_atr_mult * a
             
-            if side > 0:  # LONG
-                tp = entry_price + tp_atr_mult * a
-                sl = entry_price - sl_atr_mult * a
-            else:  # SHORT
-                tp = entry_price - tp_atr_mult * a
-                sl = entry_price + sl_atr_mult * a
+            outcome, r = triple_barrier_outcome_for_index(
+                highs, lows, prices, i, side, a,
+                tp_atr_mult, sl_atr_mult, horizon_bars, r_min_expiry,
+            )
             
-            tp_prices[i] = tp
-            sl_prices[i] = sl
+            outcomes[i] = outcome
+            realized_r[i] = r
             
-            hit = False
-            for j in range(1, horizon_bars + 1):
-                idx = i + j
-                if idx >= n:
-                    break
-                
-                if side > 0:  # LONG
-                    tp_hit = highs[idx] >= tp
-                    sl_hit = lows[idx] <= sl
-                else:  # SHORT
-                    tp_hit = lows[idx] <= tp
-                    sl_hit = highs[idx] >= sl
-                
-                if tp_hit and sl_hit:
-                    if side > 0:
-                        tp_dist = highs[idx] - entry_price
-                        sl_dist_actual = entry_price - lows[idx]
-                    else:
-                        tp_dist = entry_price - lows[idx]
-                        sl_dist_actual = highs[idx] - entry_price
-                    
-                    if tp_dist >= sl_dist_actual:
-                        enter_labels[i] = 1
-                        outcomes[i] = "TP"
-                        realized_r[i] = tp_atr_mult / sl_atr_mult
-                        n_tp += 1
-                    else:
-                        enter_labels[i] = 0
-                        outcomes[i] = "SL"
-                        realized_r[i] = -1.0
-                        n_sl += 1
-                    hit = True
-                    break
-                elif tp_hit:
-                    enter_labels[i] = 1
-                    outcomes[i] = "TP"
-                    realized_r[i] = tp_atr_mult / sl_atr_mult
-                    n_tp += 1
-                    hit = True
-                    break
-                elif sl_hit:
-                    enter_labels[i] = 0
-                    outcomes[i] = "SL"
-                    realized_r[i] = -1.0
-                    n_sl += 1
-                    hit = True
-                    break
-            
-            if not hit:
-                exit_price = prices[min(i + horizon_bars, n - 1)]
-                if side > 0:
-                    pnl = exit_price - entry_price
-                else:
-                    pnl = entry_price - exit_price
-                r_at_expiry = pnl / sl_dist_r if sl_dist_r > 0 else 0.0
-                realized_r[i] = r_at_expiry
-                
-                if r_at_expiry >= r_min_expiry:
-                    enter_labels[i] = 1
-                    outcomes[i] = "EXP_WIN"
-                    n_exp_win += 1
-                else:
-                    enter_labels[i] = 0
-                    outcomes[i] = "EXP_LOSS"
-                    n_exp_loss += 1
+            if outcome == "TP":
+                enter_labels[i] = 1
+                n_tp += 1
+            elif outcome == "SL":
+                enter_labels[i] = 0
+                n_sl += 1
+            elif outcome == "EXP_WIN":
+                enter_labels[i] = 1
+                n_exp_win += 1
+            elif outcome == "EXP_LOSS":
+                enter_labels[i] = 0
+                n_exp_loss += 1
         
         logger.info("=" * 70)
         logger.info("ENTER QUALITY LABELING: HTF-Gated Triple Barrier + R_min Expiry")

@@ -485,7 +485,7 @@ def compute_oi_features(candle_df, oi_df):
 def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float,
                       checkpoint_interval: int = 25, warmup_epochs: int = 5, min_lr: float = None,
                       tp_mult: float = 2.0, sl_mult: float = 1.5, horizon: int = 24, slope_eps: float = 0.05,
-                      r_min_expiry: float = 0.5):
+                      r_min_expiry: float = 0.5, target_tpd: float = 5.5, target_tpd_tol: float = 1.5):
     import torch
     import torch.nn as nn
     import numpy as np
@@ -542,15 +542,16 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
 
     enter_labels = label_df['enter_label'].values.astype(np.float32)
     side_hints = label_df['side_hint'].values.astype(np.int64)
-
-    forward_returns = ((df['close'].shift(-horizon) - df['close']) / df['close']).fillna(0).values.astype(np.float32)
+    precomputed_outcomes = label_df['outcome'].values
+    precomputed_r = label_df['realized_r'].values.astype(np.float64)
 
     sequence_length = config.data.sequence_length
     valid_start = sequence_length
     features_np = features_df.values[valid_start:].astype(np.float32)
     enter_np = enter_labels[valid_start:].astype(np.float32)
     side_np = side_hints[valid_start:].astype(np.int64)
-    returns_np = forward_returns[valid_start:].astype(np.float32)
+    outcomes_np = precomputed_outcomes[valid_start:]
+    r_np = precomputed_r[valid_start:]
 
     n_total = len(features_np)
     purge_gap = horizon + sequence_length
@@ -570,12 +571,13 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     train_features_raw = features_np[:train_end]
     train_enter = enter_np[:train_end]
     train_side = side_np[:train_end]
-    train_returns = returns_np[:train_end]
 
     val_features_raw = features_np[val_start_idx:val_end]
     val_enter = enter_np[val_start_idx:val_end]
     val_side = side_np[val_start_idx:val_end]
-    val_returns = returns_np[val_start_idx:val_end]
+    val_outcomes = outcomes_np[val_start_idx:val_end]
+    val_r = r_np[val_start_idx:val_end]
+    val_bars = val_samples
 
     train_features_df_scaled = pd.DataFrame(train_features_raw, columns=features_df.columns)
     engineer.fit_scalers(train_features_df_scaled)
@@ -584,18 +586,19 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     val_features_df_scaled = pd.DataFrame(val_features_raw, columns=features_df.columns)
     val_scaled = engineer.transform_and_clip(val_features_df_scaled, clip_range=clip_range).values.astype(np.float32)
 
-    def clean_enter(features, enter, side, returns, name):
+    def clean_enter(features, enter, side, outcomes, r_vals, name):
         features = np.where(np.isinf(features), np.nan, features)
-        returns = np.where(np.isinf(returns), np.nan, returns)
-        mask = np.isnan(features).any(axis=1) | np.isnan(returns)
+        mask = np.isnan(features).any(axis=1)
         valid = ~mask
         dropped = mask.sum()
         if dropped > 0:
             log.info(f"  {name}: dropped {dropped} NaN rows")
-        return features[valid], enter[valid], side[valid], returns[valid]
+        return features[valid], enter[valid], side[valid], outcomes[valid], r_vals[valid]
 
-    train_scaled, train_enter, train_side, train_returns = clean_enter(train_scaled, train_enter, train_side, train_returns, "Train")
-    val_scaled, val_enter, val_side, val_returns = clean_enter(val_scaled, val_enter, val_side, val_returns, "Val")
+    train_outcomes_dummy = np.full(len(train_enter), "NO_CANDIDATE", dtype=object)
+    train_r_dummy = np.zeros(len(train_enter), dtype=np.float64)
+    train_scaled, train_enter, train_side, _, _ = clean_enter(train_scaled, train_enter, train_side, train_outcomes_dummy, train_r_dummy, "Train")
+    val_scaled, val_enter, val_side, val_outcomes, val_r = clean_enter(val_scaled, val_enter, val_side, val_outcomes, val_r, "Val")
 
     pos_count = train_enter.sum()
     neg_count = len(train_enter) - pos_count
@@ -605,11 +608,10 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     log.info(f"BCE pos_weight: {pos_weight:.2f}")
 
     class EnterDataset(Dataset):
-        def __init__(self, features, enter_labels, side_hints, returns, seq_len):
+        def __init__(self, features, enter_labels, side_hints, seq_len):
             self.features = features.astype(np.float32)
             self.enter_labels = enter_labels.astype(np.float32)
             self.side_hints = side_hints.astype(np.int64)
-            self.returns = returns.astype(np.float32)
             self.seq_len = seq_len
             self.valid_indices = list(range(seq_len, len(features)))
 
@@ -624,11 +626,10 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                 torch.from_numpy(seq),
                 torch.tensor(self.enter_labels[actual_idx], dtype=torch.float32),
                 torch.tensor(self.side_hints[actual_idx], dtype=torch.long),
-                torch.tensor(self.returns[actual_idx], dtype=torch.float32),
             )
 
-    train_dataset = EnterDataset(train_scaled, train_enter, train_side, train_returns, sequence_length)
-    val_dataset = EnterDataset(val_scaled, val_enter, val_side, val_returns, sequence_length)
+    train_dataset = EnterDataset(train_scaled, train_enter, train_side, sequence_length)
+    val_dataset = EnterDataset(val_scaled, val_enter, val_side, sequence_length)
 
     log.info(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
 
@@ -690,7 +691,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         n_batches = 0
 
         for batch in train_loader:
-            features_batch, enter_batch, side_batch, returns_batch = batch
+            features_batch, enter_batch, side_batch = batch
             features_batch = features_batch.to(device)
             enter_batch = enter_batch.to(device)
 
@@ -715,11 +716,10 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         all_probs = []
         all_targets = []
         all_sides = []
-        all_val_returns = []
 
         with torch.no_grad():
             for batch in val_loader:
-                features_batch, enter_batch, side_batch, returns_batch = batch
+                features_batch, enter_batch, side_batch = batch
                 features_batch = features_batch.to(device)
                 enter_batch = enter_batch.to(device)
 
@@ -733,14 +733,12 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                 all_probs.extend(probs)
                 all_targets.extend(enter_batch.cpu().numpy())
                 all_sides.extend(side_batch.numpy())
-                all_val_returns.extend(returns_batch.numpy())
 
         avg_val_loss = val_loss_total / max(val_n, 1)
 
         all_probs = np.array(all_probs)
         all_targets = np.array(all_targets)
         all_sides = np.array(all_sides)
-        all_val_returns = np.array(all_val_returns)
 
         threshold = 0.5
         preds = (all_probs >= threshold).astype(int)
@@ -834,7 +832,17 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
 
         MONITORING_INTERVAL = 5
         if (epoch + 1) % MONITORING_INTERVAL == 0:
-            _run_enter_trading_sweep(all_probs, all_targets, all_sides, all_val_returns, epoch + 1, tp_mult, sl_mult)
+            sweep_outcomes = val_outcomes[sequence_length:]
+            sweep_r = val_r[sequence_length:]
+            n_sweep = min(len(all_probs), len(sweep_outcomes))
+            if len(all_probs) != len(sweep_outcomes):
+                log.warning(f"Sweep alignment: probs={len(all_probs)} vs outcomes={len(sweep_outcomes)}, using min={n_sweep}")
+            _run_enter_trading_sweep(
+                all_probs[:n_sweep], all_targets[:n_sweep], all_sides[:n_sweep],
+                sweep_outcomes[:n_sweep], sweep_r[:n_sweep],
+                val_bars, epoch + 1, tp_mult, sl_mult,
+                target_tpd=target_tpd, target_tpd_tol=target_tpd_tol,
+            )
 
         if checkpoint_interval > 0 and (epoch + 1) % checkpoint_interval == 0 and (epoch + 1) < epochs:
             log.info("=" * 60)
@@ -865,157 +873,206 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     return model, engineer, list(features_df.columns), history
 
 
-def _simulate_trades(probs, sides, returns, threshold, tp_mult, sl_mult, cooldown, fixed_cost):
-    """Core trade simulation used by both fixed-threshold and percentile sweeps.
+def _select_trades_with_cooldown(probs, sides, precomputed_outcomes, precomputed_r, threshold, cooldown):
+    """Select trades using threshold + cooldown, return precomputed outcomes for selected trades.
     
-    Uses identical barrier config (tp_mult, sl_mult) as labeling to ensure parity.
-    Returns array of per-trade PnL and R-multiples.
+    Uses PRECOMPUTED outcomes from labeling triple-barrier (single source of truth).
+    Only selects indices where side_hint != 0 (candidates) and p_enter >= threshold.
     """
     import numpy as np
     
-    rolling_window = 20
-    data_atr = np.full_like(returns, max(np.std(returns), 1e-6))
-    for i in range(rolling_window, len(returns)):
-        data_atr[i] = max(np.std(returns[i - rolling_window:i]), 1e-6)
+    candidate_mask = (probs >= threshold) & (sides != 0)
     
-    trade_signal = (probs >= threshold) & (sides != 0)
-    
-    final_trades = np.zeros_like(trade_signal, dtype=bool)
+    selected_indices = []
     last_trade = -cooldown - 1
-    for i in range(len(trade_signal)):
-        if trade_signal[i] and (i - last_trade) > cooldown:
-            final_trades[i] = True
+    for i in range(len(candidate_mask)):
+        if candidate_mask[i] and (i - last_trade) > cooldown:
+            selected_indices.append(i)
             last_trade = i
     
-    trade_pnl = []
-    trade_r = []
-    trade_outcomes = []
+    if not selected_indices:
+        return np.array([]), np.array([]), np.array([], dtype=int)
     
-    for i in range(len(returns)):
-        if not final_trades[i]:
-            continue
-        atr = max(data_atr[i], 1e-6)
-        sl_dist = sl_mult * atr
-        tp_dist = tp_mult * atr
-        actual_ret = returns[i]
-        side = sides[i]
-        
-        if side > 0:
-            directed_ret = actual_ret
-        else:
-            directed_ret = -actual_ret
-        
-        if directed_ret <= -sl_dist:
-            pnl = -sl_dist - fixed_cost
-            outcome = "SL"
-        elif directed_ret >= tp_dist:
-            pnl = tp_dist - fixed_cost
-            outcome = "TP"
-        else:
-            pnl = directed_ret - fixed_cost
-            outcome = "EXP"
-        
-        r_multiple = pnl / sl_dist if sl_dist > 0 else 0.0
-        trade_pnl.append(pnl)
-        trade_r.append(r_multiple)
-        trade_outcomes.append(outcome)
+    sel = np.array(selected_indices)
+    sel_outcomes = precomputed_outcomes[sel]
+    sel_r = precomputed_r[sel]
     
-    return np.array(trade_pnl), np.array(trade_r), trade_outcomes
+    valid_mask = ~np.isnan(sel_r.astype(float))
+    sel_outcomes = sel_outcomes[valid_mask]
+    sel_r = sel_r[valid_mask]
+    sel = sel[valid_mask]
+    
+    return sel_outcomes, sel_r, sel
 
 
-def _compute_sweep_metrics(trade_pnl, trade_r, trade_outcomes):
-    """Compute full metrics including realized R distribution."""
+
+
+def _compute_sweep_metrics(outcomes, r_values, val_bars):
+    """Compute metrics from precomputed triple-barrier outcomes.
+    
+    Args:
+        outcomes: Array of "TP", "SL", "EXP_WIN", "EXP_LOSS" strings
+        r_values: Array of realized R-multiples
+        val_bars: Total number of validation bars (for trades_per_day)
+    """
     import numpy as np
     
-    n_trades = len(trade_pnl)
+    n_trades = len(outcomes)
     if n_trades == 0:
         return {
             'trades': 0, 'expect': 0, 'winrate': 0, 'sharpe': 0, 'pf': 0,
             'avg_win_r': 0, 'avg_loss_r': 0, 'median_r': 0,
-            'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0,
+            'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0, 'trades_per_day': 0,
         }
     
-    expect = float(np.mean(trade_pnl))
-    wins = (trade_pnl > 0).sum()
+    r_values = np.array(r_values, dtype=np.float64)
+    
+    expect = float(np.mean(r_values))
+    wins = (r_values > 0).sum()
     winrate = wins / n_trades
-    gross_profit = trade_pnl[trade_pnl > 0].sum()
-    gross_loss = abs(trade_pnl[trade_pnl < 0].sum())
-    pf = float(gross_profit / gross_loss) if gross_loss > 0 else 0.0
-    sharpe = float(np.mean(trade_pnl) / np.std(trade_pnl) * np.sqrt(252 * 96)) if np.std(trade_pnl) > 0 and n_trades > 1 else 0.0
     
-    win_r = trade_r[trade_r > 0]
-    loss_r = trade_r[trade_r < 0]
-    avg_win_r = float(np.mean(win_r)) if len(win_r) > 0 else 0.0
-    avg_loss_r = float(np.mean(loss_r)) if len(loss_r) > 0 else 0.0
-    median_r = float(np.median(trade_r))
+    pos_r = r_values[r_values > 0]
+    neg_r = r_values[r_values < 0]
+    gross_profit = float(pos_r.sum()) if len(pos_r) > 0 else 0.0
+    gross_loss = float(abs(neg_r.sum())) if len(neg_r) > 0 else 0.0
+    pf = gross_profit / gross_loss if gross_loss > 0 else 0.0
     
-    outcomes_arr = np.array(trade_outcomes)
-    pct_tp = (outcomes_arr == "TP").sum() / n_trades
-    pct_sl = (outcomes_arr == "SL").sum() / n_trades
-    pct_exp = (outcomes_arr == "EXP").sum() / n_trades
+    avg_win_r = float(np.mean(pos_r)) if len(pos_r) > 0 else 0.0
+    avg_loss_r = float(np.mean(neg_r)) if len(neg_r) > 0 else 0.0
+    median_r = float(np.median(r_values))
+    
+    val_days = val_bars / 96.0
+    trades_per_day = n_trades / val_days if val_days > 0 else 0.0
+    trades_per_year = trades_per_day * 365.0
+    
+    std_r = float(np.std(r_values))
+    if std_r > 1e-8 and n_trades > 1:
+        sharpe = float(np.mean(r_values) / std_r * np.sqrt(max(trades_per_year, 1)))
+    else:
+        sharpe = 0.0
+    
+    outcomes_arr = np.array(outcomes)
+    pct_tp = float((outcomes_arr == "TP").sum() / n_trades)
+    pct_sl = float((outcomes_arr == "SL").sum() / n_trades)
+    n_exp = ((outcomes_arr == "EXP_WIN") | (outcomes_arr == "EXP_LOSS")).sum()
+    pct_exp = float(n_exp / n_trades)
     
     return {
         'trades': n_trades, 'expect': expect, 'winrate': winrate, 'sharpe': sharpe, 'pf': pf,
         'avg_win_r': avg_win_r, 'avg_loss_r': avg_loss_r, 'median_r': median_r,
         'pct_tp': pct_tp, 'pct_sl': pct_sl, 'pct_exp': pct_exp,
+        'trades_per_day': trades_per_day,
     }
 
 
-def _run_enter_trading_sweep(probs, targets, sides, returns, epoch, tp_mult, sl_mult):
+def _run_enter_trading_sweep(probs, targets, sides, precomputed_outcomes, precomputed_r,
+                              val_bars, epoch, tp_mult, sl_mult,
+                              target_tpd=5.5, target_tpd_tol=1.5, min_trades=50):
+    """ENTER trading sweep using PRECOMPUTED triple-barrier outcomes (parity with labeling).
+    
+    Args:
+        probs: Model p_enter probabilities for val set
+        targets: True enter labels for val set
+        sides: side_hint values for val set
+        precomputed_outcomes: Outcome strings from labeling ("TP","SL","EXP_WIN","EXP_LOSS","NO_CANDIDATE")
+        precomputed_r: Realized R-multiples from labeling (NaN for non-candidates)
+        val_bars: Number of validation bars (for trades_per_day)
+        epoch: Current epoch number
+        tp_mult/sl_mult: Barrier config (for display only)
+        target_tpd: Target trades per day
+        target_tpd_tol: Tolerance band around target
+        min_trades: Minimum trades for a valid sweep row
+    """
     import numpy as np
     THRESHOLDS = [0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75]
     PERCENTILES = [90, 85, 80, 75, 70]
     COOLDOWN = 4
-    FIXED_COST = 0.0009
-    MIN_TRADES = 30
 
-    best_score = float('-inf')
-    best_label = ""
+    safe_outcomes = np.where(
+        np.isin(precomputed_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]),
+        precomputed_outcomes,
+        "NO_CANDIDATE"
+    )
+    safe_r = np.where(np.isnan(precomputed_r.astype(float)), 0.0, precomputed_r.astype(float))
+
     sweep_results = []
 
     for thresh in THRESHOLDS:
-        trade_pnl, trade_r, outcomes = _simulate_trades(probs, sides, returns, thresh, tp_mult, sl_mult, COOLDOWN, FIXED_COST)
-        m = _compute_sweep_metrics(trade_pnl, trade_r, outcomes)
+        sel_outcomes, sel_r, sel_idx = _select_trades_with_cooldown(
+            probs, sides, safe_outcomes, safe_r, thresh, COOLDOWN
+        )
+        m = _compute_sweep_metrics(sel_outcomes, sel_r, val_bars)
         m['label'] = f"{thresh*100:.0f}%"
         m['thresh'] = thresh
         sweep_results.append(m)
-        if m['trades'] >= MIN_TRADES and m['expect'] > best_score:
-            best_score = m['expect']
-            best_label = m['label']
 
     active_probs = probs[sides != 0]
     if len(active_probs) > 0:
         for pct in PERCENTILES:
             pct_thresh = float(np.percentile(active_probs, pct))
-            trade_pnl, trade_r, outcomes = _simulate_trades(probs, sides, returns, pct_thresh, tp_mult, sl_mult, COOLDOWN, FIXED_COST)
-            m = _compute_sweep_metrics(trade_pnl, trade_r, outcomes)
+            sel_outcomes, sel_r, sel_idx = _select_trades_with_cooldown(
+                probs, sides, safe_outcomes, safe_r, pct_thresh, COOLDOWN
+            )
+            m = _compute_sweep_metrics(sel_outcomes, sel_r, val_bars)
             m['label'] = f"top{100-pct}%"
             m['thresh'] = pct_thresh
             sweep_results.append(m)
-            if m['trades'] >= MIN_TRADES and m['expect'] > best_score:
-                best_score = m['expect']
-                best_label = m['label']
 
-    p50 = float(np.percentile(probs, 50))
-    p75 = float(np.percentile(probs, 75))
-    p90 = float(np.percentile(probs, 90))
-    p95 = float(np.percentile(probs, 95))
-    p99 = float(np.percentile(probs, 99))
-    log.info("-" * 90)
-    log.info("p_enter percentiles (val): p50=%.3f p75=%.3f p90=%.3f p95=%.3f p99=%.3f", p50, p75, p90, p95, p99)
-    log.info("ENTER TRADING SWEEP (epoch %d) | cooldown=%d | TP=%.1fx SL=%.1fx ATR", epoch, COOLDOWN, tp_mult, sl_mult)
-    log.info("%-8s %5s %8s %6s %6s %5s | %6s %6s %6s | %4s %4s %4s",
-             "Select", "Trds", "Expect", "WR", "Shrpe", "PF",
-             "WinR", "LosR", "MedR", "%TP", "%SL", "%EX")
-    log.info("-" * 90)
+    tpd_lo = target_tpd - target_tpd_tol
+    tpd_hi = target_tpd + target_tpd_tol
+    best_freq_score = float('-inf')
+    best_freq_label = ""
+    best_any_score = float('-inf')
+    best_any_label = ""
+
     for m in sweep_results:
-        marker = " << BEST" if m['label'] == best_label and m['trades'] >= MIN_TRADES and best_score > float('-inf') else ""
-        log.info("%-8s %5d %+.4f %5.1f%% %+5.2f %5.2f | %+5.2f %+5.2f %+5.2f | %3.0f%% %3.0f%% %3.0f%%%s",
+        if m['trades'] < min_trades:
+            continue
+        if tpd_lo <= m['trades_per_day'] <= tpd_hi:
+            if m['expect'] > best_freq_score:
+                best_freq_score = m['expect']
+                best_freq_label = m['label']
+        if m['expect'] > best_any_score:
+            best_any_score = m['expect']
+            best_any_label = m['label']
+
+    if best_freq_label:
+        best_label = best_freq_label
+        best_score = best_freq_score
+    elif best_any_label:
+        best_label = best_any_label
+        best_score = best_any_score
+    else:
+        best_label = ""
+        best_score = float('-inf')
+
+    probs_arr = np.array(probs)
+    p50 = float(np.percentile(probs_arr, 50))
+    p75 = float(np.percentile(probs_arr, 75))
+    p90 = float(np.percentile(probs_arr, 90))
+    p95 = float(np.percentile(probs_arr, 95))
+    p99 = float(np.percentile(probs_arr, 99))
+    log.info("-" * 115)
+    log.info("p_enter percentiles (val): p50=%.3f p75=%.3f p90=%.3f p95=%.3f p99=%.3f", p50, p75, p90, p95, p99)
+    val_days = val_bars / 96.0
+    log.info("ENTER TRADING SWEEP (epoch %d) | cooldown=%d | TP=%.1fx SL=%.1fx ATR | val_days=%.1f | target=%.1f±%.1f tpd",
+             epoch, COOLDOWN, tp_mult, sl_mult, val_days, target_tpd, target_tpd_tol)
+    log.info("%-8s %5s %8s %6s %6s %5s | %6s %6s %6s | %4s %4s %4s | %5s",
+             "Select", "Trds", "Expect", "WR", "Shrpe", "PF",
+             "WinR", "LosR", "MedR", "%TP", "%SL", "%EX", "T/Day")
+    log.info("-" * 115)
+    for m in sweep_results:
+        in_freq = tpd_lo <= m['trades_per_day'] <= tpd_hi
+        marker = ""
+        if m['label'] == best_label and m['trades'] >= min_trades and best_score > float('-inf'):
+            marker = " << BEST" + (" (freq)" if best_freq_label else " (any)")
+        log.info("%-8s %5d %+.4f %5.1f%% %+6.2f %5.2f | %+5.2f %+5.2f %+5.2f | %3.0f%% %3.0f%% %3.0f%% | %5.1f%s",
                  m['label'], m['trades'], m['expect'], m['winrate'] * 100, m['sharpe'], m['pf'],
                  m['avg_win_r'], m['avg_loss_r'], m['median_r'],
                  m['pct_tp'] * 100, m['pct_sl'] * 100, m['pct_exp'] * 100,
+                 m['trades_per_day'],
                  marker)
-    log.info("-" * 90)
+    log.info("-" * 115)
 
 
 def make_enter_prediction(model, engineer, feature_columns, data_path, device):
@@ -1114,6 +1171,31 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
                      abs(float(lows[i]) - prev_close))
             true_ranges.append(tr)
         atr = float(np.mean(true_ranges))
+
+    log.info("=" * 70)
+    log.info("INFERENCE DIAGNOSTICS")
+    log.info("=" * 70)
+    log.info(f"Current price: {current_price:.2f} | ATR(14): {atr:.2f} ({100*atr/current_price:.2f}% of price)")
+    log.info(f"p_enter: {p_enter:.4f}")
+    log.info(f"HTF gates:")
+    log.info(f"  h1_trend_sign={h1_trend:+.0f}  h4_trend_sign={h4_trend:+.0f}  aligned={'YES' if trend_aligned else 'NO'}")
+    log.info(f"  h1_sma20_slope={h1_slope:.4f}  |slope|>0.05={'YES' if slope_ok else 'NO'}")
+    log.info(f"  h1_range_pos={h1_range_pos:.3f}  range_ok={'YES' if range_ok else 'NO'}")
+    log.info(f"  HTF direction: {side}")
+    
+    feature_diagnostics = {}
+    for col in ['rsi_14', 'rsi_7', 'macd', 'adx_14', 'bb_position', 'volume_ratio',
+                'funding_rate', 'funding_rate_zscore_30d', 'open_interest', 'oi_delta_1h']:
+        if col in features_df.columns:
+            val = float(last_row.get(col, 0))
+            feature_diagnostics[col] = val
+    
+    log.info(f"Key features: {' | '.join(f'{k}={v:.4f}' for k, v in feature_diagnostics.items())}")
+    
+    nan_count = int(np.isnan(last_scaled).sum()) + int(np.isinf(last_scaled).sum())
+    zero_count = int((last_scaled == 0).sum())
+    log.info(f"Scaled feature coverage: {len(feature_columns)} features | NaN/Inf={nan_count} | zeros={zero_count}")
+    log.info("=" * 70)
 
     enter_threshold = 0.55
     should_trade = p_enter >= enter_threshold and trend_aligned and slope_ok and range_ok
@@ -1244,6 +1326,8 @@ Examples:
     parser.add_argument("--horizon", type=int, default=24, help="Horizon bars (default: 24)")
     parser.add_argument("--slope-eps", type=float, default=0.05, help="Min slope for trend gate (default: 0.05)")
     parser.add_argument("--r-min-expiry", type=float, default=0.5, help="Min R-multiple at expiry for ENTER=1 (default: 0.5)")
+    parser.add_argument("--target-tpd", type=float, default=5.5, help="Target trades per day for BEST selection (default: 5.5)")
+    parser.add_argument("--target-tpd-tol", type=float, default=1.5, help="Tolerance band for trades/day (default: 1.5)")
 
     args = parser.parse_args()
 
@@ -1266,6 +1350,7 @@ Examples:
             tp_mult=args.tp_mult, sl_mult=args.sl_mult,
             horizon=args.horizon, slope_eps=args.slope_eps,
             r_min_expiry=args.r_min_expiry,
+            target_tpd=args.target_tpd, target_tpd_tol=args.target_tpd_tol,
         )
 
         print()

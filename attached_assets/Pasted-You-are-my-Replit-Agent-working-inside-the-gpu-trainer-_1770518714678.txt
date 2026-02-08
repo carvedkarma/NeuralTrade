@@ -1,0 +1,136 @@
+You are my Replit Agent working inside the gpu_trainer repo (v3.3.0 ENTER quality model: 47 STF + 10 HTF + 3 Funding + 3 OI = 63 features).
+
+GOAL
+Make the system production-grade for “5–6 trades/day” by fixing evaluation parity (labels == sweep == inference), then adding frequency-targeted threshold selection. Do NOT change the model architecture yet.
+
+========================================================
+PHASE 1 — FIX THE BIGGEST ISSUE: LABEL ↔ SWEEP PARITY
+========================================================
+Problem:
+- Labels are created using true triple-barrier with future HIGH/LOW and ATR(14) from OHLC.
+- Current ENTER_TRADING_SWEEP still uses close-to-close forward_returns and/or a proxy ATR (std of returns) in some paths.
+This makes expectancy/PF/Sharpe unreliable and causes “edge appears then vanishes”.
+
+Task 1.1: Implement a single source of truth triple-barrier simulator
+Create module: training/triple_barrier.py with:
+
+1) compute_atr_14(df):
+   - Must match the ATR method used in labeling (true range with OHLC).
+   - Return a vector aligned to df rows.
+
+2) triple_barrier_outcome_for_index(df, i, side, atr_i, tp_mult, sl_mult, horizon, r_min_expiry):
+   - entry = close[i]
+   - tp_dist = tp_mult * atr_i
+   - sl_dist = sl_mult * atr_i
+   - LONG: tp = entry + tp_dist, sl = entry - sl_dist
+   - SHORT: tp = entry - tp_dist, sl = entry + sl_dist
+   - Walk forward j=1..horizon using future high/low:
+     - If TP hit first => outcome="TP", r = +tp_dist/sl_dist
+     - If SL hit first => outcome="SL", r = -1
+     - If both hit same bar, resolve consistently with labeling:
+       - Use “worst-case” assumption (SL first) unless labeling uses another rule; match it exactly.
+   - If expiry:
+     - exit = close[i+horizon]
+     - pnl = (exit-entry) for LONG, (entry-exit) for SHORT
+     - r = pnl / sl_dist
+     - if r >= r_min_expiry => outcome="EXP_WIN" else "EXP_LOSS"
+   - Return (outcome, r)
+
+3) triple_barrier_batch(df, indices, sides, tp_mult, sl_mult, horizon, r_min_expiry):
+   - Vectorized loop ok (clarity > micro-optimizations).
+   - Returns arrays: outcomes, r_values.
+
+Task 1.2: Make labeling reuse the same simulator
+- In data/regression_targets.py (or wherever label_enter_quality lives):
+  Replace any duplicate barrier code so it calls training/triple_barrier.py functions.
+- Keep existing label output fields:
+  enter_label, side_hint, outcome, realized_r
+
+Task 1.3: Make ENTER_TRADING_SWEEP reuse the same simulator
+- In quick_start.py (or training/eval module):
+  Replace any forward_returns-based simulation with triple_barrier_batch outcomes.
+- For each threshold/topX selection:
+  - Build candidate indices where (side_hint != 0) and p_enter passes threshold.
+  - Apply cooldown correctly (cooldown bars only after a trade is taken).
+  - For chosen trades, use the PRECOMPUTED arrays (outcome, realized_r) from parity simulator.
+  - Compute:
+    trades, expectancy=mean(realized_r),
+    winrate = % realized_r > 0,
+    profit_factor = sum(pos_r)/abs(sum(neg_r)),
+    winR avg, lossR avg, medianR,
+    %TP, %SL, %EX where EX includes EXP_WIN+EXP_LOSS (or split them)
+
+Acceptance check:
+- Add a debug option --parity-check
+  - Sample 200 random candidate indices
+  - Compare (outcome, realized_r) from labeling vs triple_barrier_batch used by sweep
+  - Assert match rate >= 99% (log mismatches if any)
+
+========================================================
+PHASE 2 — FIX SHARPE (CURRENTLY MISLEADING)
+========================================================
+Problem:
+- Sharpe is being annualized as if trade returns were per-bar returns, causing huge negative numbers.
+
+Task 2.1:
+- Remove Sharpe OR compute trade-based Sharpe properly:
+  sharpe = mean(r_values)/std(r_values) * sqrt(trades_per_year)
+  trades_per_year = trades / (val_days) * 365
+  val_days = val_bars / 96.0 (15m bars/day)
+
+If std is near zero, set sharpe=0.
+
+========================================================
+PHASE 3 — HIT 5–6 TRADES/DAY VIA FREQUENCY-TARGETED SELECTION
+========================================================
+Task 3.1: Add frequency metrics to sweep output
+- Compute trades_per_day = trades / (val_bars / 96.0)
+- Print in sweep table.
+
+Task 3.2: Add CLI knobs and BEST selection logic
+Add args:
+- --target-trades-per-day (default 5.5)
+- --target-trades-tol (default 1.5)
+- --min-trades (default 50)
+
+BEST selection:
+- Prefer rows where trades_per_day in [target-tol, target+tol]
+- Among those, pick max expectancy (or PF if you prefer).
+- If none qualify, fall back to max expectancy with min-trades constraint.
+
+Task 3.3: Percentile selection should be the primary dial
+Keep both:
+- fixed thresholds 0.45..0.75
+- percentile selections top10/top15/top20/top25/top30
+But BEST should consider frequency.
+
+========================================================
+PHASE 4 — INFERENCE DIAGNOSTICS (FOR “p_enter=1%”)
+========================================================
+Add logs for the latest inference row:
+- funding coverage: are funding features present or zero?
+- oi coverage: are OI features present or zero?
+- number of clipped features (abs > clip range) and list top 10 clipped columns
+- print p_enter plus top 10 feature absolute z-scores after scaling
+
+If funding/OI missing, WARN clearly:
+“Funding/OI missing in live row -> p_enter may be unreliable”.
+
+========================================================
+DELIVERABLES
+========================================================
+1) Code changes implementing PHASE 1–4
+2) New module training/triple_barrier.py
+3) Updated sweep output including trades_per_day and corrected Sharpe
+4) Parity-check mode passing (>=99% match)
+5) No breaking changes to feature versioning / checkpoint metadata
+
+Do NOT:
+- change model architecture
+- add new data sources
+- remove HTF gating
+- change barrier parameters unless exposed via CLI consistently in labeling/sweep/inference
+
+When done, run:
+python quick_start.py --epochs 50 --r-min-expiry 0.5
+and paste the sweep output for epoch 10 and epoch 25 so we can verify stability and frequency targeting.
