@@ -25,6 +25,13 @@ Training involves an optimized learning rate schedule (warmup and cosine anneali
 
 The system integrates multi-head predictions from the GPU trainer into the dashboard, with API endpoints for pushing, retrieving the latest, and viewing history of predictions. The `MultiheadSignalCard` component displays unified predictions, including direction probabilities, quantile spread, volatility state, expected return, uncertainty, edge, and derived trade levels.
 
+### GPU Trainer Commands
+Training: `python quick_start.py --url URL --epochs 300`
+Prediction: `python quick_start.py --url URL --predict-only`
+Regime Eval: `python quick_start.py --url URL --regime-eval --policy threshold:0.70 --cooldown 4 --tp-mult 2.0 --sl-mult 1.5`
+
+Key files: `gpu_trainer/quick_start.py`, `gpu_trainer/training/triple_barrier.py` (shared barrier simulator), `gpu_trainer/data/regression_targets.py` (labeling), `gpu_trainer/data/pipeline.py` (features/data).
+
 ### System Design Choices
 Data is managed with Drizzle ORM for PostgreSQL and Zod for type-safe validation. Live sentiment data is separated from historical price/volume data, and all learning states are persisted. The client is bundled by Vite, and the server by esbuild. A centralized timeframe configuration ensures consistency. A runtime diagnostic system provides health endpoints and UI console logging. The GPU training API supports starting training, checking status, and daily retraining, incorporating gradient clipping and learning rate adjustments for stability. A data diagnostics system audits features and labels.
 

@@ -1301,6 +1301,363 @@ def push_prediction(replit_url: str, prediction: dict):
         return False
 
 
+def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: str,
+                    cooldown: int, tp_mult: float, sl_mult: float, horizon: int,
+                    slope_eps: float, r_min_expiry: float):
+    """Evaluate one fixed trading policy across multiple date regimes.
+    
+    No re-training, no per-slice optimization. Same checkpoint, same policy for all regimes.
+    Uses training/triple_barrier.py for trade scoring (parity with labeling).
+    """
+    import torch
+    import numpy as np
+    import pandas as pd
+    from config import config
+    from training.triple_barrier import compute_atr_14, triple_barrier_outcome_for_index
+
+    log.info("=" * 80)
+    log.info("  REGIME ROBUSTNESS EVALUATION")
+    log.info("=" * 80)
+
+    checkpoint_path = Path("checkpoints/best_enter_prauc.pt")
+    if not checkpoint_path.exists():
+        checkpoint_path = Path("checkpoints/best_enter_loss.pt")
+    if not checkpoint_path.exists():
+        log.error("No trained ENTER model found! Train first.")
+        sys.exit(1)
+
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    saved_version = checkpoint.get('feature_version', 'unknown')
+    if saved_version != FEATURE_VERSION:
+        log.error(f"FATAL: Feature version mismatch! Model: '{saved_version}', current: '{FEATURE_VERSION}'")
+        sys.exit(1)
+    log.info(f"Checkpoint: {checkpoint_path.name} | Feature version: {saved_version}")
+
+    feature_columns = checkpoint.get('feature_columns', [])
+    if not feature_columns:
+        log.error("FATAL: No feature_columns in checkpoint - retrain.")
+        sys.exit(1)
+
+    from models.simple_mlp import EnhancedMultiHeadMLP, EnhancedMultiHeadMLP_Config
+    cfg = checkpoint.get('model_config', {})
+    mlp_config = EnhancedMultiHeadMLP_Config(
+        input_dim=cfg.get('input_dim', 63),
+        hidden_dims=cfg.get('hidden_dims', [512, 256, 128, 64]),
+        num_classes=3, dropout=0.3, use_layer_norm=True, use_residual=True,
+        enable_enter_head=True, enable_quantile_head=False,
+        enable_vol_state_head=False, enable_mu_head=False, enable_sigma_head=False,
+    )
+    model = EnhancedMultiHeadMLP(mlp_config)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(device)
+    model.eval()
+    log.info(f"Model loaded: {model.parameters_count():,} parameters")
+
+    from data.pipeline import FeatureEngineer
+    engineer = FeatureEngineer()
+    scaler_path = Path("checkpoints/scaler.joblib")
+    if scaler_path.exists():
+        engineer.load_scalers(str(scaler_path))
+    else:
+        log.error("No saved scaler found! Predictions will be unreliable.")
+        sys.exit(1)
+
+    df = pd.read_parquet(data_path)
+    log.info(f"Loaded {len(df)} candles")
+
+    if 'timestamp' not in df.columns:
+        log.error("Data must contain 'timestamp' column")
+        sys.exit(1)
+
+    features_df = engineer.compute_all_features(df)
+    features_df = features_df.fillna(0)
+
+    data_dir = Path("data_cache")
+    funding_df = fetch_funding_rates(df, data_dir)
+    funding_features = compute_funding_features(df, funding_df)
+    features_df = pd.concat([features_df, funding_features], axis=1)
+    features_df = features_df.fillna(0)
+
+    oi_df = fetch_open_interest_hist(df, data_dir)
+    oi_features = compute_oi_features(df, oi_df)
+    features_df = pd.concat([features_df, oi_features], axis=1)
+    features_df = features_df.fillna(0)
+
+    missing = set(feature_columns) - set(features_df.columns)
+    extra = set(features_df.columns) - set(feature_columns)
+    if missing or extra:
+        log.error(f"Feature column mismatch!")
+        if missing:
+            log.error(f"  Missing: {sorted(missing)}")
+        if extra:
+            log.error(f"  Extra: {sorted(extra)}")
+        sys.exit(1)
+    features_df = features_df.reindex(columns=feature_columns, fill_value=0)
+    log.info(f"Features: {len(feature_columns)} columns")
+
+    scaled_df = engineer.transform_and_clip(
+        features_df, clip_range=5.0
+    )
+    scaled_np = scaled_df.values.astype(np.float32)
+    scaled_np = np.where(np.isinf(scaled_np), 0, scaled_np)
+    scaled_np = np.where(np.isnan(scaled_np), 0, scaled_np)
+
+    log.info(f"Running single-row inference over {len(df)} bars (matching make_enter_prediction)...")
+
+    all_p_enter = np.full(len(df), np.nan, dtype=np.float64)
+    BATCH_SIZE = 1024
+
+    valid_indices = list(range(len(scaled_np)))
+    with torch.no_grad():
+        for batch_start in range(0, len(valid_indices), BATCH_SIZE):
+            batch_idx = valid_indices[batch_start:batch_start + BATCH_SIZE]
+            batch_rows = scaled_np[batch_idx]
+            batch_tensor = torch.FloatTensor(batch_rows).to(device)
+            output = model.forward_multihead(batch_tensor)
+            p_batch = torch.sigmoid(output.enter_logits).cpu().numpy().flatten()
+            for k, idx in enumerate(batch_idx):
+                all_p_enter[idx] = p_batch[k]
+
+    valid_predictions = np.sum(~np.isnan(all_p_enter))
+    log.info(f"Inference complete: {valid_predictions}/{len(df)} bars have predictions")
+
+    h1_trend = features_df['h1_trend_sign'].values if 'h1_trend_sign' in features_df.columns else np.zeros(len(df))
+    h4_trend = features_df['h4_trend_sign'].values if 'h4_trend_sign' in features_df.columns else np.zeros(len(df))
+    h1_slope = features_df['h1_sma20_slope'].values if 'h1_sma20_slope' in features_df.columns else np.zeros(len(df))
+    h1_range_pos = features_df['h1_range_pos'].values if 'h1_range_pos' in features_df.columns else np.full(len(df), 0.5)
+
+    aligned = (h1_trend == h4_trend) & (h1_trend != 0)
+    slope_ok_arr = np.abs(h1_slope) > slope_eps
+    range_ok_arr = np.ones(len(df), dtype=bool)
+    range_ok_arr[(h1_trend > 0) & (h1_range_pos < 0.2)] = False
+    range_ok_arr[(h1_trend < 0) & (h1_range_pos > 0.8)] = False
+
+    htf_pass = aligned & slope_ok_arr & range_ok_arr
+    side_arr = np.where(h1_trend > 0, 1, np.where(h1_trend < 0, -1, 0)).astype(int)
+
+    candidate_mask = htf_pass & (~np.isnan(all_p_enter))
+    n_candidates = candidate_mask.sum()
+    log.info(f"HTF-gated candidates: {n_candidates}/{valid_predictions} ({100*n_candidates/max(valid_predictions,1):.1f}%)")
+
+    policy_type, policy_value = policy_str.split(":")
+    policy_type = policy_type.lower().strip()
+    policy_value_clean = policy_value.lower().replace("top", "").strip()
+    policy_value_num = float(policy_value_clean)
+    log.info(f"Policy: {policy_type}={policy_value} | Cooldown: {cooldown} | TP={tp_mult}x SL={sl_mult}x | Horizon={horizon} | r_min_expiry={r_min_expiry}")
+
+    atr_full = compute_atr_14(df)
+    highs = df["high"].values.astype(np.float64)
+    lows = df["low"].values.astype(np.float64)
+    closes = df["close"].values.astype(np.float64)
+
+    timestamps_ms = df['timestamp'].values.astype(np.int64)
+
+    regimes = []
+    for regime_str in regimes_str.split(","):
+        parts = regime_str.strip().split(":")
+        start_str, end_str = parts[0], parts[1]
+        start_dt = datetime.strptime(start_str, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_str, "%Y-%m-%d")
+        start_ms = int(start_dt.timestamp() * 1000)
+        end_ms = int(end_dt.timestamp() * 1000) + 86400 * 1000 - 1
+        regimes.append((f"{start_str} to {end_str}", start_ms, end_ms))
+
+    log.info(f"Regimes: {len(regimes)}")
+    for name, s, e in regimes:
+        mask = (timestamps_ms >= s) & (timestamps_ms <= e)
+        log.info(f"  {name}: {mask.sum()} bars")
+
+    all_regime_results = []
+    all_selected_r = []
+
+    for regime_name, start_ms, end_ms in regimes:
+        regime_mask = (timestamps_ms >= start_ms) & (timestamps_ms <= end_ms)
+        regime_indices = np.where(regime_mask)[0]
+
+        if len(regime_indices) == 0:
+            log.warning(f"  {regime_name}: No bars in range")
+            all_regime_results.append({
+                'name': regime_name, 'bars': 0, 'trades': 0, 'trades_per_day': 0,
+                'expect': 0, 'winrate': 0, 'sharpe': 0, 'pf': 0,
+                'avg_win_r': 0, 'avg_loss_r': 0, 'median_r': 0,
+                'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0, 'pct_exp_win': 0, 'pct_exp_loss': 0,
+            })
+            continue
+
+        regime_candidates = candidate_mask[regime_indices]
+        regime_p_enter = all_p_enter[regime_indices]
+        regime_sides = side_arr[regime_indices]
+
+        if policy_type == "threshold":
+            threshold = policy_value_num
+        elif policy_type == "percentile":
+            active_p = regime_p_enter[regime_candidates]
+            if len(active_p) == 0:
+                threshold = 1.0
+            else:
+                pct = 100.0 - policy_value_num
+                threshold = float(np.percentile(active_p, max(pct, 0)))
+        else:
+            log.error(f"Unknown policy type: {policy_type}")
+            sys.exit(1)
+
+        trade_mask = regime_candidates & (regime_p_enter >= threshold)
+
+        selected_local = []
+        last_trade = -cooldown - 1
+        for i in range(len(trade_mask)):
+            if trade_mask[i] and (i - last_trade) > cooldown:
+                selected_local.append(i)
+                last_trade = i
+
+        if not selected_local:
+            n_bars_regime = len(regime_indices)
+            all_regime_results.append({
+                'name': regime_name, 'bars': n_bars_regime, 'trades': 0, 'trades_per_day': 0,
+                'expect': 0, 'winrate': 0, 'sharpe': 0, 'pf': 0,
+                'avg_win_r': 0, 'avg_loss_r': 0, 'median_r': 0,
+                'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0, 'pct_exp_win': 0, 'pct_exp_loss': 0,
+            })
+            continue
+
+        global_indices = regime_indices[np.array(selected_local)]
+
+        outcomes = []
+        r_values = []
+        for gi in global_indices:
+            side = int(side_arr[gi])
+            atr_i = float(atr_full[gi])
+            outcome, r = triple_barrier_outcome_for_index(
+                highs, lows, closes, gi, side, atr_i,
+                tp_mult, sl_mult, horizon, r_min_expiry,
+            )
+            outcomes.append(outcome)
+            r_values.append(r)
+
+        outcomes = np.array(outcomes)
+        r_values = np.array(r_values, dtype=np.float64)
+
+        valid_r = ~np.isnan(r_values)
+        outcomes = outcomes[valid_r]
+        r_values = r_values[valid_r]
+
+        n_trades = len(r_values)
+        n_bars_regime = len(regime_indices)
+        regime_days = n_bars_regime / 96.0
+
+        if n_trades == 0:
+            all_regime_results.append({
+                'name': regime_name, 'bars': n_bars_regime, 'trades': 0, 'trades_per_day': 0,
+                'expect': 0, 'winrate': 0, 'sharpe': 0, 'pf': 0,
+                'avg_win_r': 0, 'avg_loss_r': 0, 'median_r': 0,
+                'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0, 'pct_exp_win': 0, 'pct_exp_loss': 0,
+            })
+            continue
+
+        expect = float(np.mean(r_values))
+        wins = (r_values > 0).sum()
+        winrate = wins / n_trades
+        trades_per_day = n_trades / regime_days if regime_days > 0 else 0
+
+        pos_r = r_values[r_values > 0]
+        neg_r = r_values[r_values < 0]
+        gross_profit = float(pos_r.sum()) if len(pos_r) > 0 else 0.0
+        gross_loss = float(abs(neg_r.sum())) if len(neg_r) > 0 else 0.0
+        pf = gross_profit / gross_loss if gross_loss > 0 else 0.0
+
+        avg_win_r = float(np.mean(pos_r)) if len(pos_r) > 0 else 0.0
+        avg_loss_r = float(np.mean(neg_r)) if len(neg_r) > 0 else 0.0
+        median_r = float(np.median(r_values))
+
+        trades_per_year = trades_per_day * 365.0
+        std_r = float(np.std(r_values))
+        if std_r > 1e-8 and n_trades > 1:
+            sharpe = float(np.mean(r_values) / std_r * np.sqrt(max(trades_per_year, 1)))
+        else:
+            sharpe = 0.0
+
+        pct_tp = float((outcomes == "TP").sum() / n_trades)
+        pct_sl = float((outcomes == "SL").sum() / n_trades)
+        pct_exp_win = float((outcomes == "EXP_WIN").sum() / n_trades)
+        pct_exp_loss = float((outcomes == "EXP_LOSS").sum() / n_trades)
+        pct_exp = pct_exp_win + pct_exp_loss
+
+        all_selected_r.extend(r_values.tolist())
+
+        all_regime_results.append({
+            'name': regime_name, 'bars': n_bars_regime, 'trades': n_trades,
+            'trades_per_day': trades_per_day, 'expect': expect, 'winrate': winrate,
+            'sharpe': sharpe, 'pf': pf, 'avg_win_r': avg_win_r, 'avg_loss_r': avg_loss_r,
+            'median_r': median_r, 'pct_tp': pct_tp, 'pct_sl': pct_sl, 'pct_exp': pct_exp,
+            'pct_exp_win': pct_exp_win, 'pct_exp_loss': pct_exp_loss,
+        })
+
+    total_bars = sum(r['bars'] for r in all_regime_results)
+    total_trades = sum(r['trades'] for r in all_regime_results)
+    total_days = total_bars / 96.0
+    overall_r = np.array(all_selected_r, dtype=np.float64)
+
+    if len(overall_r) > 0:
+        overall_expect = float(np.mean(overall_r))
+        overall_wins = (overall_r > 0).sum()
+        overall_winrate = overall_wins / len(overall_r)
+        overall_tpd = total_trades / total_days if total_days > 0 else 0
+
+        pos_r_all = overall_r[overall_r > 0]
+        neg_r_all = overall_r[overall_r < 0]
+        gp = float(pos_r_all.sum()) if len(pos_r_all) > 0 else 0
+        gl = float(abs(neg_r_all.sum())) if len(neg_r_all) > 0 else 0
+        overall_pf = gp / gl if gl > 0 else 0
+
+        overall_avg_win = float(np.mean(pos_r_all)) if len(pos_r_all) > 0 else 0
+        overall_avg_loss = float(np.mean(neg_r_all)) if len(neg_r_all) > 0 else 0
+        overall_median = float(np.median(overall_r))
+
+        tpy = overall_tpd * 365.0
+        std_all = float(np.std(overall_r))
+        overall_sharpe = float(np.mean(overall_r) / std_all * np.sqrt(max(tpy, 1))) if std_all > 1e-8 and len(overall_r) > 1 else 0
+    else:
+        overall_expect = overall_winrate = overall_tpd = overall_pf = 0
+        overall_avg_win = overall_avg_loss = overall_median = overall_sharpe = 0
+
+    log.info("")
+    log.info("=" * 140)
+    log.info("REGIME ROBUSTNESS RESULTS")
+    log.info(f"Policy: {policy_str} | Cooldown: {cooldown} | TP={tp_mult}x SL={sl_mult}x | Horizon={horizon}")
+    log.info("=" * 140)
+    log.info("%-26s %6s %5s %5s %8s %6s %+7s %5s | %+5s %+5s %+5s | %4s %4s %4s %4s %4s",
+             "Regime", "Bars", "Trds", "T/Day", "Expect", "WR", "Sharpe", "PF",
+             "WinR", "LosR", "MedR", "%TP", "%SL", "%EX", "%EW", "%EL")
+    log.info("-" * 140)
+
+    for r in all_regime_results:
+        log.info("%-26s %6d %5d %5.1f %+8.4f %5.1f%% %+7.2f %5.2f | %+5.2f %+5.2f %+5.2f | %3.0f%% %3.0f%% %3.0f%% %3.0f%% %3.0f%%",
+                 r['name'], r['bars'], r['trades'], r['trades_per_day'],
+                 r['expect'], r['winrate'] * 100, r['sharpe'], r['pf'],
+                 r['avg_win_r'], r['avg_loss_r'], r['median_r'],
+                 r['pct_tp'] * 100, r['pct_sl'] * 100, r['pct_exp'] * 100,
+                 r['pct_exp_win'] * 100, r['pct_exp_loss'] * 100)
+
+    log.info("-" * 140)
+    log.info("%-26s %6d %5d %5.1f %+8.4f %5.1f%% %+7.2f %5.2f | %+5.2f %+5.2f %+5.2f |",
+             "OVERALL", total_bars, total_trades, overall_tpd,
+             overall_expect, overall_winrate * 100, overall_sharpe, overall_pf,
+             overall_avg_win, overall_avg_loss, overall_median)
+    log.info("=" * 140)
+
+    if len(all_regime_results) > 1:
+        expects = [r['expect'] for r in all_regime_results if r['trades'] > 0]
+        if len(expects) > 1:
+            expect_std = float(np.std(expects))
+            expect_mean = float(np.mean(expects))
+            log.info(f"Cross-regime consistency: mean(expect)={expect_mean:+.4f} std={expect_std:.4f} CV={expect_std/abs(expect_mean) if abs(expect_mean)>1e-8 else float('inf'):.2f}")
+            positive_regimes = sum(1 for e in expects if e > 0)
+            log.info(f"Profitable regimes: {positive_regimes}/{len(expects)}")
+
+    log.info("")
+    return all_regime_results
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="BTC Futures GPU Trainer - ENTER QUALITY Model (v3.3.0 + Funding + OI)",
@@ -1310,6 +1667,8 @@ Examples:
   python quick_start.py --url https://your-app.replit.app
   python quick_start.py --url https://your-app.replit.app --epochs 300
   python quick_start.py --url https://your-app.replit.app --predict-only
+  python quick_start.py --url https://your-app.replit.app --regime-eval --policy threshold:0.70 --cooldown 4
+  python quick_start.py --url https://your-app.replit.app --regime-eval --policy percentile:top20
         """
     )
     parser.add_argument("--url", required=True, help="Your Replit dashboard URL")
@@ -1328,6 +1687,13 @@ Examples:
     parser.add_argument("--r-min-expiry", type=float, default=0.5, help="Min R-multiple at expiry for ENTER=1 (default: 0.5)")
     parser.add_argument("--target-tpd", type=float, default=5.5, help="Target trades per day for BEST selection (default: 5.5)")
     parser.add_argument("--target-tpd-tol", type=float, default=1.5, help="Tolerance band for trades/day (default: 1.5)")
+    parser.add_argument("--regime-eval", action="store_true", help="Run regime robustness evaluation (no training)")
+    parser.add_argument("--regimes", type=str,
+                        default="2019-01-01:2020-12-31,2021-01-01:2021-12-31,2022-01-01:2022-12-31,2023-01-01:2024-12-31",
+                        help="Comma-separated date ranges as START:END (YYYY-MM-DD)")
+    parser.add_argument("--policy", type=str, default="threshold:0.70",
+                        help="Trade selection policy: 'threshold:0.70' or 'percentile:top20'")
+    parser.add_argument("--cooldown", type=int, default=4, help="Cooldown bars after each trade (default: 4)")
 
     args = parser.parse_args()
 
@@ -1339,6 +1705,15 @@ Examples:
 
     device = check_gpu()
     data_dir = Path("data_cache")
+
+    if args.regime_eval:
+        data_path = download_data(args.url, data_dir)
+        run_regime_eval(
+            data_path, device, args.regimes, args.policy,
+            args.cooldown, args.tp_mult, args.sl_mult, args.horizon,
+            args.slope_eps, args.r_min_expiry,
+        )
+        return
 
     if not args.predict_only:
         data_path = download_data(args.url, data_dir)
