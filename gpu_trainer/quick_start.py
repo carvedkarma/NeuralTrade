@@ -31,6 +31,7 @@ logging.basicConfig(
 log = logging.getLogger("QuickStart")
 
 FEATURE_VERSION = "v3.3.0_enter_quality_stf47_htf10_funding3_oi3"
+SYSTEM_VERSION = "v3.4.0_geometry_sweep_net_profit"
 
 FUNDING_FEATURE_NAMES = ["funding_rate", "funding_rate_delta_8h", "funding_rate_zscore_30d"]
 FUNDING_FEATURE_COUNT = len(FUNDING_FEATURE_NAMES)
@@ -1779,7 +1780,7 @@ Examples:
 
     print()
     print("=" * 60)
-    print("  BTC FUTURES - ENTER QUALITY MODEL v3.3.0 + FUNDING + OI")
+    print(f"  BTC FUTURES - ENTER QUALITY MODEL {SYSTEM_VERSION}")
     print("=" * 60)
     print()
 
