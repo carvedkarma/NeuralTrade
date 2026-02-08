@@ -137,6 +137,48 @@ def triple_barrier_outcome_for_index(
         return ("EXP_LOSS", r_at_expiry)
 
 
+def compute_trade_cost_r(
+    entry_price: float,
+    atr_i: float,
+    sl_mult: float,
+    fees_bps_entry: float = 5.0,
+    fees_bps_exit: float = 5.0,
+    spread_bps: float = 1.0,
+    slip_k: float = 0.10,
+) -> float:
+    """Compute round-trip trading cost in R-units.
+
+    Cost components (all as fraction of entry_price):
+      - fees:     (fees_bps_entry + fees_bps_exit) / 10_000
+      - spread:   spread_bps / 10_000  (half at entry + half at exit)
+      - slippage: 2 * slip_k * (atr / entry_price)  (entry + exit)
+
+    R-unit conversion:
+      sl_pct = sl_mult * atr / entry_price
+      cost_R = total_cost_pct / sl_pct
+
+    Returns cost_R (always >= 0).  net_R = gross_R - cost_R
+    """
+    if entry_price <= 0 or sl_mult <= 0:
+        return 0.0
+    if np.isnan(atr_i) or atr_i <= 0:
+        return 0.0
+
+    atr_pct = atr_i / entry_price
+
+    fee_cost = (fees_bps_entry + fees_bps_exit) / 10_000.0
+    spread_cost = spread_bps / 10_000.0
+    slippage_cost = 2.0 * slip_k * atr_pct
+
+    total_cost_pct = fee_cost + spread_cost + slippage_cost
+
+    sl_pct = sl_mult * atr_pct
+    if sl_pct <= 0:
+        return 0.0
+
+    return total_cost_pct / sl_pct
+
+
 def triple_barrier_batch(
     df: pd.DataFrame,
     indices: np.ndarray,

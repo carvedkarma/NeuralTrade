@@ -1303,17 +1303,21 @@ def push_prediction(replit_url: str, prediction: dict):
 
 def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: str,
                     cooldown: int, tp_mult: float, sl_mult: float, horizon: int,
-                    slope_eps: float, r_min_expiry: float):
+                    slope_eps: float, r_min_expiry: float,
+                    fees_bps_entry: float = 5.0, fees_bps_exit: float = 5.0,
+                    spread_bps: float = 1.0, slip_k: float = 0.10,
+                    size_cap: float = 2.0):
     """Evaluate one fixed trading policy across multiple date regimes.
     
     No re-training, no per-slice optimization. Same checkpoint, same policy for all regimes.
     Uses training/triple_barrier.py for trade scoring (parity with labeling).
+    Reports gross, net (after costs), and confidence-sized metrics.
     """
     import torch
     import numpy as np
     import pandas as pd
     from config import config
-    from training.triple_barrier import compute_atr_14, triple_barrier_outcome_for_index
+    from training.triple_barrier import compute_atr_14, triple_barrier_outcome_for_index, compute_trade_cost_r
 
     log.info("=" * 80)
     log.info("  REGIME ROBUSTNESS EVALUATION")
@@ -1444,6 +1448,7 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
     policy_value_clean = policy_value.lower().replace("top", "").strip()
     policy_value_num = float(policy_value_clean)
     log.info(f"Policy: {policy_type}={policy_value} | Cooldown: {cooldown} | TP={tp_mult}x SL={sl_mult}x | Horizon={horizon} | r_min_expiry={r_min_expiry}")
+    log.info(f"Costs: entry={fees_bps_entry}bps exit={fees_bps_exit}bps spread={spread_bps}bps slip_k={slip_k} | Size cap={size_cap}x")
 
     atr_full = compute_atr_14(df)
     highs = df["high"].values.astype(np.float64)
@@ -1468,7 +1473,9 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
         log.info(f"  {name}: {mask.sum()} bars")
 
     all_regime_results = []
-    all_selected_r = []
+    all_selected_gross = []
+    all_selected_net = []
+    all_selected_sized = []
 
     for regime_name, start_ms, end_ms in regimes:
         regime_mask = (timestamps_ms >= start_ms) & (timestamps_ms <= end_ms)
@@ -1478,9 +1485,14 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
             log.warning(f"  {regime_name}: No bars in range")
             all_regime_results.append({
                 'name': regime_name, 'bars': 0, 'trades': 0, 'trades_per_day': 0,
-                'expect': 0, 'winrate': 0, 'sharpe': 0, 'pf': 0,
-                'avg_win_r': 0, 'avg_loss_r': 0, 'median_r': 0,
-                'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0, 'pct_exp_win': 0, 'pct_exp_loss': 0,
+                'expect_gross': 0, 'expect_net': 0, 'expect_sized': 0,
+                'winrate_gross': 0, 'winrate_net': 0,
+                'sharpe_gross': 0, 'sharpe_net': 0,
+                'pf_gross': 0, 'pf_net': 0, 'pf_sized': 0,
+                'avg_win_r_gross': 0, 'avg_loss_r_gross': 0,
+                'avg_win_r_net': 0, 'avg_loss_r_net': 0,
+                'avg_cost_r': 0, 'avg_size_mult': 0,
+                'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0,
             })
             continue
 
@@ -1514,16 +1526,23 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
             n_bars_regime = len(regime_indices)
             all_regime_results.append({
                 'name': regime_name, 'bars': n_bars_regime, 'trades': 0, 'trades_per_day': 0,
-                'expect': 0, 'winrate': 0, 'sharpe': 0, 'pf': 0,
-                'avg_win_r': 0, 'avg_loss_r': 0, 'median_r': 0,
-                'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0, 'pct_exp_win': 0, 'pct_exp_loss': 0,
+                'expect_gross': 0, 'expect_net': 0, 'expect_sized': 0,
+                'winrate_gross': 0, 'winrate_net': 0,
+                'sharpe_gross': 0, 'sharpe_net': 0,
+                'pf_gross': 0, 'pf_net': 0, 'pf_sized': 0,
+                'avg_win_r_gross': 0, 'avg_loss_r_gross': 0,
+                'avg_win_r_net': 0, 'avg_loss_r_net': 0,
+                'avg_cost_r': 0, 'avg_size_mult': 0,
+                'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0,
             })
             continue
 
         global_indices = regime_indices[np.array(selected_local)]
+        trade_p_enter = all_p_enter[global_indices]
 
         outcomes = []
-        r_values = []
+        gross_r_values = []
+        cost_r_values = []
         for gi in global_indices:
             side = int(side_arr[gi])
             atr_i = float(atr_full[gi])
@@ -1531,128 +1550,183 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
                 highs, lows, closes, gi, side, atr_i,
                 tp_mult, sl_mult, horizon, r_min_expiry,
             )
+            cost_r = compute_trade_cost_r(
+                float(closes[gi]), atr_i, sl_mult,
+                fees_bps_entry, fees_bps_exit, spread_bps, slip_k,
+            )
             outcomes.append(outcome)
-            r_values.append(r)
+            gross_r_values.append(r)
+            cost_r_values.append(cost_r)
 
         outcomes = np.array(outcomes)
-        r_values = np.array(r_values, dtype=np.float64)
+        gross_r = np.array(gross_r_values, dtype=np.float64)
+        cost_r_arr = np.array(cost_r_values, dtype=np.float64)
+        net_r = gross_r - cost_r_arr
 
-        valid_r = ~np.isnan(r_values)
-        outcomes = outcomes[valid_r]
-        r_values = r_values[valid_r]
+        size_mults = np.ones(len(trade_p_enter), dtype=np.float64)
+        if threshold < 1.0:
+            for k in range(len(trade_p_enter)):
+                p = trade_p_enter[k]
+                if p > threshold:
+                    raw = 1.0 + (p - threshold) / (1.0 - threshold) * (size_cap - 1.0)
+                    size_mults[k] = min(raw, size_cap)
+        sized_net_r = net_r * size_mults
 
-        n_trades = len(r_values)
+        valid_mask = ~np.isnan(gross_r) & ~np.isnan(cost_r_arr) & ~np.isnan(net_r)
+        outcomes = outcomes[valid_mask]
+        gross_r = gross_r[valid_mask]
+        net_r = net_r[valid_mask]
+        cost_r_arr = cost_r_arr[valid_mask]
+        sized_net_r = sized_net_r[valid_mask]
+        size_mults = size_mults[valid_mask]
+
+        n_trades = len(gross_r)
         n_bars_regime = len(regime_indices)
         regime_days = n_bars_regime / 96.0
 
+        empty_result = {
+            'name': regime_name, 'bars': n_bars_regime, 'trades': 0, 'trades_per_day': 0,
+            'expect_gross': 0, 'expect_net': 0, 'expect_sized': 0,
+            'winrate_gross': 0, 'winrate_net': 0,
+            'sharpe_gross': 0, 'sharpe_net': 0,
+            'pf_gross': 0, 'pf_net': 0, 'pf_sized': 0,
+            'avg_win_r_gross': 0, 'avg_loss_r_gross': 0,
+            'avg_win_r_net': 0, 'avg_loss_r_net': 0,
+            'avg_cost_r': 0, 'avg_size_mult': 0,
+            'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0,
+        }
+
         if n_trades == 0:
-            all_regime_results.append({
-                'name': regime_name, 'bars': n_bars_regime, 'trades': 0, 'trades_per_day': 0,
-                'expect': 0, 'winrate': 0, 'sharpe': 0, 'pf': 0,
-                'avg_win_r': 0, 'avg_loss_r': 0, 'median_r': 0,
-                'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0, 'pct_exp_win': 0, 'pct_exp_loss': 0,
-            })
+            all_regime_results.append(empty_result)
             continue
 
-        expect = float(np.mean(r_values))
-        wins = (r_values > 0).sum()
-        winrate = wins / n_trades
+        def _metrics(r_arr):
+            e = float(np.mean(r_arr))
+            w = float((r_arr > 0).sum() / len(r_arr))
+            pos = r_arr[r_arr > 0]
+            neg = r_arr[r_arr < 0]
+            gp = float(pos.sum()) if len(pos) > 0 else 0.0
+            gl = float(abs(neg.sum())) if len(neg) > 0 else 0.0
+            pf = gp / gl if gl > 0 else 0.0
+            aw = float(np.mean(pos)) if len(pos) > 0 else 0.0
+            al = float(np.mean(neg)) if len(neg) > 0 else 0.0
+            std = float(np.std(r_arr))
+            tpy = (len(r_arr) / regime_days * 365.0) if regime_days > 0 else 0
+            sh = float(np.mean(r_arr) / std * np.sqrt(max(tpy, 1))) if std > 1e-8 and len(r_arr) > 1 else 0.0
+            return e, w, pf, aw, al, sh
+
+        eg, wg, pfg, awg, alg, shg = _metrics(gross_r)
+        en, wn, pfn, awn, aln, shn = _metrics(net_r)
+        es, _, pfs, _, _, _ = _metrics(sized_net_r)
+
         trades_per_day = n_trades / regime_days if regime_days > 0 else 0
-
-        pos_r = r_values[r_values > 0]
-        neg_r = r_values[r_values < 0]
-        gross_profit = float(pos_r.sum()) if len(pos_r) > 0 else 0.0
-        gross_loss = float(abs(neg_r.sum())) if len(neg_r) > 0 else 0.0
-        pf = gross_profit / gross_loss if gross_loss > 0 else 0.0
-
-        avg_win_r = float(np.mean(pos_r)) if len(pos_r) > 0 else 0.0
-        avg_loss_r = float(np.mean(neg_r)) if len(neg_r) > 0 else 0.0
-        median_r = float(np.median(r_values))
-
-        trades_per_year = trades_per_day * 365.0
-        std_r = float(np.std(r_values))
-        if std_r > 1e-8 and n_trades > 1:
-            sharpe = float(np.mean(r_values) / std_r * np.sqrt(max(trades_per_year, 1)))
-        else:
-            sharpe = 0.0
 
         pct_tp = float((outcomes == "TP").sum() / n_trades)
         pct_sl = float((outcomes == "SL").sum() / n_trades)
-        pct_exp_win = float((outcomes == "EXP_WIN").sum() / n_trades)
-        pct_exp_loss = float((outcomes == "EXP_LOSS").sum() / n_trades)
-        pct_exp = pct_exp_win + pct_exp_loss
+        pct_exp = float(((outcomes == "EXP_WIN") | (outcomes == "EXP_LOSS")).sum() / n_trades)
 
-        all_selected_r.extend(r_values.tolist())
+        all_selected_gross.extend(gross_r.tolist())
+        all_selected_net.extend(net_r.tolist())
+        all_selected_sized.extend(sized_net_r.tolist())
 
         all_regime_results.append({
             'name': regime_name, 'bars': n_bars_regime, 'trades': n_trades,
-            'trades_per_day': trades_per_day, 'expect': expect, 'winrate': winrate,
-            'sharpe': sharpe, 'pf': pf, 'avg_win_r': avg_win_r, 'avg_loss_r': avg_loss_r,
-            'median_r': median_r, 'pct_tp': pct_tp, 'pct_sl': pct_sl, 'pct_exp': pct_exp,
-            'pct_exp_win': pct_exp_win, 'pct_exp_loss': pct_exp_loss,
+            'trades_per_day': trades_per_day,
+            'expect_gross': eg, 'expect_net': en, 'expect_sized': es,
+            'winrate_gross': wg, 'winrate_net': wn,
+            'sharpe_gross': shg, 'sharpe_net': shn,
+            'pf_gross': pfg, 'pf_net': pfn, 'pf_sized': pfs,
+            'avg_win_r_gross': awg, 'avg_loss_r_gross': alg,
+            'avg_win_r_net': awn, 'avg_loss_r_net': aln,
+            'avg_cost_r': float(np.mean(cost_r_arr)),
+            'avg_size_mult': float(np.mean(size_mults)),
+            'pct_tp': pct_tp, 'pct_sl': pct_sl, 'pct_exp': pct_exp,
         })
 
     total_bars = sum(r['bars'] for r in all_regime_results)
     total_trades = sum(r['trades'] for r in all_regime_results)
     total_days = total_bars / 96.0
-    overall_r = np.array(all_selected_r, dtype=np.float64)
 
-    if len(overall_r) > 0:
-        overall_expect = float(np.mean(overall_r))
-        overall_wins = (overall_r > 0).sum()
-        overall_winrate = overall_wins / len(overall_r)
-        overall_tpd = total_trades / total_days if total_days > 0 else 0
+    def _overall(r_list):
+        r_arr = np.array(r_list, dtype=np.float64)
+        if len(r_arr) == 0:
+            return 0, 0, 0, 0, 0, 0
+        e = float(np.mean(r_arr))
+        w = float((r_arr > 0).sum() / len(r_arr))
+        tpd = total_trades / total_days if total_days > 0 else 0
+        pos = r_arr[r_arr > 0]; neg = r_arr[r_arr < 0]
+        gp = float(pos.sum()) if len(pos) > 0 else 0
+        gl = float(abs(neg.sum())) if len(neg) > 0 else 0
+        pf = gp / gl if gl > 0 else 0
+        aw = float(np.mean(pos)) if len(pos) > 0 else 0
+        al = float(np.mean(neg)) if len(neg) > 0 else 0
+        std = float(np.std(r_arr))
+        tpy = tpd * 365.0
+        sh = float(np.mean(r_arr) / std * np.sqrt(max(tpy, 1))) if std > 1e-8 and len(r_arr) > 1 else 0
+        return e, w, pf, aw, al, sh
 
-        pos_r_all = overall_r[overall_r > 0]
-        neg_r_all = overall_r[overall_r < 0]
-        gp = float(pos_r_all.sum()) if len(pos_r_all) > 0 else 0
-        gl = float(abs(neg_r_all.sum())) if len(neg_r_all) > 0 else 0
-        overall_pf = gp / gl if gl > 0 else 0
-
-        overall_avg_win = float(np.mean(pos_r_all)) if len(pos_r_all) > 0 else 0
-        overall_avg_loss = float(np.mean(neg_r_all)) if len(neg_r_all) > 0 else 0
-        overall_median = float(np.median(overall_r))
-
-        tpy = overall_tpd * 365.0
-        std_all = float(np.std(overall_r))
-        overall_sharpe = float(np.mean(overall_r) / std_all * np.sqrt(max(tpy, 1))) if std_all > 1e-8 and len(overall_r) > 1 else 0
-    else:
-        overall_expect = overall_winrate = overall_tpd = overall_pf = 0
-        overall_avg_win = overall_avg_loss = overall_median = overall_sharpe = 0
+    og_e, og_w, og_pf, og_aw, og_al, og_sh = _overall(all_selected_gross)
+    on_e, on_w, on_pf, on_aw, on_al, on_sh = _overall(all_selected_net)
+    os_e, _, os_pf, _, _, _ = _overall(all_selected_sized)
+    overall_tpd = total_trades / total_days if total_days > 0 else 0
 
     log.info("")
-    log.info("=" * 140)
-    log.info("REGIME ROBUSTNESS RESULTS")
+    log.info("=" * 160)
+    log.info("REGIME ROBUSTNESS RESULTS (GROSS / NET / SIZED)")
     log.info(f"Policy: {policy_str} | Cooldown: {cooldown} | TP={tp_mult}x SL={sl_mult}x | Horizon={horizon}")
-    log.info("=" * 140)
-    log.info("%-26s %6s %5s %5s %8s %6s %+7s %5s | %+5s %+5s %+5s | %4s %4s %4s %4s %4s",
-             "Regime", "Bars", "Trds", "T/Day", "Expect", "WR", "Sharpe", "PF",
-             "WinR", "LosR", "MedR", "%TP", "%SL", "%EX", "%EW", "%EL")
-    log.info("-" * 140)
+    log.info(f"Costs: entry={fees_bps_entry}bps exit={fees_bps_exit}bps spread={spread_bps}bps slip_k={slip_k} | Size cap={size_cap}x")
+    log.info("=" * 160)
+
+    hdr = "%-26s %6s %5s %5s | %8s %8s %8s | %5s %5s | %5s %5s | %5s %5s %5s | %5s %5s | %4s %4s %4s"
+    log.info(hdr, "Regime", "Bars", "Trds", "T/Day",
+             "E[gross]", "E[net]", "E[sized]",
+             "WR_g", "WR_n",
+             "Sh_g", "Sh_n",
+             "PF_g", "PF_n", "PF_s",
+             "CostR", "SzMul",
+             "%TP", "%SL", "%EX")
+    log.info("-" * 160)
 
     for r in all_regime_results:
-        log.info("%-26s %6d %5d %5.1f %+8.4f %5.1f%% %+7.2f %5.2f | %+5.2f %+5.2f %+5.2f | %3.0f%% %3.0f%% %3.0f%% %3.0f%% %3.0f%%",
+        log.info("%-26s %6d %5d %5.1f | %+8.4f %+8.4f %+8.4f | %5.1f%% %5.1f%% | %+5.2f %+5.2f | %5.2f %5.2f %5.2f | %5.3f %5.2f | %3.0f%% %3.0f%% %3.0f%%",
                  r['name'], r['bars'], r['trades'], r['trades_per_day'],
-                 r['expect'], r['winrate'] * 100, r['sharpe'], r['pf'],
-                 r['avg_win_r'], r['avg_loss_r'], r['median_r'],
-                 r['pct_tp'] * 100, r['pct_sl'] * 100, r['pct_exp'] * 100,
-                 r['pct_exp_win'] * 100, r['pct_exp_loss'] * 100)
+                 r['expect_gross'], r['expect_net'], r['expect_sized'],
+                 r['winrate_gross'] * 100, r['winrate_net'] * 100,
+                 r['sharpe_gross'], r['sharpe_net'],
+                 r['pf_gross'], r['pf_net'], r['pf_sized'],
+                 r['avg_cost_r'], r['avg_size_mult'],
+                 r['pct_tp'] * 100, r['pct_sl'] * 100, r['pct_exp'] * 100)
 
-    log.info("-" * 140)
-    log.info("%-26s %6d %5d %5.1f %+8.4f %5.1f%% %+7.2f %5.2f | %+5.2f %+5.2f %+5.2f |",
+    log.info("-" * 160)
+    log.info("%-26s %6d %5d %5.1f | %+8.4f %+8.4f %+8.4f | %5.1f%% %5.1f%% | %+5.2f %+5.2f | %5.2f %5.2f %5.2f |",
              "OVERALL", total_bars, total_trades, overall_tpd,
-             overall_expect, overall_winrate * 100, overall_sharpe, overall_pf,
-             overall_avg_win, overall_avg_loss, overall_median)
-    log.info("=" * 140)
+             og_e, on_e, os_e,
+             og_w * 100, on_w * 100,
+             og_sh, on_sh,
+             og_pf, on_pf, os_pf)
+    log.info("=" * 160)
+
+    log.info("")
+    log.info("Win/Loss R breakdown:")
+    log.info("%-26s | %+6s %+6s | %+6s %+6s", "Regime", "WinR_g", "LosR_g", "WinR_n", "LosR_n")
+    log.info("-" * 80)
+    for r in all_regime_results:
+        if r['trades'] > 0:
+            log.info("%-26s | %+6.2f %+6.2f | %+6.2f %+6.2f",
+                     r['name'], r['avg_win_r_gross'], r['avg_loss_r_gross'],
+                     r['avg_win_r_net'], r['avg_loss_r_net'])
+    log.info("%-26s | %+6.2f %+6.2f | %+6.2f %+6.2f",
+             "OVERALL", og_aw, og_al, on_aw, on_al)
 
     if len(all_regime_results) > 1:
-        expects = [r['expect'] for r in all_regime_results if r['trades'] > 0]
-        if len(expects) > 1:
-            expect_std = float(np.std(expects))
-            expect_mean = float(np.mean(expects))
-            log.info(f"Cross-regime consistency: mean(expect)={expect_mean:+.4f} std={expect_std:.4f} CV={expect_std/abs(expect_mean) if abs(expect_mean)>1e-8 else float('inf'):.2f}")
-            positive_regimes = sum(1 for e in expects if e > 0)
-            log.info(f"Profitable regimes: {positive_regimes}/{len(expects)}")
+        net_expects = [r['expect_net'] for r in all_regime_results if r['trades'] > 0]
+        if len(net_expects) > 1:
+            en_std = float(np.std(net_expects))
+            en_mean = float(np.mean(net_expects))
+            log.info("")
+            log.info(f"Cross-regime consistency (NET): mean(E_net)={en_mean:+.4f} std={en_std:.4f} CV={en_std/abs(en_mean) if abs(en_mean)>1e-8 else float('inf'):.2f}")
+            positive_net = sum(1 for e in net_expects if e > 0)
+            log.info(f"Net-profitable regimes: {positive_net}/{len(net_expects)}")
 
     log.info("")
     return all_regime_results
@@ -1669,6 +1743,7 @@ Examples:
   python quick_start.py --url https://your-app.replit.app --predict-only
   python quick_start.py --url https://your-app.replit.app --regime-eval --policy threshold:0.70 --cooldown 4
   python quick_start.py --url https://your-app.replit.app --regime-eval --policy percentile:top20
+  python quick_start.py --url https://your-app.replit.app --regime-eval --fees-entry-bps 2 --fees-exit-bps 2 --slip-k 0.05
         """
     )
     parser.add_argument("--url", required=True, help="Your Replit dashboard URL")
@@ -1694,6 +1769,11 @@ Examples:
     parser.add_argument("--policy", type=str, default="threshold:0.70",
                         help="Trade selection policy: 'threshold:0.70' or 'percentile:top20'")
     parser.add_argument("--cooldown", type=int, default=4, help="Cooldown bars after each trade (default: 4)")
+    parser.add_argument("--fees-entry-bps", type=float, default=5.0, help="Entry fee in basis points (default: 5.0 = taker)")
+    parser.add_argument("--fees-exit-bps", type=float, default=5.0, help="Exit fee in basis points (default: 5.0 = taker)")
+    parser.add_argument("--spread-bps", type=float, default=1.0, help="Spread cost in basis points (default: 1.0)")
+    parser.add_argument("--slip-k", type=float, default=0.10, help="Slippage factor as fraction of ATR (default: 0.10)")
+    parser.add_argument("--size-cap", type=float, default=2.0, help="Max confidence size multiplier (default: 2.0)")
 
     args = parser.parse_args()
 
@@ -1712,6 +1792,9 @@ Examples:
             data_path, device, args.regimes, args.policy,
             args.cooldown, args.tp_mult, args.sl_mult, args.horizon,
             args.slope_eps, args.r_min_expiry,
+            fees_bps_entry=args.fees_entry_bps, fees_bps_exit=args.fees_exit_bps,
+            spread_bps=args.spread_bps, slip_k=args.slip_k,
+            size_cap=args.size_cap,
         )
         return
 

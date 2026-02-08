@@ -29,8 +29,19 @@ The system integrates multi-head predictions from the GPU trainer into the dashb
 Training: `python quick_start.py --url URL --epochs 300`
 Prediction: `python quick_start.py --url URL --predict-only`
 Regime Eval: `python quick_start.py --url URL --regime-eval --policy threshold:0.70 --cooldown 4 --tp-mult 2.0 --sl-mult 1.5`
+Regime Eval (custom costs): `python quick_start.py --url URL --regime-eval --fees-entry-bps 2 --fees-exit-bps 2 --slip-k 0.05`
 
-Key files: `gpu_trainer/quick_start.py`, `gpu_trainer/training/triple_barrier.py` (shared barrier simulator), `gpu_trainer/data/regression_targets.py` (labeling), `gpu_trainer/data/pipeline.py` (features/data).
+Key files: `gpu_trainer/quick_start.py`, `gpu_trainer/training/triple_barrier.py` (shared barrier simulator + cost model), `gpu_trainer/data/regression_targets.py` (labeling), `gpu_trainer/data/pipeline.py` (features/data).
+
+### Cost Model (v3.3.2)
+Default execution: MARKET orders (taker) for entry and exit. Cost components computed in R-units via `compute_trade_cost_r()` in `training/triple_barrier.py`:
+- Fees: `(entry_bps + exit_bps) / 10000` (default 5+5 bps taker)
+- Spread: `spread_bps / 10000` (default 1 bps, half each side)
+- Slippage: `2 * slip_k * ATR/price` (default slip_k=0.10, entry+exit)
+- Converted to R: `cost_R = total_cost_pct / (sl_mult * ATR/price)`
+- Net R = Gross R - Cost R
+
+Confidence-based sizing: linear scale from 1.0x at threshold to `size_cap` (default 2.0x) at p_enter=1.0. Sized R = Net R * size_mult.
 
 ### System Design Choices
 Data is managed with Drizzle ORM for PostgreSQL and Zod for type-safe validation. Live sentiment data is separated from historical price/volume data, and all learning states are persisted. The client is bundled by Vite, and the server by esbuild. A centralized timeframe configuration ensures consistency. A runtime diagnostic system provides health endpoints and UI console logging. The GPU training API supports starting training, checking status, and daily retraining, incorporating gradient clipping and learning rate adjustments for stability. A data diagnostics system audits features and labels.
