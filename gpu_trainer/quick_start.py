@@ -31,7 +31,7 @@ logging.basicConfig(
 log = logging.getLogger("QuickStart")
 
 FEATURE_VERSION = "v3.3.0_enter_quality_stf47_htf10_funding3_oi3"
-SYSTEM_VERSION = "v3.4.0_geometry_sweep_net_profit"
+SYSTEM_VERSION = "v3.4.1_geometry_sweep_audit_fix"
 
 FUNDING_FEATURE_NAMES = ["funding_rate", "funding_rate_delta_8h", "funding_rate_zscore_30d"]
 FUNDING_FEATURE_COUNT = len(FUNDING_FEATURE_NAMES)
@@ -1331,6 +1331,7 @@ def _empty_regime_result(regime_name, n_bars):
         'pf_gross': 0, 'pf_net': 0, 'pf_sized': 0,
         'avg_win_r_gross': 0, 'avg_loss_r_gross': 0,
         'avg_win_r_net': 0, 'avg_loss_r_net': 0,
+        'total_cost_r': 0, 'total_size_mult': 0,
         'avg_cost_r': 0, 'avg_size_mult': 0,
         'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0,
     }
@@ -1490,7 +1491,7 @@ def _prepare_regime_eval_context(data_path, device, regimes_str, slope_eps):
 
 def _eval_single_config(ctx, tp_mult, sl_mult, threshold, cooldown, horizon, r_min_expiry,
                          fees_bps_entry, fees_bps_exit, spread_bps, slip_k, size_cap,
-                         verbose=True):
+                         verbose=True, debug_costs=False):
     """Evaluate a single (tp_mult, sl_mult, threshold, cooldown) config across all regimes.
     
     Returns (regime_results_list, overall_summary_dict).
@@ -1598,6 +1599,15 @@ def _eval_single_config(ctx, tp_mult, sl_mult, threshold, cooldown, horizon, r_m
         pct_sl = float((outcomes == "SL").sum() / n_trades)
         pct_exp = float(((outcomes == "EXP_WIN") | (outcomes == "EXP_LOSS")).sum() / n_trades)
 
+        if debug_costs and n_trades > 0:
+            import random
+            sample_indices = random.sample(range(n_trades), min(5, n_trades))
+            log.info(f"  [DEBUG COSTS] {regime_name} — {min(5, n_trades)} random trades:")
+            for si in sample_indices:
+                g = gross_r[si]; c = cost_r_arr[si]; n = net_r[si]
+                log.info(f"    gross_r={g:+.4f}  cost_r={c:.4f}  net_r={n:+.4f}  check={g - c:+.4f}")
+                assert abs(n - (g - c)) < 1e-9, f"Cost accounting mismatch: net_r={n} != gross_r={g} - cost_r={c}"
+
         all_gross.extend(gross_r.tolist())
         all_net.extend(net_r.tolist())
         all_sized.extend(sized_net_r.tolist())
@@ -1611,8 +1621,10 @@ def _eval_single_config(ctx, tp_mult, sl_mult, threshold, cooldown, horizon, r_m
             'pf_gross': pfg, 'pf_net': pfn, 'pf_sized': pfs,
             'avg_win_r_gross': awg, 'avg_loss_r_gross': alg,
             'avg_win_r_net': awn, 'avg_loss_r_net': aln,
-            'avg_cost_r': float(np.mean(cost_r_arr)),
-            'avg_size_mult': float(np.mean(size_mults)),
+            'total_cost_r': float(np.sum(cost_r_arr)),
+            'total_size_mult': float(np.sum(size_mults)),
+            'avg_cost_r': float(np.sum(cost_r_arr) / n_trades),
+            'avg_size_mult': float(np.sum(size_mults) / n_trades),
             'pct_tp': pct_tp, 'pct_sl': pct_sl, 'pct_exp': pct_exp,
         })
 
@@ -1646,14 +1658,10 @@ def _eval_single_config(ctx, tp_mult, sl_mult, threshold, cooldown, horizon, r_m
     profitable_regimes = sum(1 for r in all_regime_results if r['trades'] > 0 and r['pf_net'] > 1.0)
     regimes_with_trades = sum(1 for r in all_regime_results if r['trades'] > 0)
 
-    all_cost_r_vals = []
-    all_sz_vals = []
-    for r in all_regime_results:
-        if r['trades'] > 0:
-            all_cost_r_vals.append(r['avg_cost_r'])
-            all_sz_vals.append(r['avg_size_mult'])
-    avg_cost_r = float(np.mean(all_cost_r_vals)) if all_cost_r_vals else 0
-    avg_sz_mul = float(np.mean(all_sz_vals)) if all_sz_vals else 1.0
+    total_cost_r_sum = sum(r.get('total_cost_r', 0) for r in all_regime_results if r['trades'] > 0)
+    total_sz_sum = sum(r.get('total_size_mult', 0) for r in all_regime_results if r['trades'] > 0)
+    avg_cost_r = float(total_cost_r_sum / total_trades) if total_trades > 0 else 0
+    avg_sz_mul = float(total_sz_sum / total_trades) if total_trades > 0 else 1.0
 
     summary = {
         'tp_mult': tp_mult, 'sl_mult': sl_mult, 'threshold': threshold, 'cooldown': cooldown,
@@ -1785,13 +1793,14 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
 
 
 def run_geometry_sweep(data_path: Path, device: str, regimes_str: str,
-                       tp_mults: list, sl_mults: list, thresholds: list, cooldowns: list,
+                       tp_sl_pairs: list, thresholds: list, cooldowns: list,
                        horizon: int, slope_eps: float, r_min_expiry: float,
                        fees_bps_entry: float = 5.0, fees_bps_exit: float = 5.0,
                        spread_bps: float = 1.0, slip_k: float = 0.10,
-                       size_cap: float = 2.0):
+                       size_cap: float = 2.0, debug_costs: bool = False):
     """Geometry sweep: evaluate multiple (tp, sl, threshold, cooldown) configs in one run.
     
+    Uses paired TP/SL combos (not cartesian product).
     Selects the BEST config using priority rules and saves to JSON.
     """
     import numpy as np
@@ -1803,13 +1812,12 @@ def run_geometry_sweep(data_path: Path, device: str, regimes_str: str,
     ctx = _prepare_regime_eval_context(data_path, device, regimes_str, slope_eps)
 
     configs = []
-    for tp in tp_mults:
-        for sl in sl_mults:
-            for thr in thresholds:
-                for cd in cooldowns:
-                    configs.append((tp, sl, thr, cd))
+    for tp, sl in tp_sl_pairs:
+        for thr in thresholds:
+            for cd in cooldowns:
+                configs.append((tp, sl, thr, cd))
 
-    log.info(f"Sweep: {len(configs)} configurations ({len(tp_mults)} TP x {len(sl_mults)} SL x {len(thresholds)} thr x {len(cooldowns)} cd)")
+    log.info(f"Sweep: {len(configs)} configurations ({len(tp_sl_pairs)} TP/SL pairs x {len(thresholds)} thr x {len(cooldowns)} cd)")
     log.info(f"Costs: entry={fees_bps_entry}bps exit={fees_bps_exit}bps spread={spread_bps}bps slip_k={slip_k} | Size cap={size_cap}x")
     log.info(f"Horizon={horizon} | r_min_expiry={r_min_expiry}")
 
@@ -1822,7 +1830,7 @@ def run_geometry_sweep(data_path: Path, device: str, regimes_str: str,
         regime_results, summary = _eval_single_config(
             ctx, tp, sl, thr, cd, horizon, r_min_expiry,
             fees_bps_entry, fees_bps_exit, spread_bps, slip_k, size_cap,
-            verbose=True,
+            verbose=True, debug_costs=debug_costs,
         )
         all_summaries.append(summary)
 
@@ -1976,15 +1984,17 @@ Examples:
     parser.add_argument("--slip-k", type=float, default=0.10, help="Slippage factor as fraction of ATR (default: 0.10)")
     parser.add_argument("--size-cap", type=float, default=2.0, help="Max confidence size multiplier (default: 2.0)")
     parser.add_argument("--geometry-sweep", action="store_true",
-                        help="Run geometry sweep with preset TP/SL/threshold/cooldown combos")
+                        help="Run geometry sweep with preset paired TP/SL combos")
     parser.add_argument("--tp-mults", type=str, default=None,
-                        help="Comma-separated TP multipliers for sweep (e.g. '2.0,2.5,3.0')")
+                        help="Comma-separated TP multipliers for non-sweep cartesian product (e.g. '2.0,2.5,3.0')")
     parser.add_argument("--sl-mults", type=str, default=None,
-                        help="Comma-separated SL multipliers for sweep (e.g. '1.25,1.5')")
+                        help="Comma-separated SL multipliers for non-sweep cartesian product (e.g. '1.25,1.5')")
     parser.add_argument("--thresholds", type=str, default=None,
                         help="Comma-separated thresholds for sweep (e.g. '0.70,0.75')")
     parser.add_argument("--cooldowns", type=str, default=None,
                         help="Comma-separated cooldowns for sweep (e.g. '4,6')")
+    parser.add_argument("--debug-costs", action="store_true",
+                        help="Print 5 random trades per regime and assert cost accounting")
 
     args = parser.parse_args()
 
@@ -2001,24 +2011,31 @@ Examples:
         data_path = download_data(args.url, data_dir)
 
         if args.geometry_sweep or args.tp_mults or args.sl_mults or args.thresholds or args.cooldowns:
+            PAIRED_TP_SL = [
+                (2.5, 1.25),
+                (3.0, 1.5),
+                (3.5, 1.5),
+            ]
+
             if args.geometry_sweep:
-                tp_mults = [float(x) for x in args.tp_mults.split(",")] if args.tp_mults else [2.5, 3.0, 3.5]
-                sl_mults = [float(x) for x in args.sl_mults.split(",")] if args.sl_mults else [1.25, 1.5]
+                tp_sl_pairs = PAIRED_TP_SL
                 thresholds = [float(x) for x in args.thresholds.split(",")] if args.thresholds else [0.70, 0.75]
                 cooldowns = [int(x) for x in args.cooldowns.split(",")] if args.cooldowns else [4, 6]
             else:
                 tp_mults = [float(x) for x in args.tp_mults.split(",")] if args.tp_mults else [args.tp_mult]
                 sl_mults = [float(x) for x in args.sl_mults.split(",")] if args.sl_mults else [args.sl_mult]
+                tp_sl_pairs = [(tp, sl) for tp in tp_mults for sl in sl_mults]
                 thresholds = [float(x) for x in args.thresholds.split(",")] if args.thresholds else [0.70]
                 cooldowns = [int(x) for x in args.cooldowns.split(",")] if args.cooldowns else [args.cooldown]
 
             run_geometry_sweep(
                 data_path, device, args.regimes,
-                tp_mults, sl_mults, thresholds, cooldowns,
+                tp_sl_pairs, thresholds, cooldowns,
                 args.horizon, args.slope_eps, args.r_min_expiry,
                 fees_bps_entry=args.fees_entry_bps, fees_bps_exit=args.fees_exit_bps,
                 spread_bps=args.spread_bps, slip_k=args.slip_k,
                 size_cap=args.size_cap,
+                debug_costs=args.debug_costs,
             )
         else:
             run_regime_eval(

@@ -31,7 +31,8 @@ Prediction: `python quick_start.py --url URL --predict-only`
 Regime Eval: `python quick_start.py --url URL --regime-eval --policy threshold:0.70 --cooldown 4 --tp-mult 2.0 --sl-mult 1.5`
 Regime Eval (custom costs): `python quick_start.py --url URL --regime-eval --fees-entry-bps 2 --fees-exit-bps 2 --slip-k 0.05`
 Geometry Sweep: `python quick_start.py --url URL --regime-eval --geometry-sweep`
-Geometry Sweep (custom): `python quick_start.py --url URL --regime-eval --geometry-sweep --tp-mults 2.5,3.0,3.5 --sl-mults 1.25,1.5 --thresholds 0.70,0.75 --cooldowns 4,6`
+Geometry Sweep (custom thresholds/cooldowns): `python quick_start.py --url URL --regime-eval --geometry-sweep --thresholds 0.70,0.75 --cooldowns 4,6`
+Geometry Sweep (debug costs): `python quick_start.py --url URL --regime-eval --geometry-sweep --debug-costs`
 
 Key files: `gpu_trainer/quick_start.py`, `gpu_trainer/training/triple_barrier.py` (shared barrier simulator + cost model), `gpu_trainer/data/regression_targets.py` (labeling), `gpu_trainer/data/pipeline.py` (features/data).
 

@@ -1,0 +1,147 @@
+✅ Replit Agent Patch Prompt — v3.4.1 (Post-Audit Fixes)
+
+You are working in the gpu_trainer project.
+The v3.4.0 geometry sweep is functionally correct, but a few spec + reporting issues must be fixed.
+
+This is a non-ML patch.
+Do NOT change model behavior, labels, triple-barrier logic, or inference.
+
+🎯 Objectives (v3.4.1)
+
+Fix geometry sweep preset to use paired TP/SL combos (12 configs, not 24)
+
+Fix AvgCostR and AvgSzMul to be trade-weighted (not mean-of-means)
+
+Add an optional debug safety check for cost accounting
+
+Bump version string to v3.4.1_geometry_sweep_audit_fix
+
+✅ Task 1 — Fix Geometry Sweep Preset (IMPORTANT)
+❌ Current behavior (wrong)
+
+--geometry-sweep uses a cartesian product:
+
+TP × SL × threshold × cooldown = 24 configs
+
+✅ Required behavior (paired geometry)
+
+When --geometry-sweep is passed, use exactly these TP/SL pairs:
+
+PAIRED_TP_SL = [
+    (2.5, 1.25),
+    (3.0, 1.5),
+    (3.5, 1.5),
+]
+
+
+Then sweep:
+
+thresholds = [0.70, 0.75]
+
+cooldowns = [4, 6]
+
+Total configs:
+
+3 TP/SL pairs × 2 thresholds × 2 cooldowns = 12
+
+Implementation rule
+
+Do NOT allow TP/SL cartesian product when --geometry-sweep is enabled
+
+Custom CLI lists (--tp-mults, --sl-mults) still work when --geometry-sweep is NOT set
+
+✅ Task 2 — Fix AvgCostR and AvgSzMul (Reporting Bug)
+❌ Current bug
+
+AvgCostR and AvgSzMul are computed as:
+
+mean(per-regime mean)
+
+This biases results when regimes have different trade counts.
+
+✅ Correct computation (trade-weighted)
+
+For executed trades only:
+
+avg_cost_r = sum(cost_r) / num_trades
+avg_sz_mul = sum(size_mult) / num_trades
+
+
+Apply this:
+
+per config
+
+across all regimes combined
+
+⚠️ This change affects only reporting, not PF or E.
+
+✅ Task 3 — Add Cost Accounting Debug Flag (Safety)
+
+Add optional CLI flag:
+
+--debug-costs
+
+
+When enabled:
+
+Print 5 random executed trades:
+
+gross_r
+
+cost_r
+
+net_r
+
+Assert:
+
+abs(net_r - (gross_r - cost_r)) < 1e-9
+
+
+If assertion fails:
+
+Raise error with clear message:
+"Cost accounting mismatch: net_r != gross_r - cost_r"
+
+Default behavior: OFF.
+
+✅ Task 4 — Version Bump
+
+Update all version strings to:
+
+v3.4.1_geometry_sweep_audit_fix
+
+
+Follow the same versioning pattern used previously.
+
+❌ Strict DO NOT
+
+DO NOT change ML model or heads
+
+DO NOT change labels or triple-barrier parity
+
+DO NOT change costs formula
+
+DO NOT change inference behavior
+
+DO NOT change sweep selection logic
+
+This is a correctness & spec patch only.
+
+✅ Acceptance Criteria
+
+After patch:
+
+--geometry-sweep runs 12 configs, not 24
+
+BEST selection logic unchanged
+
+AvgCostR and AvgSzMul are trade-weighted
+
+--debug-costs correctly validates cost math
+
+Saved file name remains:
+
+checkpoints/best_policy_v3.4.0.json
+
+
+(version field inside JSON updated to v3.4.1)
