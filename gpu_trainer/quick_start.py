@@ -1302,27 +1302,46 @@ def push_prediction(replit_url: str, prediction: dict):
         return False
 
 
-def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: str,
-                    cooldown: int, tp_mult: float, sl_mult: float, horizon: int,
-                    slope_eps: float, r_min_expiry: float,
-                    fees_bps_entry: float = 5.0, fees_bps_exit: float = 5.0,
-                    spread_bps: float = 1.0, slip_k: float = 0.10,
-                    size_cap: float = 2.0):
-    """Evaluate one fixed trading policy across multiple date regimes.
-    
-    No re-training, no per-slice optimization. Same checkpoint, same policy for all regimes.
-    Uses training/triple_barrier.py for trade scoring (parity with labeling).
-    Reports gross, net (after costs), and confidence-sized metrics.
-    """
+def _compute_r_metrics(r_arr, regime_days):
+    """Compute expectancy, win rate, PF, avg win/loss R, Sharpe from an R-multiple array."""
+    import numpy as np
+    if len(r_arr) == 0:
+        return 0, 0, 0, 0, 0, 0
+    e = float(np.mean(r_arr))
+    w = float((r_arr > 0).sum() / len(r_arr))
+    pos = r_arr[r_arr > 0]
+    neg = r_arr[r_arr < 0]
+    gp = float(pos.sum()) if len(pos) > 0 else 0.0
+    gl = float(abs(neg.sum())) if len(neg) > 0 else 0.0
+    pf = gp / gl if gl > 0 else 0.0
+    aw = float(np.mean(pos)) if len(pos) > 0 else 0.0
+    al = float(np.mean(neg)) if len(neg) > 0 else 0.0
+    std = float(np.std(r_arr))
+    tpy = (len(r_arr) / regime_days * 365.0) if regime_days > 0 else 0
+    sh = float(np.mean(r_arr) / std * np.sqrt(max(tpy, 1))) if std > 1e-8 and len(r_arr) > 1 else 0.0
+    return e, w, pf, aw, al, sh
+
+
+def _empty_regime_result(regime_name, n_bars):
+    return {
+        'name': regime_name, 'bars': n_bars, 'trades': 0, 'trades_per_day': 0,
+        'expect_gross': 0, 'expect_net': 0, 'expect_sized': 0,
+        'winrate_gross': 0, 'winrate_net': 0,
+        'sharpe_gross': 0, 'sharpe_net': 0,
+        'pf_gross': 0, 'pf_net': 0, 'pf_sized': 0,
+        'avg_win_r_gross': 0, 'avg_loss_r_gross': 0,
+        'avg_win_r_net': 0, 'avg_loss_r_net': 0,
+        'avg_cost_r': 0, 'avg_size_mult': 0,
+        'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0,
+    }
+
+
+def _prepare_regime_eval_context(data_path, device, regimes_str, slope_eps):
+    """Load model, compute features/inference, HTF gates. Returns shared context dict."""
     import torch
     import numpy as np
     import pandas as pd
-    from config import config
-    from training.triple_barrier import compute_atr_14, triple_barrier_outcome_for_index, compute_trade_cost_r
-
-    log.info("=" * 80)
-    log.info("  REGIME ROBUSTNESS EVALUATION")
-    log.info("=" * 80)
+    from training.triple_barrier import compute_atr_14
 
     checkpoint_path = Path("checkpoints/best_enter_prauc.pt")
     if not checkpoint_path.exists():
@@ -1400,18 +1419,14 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
     features_df = features_df.reindex(columns=feature_columns, fill_value=0)
     log.info(f"Features: {len(feature_columns)} columns")
 
-    scaled_df = engineer.transform_and_clip(
-        features_df, clip_range=5.0
-    )
+    scaled_df = engineer.transform_and_clip(features_df, clip_range=5.0)
     scaled_np = scaled_df.values.astype(np.float32)
     scaled_np = np.where(np.isinf(scaled_np), 0, scaled_np)
     scaled_np = np.where(np.isnan(scaled_np), 0, scaled_np)
 
-    log.info(f"Running single-row inference over {len(df)} bars (matching make_enter_prediction)...")
-
+    log.info(f"Running single-row inference over {len(df)} bars...")
     all_p_enter = np.full(len(df), np.nan, dtype=np.float64)
     BATCH_SIZE = 1024
-
     valid_indices = list(range(len(scaled_np)))
     with torch.no_grad():
         for batch_start in range(0, len(valid_indices), BATCH_SIZE):
@@ -1423,7 +1438,7 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
             for k, idx in enumerate(batch_idx):
                 all_p_enter[idx] = p_batch[k]
 
-    valid_predictions = np.sum(~np.isnan(all_p_enter))
+    valid_predictions = int(np.sum(~np.isnan(all_p_enter)))
     log.info(f"Inference complete: {valid_predictions}/{len(df)} bars have predictions")
 
     h1_trend = features_df['h1_trend_sign'].values if 'h1_trend_sign' in features_df.columns else np.zeros(len(df))
@@ -1441,21 +1456,13 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
     side_arr = np.where(h1_trend > 0, 1, np.where(h1_trend < 0, -1, 0)).astype(int)
 
     candidate_mask = htf_pass & (~np.isnan(all_p_enter))
-    n_candidates = candidate_mask.sum()
+    n_candidates = int(candidate_mask.sum())
     log.info(f"HTF-gated candidates: {n_candidates}/{valid_predictions} ({100*n_candidates/max(valid_predictions,1):.1f}%)")
-
-    policy_type, policy_value = policy_str.split(":")
-    policy_type = policy_type.lower().strip()
-    policy_value_clean = policy_value.lower().replace("top", "").strip()
-    policy_value_num = float(policy_value_clean)
-    log.info(f"Policy: {policy_type}={policy_value} | Cooldown: {cooldown} | TP={tp_mult}x SL={sl_mult}x | Horizon={horizon} | r_min_expiry={r_min_expiry}")
-    log.info(f"Costs: entry={fees_bps_entry}bps exit={fees_bps_exit}bps spread={spread_bps}bps slip_k={slip_k} | Size cap={size_cap}x")
 
     atr_full = compute_atr_14(df)
     highs = df["high"].values.astype(np.float64)
     lows = df["low"].values.astype(np.float64)
     closes = df["close"].values.astype(np.float64)
-
     timestamps_ms = df['timestamp'].values.astype(np.int64)
 
     regimes = []
@@ -1473,46 +1480,49 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
         mask = (timestamps_ms >= s) & (timestamps_ms <= e)
         log.info(f"  {name}: {mask.sum()} bars")
 
+    return {
+        'df': df, 'all_p_enter': all_p_enter, 'candidate_mask': candidate_mask,
+        'side_arr': side_arr, 'atr_full': atr_full,
+        'highs': highs, 'lows': lows, 'closes': closes,
+        'timestamps_ms': timestamps_ms, 'regimes': regimes,
+    }
+
+
+def _eval_single_config(ctx, tp_mult, sl_mult, threshold, cooldown, horizon, r_min_expiry,
+                         fees_bps_entry, fees_bps_exit, spread_bps, slip_k, size_cap,
+                         verbose=True):
+    """Evaluate a single (tp_mult, sl_mult, threshold, cooldown) config across all regimes.
+    
+    Returns (regime_results_list, overall_summary_dict).
+    """
+    import numpy as np
+    from training.triple_barrier import triple_barrier_outcome_for_index, compute_trade_cost_r
+
+    all_p_enter = ctx['all_p_enter']
+    candidate_mask = ctx['candidate_mask']
+    side_arr = ctx['side_arr']
+    atr_full = ctx['atr_full']
+    highs = ctx['highs']
+    lows = ctx['lows']
+    closes = ctx['closes']
+    timestamps_ms = ctx['timestamps_ms']
+    regimes = ctx['regimes']
+
     all_regime_results = []
-    all_selected_gross = []
-    all_selected_net = []
-    all_selected_sized = []
+    all_gross = []
+    all_net = []
+    all_sized = []
 
     for regime_name, start_ms, end_ms in regimes:
         regime_mask = (timestamps_ms >= start_ms) & (timestamps_ms <= end_ms)
         regime_indices = np.where(regime_mask)[0]
 
         if len(regime_indices) == 0:
-            log.warning(f"  {regime_name}: No bars in range")
-            all_regime_results.append({
-                'name': regime_name, 'bars': 0, 'trades': 0, 'trades_per_day': 0,
-                'expect_gross': 0, 'expect_net': 0, 'expect_sized': 0,
-                'winrate_gross': 0, 'winrate_net': 0,
-                'sharpe_gross': 0, 'sharpe_net': 0,
-                'pf_gross': 0, 'pf_net': 0, 'pf_sized': 0,
-                'avg_win_r_gross': 0, 'avg_loss_r_gross': 0,
-                'avg_win_r_net': 0, 'avg_loss_r_net': 0,
-                'avg_cost_r': 0, 'avg_size_mult': 0,
-                'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0,
-            })
+            all_regime_results.append(_empty_regime_result(regime_name, 0))
             continue
 
         regime_candidates = candidate_mask[regime_indices]
         regime_p_enter = all_p_enter[regime_indices]
-        regime_sides = side_arr[regime_indices]
-
-        if policy_type == "threshold":
-            threshold = policy_value_num
-        elif policy_type == "percentile":
-            active_p = regime_p_enter[regime_candidates]
-            if len(active_p) == 0:
-                threshold = 1.0
-            else:
-                pct = 100.0 - policy_value_num
-                threshold = float(np.percentile(active_p, max(pct, 0)))
-        else:
-            log.error(f"Unknown policy type: {policy_type}")
-            sys.exit(1)
 
         trade_mask = regime_candidates & (regime_p_enter >= threshold)
 
@@ -1524,18 +1534,7 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
                 last_trade = i
 
         if not selected_local:
-            n_bars_regime = len(regime_indices)
-            all_regime_results.append({
-                'name': regime_name, 'bars': n_bars_regime, 'trades': 0, 'trades_per_day': 0,
-                'expect_gross': 0, 'expect_net': 0, 'expect_sized': 0,
-                'winrate_gross': 0, 'winrate_net': 0,
-                'sharpe_gross': 0, 'sharpe_net': 0,
-                'pf_gross': 0, 'pf_net': 0, 'pf_sized': 0,
-                'avg_win_r_gross': 0, 'avg_loss_r_gross': 0,
-                'avg_win_r_net': 0, 'avg_loss_r_net': 0,
-                'avg_cost_r': 0, 'avg_size_mult': 0,
-                'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0,
-            })
+            all_regime_results.append(_empty_regime_result(regime_name, len(regime_indices)))
             continue
 
         global_indices = regime_indices[np.array(selected_local)]
@@ -1585,40 +1584,13 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
         n_bars_regime = len(regime_indices)
         regime_days = n_bars_regime / 96.0
 
-        empty_result = {
-            'name': regime_name, 'bars': n_bars_regime, 'trades': 0, 'trades_per_day': 0,
-            'expect_gross': 0, 'expect_net': 0, 'expect_sized': 0,
-            'winrate_gross': 0, 'winrate_net': 0,
-            'sharpe_gross': 0, 'sharpe_net': 0,
-            'pf_gross': 0, 'pf_net': 0, 'pf_sized': 0,
-            'avg_win_r_gross': 0, 'avg_loss_r_gross': 0,
-            'avg_win_r_net': 0, 'avg_loss_r_net': 0,
-            'avg_cost_r': 0, 'avg_size_mult': 0,
-            'pct_tp': 0, 'pct_sl': 0, 'pct_exp': 0,
-        }
-
         if n_trades == 0:
-            all_regime_results.append(empty_result)
+            all_regime_results.append(_empty_regime_result(regime_name, n_bars_regime))
             continue
 
-        def _metrics(r_arr):
-            e = float(np.mean(r_arr))
-            w = float((r_arr > 0).sum() / len(r_arr))
-            pos = r_arr[r_arr > 0]
-            neg = r_arr[r_arr < 0]
-            gp = float(pos.sum()) if len(pos) > 0 else 0.0
-            gl = float(abs(neg.sum())) if len(neg) > 0 else 0.0
-            pf = gp / gl if gl > 0 else 0.0
-            aw = float(np.mean(pos)) if len(pos) > 0 else 0.0
-            al = float(np.mean(neg)) if len(neg) > 0 else 0.0
-            std = float(np.std(r_arr))
-            tpy = (len(r_arr) / regime_days * 365.0) if regime_days > 0 else 0
-            sh = float(np.mean(r_arr) / std * np.sqrt(max(tpy, 1))) if std > 1e-8 and len(r_arr) > 1 else 0.0
-            return e, w, pf, aw, al, sh
-
-        eg, wg, pfg, awg, alg, shg = _metrics(gross_r)
-        en, wn, pfn, awn, aln, shn = _metrics(net_r)
-        es, _, pfs, _, _, _ = _metrics(sized_net_r)
+        eg, wg, pfg, awg, alg, shg = _compute_r_metrics(gross_r, regime_days)
+        en, wn, pfn, awn, aln, shn = _compute_r_metrics(net_r, regime_days)
+        es, _, pfs, _, _, _ = _compute_r_metrics(sized_net_r, regime_days)
 
         trades_per_day = n_trades / regime_days if regime_days > 0 else 0
 
@@ -1626,9 +1598,9 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
         pct_sl = float((outcomes == "SL").sum() / n_trades)
         pct_exp = float(((outcomes == "EXP_WIN") | (outcomes == "EXP_LOSS")).sum() / n_trades)
 
-        all_selected_gross.extend(gross_r.tolist())
-        all_selected_net.extend(net_r.tolist())
-        all_selected_sized.extend(sized_net_r.tolist())
+        all_gross.extend(gross_r.tolist())
+        all_net.extend(net_r.tolist())
+        all_sized.extend(sized_net_r.tolist())
 
         all_regime_results.append({
             'name': regime_name, 'bars': n_bars_regime, 'trades': n_trades,
@@ -1666,16 +1638,55 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
         sh = float(np.mean(r_arr) / std * np.sqrt(max(tpy, 1))) if std > 1e-8 and len(r_arr) > 1 else 0
         return e, w, pf, aw, al, sh
 
-    og_e, og_w, og_pf, og_aw, og_al, og_sh = _overall(all_selected_gross)
-    on_e, on_w, on_pf, on_aw, on_al, on_sh = _overall(all_selected_net)
-    os_e, _, os_pf, _, _, _ = _overall(all_selected_sized)
+    og_e, og_w, og_pf, og_aw, og_al, og_sh = _overall(all_gross)
+    on_e, on_w, on_pf, on_aw, on_al, on_sh = _overall(all_net)
+    os_e, _, os_pf, _, _, _ = _overall(all_sized)
     overall_tpd = total_trades / total_days if total_days > 0 else 0
 
+    profitable_regimes = sum(1 for r in all_regime_results if r['trades'] > 0 and r['pf_net'] > 1.0)
+    regimes_with_trades = sum(1 for r in all_regime_results if r['trades'] > 0)
+
+    all_cost_r_vals = []
+    all_sz_vals = []
+    for r in all_regime_results:
+        if r['trades'] > 0:
+            all_cost_r_vals.append(r['avg_cost_r'])
+            all_sz_vals.append(r['avg_size_mult'])
+    avg_cost_r = float(np.mean(all_cost_r_vals)) if all_cost_r_vals else 0
+    avg_sz_mul = float(np.mean(all_sz_vals)) if all_sz_vals else 1.0
+
+    summary = {
+        'tp_mult': tp_mult, 'sl_mult': sl_mult, 'threshold': threshold, 'cooldown': cooldown,
+        'overall_pf_net': on_pf, 'overall_e_net': on_e, 'overall_tpd': overall_tpd,
+        'overall_pf_gross': og_pf, 'overall_e_gross': og_e,
+        'overall_pf_sized': os_pf, 'overall_e_sized': os_e,
+        'overall_wr_net': on_w, 'overall_wr_gross': og_w,
+        'overall_win_r_net': on_aw, 'overall_loss_r_net': on_al,
+        'overall_win_r_gross': og_aw, 'overall_loss_r_gross': og_al,
+        'overall_sharpe_net': on_sh, 'overall_sharpe_gross': og_sh,
+        'profitable_regimes': profitable_regimes,
+        'regimes_with_trades': regimes_with_trades,
+        'total_trades': total_trades, 'total_bars': total_bars,
+        'avg_cost_r': avg_cost_r, 'avg_size_mult': avg_sz_mul,
+        'regime_results': all_regime_results,
+    }
+
+    if verbose:
+        _print_regime_table(all_regime_results, summary,
+                            tp_mult, sl_mult, threshold, cooldown, horizon,
+                            fees_bps_entry, fees_bps_exit, spread_bps, slip_k, size_cap)
+
+    return all_regime_results, summary
+
+
+def _print_regime_table(regime_results, summary, tp_mult, sl_mult, threshold, cooldown,
+                         horizon, fees_entry, fees_exit, spread, slip_k, size_cap):
+    """Print the detailed regime table for a single config."""
     log.info("")
     log.info("=" * 160)
     log.info("REGIME ROBUSTNESS RESULTS (GROSS / NET / SIZED)")
-    log.info(f"Policy: {policy_str} | Cooldown: {cooldown} | TP={tp_mult}x SL={sl_mult}x | Horizon={horizon}")
-    log.info(f"Costs: entry={fees_bps_entry}bps exit={fees_bps_exit}bps spread={spread_bps}bps slip_k={slip_k} | Size cap={size_cap}x")
+    log.info(f"Config: TP={tp_mult}x SL={sl_mult}x thr={threshold} cd={cooldown} | Horizon={horizon}")
+    log.info(f"Costs: entry={fees_entry}bps exit={fees_exit}bps spread={spread}bps slip_k={slip_k} | Size cap={size_cap}x")
     log.info("=" * 160)
 
     hdr = "%-26s %6s %5s %5s | %8s %8s %8s | %5s %5s | %5s %5s | %5s %5s %5s | %5s %5s | %4s %4s %4s"
@@ -1688,7 +1699,7 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
              "%TP", "%SL", "%EX")
     log.info("-" * 160)
 
-    for r in all_regime_results:
+    for r in regime_results:
         log.info("%-26s %6d %5d %5.1f | %+8.4f %+8.4f %+8.4f | %5.1f%% %5.1f%% | %+5.2f %+5.2f | %5.2f %5.2f %5.2f | %5.3f %5.2f | %3.0f%% %3.0f%% %3.0f%%",
                  r['name'], r['bars'], r['trades'], r['trades_per_day'],
                  r['expect_gross'], r['expect_net'], r['expect_sized'],
@@ -1699,43 +1710,231 @@ def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: 
                  r['pct_tp'] * 100, r['pct_sl'] * 100, r['pct_exp'] * 100)
 
     log.info("-" * 160)
-    log.info("%-26s %6d %5d %5.1f | %+8.4f %+8.4f %+8.4f | %5.1f%% %5.1f%% | %+5.2f %+5.2f | %5.2f %5.2f %5.2f |",
-             "OVERALL", total_bars, total_trades, overall_tpd,
-             og_e, on_e, os_e,
-             og_w * 100, on_w * 100,
-             og_sh, on_sh,
-             og_pf, on_pf, os_pf)
+    s = summary
+    log.info("%-26s %6d %5d %5.1f | %+8.4f %+8.4f %+8.4f | %5.1f%% %5.1f%% | %+5.2f %+5.2f | %5.2f %5.2f %5.2f | %5.3f %5.2f |",
+             "OVERALL", s['total_bars'], s['total_trades'], s['overall_tpd'],
+             s['overall_e_gross'], s['overall_e_net'], s['overall_e_sized'],
+             s['overall_wr_gross'] * 100, s['overall_wr_net'] * 100,
+             s['overall_sharpe_gross'], s['overall_sharpe_net'],
+             s['overall_pf_gross'], s['overall_pf_net'], s['overall_pf_sized'],
+             s['avg_cost_r'], s['avg_size_mult'])
     log.info("=" * 160)
 
     log.info("")
     log.info("Win/Loss R breakdown:")
     log.info("%-26s | %+6s %+6s | %+6s %+6s", "Regime", "WinR_g", "LosR_g", "WinR_n", "LosR_n")
     log.info("-" * 80)
-    for r in all_regime_results:
+    for r in regime_results:
         if r['trades'] > 0:
             log.info("%-26s | %+6.2f %+6.2f | %+6.2f %+6.2f",
                      r['name'], r['avg_win_r_gross'], r['avg_loss_r_gross'],
                      r['avg_win_r_net'], r['avg_loss_r_net'])
     log.info("%-26s | %+6.2f %+6.2f | %+6.2f %+6.2f",
-             "OVERALL", og_aw, og_al, on_aw, on_al)
+             "OVERALL", s['overall_win_r_gross'], s['overall_loss_r_gross'],
+             s['overall_win_r_net'], s['overall_loss_r_net'])
 
-    if len(all_regime_results) > 1:
-        net_expects = [r['expect_net'] for r in all_regime_results if r['trades'] > 0]
+    if s['regimes_with_trades'] > 1:
+        net_expects = [r['expect_net'] for r in regime_results if r['trades'] > 0]
         if len(net_expects) > 1:
+            import numpy as np
             en_std = float(np.std(net_expects))
             en_mean = float(np.mean(net_expects))
             log.info("")
             log.info(f"Cross-regime consistency (NET): mean(E_net)={en_mean:+.4f} std={en_std:.4f} CV={en_std/abs(en_mean) if abs(en_mean)>1e-8 else float('inf'):.2f}")
-            positive_net = sum(1 for e in net_expects if e > 0)
-            log.info(f"Net-profitable regimes: {positive_net}/{len(net_expects)}")
+            log.info(f"Net-profitable regimes: {s['profitable_regimes']}/{s['regimes_with_trades']}")
+
+
+def run_regime_eval(data_path: Path, device: str, regimes_str: str, policy_str: str,
+                    cooldown: int, tp_mult: float, sl_mult: float, horizon: int,
+                    slope_eps: float, r_min_expiry: float,
+                    fees_bps_entry: float = 5.0, fees_bps_exit: float = 5.0,
+                    spread_bps: float = 1.0, slip_k: float = 0.10,
+                    size_cap: float = 2.0):
+    """Evaluate one fixed trading policy across multiple date regimes (backward-compatible)."""
+    log.info("=" * 80)
+    log.info("  REGIME ROBUSTNESS EVALUATION")
+    log.info("=" * 80)
+
+    ctx = _prepare_regime_eval_context(data_path, device, regimes_str, slope_eps)
+
+    policy_type, policy_value = policy_str.split(":")
+    policy_type = policy_type.lower().strip()
+    policy_value_clean = policy_value.lower().replace("top", "").strip()
+    threshold = float(policy_value_clean)
+
+    if policy_type == "percentile":
+        import numpy as np
+        active_p = ctx['all_p_enter'][ctx['candidate_mask']]
+        active_p = active_p[~np.isnan(active_p)]
+        if len(active_p) == 0:
+            threshold = 1.0
+        else:
+            pct = 100.0 - threshold
+            threshold = float(np.percentile(active_p, max(pct, 0)))
+
+    log.info(f"Policy: {policy_str} (threshold={threshold:.4f}) | Cooldown: {cooldown} | TP={tp_mult}x SL={sl_mult}x | Horizon={horizon}")
+    log.info(f"Costs: entry={fees_bps_entry}bps exit={fees_bps_exit}bps spread={spread_bps}bps slip_k={slip_k} | Size cap={size_cap}x")
+
+    regime_results, summary = _eval_single_config(
+        ctx, tp_mult, sl_mult, threshold, cooldown, horizon, r_min_expiry,
+        fees_bps_entry, fees_bps_exit, spread_bps, slip_k, size_cap,
+        verbose=True,
+    )
+    log.info("")
+    return regime_results
+
+
+def run_geometry_sweep(data_path: Path, device: str, regimes_str: str,
+                       tp_mults: list, sl_mults: list, thresholds: list, cooldowns: list,
+                       horizon: int, slope_eps: float, r_min_expiry: float,
+                       fees_bps_entry: float = 5.0, fees_bps_exit: float = 5.0,
+                       spread_bps: float = 1.0, slip_k: float = 0.10,
+                       size_cap: float = 2.0):
+    """Geometry sweep: evaluate multiple (tp, sl, threshold, cooldown) configs in one run.
+    
+    Selects the BEST config using priority rules and saves to JSON.
+    """
+    import numpy as np
+
+    log.info("=" * 80)
+    log.info(f"  GEOMETRY SWEEP ({SYSTEM_VERSION})")
+    log.info("=" * 80)
+
+    ctx = _prepare_regime_eval_context(data_path, device, regimes_str, slope_eps)
+
+    configs = []
+    for tp in tp_mults:
+        for sl in sl_mults:
+            for thr in thresholds:
+                for cd in cooldowns:
+                    configs.append((tp, sl, thr, cd))
+
+    log.info(f"Sweep: {len(configs)} configurations ({len(tp_mults)} TP x {len(sl_mults)} SL x {len(thresholds)} thr x {len(cooldowns)} cd)")
+    log.info(f"Costs: entry={fees_bps_entry}bps exit={fees_bps_exit}bps spread={spread_bps}bps slip_k={slip_k} | Size cap={size_cap}x")
+    log.info(f"Horizon={horizon} | r_min_expiry={r_min_expiry}")
+
+    all_summaries = []
+
+    for cfg_idx, (tp, sl, thr, cd) in enumerate(configs):
+        log.info("")
+        log.info(f"--- Config {cfg_idx+1}/{len(configs)}: TP={tp} SL={sl} thr={thr} cd={cd} ---")
+
+        regime_results, summary = _eval_single_config(
+            ctx, tp, sl, thr, cd, horizon, r_min_expiry,
+            fees_bps_entry, fees_bps_exit, spread_bps, slip_k, size_cap,
+            verbose=True,
+        )
+        all_summaries.append(summary)
 
     log.info("")
-    return all_regime_results
+    log.info("=" * 160)
+    log.info("GEOMETRY SWEEP SUMMARY")
+    log.info("=" * 160)
+
+    hdr = "%-4s %-5s %-5s %-5s %-3s | %7s | %7s | %5s | %7s | %7s | %6s | %6s | %5s"
+    log.info(hdr, "#", "TP", "SL", "thr", "cd",
+             "PF_n", "E_n", "TPD", "WinR_n", "LosR_n",
+             "CostR", "SzMul", "Prof")
+    log.info("-" * 120)
+
+    best_idx = -1
+    best_pf_net = -999
+    best_tpd_dist = 999
+
+    passing_indices = []
+    for i, s in enumerate(all_summaries):
+        pf_ok = s['overall_pf_net'] >= 1.05
+        en_ok = s['overall_e_net'] > 0
+        tpd_ok = 3.0 <= s['overall_tpd'] <= 5.0
+        prof_ok = s['profitable_regimes'] >= 2
+        passes = pf_ok and en_ok and tpd_ok and prof_ok
+        if passes:
+            passing_indices.append(i)
+
+    if passing_indices:
+        best_idx = max(passing_indices, key=lambda i: all_summaries[i]['overall_pf_net'])
+    else:
+        for i, s in enumerate(all_summaries):
+            tpd_dist = abs(s['overall_tpd'] - 4.0)
+            if s['overall_pf_net'] > best_pf_net or (s['overall_pf_net'] == best_pf_net and tpd_dist < best_tpd_dist):
+                best_pf_net = s['overall_pf_net']
+                best_tpd_dist = tpd_dist
+                best_idx = i
+
+    for i, s in enumerate(all_summaries):
+        is_best = (i == best_idx)
+        tag = " << BEST" if is_best else ""
+        prof_str = f"{s['profitable_regimes']}/{s['regimes_with_trades']}"
+        log.info("%-4d %-5.1f %-5.2f %-5.2f %-3d | %+7.2f | %+7.4f | %5.1f | %+7.2f | %+7.2f | %6.3f | %6.2f | %5s%s",
+                 i+1, s['tp_mult'], s['sl_mult'], s['threshold'], s['cooldown'],
+                 s['overall_pf_net'], s['overall_e_net'], s['overall_tpd'],
+                 s['overall_win_r_net'], s['overall_loss_r_net'],
+                 s['avg_cost_r'], s['avg_size_mult'], prof_str, tag)
+
+    log.info("=" * 120)
+
+    if best_idx >= 0:
+        best = all_summaries[best_idx]
+        log.info("")
+        log.info("=" * 80)
+        log.info(f"  << BEST CONFIG ({SYSTEM_VERSION}) >>")
+        log.info("=" * 80)
+        log.info(f"  TP mult:    {best['tp_mult']}")
+        log.info(f"  SL mult:    {best['sl_mult']}")
+        log.info(f"  Threshold:  {best['threshold']}")
+        log.info(f"  Cooldown:   {best['cooldown']}")
+        log.info(f"  PF_net:     {best['overall_pf_net']:.2f}")
+        log.info(f"  E[net]:     {best['overall_e_net']:+.4f}")
+        log.info(f"  Trades/day: {best['overall_tpd']:.1f}")
+        log.info(f"  WinR_net:   {best['overall_win_r_net']:+.2f}")
+        log.info(f"  LossR_net:  {best['overall_loss_r_net']:+.2f}")
+        log.info(f"  Avg CostR:  {best['avg_cost_r']:.3f}")
+        log.info(f"  Avg SzMul:  {best['avg_size_mult']:.2f}")
+        log.info(f"  Profitable: {best['profitable_regimes']}/{best['regimes_with_trades']} regimes")
+
+        passed = best_idx in passing_indices
+        if passed:
+            log.info(f"  Status:     PASSED (PF_net>=1.05, E[net]>0, TPD 3-5, >=2 regimes profitable)")
+        else:
+            log.info(f"  Status:     BEST AVAILABLE (did not pass all criteria)")
+
+        policy_json = {
+            'version': SYSTEM_VERSION,
+            'tp_mult': best['tp_mult'],
+            'sl_mult': best['sl_mult'],
+            'threshold': best['threshold'],
+            'cooldown': best['cooldown'],
+            'horizon': horizon,
+            'r_min_expiry': r_min_expiry,
+            'fees_bps_entry': fees_bps_entry,
+            'fees_bps_exit': fees_bps_exit,
+            'spread_bps': spread_bps,
+            'slip_k': slip_k,
+            'size_cap': size_cap,
+            'overall_pf_net': best['overall_pf_net'],
+            'overall_e_net': best['overall_e_net'],
+            'overall_tpd': best['overall_tpd'],
+            'overall_win_r_net': best['overall_win_r_net'],
+            'overall_loss_r_net': best['overall_loss_r_net'],
+            'profitable_regimes': best['profitable_regimes'],
+            'regimes_with_trades': best['regimes_with_trades'],
+            'passed_all_criteria': passed,
+        }
+
+        out_path = Path("checkpoints/best_policy_v3.4.0.json")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w") as f:
+            json.dump(policy_json, f, indent=2)
+        log.info(f"  Saved to:   {out_path}")
+        log.info("=" * 80)
+
+    log.info("")
+    return all_summaries
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="BTC Futures GPU Trainer - ENTER QUALITY Model (v3.3.0 + Funding + OI)",
+        description=f"BTC Futures GPU Trainer - ENTER QUALITY Model ({SYSTEM_VERSION})",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1745,6 +1944,7 @@ Examples:
   python quick_start.py --url https://your-app.replit.app --regime-eval --policy threshold:0.70 --cooldown 4
   python quick_start.py --url https://your-app.replit.app --regime-eval --policy percentile:top20
   python quick_start.py --url https://your-app.replit.app --regime-eval --fees-entry-bps 2 --fees-exit-bps 2 --slip-k 0.05
+  python quick_start.py --url https://your-app.replit.app --regime-eval --geometry-sweep
         """
     )
     parser.add_argument("--url", required=True, help="Your Replit dashboard URL")
@@ -1775,6 +1975,16 @@ Examples:
     parser.add_argument("--spread-bps", type=float, default=1.0, help="Spread cost in basis points (default: 1.0)")
     parser.add_argument("--slip-k", type=float, default=0.10, help="Slippage factor as fraction of ATR (default: 0.10)")
     parser.add_argument("--size-cap", type=float, default=2.0, help="Max confidence size multiplier (default: 2.0)")
+    parser.add_argument("--geometry-sweep", action="store_true",
+                        help="Run geometry sweep with preset TP/SL/threshold/cooldown combos")
+    parser.add_argument("--tp-mults", type=str, default=None,
+                        help="Comma-separated TP multipliers for sweep (e.g. '2.0,2.5,3.0')")
+    parser.add_argument("--sl-mults", type=str, default=None,
+                        help="Comma-separated SL multipliers for sweep (e.g. '1.25,1.5')")
+    parser.add_argument("--thresholds", type=str, default=None,
+                        help="Comma-separated thresholds for sweep (e.g. '0.70,0.75')")
+    parser.add_argument("--cooldowns", type=str, default=None,
+                        help="Comma-separated cooldowns for sweep (e.g. '4,6')")
 
     args = parser.parse_args()
 
@@ -1789,14 +1999,36 @@ Examples:
 
     if args.regime_eval:
         data_path = download_data(args.url, data_dir)
-        run_regime_eval(
-            data_path, device, args.regimes, args.policy,
-            args.cooldown, args.tp_mult, args.sl_mult, args.horizon,
-            args.slope_eps, args.r_min_expiry,
-            fees_bps_entry=args.fees_entry_bps, fees_bps_exit=args.fees_exit_bps,
-            spread_bps=args.spread_bps, slip_k=args.slip_k,
-            size_cap=args.size_cap,
-        )
+
+        if args.geometry_sweep or args.tp_mults or args.sl_mults or args.thresholds or args.cooldowns:
+            if args.geometry_sweep:
+                tp_mults = [float(x) for x in args.tp_mults.split(",")] if args.tp_mults else [2.5, 3.0, 3.5]
+                sl_mults = [float(x) for x in args.sl_mults.split(",")] if args.sl_mults else [1.25, 1.5]
+                thresholds = [float(x) for x in args.thresholds.split(",")] if args.thresholds else [0.70, 0.75]
+                cooldowns = [int(x) for x in args.cooldowns.split(",")] if args.cooldowns else [4, 6]
+            else:
+                tp_mults = [float(x) for x in args.tp_mults.split(",")] if args.tp_mults else [args.tp_mult]
+                sl_mults = [float(x) for x in args.sl_mults.split(",")] if args.sl_mults else [args.sl_mult]
+                thresholds = [float(x) for x in args.thresholds.split(",")] if args.thresholds else [0.70]
+                cooldowns = [int(x) for x in args.cooldowns.split(",")] if args.cooldowns else [args.cooldown]
+
+            run_geometry_sweep(
+                data_path, device, args.regimes,
+                tp_mults, sl_mults, thresholds, cooldowns,
+                args.horizon, args.slope_eps, args.r_min_expiry,
+                fees_bps_entry=args.fees_entry_bps, fees_bps_exit=args.fees_exit_bps,
+                spread_bps=args.spread_bps, slip_k=args.slip_k,
+                size_cap=args.size_cap,
+            )
+        else:
+            run_regime_eval(
+                data_path, device, args.regimes, args.policy,
+                args.cooldown, args.tp_mult, args.sl_mult, args.horizon,
+                args.slope_eps, args.r_min_expiry,
+                fees_bps_entry=args.fees_entry_bps, fees_bps_exit=args.fees_exit_bps,
+                spread_bps=args.spread_bps, slip_k=args.slip_k,
+                size_cap=args.size_cap,
+            )
         return
 
     if not args.predict_only:
