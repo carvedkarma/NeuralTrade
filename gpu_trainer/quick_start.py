@@ -31,7 +31,7 @@ logging.basicConfig(
 log = logging.getLogger("QuickStart")
 
 FEATURE_VERSION = "v3.3.0_enter_quality_stf47_htf10_funding3_oi3"
-SYSTEM_VERSION = "v3.4.1_geometry_sweep_audit_fix"
+SYSTEM_VERSION = "v3.5.0_live_learning"
 
 FUNDING_FEATURE_NAMES = ["funding_rate", "funding_rate_delta_8h", "funding_rate_zscore_30d"]
 FUNDING_FEATURE_COUNT = len(FUNDING_FEATURE_NAMES)
@@ -1085,7 +1085,6 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
 
     df = pd.read_parquet(data_path)
     from data.pipeline import FeatureEngineer
-    feat_engineer = FeatureEngineer()
 
     expected_count = FeatureEngineer.TOTAL_FEATURE_COUNT + FUNDING_FEATURE_COUNT + OI_FEATURE_COUNT
     if len(feature_columns) != expected_count:
@@ -1094,7 +1093,7 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
             f"Checkpoint mismatch - retrain the model."
         )
 
-    features_df = feat_engineer.compute_all_features(df)
+    features_df = engineer.compute_all_features(df)
     features_df = features_df.fillna(0)
 
     data_dir = Path("data_cache")
@@ -2033,6 +2032,26 @@ Examples:
                         help="Number of bars to replay in dry-run mode (default: 200)")
     parser.add_argument("--no-correlation-block", action="store_true", default=False,
                         help="Disable same-direction correlation blocking (default: on)")
+    parser.add_argument("--per-symbol-models", action="store_true", default=False,
+                        help="Use per-symbol deployed models from checkpoints/deployed/{symbol}/")
+    parser.add_argument("--enable-learning", action="store_true", default=False,
+                        help="Enable scheduled retraining + safe promotion during live run")
+    parser.add_argument("--retrain-hour", type=int, default=4,
+                        help="UTC hour to trigger daily retrain (default: 4)")
+    parser.add_argument("--retrain-interval", type=int, default=24,
+                        help="Hours between retrains (default: 24)")
+    parser.add_argument("--retrain-epochs", type=int, default=300,
+                        help="Training epochs for scheduled retrain (default: 300)")
+    parser.add_argument("--min-prauc", type=float, default=0.35,
+                        help="Minimum PR-AUC for model promotion (default: 0.35)")
+    parser.add_argument("--min-pf-net", type=float, default=1.05,
+                        help="Minimum PF_net for model promotion (default: 1.05)")
+    parser.add_argument("--min-profitable-regimes", type=int, default=3,
+                        help="Minimum profitable regimes for promotion (default: 3)")
+    parser.add_argument("--no-auto-promote", action="store_true", default=False,
+                        help="Disable auto-promotion (train + evaluate only)")
+    parser.add_argument("--no-geometry-sweep-retrain", action="store_true", default=False,
+                        help="Skip geometry sweep during scheduled retrain")
 
     args = parser.parse_args()
 
@@ -2071,6 +2090,27 @@ Examples:
                 allow_market_fallback=args.allow_market_fallback,
             )
 
+        learning_mgr = None
+        if args.enable_learning:
+            from learning import LearningManager, LearningConfig
+            learning_config = LearningConfig(
+                retrain_hour_utc=args.retrain_hour,
+                retrain_interval_hours=args.retrain_interval,
+                training_epochs=args.retrain_epochs,
+                min_prauc_threshold=args.min_prauc,
+                min_pf_net=args.min_pf_net,
+                min_profitable_regimes=args.min_profitable_regimes,
+                auto_promote=not args.no_auto_promote,
+                geometry_sweep_on_retrain=not args.no_geometry_sweep_retrain,
+            )
+            learning_mgr = LearningManager(
+                replit_url=args.url,
+                device=device,
+                symbols=symbols,
+                config=learning_config,
+            )
+            print(f"  Learning system: ON (retrain @ {args.retrain_hour}:00 UTC)")
+
         runner = LiveRunner(
             replit_url=args.url,
             symbols=symbols,
@@ -2085,7 +2125,9 @@ Examples:
             execution_module=execution,
             dry_run=args.dry_run,
             dry_run_candles=args.dry_run_candles,
+            per_symbol_models=args.per_symbol_models,
         )
+        runner.learning_manager = learning_mgr
         runner.run()
         return
 

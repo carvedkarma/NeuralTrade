@@ -36,8 +36,32 @@ Geometry Sweep (debug costs): `python quick_start.py --url URL --regime-eval --g
 Live (multi-asset): `python quick_start.py --url URL --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT --interval 15m --exec-tf 3m --pullback-atr 0.20`
 Live (dry run): `python quick_start.py --url URL --live --dry-run --dry-run-candles 200`
 Live (no exec module): `python quick_start.py --url URL --live --paper --no-exec`
+Live (with learning): `python quick_start.py --url URL --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT --enable-learning --retrain-hour 4 --retrain-epochs 300`
+Live (per-symbol models): `python quick_start.py --url URL --live --paper --per-symbol-models --enable-learning`
+Live (learning, no auto-promote): `python quick_start.py --url URL --live --paper --enable-learning --no-auto-promote`
 
-Key files: `gpu_trainer/quick_start.py`, `gpu_trainer/training/triple_barrier.py` (shared barrier simulator + cost model), `gpu_trainer/data/regression_targets.py` (labeling), `gpu_trainer/data/pipeline.py` (features/data), `gpu_trainer/live_runner.py` (multi-asset live loop), `gpu_trainer/execution.py` (lower-TF entry), `gpu_trainer/portfolio.py` (position tracking/risk caps).
+Key files: `gpu_trainer/quick_start.py`, `gpu_trainer/training/triple_barrier.py` (shared barrier simulator + cost model), `gpu_trainer/data/regression_targets.py` (labeling), `gpu_trainer/data/pipeline.py` (features/data), `gpu_trainer/live_runner.py` (multi-asset live loop), `gpu_trainer/execution.py` (lower-TF entry), `gpu_trainer/portfolio.py` (position tracking/risk caps), `gpu_trainer/learning.py` (scheduled retrain + safe promotion).
+
+### Live Learning System (v3.5.0)
+The live system supports scheduled retraining with safe model promotion. Key components:
+- `learning.py`: LearningManager with LearningConfig for scheduled daily retrain + walk-forward evaluation
+- Per-symbol model management: deployed models stored under `checkpoints/deployed/{symbol}/`
+- Safe promotion gates: PR-AUC threshold, PF_net minimum, profitable regime count, TPD range
+- Dashboard integration: cycle logs, trade records, and learning stats pushed to `/api/live/*` endpoints
+- Candle data caching with append/dedupe (up to 2000 bars per symbol)
+- Exchange time sync via Binance serverTime API
+- Cooldown tracking per symbol after trade entry
+- Retry logic (3 attempts) for all dashboard HTTP pushes
+
+### Live System Dashboard
+The "Live System" tab shows:
+- Overview cards: open positions, closed trades count, win rate, total net R
+- Model Learning Stats: per-symbol cards with PR-AUC, PF_net, E[Net R], trades/day, profitable regimes, trend indicator, promotion status
+- Live Trade History: table with symbol, side, entry/exit prices, SL/TP, p_enter, outcome, net R
+- Inference Cycle Log: table with timestamp, symbol, price, p_enter, HTF alignment, direction, decision, reasons
+
+DB tables: `live_trade_records`, `model_learning_stats`, `live_cycle_logs`
+API endpoints: POST/GET `/api/live/trade`, PATCH `/api/live/trade/:id`, POST/GET `/api/live/learning-stats`, GET `/api/live/learning-stats/latest`, POST/GET `/api/live/cycle-logs`, GET `/api/live/summary`
 
 ### Cost Model (v3.3.2)
 Default execution: MARKET orders (taker) for entry and exit. Cost components computed in R-units via `compute_trade_cost_r()` in `training/triple_barrier.py`:

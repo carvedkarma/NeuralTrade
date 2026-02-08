@@ -27,8 +27,14 @@ import type {
   ConeSignal,
   InsertMultiheadPrediction,
   MultiheadPrediction,
+  InsertLiveTradeRecord,
+  LiveTradeRecord,
+  InsertModelLearningStats,
+  ModelLearningStatsEntry,
+  InsertLiveCycleLog,
+  LiveCycleLog,
 } from "@shared/schema";
-import { shotPlanHistory, coneSignals, multiheadPredictions } from "@shared/schema";
+import { shotPlanHistory, coneSignals, multiheadPredictions, liveTradeRecords, modelLearningStats, liveCycleLogs } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { getKlines, getMultiTimeframeKlines, getFuturesData, detectLargeOrders } from "./binance";
 import { getAllIndicators, calculateMultiTimeframeScore, type TechnicalIndicators } from "./indicators";
@@ -76,6 +82,18 @@ export interface IStorage {
   getMultiheadPredictions(limit?: number): Promise<MultiheadPrediction[]>;
   getLatestMultiheadPrediction(): Promise<MultiheadPrediction | null>;
   recordMultiheadPrediction(prediction: InsertMultiheadPrediction): Promise<MultiheadPrediction>;
+  // Live trade records
+  getLiveTradeRecords(limit?: number, symbol?: string): Promise<LiveTradeRecord[]>;
+  getOpenLiveTradeRecords(): Promise<LiveTradeRecord[]>;
+  recordLiveTradeRecord(record: InsertLiveTradeRecord): Promise<LiveTradeRecord>;
+  updateLiveTradeRecord(id: number, update: Partial<LiveTradeRecord>): Promise<void>;
+  // Model learning stats
+  getModelLearningStats(symbol?: string, limit?: number): Promise<ModelLearningStatsEntry[]>;
+  getLatestModelLearningStats(symbol: string): Promise<ModelLearningStatsEntry | null>;
+  recordModelLearningStats(stats: InsertModelLearningStats): Promise<ModelLearningStatsEntry>;
+  // Live cycle logs
+  getLiveCycleLogs(symbol?: string, limit?: number): Promise<LiveCycleLog[]>;
+  recordLiveCycleLog(log: InsertLiveCycleLog): Promise<LiveCycleLog>;
 }
 
 class KalmanFilter {
@@ -2794,6 +2812,82 @@ export class MemStorage implements IStorage {
   async recordMultiheadPrediction(prediction: InsertMultiheadPrediction): Promise<MultiheadPrediction> {
     const [result] = await db.insert(multiheadPredictions)
       .values(prediction)
+      .returning();
+    return result;
+  }
+
+  async getLiveTradeRecords(limit: number = 100, symbol?: string): Promise<LiveTradeRecord[]> {
+    let query = db.select().from(liveTradeRecords).orderBy(desc(liveTradeRecords.entryTime)).limit(limit);
+    if (symbol) {
+      return db.select().from(liveTradeRecords)
+        .where(eq(liveTradeRecords.symbol, symbol))
+        .orderBy(desc(liveTradeRecords.entryTime))
+        .limit(limit);
+    }
+    return query;
+  }
+
+  async getOpenLiveTradeRecords(): Promise<LiveTradeRecord[]> {
+    return db.select().from(liveTradeRecords)
+      .where(eq(liveTradeRecords.status, "open"))
+      .orderBy(desc(liveTradeRecords.entryTime));
+  }
+
+  async recordLiveTradeRecord(record: InsertLiveTradeRecord): Promise<LiveTradeRecord> {
+    const [result] = await db.insert(liveTradeRecords)
+      .values(record)
+      .returning();
+    return result;
+  }
+
+  async updateLiveTradeRecord(id: number, update: Partial<LiveTradeRecord>): Promise<void> {
+    await db.update(liveTradeRecords)
+      .set(update)
+      .where(eq(liveTradeRecords.id, id));
+  }
+
+  async getModelLearningStats(symbol?: string, limit: number = 50): Promise<ModelLearningStatsEntry[]> {
+    if (symbol) {
+      return db.select().from(modelLearningStats)
+        .where(eq(modelLearningStats.symbol, symbol))
+        .orderBy(desc(modelLearningStats.createdAt))
+        .limit(limit);
+    }
+    return db.select().from(modelLearningStats)
+      .orderBy(desc(modelLearningStats.createdAt))
+      .limit(limit);
+  }
+
+  async getLatestModelLearningStats(symbol: string): Promise<ModelLearningStatsEntry | null> {
+    const results = await db.select().from(modelLearningStats)
+      .where(eq(modelLearningStats.symbol, symbol))
+      .orderBy(desc(modelLearningStats.createdAt))
+      .limit(1);
+    return results[0] || null;
+  }
+
+  async recordModelLearningStats(stats: InsertModelLearningStats): Promise<ModelLearningStatsEntry> {
+    const [result] = await db.insert(modelLearningStats)
+      .values(stats)
+      .returning();
+    return result;
+  }
+
+  async getLiveCycleLogs(symbol?: string, limit: number = 100): Promise<LiveCycleLog[]> {
+    if (symbol) {
+      return db.select().from(liveCycleLogs)
+        .where(eq(liveCycleLogs.symbol, symbol))
+        .orderBy(desc(liveCycleLogs.cycleTs))
+        .limit(limit);
+    }
+    return db.select().from(liveCycleLogs)
+      .orderBy(desc(liveCycleLogs.cycleTs))
+      .limit(limit);
+  }
+
+  async recordLiveCycleLog(log: InsertLiveCycleLog): Promise<LiveCycleLog> {
+    const [result] = await db.insert(liveCycleLogs)
+      .values(log)
       .returning();
     return result;
   }

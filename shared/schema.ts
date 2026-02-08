@@ -1180,6 +1180,86 @@ export const coneSignalResponseSchema = z.object({
 });
 export type ConeSignalResponse = z.infer<typeof coneSignalResponseSchema>;
 
+// Live trade records — pushed from GPU trainer when positions open/close
+export const liveTradeRecords = pgTable("live_trade_records", {
+  id: serial("id").primaryKey(),
+  symbol: varchar("symbol", { length: 20 }).notNull(),
+  side: varchar("side", { length: 10 }).notNull(),
+  entryTime: bigint("entry_time", { mode: "number" }).notNull(),
+  entryPrice: real("entry_price").notNull(),
+  exitTime: bigint("exit_time", { mode: "number" }),
+  exitPrice: real("exit_price"),
+  stopLoss: real("stop_loss"),
+  takeProfit: real("take_profit"),
+  sizePct: real("size_pct"),
+  pEnter: real("p_enter"),
+  costsBps: real("costs_bps"),
+  outcome: varchar("outcome", { length: 20 }),
+  grossR: real("gross_r"),
+  netR: real("net_r"),
+  sizedR: real("sized_r"),
+  status: varchar("status", { length: 20 }).notNull().default("open"),
+  reasons: jsonb("reasons").$type<string[]>(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (table) => ({
+  symbolIdx: index("live_trades_symbol_idx").on(table.symbol),
+  statusIdx: index("live_trades_status_idx").on(table.status),
+  entryTimeIdx: index("live_trades_entry_time_idx").on(table.entryTime),
+}));
+
+// Per-symbol model learning stats — pushed after each retrain cycle
+export const modelLearningStats = pgTable("model_learning_stats", {
+  id: serial("id").primaryKey(),
+  symbol: varchar("symbol", { length: 20 }).notNull(),
+  modelVersion: varchar("model_version", { length: 50 }).notNull(),
+  trainedUntilTs: bigint("trained_until_ts", { mode: "number" }),
+  trainingSamples: integer("training_samples"),
+  valPrAuc: real("val_pr_auc"),
+  valPrecision: real("val_precision"),
+  valRecall: real("val_recall"),
+  valF1: real("val_f1"),
+  bestPolicyThreshold: real("best_policy_threshold"),
+  bestPolicyCooldown: integer("best_policy_cooldown"),
+  bestPolicyTpMult: real("best_policy_tp_mult"),
+  bestPolicySlMult: real("best_policy_sl_mult"),
+  pfNet: real("pf_net"),
+  eNet: real("e_net"),
+  tradesPerDay: real("trades_per_day"),
+  profitableRegimes: integer("profitable_regimes"),
+  totalRegimes: integer("total_regimes"),
+  promoted: boolean("promoted").default(false),
+  promotionReason: varchar("promotion_reason", { length: 200 }),
+  trend7d: varchar("trend_7d", { length: 20 }),
+  prevPfNet: real("prev_pf_net"),
+  prevENet: real("prev_e_net"),
+  prevTradesPerDay: real("prev_trades_per_day"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (table) => ({
+  symbolIdx: index("learning_stats_symbol_idx").on(table.symbol),
+  createdAtIdx: index("learning_stats_created_at_idx").on(table.createdAt),
+}));
+
+// Live cycle logs — one row per 15m inference cycle per symbol
+export const liveCycleLogs = pgTable("live_cycle_logs", {
+  id: serial("id").primaryKey(),
+  symbol: varchar("symbol", { length: 20 }).notNull(),
+  cycleTs: bigint("cycle_ts", { mode: "number" }).notNull(),
+  price: real("price"),
+  pEnter: real("p_enter"),
+  htfH1Trend: real("htf_h1_trend"),
+  htfH4Trend: real("htf_h4_trend"),
+  slopeOk: boolean("slope_ok"),
+  rangeOk: boolean("range_ok"),
+  direction: varchar("direction", { length: 10 }),
+  thresholdUsed: real("threshold_used"),
+  decision: varchar("decision", { length: 30 }).notNull(),
+  reasons: jsonb("reasons").$type<string[]>(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (table) => ({
+  symbolIdx: index("cycle_logs_symbol_idx").on(table.symbol),
+  cycleTsIdx: index("cycle_logs_cycle_ts_idx").on(table.cycleTs),
+}));
+
 export const insertCandleSchema = createInsertSchema(candles).omit({ id: true });
 export const insertFeatureSchema = createInsertSchema(features).omit({ id: true });
 export const insertPatternSchema = createInsertSchema(patterns).omit({ id: true });
@@ -1200,6 +1280,9 @@ export const insertReplayBufferSchema = createInsertSchema(replayBuffer).omit({ 
 export const insertLabeledSampleSchema = createInsertSchema(labeledSamples).omit({ id: true });
 export const insertLearningJobStatusSchema = createInsertSchema(learningJobStatus).omit({ id: true });
 export const insertMultiheadPredictionSchema = createInsertSchema(multiheadPredictions).omit({ id: true });
+export const insertLiveTradeRecordSchema = createInsertSchema(liveTradeRecords).omit({ id: true });
+export const insertModelLearningStatsSchema = createInsertSchema(modelLearningStats).omit({ id: true });
+export const insertLiveCycleLogSchema = createInsertSchema(liveCycleLogs).omit({ id: true });
 
 export type InsertCandle = z.infer<typeof insertCandleSchema>;
 export type InsertFeature = z.infer<typeof insertFeatureSchema>;
@@ -1243,3 +1326,9 @@ export type InsertLearningJobStatus = z.infer<typeof insertLearningJobStatusSche
 export type LearningJobStatus = typeof learningJobStatus.$inferSelect;
 export type InsertMultiheadPrediction = z.infer<typeof insertMultiheadPredictionSchema>;
 export type MultiheadPrediction = typeof multiheadPredictions.$inferSelect;
+export type InsertLiveTradeRecord = z.infer<typeof insertLiveTradeRecordSchema>;
+export type LiveTradeRecord = typeof liveTradeRecords.$inferSelect;
+export type InsertModelLearningStats = z.infer<typeof insertModelLearningStatsSchema>;
+export type ModelLearningStatsEntry = typeof modelLearningStats.$inferSelect;
+export type InsertLiveCycleLog = z.infer<typeof insertLiveCycleLogSchema>;
+export type LiveCycleLog = typeof liveCycleLogs.$inferSelect;

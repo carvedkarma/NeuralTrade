@@ -4,6 +4,7 @@ import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
 import { db } from "./db";
 import { candles, insertShotPlanHistorySchema } from "@shared/schema";
+import type { ModelLearningStatsEntry } from "@shared/schema";
 import { and, eq, gte, lte, asc, desc } from "drizzle-orm";
 import { z } from "zod";
 import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes, clearNNData, cancelNNDownload, getResumableStatus, resumeNNDataDownload, getDownloadETA, streamNNDataBulk } from "./historical-data";
@@ -3453,6 +3454,221 @@ export async function registerRoutes(
     } catch (error) {
       console.error("[GPU Export] Error receiving predictions:", error);
       res.status(500).json({ error: "Failed to receive predictions" });
+    }
+  });
+
+  // ============================================================================
+  // LIVE SYSTEM ENDPOINTS — Trade records, learning stats, cycle logs
+  // ============================================================================
+
+  app.post("/api/live/trade", async (req, res) => {
+    try {
+      const t = req.body;
+      if (!t || !t.symbol || !t.side || !t.entry_price) {
+        return res.status(400).json({ error: "symbol, side, and entry_price are required" });
+      }
+      const record = await storage.recordLiveTradeRecord({
+        symbol: t.symbol,
+        side: t.side,
+        entryTime: t.entry_time || Date.now(),
+        entryPrice: t.entry_price,
+        exitTime: t.exit_time ?? null,
+        exitPrice: t.exit_price ?? null,
+        stopLoss: t.stop_loss ?? null,
+        takeProfit: t.take_profit ?? null,
+        sizePct: t.size_pct ?? null,
+        pEnter: t.p_enter ?? null,
+        costsBps: t.costs_bps ?? null,
+        outcome: t.outcome ?? null,
+        grossR: t.gross_r ?? null,
+        netR: t.net_r ?? null,
+        sizedR: t.sized_r ?? null,
+        status: t.status || "open",
+        reasons: t.reasons ?? [],
+        createdAt: Date.now(),
+      });
+      console.log(`[Live Trade] Recorded ${t.side} ${t.symbol} @ ${t.entry_price} (id=${record.id})`);
+      res.json({ success: true, id: record.id });
+    } catch (error) {
+      console.error("[Live Trade] Error:", error);
+      res.status(500).json({ error: "Failed to record trade" });
+    }
+  });
+
+  app.patch("/api/live/trade/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const update = req.body;
+      await storage.updateLiveTradeRecord(id, {
+        exitTime: update.exit_time ?? undefined,
+        exitPrice: update.exit_price ?? undefined,
+        outcome: update.outcome ?? undefined,
+        grossR: update.gross_r ?? undefined,
+        netR: update.net_r ?? undefined,
+        sizedR: update.sized_r ?? undefined,
+        status: update.status ?? undefined,
+      });
+      console.log(`[Live Trade] Updated trade ${id}: ${update.outcome ?? update.status}`);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("[Live Trade] Update error:", error);
+      res.status(500).json({ error: "Failed to update trade" });
+    }
+  });
+
+  app.get("/api/live/trades", async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 100;
+      const symbol = req.query.symbol as string | undefined;
+      const trades = await storage.getLiveTradeRecords(limit, symbol);
+      res.json(trades);
+    } catch (error) {
+      console.error("[Live Trades] Error:", error);
+      res.status(500).json({ error: "Failed to get trades" });
+    }
+  });
+
+  app.get("/api/live/trades/open", async (req, res) => {
+    try {
+      const trades = await storage.getOpenLiveTradeRecords();
+      res.json(trades);
+    } catch (error) {
+      console.error("[Live Trades Open] Error:", error);
+      res.status(500).json({ error: "Failed to get open trades" });
+    }
+  });
+
+  app.post("/api/live/learning-stats", async (req, res) => {
+    try {
+      const s = req.body;
+      if (!s || !s.symbol || !s.model_version) {
+        return res.status(400).json({ error: "symbol and model_version are required" });
+      }
+      const record = await storage.recordModelLearningStats({
+        symbol: s.symbol,
+        modelVersion: s.model_version,
+        trainedUntilTs: s.trained_until_ts ?? null,
+        trainingSamples: s.training_samples ?? null,
+        valPrAuc: s.val_pr_auc ?? null,
+        valPrecision: s.val_precision ?? null,
+        valRecall: s.val_recall ?? null,
+        valF1: s.val_f1 ?? null,
+        bestPolicyThreshold: s.best_policy_threshold ?? null,
+        bestPolicyCooldown: s.best_policy_cooldown ?? null,
+        bestPolicyTpMult: s.best_policy_tp_mult ?? null,
+        bestPolicySlMult: s.best_policy_sl_mult ?? null,
+        pfNet: s.pf_net ?? null,
+        eNet: s.e_net ?? null,
+        tradesPerDay: s.trades_per_day ?? null,
+        profitableRegimes: s.profitable_regimes ?? null,
+        totalRegimes: s.total_regimes ?? null,
+        promoted: s.promoted ?? false,
+        promotionReason: s.promotion_reason ?? null,
+        trend7d: s.trend_7d ?? null,
+        prevPfNet: s.prev_pf_net ?? null,
+        prevENet: s.prev_e_net ?? null,
+        prevTradesPerDay: s.prev_trades_per_day ?? null,
+        createdAt: Date.now(),
+      });
+      console.log(`[Learning Stats] ${s.symbol} v${s.model_version} PR-AUC=${s.val_pr_auc?.toFixed(3)} PF=${s.pf_net?.toFixed(2)} promoted=${s.promoted}`);
+      res.json({ success: true, id: record.id });
+    } catch (error) {
+      console.error("[Learning Stats] Error:", error);
+      res.status(500).json({ error: "Failed to record learning stats" });
+    }
+  });
+
+  app.get("/api/live/learning-stats", async (req, res) => {
+    try {
+      const symbol = req.query.symbol as string | undefined;
+      const limit = parseInt(req.query.limit as string) || 50;
+      const stats = await storage.getModelLearningStats(symbol, limit);
+      res.json(stats);
+    } catch (error) {
+      console.error("[Learning Stats] Error:", error);
+      res.status(500).json({ error: "Failed to get learning stats" });
+    }
+  });
+
+  app.get("/api/live/learning-stats/latest", async (req, res) => {
+    try {
+      const symbols = (req.query.symbols as string || "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT").split(",");
+      const results: Record<string, ModelLearningStatsEntry | null> = {};
+      for (const sym of symbols) {
+        results[sym.trim()] = await storage.getLatestModelLearningStats(sym.trim());
+      }
+      res.json(results);
+    } catch (error) {
+      console.error("[Learning Stats Latest] Error:", error);
+      res.status(500).json({ error: "Failed to get latest stats" });
+    }
+  });
+
+  app.post("/api/live/cycle-log", async (req, res) => {
+    try {
+      const c = req.body;
+      if (!c || !c.symbol || !c.decision) {
+        return res.status(400).json({ error: "symbol and decision are required" });
+      }
+      const record = await storage.recordLiveCycleLog({
+        symbol: c.symbol,
+        cycleTs: c.cycle_ts || Date.now(),
+        price: c.price ?? null,
+        pEnter: c.p_enter ?? null,
+        htfH1Trend: c.htf_h1_trend ?? null,
+        htfH4Trend: c.htf_h4_trend ?? null,
+        slopeOk: c.slope_ok ?? null,
+        rangeOk: c.range_ok ?? null,
+        direction: c.direction ?? null,
+        thresholdUsed: c.threshold_used ?? null,
+        decision: c.decision,
+        reasons: c.reasons ?? [],
+        createdAt: Date.now(),
+      });
+      res.json({ success: true, id: record.id });
+    } catch (error) {
+      console.error("[Cycle Log] Error:", error);
+      res.status(500).json({ error: "Failed to record cycle log" });
+    }
+  });
+
+  app.get("/api/live/cycle-logs", async (req, res) => {
+    try {
+      const symbol = req.query.symbol as string | undefined;
+      const limit = parseInt(req.query.limit as string) || 100;
+      const logs = await storage.getLiveCycleLogs(symbol, limit);
+      res.json(logs);
+    } catch (error) {
+      console.error("[Cycle Logs] Error:", error);
+      res.status(500).json({ error: "Failed to get cycle logs" });
+    }
+  });
+
+  app.get("/api/live/summary", async (req, res) => {
+    try {
+      const symbols = (req.query.symbols as string || "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT").split(",").map(s => s.trim());
+      const openTrades = await storage.getOpenLiveTradeRecords();
+      const recentTrades = await storage.getLiveTradeRecords(50);
+      const learningStats: Record<string, ModelLearningStatsEntry | null> = {};
+      for (const sym of symbols) {
+        learningStats[sym] = await storage.getLatestModelLearningStats(sym);
+      }
+      const closedTrades = recentTrades.filter(t => t.status === "closed");
+      const wins = closedTrades.filter(t => (t.netR ?? 0) > 0);
+      const totalNetR = closedTrades.reduce((s, t) => s + (t.netR ?? 0), 0);
+      res.json({
+        openPositions: openTrades.length,
+        openTrades: openTrades.map(t => ({ symbol: t.symbol, side: t.side, entryPrice: t.entryPrice, pEnter: t.pEnter })),
+        closedTradesCount: closedTrades.length,
+        winRate: closedTrades.length > 0 ? (wins.length / closedTrades.length * 100).toFixed(1) : "N/A",
+        totalNetR: totalNetR.toFixed(2),
+        avgNetR: closedTrades.length > 0 ? (totalNetR / closedTrades.length).toFixed(3) : "N/A",
+        learningStats,
+        symbols,
+      });
+    } catch (error) {
+      console.error("[Live Summary] Error:", error);
+      res.status(500).json({ error: "Failed to get summary" });
     }
   });
 

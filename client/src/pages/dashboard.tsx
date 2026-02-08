@@ -58,6 +58,7 @@ import { NNDiagnosticsCard } from "@/components/nn-diagnostics-card";
 import { WalkForwardCard } from "@/components/walk-forward-card";
 import { TrainingProgressCard } from "@/components/training-progress-card";
 import { MultiheadSignalCard, MultiheadPredictionHistory, type MultiheadPredictionData } from "@/components/multihead-signal-card";
+import { LiveSystemTab } from "@/components/live-system-card";
 import type { DashboardData } from "@shared/schema";
 import { Loader2, RefreshCw, Bitcoin, Clock, Wifi, WifiOff, Brain, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -433,6 +434,7 @@ export default function Dashboard() {
             <TabsTrigger value="indicators" data-testid="tab-indicators">Indicators</TabsTrigger>
             <TabsTrigger value="diagnostics" data-testid="tab-diagnostics">Diagnostics</TabsTrigger>
             <TabsTrigger value="performance" data-testid="tab-performance">Performance</TabsTrigger>
+            <TabsTrigger value="live-system" data-testid="tab-live-system">Live System</TabsTrigger>
           </TabsList>
 
           <TabsContent value="overview" className="mt-0">
@@ -924,6 +926,10 @@ export default function Dashboard() {
                 />
               </div>
             </div>
+          </TabsContent>
+
+          <TabsContent value="live-system" className="mt-0">
+            <LiveSystemTab />
           </TabsContent>
         </Tabs>
       </main>

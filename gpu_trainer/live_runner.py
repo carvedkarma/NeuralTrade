@@ -1,8 +1,15 @@
-"""Multi-asset live inference loop.
+"""Multi-asset live inference loop (v3.5.0).
 
 Monitors multiple symbols in parallel on 15m intervals, runs the ENTER QUALITY
 model inference, applies HTF gates, ranks candidates, manages portfolio, and
 optionally improves entries via lower-timeframe execution.
+
+v3.5.0 additions:
+  - Per-symbol data caching with append/dedupe
+  - Dashboard cycle-log + trade-record push
+  - Exchange time sync (Binance serverTime)
+  - Robust retry logic for all HTTP calls
+  - Per-symbol model management (deployed/{symbol}/)
 
 Usage:
     python quick_start.py --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT
@@ -13,9 +20,10 @@ import time
 import json
 import logging
 import traceback
+import requests
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -24,24 +32,73 @@ log = logging.getLogger("LiveRunner")
 
 
 REQUIRED_CANDLES = 300
+MAX_CACHE_BARS = 2000
+RETRY_ATTEMPTS = 3
+RETRY_DELAY = 2.0
 
 
-def _load_model(device: str):
-    """Load the trained ENTER QUALITY model, scaler, and feature columns."""
+def _retry_request(method: str, url: str, **kwargs) -> Optional[requests.Response]:
+    timeout = kwargs.pop('timeout', 15)
+    for attempt in range(RETRY_ATTEMPTS):
+        try:
+            resp = requests.request(method, url, timeout=timeout, **kwargs)
+            if resp.status_code < 500:
+                return resp
+        except (requests.ConnectionError, requests.Timeout) as e:
+            log.warning(f"Request {method} {url} attempt {attempt+1}/{RETRY_ATTEMPTS} failed: {e}")
+        if attempt < RETRY_ATTEMPTS - 1:
+            time.sleep(RETRY_DELAY * (attempt + 1))
+    log.error(f"All {RETRY_ATTEMPTS} attempts failed for {method} {url}")
+    return None
+
+
+def _get_exchange_time_offset() -> float:
+    try:
+        resp = requests.get("https://api.binance.com/api/v3/time", timeout=5)
+        if resp.status_code == 200:
+            server_ms = resp.json()["serverTime"]
+            local_ms = time.time() * 1000
+            offset_ms = server_ms - local_ms
+            if abs(offset_ms) > 1000:
+                log.warning(f"Clock offset vs Binance: {offset_ms:.0f}ms")
+            return offset_ms / 1000.0
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+def _load_model(device: str, symbol: Optional[str] = None):
+    """Load the trained ENTER QUALITY model, scaler, and feature columns.
+
+    If symbol is provided, first checks checkpoints/deployed/{symbol}/ for a
+    per-symbol model. Falls back to the global checkpoints/ directory.
+    """
     import torch
     from models.simple_mlp import EnhancedMultiHeadMLP, EnhancedMultiHeadMLP_Config
     from data.pipeline import FeatureEngineer
 
     from quick_start import FEATURE_VERSION
 
-    checkpoint_path = Path("checkpoints/best_enter_prauc.pt")
-    if not checkpoint_path.exists():
-        checkpoint_path = Path("checkpoints/best_enter_loss.pt")
-    if not checkpoint_path.exists():
-        log.error("No trained ENTER model found! Run training first.")
+    search_dirs = []
+    if symbol:
+        search_dirs.append(Path(f"checkpoints/deployed/{symbol}"))
+    search_dirs.append(Path("checkpoints"))
+
+    checkpoint_path = None
+    for d in search_dirs:
+        for name in ["best_enter_prauc.pt", "best_enter_loss.pt"]:
+            p = d / name
+            if p.exists():
+                checkpoint_path = p
+                break
+        if checkpoint_path:
+            break
+
+    if not checkpoint_path:
+        log.error(f"No trained ENTER model found{' for '+symbol if symbol else ''}! Run training first.")
         sys.exit(1)
 
-    log.info(f"Loading model from {checkpoint_path}...")
+    log.info(f"Loading model from {checkpoint_path}{' ('+symbol+')' if symbol else ''}...")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     saved_version = checkpoint.get('feature_version', 'unknown')
@@ -73,10 +130,17 @@ def _load_model(device: str):
     model.to(device)
     model.eval()
 
+    scaler_path = None
+    for d in search_dirs:
+        sp = d / "scaler.joblib"
+        if sp.exists():
+            scaler_path = sp
+            break
+
     engineer = FeatureEngineer()
-    scaler_path = Path("checkpoints/scaler.joblib")
-    if scaler_path.exists():
+    if scaler_path:
         engineer.load_scalers(str(scaler_path))
+        log.info(f"Scaler loaded from {scaler_path}")
     else:
         log.warning("No saved scaler — prediction quality may be reduced")
 
@@ -305,6 +369,7 @@ class LiveRunner:
         execution_module=None,
         dry_run: bool = False,
         dry_run_candles: int = 200,
+        per_symbol_models: bool = False,
     ):
         self.replit_url = replit_url
         self.symbols = symbols
@@ -319,12 +384,17 @@ class LiveRunner:
         self.execution = execution_module
         self.dry_run = dry_run
         self.dry_run_candles = dry_run_candles
+        self.per_symbol_models = per_symbol_models
 
         self.model = None
         self.engineer = None
         self.feature_columns = None
+        self.symbol_models: Dict[str, Tuple] = {}
         self.fetcher = None
         self.cycle_count = 0
+        self.candle_cache: Dict[str, pd.DataFrame] = {}
+        self.exchange_time_offset = 0.0
+        self.cooldown_tracker: Dict[str, int] = {}
 
     def _init_fetcher(self):
         from data.pipeline import BinanceDataFetcher
@@ -341,6 +411,86 @@ class LiveRunner:
         from quick_start import push_prediction
         push_prediction(self.replit_url, prediction)
 
+    def _push_cycle_log(self, symbol: str, price: float, p_enter: float,
+                        htf: dict, direction: str, decision: str, reasons: list):
+        url = f"{self.replit_url.rstrip('/')}/api/live/cycle-log"
+        payload = {
+            "symbol": symbol,
+            "cycle_ts": int(time.time() * 1000),
+            "price": price,
+            "p_enter": p_enter,
+            "htf_h1_trend": htf.get('h1_trend'),
+            "htf_h4_trend": htf.get('h4_trend'),
+            "slope_ok": htf.get('slope_ok', False),
+            "range_ok": htf.get('range_ok', False),
+            "direction": direction,
+            "threshold_used": self.enter_threshold,
+            "decision": decision,
+            "reasons": reasons,
+        }
+        _retry_request("POST", url, json=payload)
+
+    def _push_trade_record(self, symbol: str, side: str, entry_price: float,
+                           sl_price: float, tp_price: float, p_enter: float,
+                           size_pct: float) -> Optional[int]:
+        url = f"{self.replit_url.rstrip('/')}/api/live/trade"
+        payload = {
+            "symbol": symbol,
+            "side": side,
+            "entry_time": int(time.time() * 1000),
+            "entry_price": entry_price,
+            "stop_loss": sl_price,
+            "take_profit": tp_price,
+            "p_enter": p_enter,
+            "size_pct": size_pct,
+            "status": "open",
+        }
+        resp = _retry_request("POST", url, json=payload)
+        if resp and resp.status_code == 200:
+            data = resp.json()
+            return data.get("id")
+        return None
+
+    def _update_trade_record(self, trade_id: int, exit_price: float,
+                             outcome: str, gross_r: float, net_r: float, sized_r: float):
+        url = f"{self.replit_url.rstrip('/')}/api/live/trade/{trade_id}"
+        payload = {
+            "exit_time": int(time.time() * 1000),
+            "exit_price": exit_price,
+            "outcome": outcome,
+            "gross_r": gross_r,
+            "net_r": net_r,
+            "sized_r": sized_r,
+            "status": "closed",
+        }
+        _retry_request("PATCH", url, json=payload)
+
+    def _get_model_for_symbol(self, symbol: str):
+        if self.per_symbol_models:
+            if symbol not in self.symbol_models:
+                try:
+                    m, e, fc = _load_model(self.device, symbol=symbol)
+                    self.symbol_models[symbol] = (m, e, fc)
+                except SystemExit:
+                    log.warning(f"No per-symbol model for {symbol}, using global model")
+                    self.symbol_models[symbol] = (self.model, self.engineer, self.feature_columns)
+            return self.symbol_models[symbol]
+        return self.model, self.engineer, self.feature_columns
+
+    def _update_candle_cache(self, symbol: str, new_df: pd.DataFrame) -> pd.DataFrame:
+        if symbol not in self.candle_cache:
+            self.candle_cache[symbol] = new_df.copy()
+        else:
+            existing = self.candle_cache[symbol]
+            combined = pd.concat([existing, new_df], ignore_index=True)
+            if 'timestamp' in combined.columns:
+                combined = combined.drop_duplicates(subset='timestamp', keep='last')
+                combined = combined.sort_values('timestamp').reset_index(drop=True)
+            if len(combined) > MAX_CACHE_BARS:
+                combined = combined.iloc[-MAX_CACHE_BARS:].reset_index(drop=True)
+            self.candle_cache[symbol] = combined
+        return self.candle_cache[symbol]
+
     def _interval_seconds(self) -> int:
         if self.interval == "15m":
             return 15 * 60
@@ -353,16 +503,23 @@ class LiveRunner:
     def run(self):
         """Main loop — runs continuously until interrupted."""
         log.info("=" * 80)
-        log.info(f"  LIVE RUNNER {'(PAPER)' if self.paper else '(LIVE)'}")
+        log.info(f"  LIVE RUNNER v3.5.0 {'(PAPER)' if self.paper else '(LIVE)'}")
         log.info(f"  Symbols: {', '.join(self.symbols)}")
         log.info(f"  Interval: {self.interval} | Threshold: {self.enter_threshold}")
         log.info(f"  TP={self.tp_mult}x SL={self.sl_mult}x | Cooldown: {self.cooldown_bars} bars")
+        log.info(f"  Per-symbol models: {self.per_symbol_models}")
         if self.dry_run:
             log.info(f"  DRY RUN MODE — replaying cached candles")
         log.info("=" * 80)
 
+        self.exchange_time_offset = _get_exchange_time_offset()
+        log.info(f"Exchange time offset: {self.exchange_time_offset*1000:.0f}ms")
+
         self.model, self.engineer, self.feature_columns = _load_model(self.device)
         self._init_fetcher()
+
+        for sym in self.symbols:
+            self.cooldown_tracker[sym] = 0
 
         if self.dry_run:
             self._run_dry()
@@ -371,8 +528,15 @@ class LiveRunner:
         try:
             while True:
                 self._run_cycle()
+
+                if hasattr(self, 'learning_manager') and self.learning_manager:
+                    try:
+                        self.learning_manager.check_and_retrain_all()
+                    except Exception as e:
+                        log.error(f"Learning check failed: {e}")
+
                 interval_s = self._interval_seconds()
-                now = time.time()
+                now = time.time() + self.exchange_time_offset
                 next_bar = (int(now) // interval_s + 1) * interval_s
                 wait = max(next_bar - now + 5, 10)
                 log.info(f"Next cycle in {wait:.0f}s...")
@@ -459,13 +623,17 @@ class LiveRunner:
         if df_candles is None:
             return None
 
+        df_candles = self._update_candle_cache(symbol, df_candles)
+
+        model, engineer, feature_columns = self._get_model_for_symbol(symbol)
+
         scaled, features_df = _compute_features_for_symbol(
-            df_candles, self.engineer, self.feature_columns, symbol
+            df_candles, engineer, feature_columns, symbol
         )
         if scaled is None:
             return None
 
-        p_enter = _run_inference(self.model, scaled, self.device)
+        p_enter = _run_inference(model, scaled, self.device)
         htf = _apply_htf_gates(features_df)
 
         current_price = float(df_candles.iloc[-1]['close'])
@@ -479,14 +647,43 @@ class LiveRunner:
         passes_threshold = p_enter >= self.enter_threshold
         side = htf['side']
 
-        if not passes_gates:
-            log.info(f"  {symbol}: HTF gates FAIL — skipping")
-            return None
-        if not passes_threshold:
-            log.info(f"  {symbol}: p_enter {p_enter:.4f} < threshold {self.enter_threshold} — skipping")
-            return None
-        if side == "NEUTRAL":
-            log.info(f"  {symbol}: side NEUTRAL — skipping")
+        reasons = []
+        decision = "HOLD"
+
+        if self.cooldown_tracker.get(symbol, 0) > 0:
+            bars_left = self.cooldown_tracker[symbol]
+            self.cooldown_tracker[symbol] -= 1
+            reasons.append(f"Cooldown active ({bars_left} bars left)")
+            decision = "COOLDOWN"
+        elif not passes_gates:
+            if not htf['trend_aligned']:
+                reasons.append("HTF trend not aligned")
+            if not htf['slope_ok']:
+                reasons.append("Slope too flat")
+            if not htf['range_ok']:
+                reasons.append("Range position unfavorable")
+            decision = "GATE_FAIL"
+        elif not passes_threshold:
+            reasons.append(f"p_enter {p_enter:.4f} < {self.enter_threshold}")
+            decision = "BELOW_THRESHOLD"
+        elif side == "NEUTRAL":
+            reasons.append("Side is NEUTRAL")
+            decision = "NEUTRAL"
+        else:
+            decision = "ENTER"
+            reasons.append(f"p_enter={p_enter:.1%} side={side}")
+
+        try:
+            self._push_cycle_log(
+                symbol=symbol, price=current_price, p_enter=p_enter,
+                htf=htf, direction=side, decision=decision, reasons=reasons,
+            )
+        except Exception as e:
+            log.warning(f"Failed to push cycle log for {symbol}: {e}")
+
+        if decision != "ENTER":
+            if decision != "COOLDOWN":
+                log.info(f"  {symbol}: {decision} — {'; '.join(reasons)}")
             return None
 
         sl_pct = self.sl_mult * atr / current_price
@@ -551,6 +748,7 @@ class LiveRunner:
 
         sl_pct = abs(entry_price - sl_price) / entry_price
         risk_pct = min(2.0 * sl_pct * 100, 5.0)
+        size_pct = min(2.0 * sl_pct * 100, 5.0)
 
         pos = Position(
             symbol=symbol, side=side,
@@ -560,6 +758,19 @@ class LiveRunner:
             bar_index=self.cycle_count,
         )
         self.portfolio.open_position(pos)
+
+        self.cooldown_tracker[symbol] = self.cooldown_bars
+
+        try:
+            trade_id = self._push_trade_record(
+                symbol=symbol, side=side, entry_price=entry_price,
+                sl_price=sl_price, tp_price=tp_price,
+                p_enter=p_enter, size_pct=size_pct,
+            )
+            if trade_id:
+                pos.dashboard_trade_id = trade_id
+        except Exception as e:
+            log.warning(f"Failed to push trade record for {symbol}: {e}")
 
         if self.paper:
             log.info(f"  [PAPER] {symbol} {side} @ {entry_price:.2f}")
