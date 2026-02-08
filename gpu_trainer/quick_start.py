@@ -1950,9 +1950,10 @@ Examples:
   python quick_start.py --url https://your-app.replit.app --epochs 300
   python quick_start.py --url https://your-app.replit.app --predict-only
   python quick_start.py --url https://your-app.replit.app --regime-eval --policy threshold:0.70 --cooldown 4
-  python quick_start.py --url https://your-app.replit.app --regime-eval --policy percentile:top20
-  python quick_start.py --url https://your-app.replit.app --regime-eval --fees-entry-bps 2 --fees-exit-bps 2 --slip-k 0.05
   python quick_start.py --url https://your-app.replit.app --regime-eval --geometry-sweep
+  python quick_start.py --url https://your-app.replit.app --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT
+  python quick_start.py --url https://your-app.replit.app --live --paper --exec-tf 3m --pullback-atr 0.20
+  python quick_start.py --url https://your-app.replit.app --live --dry-run --dry-run-candles 200
         """
     )
     parser.add_argument("--url", required=True, help="Your Replit dashboard URL")
@@ -1996,6 +1997,43 @@ Examples:
     parser.add_argument("--debug-costs", action="store_true",
                         help="Print 5 random trades per regime and assert cost accounting")
 
+    parser.add_argument("--live", action="store_true",
+                        help="Run continuous live multi-asset inference loop")
+    parser.add_argument("--symbols", type=str, default="BTCUSDT,ETHUSDT,SOLUSDT",
+                        help="Comma-separated symbols to monitor (default: BTCUSDT,ETHUSDT,SOLUSDT)")
+    parser.add_argument("--interval", type=str, default="15m",
+                        help="Signal timeframe interval (default: 15m)")
+    parser.add_argument("--paper", action="store_true", default=True,
+                        help="Paper mode — no exchange orders (default: true)")
+    parser.add_argument("--enter-threshold", type=float, default=0.85,
+                        help="p_enter threshold for live signals (default: 0.85)")
+    parser.add_argument("--max-pos-total", type=int, default=2,
+                        help="Max total open positions (default: 2)")
+    parser.add_argument("--max-pos-symbol", type=int, default=1,
+                        help="Max open positions per symbol (default: 1)")
+    parser.add_argument("--risk-cap-total", type=float, default=10.0,
+                        help="Max total portfolio risk %% (default: 10.0)")
+    parser.add_argument("--risk-cap-symbol", type=float, default=5.0,
+                        help="Max per-symbol risk %% (default: 5.0)")
+    parser.add_argument("--exec-tf", type=str, default="3m", choices=["1m", "3m", "5m"],
+                        help="Execution timeframe for improved fills (default: 3m)")
+    parser.add_argument("--exec-window-min", type=int, default=15,
+                        help="Execution window in minutes (default: 15)")
+    parser.add_argument("--pullback-atr", type=float, default=0.20,
+                        help="Pullback ATR fraction for exec (default: 0.20)")
+    parser.add_argument("--confirm-indicator", type=str, default="vwap", choices=["vwap", "ema20"],
+                        help="Confirmation indicator for exec (default: vwap)")
+    parser.add_argument("--allow-market-fallback", action="store_true", default=False,
+                        help="Allow market entry if exec window expires (default: off)")
+    parser.add_argument("--no-exec", action="store_true", default=False,
+                        help="Disable lower-TF execution (enter at market on signal)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Replay cached candles instead of fetching live data")
+    parser.add_argument("--dry-run-candles", type=int, default=200,
+                        help="Number of bars to replay in dry-run mode (default: 200)")
+    parser.add_argument("--no-correlation-block", action="store_true", default=False,
+                        help="Disable same-direction correlation blocking (default: on)")
+
     args = parser.parse_args()
 
     print()
@@ -2006,6 +2044,50 @@ Examples:
 
     device = check_gpu()
     data_dir = Path("data_cache")
+
+    if args.live:
+        from portfolio import PortfolioManager
+        from execution import ExecutionModule
+        from live_runner import LiveRunner
+
+        symbols = [s.strip().upper() for s in args.symbols.split(",")]
+
+        portfolio = PortfolioManager(
+            max_positions_total=args.max_pos_total,
+            max_positions_per_symbol=args.max_pos_symbol,
+            risk_cap_total_pct=args.risk_cap_total,
+            risk_cap_symbol_pct=args.risk_cap_symbol,
+            cooldown_bars=args.cooldown,
+            block_correlated_same_dir=not args.no_correlation_block,
+        )
+
+        execution = None
+        if not args.no_exec:
+            execution = ExecutionModule(
+                exec_tf=args.exec_tf,
+                exec_window_minutes=args.exec_window_min,
+                pullback_atr_frac=args.pullback_atr,
+                confirm_indicator=args.confirm_indicator,
+                allow_market_fallback=args.allow_market_fallback,
+            )
+
+        runner = LiveRunner(
+            replit_url=args.url,
+            symbols=symbols,
+            device=device,
+            interval=args.interval,
+            enter_threshold=args.enter_threshold,
+            tp_mult=args.tp_mult,
+            sl_mult=args.sl_mult,
+            cooldown_bars=args.cooldown,
+            paper=args.paper,
+            portfolio_manager=portfolio,
+            execution_module=execution,
+            dry_run=args.dry_run,
+            dry_run_candles=args.dry_run_candles,
+        )
+        runner.run()
+        return
 
     if args.regime_eval:
         data_path = download_data(args.url, data_dir)

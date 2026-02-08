@@ -33,8 +33,11 @@ Regime Eval (custom costs): `python quick_start.py --url URL --regime-eval --fee
 Geometry Sweep: `python quick_start.py --url URL --regime-eval --geometry-sweep`
 Geometry Sweep (custom thresholds/cooldowns): `python quick_start.py --url URL --regime-eval --geometry-sweep --thresholds 0.70,0.75 --cooldowns 4,6`
 Geometry Sweep (debug costs): `python quick_start.py --url URL --regime-eval --geometry-sweep --debug-costs`
+Live (multi-asset): `python quick_start.py --url URL --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT --interval 15m --exec-tf 3m --pullback-atr 0.20`
+Live (dry run): `python quick_start.py --url URL --live --dry-run --dry-run-candles 200`
+Live (no exec module): `python quick_start.py --url URL --live --paper --no-exec`
 
-Key files: `gpu_trainer/quick_start.py`, `gpu_trainer/training/triple_barrier.py` (shared barrier simulator + cost model), `gpu_trainer/data/regression_targets.py` (labeling), `gpu_trainer/data/pipeline.py` (features/data).
+Key files: `gpu_trainer/quick_start.py`, `gpu_trainer/training/triple_barrier.py` (shared barrier simulator + cost model), `gpu_trainer/data/regression_targets.py` (labeling), `gpu_trainer/data/pipeline.py` (features/data), `gpu_trainer/live_runner.py` (multi-asset live loop), `gpu_trainer/execution.py` (lower-TF entry), `gpu_trainer/portfolio.py` (position tracking/risk caps).
 
 ### Cost Model (v3.3.2)
 Default execution: MARKET orders (taker) for entry and exit. Cost components computed in R-units via `compute_trade_cost_r()` in `training/triple_barrier.py`:
