@@ -2913,8 +2913,48 @@ export async function registerRoutes(
   });
 
   // Data Proxy Endpoints - Allow local GPU trainer to fetch Binance data through Replit
-  const BINANCE_VISION_URL = "https://data-api.binance.vision/api/v3";
-  
+  const BINANCE_ENDPOINTS = [
+    "https://api.binance.com/api/v3",
+    "https://data-api.binance.vision/api/v3",
+    "https://api1.binance.com/api/v3",
+    "https://api2.binance.com/api/v3",
+  ];
+
+  async function fetchBinanceKlines(params: URLSearchParams): Promise<{ data: any[]; source: string }> {
+    for (const baseUrl of BINANCE_ENDPOINTS) {
+      try {
+        const url = `${baseUrl}/klines?${params.toString()}`;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeout);
+
+        if (!response.ok) {
+          console.warn(`[Data Proxy] ${baseUrl} returned HTTP ${response.status}`);
+          continue;
+        }
+
+        const text = await response.text();
+        if (!text || text.length < 3) {
+          console.warn(`[Data Proxy] ${baseUrl} returned empty response (${text.length} bytes)`);
+          continue;
+        }
+
+        const data = JSON.parse(text);
+        if (!Array.isArray(data) || data.length === 0) {
+          console.warn(`[Data Proxy] ${baseUrl} returned empty array`);
+          continue;
+        }
+
+        return { data, source: baseUrl };
+      } catch (e: any) {
+        console.warn(`[Data Proxy] ${baseUrl} failed: ${e.message}`);
+        continue;
+      }
+    }
+    throw new Error("All Binance endpoints failed");
+  }
+
   app.get("/api/data/klines", async (req, res) => {
     try {
       const { symbol = "BTCUSDT", interval = "15m", limit = "1000", startTime, endTime } = req.query;
@@ -2928,17 +2968,8 @@ export async function registerRoutes(
       if (startTime) params.append("startTime", String(startTime));
       if (endTime) params.append("endTime", String(endTime));
       
-      const url = `${BINANCE_VISION_URL}/klines?${params.toString()}`;
-      const response = await fetch(url);
+      const { data, source } = await fetchBinanceKlines(params);
       
-      if (!response.ok) {
-        console.error(`[Data Proxy] Binance error: ${response.status}`);
-        return res.status(response.status).json({ error: `Binance returned ${response.status}` });
-      }
-      
-      const data = await response.json();
-      
-      // Transform to cleaner format
       const candles = data.map((k: any[]) => ({
         timestamp: k[0],
         open: parseFloat(k[1]),
@@ -2953,11 +2984,11 @@ export async function registerRoutes(
         takerBuyQuote: parseFloat(k[10])
       }));
       
-      console.log(`[Data Proxy] Fetched ${candles.length} candles for ${symbol} ${interval}`);
+      console.log(`[Data Proxy] Fetched ${candles.length} candles for ${symbol} ${interval} via ${source}`);
       res.json({ candles, count: candles.length, symbol, interval });
-    } catch (error) {
-      console.error("[Data Proxy] Error fetching klines:", error);
-      res.status(500).json({ error: "Failed to fetch klines from Binance" });
+    } catch (error: any) {
+      console.error("[Data Proxy] Error fetching klines:", error.message);
+      res.status(502).json({ error: "Failed to fetch klines from all Binance endpoints" });
     }
   });
   
@@ -2965,15 +2996,20 @@ export async function registerRoutes(
     try {
       const { symbol = "BTCUSDT", limit = "100" } = req.query;
       
-      const url = `${BINANCE_VISION_URL}/depth?symbol=${symbol}&limit=${Math.min(Number(limit), 1000)}`;
-      const response = await fetch(url);
-      
-      if (!response.ok) {
-        return res.status(response.status).json({ error: `Binance returned ${response.status}` });
+      for (const baseUrl of BINANCE_ENDPOINTS) {
+        try {
+          const url = `${baseUrl}/depth?symbol=${symbol}&limit=${Math.min(Number(limit), 1000)}`;
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10000);
+          const response = await fetch(url, { signal: controller.signal });
+          clearTimeout(timeout);
+          if (response.ok) {
+            const data = await response.json();
+            return res.json(data);
+          }
+        } catch { continue; }
       }
-      
-      const data = await response.json();
-      res.json(data);
+      res.status(502).json({ error: "Failed to fetch orderbook from all endpoints" });
     } catch (error) {
       console.error("[Data Proxy] Error fetching orderbook:", error);
       res.status(500).json({ error: "Failed to fetch orderbook" });
@@ -2984,15 +3020,20 @@ export async function registerRoutes(
     try {
       const { symbol = "BTCUSDT" } = req.query;
       
-      const url = `${BINANCE_VISION_URL}/ticker/24hr?symbol=${symbol}`;
-      const response = await fetch(url);
-      
-      if (!response.ok) {
-        return res.status(response.status).json({ error: `Binance returned ${response.status}` });
+      for (const baseUrl of BINANCE_ENDPOINTS) {
+        try {
+          const url = `${baseUrl}/ticker/24hr?symbol=${symbol}`;
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10000);
+          const response = await fetch(url, { signal: controller.signal });
+          clearTimeout(timeout);
+          if (response.ok) {
+            const data = await response.json();
+            return res.json(data);
+          }
+        } catch { continue; }
       }
-      
-      const data = await response.json();
-      res.json(data);
+      res.status(502).json({ error: "Failed to fetch ticker from all endpoints" });
     } catch (error) {
       console.error("[Data Proxy] Error fetching ticker:", error);
       res.status(500).json({ error: "Failed to fetch ticker" });
@@ -3007,7 +3048,7 @@ export async function registerRoutes(
       // Fetch 24hr ticker data for all symbols
       const tickerPromises = symbols.map(async (symbol) => {
         try {
-          const url = `${BINANCE_VISION_URL}/ticker/24hr?symbol=${symbol}`;
+          const url = `${BINANCE_ENDPOINTS[0]}/ticker/24hr?symbol=${symbol}`;
           const response = await fetch(url);
           if (response.ok) {
             const data = await response.json();
@@ -3064,7 +3105,7 @@ export async function registerRoutes(
       // Fetch 100 recent candles for each symbol to calculate correlations
       const klinePromises = symbols.map(async (symbol) => {
         try {
-          const url = `${BINANCE_VISION_URL}/klines?symbol=${symbol}&interval=15m&limit=100`;
+          const url = `${BINANCE_ENDPOINTS[0]}/klines?symbol=${symbol}&interval=15m&limit=100`;
           const response = await fetch(url);
           if (response.ok) {
             const data = await response.json();
