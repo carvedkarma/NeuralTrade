@@ -1,0 +1,93 @@
+REPLIT AGENT TASK: “Trade Count Increase + Keep Net Profitability (v3.4.x)”
+Goal: Raise trades/day to ~2–3 WITHOUT collapsing net edge (PF_net >= 1.05, E_net > 0, profitable regimes >=2/3). Do NOT add new ML heads or new indicators. This is a policy/geometry/execution tuning task.
+
+1) Add a “frequency + net edge” auto-tuner (single command)
+- Implement/extend the existing geometry sweep so it can:
+  a) Run regime eval across 3 regimes (2021, 2022, 2023-2024) using the SAME inference path as live (single-row features).
+  b) Evaluate NET metrics (after costs) as primary.
+  c) Search configs that increase per-trade edge while keeping frequency in target band.
+
+2) Expand sweep dimensions (carefully)
+- Keep thresholds limited (only): 0.80, 0.85
+- Add percentile policies (needed to stabilize trade count):
+  - percentile:top8, top10, top12, top15, top18
+- Add “paired TP/SL combos” (don’t do full cartesian):
+  - (tp=3.0, sl=1.25)
+  - (tp=3.0, sl=1.5)
+  - (tp=3.5, sl=1.5)
+- Cooldowns:
+  - 4, 6, 8
+
+3) BEST selection criteria (NET first, frequency second)
+For each config compute per-regime and overall:
+- PF_net, E_net, Trades/day, Net-profitable-regimes count
+Pick BEST by:
+1) PF_net >= 1.05
+2) E_net > 0
+3) Trades/day within [target_tpd - tol, target_tpd + tol] (default target=2.5 tol=1.0)
+4) Profitable regimes >= 2/3
+If none pass, fallback to highest PF_net among configs with Trades/day >= 1.5
+
+4) Save winning policy for live
+- Save JSON to: checkpoints/best_policy.json
+Include:
+- policy_type: "threshold" or "percentile"
+- value: (0.80/0.85) OR (topN)
+- tp_mult, sl_mult, cooldown
+- costs config used
+- PF_net, E_net, Trades/day, profitable_regimes
+- timestamp + git/version string
+
+5) Make live runner automatically load best policy
+- If --live is used and --policy not specified:
+  - Load checkpoints/best_policy.json
+  - Apply tp/sl/cd/policy automatically
+- Log clearly: “Loaded BEST policy from best_policy.json …”
+
+6) Add “trade-count knobs” (safe)
+- Add CLI flags:
+  --policy-mode {threshold,percentile}
+  --topn-list "8,10,12,15,18"
+  --paired-tp-sl "3.0:1.25,3.0:1.5,3.5:1.5"
+  --cooldowns "4,6,8"
+  --target-tpd 2.5
+  --target-tpd-tol 1.0
+
+7) Add debug output to explain low trades
+When live/predict-only outputs HOLD, print:
+- p_enter
+- threshold or topN cutoff being used
+- HTF aligned? slope_ok? range_ok?
+- If percentile mode: print current p_enter percentile ranks (p50/p75/p90/p95/p99)
+
+8) Deliverables
+- Updated quick_start.py wiring for:
+  --geometry-sweep (now includes percentile mode grid too)
+  --save best_policy.json
+  --live auto-load policy
+- Update README with 3 commands:
+  A) Train fresh
+  B) Sweep + save best policy
+  C) Run live using saved best policy
+
+9) EXACT commands we must support
+A) Fresh training:
+python quick_start.py --url URL --epochs 300 --r-min-expiry 0.5
+
+B) Find best policy for 2–3 trades/day (NET):
+python quick_start.py --url URL --regime-eval --geometry-sweep \
+  --thresholds 0.80,0.85 \
+  --topn-list 8,10,12,15,18 \
+  --paired-tp-sl 3.0:1.25,3.0:1.5,3.5:1.5 \
+  --cooldowns 4,6,8 \
+  --target-tpd 2.5 --target-tpd-tol 1.0 \
+  --fees-entry-bps 5 --fees-exit-bps 5 --spread-bps 1 --slip-k 0.10
+
+C) Live runs automatically using best_policy.json unless overridden:
+python quick_start.py --url URL --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT --interval 15m --enable-learning
+
+IMPORTANT:
+- Do NOT change labeling logic.
+- Do NOT add new features.
+- Do NOT add candle-head training.
+- Focus only on: policy selection (threshold vs percentile), TP/SL geometry, cooldown, and best-policy persistence/loading.
