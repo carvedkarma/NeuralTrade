@@ -1796,11 +1796,14 @@ def run_geometry_sweep(data_path: Path, device: str, regimes_str: str,
                        horizon: int, slope_eps: float, r_min_expiry: float,
                        fees_bps_entry: float = 5.0, fees_bps_exit: float = 5.0,
                        spread_bps: float = 1.0, slip_k: float = 0.10,
-                       size_cap: float = 2.0, debug_costs: bool = False):
-    """Geometry sweep: evaluate multiple (tp, sl, threshold, cooldown) configs in one run.
+                       size_cap: float = 2.0, debug_costs: bool = False,
+                       topn_list: list = None,
+                       target_tpd: float = 2.5, target_tpd_tol: float = 1.0):
+    """Geometry sweep: evaluate multiple (tp, sl, policy, cooldown) configs in one run.
     
+    Supports both threshold and percentile (topN) policies.
     Uses paired TP/SL combos (not cartesian product).
-    Selects the BEST config using priority rules and saves to JSON.
+    Selects the BEST config using NET-first priority rules and saves to best_policy.json.
     """
     import numpy as np
 
@@ -1810,27 +1813,66 @@ def run_geometry_sweep(data_path: Path, device: str, regimes_str: str,
 
     ctx = _prepare_regime_eval_context(data_path, device, regimes_str, slope_eps)
 
+    active_p = ctx['all_p_enter'][ctx['candidate_mask']]
+    active_p = active_p[~np.isnan(active_p)]
+
+    percentile_thresholds = {}
+    if topn_list:
+        if len(active_p) > 0:
+            for topn in topn_list:
+                pct = 100.0 - topn
+                pct_thresh = float(np.percentile(active_p, max(pct, 0)))
+                percentile_thresholds[topn] = pct_thresh
+                log.info(f"  Percentile top{topn}: p_enter >= {pct_thresh:.4f}")
+        else:
+            log.warning("WARNING: topn_list requested but no valid active p_enter values found! Percentile policies will be skipped.")
+            topn_list = None
+
     configs = []
     for tp, sl in tp_sl_pairs:
         for thr in thresholds:
             for cd in cooldowns:
-                configs.append((tp, sl, thr, cd))
+                configs.append({
+                    'tp': tp, 'sl': sl, 'threshold': thr, 'cooldown': cd,
+                    'policy_type': 'threshold', 'policy_value': thr,
+                })
+        if topn_list:
+            for topn in topn_list:
+                if topn not in percentile_thresholds:
+                    continue
+                thr = percentile_thresholds[topn]
+                for cd in cooldowns:
+                    configs.append({
+                        'tp': tp, 'sl': sl, 'threshold': thr, 'cooldown': cd,
+                        'policy_type': 'percentile', 'policy_value': topn,
+                    })
 
-    log.info(f"Sweep: {len(configs)} configurations ({len(tp_sl_pairs)} TP/SL pairs x {len(thresholds)} thr x {len(cooldowns)} cd)")
+    n_thr = len(thresholds)
+    n_pct = len(topn_list) if topn_list else 0
+    n_policies = n_thr + n_pct
+    log.info(f"Sweep: {len(configs)} configurations ({len(tp_sl_pairs)} TP/SL pairs x {n_policies} policies x {len(cooldowns)} cd)")
+    log.info(f"  Threshold policies: {thresholds}")
+    if topn_list:
+        log.info(f"  Percentile policies: top{topn_list}")
     log.info(f"Costs: entry={fees_bps_entry}bps exit={fees_bps_exit}bps spread={spread_bps}bps slip_k={slip_k} | Size cap={size_cap}x")
     log.info(f"Horizon={horizon} | r_min_expiry={r_min_expiry}")
+    log.info(f"Target TPD: {target_tpd} +/- {target_tpd_tol}")
 
     all_summaries = []
 
-    for cfg_idx, (tp, sl, thr, cd) in enumerate(configs):
+    for cfg_idx, cfg in enumerate(configs):
+        tp, sl, thr, cd = cfg['tp'], cfg['sl'], cfg['threshold'], cfg['cooldown']
+        pol_label = f"thr={thr:.2f}" if cfg['policy_type'] == 'threshold' else f"top{int(cfg['policy_value'])}(={thr:.4f})"
         log.info("")
-        log.info(f"--- Config {cfg_idx+1}/{len(configs)}: TP={tp} SL={sl} thr={thr} cd={cd} ---")
+        log.info(f"--- Config {cfg_idx+1}/{len(configs)}: TP={tp} SL={sl} {pol_label} cd={cd} ---")
 
         regime_results, summary = _eval_single_config(
             ctx, tp, sl, thr, cd, horizon, r_min_expiry,
             fees_bps_entry, fees_bps_exit, spread_bps, slip_k, size_cap,
             verbose=True, debug_costs=debug_costs,
         )
+        summary['policy_type'] = cfg['policy_type']
+        summary['policy_value'] = cfg['policy_value']
         all_summaries.append(summary)
 
     log.info("")
@@ -1838,22 +1880,23 @@ def run_geometry_sweep(data_path: Path, device: str, regimes_str: str,
     log.info("GEOMETRY SWEEP SUMMARY")
     log.info("=" * 160)
 
-    hdr = "%-4s %-5s %-5s %-5s %-3s | %7s | %7s | %5s | %7s | %7s | %6s | %6s | %5s"
-    log.info(hdr, "#", "TP", "SL", "thr", "cd",
+    hdr = "%-4s %-5s %-5s %-12s %-3s | %7s | %7s | %5s | %7s | %7s | %6s | %6s | %5s"
+    log.info(hdr, "#", "TP", "SL", "Policy", "cd",
              "PF_n", "E_n", "TPD", "WinR_n", "LosR_n",
              "CostR", "SzMul", "Prof")
-    log.info("-" * 120)
+    log.info("-" * 130)
+
+    tpd_lo = target_tpd - target_tpd_tol
+    tpd_hi = target_tpd + target_tpd_tol
+    min_profitable = 2 if len(ctx['regimes']) >= 3 else 1
 
     best_idx = -1
-    best_pf_net = -999
-    best_tpd_dist = 999
-
     passing_indices = []
     for i, s in enumerate(all_summaries):
         pf_ok = s['overall_pf_net'] >= 1.05
         en_ok = s['overall_e_net'] > 0
-        tpd_ok = 3.0 <= s['overall_tpd'] <= 5.0
-        prof_ok = s['profitable_regimes'] >= 2
+        tpd_ok = tpd_lo <= s['overall_tpd'] <= tpd_hi
+        prof_ok = s['profitable_regimes'] >= min_profitable
         passes = pf_ok and en_ok and tpd_ok and prof_ok
         if passes:
             passing_indices.append(i)
@@ -1861,34 +1904,51 @@ def run_geometry_sweep(data_path: Path, device: str, regimes_str: str,
     if passing_indices:
         best_idx = max(passing_indices, key=lambda i: all_summaries[i]['overall_pf_net'])
     else:
+        best_pf_net = -999
         for i, s in enumerate(all_summaries):
-            tpd_dist = abs(s['overall_tpd'] - 4.0)
-            if s['overall_pf_net'] > best_pf_net or (s['overall_pf_net'] == best_pf_net and tpd_dist < best_tpd_dist):
+            if s['overall_tpd'] >= 1.5 and s['overall_e_net'] > 0 and s['overall_pf_net'] > best_pf_net:
                 best_pf_net = s['overall_pf_net']
-                best_tpd_dist = tpd_dist
                 best_idx = i
+        if best_idx < 0:
+            best_pf_net = -999
+            for i, s in enumerate(all_summaries):
+                if s['overall_tpd'] >= 1.5 and s['overall_pf_net'] > best_pf_net:
+                    best_pf_net = s['overall_pf_net']
+                    best_idx = i
+        if best_idx < 0:
+            best_pf_net = -999
+            for i, s in enumerate(all_summaries):
+                if s['overall_pf_net'] > best_pf_net:
+                    best_pf_net = s['overall_pf_net']
+                    best_idx = i
 
     for i, s in enumerate(all_summaries):
         is_best = (i == best_idx)
         tag = " << BEST" if is_best else ""
         prof_str = f"{s['profitable_regimes']}/{s['regimes_with_trades']}"
-        log.info("%-4d %-5.1f %-5.2f %-5.2f %-3d | %+7.2f | %+7.4f | %5.1f | %+7.2f | %+7.2f | %6.3f | %6.2f | %5s%s",
-                 i+1, s['tp_mult'], s['sl_mult'], s['threshold'], s['cooldown'],
+        pol_label = f"thr={s['threshold']:.2f}" if s['policy_type'] == 'threshold' else f"top{int(s['policy_value'])}"
+        log.info("%-4d %-5.1f %-5.2f %-12s %-3d | %+7.2f | %+7.4f | %5.1f | %+7.2f | %+7.2f | %6.3f | %6.2f | %5s%s",
+                 i+1, s['tp_mult'], s['sl_mult'], pol_label, s['cooldown'],
                  s['overall_pf_net'], s['overall_e_net'], s['overall_tpd'],
                  s['overall_win_r_net'], s['overall_loss_r_net'],
                  s['avg_cost_r'], s['avg_size_mult'], prof_str, tag)
 
-    log.info("=" * 120)
+    log.info("=" * 130)
 
     if best_idx >= 0:
         best = all_summaries[best_idx]
+        pol_type = best['policy_type']
+        pol_val = best['policy_value']
+        pol_label = f"threshold:{pol_val}" if pol_type == 'threshold' else f"percentile:top{int(pol_val)}"
+
         log.info("")
         log.info("=" * 80)
         log.info(f"  << BEST CONFIG ({SYSTEM_VERSION}) >>")
         log.info("=" * 80)
+        log.info(f"  Policy:     {pol_label}")
+        log.info(f"  Threshold:  {best['threshold']:.4f}")
         log.info(f"  TP mult:    {best['tp_mult']}")
         log.info(f"  SL mult:    {best['sl_mult']}")
-        log.info(f"  Threshold:  {best['threshold']}")
         log.info(f"  Cooldown:   {best['cooldown']}")
         log.info(f"  PF_net:     {best['overall_pf_net']:.2f}")
         log.info(f"  E[net]:     {best['overall_e_net']:+.4f}")
@@ -1900,13 +1960,17 @@ def run_geometry_sweep(data_path: Path, device: str, regimes_str: str,
         log.info(f"  Profitable: {best['profitable_regimes']}/{best['regimes_with_trades']} regimes")
 
         passed = best_idx in passing_indices
+        criteria_desc = f"PF_net>=1.05, E[net]>0, TPD {tpd_lo:.1f}-{tpd_hi:.1f}, >={min_profitable} regimes profitable"
         if passed:
-            log.info(f"  Status:     PASSED (PF_net>=1.05, E[net]>0, TPD 3-5, >=2 regimes profitable)")
+            log.info(f"  Status:     PASSED ({criteria_desc})")
         else:
             log.info(f"  Status:     BEST AVAILABLE (did not pass all criteria)")
 
         policy_json = {
             'version': SYSTEM_VERSION,
+            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'policy_type': pol_type,
+            'policy_value': pol_val,
             'tp_mult': best['tp_mult'],
             'sl_mult': best['sl_mult'],
             'threshold': best['threshold'],
@@ -1926,9 +1990,25 @@ def run_geometry_sweep(data_path: Path, device: str, regimes_str: str,
             'profitable_regimes': best['profitable_regimes'],
             'regimes_with_trades': best['regimes_with_trades'],
             'passed_all_criteria': passed,
+            'costs': {
+                'fees_bps_entry': fees_bps_entry,
+                'fees_bps_exit': fees_bps_exit,
+                'spread_bps': spread_bps,
+                'slip_k': slip_k,
+                'size_cap': size_cap,
+            },
+            'metrics': {
+                'overall_pf_net': best['overall_pf_net'],
+                'overall_e_net': best['overall_e_net'],
+                'overall_tpd': best['overall_tpd'],
+                'overall_win_r_net': best['overall_win_r_net'],
+                'overall_loss_r_net': best['overall_loss_r_net'],
+                'profitable_regimes': best['profitable_regimes'],
+                'regimes_with_trades': best['regimes_with_trades'],
+            },
         }
 
-        out_path = Path("checkpoints/best_policy_v3.4.0.json")
+        out_path = Path("checkpoints/best_policy.json")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w") as f:
             json.dump(policy_json, f, indent=2)
@@ -1945,14 +2025,23 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python quick_start.py --url https://your-app.replit.app
-  python quick_start.py --url https://your-app.replit.app --epochs 300
-  python quick_start.py --url https://your-app.replit.app --predict-only
-  python quick_start.py --url https://your-app.replit.app --regime-eval --policy threshold:0.70 --cooldown 4
-  python quick_start.py --url https://your-app.replit.app --regime-eval --geometry-sweep
-  python quick_start.py --url https://your-app.replit.app --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT
-  python quick_start.py --url https://your-app.replit.app --live --paper --exec-tf 3m --pullback-atr 0.20
-  python quick_start.py --url https://your-app.replit.app --live --dry-run --dry-run-candles 200
+  # A) Train fresh:
+  python quick_start.py --url URL --epochs 300
+
+  # B) Find best policy for 2-3 trades/day (NET):
+  python quick_start.py --url URL --regime-eval --geometry-sweep \\
+    --thresholds 0.80,0.85 --topn-list 8,10,12,15,18 \\
+    --paired-tp-sl 3.0:1.25,3.0:1.5,3.5:1.5 --cooldowns 4,6,8 \\
+    --target-tpd 2.5 --target-tpd-tol 1.0
+
+  # C) Live run using saved best_policy.json (auto-loaded):
+  python quick_start.py --url URL --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT \\
+    --interval 15m --enable-learning
+
+  # Other:
+  python quick_start.py --url URL --predict-only
+  python quick_start.py --url URL --regime-eval --policy threshold:0.85 --cooldown 6
+  python quick_start.py --url URL --live --dry-run --dry-run-candles 200
         """
     )
     parser.add_argument("--url", required=True, help="Your Replit dashboard URL")
@@ -1969,8 +2058,8 @@ Examples:
     parser.add_argument("--horizon", type=int, default=24, help="Horizon bars (default: 24)")
     parser.add_argument("--slope-eps", type=float, default=0.05, help="Min slope for trend gate (default: 0.05)")
     parser.add_argument("--r-min-expiry", type=float, default=0.5, help="Min R-multiple at expiry for ENTER=1 (default: 0.5)")
-    parser.add_argument("--target-tpd", type=float, default=5.5, help="Target trades per day for BEST selection (default: 5.5)")
-    parser.add_argument("--target-tpd-tol", type=float, default=1.5, help="Tolerance band for trades/day (default: 1.5)")
+    parser.add_argument("--target-tpd", type=float, default=2.5, help="Target trades per day for BEST selection (default: 2.5)")
+    parser.add_argument("--target-tpd-tol", type=float, default=1.0, help="Tolerance band for trades/day (default: 1.0)")
     parser.add_argument("--regime-eval", action="store_true", help="Run regime robustness evaluation (no training)")
     parser.add_argument("--regimes", type=str,
                         default="2019-01-01:2020-12-31,2021-01-01:2021-12-31,2022-01-01:2022-12-31,2023-01-01:2024-12-31",
@@ -1992,7 +2081,11 @@ Examples:
     parser.add_argument("--thresholds", type=str, default=None,
                         help="Comma-separated thresholds for sweep (e.g. '0.70,0.75')")
     parser.add_argument("--cooldowns", type=str, default=None,
-                        help="Comma-separated cooldowns for sweep (e.g. '4,6')")
+                        help="Comma-separated cooldowns for sweep (e.g. '4,6,8')")
+    parser.add_argument("--topn-list", type=str, default=None,
+                        help="Comma-separated percentile topN values for sweep (e.g. '8,10,12,15,18')")
+    parser.add_argument("--paired-tp-sl", type=str, default=None,
+                        help="Comma-separated TP:SL pairs for sweep (e.g. '3.0:1.25,3.0:1.5,3.5:1.5')")
     parser.add_argument("--debug-costs", action="store_true",
                         help="Print 5 random trades per regime and assert cost accounting")
 
@@ -2071,12 +2164,51 @@ Examples:
 
         symbols = [s.strip().upper() for s in args.symbols.split(",")]
 
+        live_tp = args.tp_mult
+        live_sl = args.sl_mult
+        live_threshold = args.enter_threshold
+        live_cooldown = args.cooldown
+        policy_source = "CLI defaults"
+
+        policy_path = Path("checkpoints/best_policy.json")
+        cli_policy_set = '--policy' in sys.argv or '--enter-threshold' in sys.argv
+        if not cli_policy_set and policy_path.exists():
+            try:
+                with open(policy_path) as f:
+                    bp = json.load(f)
+                live_tp = bp.get('tp_mult', live_tp)
+                live_sl = bp.get('sl_mult', live_sl)
+                live_threshold = bp.get('threshold', live_threshold)
+                live_cooldown = bp.get('cooldown', live_cooldown)
+                pol_type = bp.get('policy_type', 'threshold')
+                pol_val = bp.get('policy_value', live_threshold)
+                pf_net = bp.get('metrics', {}).get('overall_pf_net', bp.get('overall_pf_net', '?'))
+                e_net = bp.get('metrics', {}).get('overall_e_net', bp.get('overall_e_net', '?'))
+                tpd = bp.get('metrics', {}).get('overall_tpd', bp.get('overall_tpd', '?'))
+                pol_label = f"threshold:{pol_val}" if pol_type == 'threshold' else f"percentile:top{int(pol_val)}"
+                policy_source = f"best_policy.json ({pol_label})"
+                print(f"  Loaded BEST policy from {policy_path}")
+                print(f"    Policy: {pol_label} (threshold={live_threshold:.4f})")
+                print(f"    TP={live_tp}x SL={live_sl}x Cooldown={live_cooldown}")
+                print(f"    PF_net={pf_net} E[net]={e_net} TPD={tpd}")
+            except Exception as e:
+                log.warning(f"Failed to load best_policy.json: {e}, using CLI defaults")
+
+        if '--tp-mult' in sys.argv:
+            live_tp = args.tp_mult
+        if '--sl-mult' in sys.argv:
+            live_sl = args.sl_mult
+        if '--cooldown' in sys.argv:
+            live_cooldown = args.cooldown
+
+        print(f"  Policy source: {policy_source}")
+
         portfolio = PortfolioManager(
             max_positions_total=args.max_pos_total,
             max_positions_per_symbol=args.max_pos_symbol,
             risk_cap_total_pct=args.risk_cap_total,
             risk_cap_symbol_pct=args.risk_cap_symbol,
-            cooldown_bars=args.cooldown,
+            cooldown_bars=live_cooldown,
             block_correlated_same_dir=not args.no_correlation_block,
         )
 
@@ -2116,10 +2248,10 @@ Examples:
             symbols=symbols,
             device=device,
             interval=args.interval,
-            enter_threshold=args.enter_threshold,
-            tp_mult=args.tp_mult,
-            sl_mult=args.sl_mult,
-            cooldown_bars=args.cooldown,
+            enter_threshold=live_threshold,
+            tp_mult=live_tp,
+            sl_mult=live_sl,
+            cooldown_bars=live_cooldown,
             paper=args.paper,
             portfolio_manager=portfolio,
             execution_module=execution,
@@ -2134,23 +2266,31 @@ Examples:
     if args.regime_eval:
         data_path = download_data(args.url, data_dir)
 
-        if args.geometry_sweep or args.tp_mults or args.sl_mults or args.thresholds or args.cooldowns:
+        is_sweep = args.geometry_sweep or args.tp_mults or args.sl_mults or args.thresholds or args.cooldowns or args.topn_list or args.paired_tp_sl
+        if is_sweep:
             PAIRED_TP_SL = [
-                (2.5, 1.25),
+                (3.0, 1.25),
                 (3.0, 1.5),
                 (3.5, 1.5),
             ]
 
-            if args.geometry_sweep:
+            if args.paired_tp_sl:
+                tp_sl_pairs = []
+                for pair_str in args.paired_tp_sl.split(","):
+                    tp_str, sl_str = pair_str.strip().split(":")
+                    tp_sl_pairs.append((float(tp_str), float(sl_str)))
+            elif args.geometry_sweep:
                 tp_sl_pairs = PAIRED_TP_SL
-                thresholds = [float(x) for x in args.thresholds.split(",")] if args.thresholds else [0.70, 0.75]
-                cooldowns = [int(x) for x in args.cooldowns.split(",")] if args.cooldowns else [4, 6]
-            else:
+            elif args.tp_mults or args.sl_mults:
                 tp_mults = [float(x) for x in args.tp_mults.split(",")] if args.tp_mults else [args.tp_mult]
                 sl_mults = [float(x) for x in args.sl_mults.split(",")] if args.sl_mults else [args.sl_mult]
                 tp_sl_pairs = [(tp, sl) for tp in tp_mults for sl in sl_mults]
-                thresholds = [float(x) for x in args.thresholds.split(",")] if args.thresholds else [0.70]
-                cooldowns = [int(x) for x in args.cooldowns.split(",")] if args.cooldowns else [args.cooldown]
+            else:
+                tp_sl_pairs = PAIRED_TP_SL
+
+            thresholds = [float(x) for x in args.thresholds.split(",")] if args.thresholds else [0.80, 0.85]
+            cooldowns = [int(x) for x in args.cooldowns.split(",")] if args.cooldowns else [4, 6, 8]
+            topn_list = [int(x) for x in args.topn_list.split(",")] if args.topn_list else None
 
             run_geometry_sweep(
                 data_path, device, args.regimes,
@@ -2160,6 +2300,8 @@ Examples:
                 spread_bps=args.spread_bps, slip_k=args.slip_k,
                 size_cap=args.size_cap,
                 debug_costs=args.debug_costs,
+                topn_list=topn_list,
+                target_tpd=args.target_tpd, target_tpd_tol=args.target_tpd_tol,
             )
         else:
             run_regime_eval(

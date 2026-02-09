@@ -395,6 +395,7 @@ class LiveRunner:
         self.candle_cache: Dict[str, pd.DataFrame] = {}
         self.exchange_time_offset = 0.0
         self.cooldown_tracker: Dict[str, int] = {}
+        self.p_enter_history: Dict[str, List[float]] = {}
 
     def _init_fetcher(self):
         from data.pipeline import BinanceDataFetcher
@@ -639,6 +640,12 @@ class LiveRunner:
         current_price = float(df_candles.iloc[-1]['close'])
         atr = _compute_atr(df_candles)
 
+        if symbol not in self.p_enter_history:
+            self.p_enter_history[symbol] = []
+        self.p_enter_history[symbol].append(p_enter)
+        if len(self.p_enter_history[symbol]) > 500:
+            self.p_enter_history[symbol] = self.p_enter_history[symbol][-500:]
+
         log.info(f"  {symbol}: price={current_price:.2f} p_enter={p_enter:.4f} "
                  f"side={htf['side']} aligned={htf['trend_aligned']} "
                  f"slope_ok={htf['slope_ok']} range_ok={htf['range_ok']}")
@@ -684,6 +691,19 @@ class LiveRunner:
         if decision != "ENTER":
             if decision != "COOLDOWN":
                 log.info(f"  {symbol}: {decision} — {'; '.join(reasons)}")
+                sym_hist = self.p_enter_history.get(symbol, [])
+                if len(sym_hist) >= 10:
+                    hist = np.array(sym_hist)
+                    p50 = float(np.percentile(hist, 50))
+                    p75 = float(np.percentile(hist, 75))
+                    p90 = float(np.percentile(hist, 90))
+                    p95 = float(np.percentile(hist, 95))
+                    p99 = float(np.percentile(hist, 99))
+                    log.info(f"    {symbol} p_enter percentiles (last {len(hist)}): "
+                             f"p50={p50:.3f} p75={p75:.3f} p90={p90:.3f} p95={p95:.3f} p99={p99:.3f}")
+                    log.info(f"    threshold={self.enter_threshold:.4f} | "
+                             f"HTF: aligned={htf['trend_aligned']} slope_ok={htf['slope_ok']} range_ok={htf['range_ok']} | "
+                             f"side={side}")
             return None
 
         sl_pct = self.sl_mult * atr / current_price

@@ -28,19 +28,33 @@ The system integrates multi-head predictions from the GPU trainer into the dashb
 ### GPU Trainer Commands
 Training: `python quick_start.py --url URL --epochs 300`
 Prediction: `python quick_start.py --url URL --predict-only`
-Regime Eval: `python quick_start.py --url URL --regime-eval --policy threshold:0.70 --cooldown 4 --tp-mult 2.0 --sl-mult 1.5`
+Regime Eval: `python quick_start.py --url URL --regime-eval --policy threshold:0.85 --cooldown 6 --tp-mult 3.0 --sl-mult 1.5`
 Regime Eval (custom costs): `python quick_start.py --url URL --regime-eval --fees-entry-bps 2 --fees-exit-bps 2 --slip-k 0.05`
-Geometry Sweep: `python quick_start.py --url URL --regime-eval --geometry-sweep`
-Geometry Sweep (custom thresholds/cooldowns): `python quick_start.py --url URL --regime-eval --geometry-sweep --thresholds 0.70,0.75 --cooldowns 4,6`
+Geometry Sweep (full): `python quick_start.py --url URL --regime-eval --geometry-sweep --thresholds 0.80,0.85 --topn-list 8,10,12,15,18 --paired-tp-sl 3.0:1.25,3.0:1.5,3.5:1.5 --cooldowns 4,6,8 --target-tpd 2.5 --target-tpd-tol 1.0`
+Geometry Sweep (threshold-only): `python quick_start.py --url URL --regime-eval --geometry-sweep --thresholds 0.80,0.85 --cooldowns 4,6,8`
 Geometry Sweep (debug costs): `python quick_start.py --url URL --regime-eval --geometry-sweep --debug-costs`
-Live (multi-asset): `python quick_start.py --url URL --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT --interval 15m --exec-tf 3m --pullback-atr 0.20`
+Live (auto-load best policy): `python quick_start.py --url URL --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT --interval 15m --enable-learning`
+Live (explicit policy): `python quick_start.py --url URL --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT --interval 15m --enter-threshold 0.85 --tp-mult 3.0 --sl-mult 1.5 --cooldown 6`
 Live (dry run): `python quick_start.py --url URL --live --dry-run --dry-run-candles 200`
 Live (no exec module): `python quick_start.py --url URL --live --paper --no-exec`
-Live (with learning): `python quick_start.py --url URL --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT --enable-learning --retrain-hour 4 --retrain-epochs 300`
 Live (per-symbol models): `python quick_start.py --url URL --live --paper --per-symbol-models --enable-learning`
 Live (learning, no auto-promote): `python quick_start.py --url URL --live --paper --enable-learning --no-auto-promote`
 
 Key files: `gpu_trainer/quick_start.py`, `gpu_trainer/training/triple_barrier.py` (shared barrier simulator + cost model), `gpu_trainer/data/regression_targets.py` (labeling), `gpu_trainer/data/pipeline.py` (features/data), `gpu_trainer/live_runner.py` (multi-asset live loop), `gpu_trainer/execution.py` (lower-TF entry), `gpu_trainer/portfolio.py` (position tracking/risk caps), `gpu_trainer/learning.py` (scheduled retrain + safe promotion).
+
+### Policy Auto-Tuner (v3.4.x)
+The geometry sweep supports both threshold and percentile (topN) policies for optimizing trade frequency while maintaining net edge. The sweep evaluates configs across multiple regimes and selects the BEST config using NET-first priority:
+1. PF_net >= 1.05
+2. E_net > 0
+3. Trades/day within target band (default 2.5 +/- 1.0)
+4. Profitable regimes >= 2/3
+Fallback: highest PF_net among configs with TPD >= 1.5
+
+The winning policy is saved to `checkpoints/best_policy.json` with full metadata (policy_type, threshold, TP/SL/cooldown, cost config, metrics, timestamp). The live runner automatically loads this policy if `--enter-threshold` or `--policy` is not explicitly set on the CLI.
+
+CLI flags for sweep: `--topn-list`, `--paired-tp-sl`, `--thresholds`, `--cooldowns`, `--target-tpd`, `--target-tpd-tol`
+
+Enhanced HOLD debug output: when live inference outputs non-ENTER decisions, the CLI prints p_enter percentile ranks (p50/p75/p90/p95/p99) from recent history, plus threshold and HTF gate details.
 
 ### Live Learning System (v3.5.0)
 The live system supports scheduled retraining with safe model promotion. Key components:
