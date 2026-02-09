@@ -70,7 +70,23 @@ class BinanceDataFetcher:
                         _time.sleep(3)
                     continue
                 
-                data = response.json()
+                content_type = response.headers.get('content-type', '')
+                if 'json' not in content_type and body.strip().startswith('<'):
+                    print(f"[Replit Proxy] Got HTML instead of JSON (content-type={content_type}, len={len(body)})")
+                    print(f"[Replit Proxy] Body preview: {body[:200]}")
+                    if attempt < max_retries:
+                        _time.sleep(5)
+                    continue
+                
+                import json
+                try:
+                    data = json.loads(body)
+                except json.JSONDecodeError as je:
+                    print(f"[Replit Proxy] JSON parse failed: {je}")
+                    print(f"[Replit Proxy] Body preview ({len(body)} bytes): {body[:300]}")
+                    if attempt < max_retries:
+                        _time.sleep(3)
+                    continue
                 if "candles" not in data or not isinstance(data["candles"], list):
                     print(f"[Replit Proxy] No 'candles' key in response, got keys: {list(data.keys())}")
                     if attempt < max_retries:
@@ -119,13 +135,74 @@ class BinanceDataFetcher:
         print(f"[Replit Proxy] FAILED: Could not fetch {symbol} {timeframe} after {max_retries} attempts")
         return []
     
+    def _fetch_binance_direct_sync(self, symbol: str, timeframe: str, limit: int,
+                                     end_time: Optional[int] = None) -> List[Dict]:
+        import requests
+        
+        binance_urls = [
+            "https://api.binance.com/api/v3",
+            "https://data-api.binance.vision/api/v3",
+            "https://api1.binance.com/api/v3",
+        ]
+        
+        params: Dict[str, Any] = {
+            "symbol": symbol,
+            "interval": timeframe,
+            "limit": min(limit, 1000)
+        }
+        if end_time:
+            params["endTime"] = end_time
+        
+        for base_url in binance_urls:
+            try:
+                url = f"{base_url}/klines"
+                print(f"[Direct Binance] Trying {base_url} for {symbol} {timeframe}...")
+                response = requests.get(url, params=params, timeout=15)
+                
+                if response.status_code != 200:
+                    print(f"[Direct Binance] {base_url} returned HTTP {response.status_code}")
+                    continue
+                
+                raw = response.json()
+                if not isinstance(raw, list) or len(raw) == 0:
+                    print(f"[Direct Binance] {base_url} returned empty array")
+                    continue
+                
+                candles = []
+                for k in raw:
+                    candles.append({
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "timestamp": k[0],
+                        "open": float(k[1]),
+                        "high": float(k[2]),
+                        "low": float(k[3]),
+                        "close": float(k[4]),
+                        "volume": float(k[5]),
+                        "close_time": k[6],
+                        "quote_volume": float(k[7]),
+                        "trades": k[8],
+                        "taker_buy_base": float(k[9]),
+                        "taker_buy_quote": float(k[10])
+                    })
+                print(f"[Direct Binance] OK: {len(candles)} candles for {symbol} {timeframe} via {base_url}")
+                return candles
+            except Exception as e:
+                print(f"[Direct Binance] {base_url} failed: {e}")
+                continue
+        
+        print(f"[Direct Binance] FAILED: All Binance endpoints failed for {symbol} {timeframe}")
+        return []
+
     def fetch_klines_sync(self, symbol: str, timeframe: str, limit: int = 1000,
                           end_time: Optional[int] = None) -> List[Dict]:
         if self.replit_proxy_url:
-            return self._fetch_replit_proxy_sync(symbol, timeframe, limit, end_time)
+            result = self._fetch_replit_proxy_sync(symbol, timeframe, limit, end_time)
+            if result:
+                return result
+            print(f"[Sync] Replit proxy failed, falling back to direct Binance...")
         
-        print(f"[Sync] No Replit proxy configured - cannot fetch {symbol}")
-        return []
+        return self._fetch_binance_direct_sync(symbol, timeframe, limit, end_time)
     
     def fetch_historical_sync(self, symbol: str, timeframe: str, 
                                num_candles: int = 175000) -> pd.DataFrame:
