@@ -37,49 +37,86 @@ class BinanceDataFetcher:
         if not self.replit_proxy_url:
             return []
         
-        try:
-            import requests
-            
-            params: Dict[str, Any] = {
-                "symbol": symbol,
-                "interval": timeframe,
-                "limit": min(limit, 1000)
-            }
-            if end_time:
-                params["endTime"] = end_time
-            
-            url = f"{self.replit_proxy_url}/api/data/klines"
-            print(f"[Replit Proxy] Fetching {symbol} {timeframe} (limit={params['limit']})...")
-            
-            response = requests.get(url, params=params, timeout=30)
-            
-            if response.status_code == 200:
+        import requests
+        import time as _time
+        
+        params: Dict[str, Any] = {
+            "symbol": symbol,
+            "interval": timeframe,
+            "limit": min(limit, 1000)
+        }
+        if end_time:
+            params["endTime"] = end_time
+        
+        url = f"{self.replit_proxy_url}/api/data/klines"
+        max_retries = 3
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"[Replit Proxy] Fetching {symbol} {timeframe} (limit={params['limit']}, attempt {attempt}/{max_retries})...")
+                
+                response = requests.get(url, params=params, timeout=45)
+                
+                if response.status_code != 200:
+                    print(f"[Replit Proxy] HTTP {response.status_code} (len={len(response.text)}): {response.text[:200]}")
+                    if attempt < max_retries:
+                        _time.sleep(3)
+                    continue
+                
+                body = response.text
+                if not body or len(body) < 5:
+                    print(f"[Replit Proxy] Empty response body (len={len(body) if body else 0}), retrying...")
+                    if attempt < max_retries:
+                        _time.sleep(3)
+                    continue
+                
                 data = response.json()
-                if "candles" in data:
-                    candles = []
-                    for c in data["candles"]:
-                        candles.append({
-                            "symbol": symbol,
-                            "timeframe": timeframe,
-                            "timestamp": c["timestamp"],
-                            "open": float(c["open"]),
-                            "high": float(c["high"]),
-                            "low": float(c["low"]),
-                            "close": float(c["close"]),
-                            "volume": float(c["volume"]),
-                            "close_time": c["closeTime"],
-                            "quote_volume": float(c["quoteVolume"]),
-                            "trades": c["trades"],
-                            "taker_buy_base": float(c["takerBuyBase"]),
-                            "taker_buy_quote": float(c["takerBuyQuote"])
-                        })
-                    if candles:
-                        print(f"[Replit Proxy] Successfully fetched {len(candles)} candles for {symbol} {timeframe}")
+                if "candles" not in data or not isinstance(data["candles"], list):
+                    print(f"[Replit Proxy] No 'candles' key in response, got keys: {list(data.keys())}")
+                    if attempt < max_retries:
+                        _time.sleep(3)
+                    continue
+                
+                candles = []
+                for c in data["candles"]:
+                    candles.append({
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "timestamp": c["timestamp"],
+                        "open": float(c["open"]),
+                        "high": float(c["high"]),
+                        "low": float(c["low"]),
+                        "close": float(c["close"]),
+                        "volume": float(c["volume"]),
+                        "close_time": c["closeTime"],
+                        "quote_volume": float(c["quoteVolume"]),
+                        "trades": c["trades"],
+                        "taker_buy_base": float(c["takerBuyBase"]),
+                        "taker_buy_quote": float(c["takerBuyQuote"])
+                    })
+                if candles:
+                    print(f"[Replit Proxy] OK: {len(candles)} candles for {symbol} {timeframe}")
                     return candles
-            else:
-                print(f"[Replit Proxy] HTTP {response.status_code}: {response.text[:100]}")
-        except Exception as e:
-            print(f"[Replit Proxy] Sync fetch error: {e}")
+                else:
+                    print(f"[Replit Proxy] Response had empty candles array")
+                    if attempt < max_retries:
+                        _time.sleep(3)
+                    continue
+                    
+            except requests.exceptions.Timeout:
+                print(f"[Replit Proxy] Timeout after 45s (attempt {attempt}/{max_retries})")
+                if attempt < max_retries:
+                    _time.sleep(5)
+            except requests.exceptions.ConnectionError as e:
+                print(f"[Replit Proxy] Connection error: {e} (attempt {attempt}/{max_retries})")
+                if attempt < max_retries:
+                    _time.sleep(5)
+            except Exception as e:
+                print(f"[Replit Proxy] Error: {type(e).__name__}: {e} (attempt {attempt}/{max_retries})")
+                if attempt < max_retries:
+                    _time.sleep(3)
+        
+        print(f"[Replit Proxy] FAILED: Could not fetch {symbol} {timeframe} after {max_retries} attempts")
         return []
     
     def fetch_klines_sync(self, symbol: str, timeframe: str, limit: int = 1000,
