@@ -371,12 +371,15 @@ export async function registerRoutes(
   app.get("/api/pro/trades/:id/replay", async (req, res) => {
     try {
       const tradeId = Number(req.params.id);
+      const preBars = Math.min(Math.max(Number(req.query.preBars) || 50, 10), 200);
+      const postBars = Math.min(Math.max(Number(req.query.postBars) || 10, 5), 50);
+
       const [trade] = await db.select().from(liveTradeRecords).where(eq(liveTradeRecords.id, tradeId)).limit(1);
       if (!trade) return res.status(404).json({ error: "Trade not found" });
 
       const barMs = 15 * 60 * 1000;
-      const startTs = trade.entryTime - 50 * barMs;
-      const endTs = (trade.exitTime ?? trade.entryTime) + 10 * barMs;
+      const startTs = trade.entryTime - preBars * barMs;
+      const endTs = (trade.exitTime ?? Date.now()) + postBars * barMs;
 
       const symbol = trade.symbol || "BTCUSDT";
       const replayCandles = await db
@@ -391,25 +394,72 @@ export async function registerRoutes(
           )
         )
         .orderBy(asc(candles.timestamp))
-        .limit(200);
+        .limit(300);
 
-      console.log(`[Trade Detail] Loaded replay candles count=${replayCandles.length} for trade_id=${tradeId}`);
+      const isOpen = !trade.exitTime;
+
+      const markers: Array<{ t: number; price: number; type: string; side?: string; outcome?: string }> = [];
+      markers.push({
+        t: trade.entryTime,
+        price: trade.entryPrice,
+        type: "ENTRY",
+        side: trade.side || "LONG",
+      });
+      if (trade.exitTime && trade.exitPrice) {
+        markers.push({
+          t: trade.exitTime,
+          price: trade.exitPrice,
+          type: "EXIT",
+          outcome: trade.outcome || "EXPIRE",
+        });
+      }
+
+      const lines: Array<{ name: string; price: number }> = [];
+      lines.push({ name: "ENTRY", price: trade.entryPrice });
+      if (trade.stopLoss) lines.push({ name: "SL", price: trade.stopLoss });
+      if (trade.takeProfit) lines.push({ name: "TP", price: trade.takeProfit });
+
+      const lastCandleTs = replayCandles.length > 0
+        ? replayCandles[replayCandles.length - 1].timestamp
+        : trade.entryTime;
+
+      const bands = [{
+        from: trade.entryTime,
+        to: isOpen ? lastCandleTs : (trade.exitTime ?? trade.entryTime),
+        label: isOpen ? "OPEN" : "Trade Window",
+      }];
+
+      console.log(`[Replay] Loaded ${replayCandles.length} candles for trade_id=${tradeId} symbol=${symbol} range=${new Date(startTs).toISOString()}..${new Date(endTs).toISOString()}`);
+
       res.json({
+        trade: {
+          id: trade.id,
+          symbol: trade.symbol,
+          side: trade.side,
+          entry_at: trade.entryTime,
+          exit_at: trade.exitTime,
+          entry_price: trade.entryPrice,
+          exit_price: trade.exitPrice,
+          sl_price: trade.stopLoss,
+          tp_price: trade.takeProfit,
+          outcome: trade.outcome,
+          net_r: trade.netR,
+          pnl_usd: trade.pnlUsd,
+          bars_held: trade.barsHeld,
+          status: trade.status,
+        },
+        timeframe: "15m",
         candles: replayCandles.map((c) => ({
-          timestamp: c.timestamp,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-          volume: c.volume,
+          t: c.timestamp,
+          o: c.open,
+          h: c.high,
+          l: c.low,
+          c: c.close,
+          v: c.volume,
         })),
-        entryTime: trade.entryTime,
-        exitTime: trade.exitTime,
-        entryPrice: trade.entryPrice,
-        exitPrice: trade.exitPrice,
-        stopLoss: trade.stopLoss,
-        takeProfit: trade.takeProfit,
-        side: trade.side,
+        markers,
+        lines,
+        bands,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

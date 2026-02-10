@@ -9,9 +9,6 @@ import {
   DollarSign,
   TrendingUp,
   TrendingDown,
-  Shield,
-  Target,
-  BarChart3,
   FileText,
   Activity,
 } from "lucide-react";
@@ -27,18 +24,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  ReferenceLine,
-} from "recharts";
 import { apiRequest } from "@/lib/queryClient";
 import { queryClient } from "@/lib/queryClient";
+import TradeReplayChart from "@/components/trade-replay-chart";
+import type { ReplayData } from "@/components/trade-replay-chart";
 
 interface Trade {
   id: number;
@@ -80,16 +69,6 @@ interface TradeEvent {
   data?: Record<string, unknown>;
 }
 
-interface ReplayData {
-  candles: Array<{ ts: number; close: number }>;
-  entryTime: number;
-  exitTime: number | null;
-  entryPrice: number;
-  exitPrice: number | null;
-  stopLoss: number | null;
-  takeProfit: number | null;
-  side: string;
-}
 
 interface TradeDetailModalProps {
   tradeId: number | null;
@@ -121,15 +100,6 @@ function fmtTs(ts: string | number | null | undefined): string {
   }
 }
 
-function fmtShortTs(ts: number | null | undefined): string {
-  if (!ts) return "";
-  try {
-    return format(new Date(ts), "HH:mm");
-  } catch {
-    return "";
-  }
-}
-
 function outcomeBadgeVariant(outcome: string | null): "default" | "secondary" | "destructive" | "outline" {
   if (!outcome) return "outline";
   const upper = outcome.toUpperCase();
@@ -158,6 +128,11 @@ export default function TradeDetailModal({ tradeId, open, onClose }: TradeDetail
 
   const { data: replayData, isLoading: replayLoading } = useQuery<ReplayData>({
     queryKey: ["/api/pro/trades", String(tradeId), "replay"],
+    queryFn: async () => {
+      const res = await fetch(`/api/pro/trades/${tradeId}/replay?preBars=50&postBars=10`);
+      if (!res.ok) throw new Error("Failed to fetch replay data");
+      return res.json();
+    },
     enabled: tradeId !== null && open,
   });
 
@@ -182,14 +157,6 @@ export default function TradeDetailModal({ tradeId, open, onClose }: TradeDetail
     },
   });
 
-  const chartData = useMemo(() => {
-    if (!replayData?.candles) return [];
-    return replayData.candles.map((c) => ({
-      ts: c.ts,
-      label: fmtShortTs(c.ts),
-      close: c.close,
-    }));
-  }, [replayData]);
 
   const htfFlags = useMemo(() => {
     if (!trade?.reasons) return [];
@@ -440,87 +407,7 @@ export default function TradeDetailModal({ tradeId, open, onClose }: TradeDetail
               </CardContent>
             </Card>
 
-            <Card className="rounded-md" data-testid="card-replay-chart">
-              <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium flex items-center gap-1.5">
-                  <BarChart3 className="h-4 w-4 text-muted-foreground" />
-                  Replay Chart
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {replayLoading ? (
-                  <Skeleton className="h-48 w-full" />
-                ) : chartData.length > 0 ? (
-                  <ResponsiveContainer width="100%" height={220}>
-                    <LineChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                      <XAxis
-                        dataKey="label"
-                        tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
-                        interval="preserveStartEnd"
-                      />
-                      <YAxis
-                        domain={["auto", "auto"]}
-                        tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
-                        width={60}
-                      />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: "hsl(var(--card))",
-                          border: "1px solid hsl(var(--border))",
-                          borderRadius: "6px",
-                          fontSize: "12px",
-                        }}
-                        labelStyle={{ color: "hsl(var(--foreground))" }}
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="close"
-                        stroke="hsl(var(--primary))"
-                        strokeWidth={1.5}
-                        dot={false}
-                      />
-                      {replayData?.entryTime && (
-                        <ReferenceLine
-                          x={fmtShortTs(replayData.entryTime)}
-                          stroke="#22c55e"
-                          strokeDasharray="4 4"
-                          label={{ value: "Entry", position: "top", fill: "#22c55e", fontSize: 10 }}
-                        />
-                      )}
-                      {replayData?.exitTime && (
-                        <ReferenceLine
-                          x={fmtShortTs(replayData.exitTime)}
-                          stroke="#f59e0b"
-                          strokeDasharray="4 4"
-                          label={{ value: "Exit", position: "top", fill: "#f59e0b", fontSize: 10 }}
-                        />
-                      )}
-                      {replayData?.stopLoss !== null && replayData?.stopLoss !== undefined && (
-                        <ReferenceLine
-                          y={replayData.stopLoss}
-                          stroke="#ef4444"
-                          strokeDasharray="6 3"
-                          label={{ value: "SL", position: "right", fill: "#ef4444", fontSize: 10 }}
-                        />
-                      )}
-                      {replayData?.takeProfit !== null && replayData?.takeProfit !== undefined && (
-                        <ReferenceLine
-                          y={replayData.takeProfit}
-                          stroke="#22c55e"
-                          strokeDasharray="6 3"
-                          label={{ value: "TP", position: "right", fill: "#22c55e", fontSize: 10 }}
-                        />
-                      )}
-                    </LineChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <p className="text-sm text-muted-foreground text-center py-8">
-                    No replay data available
-                  </p>
-                )}
-              </CardContent>
-            </Card>
+            <TradeReplayChart data={replayData} isLoading={replayLoading} />
 
             <Card className="rounded-md" data-testid="card-notes">
               <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
