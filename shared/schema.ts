@@ -1260,6 +1260,67 @@ export const liveCycleLogs = pgTable("live_cycle_logs", {
   cycleTsIdx: index("cycle_logs_cycle_ts_idx").on(table.cycleTs),
 }));
 
+export const tradeEvents = pgTable("trade_events", {
+  id: serial("id").primaryKey(),
+  tradeId: integer("trade_id").notNull(),
+  ts: bigint("ts", { mode: "number" }).notNull(),
+  eventType: varchar("event_type", { length: 30 }).notNull(),
+  payloadJson: jsonb("payload_json"),
+}, (table) => ({
+  tradeIdIdx: index("trade_events_trade_id_idx").on(table.tradeId),
+  tsIdx: index("trade_events_ts_idx").on(table.ts),
+}));
+
+export const learningRuns = pgTable("learning_runs", {
+  id: serial("id").primaryKey(),
+  symbol: varchar("symbol", { length: 20 }).notNull(),
+  startAt: bigint("start_at", { mode: "number" }).notNull(),
+  endAt: bigint("end_at", { mode: "number" }),
+  dataFrom: bigint("data_from", { mode: "number" }),
+  dataTo: bigint("data_to", { mode: "number" }),
+  newBars: integer("new_bars"),
+  newTrades: integer("new_trades"),
+  epochs: integer("epochs"),
+  bestValLoss: real("best_val_loss"),
+  prAuc: real("pr_auc"),
+  pfNet: real("pf_net"),
+  eNet: real("e_net"),
+  profitableRegimes: integer("profitable_regimes"),
+  totalRegimes: integer("total_regimes"),
+  promoted: boolean("promoted").default(false),
+  reason: text("reason"),
+  modelVersion: varchar("model_version", { length: 50 }),
+  metricsJson: jsonb("metrics_json"),
+  status: varchar("status", { length: 20 }).default("running"),
+}, (table) => ({
+  symbolIdx: index("learning_runs_symbol_idx").on(table.symbol),
+  startAtIdx: index("learning_runs_start_at_idx").on(table.startAt),
+}));
+
+export const healthStatus = pgTable("health_status", {
+  id: serial("id").primaryKey(),
+  ts: bigint("ts", { mode: "number" }).notNull(),
+  component: varchar("component", { length: 50 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull(),
+  message: text("message"),
+}, (table) => ({
+  componentIdx: index("health_component_idx").on(table.component),
+  tsIdx: index("health_ts_idx").on(table.ts),
+}));
+
+export const ingestedEvents = pgTable("ingested_events", {
+  id: serial("id").primaryKey(),
+  eventId: varchar("event_id", { length: 100 }).notNull(),
+  eventType: varchar("event_type", { length: 50 }).notNull(),
+  ts: bigint("ts", { mode: "number" }).notNull(),
+  payloadJson: jsonb("payload_json"),
+  processedAt: bigint("processed_at", { mode: "number" }).notNull(),
+}, (table) => ({
+  eventIdUniqueIdx: uniqueIndex("ingested_events_event_id_unique").on(table.eventId),
+  eventTypeIdx: index("ingested_events_type_idx").on(table.eventType),
+  tsIdx: index("ingested_events_ts_idx").on(table.ts),
+}));
+
 export const insertCandleSchema = createInsertSchema(candles).omit({ id: true });
 export const insertFeatureSchema = createInsertSchema(features).omit({ id: true });
 export const insertPatternSchema = createInsertSchema(patterns).omit({ id: true });
@@ -1283,6 +1344,27 @@ export const insertMultiheadPredictionSchema = createInsertSchema(multiheadPredi
 export const insertLiveTradeRecordSchema = createInsertSchema(liveTradeRecords).omit({ id: true });
 export const insertModelLearningStatsSchema = createInsertSchema(modelLearningStats).omit({ id: true });
 export const insertLiveCycleLogSchema = createInsertSchema(liveCycleLogs).omit({ id: true });
+export const insertTradeEventSchema = createInsertSchema(tradeEvents).omit({ id: true });
+export const insertLearningRunSchema = createInsertSchema(learningRuns).omit({ id: true });
+export const insertHealthStatusSchema = createInsertSchema(healthStatus).omit({ id: true });
+export const insertIngestedEventSchema = createInsertSchema(ingestedEvents).omit({ id: true });
+
+export const ingestEventPayloadSchema = z.object({
+  event_id: z.string().min(1),
+  type: z.enum([
+    "CYCLE_UPDATE",
+    "TRADE_OPEN",
+    "TRADE_UPDATE",
+    "TRADE_CLOSE",
+    "LEARNING_PROGRESS",
+    "MODEL_PROMOTED",
+    "HEALTH_STATUS",
+    "SIGNAL_UPDATE",
+  ]),
+  payload: z.record(z.unknown()),
+  ts: z.number(),
+});
+export type IngestEventPayload = z.infer<typeof ingestEventPayloadSchema>;
 
 export type InsertCandle = z.infer<typeof insertCandleSchema>;
 export type InsertFeature = z.infer<typeof insertFeatureSchema>;
@@ -1332,3 +1414,11 @@ export type InsertModelLearningStats = z.infer<typeof insertModelLearningStatsSc
 export type ModelLearningStatsEntry = typeof modelLearningStats.$inferSelect;
 export type InsertLiveCycleLog = z.infer<typeof insertLiveCycleLogSchema>;
 export type LiveCycleLog = typeof liveCycleLogs.$inferSelect;
+export type InsertTradeEvent = z.infer<typeof insertTradeEventSchema>;
+export type TradeEventRow = typeof tradeEvents.$inferSelect;
+export type InsertLearningRun = z.infer<typeof insertLearningRunSchema>;
+export type LearningRunRow = typeof learningRuns.$inferSelect;
+export type InsertHealthStatus = z.infer<typeof insertHealthStatusSchema>;
+export type HealthStatusRow = typeof healthStatus.$inferSelect;
+export type InsertIngestedEvent = z.infer<typeof insertIngestedEventSchema>;
+export type IngestedEventRow = typeof ingestedEvents.$inferSelect;

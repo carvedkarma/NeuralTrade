@@ -5,12 +5,14 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/dashboard";
+import ProDashboard from "@/pages/pro-dashboard";
 import { useEffect } from "react";
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={Dashboard} />
+      <Route path="/pro" component={ProDashboard} />
       <Route component={NotFound} />
     </Switch>
   );

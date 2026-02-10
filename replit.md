@@ -77,6 +77,35 @@ The "Live System" tab shows:
 DB tables: `live_trade_records`, `model_learning_stats`, `live_cycle_logs`
 API endpoints: POST/GET `/api/live/trade`, PATCH `/api/live/trade/:id`, POST/GET `/api/live/learning-stats`, GET `/api/live/learning-stats/latest`, POST/GET `/api/live/cycle-logs`, GET `/api/live/summary`
 
+### Pro Dashboard (v4.0 — Realtime Analytics)
+The Pro Dashboard at `/pro` provides a premium, realtime analytics experience with 6 tabs:
+
+**Infrastructure:**
+- WebSocket server on `/ws` for realtime event streaming (auto-reconnect, client count)
+- Unified ingestion endpoint: `POST /api/ingest/event` with Zod validation, event_id deduplication, DB storage, and WS broadcast
+- Event types: CYCLE_UPDATE, TRADE_OPEN, TRADE_UPDATE, TRADE_CLOSE, LEARNING_PROGRESS, MODEL_PROMOTED, HEALTH_STATUS, SIGNAL_UPDATE
+
+**New DB tables:** `trade_events`, `learning_runs`, `health_status`, `ingested_events`
+
+**Pro API endpoints:**
+- `GET /api/pro/summary?window=24h|7d|30d` — Aggregated performance stats, equity curve, hold reasons, per-symbol breakdown
+- `GET /api/pro/cycles?from=&to=&symbol=` — Filtered cycle logs
+- `GET /api/pro/trades?from=&to=&symbol=&outcome=&format=csv` — Filtered trades with CSV export
+- `GET /api/pro/trades/:id/events` — Trade timeline events
+- `GET /api/pro/learning-runs?from=&to=&symbol=` — Training history
+- `GET /api/pro/health` — System health status
+
+**Dashboard Tabs:**
+1. **Overview** — Stat cards (positions, trades, win rate, net R, avg R, drawdown), health lights, window selector, hold reasons, per-symbol summary
+2. **Cycle Monitor** — Realtime per-symbol cycle table with color-coded decisions, symbol filter, auto-refresh
+3. **Trade Journal** — Full trade table with filters, CSV export, trade events timeline drawer
+4. **Learning** — Active model cards, training runs history, safety gate visualization
+5. **Performance** — 7 Recharts: equity curve, drawdown, per-symbol bars, net R histogram, rolling PF/E, p_enter calibration, holding time
+6. **AI Insights** — Deterministic data-driven summaries (top hold reasons, best symbol, win rate analysis, avg R commentary)
+
+**Key files:** `server/ws.ts`, `server/ingest.ts`, `client/src/pages/pro-dashboard.tsx`, `client/src/hooks/use-websocket.ts`
+**Seed script:** `npx tsx scripts/seed-demo.ts` inserts sample data for testing without GPU runner
+
 ### Cost Model (v3.3.2)
 Default execution: MARKET orders (taker) for entry and exit. Cost components computed in R-units via `compute_trade_cost_r()` in `training/triple_barrier.py`:
 - Fees: `(entry_bps + exit_bps) / 10000` (default 5+5 bps taker)

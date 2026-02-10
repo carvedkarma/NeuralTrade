@@ -2,10 +2,11 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
+import ingestRouter from "./ingest";
 import { db } from "./db";
-import { candles, insertShotPlanHistorySchema } from "@shared/schema";
+import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents } from "@shared/schema";
 import type { ModelLearningStatsEntry } from "@shared/schema";
-import { and, eq, gte, lte, asc, desc } from "drizzle-orm";
+import { and, eq, gte, lte, asc, desc, sql, count } from "drizzle-orm";
 import { z } from "zod";
 import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes, clearNNData, cancelNNDownload, getResumableStatus, resumeNNDataDownload, getDownloadETA, streamNNDataBulk } from "./historical-data";
 import zlib from "zlib";
@@ -78,6 +79,206 @@ export async function registerRoutes(
   startLiveCandleSync();
   
   app.use("/api/paper", paperRoutes);
+  app.use("/api", ingestRouter);
+
+  app.get("/api/pro/cycles", async (req, res) => {
+    try {
+      const from = Number(req.query.from) || (Date.now() - 24 * 60 * 60 * 1000);
+      const to = Number(req.query.to) || Date.now();
+      const symbol = req.query.symbol as string | undefined;
+
+      const conditions = [gte(liveCycleLogs.cycleTs, from), lte(liveCycleLogs.cycleTs, to)];
+      if (symbol) conditions.push(eq(liveCycleLogs.symbol, symbol));
+
+      const rows = await db
+        .select()
+        .from(liveCycleLogs)
+        .where(and(...conditions))
+        .orderBy(desc(liveCycleLogs.cycleTs))
+        .limit(500);
+
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/pro/trades", async (req, res) => {
+    try {
+      const from = Number(req.query.from) || 0;
+      const to = Number(req.query.to) || Date.now();
+      const symbol = req.query.symbol as string | undefined;
+      const outcome = req.query.outcome as string | undefined;
+      const format = req.query.format as string | undefined;
+
+      const conditions = [gte(liveTradeRecords.entryTime, from), lte(liveTradeRecords.entryTime, to)];
+      if (symbol) conditions.push(eq(liveTradeRecords.symbol, symbol));
+      if (outcome) conditions.push(eq(liveTradeRecords.outcome, outcome));
+
+      const rows = await db
+        .select()
+        .from(liveTradeRecords)
+        .where(and(...conditions))
+        .orderBy(desc(liveTradeRecords.entryTime))
+        .limit(1000);
+
+      if (format === "csv") {
+        const headers = [
+          "id", "symbol", "side", "entry_time", "entry_price", "exit_time", "exit_price",
+          "stop_loss", "take_profit", "size_pct", "p_enter", "costs_bps",
+          "outcome", "gross_r", "net_r", "sized_r", "status",
+        ];
+        const csvRows = rows.map((r) =>
+          [
+            r.id, r.symbol, r.side, r.entryTime, r.entryPrice, r.exitTime ?? "",
+            r.exitPrice ?? "", r.stopLoss ?? "", r.takeProfit ?? "", r.sizePct ?? "",
+            r.pEnter ?? "", r.costsBps ?? "", r.outcome ?? "", r.grossR ?? "",
+            r.netR ?? "", r.sizedR ?? "", r.status,
+          ].join(",")
+        );
+        const csv = [headers.join(","), ...csvRows].join("\n");
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader("Content-Disposition", "attachment; filename=trades.csv");
+        return res.send(csv);
+      }
+
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/pro/trades/:id/events", async (req, res) => {
+    try {
+      const tradeId = Number(req.params.id);
+      const rows = await db
+        .select()
+        .from(tradeEvents)
+        .where(eq(tradeEvents.tradeId, tradeId))
+        .orderBy(asc(tradeEvents.ts));
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/pro/learning-runs", async (req, res) => {
+    try {
+      const from = Number(req.query.from) || 0;
+      const to = Number(req.query.to) || Date.now();
+      const symbol = req.query.symbol as string | undefined;
+
+      const conditions = [gte(learningRuns.startAt, from), lte(learningRuns.startAt, to)];
+      if (symbol) conditions.push(eq(learningRuns.symbol, symbol));
+
+      const rows = await db
+        .select()
+        .from(learningRuns)
+        .where(and(...conditions))
+        .orderBy(desc(learningRuns.startAt))
+        .limit(100);
+
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/pro/health", async (req, res) => {
+    try {
+      const rows = await db
+        .select()
+        .from(healthStatus)
+        .orderBy(desc(healthStatus.ts))
+        .limit(50);
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/pro/summary", async (req, res) => {
+    try {
+      const window = (req.query.window as string) || "24h";
+      const windowMs: Record<string, number> = {
+        "24h": 24 * 60 * 60 * 1000,
+        "7d": 7 * 24 * 60 * 60 * 1000,
+        "30d": 30 * 24 * 60 * 60 * 1000,
+      };
+      const since = Date.now() - (windowMs[window] || windowMs["24h"]);
+
+      const trades = await db
+        .select()
+        .from(liveTradeRecords)
+        .where(gte(liveTradeRecords.entryTime, since))
+        .orderBy(asc(liveTradeRecords.entryTime));
+
+      const openTrades = trades.filter((t) => t.status === "open");
+      const closedTrades = trades.filter((t) => t.status === "closed");
+      const wins = closedTrades.filter((t) => (t.netR ?? 0) > 0);
+      const netRValues = closedTrades.map((t) => t.netR ?? 0);
+      const totalNetR = netRValues.reduce((s, v) => s + v, 0);
+      const avgR = closedTrades.length > 0 ? totalNetR / closedTrades.length : 0;
+      const bestTrade = netRValues.length > 0 ? Math.max(...netRValues) : 0;
+      const worstTrade = netRValues.length > 0 ? Math.min(...netRValues) : 0;
+
+      let maxDrawdown = 0;
+      let peak = 0;
+      let cumR = 0;
+      for (const r of netRValues) {
+        cumR += r;
+        if (cumR > peak) peak = cumR;
+        const dd = peak - cumR;
+        if (dd > maxDrawdown) maxDrawdown = dd;
+      }
+
+      const cycles = await db
+        .select()
+        .from(liveCycleLogs)
+        .where(gte(liveCycleLogs.cycleTs, since));
+
+      const holdCycles = cycles.filter((c) => c.decision !== "ENTER");
+      const holdReasons: Record<string, number> = {};
+      for (const c of holdCycles) {
+        const reasons = (c.reasons as string[]) ?? [c.decision];
+        for (const r of reasons) {
+          holdReasons[r] = (holdReasons[r] ?? 0) + 1;
+        }
+      }
+
+      const symbolStats: Record<string, { trades: number; wins: number; netR: number }> = {};
+      for (const t of closedTrades) {
+        if (!symbolStats[t.symbol]) symbolStats[t.symbol] = { trades: 0, wins: 0, netR: 0 };
+        symbolStats[t.symbol].trades++;
+        if ((t.netR ?? 0) > 0) symbolStats[t.symbol].wins++;
+        symbolStats[t.symbol].netR += t.netR ?? 0;
+      }
+
+      res.json({
+        window,
+        since,
+        openPositions: openTrades.length,
+        closedTrades: closedTrades.length,
+        winRate: closedTrades.length > 0 ? wins.length / closedTrades.length : 0,
+        totalNetR,
+        avgR,
+        bestTrade,
+        worstTrade,
+        maxDrawdown,
+        totalCycles: cycles.length,
+        holdReasons,
+        symbolStats,
+        equityCurve: closedTrades.map((t) => ({
+          ts: t.exitTime ?? t.entryTime,
+          netR: t.netR ?? 0,
+          symbol: t.symbol,
+        })),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get("/api/dashboard", async (req, res) => {
     try {
       const data = await storage.getDashboardData();

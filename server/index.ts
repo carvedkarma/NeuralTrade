@@ -6,9 +6,11 @@ import { checkIncompleteBackfillJobs, backfillHistoricalData } from "./historica
 import { loadPaperState } from "./paper/config";
 import { loadCandleTimestamps } from "./unified-learning-controller";
 import { initializeSelfLearning } from "./pattern-memory";
+import { setupWebSocket } from "./ws";
 
 const app = express();
 const httpServer = createServer(app);
+setupWebSocket(httpServer);
 
 declare module "http" {
   interface IncomingMessage {
