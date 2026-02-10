@@ -159,7 +159,7 @@ class LearningManager:
             fetcher = BinanceDataFetcher(
                 symbols=[symbol],
                 timeframes=["15m"],
-                replit_proxy_url=f"{self.replit_url.rstrip('/')}/api/binance-proxy",
+                replit_proxy_url=self.replit_url.rstrip('/'),
                 use_sync=True,
             )
 

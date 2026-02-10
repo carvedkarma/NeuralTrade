@@ -402,7 +402,7 @@ class LiveRunner:
         self.fetcher = BinanceDataFetcher(
             symbols=self.symbols,
             timeframes=[self.interval],
-            replit_proxy_url=f"{self.replit_url.rstrip('/')}/api/binance-proxy",
+            replit_proxy_url=self.replit_url.rstrip('/'),
             use_sync=True,
         )
         if self.execution and self.execution.fetcher is None:
