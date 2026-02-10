@@ -418,16 +418,16 @@ class LiveRunner:
         payload = {
             "symbol": symbol,
             "cycle_ts": int(time.time() * 1000),
-            "price": price,
-            "p_enter": p_enter,
-            "htf_h1_trend": htf.get('h1_trend'),
-            "htf_h4_trend": htf.get('h4_trend'),
-            "slope_ok": htf.get('slope_ok', False),
-            "range_ok": htf.get('range_ok', False),
-            "direction": direction,
-            "threshold_used": self.enter_threshold,
-            "decision": decision,
-            "reasons": reasons,
+            "price": float(price),
+            "p_enter": float(p_enter),
+            "htf_h1_trend": str(htf.get('h1_trend', '')),
+            "htf_h4_trend": str(htf.get('h4_trend', '')),
+            "slope_ok": bool(htf.get('slope_ok', False)),
+            "range_ok": bool(htf.get('range_ok', False)),
+            "direction": str(direction),
+            "threshold_used": float(self.enter_threshold),
+            "decision": str(decision),
+            "reasons": [str(r) for r in reasons] if reasons else [],
         }
         _retry_request("POST", url, json=payload)
 
