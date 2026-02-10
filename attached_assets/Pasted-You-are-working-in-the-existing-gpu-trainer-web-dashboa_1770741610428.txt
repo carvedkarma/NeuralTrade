@@ -1,0 +1,194 @@
+You are working in the existing gpu_trainer + web dashboard repo. Goal: upgrade the current dashboard into a PRO-grade, fully async, realtime, AI-powered analytics dashboard AND add money-based PnL reporting (convert Net R to $) PLUS a detailed trade popup (modal) explanation view.
+
+======================================================================
+A) MONEY / PnL REQUIREMENTS (ADD THIS FIRST — NON-NEGOTIABLE)
+======================================================================
+
+1) Add global money config (paper/live configurable)
+- Add these config parameters (env + UI editable in Settings panel):
+  - account_equity_usd (number)  // e.g. 1500, 5000, 10000
+  - risk_per_trade_pct (number)  // default 1.0 (%)
+  - optional: base_currency = "USD"
+
+2) Define risk dollars per trade (constant, derived)
+- risk_usd = account_equity_usd * (risk_per_trade_pct / 100.0)
+
+3) Convert R to USD for each trade (strict formula)
+- trade_pnl_usd = net_r * risk_usd
+- Also compute:
+  - gross_pnl_usd = gross_r * risk_usd
+  - cost_pnl_usd  = cost_r  * risk_usd
+
+4) Persist these fields in DB for every trade
+- Add columns to trades table:
+  - pnl_usd (net)
+  - pnl_usd_gross
+  - pnl_usd_cost
+  - risk_usd_used (snapshot at trade time)
+  - equity_snapshot_usd (optional, if available)
+
+Important:
+- DO NOT change trading logic.
+- Only compute money values from existing gross_r, cost_r, net_r.
+- net_r must always satisfy: net_r == gross_r - cost_r
+- pnl_usd must always satisfy: pnl_usd == net_r * risk_usd_used
+
+5) Dashboard money-first display (must implement)
+- Add top summary cards (toggle between R and $):
+  - Total Profit ($) = sum(pnl_usd)
+  - Avg Profit / Trade ($) = avg(pnl_usd) on closed trades
+  - Current Equity ($) = account_equity_usd + Total Profit ($)
+- In trade table add columns:
+  - PnL ($)  (net)
+  - Cost ($) (optional)
+  - Risk ($) used
+- Everywhere you show Total Net R, also show Total Profit ($) next to it.
+
+======================================================================
+B) REALTIME / ASYNC DASHBOARD REQUIREMENTS
+======================================================================
+
+1) Everything must be realtime and async:
+   - Use WebSockets (preferred) or Server-Sent Events for streaming live cycle logs, signals, position updates, trade updates, and learning progress.
+   - UI must update without refresh.
+
+2) Persistent storage (must not be in-memory):
+   - Store all cycles, signals, trades, fills, and learning runs in a DB (SQLite ok for MVP, Postgres-ready schema).
+   - Implement migrations (Prisma or Drizzle).
+   - Must support querying historical ranges (24h, 7d, 30d).
+
+3) Advanced dashboard sections (must implement):
+   A) Live Overview (richer)
+      - Open positions, closed trades, win rate
+      - Total Net R + Total Profit ($) side-by-side
+      - Today stats: trades today, net R today, profit $ today, avg R/trade, avg $/trade
+      - Max drawdown in R AND in $
+      - Health lights: Data OK, HTF OK, Model loaded, WS connected, Last update age
+
+   B) Realtime “Cycle Monitor”
+      - Per cycle per symbol:
+        price, p_enter, HTF alignment, direction, gate reason, decision, policy params, model version
+      - Counts per cycle: candidates, gated out, below threshold, blocked by portfolio, blocked by correlation, skipped by execution
+
+   C) Trade Journal (detailed)
+      - Full trade timeline: created_at, entry_at, exit_at, bars held
+      - Entry/SL/TP, side, symbol, size, leverage
+      - fees/spread/slippage, gross_r, cost_r, net_r
+      - pnl_usd (net), pnl_usd_cost, risk_usd_used
+      - Filters + CSV export
+
+   D) Learning / Training Panel
+      - Data ingestion: new bars, total bars, missing bars, NaN rate
+      - Label stats + regime distribution
+      - Training runs: PR-AUC, val loss, PF_net, E_net, promoted or not
+      - “Learned amount”: new bars since last train, new trades since last train, model hash/version changes
+
+   E) Performance & Risk analytics
+      - Equity curve in R AND in $
+      - Rolling PF_net, rolling E_net
+      - Drawdown chart (R + $)
+      - Per-symbol breakdown (PF_net, E_net, win rate, trades/day, profit $)
+      - Distributions: net_r histogram, pnl_usd histogram, holding time histogram, p_enter calibration
+
+   F) “AI Insights” panel (no hallucinations)
+      - Deterministic insights from stored data:
+        top hold reasons, best symbol this week, loss clustering, calibration drift, execution impact
+
+4) Visual/UX requirements (premium)
+   - Modern dark glass cards, subtle gradients, skeleton loading, responsive
+   - Use charts (Recharts/ECharts/Chart.js). At least 8 charts as described above.
+
+5) API + Events (must implement)
+   REST:
+     /api/cycles?from&to&symbol
+     /api/trades?from&to&symbol&outcome&model_version
+     /api/learning-runs?from&to
+     /api/perf/summary?window=24h|7d|30d
+     /api/config/money  (GET/POST) to set account_equity_usd and risk_per_trade_pct
+   Realtime WS:
+     emits: CYCLE_UPDATE, SIGNAL_UPDATE, TRADE_OPEN, TRADE_UPDATE, TRADE_CLOSE, LEARNING_PROGRESS, MODEL_PROMOTED, HEALTH_STATUS
+
+6) Integration with local GPU runner
+   - Add ingestion endpoint:
+     POST /ingest/event {event_id, type, payload, ts}
+   - Validate with zod and dedupe by event_id.
+   - Store to DB then broadcast via WS.
+
+7) Data model (must implement these tables)
+   - cycles(...)
+   - trades(... include pnl_usd, pnl_usd_gross, pnl_usd_cost, risk_usd_used ...)
+   - trade_events(id, trade_id, ts, type, payload_json)
+   - learning_runs(...)
+   - health(...)
+   - settings(id, key, value_json) // store money config here
+
+8) Quality gates
+   - No fake numbers. If missing, show N/A.
+   - Paper vs live must be clear.
+   - Multi-asset supported. No BTC-only assumptions.
+
+======================================================================
+C) TRADE DETAIL POPUP (MODAL) WITH EXPLANATION + REPLAY
+======================================================================
+
+Goal: Click a trade row → open a popup showing full detail + deterministic explanation + replay chart.
+
+Backend:
+1) GET /api/trades/:tradeId
+   Return full trade fields + entry_context + exit_context + policy_json + model_version
+   Include money fields: pnl_usd, pnl_usd_cost, risk_usd_used
+
+2) GET /api/trades/:tradeId/replay
+   Return 15m candles from 50 bars before entry to 10 bars after exit + entry/exit markers + SL/TP lines.
+
+Frontend modal:
+- Header: Symbol, side, outcome badge, model version, policy summary
+- PnL block:
+  Net R, Gross R, Cost R, Net PnL ($), Cost ($), Risk ($) used
+- Entry explanation (deterministic, no hallucinations):
+  p_enter vs threshold, HTF flags (aligned/slope_ok/range_ok), gate decisions, blockers
+- Exit explanation:
+  TP/SL/EXPIRE reason, bars held, exit vs SL/TP
+- Chart replay:
+  candlestick + entry/exit markers + SL/TP lines
+- Notes field saved to trades.notes
+
+Rules:
+- Explanation must be generated ONLY from stored flags/events.
+- Do not invent reasons.
+- Show assertions in dev logs:
+  net_r == gross_r - cost_r
+  pnl_usd == net_r * risk_usd_used
+
+======================================================================
+D) DELIVERABLES + VERIFICATION LOGS
+======================================================================
+
+Deliverables:
+- DB migrations + schemas
+- WS realtime stream
+- Ingestion endpoint + dedupe
+- Money config UI + conversions + display everywhere
+- Trade detail modal + replay chart + notes
+- Charts + exports
+- README: run instructions + demo seed script
+
+Logs that MUST appear:
+- Server: “DB connected”, “WS ready”
+- Ingest: “event accepted type=… id=…”, “broadcast to N clients”
+- Money config: “money config updated equity=… risk_pct=… risk_usd=…”
+- UI: “WS connected”, “last update Xs ago”
+- Trade modal: “Loaded trade detail trade_id=…”, “Loaded replay candles count=…”
+
+Implementation order:
+1) DB + migrations + settings table for money config
+2) Ingest endpoint + WS broadcast
+3) Trade persistence incl pnl_usd fields
+4) Dashboard cards + trade table PnL $
+5) Trade detail modal + replay endpoints + chart
+6) Performance charts + AI insights + exports
+
+Do NOT:
+- Change ML code, training, or trading logic
+- Fabricate metrics
+- Change triple barrier rules or inference cadence

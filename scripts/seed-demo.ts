@@ -1,5 +1,6 @@
 import { db } from "../server/db";
-import { liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, modelLearningStats } from "../shared/schema";
+import { liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, modelLearningStats, settings } from "../shared/schema";
+import { eq } from "drizzle-orm";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
 const DECISIONS = ["HOLD", "GATE_FAIL", "ENTER", "COOLDOWN"];
@@ -46,6 +47,10 @@ async function seedCycles(count = 200) {
 
 async function seedTrades(count = 50) {
   const now = Date.now();
+  const accountEquity = 1500;
+  const riskPct = 1.0;
+  const riskUsd = accountEquity * (riskPct / 100);
+
   for (let i = 0; i < count; i++) {
     const symbol = pick(SYMBOLS);
     const side = pick(DIRECTIONS);
@@ -75,10 +80,19 @@ async function seedTrades(count = 50) {
       costsBps: rand(8, 15),
       outcome,
       grossR,
+      costR,
       netR,
       sizedR: netR * rand(1, 2),
       status: "closed",
       reasons: [outcome === "TP" ? "Take profit hit" : outcome === "SL" ? "Stop loss hit" : "Expired after max bars"],
+      pnlUsd: netR * riskUsd,
+      pnlUsdGross: grossR * riskUsd,
+      pnlUsdCost: costR * riskUsd,
+      riskUsdUsed: riskUsd,
+      equitySnapshotUsd: accountEquity,
+      barsHeld,
+      leverage: Math.floor(rand(5, 20)),
+      modelVersion: `v3.5.${Math.floor(rand(0, 3))}`,
       createdAt: entryTime,
     }).returning();
 
@@ -166,8 +180,23 @@ async function seedModelStats() {
   console.log(`Seeded ${rows.length} model learning stats`);
 }
 
+async function seedMoneyConfig() {
+  const existing = await db.select().from(settings).where(eq(settings.key, "money_config")).limit(1);
+  if (existing.length === 0) {
+    await db.insert(settings).values({
+      key: "money_config",
+      valueJson: { account_equity_usd: 1500, risk_per_trade_pct: 1.0, base_currency: "USD" },
+      updatedAt: Date.now(),
+    });
+    console.log("Seeded money config (equity=$1500, risk=1%)");
+  } else {
+    console.log("Money config already exists, skipping");
+  }
+}
+
 async function main() {
   console.log("Seeding demo data...");
+  await seedMoneyConfig();
   await seedCycles();
   await seedTrades();
   await seedLearningRuns();

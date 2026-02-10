@@ -1180,6 +1180,14 @@ export const coneSignalResponseSchema = z.object({
 });
 export type ConeSignalResponse = z.infer<typeof coneSignalResponseSchema>;
 
+// Settings table — key/value store for money config and other settings
+export const settings = pgTable("settings", {
+  id: serial("id").primaryKey(),
+  key: varchar("key", { length: 100 }).notNull().unique(),
+  valueJson: jsonb("value_json"),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+});
+
 // Live trade records — pushed from GPU trainer when positions open/close
 export const liveTradeRecords = pgTable("live_trade_records", {
   id: serial("id").primaryKey(),
@@ -1196,10 +1204,20 @@ export const liveTradeRecords = pgTable("live_trade_records", {
   costsBps: real("costs_bps"),
   outcome: varchar("outcome", { length: 20 }),
   grossR: real("gross_r"),
+  costR: real("cost_r"),
   netR: real("net_r"),
   sizedR: real("sized_r"),
   status: varchar("status", { length: 20 }).notNull().default("open"),
   reasons: jsonb("reasons").$type<string[]>(),
+  pnlUsd: real("pnl_usd"),
+  pnlUsdGross: real("pnl_usd_gross"),
+  pnlUsdCost: real("pnl_usd_cost"),
+  riskUsdUsed: real("risk_usd_used"),
+  equitySnapshotUsd: real("equity_snapshot_usd"),
+  barsHeld: integer("bars_held"),
+  leverage: real("leverage"),
+  modelVersion: varchar("model_version", { length: 50 }),
+  notes: text("notes"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (table) => ({
   symbolIdx: index("live_trades_symbol_idx").on(table.symbol),
@@ -1321,6 +1339,7 @@ export const ingestedEvents = pgTable("ingested_events", {
   tsIdx: index("ingested_events_ts_idx").on(table.ts),
 }));
 
+export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true });
 export const insertCandleSchema = createInsertSchema(candles).omit({ id: true });
 export const insertFeatureSchema = createInsertSchema(features).omit({ id: true });
 export const insertPatternSchema = createInsertSchema(patterns).omit({ id: true });
@@ -1422,3 +1441,12 @@ export type InsertHealthStatus = z.infer<typeof insertHealthStatusSchema>;
 export type HealthStatusRow = typeof healthStatus.$inferSelect;
 export type InsertIngestedEvent = z.infer<typeof insertIngestedEventSchema>;
 export type IngestedEventRow = typeof ingestedEvents.$inferSelect;
+export type InsertSettings = z.infer<typeof insertSettingsSchema>;
+export type SettingsRow = typeof settings.$inferSelect;
+
+export const moneyConfigSchema = z.object({
+  account_equity_usd: z.number().min(0),
+  risk_per_trade_pct: z.number().min(0).max(100).default(1.0),
+  base_currency: z.string().default("USD"),
+});
+export type MoneyConfig = z.infer<typeof moneyConfigSchema>;

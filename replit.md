@@ -103,8 +103,36 @@ The Pro Dashboard at `/pro` provides a premium, realtime analytics experience wi
 5. **Performance** — 7 Recharts: equity curve, drawdown, per-symbol bars, net R histogram, rolling PF/E, p_enter calibration, holding time
 6. **AI Insights** — Deterministic data-driven summaries (top hold reasons, best symbol, win rate analysis, avg R commentary)
 
-**Key files:** `server/ws.ts`, `server/ingest.ts`, `client/src/pages/pro-dashboard.tsx`, `client/src/hooks/use-websocket.ts`
+**Key files:** `server/ws.ts`, `server/ingest.ts`, `client/src/pages/pro-dashboard.tsx`, `client/src/hooks/use-websocket.ts`, `client/src/components/trade-detail-modal.tsx`
 **Seed script:** `npx tsx scripts/seed-demo.ts` inserts sample data for testing without GPU runner
+
+### Money Management System (v4.0+)
+Institutional money management converts R-based metrics to USD values with configurable account equity and risk per trade.
+
+**Config Storage:** `settings` table with key `money_config`, JSON value: `{ account_equity_usd, risk_per_trade_pct, base_currency }`
+**Default:** $1,500 equity, 1.0% risk per trade = $15 risk per trade
+
+**Money Computation (on TRADE_CLOSE):**
+- `riskUsdUsed = account_equity * (risk_pct / 100)` — snapshotted at trade open
+- `pnlUsd = netR * riskUsdUsed`
+- `pnlUsdGross = grossR * riskUsdUsed`
+- `pnlUsdCost = costR * riskUsdUsed`
+
+**Extended liveTradeRecords columns:** `pnl_usd`, `pnl_usd_gross`, `pnl_usd_cost`, `risk_usd_used`, `equity_snapshot_usd`, `cost_r`, `bars_held`, `model_version`, `leverage`, `notes`
+
+**API endpoints:**
+- `GET /api/config/money` — Returns current money config
+- `POST /api/config/money` — Updates money config (Zod-validated)
+- `GET /api/pro/trades/:id` — Full trade detail with events
+- `GET /api/pro/trades/:id/replay` — Candlestick replay data (stub, returns trade context)
+- `PATCH /api/pro/trades/:id/notes` — Update trade notes/annotations
+
+**Frontend features:**
+- R/$ toggle button on Overview tab — switches stat cards between R-units and USD values
+- Trade Journal shows conditional PnL $ column when USD mode is active
+- Trade Detail Modal (`trade-detail-modal.tsx`): comprehensive dialog with PnL block, entry/exit explanation, replay chart, editable notes, events timeline
+- Summary API now includes: `totalPnlUsd`, `avgPnlUsd`, `maxDrawdownUsd`, `currentEquityUsd`, `todayPnlUsd`, `todayNetR`
+- CSV export includes all money columns
 
 ### Cost Model (v3.3.2)
 Default execution: MARKET orders (taker) for entry and exit. Cost components computed in R-units via `compute_trade_cost_r()` in `training/triple_barrier.py`:

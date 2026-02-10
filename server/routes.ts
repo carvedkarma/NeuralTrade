@@ -4,8 +4,8 @@ import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
 import ingestRouter from "./ingest";
 import { db } from "./db";
-import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents } from "@shared/schema";
-import type { ModelLearningStatsEntry } from "@shared/schema";
+import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema } from "@shared/schema";
+import type { ModelLearningStatsEntry, MoneyConfig } from "@shared/schema";
 import { and, eq, gte, lte, asc, desc, sql, count } from "drizzle-orm";
 import { z } from "zod";
 import { backfillHistoricalData, getDataRangeInfo, getIntegrityReport, getActiveBackfillJob, incrementalUpdate, fillGaps, checkIncompleteBackfillJobs, getNNDataSummary, downloadNNData, getNNDownloadProgress, exportNNData, getNNTimeframes, clearNNData, cancelNNDownload, getResumableStatus, resumeNNDataDownload, getDownloadETA, streamNNDataBulk } from "./historical-data";
@@ -126,14 +126,18 @@ export async function registerRoutes(
         const headers = [
           "id", "symbol", "side", "entry_time", "entry_price", "exit_time", "exit_price",
           "stop_loss", "take_profit", "size_pct", "p_enter", "costs_bps",
-          "outcome", "gross_r", "net_r", "sized_r", "status",
+          "outcome", "gross_r", "cost_r", "net_r", "sized_r", "status",
+          "pnl_usd", "pnl_usd_gross", "pnl_usd_cost", "risk_usd_used",
+          "bars_held", "leverage", "model_version",
         ];
         const csvRows = rows.map((r) =>
           [
             r.id, r.symbol, r.side, r.entryTime, r.entryPrice, r.exitTime ?? "",
             r.exitPrice ?? "", r.stopLoss ?? "", r.takeProfit ?? "", r.sizePct ?? "",
             r.pEnter ?? "", r.costsBps ?? "", r.outcome ?? "", r.grossR ?? "",
-            r.netR ?? "", r.sizedR ?? "", r.status,
+            r.costR ?? "", r.netR ?? "", r.sizedR ?? "", r.status,
+            r.pnlUsd ?? "", r.pnlUsdGross ?? "", r.pnlUsdCost ?? "", r.riskUsdUsed ?? "",
+            r.barsHeld ?? "", r.leverage ?? "", r.modelVersion ?? "",
           ].join(",")
         );
         const csv = [headers.join(","), ...csvRows].join("\n");
@@ -246,13 +250,37 @@ export async function registerRoutes(
         }
       }
 
-      const symbolStats: Record<string, { trades: number; wins: number; netR: number }> = {};
+      const symbolStats: Record<string, { trades: number; wins: number; netR: number; pnlUsd: number }> = {};
       for (const t of closedTrades) {
-        if (!symbolStats[t.symbol]) symbolStats[t.symbol] = { trades: 0, wins: 0, netR: 0 };
+        if (!symbolStats[t.symbol]) symbolStats[t.symbol] = { trades: 0, wins: 0, netR: 0, pnlUsd: 0 };
         symbolStats[t.symbol].trades++;
         if ((t.netR ?? 0) > 0) symbolStats[t.symbol].wins++;
         symbolStats[t.symbol].netR += t.netR ?? 0;
+        symbolStats[t.symbol].pnlUsd += t.pnlUsd ?? 0;
       }
+
+      const moneyRow = await db.select().from(settings).where(eq(settings.key, "money_config")).limit(1);
+      const moneyConfig = moneyRow.length > 0 ? moneyRow[0].valueJson as any : { account_equity_usd: 1500, risk_per_trade_pct: 1.0 };
+      const riskUsd = moneyConfig.account_equity_usd * (moneyConfig.risk_per_trade_pct / 100);
+      const totalPnlUsd = closedTrades.reduce((s, t) => s + (t.pnlUsd ?? (t.netR ?? 0) * riskUsd), 0);
+      const avgPnlUsd = closedTrades.length > 0 ? totalPnlUsd / closedTrades.length : 0;
+
+      let maxDrawdownUsd = 0;
+      let peakUsd = 0;
+      let cumUsd = 0;
+      for (const t of closedTrades) {
+        cumUsd += t.pnlUsd ?? (t.netR ?? 0) * riskUsd;
+        if (cumUsd > peakUsd) peakUsd = cumUsd;
+        const ddUsd = peakUsd - cumUsd;
+        if (ddUsd > maxDrawdownUsd) maxDrawdownUsd = ddUsd;
+      }
+
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const todayTs = todayStart.getTime();
+      const todayTrades = closedTrades.filter((t) => (t.exitTime ?? t.entryTime) >= todayTs);
+      const todayNetR = todayTrades.reduce((s, t) => s + (t.netR ?? 0), 0);
+      const todayPnlUsd = todayTrades.reduce((s, t) => s + (t.pnlUsd ?? (t.netR ?? 0) * riskUsd), 0);
 
       res.json({
         window,
@@ -265,15 +293,136 @@ export async function registerRoutes(
         bestTrade,
         worstTrade,
         maxDrawdown,
+        totalPnlUsd,
+        avgPnlUsd,
+        maxDrawdownUsd,
+        currentEquityUsd: moneyConfig.account_equity_usd + totalPnlUsd,
+        riskUsd,
+        todayTrades: todayTrades.length,
+        todayNetR,
+        todayPnlUsd,
         totalCycles: cycles.length,
         holdReasons,
         symbolStats,
         equityCurve: closedTrades.map((t) => ({
           ts: t.exitTime ?? t.entryTime,
           netR: t.netR ?? 0,
+          pnlUsd: t.pnlUsd ?? (t.netR ?? 0) * riskUsd,
           symbol: t.symbol,
         })),
       });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // === Money Config API ===
+  app.get("/api/config/money", async (req, res) => {
+    try {
+      const row = await db.select().from(settings).where(eq(settings.key, "money_config")).limit(1);
+      if (row.length === 0) {
+        return res.json({ account_equity_usd: 1500, risk_per_trade_pct: 1.0, base_currency: "USD" });
+      }
+      res.json(row[0].valueJson);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/config/money", async (req, res) => {
+    try {
+      const parsed = moneyConfigSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid money config", details: parsed.error.flatten() });
+      }
+      const config = parsed.data;
+      const riskUsd = config.account_equity_usd * (config.risk_per_trade_pct / 100);
+
+      const existing = await db.select().from(settings).where(eq(settings.key, "money_config")).limit(1);
+      if (existing.length > 0) {
+        await db.update(settings).set({ valueJson: config, updatedAt: Date.now() }).where(eq(settings.key, "money_config"));
+      } else {
+        await db.insert(settings).values({ key: "money_config", valueJson: config, updatedAt: Date.now() });
+      }
+
+      console.log(`[Money Config] Updated: equity=$${config.account_equity_usd}, risk_pct=${config.risk_per_trade_pct}%, risk_usd=$${riskUsd.toFixed(2)}`);
+      res.json({ ...config, risk_usd: riskUsd });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // === Trade Detail + Replay ===
+  app.get("/api/pro/trades/:id", async (req, res) => {
+    try {
+      const tradeId = Number(req.params.id);
+      const [trade] = await db.select().from(liveTradeRecords).where(eq(liveTradeRecords.id, tradeId)).limit(1);
+      if (!trade) return res.status(404).json({ error: "Trade not found" });
+
+      const events = await db.select().from(tradeEvents).where(eq(tradeEvents.tradeId, tradeId)).orderBy(asc(tradeEvents.ts));
+
+      console.log(`[Trade Detail] Loaded trade detail trade_id=${tradeId}`);
+      res.json({ trade, events });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/pro/trades/:id/replay", async (req, res) => {
+    try {
+      const tradeId = Number(req.params.id);
+      const [trade] = await db.select().from(liveTradeRecords).where(eq(liveTradeRecords.id, tradeId)).limit(1);
+      if (!trade) return res.status(404).json({ error: "Trade not found" });
+
+      const barMs = 15 * 60 * 1000;
+      const startTs = trade.entryTime - 50 * barMs;
+      const endTs = (trade.exitTime ?? trade.entryTime) + 10 * barMs;
+
+      const symbol = trade.symbol || "BTCUSDT";
+      const replayCandles = await db
+        .select()
+        .from(candles)
+        .where(
+          and(
+            eq(candles.symbol, symbol),
+            eq(candles.timeframe, "15m"),
+            gte(candles.timestamp, startTs),
+            lte(candles.timestamp, endTs)
+          )
+        )
+        .orderBy(asc(candles.timestamp))
+        .limit(200);
+
+      console.log(`[Trade Detail] Loaded replay candles count=${replayCandles.length} for trade_id=${tradeId}`);
+      res.json({
+        candles: replayCandles.map((c) => ({
+          timestamp: c.timestamp,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+          volume: c.volume,
+        })),
+        entryTime: trade.entryTime,
+        exitTime: trade.exitTime,
+        entryPrice: trade.entryPrice,
+        exitPrice: trade.exitPrice,
+        stopLoss: trade.stopLoss,
+        takeProfit: trade.takeProfit,
+        side: trade.side,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // === Trade Notes ===
+  app.patch("/api/pro/trades/:id/notes", async (req, res) => {
+    try {
+      const tradeId = Number(req.params.id);
+      const { notes } = req.body;
+      await db.update(liveTradeRecords).set({ notes: notes ?? null }).where(eq(liveTradeRecords.id, tradeId));
+      res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

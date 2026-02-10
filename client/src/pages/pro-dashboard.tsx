@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useWebSocket } from "@/hooks/use-websocket";
 import { format } from "date-fns";
+import TradeDetailModal from "@/components/trade-detail-modal";
 import {
   Activity,
   TrendingUp,
@@ -31,6 +32,7 @@ import {
   Database,
   Cpu,
   CircleDot,
+  DollarSign,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -52,13 +54,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-  SheetDescription,
-} from "@/components/ui/sheet";
 import {
   AreaChart,
   Area,
@@ -86,10 +81,18 @@ interface ProSummary {
   bestTrade: number;
   worstTrade: number;
   maxDrawdown: number;
+  totalPnlUsd: number;
+  avgPnlUsd: number;
+  maxDrawdownUsd: number;
+  currentEquityUsd: number;
+  riskUsd: number;
+  todayTrades: number;
+  todayNetR: number;
+  todayPnlUsd: number;
   totalCycles: number;
   holdReasons: Record<string, number>;
-  symbolStats: Record<string, { trades: number; wins: number; netR: number }>;
-  equityCurve: Array<{ ts: number; netR: number; symbol: string }>;
+  symbolStats: Record<string, { trades: number; wins: number; netR: number; pnlUsd: number }>;
+  equityCurve: Array<{ ts: number; netR: number; pnlUsd: number; symbol: string }>;
 }
 
 interface CycleEntry {
@@ -124,10 +127,20 @@ interface TradeEntry {
   costsBps: number;
   outcome: string | null;
   grossR: number | null;
+  costR: number | null;
   netR: number | null;
   sizedR: number | null;
   status: string;
   reasons: string[];
+  pnlUsd: number | null;
+  pnlUsdGross: number | null;
+  pnlUsdCost: number | null;
+  riskUsdUsed: number | null;
+  equitySnapshotUsd: number | null;
+  barsHeld: number | null;
+  leverage: number | null;
+  modelVersion: string | null;
+  notes: string | null;
 }
 
 interface TradeEvent {
@@ -232,6 +245,12 @@ function formatTs(ts: string | number | null | undefined): string {
   }
 }
 
+function formatUsd(val: number | null | undefined): string {
+  if (val === null || val === undefined) return "—";
+  const sign = val >= 0 ? "+" : "";
+  return `${sign}$${Math.abs(val).toFixed(2)}`;
+}
+
 function decisionColor(decision: string): string {
   switch (decision?.toUpperCase()) {
     case "ENTER": return "text-emerald-400";
@@ -277,6 +296,8 @@ export default function ProDashboard() {
   const [tradeOutcomeFilter, setTradeOutcomeFilter] = useState<string>("all");
   const [selectedTradeId, setSelectedTradeId] = useState<number | null>(null);
   const [learningSymbolFilter, setLearningSymbolFilter] = useState<string>("all");
+  const [showUsd, setShowUsd] = useState(false);
+  const [tradeModalOpen, setTradeModalOpen] = useState(false);
 
   const { data: summary, isLoading: summaryLoading } = useQuery<ProSummary>({
     queryKey: ["/api/pro/summary", `?window=${window}`],
@@ -291,11 +312,6 @@ export default function ProDashboard() {
   const { data: trades, isLoading: tradesLoading } = useQuery<TradeEntry[]>({
     queryKey: ["/api/pro/trades"],
     refetchInterval: 15000,
-  });
-
-  const { data: tradeEvents } = useQuery<TradeEvent[]>({
-    queryKey: ["/api/pro/trades", String(selectedTradeId), "events"],
-    enabled: selectedTradeId !== null,
   });
 
   const { data: learningRuns, isLoading: learningLoading } = useQuery<LearningRun[]>({
@@ -360,18 +376,26 @@ export default function ProDashboard() {
   const equityCurveData = useMemo(() => {
     if (!summary?.equityCurve) return [];
     let cumR = 0;
+    let cumUsd = 0;
     let peak = 0;
+    let peakUsd = 0;
     return summary.equityCurve.map((pt) => {
       cumR += pt.netR;
+      cumUsd += pt.pnlUsd ?? 0;
       peak = Math.max(peak, cumR);
+      peakUsd = Math.max(peakUsd, cumUsd);
       const dd = peak > 0 ? ((peak - cumR) / peak) * 100 : 0;
+      const ddUsd = peakUsd > 0 ? ((peakUsd - cumUsd) / peakUsd) * 100 : 0;
       return {
         ts: pt.ts,
         label: formatTs(pt.ts),
         cumR: parseFloat(cumR.toFixed(3)),
+        cumUsd: parseFloat(cumUsd.toFixed(2)),
         drawdown: parseFloat((-dd).toFixed(2)),
+        drawdownUsd: parseFloat((-ddUsd).toFixed(2)),
         symbol: pt.symbol,
         netR: pt.netR,
+        pnlUsd: pt.pnlUsd ?? 0,
       };
     });
   }, [summary]);
@@ -601,16 +625,27 @@ export default function ProDashboard() {
           <TabsContent value="overview" className="mt-0 space-y-6">
             <div className="flex items-center justify-between gap-4 flex-wrap">
               <h2 className="text-xl font-semibold">System Overview</h2>
-              <Select value={window} onValueChange={setWindow} data-testid="select-window">
-                <SelectTrigger className="w-28" data-testid="button-window-select">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="24h">24h</SelectItem>
-                  <SelectItem value="7d">7 Days</SelectItem>
-                  <SelectItem value="30d">30 Days</SelectItem>
-                </SelectContent>
-              </Select>
+              <div className="flex items-center gap-2 flex-wrap">
+                <Button
+                  variant="outline"
+                  onClick={() => setShowUsd(!showUsd)}
+                  className={`toggle-elevate ${showUsd ? "toggle-elevated" : ""}`}
+                  data-testid="button-toggle-usd"
+                >
+                  <DollarSign className="h-4 w-4 mr-1" />
+                  {showUsd ? "USD" : "R"}
+                </Button>
+                <Select value={window} onValueChange={setWindow} data-testid="select-window">
+                  <SelectTrigger className="w-28" data-testid="button-window-select">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="24h">24h</SelectItem>
+                    <SelectItem value="7d">7 Days</SelectItem>
+                    <SelectItem value="30d">30 Days</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
 
             {summaryLoading ? (
@@ -671,37 +706,40 @@ export default function ProDashboard() {
                 <Card data-testid="card-total-net-r">
                   <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
                     <CardTitle className="text-sm font-medium text-muted-foreground">
-                      Total Net R
+                      {showUsd ? "Total PnL" : "Total Net R"}
                     </CardTitle>
-                    <Zap className="h-4 w-4 text-muted-foreground" />
+                    {showUsd ? <DollarSign className="h-4 w-4 text-muted-foreground" /> : <Zap className="h-4 w-4 text-muted-foreground" />}
                   </CardHeader>
                   <CardContent>
                     <div
                       className={`text-2xl font-bold ${
-                        (summary?.totalNetR ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"
+                        (showUsd ? (summary?.totalPnlUsd ?? 0) : (summary?.totalNetR ?? 0)) >= 0 ? "text-emerald-400" : "text-red-400"
                       }`}
                       data-testid="text-total-net-r"
                     >
-                      {formatR(summary?.totalNetR)}
+                      {showUsd ? formatUsd(summary?.totalPnlUsd) : formatR(summary?.totalNetR)}
                     </div>
+                    {showUsd && summary?.totalNetR !== undefined && (
+                      <p className="text-xs text-muted-foreground mt-0.5">{formatR(summary.totalNetR)}</p>
+                    )}
                   </CardContent>
                 </Card>
 
                 <Card data-testid="card-avg-r">
                   <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
                     <CardTitle className="text-sm font-medium text-muted-foreground">
-                      Avg R/Trade
+                      {showUsd ? "Avg PnL/Trade" : "Avg R/Trade"}
                     </CardTitle>
                     <BarChart3 className="h-4 w-4 text-muted-foreground" />
                   </CardHeader>
                   <CardContent>
                     <div
                       className={`text-2xl font-bold ${
-                        (summary?.avgR ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"
+                        (showUsd ? (summary?.avgPnlUsd ?? 0) : (summary?.avgR ?? 0)) >= 0 ? "text-emerald-400" : "text-red-400"
                       }`}
                       data-testid="text-avg-r"
                     >
-                      {formatR(summary?.avgR)}
+                      {showUsd ? formatUsd(summary?.avgPnlUsd) : formatR(summary?.avgR)}
                     </div>
                   </CardContent>
                 </Card>
@@ -709,13 +747,13 @@ export default function ProDashboard() {
                 <Card data-testid="card-max-drawdown">
                   <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
                     <CardTitle className="text-sm font-medium text-muted-foreground">
-                      Max Drawdown
+                      {showUsd ? "Max DD ($)" : "Max Drawdown"}
                     </CardTitle>
                     <TrendingDown className="h-4 w-4 text-muted-foreground" />
                   </CardHeader>
                   <CardContent>
                     <div className="text-2xl font-bold text-red-400" data-testid="text-max-drawdown">
-                      {formatR(summary?.maxDrawdown)}
+                      {showUsd ? formatUsd(summary?.maxDrawdownUsd ? -summary.maxDrawdownUsd : 0) : formatR(summary?.maxDrawdown)}
                     </div>
                   </CardContent>
                 </Card>
@@ -840,10 +878,10 @@ export default function ProDashboard() {
                               </span>
                               <span
                                 className={`text-sm font-semibold ${
-                                  stats.netR >= 0 ? "text-emerald-400" : "text-red-400"
+                                  (showUsd ? stats.pnlUsd : stats.netR) >= 0 ? "text-emerald-400" : "text-red-400"
                                 }`}
                               >
-                                {formatR(stats.netR)}
+                                {showUsd ? formatUsd(stats.pnlUsd) : formatR(stats.netR)}
                               </span>
                             </div>
                           </div>
@@ -1023,6 +1061,7 @@ export default function ProDashboard() {
                         <TableHead>Outcome</TableHead>
                         <TableHead>Gross R</TableHead>
                         <TableHead>Net R</TableHead>
+                        {showUsd && <TableHead>PnL $</TableHead>}
                         <TableHead>Status</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -1030,8 +1069,8 @@ export default function ProDashboard() {
                       {filteredTrades.slice(0, 100).map((trade) => (
                         <TableRow
                           key={trade.id}
-                          className="cursor-pointer"
-                          onClick={() => setSelectedTradeId(trade.id)}
+                          className="cursor-pointer hover-elevate"
+                          onClick={() => { setSelectedTradeId(trade.id); setTradeModalOpen(true); }}
                           data-testid={`row-trade-${trade.id}`}
                         >
                           <TableCell>
@@ -1066,7 +1105,7 @@ export default function ProDashboard() {
                             {formatPrice(trade.takeProfit)}
                           </TableCell>
                           <TableCell className="text-xs">
-                            {(trade.sizePct * 100).toFixed(1)}%
+                            {trade.sizePct != null ? `${(trade.sizePct * 100).toFixed(1)}%` : "—"}
                           </TableCell>
                           <TableCell>
                             {trade.outcome && (
@@ -1098,6 +1137,15 @@ export default function ProDashboard() {
                           >
                             {formatR(trade.netR)}
                           </TableCell>
+                          {showUsd && (
+                            <TableCell
+                              className={`text-xs font-mono font-semibold ${
+                                (trade.pnlUsd ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"
+                              }`}
+                            >
+                              {formatUsd(trade.pnlUsd)}
+                            </TableCell>
+                          )}
                           <TableCell>
                             <Badge variant="outline" className="text-xs">
                               {trade.status}
@@ -1111,53 +1159,11 @@ export default function ProDashboard() {
               </CardContent>
             </Card>
 
-            {/* Trade Events Sheet */}
-            <Sheet
-              open={selectedTradeId !== null}
-              onOpenChange={(open) => {
-                if (!open) setSelectedTradeId(null);
-              }}
-            >
-              <SheetContent side="right" className="w-full sm:max-w-lg overflow-y-auto">
-                <SheetHeader>
-                  <SheetTitle>Trade Timeline</SheetTitle>
-                  <SheetDescription>
-                    Events for trade #{selectedTradeId}
-                  </SheetDescription>
-                </SheetHeader>
-                <div className="mt-6 space-y-4">
-                  {tradeEvents && tradeEvents.length > 0 ? (
-                    tradeEvents.map((event, idx) => (
-                      <div
-                        key={event.id || idx}
-                        className="flex gap-3"
-                        data-testid={`text-trade-event-${idx}`}
-                      >
-                        <div className="flex flex-col items-center">
-                          <CircleDot className="h-4 w-4 text-primary" />
-                          {idx < tradeEvents.length - 1 && (
-                            <div className="w-px h-full bg-border" />
-                          )}
-                        </div>
-                        <div className="pb-4">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <Badge variant="outline" className="text-xs">
-                              {event.type}
-                            </Badge>
-                            <span className="text-xs text-muted-foreground">
-                              {formatTs(event.ts)}
-                            </span>
-                          </div>
-                          <p className="text-sm mt-1">{event.message}</p>
-                        </div>
-                      </div>
-                    ))
-                  ) : (
-                    <p className="text-sm text-muted-foreground">No events recorded</p>
-                  )}
-                </div>
-              </SheetContent>
-            </Sheet>
+            <TradeDetailModal
+              tradeId={selectedTradeId}
+              open={tradeModalOpen}
+              onClose={() => { setTradeModalOpen(false); setSelectedTradeId(null); }}
+            />
           </TabsContent>
 
           {/* ===== TAB 4: LEARNING PANEL ===== */}

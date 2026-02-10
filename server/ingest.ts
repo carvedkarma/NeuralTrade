@@ -10,8 +10,16 @@ import {
   learningRuns,
   healthStatus,
   modelLearningStats,
+  settings,
 } from "@shared/schema";
+import type { MoneyConfig } from "@shared/schema";
 import { eq } from "drizzle-orm";
+
+async function getMoneyConfig(): Promise<MoneyConfig> {
+  const row = await db.select().from(settings).where(eq(settings.key, "money_config")).limit(1);
+  if (row.length === 0) return { account_equity_usd: 1500, risk_per_trade_pct: 1.0, base_currency: "USD" };
+  return row[0].valueJson as MoneyConfig;
+}
 
 const router = Router();
 
@@ -85,6 +93,8 @@ async function processEvent(
 
     case "TRADE_OPEN": {
       const p = payload as any;
+      const moneyConfig = await getMoneyConfig();
+      const riskUsd = moneyConfig.account_equity_usd * (moneyConfig.risk_per_trade_pct / 100);
       await db.insert(liveTradeRecords).values({
         symbol: p.symbol ?? "BTCUSDT",
         side: p.side ?? "LONG",
@@ -95,6 +105,10 @@ async function processEvent(
         pEnter: p.p_enter ?? null,
         sizePct: p.size_pct ?? null,
         costsBps: p.costs_bps ?? null,
+        leverage: p.leverage ?? null,
+        modelVersion: p.model_version ?? null,
+        riskUsdUsed: riskUsd,
+        equitySnapshotUsd: moneyConfig.account_equity_usd,
         status: "open",
         createdAt: Date.now(),
       });
@@ -110,10 +124,29 @@ async function processEvent(
         if (p.exit_price) updates.exitPrice = p.exit_price;
         if (p.outcome) updates.outcome = p.outcome;
         if (p.gross_r !== undefined) updates.grossR = p.gross_r;
+        if (p.cost_r !== undefined) updates.costR = p.cost_r;
         if (p.net_r !== undefined) updates.netR = p.net_r;
         if (p.sized_r !== undefined) updates.sizedR = p.sized_r;
+        if (p.bars_held !== undefined) updates.barsHeld = p.bars_held;
+        if (p.model_version) updates.modelVersion = p.model_version;
+        if (p.leverage !== undefined) updates.leverage = p.leverage;
         if (type === "TRADE_CLOSE") updates.status = "closed";
         if (p.status) updates.status = p.status;
+
+        if (type === "TRADE_CLOSE") {
+          const [existing] = await db.select().from(liveTradeRecords).where(eq(liveTradeRecords.id, p.trade_id)).limit(1);
+          if (existing) {
+            const riskUsd = existing.riskUsdUsed ?? (await getMoneyConfig().then(c => c.account_equity_usd * (c.risk_per_trade_pct / 100)));
+            const netR = p.net_r ?? existing.netR ?? 0;
+            const grossR = p.gross_r ?? existing.grossR ?? 0;
+            const costR = p.cost_r ?? (grossR - netR);
+            updates.costR = costR;
+            updates.pnlUsd = netR * riskUsd;
+            updates.pnlUsdGross = grossR * riskUsd;
+            updates.pnlUsdCost = costR * riskUsd;
+            if (!existing.riskUsdUsed) updates.riskUsdUsed = riskUsd;
+          }
+        }
 
         if (Object.keys(updates).length > 0) {
           await db
