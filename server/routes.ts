@@ -382,7 +382,7 @@ export async function registerRoutes(
       const endTs = (trade.exitTime ?? Date.now()) + postBars * barMs;
 
       const symbol = trade.symbol || "BTCUSDT";
-      const replayCandles = await db
+      let replayCandles = await db
         .select()
         .from(candles)
         .where(
@@ -395,6 +395,36 @@ export async function registerRoutes(
         )
         .orderBy(asc(candles.timestamp))
         .limit(300);
+
+      if (replayCandles.length === 0) {
+        try {
+          const binanceUrl = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=15m&startTime=${startTs}&endTime=${endTs}&limit=300`;
+          console.log(`[Replay] No DB candles, fetching from Binance: ${binanceUrl}`);
+          const binanceResp = await fetch(binanceUrl);
+          if (binanceResp.ok) {
+            const klines = await binanceResp.json() as Array<Array<string | number>>;
+            replayCandles = klines.map((k: Array<string | number>) => ({
+              id: 0,
+              symbol,
+              timeframe: "15m",
+              timestamp: Number(k[0]),
+              open: parseFloat(String(k[1])),
+              high: parseFloat(String(k[2])),
+              low: parseFloat(String(k[3])),
+              close: parseFloat(String(k[4])),
+              volume: parseFloat(String(k[5])),
+            }));
+            console.log(`[Replay] Fetched ${replayCandles.length} candles from Binance for ${symbol}`);
+            if (replayCandles.length === 0) {
+              console.warn(`[Replay] Binance returned 0 candles for ${symbol} range ${new Date(startTs).toISOString()}..${new Date(endTs).toISOString()}`);
+            }
+          } else {
+            console.warn(`[Replay] Binance API returned ${binanceResp.status}`);
+          }
+        } catch (binanceErr: any) {
+          console.warn(`[Replay] Binance fallback failed: ${binanceErr.message}`);
+        }
+      }
 
       const isOpen = !trade.exitTime;
 
