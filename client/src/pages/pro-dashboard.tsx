@@ -250,11 +250,20 @@ function decisionBadgeVariant(decision: string): "default" | "secondary" | "dest
   }
 }
 
-function trendIcon(trend: string) {
-  if (trend?.toLowerCase().includes("up") || trend?.toLowerCase().includes("bull")) {
+function trendIcon(trend: string | number | null | undefined) {
+  if (trend === null || trend === undefined) {
+    return <Minus className="h-3.5 w-3.5 text-muted-foreground" />;
+  }
+  if (typeof trend === "number") {
+    if (trend > 0.1) return <ArrowUpRight className="h-3.5 w-3.5 text-emerald-400" />;
+    if (trend < -0.1) return <ArrowDownRight className="h-3.5 w-3.5 text-red-400" />;
+    return <Minus className="h-3.5 w-3.5 text-muted-foreground" />;
+  }
+  const s = String(trend).toLowerCase();
+  if (s.includes("up") || s.includes("bull")) {
     return <ArrowUpRight className="h-3.5 w-3.5 text-emerald-400" />;
   }
-  if (trend?.toLowerCase().includes("down") || trend?.toLowerCase().includes("bear")) {
+  if (s.includes("down") || s.includes("bear")) {
     return <ArrowDownRight className="h-3.5 w-3.5 text-red-400" />;
   }
   return <Minus className="h-3.5 w-3.5 text-muted-foreground" />;
