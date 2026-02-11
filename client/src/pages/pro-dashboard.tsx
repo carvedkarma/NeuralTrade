@@ -92,6 +92,9 @@ interface ProSummary {
   totalCycles: number;
   holdReasons: Record<string, number>;
   symbolStats: Record<string, { trades: number; wins: number; netR: number; pnlUsd: number }>;
+  policyStats: Record<string, { trades: number; wins: number; netR: number; pnlUsd: number }>;
+  flowEnabledPct: number;
+  avgThresholds: Record<string, { avgCoreThr: number; avgFlowThr: number }>;
   equityCurve: Array<{ ts: number; netR: number; pnlUsd: number; symbol: string }>;
 }
 
@@ -109,6 +112,9 @@ interface CycleEntry {
   thresholdUsed: number;
   decision: string;
   reasons: string[];
+  policy: string | null;
+  coreThr: number | null;
+  flowThr: number | null;
   createdAt: string;
 }
 
@@ -132,6 +138,8 @@ interface TradeEntry {
   sizedR: number | null;
   status: string;
   reasons: string[];
+  policy: string | null;
+  flowRiskMult: number | null;
   pnlUsd: number | null;
   pnlUsdGross: number | null;
   pnlUsdCost: number | null;
@@ -294,6 +302,7 @@ export default function ProDashboard() {
   const [cycleSymbolFilter, setCycleSymbolFilter] = useState<string>("all");
   const [tradeSymbolFilter, setTradeSymbolFilter] = useState<string>("all");
   const [tradeOutcomeFilter, setTradeOutcomeFilter] = useState<string>("all");
+  const [tradePolicyFilter, setTradePolicyFilter] = useState<string>("all");
   const [selectedTradeId, setSelectedTradeId] = useState<number | null>(null);
   const [learningSymbolFilter, setLearningSymbolFilter] = useState<string>("all");
   const [showUsd, setShowUsd] = useState(false);
@@ -344,8 +353,11 @@ export default function ProDashboard() {
     if (tradeOutcomeFilter !== "all") {
       result = result.filter((t) => t.outcome === tradeOutcomeFilter);
     }
+    if (tradePolicyFilter !== "all") {
+      result = result.filter((t) => (t.policy ?? "CORE") === tradePolicyFilter);
+    }
     return result;
-  }, [trades, tradeSymbolFilter, tradeOutcomeFilter]);
+  }, [trades, tradeSymbolFilter, tradeOutcomeFilter, tradePolicyFilter]);
 
   const filteredLearningRuns = useMemo(() => {
     if (!learningRuns) return [];
@@ -807,8 +819,107 @@ export default function ProDashboard() {
               </CardContent>
             </Card>
 
+            {/* CORE vs FLOW Policy Breakdown */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <Card data-testid="card-core-trades">
+                <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+                  <CardTitle className="text-sm font-medium text-muted-foreground">CORE Trades</CardTitle>
+                  <Shield className="h-4 w-4 text-blue-400" />
+                </CardHeader>
+                <CardContent>
+                  <div className="text-2xl font-bold" data-testid="text-core-trades">
+                    {summary?.policyStats?.CORE?.trades ?? 0}
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    WR: {summary?.policyStats?.CORE?.trades ? ((summary.policyStats.CORE.wins / summary.policyStats.CORE.trades) * 100).toFixed(0) : 0}%
+                  </p>
+                </CardContent>
+              </Card>
+
+              <Card data-testid="card-core-net-r">
+                <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+                  <CardTitle className="text-sm font-medium text-muted-foreground">
+                    {showUsd ? "CORE PnL" : "CORE Net R"}
+                  </CardTitle>
+                  <Shield className="h-4 w-4 text-blue-400" />
+                </CardHeader>
+                <CardContent>
+                  <div className={`text-2xl font-bold ${(showUsd ? (summary?.policyStats?.CORE?.pnlUsd ?? 0) : (summary?.policyStats?.CORE?.netR ?? 0)) >= 0 ? "text-emerald-400" : "text-red-400"}`} data-testid="text-core-net-r">
+                    {showUsd ? formatUsd(summary?.policyStats?.CORE?.pnlUsd) : formatR(summary?.policyStats?.CORE?.netR)}
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card data-testid="card-flow-trades">
+                <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+                  <CardTitle className="text-sm font-medium text-muted-foreground">FLOW Trades</CardTitle>
+                  <Zap className="h-4 w-4 text-amber-400" />
+                </CardHeader>
+                <CardContent>
+                  <div className="text-2xl font-bold" data-testid="text-flow-trades">
+                    {summary?.policyStats?.FLOW?.trades ?? 0}
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    WR: {summary?.policyStats?.FLOW?.trades ? ((summary.policyStats.FLOW.wins / summary.policyStats.FLOW.trades) * 100).toFixed(0) : 0}%
+                  </p>
+                </CardContent>
+              </Card>
+
+              <Card data-testid="card-flow-net-r">
+                <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+                  <CardTitle className="text-sm font-medium text-muted-foreground">
+                    {showUsd ? "FLOW PnL" : "FLOW Net R"}
+                  </CardTitle>
+                  <Zap className="h-4 w-4 text-amber-400" />
+                </CardHeader>
+                <CardContent>
+                  <div className={`text-2xl font-bold ${(showUsd ? (summary?.policyStats?.FLOW?.pnlUsd ?? 0) : (summary?.policyStats?.FLOW?.netR ?? 0)) >= 0 ? "text-emerald-400" : "text-red-400"}`} data-testid="text-flow-net-r">
+                    {showUsd ? formatUsd(summary?.policyStats?.FLOW?.pnlUsd) : formatR(summary?.policyStats?.FLOW?.netR)}
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* FLOW Status & Thresholds */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {/* Hold Reasons */}
+              <Card data-testid="card-flow-status">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm font-medium">FLOW Engine Status</CardTitle>
+                  <CardDescription>Frequency boost policy</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex items-center gap-4 flex-wrap mb-3">
+                    <div>
+                      <span className="text-xs text-muted-foreground">FLOW Enabled</span>
+                      <div className="text-lg font-bold">{((summary?.flowEnabledPct ?? 0) * 100).toFixed(0)}%</div>
+                    </div>
+                    <div className={`h-2.5 w-2.5 rounded-full ${(summary?.flowEnabledPct ?? 0) > 0 ? "bg-amber-400" : "bg-muted"}`} />
+                  </div>
+                  {summary?.avgThresholds && Object.keys(summary.avgThresholds).length > 0 ? (
+                    <div className="space-y-2">
+                      {Object.entries(summary.avgThresholds).map(([sym, thr]) => (
+                        <div key={sym} className="flex items-center justify-between gap-4 flex-wrap">
+                          <Badge variant="outline" className="text-xs">{sym}</Badge>
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs">
+                              <span className="text-blue-400">CORE:</span>{" "}
+                              <span className="font-mono">{(thr.avgCoreThr * 100).toFixed(1)}%</span>
+                            </span>
+                            <span className="text-xs">
+                              <span className="text-amber-400">FLOW:</span>{" "}
+                              <span className="font-mono">{(thr.avgFlowThr * 100).toFixed(1)}%</span>
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No threshold data yet</p>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Hold Reasons - moved here */}
               <Card data-testid="card-hold-reasons">
                 <CardHeader className="pb-2">
                   <CardTitle className="text-sm font-medium">Hold Reasons Breakdown</CardTitle>
@@ -938,6 +1049,9 @@ export default function ProDashboard() {
                         <TableHead>Range</TableHead>
                         <TableHead>Dir</TableHead>
                         <TableHead>Threshold</TableHead>
+                        <TableHead>Policy</TableHead>
+                        <TableHead>CORE Thr</TableHead>
+                        <TableHead>FLOW Thr</TableHead>
                         <TableHead>Decision</TableHead>
                         <TableHead>Reasons</TableHead>
                       </TableRow>
@@ -980,6 +1094,24 @@ export default function ProDashboard() {
                             {(cycle.thresholdUsed * 100).toFixed(1)}%
                           </TableCell>
                           <TableCell>
+                            {cycle.policy ? (
+                              <Badge
+                                variant="outline"
+                                className={`text-xs ${cycle.policy === "CORE" ? "text-blue-400 border-blue-400/30" : cycle.policy === "FLOW" ? "text-amber-400 border-amber-400/30" : ""}`}
+                              >
+                                {cycle.policy}
+                              </Badge>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">—</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-xs font-mono">
+                            {cycle.coreThr != null ? (cycle.coreThr * 100).toFixed(1) + "%" : "—"}
+                          </TableCell>
+                          <TableCell className="text-xs font-mono">
+                            {cycle.flowThr != null ? (cycle.flowThr * 100).toFixed(1) + "%" : "—"}
+                          </TableCell>
+                          <TableCell>
                             <Badge
                               variant={decisionBadgeVariant(cycle.decision)}
                               className={`text-xs ${decisionColor(cycle.decision)}`}
@@ -1017,6 +1149,16 @@ export default function ProDashboard() {
                     ))}
                   </SelectContent>
                 </Select>
+                <Select value={tradePolicyFilter} onValueChange={setTradePolicyFilter}>
+                  <SelectTrigger className="w-28" data-testid="button-trade-policy-filter">
+                    <SelectValue placeholder="All Policies" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All</SelectItem>
+                    <SelectItem value="CORE">CORE</SelectItem>
+                    <SelectItem value="FLOW">FLOW</SelectItem>
+                  </SelectContent>
+                </Select>
                 <Select value={tradeOutcomeFilter} onValueChange={setTradeOutcomeFilter}>
                   <SelectTrigger className="w-28" data-testid="button-trade-outcome-filter">
                     <SelectValue placeholder="All Outcomes" />
@@ -1051,6 +1193,7 @@ export default function ProDashboard() {
                       <TableRow>
                         <TableHead>Symbol</TableHead>
                         <TableHead>Side</TableHead>
+                        <TableHead>Policy</TableHead>
                         <TableHead>Entry</TableHead>
                         <TableHead>Exit</TableHead>
                         <TableHead>Entry $</TableHead>
@@ -1085,6 +1228,18 @@ export default function ProDashboard() {
                             >
                               {trade.side}
                             </Badge>
+                          </TableCell>
+                          <TableCell>
+                            {trade.policy ? (
+                              <Badge
+                                variant="outline"
+                                className={`text-xs ${trade.policy === "CORE" ? "text-blue-400 border-blue-400/30" : trade.policy === "FLOW" ? "text-amber-400 border-amber-400/30" : ""}`}
+                              >
+                                {trade.policy}
+                              </Badge>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">—</span>
+                            )}
                           </TableCell>
                           <TableCell className="text-xs whitespace-nowrap">
                             {formatTs(trade.entryTime)}

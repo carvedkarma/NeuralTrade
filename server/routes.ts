@@ -259,6 +259,39 @@ export async function registerRoutes(
         symbolStats[t.symbol].pnlUsd += t.pnlUsd ?? 0;
       }
 
+      const policyStats: Record<string, { trades: number; wins: number; netR: number; pnlUsd: number }> = {
+        CORE: { trades: 0, wins: 0, netR: 0, pnlUsd: 0 },
+        FLOW: { trades: 0, wins: 0, netR: 0, pnlUsd: 0 },
+      };
+      for (const t of closedTrades) {
+        const pol = t.policy === "CORE" || t.policy === "FLOW" ? t.policy : "CORE";
+        policyStats[pol].trades++;
+        if ((t.netR ?? 0) > 0) policyStats[pol].wins++;
+        policyStats[pol].netR += t.netR ?? 0;
+        policyStats[pol].pnlUsd += t.pnlUsd ?? 0;
+      }
+
+      const flowCycles = cycles.filter((c) => c.flowThr != null);
+      const flowEnabledCycles = flowCycles.filter((c) => c.policy === "FLOW" || (c.coreThr != null && c.flowThr != null));
+      const flowEnabledPct = flowCycles.length > 0 ? flowEnabledCycles.length / flowCycles.length : 0;
+
+      const symbolThresholds: Record<string, { coreThrSum: number; flowThrSum: number; count: number }> = {};
+      for (const c of cycles) {
+        if (c.coreThr != null || c.flowThr != null) {
+          if (!symbolThresholds[c.symbol]) symbolThresholds[c.symbol] = { coreThrSum: 0, flowThrSum: 0, count: 0 };
+          symbolThresholds[c.symbol].coreThrSum += c.coreThr ?? 0;
+          symbolThresholds[c.symbol].flowThrSum += c.flowThr ?? 0;
+          symbolThresholds[c.symbol].count++;
+        }
+      }
+      const avgThresholds: Record<string, { avgCoreThr: number; avgFlowThr: number }> = {};
+      for (const [sym, st] of Object.entries(symbolThresholds)) {
+        avgThresholds[sym] = {
+          avgCoreThr: st.count > 0 ? st.coreThrSum / st.count : 0,
+          avgFlowThr: st.count > 0 ? st.flowThrSum / st.count : 0,
+        };
+      }
+
       const moneyRow = await db.select().from(settings).where(eq(settings.key, "money_config")).limit(1);
       const moneyConfig = moneyRow.length > 0 ? moneyRow[0].valueJson as any : { account_equity_usd: 1500, risk_per_trade_pct: 1.0 };
       const riskUsd = moneyConfig.account_equity_usd * (moneyConfig.risk_per_trade_pct / 100);
@@ -304,6 +337,9 @@ export async function registerRoutes(
         totalCycles: cycles.length,
         holdReasons,
         symbolStats,
+        policyStats,
+        flowEnabledPct,
+        avgThresholds,
         equityCurve: closedTrades.map((t) => ({
           ts: t.exitTime ?? t.entryTime,
           netR: t.netR ?? 0,

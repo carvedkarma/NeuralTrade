@@ -1218,6 +1218,8 @@ export const liveTradeRecords = pgTable("live_trade_records", {
   leverage: real("leverage"),
   modelVersion: varchar("model_version", { length: 50 }),
   notes: text("notes"),
+  policy: varchar("policy", { length: 10 }),
+  flowRiskMult: real("flow_risk_mult"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (table) => ({
   symbolIdx: index("live_trades_symbol_idx").on(table.symbol),
@@ -1272,6 +1274,9 @@ export const liveCycleLogs = pgTable("live_cycle_logs", {
   thresholdUsed: real("threshold_used"),
   decision: varchar("decision", { length: 30 }).notNull(),
   reasons: jsonb("reasons").$type<string[]>(),
+  policy: varchar("policy", { length: 10 }),
+  coreThr: real("core_thr"),
+  flowThr: real("flow_thr"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (table) => ({
   symbolIdx: index("cycle_logs_symbol_idx").on(table.symbol),

@@ -86,6 +86,9 @@ async function processEvent(
         thresholdUsed: p.threshold_used ?? null,
         decision: p.decision ?? "UNKNOWN",
         reasons: p.reasons ?? [],
+        policy: p.policy ?? null,
+        coreThr: p.core_thr ?? null,
+        flowThr: p.flow_thr ?? null,
         createdAt: Date.now(),
       });
       break;
@@ -109,6 +112,8 @@ async function processEvent(
         modelVersion: p.model_version ?? null,
         riskUsdUsed: riskUsd,
         equitySnapshotUsd: moneyConfig.account_equity_usd,
+        policy: p.policy ?? null,
+        flowRiskMult: p.flow_risk_mult ?? null,
         status: "open",
         createdAt: Date.now(),
       });
