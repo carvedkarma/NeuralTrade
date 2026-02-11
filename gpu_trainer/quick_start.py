@@ -2145,6 +2145,10 @@ Examples:
                         help="Disable auto-promotion (train + evaluate only)")
     parser.add_argument("--no-geometry-sweep-retrain", action="store_true", default=False,
                         help="Skip geometry sweep during scheduled retrain")
+    parser.add_argument("--limit-15m", type=int, default=800,
+                        help="Number of 15m candles to fetch per symbol (default: 800, ~50 H4 bars)")
+    parser.add_argument("--direct-htf", action="store_true", default=False,
+                        help="Fetch 1H/4H candles directly from exchange instead of resampling")
 
     args = parser.parse_args()
 
@@ -2258,6 +2262,8 @@ Examples:
             dry_run=args.dry_run,
             dry_run_candles=args.dry_run_candles,
             per_symbol_models=args.per_symbol_models,
+            limit_15m=args.limit_15m,
+            direct_htf=args.direct_htf,
         )
         runner.learning_manager = learning_mgr
         runner.run()

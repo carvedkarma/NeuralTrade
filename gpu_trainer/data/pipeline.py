@@ -946,10 +946,8 @@ class FeatureEngineer:
         nan_counts = result.isna().sum()
         total_nans = nan_counts.sum()
         if total_nans > 0:
-            logger.info(f"HTF features: {total_nans} NaN values (expected for initial bars)")
-            for col in result.columns:
-                if nan_counts[col] > 0:
-                    logger.info(f"  {col}: {nan_counts[col]} NaN rows")
+            nan_cols = {col: int(nan_counts[col]) for col in result.columns if nan_counts[col] > 0}
+            logger.info(f"HTF NaNs summary: total={total_nans} (expected during warmup) | {nan_cols}")
         
         self._sanity_check_htf_leakage(ohlcv, df)
         

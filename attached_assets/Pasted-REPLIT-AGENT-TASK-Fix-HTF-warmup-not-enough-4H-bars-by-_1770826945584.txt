@@ -1,0 +1,61 @@
+REPLIT AGENT TASK: Fix HTF warmup (not enough 4H bars) by increasing candle history + optional direct HTF fetch
+
+Problem (seen in logs):
+"Only 20 h4 bars — need at least 25 for indicators" + lots of HTF NaNs
+Cause: live loop fetches only 300 x 15m candles → ~18–20 H4 bars → HTF indicators can’t form → HTF gates fail → HOLD.
+
+GOAL:
+Guarantee enough history for HTF indicators on every symbol so HTF gates work and trades can happen.
+
+========================================================
+A) Increase 15m history fetch (mandatory)
+========================================================
+1) Find the live candle fetch in gpu_trainer (likely live_runner.py or a fetcher used by quick_start.py):
+   - It currently uses limit=300 (or REQUIRED_CANDLES=300).
+2) Change default 15m fetch limit to:
+   - 800 (recommended) or at least 600.
+   Reason: 800 x 15m = 200 hours ≈ 50 H4 bars (enough for SMA20/RSI14/ATR + buffer)
+
+Implementation detail:
+- Add CLI flag: --limit-15m (default 800)
+- Wire it into live runner for every symbol fetch:
+  Fetching SYMBOL 15m (limit={limit_15m} ...)
+
+========================================================
+B) Add HTF minimum bars + WARMUP state (mandatory safety)
+========================================================
+3) In HTF feature pipeline, add strict gate:
+   - If h4_bars < 50 OR h1_bars < 100:
+       skip HTF indicators + skip trading for that symbol
+       emit status=WARMUP
+       log once per cycle:
+         "SYMBOL WARMUP: h1_bars=X h4_bars=Y (min 100/50) -> skip gates/trading"
+   - Do NOT allow partial HTF indicators to drive decisions.
+
+4) Reduce NaN spam:
+   - Keep your per-feature NaN counts, but print summary line:
+     "SYMBOL HTF NaNs summary: total=... (expected during warmup)"
+
+========================================================
+C) (Optional but best) Fetch HTF candles directly
+========================================================
+5) If the exchange API supports it, fetch 1H and 4H candles directly instead of resampling:
+   - fetch_1h(limit=300)
+   - fetch_4h(limit=200)
+   Use these to compute HTF indicators (more stable than resample).
+   Keep the HTF leakage sanity check (it must still PASS).
+
+========================================================
+D) Verification Checklist (must pass)
+========================================================
+After patch, when running live:
+- Logs show:
+  "Fetching ETHUSDT 15m (limit=800...)"
+- HTF warnings disappear:
+  NO "Only 20 h4 bars — need at least 25..."
+- HTF leakage check still prints PASS:
+  "PASS: ... strictly past HTF bars. No leakage detected."
+- More symbols reach aligned=YES sometimes, not always False.
+
+DELIVERABLE:
+Push code changes + update any docs/README for new flags.

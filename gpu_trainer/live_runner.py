@@ -31,10 +31,13 @@ import pandas as pd
 log = logging.getLogger("LiveRunner")
 
 
-REQUIRED_CANDLES = 300
+REQUIRED_CANDLES = 800
 MAX_CACHE_BARS = 2000
 RETRY_ATTEMPTS = 3
 RETRY_DELAY = 2.0
+
+MIN_H1_BARS = 100
+MIN_H4_BARS = 50
 
 
 def _retry_request(method: str, url: str, **kwargs) -> Optional[requests.Response]:
@@ -152,6 +155,7 @@ def _fetch_candles_for_symbol(fetcher, symbol: str, timeframe: str = "15m",
                                limit: int = REQUIRED_CANDLES) -> Optional[pd.DataFrame]:
     """Fetch recent candles for a symbol via the BinanceDataFetcher."""
     try:
+        log.info(f"Fetching {symbol} {timeframe} (limit={limit}...)")
         raw = fetcher.fetch_klines_sync(symbol, timeframe, limit=limit)
         if not raw or len(raw) < 100:
             log.warning(f"Insufficient candles for {symbol}: got {len(raw) if raw else 0}")
@@ -169,6 +173,71 @@ def _fetch_candles_for_symbol(fetcher, symbol: str, timeframe: str = "15m",
     except Exception as e:
         log.error(f"Failed to fetch candles for {symbol}: {e}")
         return None
+
+
+def _check_htf_warmup(df: pd.DataFrame, symbol: str) -> Optional[str]:
+    """Check if there are enough candles to form valid HTF bars.
+
+    Returns None if OK, or a WARMUP reason string if insufficient bars.
+    Logs once per cycle when in warmup state.
+    """
+    if 'timestamp' not in df.columns:
+        return f"{symbol} WARMUP: no timestamp column"
+
+    ts = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+
+    ohlcv = pd.DataFrame({
+        'open': df['open'].values,
+        'high': df['high'].values,
+        'low': df['low'].values,
+        'close': df['close'].values,
+        'volume': df['volume'].values,
+    }, index=ts)
+
+    h1_bars = ohlcv.resample('1h', label='left', closed='left').agg({
+        'open': 'first'
+    }).dropna()
+    h4_bars = ohlcv.resample('4h', label='left', closed='left').agg({
+        'open': 'first'
+    }).dropna()
+
+    n_h1 = len(h1_bars)
+    n_h4 = len(h4_bars)
+
+    if n_h1 < MIN_H1_BARS or n_h4 < MIN_H4_BARS:
+        msg = (f"{symbol} WARMUP: h1_bars={n_h1} h4_bars={n_h4} "
+               f"(min {MIN_H1_BARS}/{MIN_H4_BARS}) -> skip gates/trading")
+        return msg
+
+    return None
+
+
+def _fetch_htf_candles_direct(fetcher, symbol: str) -> Optional[Dict[str, pd.DataFrame]]:
+    """Fetch 1H and 4H candles directly from the exchange instead of resampling.
+
+    Returns dict with '1h' and '4h' DataFrames, or None on failure.
+    """
+    result = {}
+    for tf, limit in [("1h", 300), ("4h", 200)]:
+        try:
+            log.info(f"Fetching {symbol} {tf} (limit={limit}, direct HTF...)")
+            raw = fetcher.fetch_klines_sync(symbol, tf, limit=limit)
+            if not raw or len(raw) < 10:
+                log.warning(f"Insufficient direct {tf} candles for {symbol}: got {len(raw) if raw else 0}")
+                return None
+            df = pd.DataFrame(raw)
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                if col in df.columns:
+                    df[col] = df[col].astype(float)
+            if 'timestamp' in df.columns:
+                df['timestamp'] = df['timestamp'].astype(int)
+            df = df.sort_values('timestamp').reset_index(drop=True)
+            result[tf] = df
+            log.info(f"  {symbol} {tf}: got {len(df)} bars")
+        except Exception as e:
+            log.error(f"Failed to fetch direct {tf} candles for {symbol}: {e}")
+            return None
+    return result
 
 
 def _compute_features_for_symbol(df: pd.DataFrame, engineer, feature_columns: list,
@@ -370,6 +439,8 @@ class LiveRunner:
         dry_run: bool = False,
         dry_run_candles: int = 200,
         per_symbol_models: bool = False,
+        limit_15m: int = REQUIRED_CANDLES,
+        direct_htf: bool = False,
     ):
         self.replit_url = replit_url
         self.symbols = symbols
@@ -385,6 +456,8 @@ class LiveRunner:
         self.dry_run = dry_run
         self.dry_run_candles = dry_run_candles
         self.per_symbol_models = per_symbol_models
+        self.limit_15m = limit_15m
+        self.direct_htf = direct_htf
 
         self.model = None
         self.engineer = None
@@ -396,6 +469,7 @@ class LiveRunner:
         self.exchange_time_offset = 0.0
         self.cooldown_tracker: Dict[str, int] = {}
         self.p_enter_history: Dict[str, List[float]] = {}
+        self.warmup_logged: Dict[str, bool] = {}
 
     def _init_fetcher(self):
         from data.pipeline import BinanceDataFetcher
@@ -509,6 +583,8 @@ class LiveRunner:
         log.info(f"  Interval: {self.interval} | Threshold: {self.enter_threshold}")
         log.info(f"  TP={self.tp_mult}x SL={self.sl_mult}x | Cooldown: {self.cooldown_bars} bars")
         log.info(f"  Per-symbol models: {self.per_symbol_models}")
+        log.info(f"  15m fetch limit: {self.limit_15m} | Direct HTF fetch: {self.direct_htf}")
+        log.info(f"  HTF warmup gates: min h1={MIN_H1_BARS} h4={MIN_H4_BARS} bars")
         if self.dry_run:
             log.info(f"  DRY RUN MODE — replaying cached candles")
         log.info("=" * 80)
@@ -594,7 +670,7 @@ class LiveRunner:
 
         prices = {}
         for symbol in self.symbols:
-            df = _fetch_candles_for_symbol(self.fetcher, symbol, self.interval)
+            df = _fetch_candles_for_symbol(self.fetcher, symbol, self.interval, limit=self.limit_15m)
             if df is not None and len(df) > 0:
                 prices[symbol] = float(df.iloc[-1]['close'])
         self.portfolio.check_exits(prices)
@@ -617,14 +693,137 @@ class LiveRunner:
         for c in accepted:
             self._execute_candidate(c)
 
+    def _compute_htf_from_direct(self, htf_direct: Dict[str, pd.DataFrame],
+                                  df_candles: pd.DataFrame) -> dict:
+        """Compute HTF gate values from directly-fetched 1H/4H candle data.
+
+        Mirrors _apply_htf_gates but uses real HTF bars instead of resampled features.
+        Uses the last COMPLETED bar (second-to-last) for each timeframe to avoid lookahead.
+        """
+        result = {
+            'trend_aligned': False, 'slope_ok': False, 'range_ok': False,
+            'side': 'NEUTRAL', 'h1_trend': 0, 'h4_trend': 0,
+            'h1_slope': 0.0, 'h1_range_pos': 0.5,
+        }
+
+        for tf_key, tf_label in [('1h', 'h1'), ('4h', 'h4')]:
+            df_tf = htf_direct.get(tf_key)
+            if df_tf is None or len(df_tf) < 22:
+                continue
+
+            closes = df_tf['close'].values.astype(float)
+            highs = df_tf['high'].values.astype(float)
+            lows = df_tf['low'].values.astype(float)
+
+            sma20 = pd.Series(closes).rolling(20, min_periods=1).mean().values
+            atr_vals = []
+            for i in range(1, len(closes)):
+                tr = max(highs[i] - lows[i],
+                         abs(highs[i] - closes[i-1]),
+                         abs(lows[i] - closes[i-1]))
+                atr_vals.append(tr)
+            atr_series = pd.Series([atr_vals[0]] + atr_vals).rolling(14, min_periods=1).mean().values
+
+            idx = -2
+            slope = (sma20[idx] - sma20[max(idx-3, 0)]) / (atr_series[idx] + 1e-9)
+            trend_sign = 1 if slope > 0 else (-1 if slope < 0 else 0)
+
+            result[f'{tf_label}_trend'] = trend_sign
+
+            if tf_label == 'h1':
+                result['h1_slope'] = float(slope)
+                htf_high = highs[idx]
+                htf_low = lows[idx]
+                current_close = float(df_candles.iloc[-1]['close'])
+                result['h1_range_pos'] = float(np.clip(
+                    (current_close - htf_low) / (htf_high - htf_low + 1e-9), 0.0, 1.0
+                ))
+
+        h1_trend = result['h1_trend']
+        h4_trend = result['h4_trend']
+        result['trend_aligned'] = (h1_trend == h4_trend) and (h1_trend != 0)
+        result['slope_ok'] = abs(result['h1_slope']) > 0.05
+
+        h1_range_pos = result['h1_range_pos']
+        result['range_ok'] = True
+        if h1_trend > 0 and h1_range_pos < 0.2:
+            result['range_ok'] = False
+        if h1_trend < 0 and h1_range_pos > 0.8:
+            result['range_ok'] = False
+
+        if h1_trend > 0:
+            result['side'] = 'LONG'
+        elif h1_trend < 0:
+            result['side'] = 'SHORT'
+        else:
+            result['side'] = 'NEUTRAL'
+
+        log.info(f"  HTF gates (direct): aligned={result['trend_aligned']} "
+                 f"h1={h1_trend:+d} h4={h4_trend:+d} slope={result['h1_slope']:.3f} "
+                 f"range_pos={h1_range_pos:.2f}")
+
+        return result
+
     def _process_symbol(self, symbol: str, df_candles: Optional[pd.DataFrame] = None) -> Optional[dict]:
         """Process one symbol: fetch data, compute features, run inference, apply gates."""
         if df_candles is None:
-            df_candles = _fetch_candles_for_symbol(self.fetcher, symbol, self.interval)
+            df_candles = _fetch_candles_for_symbol(self.fetcher, symbol, self.interval, limit=self.limit_15m)
         if df_candles is None:
             return None
 
         df_candles = self._update_candle_cache(symbol, df_candles)
+
+        htf_direct = None
+        use_direct_htf = False
+
+        if self.direct_htf:
+            htf_direct = _fetch_htf_candles_direct(self.fetcher, symbol)
+            if htf_direct:
+                n_h1 = len(htf_direct.get('1h', []))
+                n_h4 = len(htf_direct.get('4h', []))
+                log.info(f"  {symbol} direct HTF: h1={n_h1} bars, h4={n_h4} bars")
+                if n_h1 < MIN_H1_BARS or n_h4 < MIN_H4_BARS:
+                    warmup_msg = (f"{symbol} WARMUP (direct HTF): h1_bars={n_h1} h4_bars={n_h4} "
+                                  f"(min {MIN_H1_BARS}/{MIN_H4_BARS}) -> skip gates/trading")
+                    if not self.warmup_logged.get(symbol):
+                        log.warning(warmup_msg)
+                        self.warmup_logged[symbol] = True
+                    try:
+                        current_price = float(df_candles.iloc[-1]['close'])
+                        self._push_cycle_log(
+                            symbol=symbol, price=current_price, p_enter=0.0,
+                            htf={'h1_trend': 0, 'h4_trend': 0, 'slope_ok': False, 'range_ok': False},
+                            direction="NEUTRAL", decision="WARMUP",
+                            reasons=[warmup_msg],
+                        )
+                    except Exception:
+                        pass
+                    return None
+                else:
+                    self.warmup_logged[symbol] = False
+                    use_direct_htf = True
+            else:
+                log.warning(f"{symbol}: direct HTF fetch failed, falling back to resampled warmup check")
+
+        if not use_direct_htf:
+            warmup_reason = _check_htf_warmup(df_candles, symbol)
+            if warmup_reason:
+                if not self.warmup_logged.get(symbol):
+                    log.warning(warmup_reason)
+                    self.warmup_logged[symbol] = True
+                try:
+                    current_price = float(df_candles.iloc[-1]['close'])
+                    self._push_cycle_log(
+                        symbol=symbol, price=current_price, p_enter=0.0,
+                        htf={'h1_trend': 0, 'h4_trend': 0, 'slope_ok': False, 'range_ok': False},
+                        direction="NEUTRAL", decision="WARMUP",
+                        reasons=[warmup_reason],
+                    )
+                except Exception:
+                    pass
+                return None
+            else:
+                self.warmup_logged[symbol] = False
 
         model, engineer, feature_columns = self._get_model_for_symbol(symbol)
 
@@ -635,7 +834,11 @@ class LiveRunner:
             return None
 
         p_enter = _run_inference(model, scaled, self.device)
-        htf = _apply_htf_gates(features_df)
+
+        if use_direct_htf and htf_direct:
+            htf = self._compute_htf_from_direct(htf_direct, df_candles)
+        else:
+            htf = _apply_htf_gates(features_df)
 
         current_price = float(df_candles.iloc[-1]['close'])
         atr = _compute_atr(df_candles)
