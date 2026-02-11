@@ -95,6 +95,12 @@ async function processEvent(
         tradesTodayTarget: p.trades_today_target ?? null,
         tradesTodayMax: p.trades_today_max ?? null,
         quotaFlowRiskMult: p.quota_flow_risk_mult ?? null,
+        laneSelected: p.lane_selected ?? null,
+        htfScore: p.htf_score ?? null,
+        scalpThr: p.scalp_thr ?? null,
+        laneSizeMult: p.lane_size_mult ?? null,
+        laneBudgetRemainingR: p.lane_budget_remaining_r ?? null,
+        holdReason: p.hold_reason ?? null,
         createdAt: Date.now(),
       });
       break;
@@ -120,6 +126,11 @@ async function processEvent(
         equitySnapshotUsd: moneyConfig.account_equity_usd,
         policy: p.policy ?? null,
         flowRiskMult: p.flow_risk_mult ?? null,
+        lane: p.lane ?? null,
+        htfScore: p.htf_score ?? null,
+        laneThresholdUsed: p.lane_threshold_used ?? null,
+        laneSizeMult: p.lane_size_mult ?? null,
+        laneHorizon: p.lane_horizon ?? null,
         status: "open",
         createdAt: Date.now(),
       });
@@ -141,6 +152,7 @@ async function processEvent(
         if (p.bars_held !== undefined) updates.barsHeld = p.bars_held;
         if (p.model_version) updates.modelVersion = p.model_version;
         if (p.leverage !== undefined) updates.leverage = p.leverage;
+        if (p.exit_reason) updates.exitReason = p.exit_reason;
         if (type === "TRADE_CLOSE") updates.status = "closed";
         if (p.status) updates.status = p.status;
 

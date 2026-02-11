@@ -1,0 +1,141 @@
+REPLIT AGENT — IMPLEMENT v4.3.0 “TRIPLE-LANE AGGRESSION ENGINE”
+Goal: Increase to ~2–3 trades/asset/day WITHOUT changing model/features/labels/triple-barrier.
+We will add a 3-lane policy router (CORE / FLOW / SCALP) using an HTF score + daily R budgets + time-stop.
+
+STRICT:
+- Do NOT change neural model, features, labels, or triple_barrier parity rules.
+- Keep single-row inference exactly as live.
+- Keep cost model net_r = gross_r - cost_r.
+- Only modify policy logic + logging + dashboard payload fields.
+
+========================================================
+A) Add HTF SCORE (0–3) (core unlock)
+========================================================
+Create a function (where HTF gates are evaluated) that computes:
+- htf_score = 0
+- +1 if h1_trend_sign matches trade direction (or aligned proxy)
+- +1 if h4_trend_sign matches trade direction
+- +1 if slope_ok == True
+
+Log per symbol per cycle:
+"HTF_SCORE: {sym} score={htf_score} h1={h1_trend_sign} h4={h4_trend_sign} slope_ok={slope_ok} range_ok={range_ok}"
+
+Replace binary “aligned gate” usage:
+- CORE requires score >= 3
+- FLOW requires score >= 2
+- SCALP requires score >= 1 (plus momentum/vol checks)
+
+========================================================
+B) Triple-Lane Router (CORE / FLOW / SCALP)
+========================================================
+Implement lane selection in the live loop AFTER inference p_enter is computed but BEFORE entering.
+
+1) CORE lane (sniper):
+- requires: htf_score >= 3 AND range_ok == True
+- threshold: core_thr = max(user_threshold (default 0.85), percentile p99 (if available))
+- size_mult: 1.00
+- horizon: keep existing horizon (24)
+- cooldown: keep existing cooldown
+
+2) FLOW lane (quota/frequency):
+- requires: htf_score >= 2 AND (range_ok OR momentum_ok)
+- threshold: flow_thr = dynamic by quota step:
+    step0: p95
+    step1: p93
+    step2: p91
+    step3: p89
+  (if percentiles missing, fallback to 0.75)
+- size_mult: dynamic by quota step (must shrink as threshold loosens):
+    step0: 0.60
+    step1: 0.50
+    step2: 0.40
+    step3: 0.30
+- horizon: 24 (same)
+- cooldown: same as existing or slightly shorter if already safe
+
+3) SCALP lane (aggressive but tiny, time-stopped):
+Default params (use these EXACT defaults):
+- scalp_horizon = 4 bars (1 hour on 15m)
+- scalp_tp_r = +1.20R
+- scalp_sl_r = -0.80R
+- size_mult = 0.25 (hard cap 0.25)
+- requires:
+    htf_score >= 1 AND volatility_ok AND momentum_ok
+  where:
+    volatility_ok = (atr_pct >= 0.25%) OR (volume_ratio >= 1.10)
+    momentum_ok   = (adx_14 >= 18) OR (macd_sign matches direction)
+- threshold: scalp_thr = percentile p90 (or fallback 0.65)
+
+SCALP geometry rules:
+- Use R-based TP/SL conversion consistent with current triple_barrier implementation.
+- Enforce TIME STOP:
+   if trade open and bars_open >= scalp_horizon and TP/SL not hit:
+       exit at market (cost-aware), mark outcome="TIME_EXIT"
+       compute gross_r from exit price, apply costs -> net_r
+
+========================================================
+C) Daily R Budget (anti-collapse governor)
+========================================================
+Add per-symbol daily budget in R units; reset at UTC day boundary:
+- daily_budget_r_total = 2.0R per symbol
+Lane budgets:
+- CORE max spend = 1.20R/day
+- FLOW max spend = 0.60R/day
+- SCALP max spend = 0.20R/day
+
+Each new trade “reserves” budget by lane:
+- reserve_r = 1.0R * size_mult  (or equivalent in your risk model)
+If lane remaining < reserve_r:
+- disable lane for that symbol until next UTC day
+- log once:
+  "BUDGET_BLOCK: {sym} lane={lane} remaining={x:.2f} < need={reserve_r:.2f} -> disabled today"
+CORE never becomes more aggressive when losing; SCALP dies first.
+
+========================================================
+D) Logging + Dashboard Payload (must)
+========================================================
+Cycle logs must include these fields (so dashboard can show lane state):
+- lane_selected: "CORE" | "FLOW" | "SCALP" | "HOLD" | "WARMUP"
+- core_thr, flow_thr, scalp_thr (float or null)
+- htf_score (int)
+- quota_step (int or null)
+- lane_size_mult (float)
+- lane_budget_remaining_r (float)
+- hold_reason (string; include primary reason)
+
+Trade records must include:
+- lane
+- htf_score
+- threshold_used
+- size_mult_used
+- exit_reason: TP | SL | EXPIRE | TIME_EXIT
+- gross_r, cost_r, net_r
+
+========================================================
+E) Verification checklist (must pass)
+========================================================
+In logs you MUST see:
+- HTF_SCORE lines per symbol
+- LANE decisions:
+  "ENTER CORE", "ENTER FLOW", "ENTER SCALP"
+- SCALP time exits:
+  "SCALP TIME_EXIT after 4 bars"
+- Budget blocks if overtrading:
+  "BUDGET_BLOCK ..."
+
+On dashboard:
+- CORE trades count can be low; FLOW + SCALP should increase activity
+- New cards/fields can be added later, but the payload fields MUST be stored now.
+
+========================================================
+F) DO NOT TOUCH
+========================================================
+- model checkpoints
+- training loop
+- features/labels
+- triple_barrier parity logic
+- cost model
+
+Deliver:
+- code changes + unit test for time-exit net_r correctness
+- ensure net_r == gross_r - cost_r always

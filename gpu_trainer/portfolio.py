@@ -25,12 +25,21 @@ class Position:
     size_mult: float
     risk_pct: float
     bar_index: int = 0
+    lane: str = "CORE"
+    horizon: int = 24
+    htf_score: int = 0
+    threshold_used: float = 0.85
+    dashboard_trade_id: Optional[int] = None
 
     @property
     def is_long(self) -> bool:
         return self.side == "LONG"
 
-    def check_exit(self, current_price: float) -> Optional[str]:
+    @property
+    def bars_open(self) -> int:
+        return 0
+
+    def check_exit(self, current_price: float, current_bar: int = 0) -> Optional[str]:
         if self.is_long:
             if current_price >= self.tp_price:
                 return "TP"
@@ -41,6 +50,10 @@ class Position:
                 return "TP"
             if current_price >= self.sl_price:
                 return "SL"
+        if self.lane == "SCALP" and current_bar > 0 and self.bar_index > 0:
+            bars_held = current_bar - self.bar_index
+            if bars_held >= self.horizon:
+                return "TIME_EXIT"
         return None
 
 
@@ -76,6 +89,7 @@ class PortfolioManager:
         self.block_correlated_same_dir = block_correlated_same_dir
         self.correlated_pairs = correlated_pairs or [("BTCUSDT", "ETHUSDT")]
 
+        self.on_close_callback: Optional[callable] = None
         self.open_positions: Dict[str, Position] = {}
         self.last_trade_bar: Dict[str, int] = {}
         self.trade_history: List[TradeRecord] = []
@@ -162,7 +176,13 @@ class PortfolioManager:
         )
         self.trade_history.append(record)
         log.info(f"[CLOSE] {symbol} {pos.side} @ {exit_price:.2f} | "
-                 f"outcome={outcome} R={gross_r:+.2f}")
+                 f"outcome={outcome} R={gross_r:+.2f} lane={pos.lane}")
+
+        if self.on_close_callback and pos.dashboard_trade_id:
+            try:
+                self.on_close_callback(pos, exit_price, outcome, gross_r)
+            except Exception as e:
+                log.warning(f"on_close_callback failed for {symbol}: {e}")
 
     def check_exits(self, prices: Dict[str, float]):
         to_close = []
@@ -170,7 +190,7 @@ class PortfolioManager:
             price = prices.get(symbol)
             if price is None:
                 continue
-            outcome = pos.check_exit(price)
+            outcome = pos.check_exit(price, current_bar=self.current_bar)
             if outcome:
                 to_close.append((symbol, price, outcome))
         for symbol, price, outcome in to_close:

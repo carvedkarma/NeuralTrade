@@ -1,15 +1,16 @@
-"""Multi-asset live inference loop (v3.5.0).
+"""Multi-asset live inference loop (v4.3.0 — Triple-Lane Aggression Engine).
 
 Monitors multiple symbols in parallel on 15m intervals, runs the ENTER QUALITY
-model inference, applies HTF gates, ranks candidates, manages portfolio, and
-optionally improves entries via lower-timeframe execution.
+model inference, applies HTF gates, computes HTF score, routes trades through
+CORE / FLOW / SCALP lanes, manages per-symbol daily R budgets, and handles
+SCALP time-stop exits.
 
-v3.5.0 additions:
-  - Per-symbol data caching with append/dedupe
-  - Dashboard cycle-log + trade-record push
-  - Exchange time sync (Binance serverTime)
-  - Robust retry logic for all HTTP calls
-  - Per-symbol model management (deployed/{symbol}/)
+v4.3.0 additions:
+  - HTF score (0–3) replacing binary aligned gate
+  - Triple-lane policy router (CORE / FLOW / SCALP)
+  - Per-symbol daily R budget with lane-specific caps
+  - SCALP lane with time-stop exit after 4 bars
+  - Enhanced cycle log + trade record payloads
 
 Usage:
     python quick_start.py --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT
@@ -38,6 +39,27 @@ RETRY_DELAY = 2.0
 
 MIN_H1_BARS = 100
 MIN_H4_BARS = 50
+
+SCALP_HORIZON = 4
+SCALP_TP_R = 1.20
+SCALP_SL_R = 0.80
+SCALP_SIZE_MULT = 0.25
+
+DAILY_BUDGET_R_TOTAL = 2.0
+LANE_BUDGET = {
+    "CORE": 1.20,
+    "FLOW": 0.60,
+    "SCALP": 0.20,
+}
+
+FLOW_QUOTA_STEPS = {
+    0: {"percentile": 95, "size_mult": 0.60},
+    1: {"percentile": 93, "size_mult": 0.50},
+    2: {"percentile": 91, "size_mult": 0.40},
+    3: {"percentile": 89, "size_mult": 0.30},
+}
+
+COST_BPS = 8.0
 
 
 def _retry_request(method: str, url: str, **kwargs) -> Optional[requests.Response]:
@@ -336,6 +358,62 @@ def _apply_htf_gates(features_df: pd.DataFrame) -> dict:
     }
 
 
+def _compute_htf_score(htf: dict, direction: str) -> int:
+    """Compute HTF score (0–3) for a given trade direction.
+
+    +1 if h1_trend matches direction
+    +1 if h4_trend matches direction
+    +1 if slope_ok == True
+    """
+    score = 0
+    dir_sign = 1 if direction == "LONG" else (-1 if direction == "SHORT" else 0)
+    if dir_sign == 0:
+        return 0
+
+    h1 = htf.get('h1_trend', 0)
+    h4 = htf.get('h4_trend', 0)
+    slope_ok = htf.get('slope_ok', False)
+    range_ok = htf.get('range_ok', False)
+
+    if int(h1) == dir_sign:
+        score += 1
+    if int(h4) == dir_sign:
+        score += 1
+    if slope_ok:
+        score += 1
+
+    log.info(f"HTF_SCORE: score={score} h1={h1} h4={h4} slope_ok={slope_ok} range_ok={range_ok} dir={direction}")
+    return score
+
+
+def _compute_momentum_ok(features_df: pd.DataFrame, direction: str) -> bool:
+    """Check momentum conditions for SCALP: ADX >= 18 OR MACD matches direction."""
+    last_row = features_df.iloc[-1]
+    adx = last_row.get('adx_14', 0)
+    if adx >= 18:
+        return True
+    macd_val = last_row.get('macd', 0)
+    if direction == "LONG" and macd_val > 0:
+        return True
+    if direction == "SHORT" and macd_val < 0:
+        return True
+    return False
+
+
+def _compute_volatility_ok(df_candles: pd.DataFrame, atr: float) -> bool:
+    """Check volatility conditions for SCALP: ATR% >= 0.25% OR volume_ratio >= 1.10."""
+    price = float(df_candles.iloc[-1]['close'])
+    atr_pct = (atr / price) * 100 if price > 0 else 0
+    if atr_pct >= 0.25:
+        return True
+    recent_vol = df_candles['volume'].iloc[-4:].mean()
+    avg_vol = df_candles['volume'].iloc[-20:].mean()
+    vol_ratio = recent_vol / avg_vol if avg_vol > 0 else 0
+    if vol_ratio >= 1.10:
+        return True
+    return False
+
+
 def _compute_atr(df: pd.DataFrame, window: int = 14) -> float:
     """Compute ATR from candle data."""
     n = min(window + 1, len(df))
@@ -471,6 +549,10 @@ class LiveRunner:
         self.p_enter_history: Dict[str, List[float]] = {}
         self.warmup_logged: Dict[str, bool] = {}
 
+        self.daily_budget: Dict[str, Dict[str, float]] = {}
+        self.daily_budget_date: Dict[str, str] = {}
+        self.budget_block_logged: Dict[str, Dict[str, bool]] = {}
+
     def _init_fetcher(self):
         from data.pipeline import BinanceDataFetcher
         self.fetcher = BinanceDataFetcher(
@@ -482,13 +564,41 @@ class LiveRunner:
         if self.execution and self.execution.fetcher is None:
             self.execution.fetcher = self.fetcher
 
+    def _on_position_close(self, pos, exit_price: float, outcome: str, gross_r: float):
+        """Callback when portfolio closes a position — push trade update to dashboard."""
+        from portfolio import Position as _Pos
+
+        cost_bps = COST_BPS
+        cost_r = (cost_bps / 10000) * 2 / (abs(pos.entry_price - pos.sl_price) / pos.entry_price) if pos.entry_price != pos.sl_price else 0
+        net_r = gross_r - cost_r
+        sized_r = net_r * pos.size_mult
+
+        exit_reason = outcome
+        if outcome == "TIME_EXIT":
+            exit_reason = f"SCALP_TIME_STOP ({pos.horizon} bars)"
+
+        try:
+            self._update_trade_record(
+                trade_id=pos.dashboard_trade_id,
+                exit_price=exit_price,
+                outcome=outcome,
+                gross_r=gross_r,
+                net_r=net_r,
+                sized_r=sized_r,
+                exit_reason=exit_reason,
+            )
+        except Exception as e:
+            log.warning(f"Failed to update trade record {pos.dashboard_trade_id}: {e}")
+
     def _push_prediction(self, prediction: dict):
         from quick_start import push_prediction
         push_prediction(self.replit_url, prediction)
 
     def _push_cycle_log(self, symbol: str, price: float, p_enter: float,
-                        htf: dict, direction: str, decision: str, reasons: list):
+                        htf: dict, direction: str, decision: str, reasons: list,
+                        lane_info: Optional[dict] = None):
         url = f"{self.replit_url.rstrip('/')}/api/live/cycle-log"
+        li = lane_info or {}
         payload = {
             "symbol": symbol,
             "cycle_ts": int(time.time() * 1000),
@@ -499,16 +609,26 @@ class LiveRunner:
             "slope_ok": bool(htf.get('slope_ok', False)),
             "range_ok": bool(htf.get('range_ok', False)),
             "direction": str(direction),
-            "threshold_used": float(self.enter_threshold),
+            "threshold_used": float(li.get('threshold_used', self.enter_threshold)),
             "decision": str(decision),
             "reasons": [str(r) for r in reasons] if reasons else [],
+            "lane_selected": li.get('lane_selected'),
+            "htf_score": li.get('htf_score'),
+            "core_thr": li.get('core_thr'),
+            "flow_thr": li.get('flow_thr'),
+            "scalp_thr": li.get('scalp_thr'),
+            "lane_size_mult": li.get('lane_size_mult'),
+            "lane_budget_remaining_r": li.get('lane_budget_remaining_r'),
+            "hold_reason": li.get('hold_reason'),
+            "quota_step": li.get('quota_step'),
         }
         _retry_request("POST", url, json=payload)
 
     def _push_trade_record(self, symbol: str, side: str, entry_price: float,
                            sl_price: float, tp_price: float, p_enter: float,
-                           size_pct: float) -> Optional[int]:
+                           size_pct: float, lane_info: Optional[dict] = None) -> Optional[int]:
         url = f"{self.replit_url.rstrip('/')}/api/live/trade"
+        li = lane_info or {}
         payload = {
             "symbol": symbol,
             "side": side,
@@ -519,6 +639,11 @@ class LiveRunner:
             "p_enter": p_enter,
             "size_pct": size_pct,
             "status": "open",
+            "lane": li.get('lane'),
+            "htf_score": li.get('htf_score'),
+            "lane_threshold_used": li.get('threshold_used'),
+            "lane_size_mult": li.get('lane_size_mult'),
+            "lane_horizon": li.get('lane_horizon'),
         }
         resp = _retry_request("POST", url, json=payload)
         if resp and resp.status_code == 200:
@@ -527,7 +652,8 @@ class LiveRunner:
         return None
 
     def _update_trade_record(self, trade_id: int, exit_price: float,
-                             outcome: str, gross_r: float, net_r: float, sized_r: float):
+                             outcome: str, gross_r: float, net_r: float, sized_r: float,
+                             exit_reason: Optional[str] = None):
         url = f"{self.replit_url.rstrip('/')}/api/live/trade/{trade_id}"
         payload = {
             "exit_time": int(time.time() * 1000),
@@ -537,6 +663,7 @@ class LiveRunner:
             "net_r": net_r,
             "sized_r": sized_r,
             "status": "closed",
+            "exit_reason": exit_reason or outcome,
         }
         _retry_request("PATCH", url, json=payload)
 
@@ -578,11 +705,15 @@ class LiveRunner:
     def run(self):
         """Main loop — runs continuously until interrupted."""
         log.info("=" * 80)
-        log.info(f"  LIVE RUNNER v3.5.0 {'(PAPER)' if self.paper else '(LIVE)'}")
+        log.info(f"  LIVE RUNNER v4.3.0 {'(PAPER)' if self.paper else '(LIVE)'}")
         log.info(f"  Symbols: {', '.join(self.symbols)}")
         log.info(f"  Interval: {self.interval} | Threshold: {self.enter_threshold}")
         log.info(f"  TP={self.tp_mult}x SL={self.sl_mult}x | Cooldown: {self.cooldown_bars} bars")
         log.info(f"  Per-symbol models: {self.per_symbol_models}")
+        log.info(f"  Triple-Lane Engine: CORE(p99/1.0x) FLOW(p95-stepped) SCALP(p90/0.25x/4bar)")
+        log.info(f"  Daily R Budget: {DAILY_BUDGET_R_TOTAL}R total | CORE={LANE_BUDGET['CORE']}R FLOW={LANE_BUDGET['FLOW']}R SCALP={LANE_BUDGET['SCALP']}R")
+
+        self.portfolio.on_close_callback = self._on_position_close
         log.info(f"  15m fetch limit: {self.limit_15m} | Direct HTF fetch: {self.direct_htf}")
         log.info(f"  HTF warmup gates: min h1={MIN_H1_BARS} h4={MIN_H4_BARS} bars")
         if self.dry_run:
@@ -692,6 +823,175 @@ class LiveRunner:
 
         for c in accepted:
             self._execute_candidate(c)
+
+    def _reset_daily_budget_if_needed(self, symbol: str):
+        """Reset daily R budget for symbol at UTC day boundary."""
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        if self.daily_budget_date.get(symbol) != today:
+            self.daily_budget[symbol] = {
+                "CORE": LANE_BUDGET["CORE"],
+                "FLOW": LANE_BUDGET["FLOW"],
+                "SCALP": LANE_BUDGET["SCALP"],
+            }
+            self.daily_budget_date[symbol] = today
+            self.budget_block_logged[symbol] = {"CORE": False, "FLOW": False, "SCALP": False}
+
+    def _check_lane_budget(self, symbol: str, lane: str, size_mult: float) -> bool:
+        """Check if lane has enough R budget remaining. Reserve = 1.0R * size_mult."""
+        self._reset_daily_budget_if_needed(symbol)
+        reserve_r = 1.0 * size_mult
+        remaining = self.daily_budget.get(symbol, {}).get(lane, 0.0)
+        if remaining < reserve_r:
+            if not self.budget_block_logged.get(symbol, {}).get(lane, False):
+                log.warning(f"BUDGET_BLOCK: {symbol} lane={lane} remaining={remaining:.2f} < need={reserve_r:.2f} -> disabled today")
+                self.budget_block_logged.setdefault(symbol, {})[lane] = True
+            return False
+        return True
+
+    def _spend_lane_budget(self, symbol: str, lane: str, size_mult: float):
+        """Deduct R budget after a trade is opened."""
+        reserve_r = 1.0 * size_mult
+        self.daily_budget.setdefault(symbol, {})
+        self.daily_budget[symbol][lane] = self.daily_budget[symbol].get(lane, 0.0) - reserve_r
+
+    def _get_lane_budget_remaining(self, symbol: str, lane: str) -> float:
+        """Get remaining R budget for a lane."""
+        self._reset_daily_budget_if_needed(symbol)
+        return self.daily_budget.get(symbol, {}).get(lane, 0.0)
+
+    def _get_percentile(self, symbol: str, pct: int) -> Optional[float]:
+        """Get p_enter percentile from history for a symbol."""
+        hist = self.p_enter_history.get(symbol, [])
+        if len(hist) < 20:
+            return None
+        return float(np.percentile(hist, pct))
+
+    def _select_lane(self, symbol: str, p_enter: float, htf: dict,
+                     htf_score: int, features_df: pd.DataFrame,
+                     df_candles: pd.DataFrame, atr: float) -> dict:
+        """Triple-lane router: CORE > FLOW > SCALP > HOLD.
+
+        Returns dict with lane selection info including:
+        lane_selected, threshold_used, lane_size_mult, lane_horizon,
+        core_thr, flow_thr, scalp_thr, hold_reason, quota_step
+        """
+        range_ok = htf.get('range_ok', False)
+        side = htf.get('side', 'NEUTRAL')
+        if side == 'NEUTRAL':
+            return {
+                'lane_selected': 'HOLD', 'threshold_used': 0.0,
+                'lane_size_mult': 0.0, 'lane_horizon': 24,
+                'core_thr': None, 'flow_thr': None, 'scalp_thr': None,
+                'hold_reason': 'NEUTRAL_SIDE', 'htf_score': htf_score,
+                'lane_budget_remaining_r': 0.0, 'quota_step': None, 'lane': None,
+            }
+
+        p99 = self._get_percentile(symbol, 99)
+        p95 = self._get_percentile(symbol, 95)
+        p90 = self._get_percentile(symbol, 90)
+
+        core_thr = max(self.enter_threshold, p99) if p99 is not None else self.enter_threshold
+        scalp_thr = p90 if p90 is not None else 0.65
+
+        momentum_ok = _compute_momentum_ok(features_df, side)
+        volatility_ok = _compute_volatility_ok(df_candles, atr)
+
+        quota_step = 0
+        sym_hist = self.p_enter_history.get(symbol, [])
+        trades_today = self.daily_budget_date.get(symbol, '')
+        if len(sym_hist) >= 20:
+            recent_hist = np.array(sym_hist)
+            target_trades_per_day = 3
+            actual_today = LANE_BUDGET["FLOW"] - self._get_lane_budget_remaining(symbol, "FLOW")
+            if actual_today > 0:
+                ratio = actual_today / LANE_BUDGET["FLOW"]
+                if ratio < 0.25:
+                    quota_step = 3
+                elif ratio < 0.5:
+                    quota_step = 2
+                elif ratio < 0.75:
+                    quota_step = 1
+                else:
+                    quota_step = 0
+
+        flow_config = FLOW_QUOTA_STEPS.get(quota_step, FLOW_QUOTA_STEPS[0])
+        flow_pct = flow_config["percentile"]
+        flow_size_mult = flow_config["size_mult"]
+        flow_thr_val = self._get_percentile(symbol, flow_pct)
+        flow_thr = flow_thr_val if flow_thr_val is not None else 0.75
+
+        result_base = {
+            'htf_score': htf_score,
+            'core_thr': round(core_thr, 4),
+            'flow_thr': round(flow_thr, 4),
+            'scalp_thr': round(scalp_thr, 4),
+            'quota_step': quota_step,
+        }
+
+        if htf_score >= 3 and range_ok:
+            if p_enter >= core_thr:
+                if self._check_lane_budget(symbol, "CORE", 1.0):
+                    return {**result_base,
+                        'lane_selected': 'CORE', 'lane': 'CORE',
+                        'threshold_used': core_thr, 'lane_size_mult': 1.0,
+                        'lane_horizon': 24,
+                        'lane_budget_remaining_r': self._get_lane_budget_remaining(symbol, "CORE"),
+                        'hold_reason': None,
+                    }
+                else:
+                    pass
+
+        if htf_score >= 2 and (range_ok or momentum_ok):
+            if p_enter >= flow_thr:
+                if self._check_lane_budget(symbol, "FLOW", flow_size_mult):
+                    return {**result_base,
+                        'lane_selected': 'FLOW', 'lane': 'FLOW',
+                        'threshold_used': flow_thr, 'lane_size_mult': flow_size_mult,
+                        'lane_horizon': 24,
+                        'lane_budget_remaining_r': self._get_lane_budget_remaining(symbol, "FLOW"),
+                        'hold_reason': None,
+                    }
+                else:
+                    pass
+
+        if htf_score >= 1 and volatility_ok and momentum_ok:
+            if p_enter >= scalp_thr:
+                if self._check_lane_budget(symbol, "SCALP", SCALP_SIZE_MULT):
+                    return {**result_base,
+                        'lane_selected': 'SCALP', 'lane': 'SCALP',
+                        'threshold_used': scalp_thr, 'lane_size_mult': SCALP_SIZE_MULT,
+                        'lane_horizon': SCALP_HORIZON,
+                        'lane_budget_remaining_r': self._get_lane_budget_remaining(symbol, "SCALP"),
+                        'hold_reason': None,
+                    }
+                else:
+                    pass
+
+        hold_reasons = []
+        if htf_score < 1:
+            hold_reasons.append(f"htf_score={htf_score}<1")
+        elif htf_score < 2:
+            if p_enter < scalp_thr:
+                hold_reasons.append(f"p_enter={p_enter:.4f}<scalp_thr={scalp_thr:.4f}")
+            if not volatility_ok:
+                hold_reasons.append("volatility_too_low")
+            if not momentum_ok:
+                hold_reasons.append("momentum_weak")
+        elif htf_score < 3:
+            if p_enter < flow_thr:
+                hold_reasons.append(f"p_enter={p_enter:.4f}<flow_thr={flow_thr:.4f}")
+        else:
+            if p_enter < core_thr:
+                hold_reasons.append(f"p_enter={p_enter:.4f}<core_thr={core_thr:.4f}")
+
+        total_remaining = sum(self._get_lane_budget_remaining(symbol, l) for l in ["CORE", "FLOW", "SCALP"])
+        return {**result_base,
+            'lane_selected': 'HOLD', 'lane': None,
+            'threshold_used': 0.0, 'lane_size_mult': 0.0,
+            'lane_horizon': 24,
+            'lane_budget_remaining_r': total_remaining,
+            'hold_reason': '; '.join(hold_reasons) if hold_reasons else 'NO_LANE_MATCH',
+        }
 
     def _compute_htf_from_direct(self, htf_direct: Dict[str, pd.DataFrame],
                                   df_candles: pd.DataFrame) -> dict:
@@ -846,16 +1146,19 @@ class LiveRunner:
         if symbol not in self.p_enter_history:
             self.p_enter_history[symbol] = []
         self.p_enter_history[symbol].append(p_enter)
-        if len(self.p_enter_history[symbol]) > 500:
-            self.p_enter_history[symbol] = self.p_enter_history[symbol][-500:]
+        if len(self.p_enter_history[symbol]) > 2000:
+            self.p_enter_history[symbol] = self.p_enter_history[symbol][-2000:]
+
+        side = htf.get('side', 'NEUTRAL')
+        if side == 'NEUTRAL':
+            dir_for_score = 'LONG' if htf.get('h1_trend', 0) >= 0 else 'SHORT'
+        else:
+            dir_for_score = side
+        htf_score = _compute_htf_score(htf, dir_for_score)
 
         log.info(f"  {symbol}: price={current_price:.2f} p_enter={p_enter:.4f} "
-                 f"side={htf['side']} aligned={htf['trend_aligned']} "
+                 f"side={side} htf_score={htf_score} "
                  f"slope_ok={htf['slope_ok']} range_ok={htf['range_ok']}")
-
-        passes_gates = htf['trend_aligned'] and htf['slope_ok'] and htf['range_ok']
-        passes_threshold = p_enter >= self.enter_threshold
-        side = htf['side']
 
         reasons = []
         decision = "HOLD"
@@ -865,52 +1168,69 @@ class LiveRunner:
             self.cooldown_tracker[symbol] -= 1
             reasons.append(f"Cooldown active ({bars_left} bars left)")
             decision = "COOLDOWN"
-        elif not passes_gates:
-            if not htf['trend_aligned']:
-                reasons.append("HTF trend not aligned")
-            if not htf['slope_ok']:
-                reasons.append("Slope too flat")
-            if not htf['range_ok']:
-                reasons.append("Range position unfavorable")
-            decision = "GATE_FAIL"
-        elif not passes_threshold:
-            reasons.append(f"p_enter {p_enter:.4f} < {self.enter_threshold}")
-            decision = "BELOW_THRESHOLD"
-        elif side == "NEUTRAL":
-            reasons.append("Side is NEUTRAL")
-            decision = "NEUTRAL"
-        else:
-            decision = "ENTER"
-            reasons.append(f"p_enter={p_enter:.1%} side={side}")
+            lane_info = {
+                'lane_selected': 'HOLD', 'htf_score': htf_score,
+                'hold_reason': f'COOLDOWN ({bars_left} bars)',
+                'lane_size_mult': 0.0, 'threshold_used': 0.0,
+                'core_thr': None, 'flow_thr': None, 'scalp_thr': None,
+            }
+            try:
+                self._push_cycle_log(symbol=symbol, price=current_price, p_enter=p_enter,
+                    htf=htf, direction=side, decision=decision, reasons=reasons,
+                    lane_info=lane_info)
+            except Exception as e:
+                log.warning(f"Failed to push cycle log for {symbol}: {e}")
+            return None
+
+        self._reset_daily_budget_if_needed(symbol)
+        lane_result = self._select_lane(
+            symbol=symbol, p_enter=p_enter, htf=htf,
+            htf_score=htf_score, features_df=features_df,
+            df_candles=df_candles, atr=atr,
+        )
+
+        lane_selected = lane_result['lane_selected']
+        if lane_selected == 'HOLD':
+            decision = "HOLD"
+            hold_reason = lane_result.get('hold_reason', 'NO_LANE_MATCH')
+            reasons.append(hold_reason)
+            log.info(f"  {symbol}: HOLD — {hold_reason}")
+
+            sym_hist = self.p_enter_history.get(symbol, [])
+            if len(sym_hist) >= 20:
+                hist = np.array(sym_hist)
+                p90 = float(np.percentile(hist, 90))
+                p95 = float(np.percentile(hist, 95))
+                p99 = float(np.percentile(hist, 99))
+                log.info(f"    {symbol} p_enter percentiles (last {len(hist)}): "
+                         f"p90={p90:.3f} p95={p95:.3f} p99={p99:.3f}")
+                log.info(f"    thresholds: core={lane_result.get('core_thr','?')} "
+                         f"flow={lane_result.get('flow_thr','?')} "
+                         f"scalp={lane_result.get('scalp_thr','?')}")
+
+            try:
+                self._push_cycle_log(symbol=symbol, price=current_price, p_enter=p_enter,
+                    htf=htf, direction=side, decision=decision, reasons=reasons,
+                    lane_info=lane_result)
+            except Exception as e:
+                log.warning(f"Failed to push cycle log for {symbol}: {e}")
+            return None
+
+        decision = f"ENTER {lane_selected}"
+        reasons.append(f"p_enter={p_enter:.1%} side={side} lane={lane_selected}")
+        log.info(f"  LANE DECISION: ENTER {lane_selected} | "
+                 f"thr={lane_result['threshold_used']:.4f} size_mult={lane_result['lane_size_mult']:.2f} "
+                 f"horizon={lane_result['lane_horizon']}")
 
         try:
-            self._push_cycle_log(
-                symbol=symbol, price=current_price, p_enter=p_enter,
+            self._push_cycle_log(symbol=symbol, price=current_price, p_enter=p_enter,
                 htf=htf, direction=side, decision=decision, reasons=reasons,
-            )
+                lane_info=lane_result)
         except Exception as e:
             log.warning(f"Failed to push cycle log for {symbol}: {e}")
 
-        if decision != "ENTER":
-            if decision != "COOLDOWN":
-                log.info(f"  {symbol}: {decision} — {'; '.join(reasons)}")
-                sym_hist = self.p_enter_history.get(symbol, [])
-                if len(sym_hist) >= 10:
-                    hist = np.array(sym_hist)
-                    p50 = float(np.percentile(hist, 50))
-                    p75 = float(np.percentile(hist, 75))
-                    p90 = float(np.percentile(hist, 90))
-                    p95 = float(np.percentile(hist, 95))
-                    p99 = float(np.percentile(hist, 99))
-                    log.info(f"    {symbol} p_enter percentiles (last {len(hist)}): "
-                             f"p50={p50:.3f} p75={p75:.3f} p90={p90:.3f} p95={p95:.3f} p99={p99:.3f}")
-                    log.info(f"    threshold={self.enter_threshold:.4f} | "
-                             f"HTF: aligned={htf['trend_aligned']} slope_ok={htf['slope_ok']} range_ok={htf['range_ok']} | "
-                             f"side={side}")
-            return None
-
         sl_pct = self.sl_mult * atr / current_price
-        risk_pct = min(2.0 * sl_pct * 100, 5.0)
+        risk_pct = min(2.0 * sl_pct * 100, 5.0) * lane_result['lane_size_mult']
 
         return {
             'symbol': symbol,
@@ -922,10 +1242,12 @@ class LiveRunner:
             'risk_pct': risk_pct,
             'df_candles': df_candles,
             'expected_net_r': (p_enter - 0.5) * self.tp_mult / self.sl_mult,
+            'lane_info': lane_result,
+            'features_df': features_df,
         }
 
     def _execute_candidate(self, candidate: dict):
-        """Execute a trade candidate — with optional lower-TF execution improvement."""
+        """Execute a trade candidate — with lane-aware geometry and budget spending."""
         from portfolio import Position
 
         symbol = candidate['symbol']
@@ -934,6 +1256,11 @@ class LiveRunner:
         atr = candidate['atr']
         p_enter = candidate['p_enter']
         htf = candidate['htf']
+        lane_info = candidate.get('lane_info', {})
+        lane = lane_info.get('lane', 'CORE')
+        size_mult = lane_info.get('lane_size_mult', 1.0)
+        horizon = lane_info.get('lane_horizon', 24)
+        htf_score = lane_info.get('htf_score', 0)
 
         entry_price = current_price
         exec_result = None
@@ -955,6 +1282,20 @@ class LiveRunner:
 
             entry_price = exec_result.entry_price
 
+        if lane == "SCALP":
+            sl_dist = SCALP_SL_R * atr
+            tp_dist = SCALP_TP_R * atr
+        else:
+            sl_dist = self.sl_mult * atr
+            tp_dist = self.tp_mult * atr
+
+        if side == "LONG":
+            sl_price = entry_price - sl_dist
+            tp_price = entry_price + tp_dist
+        else:
+            sl_price = entry_price + sl_dist
+            tp_price = entry_price - tp_dist
+
         prediction = _build_prediction_payload(
             symbol=symbol, side=side, p_enter=p_enter,
             current_price=current_price, atr=atr,
@@ -962,33 +1303,38 @@ class LiveRunner:
             htf=htf, exec_result=exec_result,
         )
 
-        if side == "LONG":
-            sl_price = entry_price - self.sl_mult * atr
-            tp_price = entry_price + self.tp_mult * atr
-        else:
-            sl_price = entry_price + self.sl_mult * atr
-            tp_price = entry_price - self.tp_mult * atr
-
         sl_pct = abs(entry_price - sl_price) / entry_price
-        risk_pct = min(2.0 * sl_pct * 100, 5.0)
-        size_pct = min(2.0 * sl_pct * 100, 5.0)
+        risk_pct = min(2.0 * sl_pct * 100, 5.0) * size_mult
+        size_pct = risk_pct
 
         pos = Position(
             symbol=symbol, side=side,
             entry_price=entry_price, entry_time=time.time(),
             atr=atr, tp_price=tp_price, sl_price=sl_price,
-            p_enter=p_enter, size_mult=1.0, risk_pct=risk_pct,
+            p_enter=p_enter, size_mult=size_mult, risk_pct=risk_pct,
             bar_index=self.cycle_count,
+            lane=lane, horizon=horizon, htf_score=htf_score,
+            threshold_used=lane_info.get('threshold_used', self.enter_threshold),
         )
         self.portfolio.open_position(pos)
 
-        self.cooldown_tracker[symbol] = self.cooldown_bars
+        self._spend_lane_budget(symbol, lane, size_mult)
+
+        cooldown = self.cooldown_bars
+        if lane == "SCALP":
+            cooldown = max(2, self.cooldown_bars // 2)
+        self.cooldown_tracker[symbol] = cooldown
 
         try:
             trade_id = self._push_trade_record(
                 symbol=symbol, side=side, entry_price=entry_price,
                 sl_price=sl_price, tp_price=tp_price,
-                p_enter=p_enter, size_pct=size_pct,
+                p_enter=p_enter, size_pct=size_pct, lane_info={
+                    'lane': lane, 'htf_score': htf_score,
+                    'threshold_used': lane_info.get('threshold_used'),
+                    'lane_size_mult': size_mult,
+                    'lane_horizon': horizon,
+                },
             )
             if trade_id:
                 pos.dashboard_trade_id = trade_id
@@ -996,7 +1342,8 @@ class LiveRunner:
             log.warning(f"Failed to push trade record for {symbol}: {e}")
 
         if self.paper:
-            log.info(f"  [PAPER] {symbol} {side} @ {entry_price:.2f}")
+            log.info(f"  [PAPER] ENTER {lane} {symbol} {side} @ {entry_price:.2f} "
+                     f"| size_mult={size_mult:.2f} horizon={horizon}")
         self._push_prediction(prediction)
 
     def _print_summary(self):
