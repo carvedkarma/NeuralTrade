@@ -292,6 +292,27 @@ export async function registerRoutes(
         };
       }
 
+      const quotaStatus: Record<string, { tradesToday: number; target: number; max: number; currentStep: number; flowPct: number; flowThr: number; flowRiskMult: number }> = {};
+      const symbolLatestCycle: Record<string, typeof cycles[0]> = {};
+      for (const c of cycles) {
+        if (!symbolLatestCycle[c.symbol] || c.cycleTs > symbolLatestCycle[c.symbol].cycleTs) {
+          symbolLatestCycle[c.symbol] = c;
+        }
+      }
+      for (const [sym, c] of Object.entries(symbolLatestCycle)) {
+        if (c.quotaStep != null || c.tradesTodayTotal != null) {
+          quotaStatus[sym] = {
+            tradesToday: c.tradesTodayTotal ?? 0,
+            target: c.tradesTodayTarget ?? 2,
+            max: c.tradesTodayMax ?? 3,
+            currentStep: c.quotaStep ?? 0,
+            flowPct: c.flowPctUsed ?? 95,
+            flowThr: c.flowThr ?? 0,
+            flowRiskMult: c.quotaFlowRiskMult ?? 0.6,
+          };
+        }
+      }
+
       const moneyRow = await db.select().from(settings).where(eq(settings.key, "money_config")).limit(1);
       const moneyConfig = moneyRow.length > 0 ? moneyRow[0].valueJson as any : { account_equity_usd: 1500, risk_per_trade_pct: 1.0 };
       const riskUsd = moneyConfig.account_equity_usd * (moneyConfig.risk_per_trade_pct / 100);
@@ -340,6 +361,7 @@ export async function registerRoutes(
         policyStats,
         flowEnabledPct,
         avgThresholds,
+        quotaStatus,
         equityCurve: closedTrades.map((t) => ({
           ts: t.exitTime ?? t.entryTime,
           netR: t.netR ?? 0,

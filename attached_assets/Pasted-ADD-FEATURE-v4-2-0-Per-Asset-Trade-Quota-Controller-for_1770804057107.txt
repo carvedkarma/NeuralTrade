@@ -1,0 +1,119 @@
+ADD FEATURE (v4.2.0): Per-Asset Trade Quota Controller for FLOW (frequency without collapse)
+
+GOAL
+Increase frequency to ~2–3 trades per asset per day by dynamically relaxing FLOW thresholds ONLY when a symbol is under-trading, while automatically reducing risk and enforcing strict kill-switches.
+
+DO NOT change model, features, HTF gates, or triple-barrier logic.
+
+======================================================================
+A) NEW CONFIG FLAGS (with safe defaults)
+======================================================================
+
+Add CLI/config + dashboard settings:
+- --quota-enabled (default true)
+- --quota-target-per-day (default 2)
+- --quota-max-per-day (default 3)
+- --quota-check-interval-min (default 60)  // adjust once per hour
+- --quota-roll-percentiles (default "95,93,91,89")  // relaxation steps for FLOW
+- --quota-abs-thr-floor (default 0.25)  // never allow below this threshold
+- --quota-size-mults (default "0.60,0.50,0.40,0.30") // size shrinks as threshold relaxes
+- --quota-disable-in-chop (default true) // only allow FLOW when aligned+slope+range ok
+- --quota-min-history (default 300) // if not enough p_enter samples, do NOT relax; use static
+
+======================================================================
+B) PER-SYMBOL DAILY STATE
+======================================================================
+
+Implement per-symbol daily counters reset at UTC day boundary:
+- trades_opened_today_total
+- trades_opened_today_core
+- trades_opened_today_flow
+- last_quota_adjust_ts
+- current_quota_step (index into roll_percentiles / size_mults)
+- flow_enabled_today (bool)
+
+Reset at UTC midnight:
+- counters = 0
+- current_quota_step = 0
+
+Log at reset:
+"QUOTA RESET: SYMBOL new UTC day, step=0"
+
+======================================================================
+C) QUOTA DECISION LOGIC (hourly)
+======================================================================
+
+Every quota_check_interval_min per symbol:
+- If trades_opened_today_total >= quota_target_per_day:
+    keep step at current (do NOT loosen further)
+- Else if trades_opened_today_total < quota_target_per_day:
+    increase step by +1 (loosen FLOW) up to max step
+- BUT enforce:
+   1) Never exceed quota_max_per_day (hard stop: if >= max, block any new FLOW entries)
+   2) If FLOW kill-switch is currently disabled due to rolling PF/E gate -> do NOT loosen (stay at strict step, and keep FLOW disabled)
+   3) If HTF regime not OK (aligned+slope+range false) and quota_disable_in_chop=true -> do NOT loosen
+   4) If p_enter history < quota_min_history -> do NOT loosen; fallback to FLOW static threshold
+Log on step change:
+"QUOTA STEP: SYMBOL step=2 flow_pct=91 flow_size_mult=0.40 (trades_today=0 target=2)"
+
+======================================================================
+D) APPLY QUOTA TO FLOW THRESHOLD + SIZE
+======================================================================
+
+Modify get_dynamic_threshold(symbol,"FLOW"):
+
+- Base FLOW threshold is percentile(symbol, base_flow_pct=95) or static 0.75 fallback
+- If quota_enabled:
+   use flow_pct = quota_roll_percentiles[current_quota_step]
+   threshold = max(quota_abs_thr_floor, percentile(symbol, flow_pct))
+- Also apply FLOW risk multiplier:
+   flow_risk_mult = quota_size_mults[current_quota_step]
+   (this overrides default 0.6 when quota steps > 0)
+
+CORE is never affected by quota logic.
+
+======================================================================
+E) HARD LIMITS + SAFETY (non-negotiable)
+======================================================================
+
+1) Max trades/day per symbol:
+- If trades_opened_today_total >= quota_max_per_day:
+    block new entries for that symbol for rest of day
+    reason = "DAILY_TRADE_MAX"
+
+2) Daily drawdown cap per symbol (already exists):
+- If daily_net_r <= -2.0R -> disable symbol entirely for day
+
+3) FLOW kill-switch (already exists):
+- If rolling PF_net < 1.05 OR rolling E_net < 0 => FLOW_DISABLED for that symbol
+- Quota logic must respect FLOW_DISABLED and not attempt to override
+
+4) Global portfolio risk caps remain unchanged.
+
+======================================================================
+F) DASHBOARD + LOGGING (must show transparency)
+======================================================================
+
+Add to Cycle Monitor rows:
+- quota_step
+- flow_pct used
+- flow_thr used
+- flow_risk_mult used
+- trades_today_total / target / max
+- decision reason includes:
+  BELOW_FLOW_THR, DAILY_TRADE_MAX, FLOW_DISABLED, DAILY_DD_CAP, HTF_FAIL, COOLDOWN
+
+Add a new dashboard card:
+"Quota Status"
+- per symbol: trades_today, target, max, current step, flow_pct, flow_thr, flow_risk_mult
+
+======================================================================
+G) VERIFICATION (must pass)
+======================================================================
+
+1) In logs we must see hourly:
+- "QUOTA STEP: ..." (when under target)
+- "DAILY_TRADE_MAX: ..." (when max reached)
+2) Ensure FLOW size decreases as step loosens.
+3) CORE behavior unchanged.
+4) No changes to model/features/triple-barrier.

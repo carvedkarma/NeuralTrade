@@ -89,6 +89,12 @@ async function processEvent(
         policy: p.policy ?? null,
         coreThr: p.core_thr ?? null,
         flowThr: p.flow_thr ?? null,
+        quotaStep: p.quota_step ?? null,
+        flowPctUsed: p.flow_pct_used ?? null,
+        tradesTodayTotal: p.trades_today_total ?? null,
+        tradesTodayTarget: p.trades_today_target ?? null,
+        tradesTodayMax: p.trades_today_max ?? null,
+        quotaFlowRiskMult: p.quota_flow_risk_mult ?? null,
         createdAt: Date.now(),
       });
       break;

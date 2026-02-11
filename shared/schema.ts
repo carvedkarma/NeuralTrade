@@ -1277,6 +1277,12 @@ export const liveCycleLogs = pgTable("live_cycle_logs", {
   policy: varchar("policy", { length: 10 }),
   coreThr: real("core_thr"),
   flowThr: real("flow_thr"),
+  quotaStep: integer("quota_step"),
+  flowPctUsed: real("flow_pct_used"),
+  tradesTodayTotal: integer("trades_today_total"),
+  tradesTodayTarget: integer("trades_today_target"),
+  tradesTodayMax: integer("trades_today_max"),
+  quotaFlowRiskMult: real("quota_flow_risk_mult"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (table) => ({
   symbolIdx: index("cycle_logs_symbol_idx").on(table.symbol),

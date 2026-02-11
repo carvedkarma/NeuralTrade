@@ -95,6 +95,7 @@ interface ProSummary {
   policyStats: Record<string, { trades: number; wins: number; netR: number; pnlUsd: number }>;
   flowEnabledPct: number;
   avgThresholds: Record<string, { avgCoreThr: number; avgFlowThr: number }>;
+  quotaStatus: Record<string, { tradesToday: number; target: number; max: number; currentStep: number; flowPct: number; flowThr: number; flowRiskMult: number }>;
   equityCurve: Array<{ ts: number; netR: number; pnlUsd: number; symbol: string }>;
 }
 
@@ -115,6 +116,12 @@ interface CycleEntry {
   policy: string | null;
   coreThr: number | null;
   flowThr: number | null;
+  quotaStep: number | null;
+  flowPctUsed: number | null;
+  tradesTodayTotal: number | null;
+  tradesTodayTarget: number | null;
+  tradesTodayMax: number | null;
+  quotaFlowRiskMult: number | null;
   createdAt: string;
 }
 
@@ -958,6 +965,58 @@ export default function ProDashboard() {
                 </CardContent>
               </Card>
 
+              {/* Quota Status */}
+              <Card data-testid="card-quota-status">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm font-medium">Quota Status</CardTitle>
+                  <CardDescription>Per-asset daily trade quota controller</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {summary?.quotaStatus && Object.keys(summary.quotaStatus).length > 0 ? (
+                    <div className="space-y-3">
+                      {Object.entries(summary.quotaStatus).map(([sym, q]: [string, any]) => {
+                        const atMax = q.tradesToday >= q.max;
+                        const atTarget = q.tradesToday >= q.target;
+                        return (
+                          <div key={sym} className="space-y-1.5" data-testid={`quota-row-${sym}`}>
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <Badge variant="outline" className="text-xs">{sym}</Badge>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-mono" data-testid={`text-quota-trades-${sym}`}>
+                                  {q.tradesToday}/{q.target}/{q.max}
+                                </span>
+                                <Badge
+                                  variant={atMax ? "destructive" : atTarget ? "secondary" : "outline"}
+                                  className="text-xs"
+                                >
+                                  {atMax ? "MAX" : atTarget ? "ON TARGET" : `Step ${q.currentStep}`}
+                                </Badge>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                              <span data-testid={`text-quota-pct-${sym}`}>
+                                <span className="text-amber-400">p</span>{" "}
+                                <span className="font-mono">{q.flowPct ?? "—"}</span>
+                              </span>
+                              <span data-testid={`text-quota-thr-${sym}`}>
+                                <span className="text-amber-400">thr</span>{" "}
+                                <span className="font-mono">{q.flowThr != null ? (q.flowThr * 100).toFixed(1) + "%" : "—"}</span>
+                              </span>
+                              <span data-testid={`text-quota-size-${sym}`}>
+                                <span className="text-amber-400">size</span>{" "}
+                                <span className="font-mono">{q.flowRiskMult != null ? q.flowRiskMult.toFixed(2) + "x" : "—"}</span>
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No quota data yet</p>
+                  )}
+                </CardContent>
+              </Card>
+
               {/* Per-Symbol Performance */}
               <Card data-testid="card-symbol-performance">
                 <CardHeader className="pb-2">
@@ -1052,6 +1111,8 @@ export default function ProDashboard() {
                         <TableHead>Policy</TableHead>
                         <TableHead>CORE Thr</TableHead>
                         <TableHead>FLOW Thr</TableHead>
+                        <TableHead data-testid="header-quota-step">Q.Step</TableHead>
+                        <TableHead data-testid="header-trades-day">Trades/Day</TableHead>
                         <TableHead>Decision</TableHead>
                         <TableHead>Reasons</TableHead>
                       </TableRow>
@@ -1110,6 +1171,14 @@ export default function ProDashboard() {
                           </TableCell>
                           <TableCell className="text-xs font-mono">
                             {cycle.flowThr != null ? (cycle.flowThr * 100).toFixed(1) + "%" : "—"}
+                          </TableCell>
+                          <TableCell className="text-xs font-mono">
+                            {cycle.quotaStep != null ? cycle.quotaStep : "—"}
+                          </TableCell>
+                          <TableCell className="text-xs font-mono">
+                            {cycle.tradesTodayTotal != null
+                              ? `${cycle.tradesTodayTotal}/${cycle.tradesTodayTarget ?? "?"}/${cycle.tradesTodayMax ?? "?"}`
+                              : "—"}
                           </TableCell>
                           <TableCell>
                             <Badge
