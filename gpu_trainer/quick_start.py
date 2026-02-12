@@ -2719,9 +2719,6 @@ Examples:
                         help="Fetch 1H/4H candles directly from exchange instead of resampling")
     parser.add_argument("--verify-system", action="store_true", default=False,
                         help="Run system verification mode: N cycles of assertions on lane routing, CROSS, quota, payloads")
-    parser.add_argument("--verify-separation", action="store_true", default=False,
-                        help="Run v4.5 separation verification: 200-cycle dry-run asserting SCALP gate enforcement, "
-                             "router priority, budget bounds, exit resolve logs. Outputs verify_report_v4.5.md")
     parser.add_argument("--cycles", type=int, default=30,
                         help="Number of cycles for --verify-system/--verify-separation mode (default: 30)")
 
