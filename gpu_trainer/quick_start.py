@@ -270,7 +270,7 @@ def compute_funding_features(candle_df, funding_df):
     return result
 
 
-def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m"):
+def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m", symbol: str = "BTCUSDT"):
     """Fetch historical Open Interest from Binance Futures API, paginating to cover full candle range."""
     import requests
     import pandas as pd
@@ -279,6 +279,12 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m"):
 
     candle_start_ms = int(candle_df['timestamp'].min())
     candle_end_ms = int(candle_df['timestamp'].max())
+
+    max_oi_lookback_ms = 90 * 24 * 60 * 60 * 1000
+    oi_earliest_ms = candle_end_ms - max_oi_lookback_ms
+    if candle_start_ms < oi_earliest_ms:
+        log.info(f"OI: clamping start from {candle_start_ms} to {oi_earliest_ms} (~90d lookback, Binance limit)")
+        candle_start_ms = oi_earliest_ms
 
     if cache_path.exists():
         existing = pd.read_parquet(cache_path)
@@ -301,7 +307,7 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m"):
 
     while current_start < candle_end_ms:
         params = {
-            "symbol": "BTCUSDT",
+            "symbol": symbol,
             "period": period,
             "startTime": current_start,
             "endTime": candle_end_ms,
@@ -314,13 +320,13 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m"):
                 log.warning("OI rate limited - sleeping 3s")
                 _time.sleep(3)
                 continue
-            if resp.status_code == 403 or resp.status_code == 451:
+            if resp.status_code in (400, 403, 451):
                 if period == "5m":
                     log.warning(f"OI period={period} not available (HTTP {resp.status_code}), falling back to 15m")
-                    return fetch_open_interest_hist(candle_df, data_dir, period="15m")
+                    return fetch_open_interest_hist(candle_df, data_dir, period="15m", symbol=symbol)
                 elif period == "15m":
                     log.warning(f"OI period={period} not available (HTTP {resp.status_code}), falling back to 1h")
-                    return fetch_open_interest_hist(candle_df, data_dir, period="1h")
+                    return fetch_open_interest_hist(candle_df, data_dir, period="1h", symbol=symbol)
                 else:
                     log.error(f"OI fetch failed for all periods (HTTP {resp.status_code})")
                     return pd.DataFrame(columns=["oi_time_ms", "sumOpenInterest", "symbol", "period"])
@@ -329,10 +335,10 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m"):
         except requests.exceptions.HTTPError as e:
             if period == "5m":
                 log.warning(f"OI period={period} error: {e}, falling back to 15m")
-                return fetch_open_interest_hist(candle_df, data_dir, period="15m")
+                return fetch_open_interest_hist(candle_df, data_dir, period="15m", symbol=symbol)
             elif period == "15m":
                 log.warning(f"OI period={period} error: {e}, falling back to 1h")
-                return fetch_open_interest_hist(candle_df, data_dir, period="1h")
+                return fetch_open_interest_hist(candle_df, data_dir, period="1h", symbol=symbol)
             log.warning(f"OI fetch error (page {page}): {e}")
             break
         except Exception as e:
@@ -346,7 +352,7 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m"):
             all_records.append({
                 "oi_time_ms": int(item["timestamp"]),
                 "sumOpenInterest": float(item["sumOpenInterest"]),
-                "symbol": item.get("symbol", "BTCUSDT"),
+                "symbol": item.get("symbol", symbol),
                 "period": period,
             })
 
@@ -540,7 +546,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             sym_features_df = pd.concat([sym_features_df, sym_funding_features], axis=1)
             sym_features_df = sym_features_df.fillna(0)
 
-            sym_oi_df = fetch_open_interest_hist(sym_df, data_dir)
+            sym_oi_df = fetch_open_interest_hist(sym_df, data_dir, symbol=sym)
             sym_oi_features = compute_oi_features(sym_df, sym_oi_df)
             sym_features_df = pd.concat([sym_features_df, sym_oi_features], axis=1)
             sym_features_df = sym_features_df.fillna(0)
