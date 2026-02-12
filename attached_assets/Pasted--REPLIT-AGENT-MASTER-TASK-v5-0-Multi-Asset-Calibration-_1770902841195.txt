@@ -1,0 +1,219 @@
+✅ REPLIT AGENT MASTER TASK — v5.0 “Multi-Asset + Calibration + Value Head (E[netR])”
+Project: gpu_trainer (local GPU) + Replit dashboard (server/UI)
+
+GOAL
+We are retraining. Implement a v5.0 training upgrade pack that makes the system aggressive-but-safe and fixes the “p_enter collapse” problem.
+We want:
+- Multi-asset training (single shared model)
+- Correct imbalance handling (pos_weight + bias init)
+- Add a value head predicting E[net R] (net of costs) so policy can require E_net_pred > 0
+- Temperature scaling calibration for p_enter
+- Promotion gates (PF_net, E[net], regimes profitable, drawdown) + calibration stability
+- Zero breaking changes to live inference payloads unless explicitly versioned
+
+STRICT DO NOT:
+- Do NOT add new external data sources (no news/social/OI expansion)
+- Do NOT change triple_barrier rules/parity
+- Do NOT change inference windowing (single-row inference stays)
+- Do NOT tune portfolio caps/correlation rules in this task
+- Do NOT change cost model; costs remain in compute_trade_cost_r()
+
+────────────────────────────────────────────────────────
+A) VERSIONING
+1) Bump system version everywhere:
+   v5.0_multiasset_calibrated_valuehead
+
+2) Save artifacts with version tags:
+   checkpoints/
+     model_v5.0.pt
+     scaler_v5.0.joblib
+     temp_scale_v5.0.json
+     best_policy_v5.0.json (optional if you reuse geometry sweep)
+
+────────────────────────────────────────────────────────
+B) MULTI-ASSET TRAINING (single shared model)
+1) DataLoader must support multiple symbols in one dataset:
+   - Accept CLI: --symbols BTCUSDT,ETHUSDT,SOLUSDT (comma list)
+   - For training, concatenate samples across symbols
+   - Ensure splits are time-based per symbol (no leakage):
+       train: oldest 70%
+       val: next 15%
+       test: most recent 15%
+     (per-symbol split, then merged)
+
+2) Symbol identity input:
+   OPTION 1 (preferred): small embedding
+   - Add symbol_id (int) per sample
+   - Embed dim=4 or 8
+   - Concatenate embedding to feature vector BEFORE trunk
+   - Input becomes (63 + emb_dim)
+
+   OPTION 2 (fallback): one-hot vector appended (N symbols)
+
+3) Refit scaler:
+   - Fit scaler on TRAIN across all symbols (features only)
+   - Save as scaler_v5.0.joblib
+   - During validation/test/live, only transform using saved scaler
+
+ACCEPTANCE LOGS:
+- [DATA] symbols=... total_samples=... per_symbol=...
+- [SPLIT] sym=BTC... train=... val=... test=...
+- [SCALER] fit_on=train only | features=63 | symbols=N
+
+────────────────────────────────────────────────────────
+C) MODEL ARCH CHANGE: add VALUE head (E[netR]) while keeping ENTER head
+1) Architecture:
+   - shared trunk: MLP (existing)
+   - enter_head: Linear -> logit (NO sigmoid inside model; apply sigmoid outside)
+   - value_head: Linear -> value_logit (regression output predicting net_R expectation)
+
+2) Targets:
+   - enter_target: existing binary label (from triple barrier parity)
+   - value_target: net_r from triple_barrier (gross_r - cost_r), clipped to [-3, +3] R
+     NOTE: value_target should be 0 for HOLD-only samples? No — only compute for labeled opportunities.
+     Implement consistent rule:
+       - If sample is “enter positive” or “enter negative” per current labeling, it has a realized net_r.
+       - value_target is that net_r (can be negative).
+     This allows the head to learn expectancy, not just direction.
+
+3) Loss:
+   - enter loss: BCEWithLogitsLoss(pos_weight=neg/pos)
+   - value loss: HuberLoss (delta=1.0) or SmoothL1Loss
+   - total loss: L = enter_loss + λ * value_loss (default λ=0.5)
+   CLI flags:
+   --value-loss-weight (default 0.5)
+   --value-clip (default 3.0)
+
+ACCEPTANCE LOGS EACH EPOCH:
+- [TRAIN] pos_rate=... neg_rate=... pos_weight=...
+- [TRAIN] enter_bias_init=... (see section D)
+- [METRIC] mean_logit_pos=... mean_logit_neg=...
+- [METRIC] value_mae=... value_rmse=...
+- [METRIC] p_enter percentiles (val): p50 p75 p90 p95 p99
+
+────────────────────────────────────────────────────────
+D) FIX p_enter COLLAPSE: bias init + pos_weight
+1) Bias initialization:
+   - Compute train_pos_rate r
+   - Set enter_head.bias = log(r/(1-r))
+   - Log it clearly:
+     [BIAS_INIT] pos_rate=0.xxx bias=-y.yy
+
+2) pos_weight:
+   - pos_weight = neg/pos
+   - Use BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]))
+
+ACCEPTANCE:
+- [BIAS_INIT] line appears
+- [POS_WEIGHT] pos_weight printed
+
+────────────────────────────────────────────────────────
+E) TEMPERATURE SCALING CALIBRATION (post-train)
+Purpose: make p_enter thresholds meaningful across assets.
+1) After training finishes, fit temperature T on VAL logits:
+   - Collect enter_logits and enter_labels on val
+   - Optimize T > 0 minimizing NLL: BCEWithLogitsLoss(logits/T, labels)
+   - Save temp_scale_v5.0.json:
+     {"temperature": 1.37, "fitted_on": "val", "version": "v5.0_multiasset_calibrated_valuehead"}
+
+2) In inference:
+   - Load temperature if file exists
+   - Use calibrated logits: logit_cal = logit / T
+   - p_enter = sigmoid(logit_cal)
+
+ACCEPTANCE LOGS:
+- [CALIB] temperature_fit start | n=...
+- [CALIB] temperature=... | nll_before=... nll_after=...
+- [INFER] using_temperature=... (once at startup)
+
+────────────────────────────────────────────────────────
+F) POLICY UPGRADE (safe aggressiveness)
+In live_runner policy decision:
+- compute p_enter (calibrated)
+- compute e_net_pred = value_head output (predicted net R)
+New gating (per lane):
+CORE: p_enter >= core_thr AND e_net_pred > 0.00
+FLOW: p_enter >= flow_thr AND e_net_pred > -0.05 (slightly looser)
+SCALP: p_enter >= scalp_thr AND e_net_pred > -0.02 (very light loosen)
+CLI flags:
+--min-enet-core (default 0.00)
+--min-enet-flow (default -0.05)
+--min-enet-scalp (default -0.02)
+
+ACCEPTANCE LOG:
+[LANE_DECISION] ... p=... e_net_pred=... thresholds: core_thr=... enet_core=...
+
+IMPORTANT: Do NOT change TP/SL logic in this task.
+
+────────────────────────────────────────────────────────
+G) PROMOTION GATES (do not deploy bad model)
+When --enable-learning promotes a new checkpoint, require:
+1) PF_net >= 1.05 overall (from regime-eval net)
+2) E[net] > 0 overall
+3) profitable regimes >= 2
+4) max drawdown (net R) <= 6.0R
+5) calibration sanity:
+   - val p_enter percentiles stable: p95 between 0.4 and 0.98 (configurable)
+   - not all near 0.0 or near 1.0
+CLI:
+--gate-pf-net 1.05
+--gate-enet 0.0
+--gate-profitable-regimes 2
+--gate-maxdd-r 6.0
+--gate-p95-min 0.40
+--gate-p95-max 0.98
+
+ACCEPTANCE LOGS:
+[GATE] pf_net=... pass=...
+[GATE] e_net=... pass=...
+[GATE] profitable_regimes=... pass=...
+[GATE] maxdd_r=... pass=...
+[GATE] p95=... pass=...
+[PROMOTE] promoted=YES/NO reason=...
+
+────────────────────────────────────────────────────────
+H) DASHBOARD PAYLOAD EXTENSION (minimal, versioned)
+Add optional fields to cycle logs + trade entries:
+- e_net_pred (float)
+- enter_logit (float, optional debug)
+- temperature_used (float)
+UI:
+- In Cycle Monitor, show “E_net_pred” column
+- In Hold Reasons, include: “e_net_pred below min” when it blocks
+- In Trade Detail modal, show E_net_pred at entry time
+
+ACCEPTANCE:
+- UI renders when fields missing (null-safe)
+- New fields appear when present
+
+────────────────────────────────────────────────────────
+I) VERIFY COMMAND (must be added)
+Add a CLI to validate the whole v5.0 pipeline quickly:
+python quick_start.py --train --symbols BTCUSDT,ETHUSDT,SOLUSDT --epochs 3 --smoke-calib --smoke-infer
+
+This should:
+1) train 3 epochs
+2) fit temperature
+3) run single-row inference on last candle per symbol
+4) print:
+   [SMOKE] sym=... logit=... T=... p=... e_net_pred=...
+   [SMOKE] z_min=... z_max=... clipped=K/63
+
+────────────────────────────────────────────────────────
+J) TESTS (minimum)
+1) Unit: temperature scaling reduces NLL on synthetic logits
+2) Unit: bias init correct within tolerance
+3) Integration: multi-asset split has no timestamp overlap train/val/test per symbol
+4) Integration: inference loads scaler + temp + model and outputs p_enter in (0,1)
+
+────────────────────────────────────────────────────────
+DELIVERABLES
+- Code changes across trainer + live_runner + optional UI fields
+- New artifacts: model_v5.0.pt, scaler_v5.0.joblib, temp_scale_v5.0.json
+- Logs must match acceptance lines above
+- Update README with new flags and upgrade notes
+
+SUCCESS CRITERIA
+- After retrain on recent data: p_enter is not collapsed (val p95 >= 0.40)
+- Live inference shows meaningful p_enter distribution (not 0.005–0.01 always)
+- System can trade more frequently safely because e_net_pred filter prevents junk
