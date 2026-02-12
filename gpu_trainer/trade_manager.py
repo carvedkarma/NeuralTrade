@@ -1,7 +1,11 @@
-"""Smart Trade Manager v4.4.0 — Dynamic exit intelligence.
+"""Smart Trade Manager v4.4.1 — Dynamic exit intelligence.
 
 Evaluates open positions each cycle and returns actions:
 HOLD | MOVE_SL | TRAIL_SL | CLOSE_PARTIAL | CLOSE_FULL
+
+Safety limits:
+  MAX_SL_UPDATES (6)  — hard cap on SL moves per trade to prevent flip-flop.
+  MIN_BARS_BETWEEN_SL (1) — cooldown between SL updates to prevent micro-jitter.
 
 Uses existing lanes + HTF score + p_enter — no model retraining needed.
 """
@@ -20,6 +24,8 @@ STALL_BARS = 2
 ADVERSE_FLIP_R = -0.60
 ADVERSE_HTF_DROP = 2
 ADVERSE_P_ENTER_DECAY = 0.80
+MAX_SL_UPDATES = 6
+MIN_BARS_BETWEEN_SL = 1
 
 
 @dataclass
@@ -50,6 +56,8 @@ class TradeManager:
                 'risk_per_unit': risk_per_unit,
                 'original_sl': pos.sl_price,
                 'entry_htf_score': pos.htf_score,
+                'sl_update_count': 0,
+                'last_sl_update_bar': -999,
             }
         return self.position_state[symbol]
 
@@ -130,34 +138,69 @@ class TradeManager:
             state['stall_counter'] = 0
             state['last_mfe'] = state['max_favorable_r']
 
+        sl_allowed = (state['sl_update_count'] < MAX_SL_UPDATES and
+                      current_bar - state['last_sl_update_bar'] >= MIN_BARS_BETWEEN_SL)
+
         if state['max_favorable_r'] >= TRAIL_TRIGGER_R:
             trail_r = TRAIL_DISTANCE_R
             if pos.is_long:
                 new_sl = state['peak_price'] - trail_r * risk_per_unit
                 if new_sl > pos.sl_price:
-                    log.info(f"[TM_SL] sym={symbol} action=TRAIL_SL new_sl={new_sl:.2f} "
-                             f"old_sl={pos.sl_price:.2f} peak={state['peak_price']:.2f} "
-                             f"mfe={state['max_favorable_r']:.2f}R")
-                    return TMAction(action="TRAIL_SL", reason="TRAIL_LOCK", new_sl=new_sl)
+                    if not sl_allowed:
+                        log.debug(f"[TM_SL] sym={symbol} TRAIL_SL suppressed "
+                                  f"(updates={state['sl_update_count']}/{MAX_SL_UPDATES}, "
+                                  f"bars_since_last={current_bar - state['last_sl_update_bar']}/{MIN_BARS_BETWEEN_SL})")
+                    else:
+                        state['sl_update_count'] += 1
+                        state['last_sl_update_bar'] = current_bar
+                        log.info(f"[TM_SL] sym={symbol} action=TRAIL_SL new_sl={new_sl:.2f} "
+                                 f"old_sl={pos.sl_price:.2f} peak={state['peak_price']:.2f} "
+                                 f"mfe={state['max_favorable_r']:.2f}R "
+                                 f"(update {state['sl_update_count']}/{MAX_SL_UPDATES})")
+                        return TMAction(action="TRAIL_SL", reason="TRAIL_LOCK", new_sl=new_sl)
             else:
                 new_sl = state['peak_price'] + trail_r * risk_per_unit
                 if new_sl < pos.sl_price:
-                    log.info(f"[TM_SL] sym={symbol} action=TRAIL_SL new_sl={new_sl:.2f} "
-                             f"old_sl={pos.sl_price:.2f} peak={state['peak_price']:.2f} "
-                             f"mfe={state['max_favorable_r']:.2f}R")
-                    return TMAction(action="TRAIL_SL", reason="TRAIL_LOCK", new_sl=new_sl)
+                    if not sl_allowed:
+                        log.debug(f"[TM_SL] sym={symbol} TRAIL_SL suppressed "
+                                  f"(updates={state['sl_update_count']}/{MAX_SL_UPDATES}, "
+                                  f"bars_since_last={current_bar - state['last_sl_update_bar']}/{MIN_BARS_BETWEEN_SL})")
+                    else:
+                        state['sl_update_count'] += 1
+                        state['last_sl_update_bar'] = current_bar
+                        log.info(f"[TM_SL] sym={symbol} action=TRAIL_SL new_sl={new_sl:.2f} "
+                                 f"old_sl={pos.sl_price:.2f} peak={state['peak_price']:.2f} "
+                                 f"mfe={state['max_favorable_r']:.2f}R "
+                                 f"(update {state['sl_update_count']}/{MAX_SL_UPDATES})")
+                        return TMAction(action="TRAIL_SL", reason="TRAIL_LOCK", new_sl=new_sl)
 
         if state['max_favorable_r'] >= BREAKEVEN_TRIGGER_R and not state['breakeven_moved']:
             if pos.is_long and pos.sl_price < pos.entry_price:
-                state['breakeven_moved'] = True
-                log.info(f"[TM_SL] sym={symbol} action=BREAKEVEN new_sl={pos.entry_price:.2f} "
-                         f"old_sl={pos.sl_price:.2f} mfe={state['max_favorable_r']:.2f}R")
-                return TMAction(action="MOVE_SL", reason="BREAKEVEN", new_sl=pos.entry_price)
+                if not sl_allowed:
+                    log.debug(f"[TM_SL] sym={symbol} BREAKEVEN suppressed "
+                              f"(updates={state['sl_update_count']}/{MAX_SL_UPDATES}, "
+                              f"bars_since_last={current_bar - state['last_sl_update_bar']}/{MIN_BARS_BETWEEN_SL})")
+                else:
+                    state['breakeven_moved'] = True
+                    state['sl_update_count'] += 1
+                    state['last_sl_update_bar'] = current_bar
+                    log.info(f"[TM_SL] sym={symbol} action=BREAKEVEN new_sl={pos.entry_price:.2f} "
+                             f"old_sl={pos.sl_price:.2f} mfe={state['max_favorable_r']:.2f}R "
+                             f"(update {state['sl_update_count']}/{MAX_SL_UPDATES})")
+                    return TMAction(action="MOVE_SL", reason="BREAKEVEN", new_sl=pos.entry_price)
             elif not pos.is_long and pos.sl_price > pos.entry_price:
-                state['breakeven_moved'] = True
-                log.info(f"[TM_SL] sym={symbol} action=BREAKEVEN new_sl={pos.entry_price:.2f} "
-                         f"old_sl={pos.sl_price:.2f} mfe={state['max_favorable_r']:.2f}R")
-                return TMAction(action="MOVE_SL", reason="BREAKEVEN", new_sl=pos.entry_price)
+                if not sl_allowed:
+                    log.debug(f"[TM_SL] sym={symbol} BREAKEVEN suppressed "
+                              f"(updates={state['sl_update_count']}/{MAX_SL_UPDATES}, "
+                              f"bars_since_last={current_bar - state['last_sl_update_bar']}/{MIN_BARS_BETWEEN_SL})")
+                else:
+                    state['breakeven_moved'] = True
+                    state['sl_update_count'] += 1
+                    state['last_sl_update_bar'] = current_bar
+                    log.info(f"[TM_SL] sym={symbol} action=BREAKEVEN new_sl={pos.entry_price:.2f} "
+                             f"old_sl={pos.sl_price:.2f} mfe={state['max_favorable_r']:.2f}R "
+                             f"(update {state['sl_update_count']}/{MAX_SL_UPDATES})")
+                    return TMAction(action="MOVE_SL", reason="BREAKEVEN", new_sl=pos.entry_price)
 
         return TMAction(action="HOLD", reason="no_exit_trigger")
 
