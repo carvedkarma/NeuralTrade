@@ -39,6 +39,7 @@ interface Trade {
   exitPrice: number | null;
   stopLoss: number | null;
   takeProfit: number | null;
+  initialSl: number | null;
   sizePct: number | null;
   pEnter: number | null;
   costsBps: number | null;
@@ -94,9 +95,19 @@ function fmtR(val: number | null | undefined): string {
   return `${val >= 0 ? "+" : ""}${val.toFixed(2)}R`;
 }
 
+function fmtR0(val: number | null | undefined): string {
+  const v = val ?? 0;
+  return `${v >= 0 ? "+" : ""}${v.toFixed(2)}R`;
+}
+
 function fmtUsd(val: number | null | undefined): string {
   if (val === null || val === undefined) return "N/A";
   return `$${val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function fmtUsd0(val: number | null | undefined): string {
+  const v = val ?? 0;
+  return `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function fmtPrice(val: number | null | undefined): string {
@@ -293,28 +304,28 @@ export default function TradeDetailModal({ tradeId, open, onClose }: TradeDetail
                   <div>
                     <p className="text-xs text-muted-foreground">Cost R</p>
                     <p className="text-sm font-semibold" data-testid="text-cost-r">
-                      {fmtR(trade.costR)}
+                      {fmtR0(trade.costR)}
                     </p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Net PnL ($)</p>
                     <p
-                      className={`text-sm font-semibold ${trade.pnlUsd !== null ? (trade.pnlUsd >= 0 ? "text-emerald-400" : "text-red-400") : ""}`}
+                      className={`text-sm font-semibold ${(trade.pnlUsd ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}
                       data-testid="text-net-pnl-usd"
                     >
-                      {fmtUsd(trade.pnlUsd)}
+                      {fmtUsd0(trade.pnlUsd)}
                     </p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Cost ($)</p>
                     <p className="text-sm font-semibold" data-testid="text-cost-usd">
-                      {fmtUsd(trade.pnlUsdCost)}
+                      {fmtUsd0(trade.pnlUsdCost)}
                     </p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Risk ($) Used</p>
                     <p className="text-sm font-semibold" data-testid="text-risk-usd">
-                      {fmtUsd(trade.riskUsdUsed)}
+                      {fmtUsd0(trade.riskUsdUsed)}
                     </p>
                   </div>
                 </div>
@@ -427,7 +438,7 @@ export default function TradeDetailModal({ tradeId, open, onClose }: TradeDetail
                   <div>
                     <p className="text-xs text-muted-foreground">Bars Held</p>
                     <p className="text-sm font-semibold" data-testid="text-bars-held">
-                      {trade.barsHeld !== null ? `${trade.barsHeld} bars` : "N/A"}
+                      {`${trade.barsHeld ?? 0} bars`}
                     </p>
                   </div>
                   <div>
@@ -452,6 +463,12 @@ export default function TradeDetailModal({ tradeId, open, onClose }: TradeDetail
                     <p className="text-xs text-muted-foreground">Stop Loss</p>
                     <p className="text-sm font-semibold text-red-400" data-testid="text-stop-loss">
                       {fmtPrice(trade.stopLoss)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Initial SL</p>
+                    <p className="text-sm font-semibold text-red-400/70" data-testid="text-initial-sl">
+                      {fmtPrice(trade.initialSl ?? trade.stopLoss)}
                     </p>
                   </div>
                   <div>
@@ -490,6 +507,25 @@ export default function TradeDetailModal({ tradeId, open, onClose }: TradeDetail
                     </Badge>
                   )}
                 </div>
+                {trade.exitPrice != null && trade.entryPrice != null && (
+                  (() => {
+                    const isl = trade.initialSl ?? trade.stopLoss;
+                    const origRisk = isl != null ? Math.abs(trade.entryPrice - isl) : 0;
+                    const isLongDir = trade.side?.toUpperCase() === "LONG" || trade.side?.toUpperCase() === "BUY";
+                    const calcR = origRisk > 0
+                      ? (isLongDir
+                          ? (trade.exitPrice - trade.entryPrice) / origRisk
+                          : (trade.entryPrice - trade.exitPrice) / origRisk)
+                      : 0;
+                    const match = trade.grossR != null ? Math.abs(calcR - trade.grossR) <= 0.01 : true;
+                    return (
+                      <p className={`text-xs mt-1 ${match ? "text-muted-foreground" : "text-amber-400"}`} data-testid="text-pnl-check">
+                        PnL check: (exit-entry)/orig_risk = {calcR >= 0 ? "+" : ""}{calcR.toFixed(2)}R
+                        {trade.grossR != null && !match && ` (stored: ${trade.grossR >= 0 ? "+" : ""}${trade.grossR.toFixed(2)}R)`}
+                      </p>
+                    );
+                  })()
+                )}
               </CardContent>
             </Card>
 
