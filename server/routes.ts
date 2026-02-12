@@ -4225,6 +4225,14 @@ export async function registerRoutes(
         eNetPred: c.e_net_pred ?? null,
         enterLogit: c.enter_logit ?? null,
         temperatureUsed: c.temperature_used ?? null,
+        scalpAtrRatio: c.scalp_atr_ratio ?? null,
+        scalpTrZ: c.scalp_tr_z ?? null,
+        scalpBbZ: c.scalp_bb_z ?? null,
+        scalpEma20Slope: c.scalp_ema20_slope ?? null,
+        scalpMacdHist: c.scalp_macd_hist ?? null,
+        scalpVolRatio: c.scalp_vol_ratio ?? null,
+        scalpVolExpansionOk: c.scalp_vol_expansion_ok ?? null,
+        scalpMomentumOk: c.scalp_momentum_ok ?? null,
         createdAt: Date.now(),
       });
       res.json({ success: true, id: record.id });

@@ -434,8 +434,88 @@ def _compute_htf_score(htf: dict, direction: str) -> int:
     return score
 
 
+SCALP_ATR_RATIO_MIN = 1.20
+SCALP_TR_Z_MIN = 1.0
+SCALP_BB_Z_MIN = 1.0
+SCALP_SLOPE_MIN = 0.0005
+SCALP_MACD_MIN = 0.0001
+SCALP_VOL_RATIO_MIN = 1.2
+
+
+def _compute_scalp_gates(df_candles: pd.DataFrame, features_df: pd.DataFrame,
+                         direction: str, atr: float) -> dict:
+    """Compute all SCALP gate metrics and pass/fail flags.
+
+    Returns dict with:
+      vol_expansion_ok, momentum_ok, atr_ratio, true_range_z, bb_width_z,
+      ema20_slope, macd_hist_val, volume_ratio, range_ok_adjusted_mult
+    """
+    n = len(df_candles)
+    last_row = features_df.iloc[-1] if len(features_df) > 0 else {}
+
+    atr14 = atr
+    atr50 = _compute_atr(df_candles, window=50) if n > 51 else atr
+    atr_ratio = atr14 / atr50 if atr50 > 0 else 0.0
+
+    highs = df_candles['high'].values.astype(float)
+    lows = df_candles['low'].values.astype(float)
+    closes = df_candles['close'].values.astype(float)
+    trs = []
+    for i in range(1, n):
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+        trs.append(tr)
+    if len(trs) >= 20:
+        tr_arr = np.array(trs)
+        tr_mean = tr_arr[-20:].mean()
+        tr_std = tr_arr[-20:].std()
+        true_range_z = (tr_arr[-1] - tr_mean) / tr_std if tr_std > 0 else 0.0
+    else:
+        true_range_z = 0.0
+
+    bb_width = float(last_row.get('bb_width', 0))
+    if n > 20 and 'bb_width' in features_df.columns:
+        bw_vals = features_df['bb_width'].iloc[-20:].values.astype(float)
+        bw_mean = np.nanmean(bw_vals)
+        bw_std = np.nanstd(bw_vals)
+        bb_width_z = (bb_width - bw_mean) / bw_std if bw_std > 0 else 0.0
+    else:
+        bb_width_z = 0.0
+
+    vol_expansion_ok = (atr_ratio >= SCALP_ATR_RATIO_MIN and
+                        (true_range_z >= SCALP_TR_Z_MIN or bb_width_z >= SCALP_BB_Z_MIN))
+
+    if n >= 20:
+        ema20 = pd.Series(closes).ewm(span=20, adjust=False).mean()
+        ema20_slope = (ema20.iloc[-1] - ema20.iloc[-2]) / ema20.iloc[-2] if ema20.iloc[-2] != 0 else 0.0
+    else:
+        ema20_slope = 0.0
+
+    macd_hist_val = float(last_row.get('macd_hist', 0))
+
+    slope_pass = abs(ema20_slope) >= SCALP_SLOPE_MIN
+    macd_pass = abs(macd_hist_val) >= SCALP_MACD_MIN
+    signal_component = slope_pass or macd_pass
+
+    recent_vol = df_candles['volume'].iloc[-4:].mean() if n >= 4 else 0
+    avg_vol = df_candles['volume'].iloc[-20:].mean() if n >= 20 else (df_candles['volume'].mean() if n > 0 else 1)
+    volume_ratio = float(recent_vol / avg_vol) if avg_vol > 0 else 0.0
+
+    momentum_ok = signal_component and volume_ratio >= SCALP_VOL_RATIO_MIN
+
+    return {
+        'vol_expansion_ok': vol_expansion_ok,
+        'momentum_ok': momentum_ok,
+        'atr_ratio': round(atr_ratio, 4),
+        'true_range_z': round(true_range_z, 4),
+        'bb_width_z': round(bb_width_z, 4),
+        'ema20_slope': round(ema20_slope, 6),
+        'macd_hist_val': round(macd_hist_val, 6),
+        'volume_ratio': round(volume_ratio, 4),
+    }
+
+
 def _compute_momentum_ok(features_df: pd.DataFrame, direction: str) -> bool:
-    """Check momentum conditions for SCALP: ADX >= 18 OR MACD matches direction."""
+    """Check momentum conditions for FLOW: ADX >= 18 OR MACD matches direction."""
     last_row = features_df.iloc[-1]
     adx = last_row.get('adx_14', 0)
     if adx >= 18:
@@ -444,20 +524,6 @@ def _compute_momentum_ok(features_df: pd.DataFrame, direction: str) -> bool:
     if direction == "LONG" and macd_val > 0:
         return True
     if direction == "SHORT" and macd_val < 0:
-        return True
-    return False
-
-
-def _compute_volatility_ok(df_candles: pd.DataFrame, atr: float) -> bool:
-    """Check volatility conditions for SCALP: ATR% >= 0.25% OR volume_ratio >= 1.10."""
-    price = float(df_candles.iloc[-1]['close'])
-    atr_pct = (atr / price) * 100 if price > 0 else 0
-    if atr_pct >= 0.25:
-        return True
-    recent_vol = df_candles['volume'].iloc[-4:].mean()
-    avg_vol = df_candles['volume'].iloc[-20:].mean()
-    vol_ratio = recent_vol / avg_vol if avg_vol > 0 else 0
-    if vol_ratio >= 1.10:
         return True
     return False
 
@@ -568,6 +634,9 @@ class LiveRunner:
         per_symbol_models: bool = False,
         limit_15m: int = REQUIRED_CANDLES,
         direct_htf: bool = False,
+        budget_core: float = None,
+        budget_flow: float = None,
+        budget_scalp: float = None,
     ):
         self.replit_url = replit_url
         self.symbols = symbols
@@ -586,6 +655,14 @@ class LiveRunner:
         self.per_symbol_models = per_symbol_models
         self.limit_15m = limit_15m
         self.direct_htf = direct_htf
+
+        self.lane_budgets = {
+            "CORE": budget_core if budget_core is not None else LANE_BUDGET["CORE"],
+            "FLOW": budget_flow if budget_flow is not None else LANE_BUDGET["FLOW"],
+            "SCALP": budget_scalp if budget_scalp is not None else LANE_BUDGET["SCALP"],
+        }
+        log.info(f"[CONFIG] Lane budgets: CORE={self.lane_budgets['CORE']:.2f}R "
+                 f"FLOW={self.lane_budgets['FLOW']:.2f}R SCALP={self.lane_budgets['SCALP']:.2f}R")
 
         self.model = None
         self.engineer = None
@@ -619,6 +696,8 @@ class LiveRunner:
 
     def _on_position_close(self, pos, exit_price: float, outcome: str, gross_r: float):
         """Callback when portfolio closes a position — push trade update to dashboard."""
+        if hasattr(self, 'separation_verifier') and self.separation_verifier:
+            self.separation_verifier.record_exit_resolve()
         from portfolio import Position as _Pos
 
         initial_sl = pos.original_sl if pos.original_sl is not None else pos.sl_price
@@ -748,6 +827,16 @@ class LiveRunner:
             "enter_logit": round(float(enter_logit), 4) if enter_logit is not None else None,
             "temperature_used": round(float(temperature_used), 4) if temperature_used is not None else None,
         }
+        sg = li.get('scalp_gates')
+        if sg:
+            payload["scalp_atr_ratio"] = sg.get('atr_ratio')
+            payload["scalp_tr_z"] = sg.get('true_range_z')
+            payload["scalp_bb_z"] = sg.get('bb_width_z')
+            payload["scalp_ema20_slope"] = sg.get('ema20_slope')
+            payload["scalp_macd_hist"] = sg.get('macd_hist_val')
+            payload["scalp_vol_ratio"] = sg.get('volume_ratio')
+            payload["scalp_vol_expansion_ok"] = sg.get('vol_expansion_ok')
+            payload["scalp_momentum_ok"] = sg.get('momentum_ok')
         payload_keys = [k for k, v in payload.items() if v is not None]
         log.debug(f"[CYCLE_PAYLOAD] sym={symbol} fields_present={payload_keys}")
         _retry_request("POST", url, json=payload)
@@ -875,7 +964,8 @@ class LiveRunner:
         log.info(f"  TP={self.tp_mult}x SL={self.sl_mult}x | Cooldown: {self.cooldown_bars} bars")
         log.info(f"  Per-symbol models: {self.per_symbol_models}")
         log.info(f"  Triple-Lane Engine: CORE(p99/1.0x) FLOW(p95-stepped) SCALP(p90/0.25x/4bar)")
-        log.info(f"  Daily R Budget: {DAILY_BUDGET_R_TOTAL}R total | CORE={LANE_BUDGET['CORE']}R FLOW={LANE_BUDGET['FLOW']}R SCALP={LANE_BUDGET['SCALP']}R")
+        total_budget = sum(self.lane_budgets.values())
+        log.info(f"  Daily R Budget: {total_budget:.2f}R total | CORE={self.lane_budgets['CORE']:.2f}R FLOW={self.lane_budgets['FLOW']:.2f}R SCALP={self.lane_budgets['SCALP']:.2f}R")
 
         self.portfolio.on_close_callback = self._on_position_close
         log.info(f"  15m fetch limit: {self.limit_15m} | Direct HTF fetch: {self.direct_htf}")
@@ -1060,9 +1150,9 @@ class LiveRunner:
         today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         if self.daily_budget_date.get(symbol) != today:
             self.daily_budget[symbol] = {
-                "CORE": LANE_BUDGET["CORE"],
-                "FLOW": LANE_BUDGET["FLOW"],
-                "SCALP": LANE_BUDGET["SCALP"],
+                "CORE": self.lane_budgets["CORE"],
+                "FLOW": self.lane_budgets["FLOW"],
+                "SCALP": self.lane_budgets["SCALP"],
             }
             self.daily_budget_date[symbol] = today
             self.budget_block_logged[symbol] = {"CORE": False, "FLOW": False, "SCALP": False}
@@ -1125,8 +1215,12 @@ class LiveRunner:
         core_thr = max(self.enter_threshold, p99) if p99 is not None else self.enter_threshold
         scalp_thr = p90 if p90 is not None else 0.65
 
-        momentum_ok = _compute_momentum_ok(features_df, side)
-        volatility_ok = _compute_volatility_ok(df_candles, atr)
+        flow_momentum_ok = _compute_momentum_ok(features_df, side)
+        scalp_gates = _compute_scalp_gates(df_candles, features_df, side, atr)
+        log.info(f"[SCALP_GATES] sym={symbol} vol_ok={scalp_gates['vol_expansion_ok']} "
+                 f"mom_ok={scalp_gates['momentum_ok']} atr_ratio={scalp_gates['atr_ratio']:.4f} "
+                 f"bb_z={scalp_gates['bb_width_z']:.4f} tr_z={scalp_gates['true_range_z']:.4f} "
+                 f"vol_ratio={scalp_gates['volume_ratio']:.4f}")
 
         quota_step = 0
         sym_hist = self.p_enter_history.get(symbol, [])
@@ -1134,9 +1228,9 @@ class LiveRunner:
         if len(sym_hist) >= 20:
             recent_hist = np.array(sym_hist)
             target_trades_per_day = 3
-            actual_today = LANE_BUDGET["FLOW"] - self._get_lane_budget_remaining(symbol, "FLOW")
+            actual_today = self.lane_budgets["FLOW"] - self._get_lane_budget_remaining(symbol, "FLOW")
             if actual_today > 0:
-                ratio = actual_today / LANE_BUDGET["FLOW"]
+                ratio = actual_today / self.lane_budgets["FLOW"]
                 if ratio < 0.25:
                     quota_step = 3
                 elif ratio < 0.5:
@@ -1152,7 +1246,7 @@ class LiveRunner:
         flow_thr_val = self._get_percentile(symbol, flow_pct)
         flow_thr = flow_thr_val if flow_thr_val is not None else 0.75
 
-        flow_budget_used = LANE_BUDGET["FLOW"] - self._get_lane_budget_remaining(symbol, "FLOW")
+        flow_budget_used = self.lane_budgets["FLOW"] - self._get_lane_budget_remaining(symbol, "FLOW")
         log.info(f"[QUOTA] sym={symbol} trades_today={flow_budget_used:.2f}R_used "
                  f"target_tpd=3 step={quota_step} pressure={quota_step} "
                  f"flow_pct={flow_pct} flow_size_mult={flow_size_mult:.2f}")
@@ -1175,39 +1269,55 @@ class LiveRunner:
                 if e_net_pred < min_enet_core:
                     log.info(f"[ENET_GATE] CORE blocked: e_net={e_net_pred:.4f} < min={min_enet_core:.4f}")
                 elif self._check_lane_budget(symbol, "CORE", 1.0):
+                    log.info(f"[BUDGET] sym={symbol} core_rem={self._get_lane_budget_remaining(symbol, 'CORE'):.2f} "
+                             f"flow_rem={self._get_lane_budget_remaining(symbol, 'FLOW'):.2f} "
+                             f"scalp_rem={self._get_lane_budget_remaining(symbol, 'SCALP'):.2f}")
                     return {**result_base,
                         'lane_selected': 'CORE', 'lane': 'CORE',
                         'threshold_used': core_thr, 'lane_size_mult': 1.0,
                         'lane_horizon': 24,
                         'lane_budget_remaining_r': self._get_lane_budget_remaining(symbol, "CORE"),
                         'hold_reason': None,
+                        'scalp_gates': scalp_gates,
                     }
 
-        if htf_score >= 2 and (range_ok or momentum_ok):
+        if htf_score >= 2 and (range_ok or flow_momentum_ok):
             if p_enter >= flow_thr:
                 if e_net_pred < min_enet_flow:
                     log.info(f"[ENET_GATE] FLOW blocked: e_net={e_net_pred:.4f} < min={min_enet_flow:.4f}")
                 elif self._check_lane_budget(symbol, "FLOW", flow_size_mult):
+                    log.info(f"[BUDGET] sym={symbol} core_rem={self._get_lane_budget_remaining(symbol, 'CORE'):.2f} "
+                             f"flow_rem={self._get_lane_budget_remaining(symbol, 'FLOW'):.2f} "
+                             f"scalp_rem={self._get_lane_budget_remaining(symbol, 'SCALP'):.2f}")
                     return {**result_base,
                         'lane_selected': 'FLOW', 'lane': 'FLOW',
                         'threshold_used': flow_thr, 'lane_size_mult': flow_size_mult,
                         'lane_horizon': 24,
                         'lane_budget_remaining_r': self._get_lane_budget_remaining(symbol, "FLOW"),
                         'hold_reason': None,
+                        'scalp_gates': scalp_gates,
                     }
 
-        if htf_score >= 1 and volatility_ok and momentum_ok:
+        if htf_score >= 1 and scalp_gates['vol_expansion_ok'] and scalp_gates['momentum_ok']:
             if p_enter >= scalp_thr:
                 if e_net_pred < min_enet_scalp:
                     log.info(f"[ENET_GATE] SCALP blocked: e_net={e_net_pred:.4f} < min={min_enet_scalp:.4f}")
-                elif self._check_lane_budget(symbol, "SCALP", SCALP_SIZE_MULT):
-                    return {**result_base,
-                        'lane_selected': 'SCALP', 'lane': 'SCALP',
-                        'threshold_used': scalp_thr, 'lane_size_mult': SCALP_SIZE_MULT,
-                        'lane_horizon': SCALP_HORIZON,
-                        'lane_budget_remaining_r': self._get_lane_budget_remaining(symbol, "SCALP"),
-                        'hold_reason': None,
-                    }
+                else:
+                    scalp_size = SCALP_SIZE_MULT
+                    if not range_ok:
+                        scalp_size *= 0.5
+                    if self._check_lane_budget(symbol, "SCALP", scalp_size):
+                        log.info(f"[BUDGET] sym={symbol} core_rem={self._get_lane_budget_remaining(symbol, 'CORE'):.2f} "
+                                 f"flow_rem={self._get_lane_budget_remaining(symbol, 'FLOW'):.2f} "
+                                 f"scalp_rem={self._get_lane_budget_remaining(symbol, 'SCALP'):.2f}")
+                        return {**result_base,
+                            'lane_selected': 'SCALP', 'lane': 'SCALP',
+                            'threshold_used': scalp_thr, 'lane_size_mult': scalp_size,
+                            'lane_horizon': SCALP_HORIZON,
+                            'lane_budget_remaining_r': self._get_lane_budget_remaining(symbol, "SCALP"),
+                            'hold_reason': None,
+                            'scalp_gates': scalp_gates,
+                        }
 
         hold_reasons = []
         if htf_score < 1:
@@ -1215,10 +1325,10 @@ class LiveRunner:
         elif htf_score < 2:
             if p_enter < scalp_thr:
                 hold_reasons.append(f"p_enter={p_enter:.4f}<scalp_thr={scalp_thr:.4f}")
-            if not volatility_ok:
-                hold_reasons.append("volatility_too_low")
-            if not momentum_ok:
-                hold_reasons.append("momentum_weak")
+            if not scalp_gates['vol_expansion_ok']:
+                hold_reasons.append("vol_expansion_fail")
+            if not scalp_gates['momentum_ok']:
+                hold_reasons.append("momentum_fail")
         elif htf_score < 3:
             if p_enter < flow_thr:
                 hold_reasons.append(f"p_enter={p_enter:.4f}<flow_thr={flow_thr:.4f}")
@@ -1228,13 +1338,18 @@ class LiveRunner:
         if e_net_pred < min_enet_scalp:
             hold_reasons.append(f"e_net={e_net_pred:.4f}<min_enet_scalp={min_enet_scalp:.4f}")
 
-        total_remaining = sum(self._get_lane_budget_remaining(symbol, l) for l in ["CORE", "FLOW", "SCALP"])
+        core_rem = self._get_lane_budget_remaining(symbol, "CORE")
+        flow_rem = self._get_lane_budget_remaining(symbol, "FLOW")
+        scalp_rem = self._get_lane_budget_remaining(symbol, "SCALP")
+        log.info(f"[BUDGET] sym={symbol} core_rem={core_rem:.2f} flow_rem={flow_rem:.2f} scalp_rem={scalp_rem:.2f}")
+        total_remaining = core_rem + flow_rem + scalp_rem
         return {**result_base,
             'lane_selected': 'HOLD', 'lane': None,
             'threshold_used': 0.0, 'lane_size_mult': 0.0,
             'lane_horizon': 24,
             'lane_budget_remaining_r': total_remaining,
             'hold_reason': '; '.join(hold_reasons) if hold_reasons else 'NO_LANE_MATCH',
+            'scalp_gates': scalp_gates,
         }
 
     def _compute_htf_from_direct(self, htf_direct: Dict[str, pd.DataFrame],
@@ -1472,6 +1587,27 @@ class LiveRunner:
                 vf.record_quota_step(qs)
             if cycle_n >= vf.max_cycles:
                 log.info(f"[VERIFY] Reached {vf.max_cycles} cycles -- stopping for report generation")
+                self._should_stop = True
+
+        if hasattr(self, 'separation_verifier') and self.separation_verifier:
+            sv = self.separation_verifier
+            scalp_gates = lane_result.get('scalp_gates', {})
+            budgets = {
+                'core_remaining': self._get_lane_budget_remaining(symbol, "CORE"),
+                'flow_remaining': self._get_lane_budget_remaining(symbol, "FLOW"),
+                'scalp_remaining': self._get_lane_budget_remaining(symbol, "SCALP"),
+            }
+            sv.verify_cycle(
+                cycle=sv.stats.total_cycles,
+                lane_result=lane_result,
+                p_enter=p_enter,
+                htf_score=htf_score,
+                htf=htf,
+                scalp_gates=scalp_gates,
+                budgets=budgets,
+            )
+            if sv.stats.total_cycles >= sv.max_cycles:
+                log.info(f"[VERIFY_SEPARATION] Reached {sv.max_cycles} cycles -- stopping for report generation")
                 self._should_stop = True
 
         if lane_selected == 'HOLD':

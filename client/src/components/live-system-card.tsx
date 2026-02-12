@@ -90,6 +90,14 @@ interface LiveCycleLog {
   eNetPred: number | null;
   enterLogit: number | null;
   temperatureUsed: number | null;
+  scalpAtrRatio: number | null;
+  scalpTrZ: number | null;
+  scalpBbZ: number | null;
+  scalpEma20Slope: number | null;
+  scalpMacdHist: number | null;
+  scalpVolRatio: number | null;
+  scalpVolExpansionOk: boolean | null;
+  scalpMomentumOk: boolean | null;
   createdAt: number;
 }
 
@@ -485,10 +493,101 @@ export function LiveCycleLogTable() {
   );
 }
 
+export function ScalpGatesPanel() {
+  const { data: logs } = useQuery<LiveCycleLog[]>({
+    queryKey: ["/api/live/cycle-logs"],
+    refetchInterval: 15000,
+  });
+
+  const withGateData = (logs || []).filter(l => l.scalpAtrRatio != null);
+  const total = withGateData.length;
+
+  if (total === 0) {
+    return (
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Shield className="w-4 h-4" />SCALP Gate Diagnostics
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-muted-foreground text-sm">No SCALP gate data yet. Appears when the v4.5 runner sends cycle logs.</p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const volExpOkCount = withGateData.filter(l => l.scalpVolExpansionOk).length;
+  const momOkCount = withGateData.filter(l => l.scalpMomentumOk).length;
+  const avgAtrRatio = withGateData.reduce((s, l) => s + (l.scalpAtrRatio || 0), 0) / total;
+  const avgVolRatio = withGateData.reduce((s, l) => s + (l.scalpVolRatio || 0), 0) / total;
+  const avgTrZ = withGateData.reduce((s, l) => s + (l.scalpTrZ || 0), 0) / total;
+  const avgBbZ = withGateData.reduce((s, l) => s + (l.scalpBbZ || 0), 0) / total;
+  const bothOk = withGateData.filter(l => l.scalpVolExpansionOk && l.scalpMomentumOk).length;
+
+  return (
+    <Card data-testid="card-scalp-gates">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Shield className="w-4 h-4" />SCALP Gate Diagnostics
+          <Badge variant="outline" className="ml-auto text-xs">{total} cycles</Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="space-y-1">
+            <p className="text-xs text-muted-foreground">Vol Expansion OK</p>
+            <p className="text-xl font-bold" data-testid="text-vol-expansion-pct">
+              {((volExpOkCount / total) * 100).toFixed(1)}%
+            </p>
+            <p className="text-xs text-muted-foreground">{volExpOkCount}/{total}</p>
+          </div>
+          <div className="space-y-1">
+            <p className="text-xs text-muted-foreground">Momentum OK</p>
+            <p className="text-xl font-bold" data-testid="text-momentum-pct">
+              {((momOkCount / total) * 100).toFixed(1)}%
+            </p>
+            <p className="text-xs text-muted-foreground">{momOkCount}/{total}</p>
+          </div>
+          <div className="space-y-1">
+            <p className="text-xs text-muted-foreground">Avg ATR Ratio</p>
+            <p className="text-xl font-bold font-mono" data-testid="text-avg-atr-ratio">
+              {avgAtrRatio.toFixed(3)}
+            </p>
+            <p className="text-xs text-muted-foreground">min: 1.20</p>
+          </div>
+          <div className="space-y-1">
+            <p className="text-xs text-muted-foreground">Avg Vol Ratio</p>
+            <p className="text-xl font-bold font-mono" data-testid="text-avg-vol-ratio">
+              {avgVolRatio.toFixed(3)}
+            </p>
+            <p className="text-xs text-muted-foreground">min: 1.20</p>
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-4 mt-4 pt-4 border-t border-border/50">
+          <div className="space-y-1">
+            <p className="text-xs text-muted-foreground">Both Gates Pass</p>
+            <p className="text-lg font-bold">{((bothOk / total) * 100).toFixed(1)}%</p>
+          </div>
+          <div className="space-y-1">
+            <p className="text-xs text-muted-foreground">Avg TR Z-Score</p>
+            <p className="text-lg font-bold font-mono">{avgTrZ.toFixed(2)}</p>
+          </div>
+          <div className="space-y-1">
+            <p className="text-xs text-muted-foreground">Avg BB Width Z</p>
+            <p className="text-lg font-bold font-mono">{avgBbZ.toFixed(2)}</p>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function LiveSystemTab() {
   return (
     <div className="space-y-4">
       <LiveSystemOverview />
+      <ScalpGatesPanel />
       
       <Tabs defaultValue="learning" className="w-full">
         <TabsList>

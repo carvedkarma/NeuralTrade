@@ -50,6 +50,7 @@ class Position:
                    candle_low: Optional[float] = None) -> Optional[str]:
         use_high = candle_high if candle_high is not None else current_price
         use_low = candle_low if candle_low is not None else current_price
+        intrabar = candle_high is not None or candle_low is not None
 
         if self.is_long:
             sl_hit = use_low <= self.sl_price
@@ -58,16 +59,26 @@ class Position:
             sl_hit = use_high >= self.sl_price
             tp_hit = use_low <= self.tp_price
 
+        outcome = None
         if sl_hit and tp_hit:
-            return "SL"
-        if sl_hit:
-            return "SL"
-        if tp_hit:
-            return "TP"
+            outcome = "SL"
+        elif sl_hit:
+            outcome = "SL"
+        elif tp_hit:
+            outcome = "TP"
+
+        if outcome is not None:
+            log.info(f"[EXIT_RESOLVE] sym={self.symbol} intrabar={intrabar} "
+                     f"tp_hit={tp_hit} sl_hit={sl_hit} outcome={outcome} "
+                     f"lane={self.lane} bars_held={current_bar - self.bar_index if current_bar > 0 and self.bar_index > 0 else 0}")
+            return outcome
 
         if current_bar > 0 and self.bar_index > 0:
             bars_held = current_bar - self.bar_index
             if bars_held >= self.horizon:
+                log.info(f"[EXIT_RESOLVE] sym={self.symbol} intrabar={intrabar} "
+                         f"tp_hit=False sl_hit=False outcome=TIME_EXIT "
+                         f"lane={self.lane} bars_held={bars_held}")
                 return "TIME_EXIT"
         return None
 

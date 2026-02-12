@@ -2415,6 +2415,14 @@ Examples:
                         help="Min E[net R] for FLOW lane (default: -0.05)")
     parser.add_argument("--min-enet-scalp", type=float, default=-0.02,
                         help="Min E[net R] for SCALP lane (default: -0.02)")
+    parser.add_argument("--budget-core", type=float, default=1.20,
+                        help="Daily R budget for CORE lane per symbol (default: 1.20)")
+    parser.add_argument("--budget-flow", type=float, default=0.60,
+                        help="Daily R budget for FLOW lane per symbol (default: 0.60)")
+    parser.add_argument("--budget-scalp", type=float, default=0.20,
+                        help="Daily R budget for SCALP lane per symbol (default: 0.20)")
+    parser.add_argument("--verify-separation", action="store_true", default=False,
+                        help="Run 200-cycle dry-run verifying SCALP/CORE separation, budget bounds, exit logs")
     parser.add_argument("--gate-pf-net", type=float, default=1.05,
                         help="Promotion gate: min PF_net (default: 1.05)")
     parser.add_argument("--gate-enet", type=float, default=0.0,
@@ -2521,8 +2529,11 @@ Examples:
                         help="Fetch 1H/4H candles directly from exchange instead of resampling")
     parser.add_argument("--verify-system", action="store_true", default=False,
                         help="Run system verification mode: N cycles of assertions on lane routing, CROSS, quota, payloads")
+    parser.add_argument("--verify-separation", action="store_true", default=False,
+                        help="Run v4.5 separation verification: 200-cycle dry-run asserting SCALP gate enforcement, "
+                             "router priority, budget bounds, exit resolve logs. Outputs verify_report_v4.5.md")
     parser.add_argument("--cycles", type=int, default=30,
-                        help="Number of cycles for --verify-system mode (default: 30)")
+                        help="Number of cycles for --verify-system/--verify-separation mode (default: 30)")
 
     args = parser.parse_args()
 
@@ -2648,10 +2659,32 @@ Examples:
             per_symbol_models=args.per_symbol_models,
             limit_15m=args.limit_15m,
             direct_htf=args.direct_htf,
+            budget_core=args.budget_core,
+            budget_flow=args.budget_flow,
+            budget_scalp=args.budget_scalp,
         )
         runner.learning_manager = learning_mgr
 
-        if args.verify_system:
+        if args.verify_separation:
+            from verify_system import SeparationVerifier, run_static_audit
+            cycles = args.cycles if args.cycles != 30 else 200
+            sep_verifier = SeparationVerifier(max_cycles=cycles)
+            runner.separation_verifier = sep_verifier
+            print(f"\n  SEPARATION VERIFICATION MODE (v4.5): Running {cycles} cycles")
+            print(f"  Checks: SCALP gate enforcement, router priority, budget bounds, exit resolve")
+            print(f"  Running static code audit first...\n")
+            static_report = run_static_audit()
+            print(static_report)
+            runner.run()
+            report = sep_verifier.generate_report()
+            full_report = static_report + "\n\n" + report
+            with open("verify_report_v4.5.md", 'w') as f:
+                f.write(full_report)
+            print(f"\n{'='*60}")
+            print(report)
+            print(f"{'='*60}")
+            print(f"\nFull report saved to verify_report_v4.5.md")
+        elif args.verify_system:
             from verify_system import SystemVerifier, run_static_audit
             verifier = SystemVerifier(max_cycles=args.cycles)
             runner.verifier = verifier

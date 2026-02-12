@@ -314,7 +314,7 @@ def run_static_audit() -> str:
     lines.append("")
 
     import inspect
-    from live_runner import LiveRunner, _compute_htf_score, _compute_momentum_ok, _compute_volatility_ok
+    from live_runner import LiveRunner, _compute_htf_score, _compute_momentum_ok, _compute_scalp_gates
     from live_runner import LANE_BUDGET, FLOW_QUOTA_STEPS, SCALP_HORIZON, SCALP_TP_R, SCALP_SL_R, SCALP_SIZE_MULT
     from portfolio import PortfolioManager, Position
 
@@ -322,7 +322,7 @@ def run_static_audit() -> str:
     src = inspect.getsource(LiveRunner._select_lane)
     has_core_check = "htf_score >= 3" in src and "range_ok" in src
     has_flow_check = "htf_score >= 2" in src
-    has_scalp_check = "htf_score >= 1" in src and "volatility_ok" in src and "momentum_ok" in src
+    has_scalp_check = "htf_score >= 1" in src and ("volatility_ok" in src or "vol_expansion_ok" in src) and "momentum_ok" in src
     has_ordered_routing = src.index("CORE") < src.index("FLOW") < src.index("SCALP")
     lines.append(f"- CORE check (htf>=3 + range_ok): {'FOUND' if has_core_check else 'MISSING'}")
     lines.append(f"- FLOW check (htf>=2): {'FOUND' if has_flow_check else 'MISSING'}")
@@ -377,4 +377,211 @@ def run_static_audit() -> str:
     lines.append(f"- horizon check: {'YES' if 'self.horizon' in exit_src else 'NO'}")
     lines.append("")
 
+    lines.append("### SCALP v4.5 Separation Gates (`_compute_scalp_gates`)")
+    scalp_src = inspect.getsource(_compute_scalp_gates)
+    lines.append(f"- ATR14/ATR50 ratio check: {'YES' if 'atr_ratio' in scalp_src else 'NO'}")
+    lines.append(f"- true_range_z check: {'YES' if 'true_range_z' in scalp_src else 'NO'}")
+    lines.append(f"- bb_width_z check: {'YES' if 'bb_width_z' in scalp_src else 'NO'}")
+    lines.append(f"- ema20_slope check: {'YES' if 'ema20_slope' in scalp_src else 'NO'}")
+    lines.append(f"- volume_ratio check: {'YES' if 'volume_ratio' in scalp_src else 'NO'}")
+    lines.append(f"- macd_hist check: {'YES' if 'macd_hist' in scalp_src else 'NO'}")
+    lines.append("")
+
     return "\n".join(lines)
+
+
+@dataclass
+class SeparationStats:
+    total_cycles: int = 0
+    scalp_entries: int = 0
+    scalp_gate_pass: int = 0
+    scalp_gate_fail: int = 0
+    core_entries: int = 0
+    flow_entries: int = 0
+    hold_entries: int = 0
+    scalp_with_range_ok: int = 0
+    scalp_without_range_ok: int = 0
+    scalp_size_halved: int = 0
+    budget_violations: int = 0
+    budget_checks: int = 0
+    exit_resolve_logs: int = 0
+    priority_violations: int = 0
+    vol_expansion_rates: List[bool] = field(default_factory=list)
+    momentum_rates: List[bool] = field(default_factory=list)
+    atr_ratios: List[float] = field(default_factory=list)
+    vol_ratios: List[float] = field(default_factory=list)
+    failures: List[VerifyFailure] = field(default_factory=list)
+
+
+class SeparationVerifier:
+    """v4.5 Separation Verification -- checks SCALP gate enforcement,
+    router priority, budget bounds, and exit resolve logs."""
+
+    def __init__(self, max_cycles: int = 200):
+        self.max_cycles = max_cycles
+        self.stats = SeparationStats()
+
+    def verify_cycle(self, cycle: int, lane_result: dict, p_enter: float,
+                     htf_score: int, htf: dict, scalp_gates: dict,
+                     budgets: dict) -> List[VerifyFailure]:
+        failures = []
+        self.stats.total_cycles += 1
+        lane = lane_result.get('lane_selected', 'HOLD')
+
+        if lane == 'CORE':
+            self.stats.core_entries += 1
+        elif lane == 'FLOW':
+            self.stats.flow_entries += 1
+        elif lane == 'SCALP':
+            self.stats.scalp_entries += 1
+        else:
+            self.stats.hold_entries += 1
+
+        vol_expansion_ok = scalp_gates.get('vol_expansion_ok', False)
+        momentum_ok = scalp_gates.get('momentum_ok', False)
+        self.stats.vol_expansion_rates.append(vol_expansion_ok)
+        self.stats.momentum_rates.append(momentum_ok)
+        if scalp_gates.get('atr_ratio') is not None:
+            self.stats.atr_ratios.append(scalp_gates['atr_ratio'])
+        if scalp_gates.get('vol_ratio') is not None:
+            self.stats.vol_ratios.append(scalp_gates['vol_ratio'])
+
+        if lane == 'SCALP':
+            if not vol_expansion_ok:
+                self.stats.scalp_gate_fail += 1
+                failures.append(VerifyFailure(
+                    cycle, "SCALP_GATE",
+                    f"SCALP entered without vol_expansion_ok=True "
+                    f"(atr_ratio={scalp_gates.get('atr_ratio', 0):.4f})"
+                ))
+            if not momentum_ok:
+                self.stats.scalp_gate_fail += 1
+                failures.append(VerifyFailure(
+                    cycle, "SCALP_GATE",
+                    f"SCALP entered without momentum_ok=True "
+                    f"(ema20_slope={scalp_gates.get('ema20_slope')}, "
+                    f"vol_ratio={scalp_gates.get('vol_ratio')})"
+                ))
+
+            if vol_expansion_ok and momentum_ok:
+                self.stats.scalp_gate_pass += 1
+
+            range_ok = htf.get('range_ok', False)
+            if range_ok:
+                self.stats.scalp_with_range_ok += 1
+            else:
+                self.stats.scalp_without_range_ok += 1
+
+            size_mult = lane_result.get('lane_size_mult', 0)
+            if not range_ok and size_mult > 0.126:
+                failures.append(VerifyFailure(
+                    cycle, "SCALP_SIZE_HALVING",
+                    f"SCALP size_mult={size_mult} should be <=0.125 when range_ok=False"
+                ))
+            elif not range_ok and size_mult <= 0.126:
+                self.stats.scalp_size_halved += 1
+
+        core_thr = lane_result.get('core_thr')
+        flow_thr = lane_result.get('flow_thr')
+        range_ok = htf.get('range_ok', False)
+
+        if lane == 'SCALP':
+            if htf_score >= 3 and range_ok and core_thr and p_enter >= core_thr:
+                self.stats.priority_violations += 1
+                failures.append(VerifyFailure(
+                    cycle, "PRIORITY",
+                    f"SCALP selected but CORE eligible: htf={htf_score} range_ok p_enter={p_enter:.4f}>={core_thr:.4f}"
+                ))
+            if htf_score >= 2 and flow_thr and p_enter >= flow_thr:
+                self.stats.priority_violations += 1
+                failures.append(VerifyFailure(
+                    cycle, "PRIORITY",
+                    f"SCALP selected but FLOW eligible: htf={htf_score} p_enter={p_enter:.4f}>={flow_thr:.4f}"
+                ))
+
+        self.stats.budget_checks += 1
+        for lane_name in ['CORE', 'FLOW', 'SCALP']:
+            remaining = budgets.get(f'{lane_name.lower()}_remaining', None)
+            if remaining is not None and remaining < -0.01:
+                self.stats.budget_violations += 1
+                failures.append(VerifyFailure(
+                    cycle, "BUDGET",
+                    f"{lane_name} budget negative: {remaining:.4f}R"
+                ))
+
+        self.stats.failures.extend(failures)
+        return failures
+
+    def record_exit_resolve(self):
+        self.stats.exit_resolve_logs += 1
+
+    def generate_report(self) -> str:
+        s = self.stats
+        passed = len(s.failures) == 0
+        status = "PASSED" if passed else "FAILED"
+
+        vol_rate = sum(1 for v in s.vol_expansion_rates if v) / max(len(s.vol_expansion_rates), 1) * 100
+        mom_rate = sum(1 for v in s.momentum_rates if v) / max(len(s.momentum_rates), 1) * 100
+        avg_atr = sum(s.atr_ratios) / max(len(s.atr_ratios), 1)
+        avg_vol = sum(s.vol_ratios) / max(len(s.vol_ratios), 1)
+
+        lines = [
+            "# Separation Verification Report (v4.5)",
+            "",
+            f"## Overall Status: **VERIFICATION {status}**",
+            "",
+            f"Cycles run: {s.total_cycles}",
+            f"Total failures: {len(s.failures)}",
+            "",
+            "## Summary Table",
+            "",
+            "| Check | Status |",
+            "|-------|--------|",
+            f"| SCALP gate enforcement (vol_expansion + momentum) | {'PASS' if not any(f.category == 'SCALP_GATE' for f in s.failures) else 'FAIL'} |",
+            f"| Router priority (CORE > FLOW > SCALP) | {'PASS' if s.priority_violations == 0 else 'FAIL'} |",
+            f"| Budget bounds (no negative) | {'PASS' if s.budget_violations == 0 else 'FAIL'} |",
+            f"| SCALP size halving (range_ok=False -> 0.125x) | {'PASS' if not any(f.category == 'SCALP_SIZE_HALVING' for f in s.failures) else 'FAIL'} |",
+            f"| Exit resolve logs present | {'PASS' if s.exit_resolve_logs > 0 else 'WARN (none seen)'} |",
+            "",
+            "## Lane Distribution",
+            "",
+            f"- CORE: {s.core_entries}",
+            f"- FLOW: {s.flow_entries}",
+            f"- SCALP: {s.scalp_entries} (gate_pass={s.scalp_gate_pass}, gate_fail={s.scalp_gate_fail})",
+            f"- HOLD: {s.hold_entries}",
+            "",
+            "## SCALP Gate Metrics",
+            "",
+            f"- Vol Expansion OK rate: {vol_rate:.1f}%",
+            f"- Momentum OK rate: {mom_rate:.1f}%",
+            f"- Avg ATR ratio: {avg_atr:.3f} (min required: 1.20)",
+            f"- Avg Volume ratio: {avg_vol:.3f} (min required: 1.20)",
+            f"- SCALP with range_ok: {s.scalp_with_range_ok}",
+            f"- SCALP without range_ok (size halved): {s.scalp_size_halved}",
+            "",
+            "## Budget & Exit",
+            "",
+            f"- Budget checks: {s.budget_checks}",
+            f"- Budget violations: {s.budget_violations}",
+            f"- Exit resolve logs captured: {s.exit_resolve_logs}",
+            "",
+        ]
+
+        if s.failures:
+            lines.append("## Failures (first 15)")
+            lines.append("")
+            for f in s.failures[:15]:
+                lines.append(f"- [Cycle {f.cycle}] **{f.category}**: {f.message}")
+            lines.append("")
+
+        lines.append("---")
+        lines.append(f"Report generated at {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}")
+        return "\n".join(lines)
+
+    def save_report(self, path: str = "verify_report_v4.5.md"):
+        report = self.generate_report()
+        with open(path, 'w') as f:
+            f.write(report)
+        log.info(f"Separation verification report saved to {path}")
+        print("\n" + report)
+        return report

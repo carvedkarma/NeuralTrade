@@ -1,0 +1,66 @@
+You are working on the gpu_trainer + dashboard stack. Implement “Aggression with Separation” as a precise dual-engine system.
+
+GOAL:
+- Keep CORE high precision (2–3 trades/day/asset) with stable PF/low DD
+- Add SCALP lane for volatility-expansion capture (additional 4–8 trades/day/asset) WITHOUT degrading CORE
+- Enforce strict separation + risk budgets so system cannot collapse.
+
+TASKS (MUST DO):
+
+1) Implement SCALP gates (NO ambiguity):
+   - Volatility Expansion Gate:
+     atr_ratio = ATR14 / ATR50 >= 1.20
+     AND (true_range_z >= 1.0 OR bb_width_z >= 1.0)
+   - Momentum Confirmation:
+     (abs(ema20_slope) >= slope_min OR abs(macd_hist) >= macd_min)
+     AND volume_ratio >= 1.2
+   - Signal gate:
+     p_enter >= scalp_thr
+   - Structure:
+     htf_score >= 1
+     range_ok can be False, but if False then size_mult *= 0.5
+
+2) Hard separation rule (router priority):
+   CORE > FLOW > SCALP > HOLD
+   SCALP must NEVER reuse CORE thresholds or gates.
+
+3) SCALP geometry + sizing:
+   TP=1.2R SL=0.8R horizon=4 bars cooldown=half
+   size_mult hard cap 0.25
+   if range_ok False => size_mult *= 0.5
+
+4) Daily R budgets per symbol (UTC midnight reset):
+   CORE=1.2R FLOW=0.6R SCALP=0.2R (configurable via CLI)
+   If SCALP budget exhausted, SCALP disabled for that symbol for the day.
+
+5) Intrabar TP/SL resolution (correctness):
+   For exits, use candle high/low.
+   If both TP and SL hit within the same bar, apply worst-case SL (conservative).
+   Add log: [EXIT_RESOLVE] with tp_hit/sl_hit/intrabar flags.
+
+6) Logging (required, grep-friendly):
+   [LANE_DECISION] sym= lane= reason=
+   [SCALP_GATES] sym= vol_ok= mom_ok= atr_ratio= bb_z= tr_z= vol_ratio=
+   [BUDGET] sym= core_rem= flow_rem= scalp_rem=
+   [EXIT_RESOLVE] sym= intrabar= tp_hit= sl_hit= outcome=
+
+7) Dashboard upgrades (audit + clarity):
+   - Add SCALP gate panel on Overview:
+     “Vol Expansion OK %”, “Momentum OK %”, “Avg atr_ratio”, “Avg vol_ratio”
+   - Add per-trade detail modal fields:
+     lane, entry_reason, scalp gate values, budgets at entry, intrabar flags, mfe/mae, bars_held
+   - Add PnL in dollars in addition to R:
+     Store and display: pnl_usd_net, pnl_usd_gross, fees_usd_est
+     Also show “Account Start Balance” setting and compute equity curve.
+
+8) Verification mode:
+   Add CLI flag: --verify-separation
+   Runs 200 cycles dry-run and asserts:
+     - Router priority obeyed
+     - SCALP only when vol_ok AND mom_ok AND p_enter>=scalp_thr
+     - Budgets never go below 0
+     - Exit resolve logs emitted on closes
+   Output verify report: verify_report_v4.5.md
+
+STOP CONDITION:
+- CORE remains stable (PF not reduced vs baseline) AND SCALP increases trade count without exceeding daily R budgets.
