@@ -4042,6 +4042,12 @@ export async function registerRoutes(
         sizedR: update.sized_r ?? undefined,
         status: update.status ?? undefined,
         exitReason: update.exit_reason ?? undefined,
+        stopLoss: update.stop_loss ?? undefined,
+        maxFavorableR: update.max_favorable_r ?? undefined,
+        maxAdverseR: update.max_adverse_r ?? undefined,
+        timeExit: update.time_exit ?? undefined,
+        breakevenMoved: update.breakeven_moved ?? undefined,
+        barsHeld: update.bars_held ?? undefined,
       });
       console.log(`[Live Trade] Updated trade ${id}: ${update.outcome ?? update.status}`);
       res.json({ success: true });

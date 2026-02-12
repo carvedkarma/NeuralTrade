@@ -1224,8 +1224,12 @@ export const liveTradeRecords = pgTable("live_trade_records", {
   htfScore: integer("htf_score"),
   laneThresholdUsed: real("lane_threshold_used"),
   laneSizeMult: real("lane_size_mult"),
-  exitReason: varchar("exit_reason", { length: 20 }),
+  exitReason: varchar("exit_reason", { length: 50 }),
   laneHorizon: integer("lane_horizon"),
+  maxFavorableR: real("max_favorable_r"),
+  maxAdverseR: real("max_adverse_r"),
+  timeExit: boolean("time_exit"),
+  breakevenMoved: boolean("breakeven_moved"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (table) => ({
   symbolIdx: index("live_trades_symbol_idx").on(table.symbol),

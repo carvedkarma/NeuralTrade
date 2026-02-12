@@ -59,6 +59,17 @@ interface Trade {
   modelVersion: string | null;
   notes: string | null;
   createdAt: number;
+  lane: string | null;
+  htfScore: number | null;
+  laneThresholdUsed: number | null;
+  laneSizeMult: number | null;
+  exitReason: string | null;
+  laneHorizon: number | null;
+  maxFavorableR: number | null;
+  maxAdverseR: number | null;
+  timeExit: boolean | null;
+  breakevenMoved: boolean | null;
+  policy: string | null;
 }
 
 interface TradeEvent {
@@ -218,6 +229,20 @@ export default function TradeDetailModal({ tradeId, open, onClose }: TradeDetail
                 >
                   {outcomeLabel(trade?.outcome ?? null)}
                 </Badge>
+                {trade?.lane && (
+                  <Badge
+                    variant="outline"
+                    className={`text-xs ${trade.lane === "CORE" ? "text-blue-400 border-blue-400/30" : trade.lane === "FLOW" ? "text-amber-400 border-amber-400/30" : trade.lane === "SCALP" ? "text-purple-400 border-purple-400/30" : ""}`}
+                    data-testid="badge-trade-lane"
+                  >
+                    {trade.lane}
+                  </Badge>
+                )}
+                {trade?.htfScore != null && (
+                  <Badge variant="secondary" className="text-xs" data-testid="badge-htf-score">
+                    HTF {trade.htfScore}/3
+                  </Badge>
+                )}
                 {trade?.modelVersion && (
                   <span className="text-xs text-muted-foreground" data-testid="text-model-version">
                     v{trade.modelVersion}
@@ -302,7 +327,7 @@ export default function TradeDetailModal({ tradeId, open, onClose }: TradeDetail
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                   <div>
                     <p className="text-xs text-muted-foreground">p_enter</p>
                     <p className="text-sm font-semibold" data-testid="text-p-enter">
@@ -313,6 +338,30 @@ export default function TradeDetailModal({ tradeId, open, onClose }: TradeDetail
                     <p className="text-xs text-muted-foreground">Direction</p>
                     <p className="text-sm font-semibold" data-testid="text-direction">
                       {trade.side?.toUpperCase() ?? "N/A"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Lane</p>
+                    <p className="text-sm font-semibold" data-testid="text-lane">
+                      {trade.lane ?? trade.policy ?? "N/A"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">HTF Score</p>
+                    <p className="text-sm font-semibold" data-testid="text-htf-score">
+                      {trade.htfScore != null ? `${trade.htfScore}/3` : "N/A"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Lane Threshold</p>
+                    <p className="text-sm font-semibold" data-testid="text-lane-threshold">
+                      {trade.laneThresholdUsed != null ? `${(trade.laneThresholdUsed * 100).toFixed(1)}%` : "N/A"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Size Mult</p>
+                    <p className="text-sm font-semibold" data-testid="text-size-mult">
+                      {trade.laneSizeMult != null ? `${trade.laneSizeMult.toFixed(2)}x` : "N/A"}
                     </p>
                   </div>
                 </div>
@@ -365,18 +414,24 @@ export default function TradeDetailModal({ tradeId, open, onClose }: TradeDetail
                   Exit Explanation
                 </CardTitle>
               </CardHeader>
-              <CardContent>
+              <CardContent className="space-y-3">
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                   <div>
                     <p className="text-xs text-muted-foreground">Exit Reason</p>
                     <p className="text-sm font-semibold" data-testid="text-exit-reason">
-                      {outcomeLabel(trade.outcome)}
+                      {trade.exitReason || outcomeLabel(trade.outcome)}
                     </p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Bars Held</p>
                     <p className="text-sm font-semibold" data-testid="text-bars-held">
-                      {trade.barsHeld !== null ? trade.barsHeld : "N/A"}
+                      {trade.barsHeld !== null ? `${trade.barsHeld} bars` : "N/A"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Horizon</p>
+                    <p className="text-sm font-semibold" data-testid="text-horizon">
+                      {trade.laneHorizon != null ? `${trade.laneHorizon} bars` : "N/A"}
                     </p>
                   </div>
                   <div>
@@ -403,6 +458,30 @@ export default function TradeDetailModal({ tradeId, open, onClose }: TradeDetail
                       {fmtPrice(trade.takeProfit)}
                     </p>
                   </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">MFE (Best R)</p>
+                    <p className={`text-sm font-semibold ${(trade.maxFavorableR ?? 0) > 0 ? "text-emerald-400" : ""}`} data-testid="text-mfe">
+                      {trade.maxFavorableR != null ? fmtR(trade.maxFavorableR) : "N/A"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">MAE (Worst R)</p>
+                    <p className={`text-sm font-semibold ${(trade.maxAdverseR ?? 0) < 0 ? "text-red-400" : ""}`} data-testid="text-mae">
+                      {trade.maxAdverseR != null ? fmtR(trade.maxAdverseR) : "N/A"}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {trade.breakevenMoved && (
+                    <Badge variant="secondary" className="text-xs" data-testid="badge-breakeven">
+                      BE Moved
+                    </Badge>
+                  )}
+                  {trade.timeExit && (
+                    <Badge variant="secondary" className="text-xs" data-testid="badge-time-exit">
+                      Time Exit
+                    </Badge>
+                  )}
                 </div>
               </CardContent>
             </Card>

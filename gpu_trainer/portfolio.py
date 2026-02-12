@@ -30,6 +30,12 @@ class Position:
     htf_score: int = 0
     threshold_used: float = 0.85
     dashboard_trade_id: Optional[int] = None
+    original_sl: Optional[float] = None
+    breakeven_moved: bool = False
+
+    def __post_init__(self):
+        if self.original_sl is None:
+            self.original_sl = self.sl_price
 
     @property
     def is_long(self) -> bool:
@@ -39,18 +45,27 @@ class Position:
     def bars_open(self) -> int:
         return 0
 
-    def check_exit(self, current_price: float, current_bar: int = 0) -> Optional[str]:
+    def check_exit(self, current_price: float, current_bar: int = 0,
+                   candle_high: Optional[float] = None,
+                   candle_low: Optional[float] = None) -> Optional[str]:
+        use_high = candle_high if candle_high is not None else current_price
+        use_low = candle_low if candle_low is not None else current_price
+
         if self.is_long:
-            if current_price >= self.tp_price:
-                return "TP"
-            if current_price <= self.sl_price:
-                return "SL"
+            sl_hit = use_low <= self.sl_price
+            tp_hit = use_high >= self.tp_price
         else:
-            if current_price <= self.tp_price:
-                return "TP"
-            if current_price >= self.sl_price:
-                return "SL"
-        if self.lane == "SCALP" and current_bar > 0 and self.bar_index > 0:
+            sl_hit = use_high >= self.sl_price
+            tp_hit = use_low <= self.tp_price
+
+        if sl_hit and tp_hit:
+            return "SL"
+        if sl_hit:
+            return "SL"
+        if tp_hit:
+            return "TP"
+
+        if current_bar > 0 and self.bar_index > 0:
             bars_held = current_bar - self.bar_index
             if bars_held >= self.horizon:
                 return "TIME_EXIT"
@@ -198,15 +213,27 @@ class PortfolioManager:
             except Exception as e:
                 log.warning(f"on_close_callback failed for {symbol}: {e}")
 
-    def check_exits(self, prices: Dict[str, float]):
+    def check_exits(self, prices: Dict[str, float],
+                     highs: Optional[Dict[str, float]] = None,
+                     lows: Optional[Dict[str, float]] = None):
         to_close = []
+        highs = highs or {}
+        lows = lows or {}
         for symbol, pos in self.open_positions.items():
             price = prices.get(symbol)
             if price is None:
                 continue
-            outcome = pos.check_exit(price, current_bar=self.current_bar)
+            candle_high = highs.get(symbol)
+            candle_low = lows.get(symbol)
+            outcome = pos.check_exit(price, current_bar=self.current_bar,
+                                      candle_high=candle_high, candle_low=candle_low)
             if outcome:
-                to_close.append((symbol, price, outcome))
+                exit_price = price
+                if outcome == "SL":
+                    exit_price = pos.sl_price
+                elif outcome == "TP":
+                    exit_price = pos.tp_price
+                to_close.append((symbol, exit_price, outcome))
         for symbol, price, outcome in to_close:
             self.close_position(symbol, price, outcome)
 

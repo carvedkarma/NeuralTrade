@@ -553,6 +553,9 @@ class LiveRunner:
         self.daily_budget_date: Dict[str, str] = {}
         self.budget_block_logged: Dict[str, Dict[str, bool]] = {}
 
+        from trade_manager import TradeManager
+        self.trade_manager = TradeManager()
+
     def _init_fetcher(self):
         from data.pipeline import BinanceDataFetcher
         self.fetcher = BinanceDataFetcher(
@@ -588,6 +591,15 @@ class LiveRunner:
         if outcome == "TIME_EXIT":
             exit_reason = f"SCALP_TIME_STOP ({pos.horizon} bars)"
 
+        tm_state = self.trade_manager.get_state(pos.symbol)
+        mfe = tm_state['max_favorable_r'] if tm_state else None
+        mae = tm_state['max_adverse_r'] if tm_state else None
+        be_moved = tm_state['breakeven_moved'] if tm_state else pos.breakeven_moved
+        bars_held = self.cycle_count - pos.bar_index if pos.bar_index > 0 else None
+        is_time_exit = outcome == "TIME_EXIT"
+
+        self.trade_manager.clear_position(pos.symbol)
+
         try:
             self._update_trade_record(
                 trade_id=pos.dashboard_trade_id,
@@ -597,6 +609,11 @@ class LiveRunner:
                 net_r=net_r,
                 sized_r=sized_r,
                 exit_reason=exit_reason,
+                max_favorable_r=mfe,
+                max_adverse_r=mae,
+                time_exit=is_time_exit,
+                breakeven_moved=be_moved,
+                bars_held=bars_held,
             )
         except Exception as e:
             log.warning(f"Failed to update trade record {pos.dashboard_trade_id}: {e}")
@@ -666,7 +683,12 @@ class LiveRunner:
 
     def _update_trade_record(self, trade_id: int, exit_price: float,
                              outcome: str, gross_r: float, net_r: float, sized_r: float,
-                             exit_reason: Optional[str] = None):
+                             exit_reason: Optional[str] = None,
+                             max_favorable_r: Optional[float] = None,
+                             max_adverse_r: Optional[float] = None,
+                             time_exit: Optional[bool] = None,
+                             breakeven_moved: Optional[bool] = None,
+                             bars_held: Optional[int] = None):
         url = f"{self.replit_url.rstrip('/')}/api/live/trade/{trade_id}"
         payload = {
             "exit_time": int(time.time() * 1000),
@@ -678,6 +700,22 @@ class LiveRunner:
             "status": "closed",
             "exit_reason": exit_reason or outcome,
         }
+        if max_favorable_r is not None:
+            payload["max_favorable_r"] = round(max_favorable_r, 4)
+        if max_adverse_r is not None:
+            payload["max_adverse_r"] = round(max_adverse_r, 4)
+        if time_exit is not None:
+            payload["time_exit"] = time_exit
+        if breakeven_moved is not None:
+            payload["breakeven_moved"] = breakeven_moved
+        if bars_held is not None:
+            payload["bars_held"] = bars_held
+        _retry_request("PATCH", url, json=payload)
+
+    def _update_trade_sl(self, trade_id: int, new_sl: float):
+        """Update stop loss on an open trade record in the dashboard."""
+        url = f"{self.replit_url.rstrip('/')}/api/live/trade/{trade_id}"
+        payload = {"stop_loss": new_sl}
         _retry_request("PATCH", url, json=payload)
 
     def _get_model_for_symbol(self, symbol: str):
@@ -806,6 +844,58 @@ class LiveRunner:
 
         self._print_summary()
 
+    def _run_trade_manager(self, prices: Dict[str, float],
+                           highs: Dict[str, float], lows: Dict[str, float]):
+        """Run Smart Trade Manager over all open positions.
+
+        For each open position, compute current HTF score and p_enter,
+        then ask TradeManager for an action. Handle MOVE_SL, TRAIL_SL, CLOSE_FULL.
+        """
+        open_positions = dict(self.portfolio.open_positions)
+        if not open_positions:
+            return
+
+        for symbol, pos in open_positions.items():
+            price = prices.get(symbol)
+            if price is None:
+                continue
+
+            candle_high = highs.get(symbol)
+            candle_low = lows.get(symbol)
+
+            current_htf_score = getattr(pos, 'htf_score', None)
+            current_p_enter = None
+
+            action = self.trade_manager.update_position(
+                symbol=symbol,
+                pos=pos,
+                current_price=price,
+                current_bar=self.cycle_count,
+                current_htf_score=current_htf_score,
+                current_p_enter=current_p_enter,
+                candle_high=candle_high,
+                candle_low=candle_low,
+            )
+
+            if action.action == "HOLD":
+                continue
+
+            if action.action in ("MOVE_SL", "TRAIL_SL") and action.new_sl is not None:
+                pos.sl_price = action.new_sl
+                if action.reason == "BREAKEVEN":
+                    pos.breakeven_moved = True
+                if pos.dashboard_trade_id:
+                    try:
+                        self._update_trade_sl(pos.dashboard_trade_id, action.new_sl)
+                    except Exception as e:
+                        log.warning(f"Failed to update SL on dashboard for {symbol}: {e}")
+
+            elif action.action == "CLOSE_FULL":
+                if symbol not in self.portfolio.open_positions:
+                    continue
+                close_price = action.close_price or price
+                self.portfolio.close_position(symbol, close_price, action.reason)
+
     def _run_cycle(self):
         """One 15m cycle: fetch, predict, rank, execute for all symbols."""
         self.cycle_count += 1
@@ -818,11 +908,21 @@ class LiveRunner:
         log.info(f"{'='*60}")
 
         prices = {}
+        highs = {}
+        lows = {}
+        candle_dfs = {}
         for symbol in self.symbols:
             df = _fetch_candles_for_symbol(self.fetcher, symbol, self.interval, limit=self.limit_15m)
             if df is not None and len(df) > 0:
                 prices[symbol] = float(df.iloc[-1]['close'])
-        self.portfolio.check_exits(prices)
+                if 'high' in df.columns:
+                    highs[symbol] = float(df.iloc[-1]['high'])
+                if 'low' in df.columns:
+                    lows[symbol] = float(df.iloc[-1]['low'])
+                candle_dfs[symbol] = df
+        self.portfolio.check_exits(prices, highs=highs, lows=lows)
+
+        self._run_trade_manager(prices, highs, lows)
 
         candidates = []
         for symbol in self.symbols:

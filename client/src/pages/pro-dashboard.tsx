@@ -156,6 +156,16 @@ interface TradeEntry {
   leverage: number | null;
   modelVersion: string | null;
   notes: string | null;
+  lane: string | null;
+  htfScore: number | null;
+  laneThresholdUsed: number | null;
+  laneSizeMult: number | null;
+  exitReason: string | null;
+  laneHorizon: number | null;
+  maxFavorableR: number | null;
+  maxAdverseR: number | null;
+  timeExit: boolean | null;
+  breakevenMoved: boolean | null;
 }
 
 interface TradeEvent {
@@ -361,7 +371,7 @@ export default function ProDashboard() {
       result = result.filter((t) => t.outcome === tradeOutcomeFilter);
     }
     if (tradePolicyFilter !== "all") {
-      result = result.filter((t) => (t.policy ?? "CORE") === tradePolicyFilter);
+      result = result.filter((t) => (t.lane ?? t.policy ?? "CORE") === tradePolicyFilter);
     }
     return result;
   }, [trades, tradeSymbolFilter, tradeOutcomeFilter, tradePolicyFilter]);
@@ -1220,12 +1230,13 @@ export default function ProDashboard() {
                 </Select>
                 <Select value={tradePolicyFilter} onValueChange={setTradePolicyFilter}>
                   <SelectTrigger className="w-28" data-testid="button-trade-policy-filter">
-                    <SelectValue placeholder="All Policies" />
+                    <SelectValue placeholder="All Lanes" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">All</SelectItem>
                     <SelectItem value="CORE">CORE</SelectItem>
                     <SelectItem value="FLOW">FLOW</SelectItem>
+                    <SelectItem value="SCALP">SCALP</SelectItem>
                   </SelectContent>
                 </Select>
                 <Select value={tradeOutcomeFilter} onValueChange={setTradeOutcomeFilter}>
@@ -1262,17 +1273,16 @@ export default function ProDashboard() {
                       <TableRow>
                         <TableHead>Symbol</TableHead>
                         <TableHead>Side</TableHead>
-                        <TableHead>Policy</TableHead>
+                        <TableHead>Lane</TableHead>
                         <TableHead>Entry</TableHead>
                         <TableHead>Exit</TableHead>
                         <TableHead>Entry $</TableHead>
                         <TableHead>Exit $</TableHead>
-                        <TableHead>SL</TableHead>
-                        <TableHead>TP</TableHead>
-                        <TableHead>Size</TableHead>
                         <TableHead>Outcome</TableHead>
-                        <TableHead>Gross R</TableHead>
+                        <TableHead>Exit Reason</TableHead>
                         <TableHead>Net R</TableHead>
+                        <TableHead>MFE</TableHead>
+                        <TableHead>MAE</TableHead>
                         {showUsd && <TableHead>PnL $</TableHead>}
                         <TableHead>Status</TableHead>
                       </TableRow>
@@ -1299,12 +1309,12 @@ export default function ProDashboard() {
                             </Badge>
                           </TableCell>
                           <TableCell>
-                            {trade.policy ? (
+                            {(trade.lane || trade.policy) ? (
                               <Badge
                                 variant="outline"
-                                className={`text-xs ${trade.policy === "CORE" ? "text-blue-400 border-blue-400/30" : trade.policy === "FLOW" ? "text-amber-400 border-amber-400/30" : ""}`}
+                                className={`text-xs ${(trade.lane || trade.policy) === "CORE" ? "text-blue-400 border-blue-400/30" : (trade.lane || trade.policy) === "FLOW" ? "text-amber-400 border-amber-400/30" : (trade.lane || trade.policy) === "SCALP" ? "text-purple-400 border-purple-400/30" : ""}`}
                               >
-                                {trade.policy}
+                                {trade.lane || trade.policy}
                               </Badge>
                             ) : (
                               <span className="text-xs text-muted-foreground">—</span>
@@ -1322,15 +1332,6 @@ export default function ProDashboard() {
                           <TableCell className="text-xs font-mono">
                             {formatPrice(trade.exitPrice)}
                           </TableCell>
-                          <TableCell className="text-xs font-mono">
-                            {formatPrice(trade.stopLoss)}
-                          </TableCell>
-                          <TableCell className="text-xs font-mono">
-                            {formatPrice(trade.takeProfit)}
-                          </TableCell>
-                          <TableCell className="text-xs">
-                            {trade.sizePct != null ? `${(trade.sizePct * 100).toFixed(1)}%` : "—"}
-                          </TableCell>
                           <TableCell>
                             {trade.outcome && (
                               <Badge
@@ -1347,12 +1348,8 @@ export default function ProDashboard() {
                               </Badge>
                             )}
                           </TableCell>
-                          <TableCell
-                            className={`text-xs font-mono ${
-                              (trade.grossR ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"
-                            }`}
-                          >
-                            {formatR(trade.grossR)}
+                          <TableCell className="text-xs text-muted-foreground">
+                            {trade.exitReason || "—"}
                           </TableCell>
                           <TableCell
                             className={`text-xs font-mono font-semibold ${
@@ -1360,6 +1357,20 @@ export default function ProDashboard() {
                             }`}
                           >
                             {formatR(trade.netR)}
+                          </TableCell>
+                          <TableCell
+                            className={`text-xs font-mono ${
+                              (trade.maxFavorableR ?? 0) > 0 ? "text-emerald-400" : "text-muted-foreground"
+                            }`}
+                          >
+                            {trade.maxFavorableR != null ? formatR(trade.maxFavorableR) : "—"}
+                          </TableCell>
+                          <TableCell
+                            className={`text-xs font-mono ${
+                              (trade.maxAdverseR ?? 0) < 0 ? "text-red-400" : "text-muted-foreground"
+                            }`}
+                          >
+                            {trade.maxAdverseR != null ? formatR(trade.maxAdverseR) : "—"}
                           </TableCell>
                           {showUsd && (
                             <TableCell
