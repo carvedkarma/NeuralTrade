@@ -280,10 +280,11 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m", symb
     candle_start_ms = int(candle_df['timestamp'].min())
     candle_end_ms = int(candle_df['timestamp'].max())
 
-    max_oi_lookback_ms = 90 * 24 * 60 * 60 * 1000
-    oi_earliest_ms = candle_end_ms - max_oi_lookback_ms
+    max_oi_lookback_ms = 30 * 24 * 60 * 60 * 1000
+    now_ms = int(datetime.now().timestamp() * 1000)
+    oi_earliest_ms = now_ms - max_oi_lookback_ms
     if candle_start_ms < oi_earliest_ms:
-        log.info(f"OI: clamping start from {candle_start_ms} to {oi_earliest_ms} (~90d lookback, Binance limit)")
+        log.info(f"OI: clamping start from {candle_start_ms} to {oi_earliest_ms} (~30d lookback, Binance limit)")
         candle_start_ms = oi_earliest_ms
 
     if cache_path.exists():
@@ -304,6 +305,7 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m", symb
 
     url = "https://fapi.binance.com/futures/data/openInterestHist"
     all_records = []
+    period_failed = False
 
     for try_period in try_periods:
         log.info(f"Fetching historical Open Interest from Binance Futures (period={try_period})...")
@@ -311,15 +313,17 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m", symb
         current_start = candle_start_ms
         page = 0
         period_failed = False
+        use_time_params = True
 
         while current_start < candle_end_ms:
             params = {
                 "symbol": symbol,
                 "period": try_period,
-                "startTime": current_start,
-                "endTime": candle_end_ms,
                 "limit": 500,
             }
+            if use_time_params:
+                params["startTime"] = int(current_start)
+                params["endTime"] = int(candle_end_ms)
             try:
                 resp = requests.get(url, params=params, timeout=30)
                 if resp.status_code == 429:
@@ -327,7 +331,17 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m", symb
                     log.warning("OI rate limited - sleeping 3s")
                     _time.sleep(3)
                     continue
-                if resp.status_code in (400, 403, 418, 451):
+                if resp.status_code == 400:
+                    resp_text = resp.text[:200] if resp.text else "no body"
+                    if "startTime" in resp_text or "invalid" in resp_text.lower():
+                        if use_time_params:
+                            log.warning(f"OI period={try_period}: startTime rejected, retrying without time params")
+                            use_time_params = False
+                            continue
+                    log.warning(f"OI period={try_period} blocked (HTTP 400): {resp_text}")
+                    period_failed = True
+                    break
+                if resp.status_code in (403, 418, 451):
                     resp_text = resp.text[:200] if resp.text else "no body"
                     log.warning(f"OI period={try_period} blocked (HTTP {resp.status_code}): {resp_text}")
                     period_failed = True
@@ -353,6 +367,9 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m", symb
                     "symbol": item.get("symbol", symbol),
                     "period": try_period,
                 })
+
+            if not use_time_params:
+                break
 
             last_ts = int(data[-1]["timestamp"])
             if last_ts <= current_start:
