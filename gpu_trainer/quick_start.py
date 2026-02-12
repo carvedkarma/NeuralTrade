@@ -299,73 +299,84 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m", symb
                 log.info(f"Using cached OI data: {len(existing)} records (period={cached_period})")
                 return existing
 
-    log.info(f"Fetching historical Open Interest from Binance Futures (period={period})...")
+    periods_to_try = {"5m": ["5m", "15m", "1h"], "15m": ["15m", "1h"], "1h": ["1h"]}
+    try_periods = periods_to_try.get(period, [period])
+
     url = "https://fapi.binance.com/futures/data/openInterestHist"
     all_records = []
-    current_start = candle_start_ms
-    page = 0
 
-    while current_start < candle_end_ms:
-        params = {
-            "symbol": symbol,
-            "period": period,
-            "startTime": current_start,
-            "endTime": candle_end_ms,
-            "limit": 500,
-        }
-        try:
-            resp = requests.get(url, params=params, timeout=30)
-            if resp.status_code == 429:
-                import time as _time
-                log.warning("OI rate limited - sleeping 3s")
-                _time.sleep(3)
-                continue
-            if resp.status_code in (400, 403, 451):
-                if period == "5m":
-                    log.warning(f"OI period={period} not available (HTTP {resp.status_code}), falling back to 15m")
-                    return fetch_open_interest_hist(candle_df, data_dir, period="15m", symbol=symbol)
-                elif period == "15m":
-                    log.warning(f"OI period={period} not available (HTTP {resp.status_code}), falling back to 1h")
-                    return fetch_open_interest_hist(candle_df, data_dir, period="1h", symbol=symbol)
-                else:
-                    log.error(f"OI fetch failed for all periods (HTTP {resp.status_code})")
-                    return pd.DataFrame(columns=["oi_time_ms", "sumOpenInterest", "symbol", "period"])
-            resp.raise_for_status()
-            data = resp.json()
-        except requests.exceptions.HTTPError as e:
-            if period == "5m":
-                log.warning(f"OI period={period} error: {e}, falling back to 15m")
-                return fetch_open_interest_hist(candle_df, data_dir, period="15m", symbol=symbol)
-            elif period == "15m":
-                log.warning(f"OI period={period} error: {e}, falling back to 1h")
-                return fetch_open_interest_hist(candle_df, data_dir, period="1h", symbol=symbol)
-            log.warning(f"OI fetch error (page {page}): {e}")
+    for try_period in try_periods:
+        log.info(f"Fetching historical Open Interest from Binance Futures (period={try_period})...")
+        all_records = []
+        current_start = candle_start_ms
+        page = 0
+        period_failed = False
+
+        while current_start < candle_end_ms:
+            params = {
+                "symbol": symbol,
+                "period": try_period,
+                "startTime": current_start,
+                "endTime": candle_end_ms,
+                "limit": 500,
+            }
+            try:
+                resp = requests.get(url, params=params, timeout=30)
+                if resp.status_code == 429:
+                    import time as _time
+                    log.warning("OI rate limited - sleeping 3s")
+                    _time.sleep(3)
+                    continue
+                if resp.status_code in (400, 403, 418, 451):
+                    resp_text = resp.text[:200] if resp.text else "no body"
+                    log.warning(f"OI period={try_period} blocked (HTTP {resp.status_code}): {resp_text}")
+                    period_failed = True
+                    break
+                resp.raise_for_status()
+                data = resp.json()
+            except requests.exceptions.HTTPError as e:
+                log.warning(f"OI period={try_period} error: {e}")
+                period_failed = True
+                break
+            except Exception as e:
+                log.warning(f"OI fetch error (page {page}): {e}")
+                period_failed = True
+                break
+
+            if not data:
+                break
+
+            for item in data:
+                all_records.append({
+                    "oi_time_ms": int(item["timestamp"]),
+                    "sumOpenInterest": float(item["sumOpenInterest"]),
+                    "symbol": item.get("symbol", symbol),
+                    "period": try_period,
+                })
+
+            last_ts = int(data[-1]["timestamp"])
+            if last_ts <= current_start:
+                break
+            current_start = last_ts + 1
+            page += 1
+
+            if page % 10 == 0:
+                log.info(f"  Fetched {len(all_records)} OI records so far (page {page})...")
+            import time as _time
+            _time.sleep(0.2)
+
+        if not period_failed and all_records:
+            period = try_period
             break
-        except Exception as e:
-            log.warning(f"OI fetch error (page {page}): {e}")
+        if period_failed:
+            log.warning(f"OI period={try_period} unavailable, trying next fallback...")
+            continue
+        if not all_records:
             break
 
-        if not data:
-            break
-
-        for item in data:
-            all_records.append({
-                "oi_time_ms": int(item["timestamp"]),
-                "sumOpenInterest": float(item["sumOpenInterest"]),
-                "symbol": item.get("symbol", symbol),
-                "period": period,
-            })
-
-        last_ts = int(data[-1]["timestamp"])
-        if last_ts <= current_start:
-            break
-        current_start = last_ts + 1
-        page += 1
-
-        if page % 10 == 0:
-            log.info(f"  Fetched {len(all_records)} OI records so far (page {page})...")
-        import time as _time
-        _time.sleep(0.2)
+    if period_failed and not all_records:
+        log.warning(f"OI endpoint blocked for {symbol} (all periods failed) — OI features will be zero")
+        return pd.DataFrame(columns=["oi_time_ms", "sumOpenInterest", "symbol", "period"])
 
     if not all_records:
         log.warning("No OI data fetched - OI features will be zero")
