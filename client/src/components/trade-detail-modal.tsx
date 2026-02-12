@@ -69,6 +69,8 @@ interface Trade {
   maxAdverseR: number | null;
   timeExit: boolean | null;
   breakevenMoved: boolean | null;
+  trailUpdates: number | null;
+  tmActions: Array<{ ts: number; action: string; reason: string; price?: number; sl?: number; ur?: number }> | null;
   policy: string | null;
 }
 
@@ -482,11 +484,20 @@ export default function TradeDetailModal({ tradeId, open, onClose }: TradeDetail
                       Time Exit
                     </Badge>
                   )}
+                  {(trade.trailUpdates ?? 0) > 0 && (
+                    <Badge variant="secondary" className="text-xs" data-testid="badge-trail-updates">
+                      Trail x{trade.trailUpdates}
+                    </Badge>
+                  )}
                 </div>
               </CardContent>
             </Card>
 
-            <TradeReplayChart data={replayData} isLoading={replayLoading} />
+            <TradeReplayChart
+              data={replayData}
+              isLoading={replayLoading}
+              tmActions={trade.tmActions ?? undefined}
+            />
 
             <Card className="rounded-md" data-testid="card-notes">
               <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
@@ -515,6 +526,68 @@ export default function TradeDetailModal({ tradeId, open, onClose }: TradeDetail
                 />
               </CardContent>
             </Card>
+
+            {trade.tmActions && trade.tmActions.length > 0 && (
+              <Card className="rounded-md" data-testid="card-tm-timeline">
+                <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+                  <CardTitle className="text-sm font-medium flex items-center gap-1.5">
+                    <Activity className="h-4 w-4 text-muted-foreground" />
+                    Trade Manager Timeline
+                  </CardTitle>
+                  <Badge variant="secondary" className="text-xs" data-testid="badge-tm-action-count">
+                    {trade.tmActions.length} action{trade.tmActions.length !== 1 ? "s" : ""}
+                  </Badge>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-2 max-h-60 overflow-y-auto">
+                    {trade.tmActions.map((act, idx) => {
+                      const actionColor =
+                        act.action === "CLOSE_FULL" ? "text-red-400 border-red-400/30" :
+                        act.action === "TRAIL_SL" ? "text-blue-400 border-blue-400/30" :
+                        act.action === "MOVE_SL" ? "text-emerald-400 border-emerald-400/30" :
+                        "";
+                      return (
+                        <div
+                          key={idx}
+                          className="flex items-start gap-3 p-2 rounded-md bg-muted/30"
+                          data-testid={`tm-action-row-${idx}`}
+                        >
+                          <div className="flex items-center gap-1.5 text-xs text-muted-foreground shrink-0">
+                            <Clock className="h-3 w-3" />
+                            {fmtTs(act.ts)}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <Badge variant="outline" className={`text-xs ${actionColor}`}>
+                              {act.action}
+                            </Badge>
+                            <p className="text-xs text-muted-foreground mt-1 break-words">
+                              {act.reason}
+                            </p>
+                            <div className="flex flex-wrap gap-3 mt-1">
+                              {act.price != null && (
+                                <span className="text-xs text-muted-foreground">
+                                  Price: <span className="font-mono">{act.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                </span>
+                              )}
+                              {act.sl != null && (
+                                <span className="text-xs text-muted-foreground">
+                                  SL: <span className="font-mono text-red-400">{act.sl.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                </span>
+                              )}
+                              {act.ur != null && (
+                                <span className="text-xs text-muted-foreground">
+                                  uR: <span className={`font-mono ${act.ur >= 0 ? "text-emerald-400" : "text-red-400"}`}>{act.ur >= 0 ? "+" : ""}{act.ur.toFixed(3)}</span>
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
             <Card className="rounded-md" data-testid="card-events-timeline">
               <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">

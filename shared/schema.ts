@@ -1230,6 +1230,8 @@ export const liveTradeRecords = pgTable("live_trade_records", {
   maxAdverseR: real("max_adverse_r"),
   timeExit: boolean("time_exit"),
   breakevenMoved: boolean("breakeven_moved"),
+  trailUpdates: integer("trail_updates").default(0),
+  tmActions: jsonb("tm_actions").$type<Array<{ ts: number; action: string; reason: string; price?: number; sl?: number; ur?: number }>>(),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (table) => ({
   symbolIdx: index("live_trades_symbol_idx").on(table.symbol),

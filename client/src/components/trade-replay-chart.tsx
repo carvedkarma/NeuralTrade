@@ -75,9 +75,19 @@ export interface ReplayData {
   bands: ReplayBand[];
 }
 
+interface TmAction {
+  ts: number;
+  action: string;
+  reason: string;
+  price?: number;
+  sl?: number;
+  ur?: number;
+}
+
 interface TradeReplayChartProps {
   data: ReplayData | null | undefined;
   isLoading: boolean;
+  tmActions?: TmAction[];
 }
 
 function msToChartTime(ms: number): Time {
@@ -94,7 +104,7 @@ function fmtUsd(val: number | null | undefined): string {
   return `$${val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-export default function TradeReplayChart({ data, isLoading }: TradeReplayChartProps) {
+export default function TradeReplayChart({ data, isLoading, tmActions }: TradeReplayChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
@@ -278,6 +288,37 @@ export default function TradeReplayChart({ data, isLoading }: TradeReplayChartPr
       }
     }
 
+    if (showLevels && tmActions && tmActions.length > 0) {
+      const slActions = tmActions.filter(a => (a.action === "TRAIL_SL" || a.action === "MOVE_SL") && a.sl != null);
+      for (let i = 0; i < slActions.length; i++) {
+        const act = slActions[i];
+        const color = act.action === "TRAIL_SL" ? "#3b82f6" : "#22c55e";
+        const label = act.action === "TRAIL_SL" ? `Trail ${i + 1}` : "BE";
+        candleSeries.createPriceLine({
+          price: act.sl!,
+          color: color,
+          lineWidth: 1,
+          lineStyle: LineStyle.SparseDotted,
+          axisLabelVisible: false,
+          title: label,
+        });
+      }
+
+      const tmMarkers: SeriesMarker<Time>[] = tmActions
+        .filter(a => a.action === "CLOSE_FULL" && a.price != null)
+        .map(a => ({
+          time: msToChartTime(a.ts),
+          position: "aboveBar" as "aboveBar",
+          color: "#f59e0b",
+          shape: "square" as "square",
+          text: a.reason.split("_").slice(0, 2).join(" "),
+        }));
+      if (tmMarkers.length > 0) {
+        const allMarkersSorted = [...chartMarkers, ...tmMarkers].sort((a, b) => (a.time as number) - (b.time as number));
+        markersPlugin.setMarkers(allMarkersSorted);
+      }
+    }
+
     if (data.trade.entry_at && candleData.length > 0) {
       const paddingBars = 5;
       const barWidth = 15 * 60;
@@ -304,7 +345,7 @@ export default function TradeReplayChart({ data, isLoading }: TradeReplayChartPr
       chart.remove();
       chartRef.current = null;
     };
-  }, [data, showLevels, showVolume]);
+  }, [data, showLevels, showVolume, tmActions]);
 
   const hasData = data && data.candles.length > 0;
   const entryInRange = hasData && data.candles.some(c => Math.abs(c.t - data.trade.entry_at) < 15 * 60 * 1000);

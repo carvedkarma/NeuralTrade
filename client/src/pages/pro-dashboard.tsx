@@ -96,6 +96,9 @@ interface ProSummary {
   flowEnabledPct: number;
   avgThresholds: Record<string, { avgCoreThr: number; avgFlowThr: number }>;
   quotaStatus: Record<string, { tradesToday: number; target: number; max: number; currentStep: number; flowPct: number; flowThr: number; flowRiskMult: number }>;
+  tmActionCounts: Record<string, number>;
+  avgHoldBars: number;
+  savedREstimate: number;
   equityCurve: Array<{ ts: number; netR: number; pnlUsd: number; symbol: string }>;
 }
 
@@ -166,6 +169,8 @@ interface TradeEntry {
   maxAdverseR: number | null;
   timeExit: boolean | null;
   breakevenMoved: boolean | null;
+  trailUpdates: number | null;
+  tmActions: Array<{ ts: number; action: string; reason: string; price?: number; sl?: number; ur?: number }> | null;
 }
 
 interface TradeEvent {
@@ -1023,6 +1028,65 @@ export default function ProDashboard() {
                     </div>
                   ) : (
                     <p className="text-sm text-muted-foreground">No quota data yet</p>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Trade Manager Status */}
+              <Card data-testid="card-trade-manager">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm font-medium">Trade Manager</CardTitle>
+                  <CardDescription>Dynamic exit intelligence (v4.4.0)</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex items-center gap-4 flex-wrap mb-3">
+                    <div>
+                      <span className="text-xs text-muted-foreground">TM Enabled</span>
+                      <div className="flex items-center gap-2">
+                        <div className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
+                        <span className="text-sm font-semibold" data-testid="text-tm-enabled">Active</span>
+                      </div>
+                    </div>
+                    <div>
+                      <span className="text-xs text-muted-foreground">Avg Hold</span>
+                      <div className="text-sm font-semibold" data-testid="text-avg-hold-bars">
+                        {(summary?.avgHoldBars ?? 0).toFixed(1)} bars
+                      </div>
+                    </div>
+                    <div>
+                      <span className="text-xs text-muted-foreground">Saved R (est)</span>
+                      <div className="text-sm font-semibold text-emerald-400" data-testid="text-saved-r">
+                        +{(summary?.savedREstimate ?? 0).toFixed(2)}R
+                      </div>
+                    </div>
+                  </div>
+                  {summary?.tmActionCounts && Object.keys(summary.tmActionCounts).length > 0 ? (
+                    <div className="space-y-2">
+                      {Object.entries(summary.tmActionCounts)
+                        .sort(([, a], [, b]) => b - a)
+                        .map(([action, count]) => {
+                          const total = Object.values(summary.tmActionCounts).reduce((a, b) => a + b, 0);
+                          const pct = total > 0 ? (count / total) * 100 : 0;
+                          return (
+                            <div key={action} className="space-y-1">
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <span className="text-sm">{action}</span>
+                                <span className="text-xs text-muted-foreground">
+                                  {count}x ({pct.toFixed(0)}%)
+                                </span>
+                              </div>
+                              <div className="h-1.5 rounded-full bg-muted">
+                                <div
+                                  className="h-full rounded-full bg-blue-400/60"
+                                  style={{ width: `${pct}%` }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No TM actions recorded yet</p>
                   )}
                 </CardContent>
               </Card>

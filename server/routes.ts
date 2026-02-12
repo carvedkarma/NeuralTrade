@@ -313,6 +313,30 @@ export async function registerRoutes(
         }
       }
 
+      const tmActionCounts: Record<string, number> = {};
+      let totalBarsHeld = 0;
+      let barsHeldCount = 0;
+      let savedREstimate = 0;
+      for (const t of closedTrades) {
+        if (t.barsHeld != null) {
+          totalBarsHeld += t.barsHeld;
+          barsHeldCount++;
+        }
+        if (t.tmActions && Array.isArray(t.tmActions)) {
+          for (const a of t.tmActions as Array<{ action: string; [key: string]: any }>) {
+            tmActionCounts[a.action] = (tmActionCounts[a.action] ?? 0) + 1;
+          }
+        }
+        if (t.exitReason && t.exitReason !== "TP" && t.exitReason !== "SL") {
+          const mfe = t.maxFavorableR ?? 0;
+          const net = t.netR ?? 0;
+          if (net > -1.0 && mfe > 0.3) {
+            savedREstimate += Math.max(0, net - (-1.0));
+          }
+        }
+      }
+      const avgHoldBars = barsHeldCount > 0 ? totalBarsHeld / barsHeldCount : 0;
+
       const moneyRow = await db.select().from(settings).where(eq(settings.key, "money_config")).limit(1);
       const moneyConfig = moneyRow.length > 0 ? moneyRow[0].valueJson as any : { account_equity_usd: 1500, risk_per_trade_pct: 1.0 };
       const riskUsd = moneyConfig.account_equity_usd * (moneyConfig.risk_per_trade_pct / 100);
@@ -362,6 +386,9 @@ export async function registerRoutes(
         flowEnabledPct,
         avgThresholds,
         quotaStatus,
+        tmActionCounts,
+        avgHoldBars,
+        savedREstimate,
         equityCurve: closedTrades.map((t) => ({
           ts: t.exitTime ?? t.entryTime,
           netR: t.netR ?? 0,
@@ -4019,6 +4046,13 @@ export async function registerRoutes(
         laneThresholdUsed: t.lane_threshold_used ?? null,
         laneSizeMult: t.lane_size_mult ?? null,
         laneHorizon: t.lane_horizon ?? null,
+        exitReason: t.exit_reason ?? null,
+        maxFavorableR: t.max_favorable_r ?? null,
+        maxAdverseR: t.max_adverse_r ?? null,
+        timeExit: t.time_exit ?? null,
+        breakevenMoved: t.breakeven_moved ?? null,
+        trailUpdates: t.trail_updates ?? 0,
+        tmActions: t.tm_actions ?? null,
         createdAt: Date.now(),
       });
       console.log(`[Live Trade] Recorded ${t.side} ${t.symbol} @ ${t.entry_price} (id=${record.id})`);
@@ -4048,6 +4082,8 @@ export async function registerRoutes(
         timeExit: update.time_exit ?? undefined,
         breakevenMoved: update.breakeven_moved ?? undefined,
         barsHeld: update.bars_held ?? undefined,
+        trailUpdates: update.trail_updates ?? undefined,
+        tmActions: update.tm_actions ?? undefined,
       });
       console.log(`[Live Trade] Updated trade ${id}: ${update.outcome ?? update.status}`);
       res.json({ success: true });
