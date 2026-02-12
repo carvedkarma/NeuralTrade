@@ -30,8 +30,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("QuickStart")
 
-FEATURE_VERSION = "v5.0_multiasset_calibrated_valuehead"
-SYSTEM_VERSION = "v5.0_multiasset_calibrated_valuehead"
+FEATURE_VERSION = "v4.5.0_pr_auc_upgrade_pack"
+SYSTEM_VERSION = "v4.5.0_pr_auc_upgrade_pack"
 
 FUNDING_FEATURE_NAMES = ["funding_rate", "funding_rate_delta_8h", "funding_rate_zscore_30d"]
 FUNDING_FEATURE_COUNT = len(FUNDING_FEATURE_NAMES)

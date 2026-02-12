@@ -1,0 +1,167 @@
+✅ Replit Agent Master Prompt — v4.5.0_pr_auc_upgrade_pack (PR-AUC Boost)
+
+You are working in the existing gpu_trainer repo. Goal: increase ENTER head PR-AUC from ~0.33–0.35 to 0.45+ WITHOUT breaking live inference or changing the 63-feature schema.
+
+NON-NEGOTIABLES
+- Do NOT change live inference feature count/order (still 63 cols).
+- Do NOT touch HTF matching / leak prevention logic.
+- Do NOT change triple-barrier parity outcomes (TP/SL/EXPIRE rules remain).
+- Training may add auxiliary targets/heads, but live runner must still primarily use p_enter.
+- Backward compatible checkpoints: older models must still load.
+
+========================================================
+PHASE 0 — VERSION BUMP
+========================================================
+1) Update version string everywhere it’s tracked to:
+   v4.5.0_pr_auc_upgrade_pack
+
+========================================================
+PHASE 1 — SOFT “QUALITY” LABELS (MAIN PR-AUC WIN)
+========================================================
+In triple_barrier.py (single source of truth), add optional soft labels:
+
+A) For each labeled sample you already generate, also compute:
+   - mfe_r (max favorable excursion in R)
+   - mae_r (max adverse excursion in R)
+   - cost_r via existing compute_trade_cost_r()
+   - net_mfe_r = mfe_r - cost_r
+   - net_mae_r = mae_r - cost_r
+
+B) Define an edge-quality score and a soft label:
+   quality = clip((net_mfe_r - abs(net_mae_r)) / 2.0, -2.0, +2.0)
+   y_soft = sigmoid(quality * temp)
+
+Defaults:
+   temp = 1.5
+Add CLI flags:
+   --use-soft-labels (default ON for training)
+   --soft-label-temp 1.5
+
+C) Keep existing binary label y_bin unchanged.
+Return both in dataset records (y_bin and y_soft).
+
+Logging (once per epoch or per dataset build):
+   [LABELS] pos_rate_bin=... soft_mean=... soft_std=...
+
+========================================================
+PHASE 2 — OHEM (ONLINE HARD NEGATIVE MINING)
+========================================================
+Goal: Reduce easy negatives that stall PR-AUC. Keep all positives, keep only hardest negatives by BCE loss.
+
+In trainer training step (where enter head loss is computed):
+1) Compute logits -> BCE per-sample loss vs y_bin.
+2) Split indices into pos/neg using y_bin.
+3) Select:
+   - all positives
+   - top K% negatives with highest per-sample loss
+Defaults:
+   --ohem-neg-pct 0.35
+
+Log every epoch:
+   [OHEM] kept_pos=N kept_neg=M neg_pct=0.35
+
+========================================================
+PHASE 3 — FOCAL LOSS RETUNE (SAFER DEFAULTS)
+========================================================
+If focal is enabled, update defaults to:
+   --focal-gamma 1.5
+   --focal-alpha 0.60
+
+Log:
+   [LOSS] focal_gamma=... focal_alpha=...
+
+========================================================
+PHASE 4 — AUX EDGE REGRESSION HEAD (RANKING POWER)
+========================================================
+Add a lightweight auxiliary head to predict edge_score (future net edge proxy).
+
+Target:
+   y_edge = clip(net_mfe_r - abs(net_mae_r), -2.0, +2.0)
+
+Model:
+- Add a regression head output: edge_pred (1 float).
+- Must be optional and backward compatible:
+    - If checkpoint lacks this head, load should still work.
+    - If enabled, new checkpoints save it.
+
+Loss:
+   loss_total = loss_enter + aux_edge_weight * huber(edge_pred, y_edge)
+Defaults:
+   --aux-edge-head (default ON)
+   --aux-edge-weight 0.25
+
+Log:
+   [AUX] edge_loss=... edge_corr=...
+
+IMPORTANT: live_runner keeps using p_enter for decisions (edge_pred is optional logging only).
+
+========================================================
+PHASE 5 — CALIBRATION (TEMPERATURE SCALING)
+========================================================
+After training finishes or best checkpoint is chosen:
+- Fit scalar temperature T on validation logits (enter head) to minimize NLL.
+- Save: checkpoints/calibration.json { "temperature": T }
+- At inference: logit /= T before sigmoid
+
+Flags:
+  --calibrate (default ON)
+  --no-calibrate to disable
+
+Log:
+  [CALIB] temperature=... before_ece=... after_ece=...
+
+========================================================
+PHASE 6 — TRAINING METRICS + PROMOTION GATES
+========================================================
+Every epoch print:
+- PR-AUC
+- best PR-AUC
+- P/R/F1 at current threshold or best-threshold
+- keep existing percentile sweep logs
+
+Add promotion gating for model promotion (if you have auto-promote):
+- Only promote if:
+   PR-AUC >= 0.42 (configurable)
+Flags:
+   --promote-min-pr-auc 0.42
+
+Log:
+  [PROMOTE] pr_auc=... min=... promoted=YES/NO
+
+========================================================
+PHASE 7 — END-TO-END VERIFICATION
+========================================================
+Add a single CLI flag:
+  --verify-pr-auc-upgrade
+
+When run, it should:
+- Build dataset and confirm y_bin + y_soft exist when enabled
+- Run 1 short training epoch and confirm logs appear:
+  [LABELS], [OHEM], [AUX] (if enabled), [CALIB] (if enabled)
+- Run val PR-AUC computation without crashing
+- Exit with code 0 if all checks pass
+
+========================================================
+DELIVERABLES
+========================================================
+1) PR-AUC Upgrade Pack implemented end-to-end.
+2) Backward compatible model loading.
+3) calibration.json saved when calibrate is ON.
+4) Logs: [LABELS], [OHEM], [LOSS], [AUX], [CALIB], [PROMOTE]
+5) A short markdown report at:
+   reports/pr_auc_upgrade_pack_v4.5.0.md
+   Include: what changed, how to run training, how to verify, expected PR-AUC improvements.
+
+DO NOT CHANGE
+- live feature schema (63 cols)
+- HTF leak prevention
+- triple-barrier parity rules
+- inference windowing logic
+
+After implementation, run:
+- unit tests (if present)
+- a quick train smoke test
+- verify flag:
+  python train.py --verify-pr-auc-upgrade
+
+Then summarize results and show the exact commands to train + evaluate PR-AUC.
