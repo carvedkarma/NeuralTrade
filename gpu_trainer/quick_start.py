@@ -2095,8 +2095,11 @@ Examples:
                         help="Comma-separated symbols to monitor (default: BTCUSDT,ETHUSDT,SOLUSDT)")
     parser.add_argument("--interval", type=str, default="15m",
                         help="Signal timeframe interval (default: 15m)")
-    parser.add_argument("--paper", action="store_true", default=True,
-                        help="Paper mode — no exchange orders (default: true)")
+    parser.add_argument("--paper", action="store_true", default=False,
+                        help="Paper mode — simulate positions + record trades (default: off)")
+    parser.add_argument("--execution-mode", type=str, default=None,
+                        choices=["signal_only", "paper", "live"],
+                        help="Explicit execution mode override (default: derived from --paper/--live flags)")
     parser.add_argument("--enter-threshold", type=float, default=0.85,
                         help="p_enter threshold for live signals (default: 0.85)")
     parser.add_argument("--max-pos-total", type=int, default=2,
@@ -2251,6 +2254,15 @@ Examples:
             )
             print(f"  Learning system: ON (retrain @ {args.retrain_hour}:00 UTC)")
 
+        if args.execution_mode:
+            exec_mode = args.execution_mode
+        elif args.live and not args.paper:
+            exec_mode = "live"
+        elif args.paper:
+            exec_mode = "paper"
+        else:
+            exec_mode = "signal_only"
+
         runner = LiveRunner(
             replit_url=args.url,
             symbols=symbols,
@@ -2261,6 +2273,7 @@ Examples:
             sl_mult=live_sl,
             cooldown_bars=live_cooldown,
             paper=args.paper,
+            execution_mode=exec_mode,
             portfolio_manager=portfolio,
             execution_module=execution,
             dry_run=args.dry_run,
