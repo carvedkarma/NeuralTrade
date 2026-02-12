@@ -48,6 +48,12 @@ class LearningConfig:
     geometry_sweep_on_retrain: bool = True
     sweep_thresholds: List[float] = field(default_factory=lambda: [0.60, 0.65, 0.70, 0.75, 0.80, 0.85])
     sweep_cooldowns: List[int] = field(default_factory=lambda: [2, 4, 6, 8])
+    gate_pf_net: float = 1.05
+    gate_enet: float = 0.0
+    gate_profitable_regimes: int = 2
+    gate_maxdd_r: float = 6.0
+    gate_p95_min: float = 0.40
+    gate_p95_max: float = 0.98
 
 
 @dataclass
@@ -67,6 +73,9 @@ class RetrainResult:
     profitable_regimes: int = 0
     total_regimes: int = 0
     error: str = ""
+    max_drawdown_r: float = 0.0
+    p95_val: float = 0.0
+    temperature: float = 1.0
 
 
 class LearningManager:
@@ -250,26 +259,39 @@ class LearningManager:
     def _evaluate_promotion(self, symbol: str, result: RetrainResult) -> tuple:
         """Evaluate whether candidate model should be promoted.
         
-        Two-stage gating:
+        Three-stage gating (v5.0):
         1. Absolute thresholds: candidate must meet minimum quality bars
-        2. Relative comparison: if deployed stats exist, candidate must not regress
+        2. v5.0 calibration gates: p95 sanity, E[net], max drawdown
+        3. Relative comparison: if deployed stats exist, candidate must not regress
         
         When no deployed stats exist (first training), only absolute thresholds apply.
         """
         if result.val_prauc < self.config.min_prauc_threshold:
             return False, f"PR-AUC {result.val_prauc:.3f} < min {self.config.min_prauc_threshold}"
 
-        if result.pf_net < self.config.min_pf_net:
-            return False, f"PF_net {result.pf_net:.2f} < min {self.config.min_pf_net}"
+        if result.pf_net < self.config.gate_pf_net:
+            return False, f"PF_net {result.pf_net:.2f} < gate {self.config.gate_pf_net}"
 
-        if result.profitable_regimes < self.config.min_profitable_regimes:
-            return False, f"Profitable regimes {result.profitable_regimes} < min {self.config.min_profitable_regimes}"
+        if result.profitable_regimes < self.config.gate_profitable_regimes:
+            return False, f"Profitable regimes {result.profitable_regimes} < gate {self.config.gate_profitable_regimes}"
 
         if result.trades_per_day < self.config.min_tpd:
             return False, f"TPD {result.trades_per_day:.1f} < min {self.config.min_tpd}"
 
         if result.trades_per_day > self.config.max_tpd:
             return False, f"TPD {result.trades_per_day:.1f} > max {self.config.max_tpd}"
+
+        if result.e_net < self.config.gate_enet:
+            return False, f"E[net] {result.e_net:.4f} < gate {self.config.gate_enet}"
+
+        if result.max_drawdown_r > self.config.gate_maxdd_r:
+            return False, f"MaxDD {result.max_drawdown_r:.2f}R > gate {self.config.gate_maxdd_r}R"
+
+        if result.p95_val > 0:
+            if result.p95_val < self.config.gate_p95_min:
+                return False, f"p95={result.p95_val:.4f} < gate_p95_min={self.config.gate_p95_min} (collapsed predictions)"
+            if result.p95_val > self.config.gate_p95_max:
+                return False, f"p95={result.p95_val:.4f} > gate_p95_max={self.config.gate_p95_max} (overconfident predictions)"
 
         prev = self.deployed_stats.get(symbol)
         if prev and prev.get('pf_net', 0) > 0:
@@ -283,10 +305,13 @@ class LearningManager:
         elif not prev:
             log.info(f"[Learning] No deployed stats for {symbol} — first promotion uses absolute thresholds only")
 
-        return True, f"PF={result.pf_net:.2f} PR-AUC={result.val_prauc:.3f} regimes={result.profitable_regimes}/{result.total_regimes}"
+        return True, (f"PF={result.pf_net:.2f} PR-AUC={result.val_prauc:.3f} "
+                      f"E[net]={result.e_net:.4f} p95={result.p95_val:.4f} "
+                      f"maxDD={result.max_drawdown_r:.2f}R "
+                      f"regimes={result.profitable_regimes}/{result.total_regimes}")
 
     def _promote_model(self, symbol: str, candidate_dir: Path, deployed_dir: Path):
-        for filename in ["best_enter_prauc.pt", "best_enter_loss.pt", "scaler.joblib"]:
+        for filename in ["best_enter_prauc.pt", "best_enter_loss.pt", "scaler.joblib", "temp_scale_v5.0.json"]:
             src = candidate_dir / filename
             if src.exists():
                 dst = deployed_dir / filename

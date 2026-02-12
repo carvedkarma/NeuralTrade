@@ -1302,6 +1302,9 @@ export const liveCycleLogs = pgTable("live_cycle_logs", {
   laneSizeMult: real("lane_size_mult"),
   laneBudgetRemainingR: real("lane_budget_remaining_r"),
   holdReason: varchar("hold_reason", { length: 100 }),
+  eNetPred: real("e_net_pred"),
+  enterLogit: real("enter_logit"),
+  temperatureUsed: real("temperature_used"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (table) => ({
   symbolIdx: index("cycle_logs_symbol_idx").on(table.symbol),

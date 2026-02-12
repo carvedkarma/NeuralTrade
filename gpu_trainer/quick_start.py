@@ -30,8 +30,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("QuickStart")
 
-FEATURE_VERSION = "v3.3.0_enter_quality_stf47_htf10_funding3_oi3"
-SYSTEM_VERSION = "v3.5.0_live_learning"
+FEATURE_VERSION = "v5.0_multiasset_calibrated_valuehead"
+SYSTEM_VERSION = "v5.0_multiasset_calibrated_valuehead"
 
 FUNDING_FEATURE_NAMES = ["funding_rate", "funding_rate_delta_8h", "funding_rate_zscore_30d"]
 FUNDING_FEATURE_COUNT = len(FUNDING_FEATURE_NAMES)
@@ -486,7 +486,9 @@ def compute_oi_features(candle_df, oi_df):
 def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float,
                       checkpoint_interval: int = 25, warmup_epochs: int = 5, min_lr: float = None,
                       tp_mult: float = 2.0, sl_mult: float = 1.5, horizon: int = 24, slope_eps: float = 0.05,
-                      r_min_expiry: float = 0.5, target_tpd: float = 5.5, target_tpd_tol: float = 1.5):
+                      r_min_expiry: float = 0.5, target_tpd: float = 5.5, target_tpd_tol: float = 1.5,
+                      symbols: list = None, value_loss_weight: float = 0.5, value_clip: float = 3.0,
+                      smoke_calib: bool = False, smoke_infer: bool = False):
     import torch
     import torch.nn as nn
     import numpy as np
@@ -500,106 +502,253 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     log.info("=" * 60)
     log.info(f"Version: {FEATURE_VERSION}")
 
-    df = pd.read_parquet(data_path)
-    log.info(f"Loaded {len(df)} candles")
-
     from data.pipeline import FeatureEngineer
-    engineer = FeatureEngineer()
-    features_df = engineer.compute_all_features(df)
-    features_df = features_df.fillna(0)
-    log.info(f"Computed {len(features_df.columns)} base features ({engineer.STF_FEATURE_COUNT} STF + {engineer.HTF_FEATURE_COUNT} HTF)")
-
     data_dir = Path("data_cache")
-    funding_df = fetch_funding_rates(df, data_dir)
-    funding_features = compute_funding_features(df, funding_df)
-    features_df = pd.concat([features_df, funding_features], axis=1)
-    features_df = features_df.fillna(0)
-
-    oi_df = fetch_open_interest_hist(df, data_dir)
-    oi_features = compute_oi_features(df, oi_df)
-    features_df = pd.concat([features_df, oi_features], axis=1)
-    features_df = features_df.fillna(0)
-
-    total_features = engineer.STF_FEATURE_COUNT + engineer.HTF_FEATURE_COUNT + FUNDING_FEATURE_COUNT + OI_FEATURE_COUNT
-    actual_cols = len(features_df.columns)
-    log.info(f"Total features: {actual_cols} ({engineer.STF_FEATURE_COUNT} STF + {engineer.HTF_FEATURE_COUNT} HTF + {FUNDING_FEATURE_COUNT} funding + {OI_FEATURE_COUNT} OI)")
-    if actual_cols != total_features:
-        log.error(f"FATAL: Feature count mismatch! Expected {total_features}, got {actual_cols}")
-        log.error(f"Columns: {sorted(features_df.columns.tolist())}")
-        sys.exit(1)
-
-    htf_cols = [c for c in features_df.columns if c.startswith('h1_') or c.startswith('h4_')]
-    htf_features_df = features_df[htf_cols].copy()
-    log.info(f"HTF features for labeling: {htf_cols}")
-
-    from data.regression_targets import generate_enter_quality_targets
-    label_df = generate_enter_quality_targets(
-        df, htf_features_df,
-        horizon_periods=horizon,
-        tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
-        slope_eps=slope_eps,
-        r_min_expiry=r_min_expiry,
-    )
-
-    enter_labels = label_df['enter_label'].values.astype(np.float32)
-    side_hints = label_df['side_hint'].values.astype(np.int64)
-    precomputed_outcomes = label_df['outcome'].values
-    precomputed_r = label_df['realized_r'].values.astype(np.float64)
-
     sequence_length = config.data.sequence_length
-    valid_start = sequence_length
-    features_np = features_df.values[valid_start:].astype(np.float32)
-    enter_np = enter_labels[valid_start:].astype(np.float32)
-    side_np = side_hints[valid_start:].astype(np.int64)
-    outcomes_np = precomputed_outcomes[valid_start:]
-    r_np = precomputed_r[valid_start:]
 
-    n_total = len(features_np)
-    purge_gap = horizon + sequence_length
-    val_samples = max(int(n_total * 0.1), purge_gap)
-    train_samples = n_total - purge_gap - val_samples
+    # === MULTI-ASSET SUPPORT ===
+    if symbols and len(symbols) > 1:
+        log.info(f"[DATA] Multi-asset training: symbols={symbols}")
+        all_train_features = []
+        all_train_enter = []
+        all_train_side = []
+        all_train_r = []
+        all_train_sym_ids = []
+        all_val_features = []
+        all_val_enter = []
+        all_val_side = []
+        all_val_outcomes = []
+        all_val_r = []
+        all_val_sym_ids = []
+        feature_columns_ref = None
 
-    if train_samples < sequence_length * 3:
-        log.error(f"Not enough data for training: {train_samples} samples")
-        sys.exit(1)
+        for sym_idx, sym in enumerate(symbols):
+            sym_data_path = data_dir / f"{sym}_15m.parquet"
+            if not sym_data_path.exists():
+                log.warning(f"[DATA] No data for {sym} at {sym_data_path}, skipping")
+                continue
 
-    train_end = train_samples
-    val_start_idx = train_end + purge_gap
-    val_end = val_start_idx + val_samples
+            sym_df = pd.read_parquet(sym_data_path)
+            log.info(f"[DATA] {sym}: {len(sym_df)} candles")
 
-    log.info(f"Data split: train={train_samples}, purge={purge_gap}, val={val_samples}")
+            sym_engineer = FeatureEngineer()
+            sym_features_df = sym_engineer.compute_all_features(sym_df)
+            sym_features_df = sym_features_df.fillna(0)
 
-    train_features_raw = features_np[:train_end]
-    train_enter = enter_np[:train_end]
-    train_side = side_np[:train_end]
+            sym_funding_df = fetch_funding_rates(sym_df, data_dir)
+            sym_funding_features = compute_funding_features(sym_df, sym_funding_df)
+            sym_features_df = pd.concat([sym_features_df, sym_funding_features], axis=1)
+            sym_features_df = sym_features_df.fillna(0)
 
-    val_features_raw = features_np[val_start_idx:val_end]
-    val_enter = enter_np[val_start_idx:val_end]
-    val_side = side_np[val_start_idx:val_end]
-    val_outcomes = outcomes_np[val_start_idx:val_end]
-    val_r = r_np[val_start_idx:val_end]
-    val_bars = val_samples
+            sym_oi_df = fetch_open_interest_hist(sym_df, data_dir)
+            sym_oi_features = compute_oi_features(sym_df, sym_oi_df)
+            sym_features_df = pd.concat([sym_features_df, sym_oi_features], axis=1)
+            sym_features_df = sym_features_df.fillna(0)
 
-    train_features_df_scaled = pd.DataFrame(train_features_raw, columns=features_df.columns)
-    engineer.fit_scalers(train_features_df_scaled)
-    clip_range = 5.0
-    train_scaled = engineer.transform_and_clip(train_features_df_scaled, clip_range=clip_range).values.astype(np.float32)
-    val_features_df_scaled = pd.DataFrame(val_features_raw, columns=features_df.columns)
-    val_scaled = engineer.transform_and_clip(val_features_df_scaled, clip_range=clip_range).values.astype(np.float32)
+            if feature_columns_ref is None:
+                feature_columns_ref = list(sym_features_df.columns)
 
-    def clean_enter(features, enter, side, outcomes, r_vals, name):
-        features = np.where(np.isinf(features), np.nan, features)
-        mask = np.isnan(features).any(axis=1)
-        valid = ~mask
-        dropped = mask.sum()
-        if dropped > 0:
-            log.info(f"  {name}: dropped {dropped} NaN rows")
-        return features[valid], enter[valid], side[valid], outcomes[valid], r_vals[valid]
+            htf_cols = [c for c in sym_features_df.columns if c.startswith('h1_') or c.startswith('h4_')]
+            sym_htf_df = sym_features_df[htf_cols].copy()
 
-    train_outcomes_dummy = np.full(len(train_enter), "NO_CANDIDATE", dtype=object)
-    train_r_dummy = np.zeros(len(train_enter), dtype=np.float64)
-    train_scaled, train_enter, train_side, _, _ = clean_enter(train_scaled, train_enter, train_side, train_outcomes_dummy, train_r_dummy, "Train")
-    val_scaled, val_enter, val_side, val_outcomes, val_r = clean_enter(val_scaled, val_enter, val_side, val_outcomes, val_r, "Val")
+            from data.regression_targets import generate_enter_quality_targets
+            sym_label_df = generate_enter_quality_targets(
+                sym_df, sym_htf_df,
+                horizon_periods=horizon,
+                tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
+                slope_eps=slope_eps, r_min_expiry=r_min_expiry,
+            )
+
+            sym_enter = sym_label_df['enter_label'].values.astype(np.float32)
+            sym_side = sym_label_df['side_hint'].values.astype(np.int64)
+            sym_outcomes = sym_label_df['outcome'].values
+            sym_realized_r = sym_label_df['realized_r'].values.astype(np.float64)
+
+            valid_start = sequence_length
+            sym_feat_np = sym_features_df.values[valid_start:].astype(np.float32)
+            sym_enter_np = sym_enter[valid_start:]
+            sym_side_np = sym_side[valid_start:]
+            sym_outcomes_np = sym_outcomes[valid_start:]
+            sym_r_np = sym_realized_r[valid_start:]
+
+            n_sym = len(sym_feat_np)
+
+            train_end_sym = int(n_sym * 0.70)
+            val_end_sym = int(n_sym * 0.85)
+
+            log.info(f"[SPLIT] sym={sym} total={n_sym} train={train_end_sym} val={val_end_sym - train_end_sym} test={n_sym - val_end_sym}")
+
+            all_train_features.append(sym_feat_np[:train_end_sym])
+            all_train_enter.append(sym_enter_np[:train_end_sym])
+            all_train_side.append(sym_side_np[:train_end_sym])
+            all_train_r.append(sym_r_np[:train_end_sym])
+            all_train_sym_ids.append(np.full(train_end_sym, sym_idx, dtype=np.int64))
+
+            val_size = val_end_sym - train_end_sym
+            all_val_features.append(sym_feat_np[train_end_sym:val_end_sym])
+            all_val_enter.append(sym_enter_np[train_end_sym:val_end_sym])
+            all_val_side.append(sym_side_np[train_end_sym:val_end_sym])
+            all_val_outcomes.append(sym_outcomes_np[train_end_sym:val_end_sym])
+            all_val_r.append(sym_r_np[train_end_sym:val_end_sym])
+            all_val_sym_ids.append(np.full(val_size, sym_idx, dtype=np.int64))
+
+        train_features_raw = np.concatenate(all_train_features, axis=0)
+        train_enter = np.concatenate(all_train_enter, axis=0)
+        train_side = np.concatenate(all_train_side, axis=0)
+        train_r = np.concatenate(all_train_r, axis=0)
+        train_sym_ids = np.concatenate(all_train_sym_ids, axis=0)
+
+        val_features_raw = np.concatenate(all_val_features, axis=0)
+        val_enter = np.concatenate(all_val_enter, axis=0)
+        val_side = np.concatenate(all_val_side, axis=0)
+        val_outcomes = np.concatenate(all_val_outcomes, axis=0)
+        val_r = np.concatenate(all_val_r, axis=0)
+        val_sym_ids = np.concatenate(all_val_sym_ids, axis=0)
+
+        n_symbols = len(symbols)
+        features_columns_list = feature_columns_ref
+        input_dim = train_features_raw.shape[1]
+        val_bars = len(val_enter)
+
+        log.info(f"[DATA] symbols={symbols} total_samples={len(train_enter) + len(val_enter)} per_symbol=[see above]")
+        log.info(f"[SCALER] fit_on=train only | features={input_dim} | symbols={n_symbols}")
+
+        engineer = FeatureEngineer()
+        train_features_df_scaled = pd.DataFrame(train_features_raw, columns=features_columns_list)
+        engineer.fit_scalers(train_features_df_scaled)
+        clip_range = 5.0
+        train_scaled = engineer.transform_and_clip(train_features_df_scaled, clip_range=clip_range).values.astype(np.float32)
+        val_features_df_scaled = pd.DataFrame(val_features_raw, columns=features_columns_list)
+        val_scaled = engineer.transform_and_clip(val_features_df_scaled, clip_range=clip_range).values.astype(np.float32)
+
+        def clean_multi(features, enter, side, outcomes, r_vals, sym_ids, name):
+            features = np.where(np.isinf(features), np.nan, features)
+            mask = np.isnan(features).any(axis=1)
+            valid = ~mask
+            dropped = mask.sum()
+            if dropped > 0:
+                log.info(f"  {name}: dropped {dropped} NaN rows")
+            return features[valid], enter[valid], side[valid], outcomes[valid], r_vals[valid], sym_ids[valid]
+
+        train_outcomes_dummy = np.full(len(train_enter), "NO_CANDIDATE", dtype=object)
+        train_scaled, train_enter, train_side, _, train_r, train_sym_ids = clean_multi(
+            train_scaled, train_enter, train_side, train_outcomes_dummy, train_r, train_sym_ids, "Train")
+        val_scaled, val_enter, val_side, val_outcomes, val_r, val_sym_ids = clean_multi(
+            val_scaled, val_enter, val_side, val_outcomes, val_r, val_sym_ids, "Val")
+
+        features_df_columns = features_columns_list
+
+    else:
+        n_symbols = 1
+        df = pd.read_parquet(data_path)
+        log.info(f"Loaded {len(df)} candles")
+
+        engineer = FeatureEngineer()
+        features_df = engineer.compute_all_features(df)
+        features_df = features_df.fillna(0)
+        log.info(f"Computed {len(features_df.columns)} base features ({engineer.STF_FEATURE_COUNT} STF + {engineer.HTF_FEATURE_COUNT} HTF)")
+
+        funding_df = fetch_funding_rates(df, data_dir)
+        funding_features = compute_funding_features(df, funding_df)
+        features_df = pd.concat([features_df, funding_features], axis=1)
+        features_df = features_df.fillna(0)
+
+        oi_df = fetch_open_interest_hist(df, data_dir)
+        oi_features = compute_oi_features(df, oi_df)
+        features_df = pd.concat([features_df, oi_features], axis=1)
+        features_df = features_df.fillna(0)
+
+        total_features = engineer.STF_FEATURE_COUNT + engineer.HTF_FEATURE_COUNT + FUNDING_FEATURE_COUNT + OI_FEATURE_COUNT
+        actual_cols = len(features_df.columns)
+        log.info(f"Total features: {actual_cols} ({engineer.STF_FEATURE_COUNT} STF + {engineer.HTF_FEATURE_COUNT} HTF + {FUNDING_FEATURE_COUNT} funding + {OI_FEATURE_COUNT} OI)")
+        if actual_cols != total_features:
+            log.error(f"FATAL: Feature count mismatch! Expected {total_features}, got {actual_cols}")
+            log.error(f"Columns: {sorted(features_df.columns.tolist())}")
+            sys.exit(1)
+
+        htf_cols = [c for c in features_df.columns if c.startswith('h1_') or c.startswith('h4_')]
+        htf_features_df = features_df[htf_cols].copy()
+        log.info(f"HTF features for labeling: {htf_cols}")
+
+        from data.regression_targets import generate_enter_quality_targets
+        label_df = generate_enter_quality_targets(
+            df, htf_features_df,
+            horizon_periods=horizon,
+            tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
+            slope_eps=slope_eps,
+            r_min_expiry=r_min_expiry,
+        )
+
+        enter_labels = label_df['enter_label'].values.astype(np.float32)
+        side_hints = label_df['side_hint'].values.astype(np.int64)
+        precomputed_outcomes = label_df['outcome'].values
+        precomputed_r = label_df['realized_r'].values.astype(np.float64)
+
+        valid_start = sequence_length
+        features_np = features_df.values[valid_start:].astype(np.float32)
+        enter_np = enter_labels[valid_start:].astype(np.float32)
+        side_np = side_hints[valid_start:].astype(np.int64)
+        outcomes_np = precomputed_outcomes[valid_start:]
+        r_np = precomputed_r[valid_start:]
+
+        n_total = len(features_np)
+        purge_gap = horizon + sequence_length
+        val_samples = max(int(n_total * 0.1), purge_gap)
+        train_samples = n_total - purge_gap - val_samples
+
+        if train_samples < sequence_length * 3:
+            log.error(f"Not enough data for training: {train_samples} samples")
+            sys.exit(1)
+
+        train_end = train_samples
+        val_start_idx = train_end + purge_gap
+        val_end = val_start_idx + val_samples
+
+        log.info(f"Data split: train={train_samples}, purge={purge_gap}, val={val_samples}")
+
+        train_features_raw = features_np[:train_end]
+        train_enter = enter_np[:train_end]
+        train_side = side_np[:train_end]
+        train_r = r_np[:train_end]
+
+        val_features_raw = features_np[val_start_idx:val_end]
+        val_enter = enter_np[val_start_idx:val_end]
+        val_side = side_np[val_start_idx:val_end]
+        val_outcomes = outcomes_np[val_start_idx:val_end]
+        val_r = r_np[val_start_idx:val_end]
+        val_bars = val_samples
+
+        train_features_df_scaled = pd.DataFrame(train_features_raw, columns=features_df.columns)
+        engineer.fit_scalers(train_features_df_scaled)
+        clip_range = 5.0
+        train_scaled = engineer.transform_and_clip(train_features_df_scaled, clip_range=clip_range).values.astype(np.float32)
+        val_features_df_scaled = pd.DataFrame(val_features_raw, columns=features_df.columns)
+        val_scaled = engineer.transform_and_clip(val_features_df_scaled, clip_range=clip_range).values.astype(np.float32)
+
+        def clean_enter(features, enter, side, outcomes, r_vals, name):
+            features = np.where(np.isinf(features), np.nan, features)
+            mask = np.isnan(features).any(axis=1)
+            valid = ~mask
+            dropped = mask.sum()
+            if dropped > 0:
+                log.info(f"  {name}: dropped {dropped} NaN rows")
+            return features[valid], enter[valid], side[valid], outcomes[valid], r_vals[valid]
+
+        train_outcomes_dummy = np.full(len(train_enter), "NO_CANDIDATE", dtype=object)
+        train_r_dummy = np.zeros(len(train_enter), dtype=np.float64)
+        train_scaled, train_enter, train_side, _, _ = clean_enter(train_scaled, train_enter, train_side, train_outcomes_dummy, train_r_dummy, "Train")
+        val_scaled, val_enter, val_side, val_outcomes, val_r = clean_enter(val_scaled, val_enter, val_side, val_outcomes, val_r, "Val")
+
+        train_sym_ids = np.zeros(len(train_enter), dtype=np.int64)
+        val_sym_ids = np.zeros(len(val_enter), dtype=np.int64)
+        features_df_columns = list(features_df.columns)
+        input_dim = features_np.shape[1]
+
+    # === VALUE TARGETS (net_r) ===
+    train_value_targets = np.nan_to_num(train_r, nan=0.0).astype(np.float32)
+    train_value_targets = np.clip(train_value_targets, -value_clip, value_clip)
+    val_value_targets = np.nan_to_num(val_r, nan=0.0).astype(np.float32)
+    val_value_targets = np.clip(val_value_targets, -value_clip, value_clip)
 
     pos_count = train_enter.sum()
     neg_count = len(train_enter) - pos_count
@@ -609,10 +758,12 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     log.info(f"BCE pos_weight: {pos_weight:.2f}")
 
     class EnterDataset(Dataset):
-        def __init__(self, features, enter_labels, side_hints, seq_len):
+        def __init__(self, features, enter_labels, side_hints, symbol_ids, value_targets, seq_len):
             self.features = features.astype(np.float32)
             self.enter_labels = enter_labels.astype(np.float32)
             self.side_hints = side_hints.astype(np.int64)
+            self.symbol_ids = symbol_ids.astype(np.int64)
+            self.value_targets = value_targets.astype(np.float32)
             self.seq_len = seq_len
             self.valid_indices = list(range(seq_len, len(features)))
 
@@ -627,17 +778,17 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                 torch.from_numpy(seq),
                 torch.tensor(self.enter_labels[actual_idx], dtype=torch.float32),
                 torch.tensor(self.side_hints[actual_idx], dtype=torch.long),
+                torch.tensor(self.symbol_ids[actual_idx], dtype=torch.long),
+                torch.tensor(self.value_targets[actual_idx], dtype=torch.float32),
             )
 
-    train_dataset = EnterDataset(train_scaled, train_enter, train_side, sequence_length)
-    val_dataset = EnterDataset(val_scaled, val_enter, val_side, sequence_length)
+    train_dataset = EnterDataset(train_scaled, train_enter, train_side, train_sym_ids, train_value_targets, sequence_length)
+    val_dataset = EnterDataset(val_scaled, val_enter, val_side, val_sym_ids, val_value_targets, sequence_length)
 
     log.info(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-
-    input_dim = features_np.shape[1]
 
     from models.simple_mlp import EnhancedMultiHeadMLP, EnhancedMultiHeadMLP_Config
     mlp_config = EnhancedMultiHeadMLP_Config(
@@ -647,20 +798,35 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         dropout=0.3,
         use_layer_norm=True,
         use_residual=True,
+        enable_enter_head=True,
         enable_quantile_head=False,
         enable_vol_state_head=False,
         enable_mu_head=False,
         enable_sigma_head=False,
-        enable_enter_head=True,
+        enable_value_head=True,
+        n_symbols=n_symbols,
+        symbol_embed_dim=4 if n_symbols > 1 else 0,
     )
     model = EnhancedMultiHeadMLP(mlp_config)
     model.name = "EnterQualityMLP"
     model.to(device)
     log.info(f"Model: EnterQualityMLP ({model.parameters_count():,} parameters)")
     log.info(f"Architecture: [512, 256, 128, 64] with residual connections")
-    log.info(f"Active head: enter_head (binary) | All other heads DISABLED")
+    log.info(f"Active heads: enter_head (binary) + value_head (regression) | n_symbols={n_symbols}")
+
+    pos_rate = pos_count / max(len(train_enter), 1)
+    if 0 < pos_rate < 1:
+        bias_init_val = float(np.log(pos_rate / (1 - pos_rate)))
+    else:
+        bias_init_val = 0.0
+    with torch.no_grad():
+        enter_head_last = model.enter_head[-1]
+        enter_head_last.bias.fill_(bias_init_val)
+    log.info(f"[BIAS_INIT] pos_rate={pos_rate:.4f} bias={bias_init_val:.4f}")
+    log.info(f"[POS_WEIGHT] pos_weight={pos_weight:.2f}")
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]).to(device))
+    value_criterion = nn.HuberLoss(delta=1.0)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     effective_min_lr = min_lr if min_lr is not None else lr * 0.05
@@ -692,14 +858,24 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         n_batches = 0
 
         for batch in train_loader:
-            features_batch, enter_batch, side_batch = batch
+            features_batch, enter_batch, side_batch, sym_id_batch, value_batch = batch
             features_batch = features_batch.to(device)
             enter_batch = enter_batch.to(device)
+            sym_id_batch = sym_id_batch.to(device)
+            value_batch = value_batch.to(device)
 
             optimizer.zero_grad()
-            output = model.forward_multihead(features_batch)
+            output = model.forward_multihead(features_batch, symbol_ids=sym_id_batch if n_symbols > 1 else None)
             enter_logits = output.enter_logits.squeeze(-1)
-            loss = criterion(enter_logits, enter_batch)
+            enter_loss = criterion(enter_logits, enter_batch)
+
+            if output.value_logits is not None:
+                value_pred = output.value_logits.squeeze(-1)
+                v_loss = value_criterion(value_pred, value_batch)
+                loss = enter_loss + value_loss_weight * v_loss
+            else:
+                loss = enter_loss
+
             loss.backward()
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.7)
@@ -717,23 +893,39 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         all_probs = []
         all_targets = []
         all_sides = []
+        all_value_preds = []
+        all_value_targets_list = []
+        all_enter_logits_list = []
 
         with torch.no_grad():
             for batch in val_loader:
-                features_batch, enter_batch, side_batch = batch
+                features_batch, enter_batch, side_batch, sym_id_batch, value_batch = batch
                 features_batch = features_batch.to(device)
                 enter_batch = enter_batch.to(device)
+                sym_id_batch = sym_id_batch.to(device)
+                value_batch = value_batch.to(device)
 
-                output = model.forward_multihead(features_batch)
+                output = model.forward_multihead(features_batch, symbol_ids=sym_id_batch if n_symbols > 1 else None)
                 enter_logits = output.enter_logits.squeeze(-1)
-                v_loss = criterion(enter_logits, enter_batch)
-                val_loss_total += v_loss.item()
+                enter_loss = criterion(enter_logits, enter_batch)
+
+                if output.value_logits is not None:
+                    value_pred = output.value_logits.squeeze(-1)
+                    v_loss_val = value_criterion(value_pred, value_batch)
+                    batch_loss = enter_loss + value_loss_weight * v_loss_val
+                    all_value_preds.extend(value_pred.cpu().numpy())
+                    all_value_targets_list.extend(value_batch.cpu().numpy())
+                else:
+                    batch_loss = enter_loss
+
+                val_loss_total += batch_loss.item()
                 val_n += 1
 
                 probs = torch.sigmoid(enter_logits).cpu().numpy()
                 all_probs.extend(probs)
                 all_targets.extend(enter_batch.cpu().numpy())
                 all_sides.extend(side_batch.numpy())
+                all_enter_logits_list.extend(enter_logits.cpu().numpy())
 
         avg_val_loss = val_loss_total / max(val_n, 1)
 
@@ -772,6 +964,31 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             f"Pos:{pos_rate:.1%} | Pred1:{preds.mean():.1%} | LR:{current_lr:.2e}"
         )
 
+        if all_value_preds:
+            all_vp = np.array(all_value_preds)
+            all_vt = np.array(all_value_targets_list)
+            value_mae = np.mean(np.abs(all_vp - all_vt))
+            value_rmse = np.sqrt(np.mean((all_vp - all_vt)**2))
+        else:
+            value_mae = value_rmse = 0.0
+
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            p50 = np.percentile(all_probs, 50)
+            p75 = np.percentile(all_probs, 75)
+            p90 = np.percentile(all_probs, 90)
+            p95 = np.percentile(all_probs, 95)
+            p99 = np.percentile(all_probs, 99)
+
+            all_logits_np = np.array(all_enter_logits_list)
+            pos_mask = all_targets == 1
+            neg_mask = all_targets == 0
+            mean_logit_pos = all_logits_np[pos_mask].mean() if pos_mask.any() else 0.0
+            mean_logit_neg = all_logits_np[neg_mask].mean() if neg_mask.any() else 0.0
+
+            log.info(f"[METRIC] mean_logit_pos={mean_logit_pos:.3f} mean_logit_neg={mean_logit_neg:.3f}")
+            log.info(f"[METRIC] value_mae={value_mae:.4f} value_rmse={value_rmse:.4f}")
+            log.info(f"[METRIC] p_enter percentiles (val): p50={p50:.4f} p75={p75:.4f} p90={p90:.4f} p95={p95:.4f} p99={p99:.4f}")
+
         if prauc > best_val_prauc:
             best_val_prauc = prauc
             torch.save({
@@ -788,8 +1005,11 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                     'enable_vol_state_head': False,
                     'enable_mu_head': False,
                     'enable_sigma_head': False,
+                    'enable_value_head': True,
+                    'n_symbols': n_symbols,
+                    'symbol_embed_dim': 4 if n_symbols > 1 else 0,
                 },
-                'feature_columns': list(features_df.columns),
+                'feature_columns': features_df_columns,
                 'n_features': input_dim,
                 'feature_version': FEATURE_VERSION,
                 'model_type': 'enter_quality',
@@ -815,8 +1035,11 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                     'enable_vol_state_head': False,
                     'enable_mu_head': False,
                     'enable_sigma_head': False,
+                    'enable_value_head': True,
+                    'n_symbols': n_symbols,
+                    'symbol_embed_dim': 4 if n_symbols > 1 else 0,
                 },
-                'feature_columns': list(features_df.columns),
+                'feature_columns': features_df_columns,
                 'n_features': input_dim,
                 'feature_version': FEATURE_VERSION,
                 'model_type': 'enter_quality',
@@ -871,7 +1094,89 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         model.load_state_dict(ckpt['model_state_dict'])
         log.info(f"Loaded best PR-AUC checkpoint (PR-AUC={best_val_prauc:.3f})")
 
-    return model, engineer, list(features_df.columns), history
+    # === TEMPERATURE SCALING CALIBRATION ===
+    log.info("[CALIB] temperature_fit start | collecting val logits...")
+    model.eval()
+    cal_logits = []
+    cal_labels = []
+    with torch.no_grad():
+        for batch in val_loader:
+            features_batch, enter_batch, side_batch, sym_id_batch, value_batch = batch
+            features_batch = features_batch.to(device)
+            enter_batch = enter_batch.to(device)
+            sym_id_batch = sym_id_batch.to(device)
+            output = model.forward_multihead(features_batch, symbol_ids=sym_id_batch if n_symbols > 1 else None)
+            cal_logits.append(output.enter_logits.squeeze(-1).cpu())
+            cal_labels.append(enter_batch.cpu())
+
+    cal_logits = torch.cat(cal_logits)
+    cal_labels = torch.cat(cal_labels)
+    n_cal = len(cal_logits)
+    log.info(f"[CALIB] temperature_fit start | n={n_cal}")
+
+    nll_before = nn.BCEWithLogitsLoss()(cal_logits, cal_labels).item()
+
+    log_T = torch.nn.Parameter(torch.zeros(1))
+    temp_optimizer = torch.optim.LBFGS([log_T], lr=0.01, max_iter=50)
+
+    def temp_closure():
+        temp_optimizer.zero_grad()
+        T = torch.exp(log_T)
+        loss = nn.BCEWithLogitsLoss()(cal_logits / T, cal_labels)
+        loss.backward()
+        return loss
+
+    temp_optimizer.step(temp_closure)
+    temperature = float(torch.exp(log_T).item())
+    nll_after = nn.BCEWithLogitsLoss()(cal_logits / temperature, cal_labels).item()
+
+    log.info(f"[CALIB] temperature={temperature:.4f} | nll_before={nll_before:.4f} nll_after={nll_after:.4f}")
+
+    temp_scale_path = checkpoint_dir / "temp_scale_v5.0.json"
+    import json
+    temp_data = {
+        "temperature": temperature,
+        "fitted_on": "val",
+        "version": FEATURE_VERSION,
+        "nll_before": nll_before,
+        "nll_after": nll_after,
+        "n_samples": n_cal,
+    }
+    with open(temp_scale_path, 'w') as f:
+        json.dump(temp_data, f, indent=2)
+    log.info(f"Temperature scale saved to {temp_scale_path}")
+
+    if smoke_infer:
+        log.info("[SMOKE] Running single-row inference per symbol...")
+        model.eval()
+        syms = symbols if symbols and len(symbols) > 1 else ["BTCUSDT"]
+        for si, sym in enumerate(syms):
+            if n_symbols > 1:
+                sym_mask = val_sym_ids == si
+                if sym_mask.any():
+                    last_feat = val_scaled[sym_mask][-1:]
+                else:
+                    continue
+            else:
+                last_feat = val_scaled[-1:]
+
+            with torch.no_grad():
+                x = torch.FloatTensor(last_feat).to(device)
+                sym_tensor = torch.tensor([si], dtype=torch.long, device=device) if n_symbols > 1 else None
+                output = model.forward_multihead(x, symbol_ids=sym_tensor)
+                logit = float(output.enter_logits.cpu().item())
+                p = float(torch.sigmoid(torch.tensor(logit / temperature)).item())
+                e_net = float(output.value_logits.cpu().item()) if output.value_logits is not None else 0.0
+
+                z_vals = last_feat[0]
+                z_min = float(z_vals.min())
+                z_max = float(z_vals.max())
+                clipped = int(((z_vals <= -5.0) | (z_vals >= 5.0)).sum())
+
+                log.info(f"[SMOKE] sym={sym} logit={logit:.4f} T={temperature:.4f} p={p:.4f} e_net_pred={e_net:.4f}")
+                log.info(f"[SMOKE] z_min={z_min:.4f} z_max={z_max:.4f} clipped={clipped}/{len(z_vals)}")
+
+    return model, engineer, features_df_columns, history
 
 
 def _select_trades_with_cooldown(probs, sides, precomputed_outcomes, precomputed_r, threshold, cooldown):
@@ -2060,6 +2365,34 @@ Examples:
     parser.add_argument("--r-min-expiry", type=float, default=0.5, help="Min R-multiple at expiry for ENTER=1 (default: 0.5)")
     parser.add_argument("--target-tpd", type=float, default=2.5, help="Target trades per day for BEST selection (default: 2.5)")
     parser.add_argument("--target-tpd-tol", type=float, default=1.0, help="Tolerance band for trades/day (default: 1.0)")
+    parser.add_argument("--train", action="store_true", default=False,
+                        help="Explicitly trigger training mode")
+    parser.add_argument("--value-loss-weight", type=float, default=0.5,
+                        help="Weight for value head loss (default: 0.5)")
+    parser.add_argument("--value-clip", type=float, default=3.0,
+                        help="Clip value targets to [-clip, +clip] R (default: 3.0)")
+    parser.add_argument("--smoke-calib", action="store_true", default=False,
+                        help="Run temperature calibration smoke test after training")
+    parser.add_argument("--smoke-infer", action="store_true", default=False,
+                        help="Run single-row inference smoke test per symbol after training")
+    parser.add_argument("--min-enet-core", type=float, default=0.00,
+                        help="Min E[net R] for CORE lane (default: 0.00)")
+    parser.add_argument("--min-enet-flow", type=float, default=-0.05,
+                        help="Min E[net R] for FLOW lane (default: -0.05)")
+    parser.add_argument("--min-enet-scalp", type=float, default=-0.02,
+                        help="Min E[net R] for SCALP lane (default: -0.02)")
+    parser.add_argument("--gate-pf-net", type=float, default=1.05,
+                        help="Promotion gate: min PF_net (default: 1.05)")
+    parser.add_argument("--gate-enet", type=float, default=0.0,
+                        help="Promotion gate: min E[net] (default: 0.0)")
+    parser.add_argument("--gate-profitable-regimes", type=int, default=2,
+                        help="Promotion gate: min profitable regimes (default: 2)")
+    parser.add_argument("--gate-maxdd-r", type=float, default=6.0,
+                        help="Promotion gate: max drawdown in R (default: 6.0)")
+    parser.add_argument("--gate-p95-min", type=float, default=0.40,
+                        help="Promotion gate: min p95 for calibration sanity (default: 0.40)")
+    parser.add_argument("--gate-p95-max", type=float, default=0.98,
+                        help="Promotion gate: max p95 for calibration sanity (default: 0.98)")
     parser.add_argument("--regime-eval", action="store_true", help="Run regime robustness evaluation (no training)")
     parser.add_argument("--regimes", type=str,
                         default="2019-01-01:2020-12-31,2021-01-01:2021-12-31,2022-01-01:2022-12-31,2023-01-01:2024-12-31",
@@ -2360,6 +2693,8 @@ Examples:
     if not args.predict_only:
         data_path = download_data(args.url, data_dir)
 
+        symbols_list = [s.strip().upper() for s in args.symbols.split(",")]
+
         model, engineer, feature_columns, history = train_enter_model(
             data_path, device, args.epochs, args.batch_size, args.lr,
             checkpoint_interval=args.checkpoint_interval,
@@ -2368,6 +2703,9 @@ Examples:
             horizon=args.horizon, slope_eps=args.slope_eps,
             r_min_expiry=args.r_min_expiry,
             target_tpd=args.target_tpd, target_tpd_tol=args.target_tpd_tol,
+            symbols=symbols_list, value_loss_weight=args.value_loss_weight,
+            value_clip=args.value_clip,
+            smoke_calib=args.smoke_calib, smoke_infer=args.smoke_infer,
         )
 
         print()

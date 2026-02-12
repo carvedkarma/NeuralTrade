@@ -232,6 +232,9 @@ class MultiHeadOutput:
     # Entry quality head (binary: should we enter this trade?)
     enter_logits: Optional[torch.Tensor] = None  # [batch, 1] raw logits for BCEWithLogitsLoss
 
+    # Value head (regression: predicted E[net R])
+    value_logits: Optional[torch.Tensor] = None  # [batch, 1] predicted net R expectation
+
 
 class QuantileHead(nn.Module):
     """

@@ -4222,6 +4222,9 @@ export async function registerRoutes(
         laneBudgetRemainingR: c.lane_budget_remaining_r ?? null,
         holdReason: c.hold_reason ?? null,
         quotaStep: c.quota_step ?? null,
+        eNetPred: c.e_net_pred ?? null,
+        enterLogit: c.enter_logit ?? null,
+        temperatureUsed: c.temperature_used ?? null,
         createdAt: Date.now(),
       });
       res.json({ success: true, id: record.id });

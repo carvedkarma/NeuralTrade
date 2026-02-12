@@ -84,6 +84,12 @@ interface LiveCycleLog {
   thresholdUsed: number | null;
   decision: string;
   reasons: string[] | null;
+  laneSelected: string | null;
+  htfScore: number | null;
+  holdReason: string | null;
+  eNetPred: number | null;
+  enterLogit: number | null;
+  temperatureUsed: number | null;
   createdAt: number;
 }
 
@@ -420,10 +426,12 @@ export function LiveCycleLogTable() {
                 <th className="py-2 pr-2">Symbol</th>
                 <th className="py-2 pr-2">Price</th>
                 <th className="py-2 pr-2">p_enter</th>
+                <th className="py-2 pr-2">E[net]</th>
+                <th className="py-2 pr-2">Lane</th>
                 <th className="py-2 pr-2">HTF</th>
                 <th className="py-2 pr-2">Direction</th>
                 <th className="py-2 pr-2">Decision</th>
-                <th className="py-2 pr-2">Reasons</th>
+                <th className="py-2 pr-2">Hold Reason</th>
               </tr>
             </thead>
             <tbody>
@@ -435,8 +443,19 @@ export function LiveCycleLogTable() {
                   <td className="py-2 pr-2 font-mono text-xs font-semibold">
                     {l.pEnter != null ? `${(l.pEnter * 100).toFixed(1)}%` : "—"}
                   </td>
+                  <td className="py-2 pr-2 font-mono text-xs">
+                    {l.eNetPred != null ? l.eNetPred.toFixed(3) : "—"}
+                  </td>
+                  <td className="py-2 pr-2">
+                    {l.laneSelected ? (
+                      <Badge variant={l.laneSelected === "CORE" ? "default" : l.laneSelected === "HOLD" ? "outline" : "secondary"} className="text-xs">
+                        {l.laneSelected}
+                      </Badge>
+                    ) : "—"}
+                  </td>
                   <td className="py-2 pr-2 text-xs">
                     <span className="font-mono">
+                      {l.htfScore != null ? `S:${l.htfScore}` : "?"}{" "}
                       H1:{l.htfH1Trend ?? "?"} H4:{l.htfH4Trend ?? "?"}
                     </span>
                     {l.slopeOk && <CheckCircle2 className="w-3 h-3 text-green-500 inline ml-1" />}
@@ -449,12 +468,12 @@ export function LiveCycleLogTable() {
                     ) : "—"}
                   </td>
                   <td className="py-2 pr-2">
-                    <Badge variant={l.decision === "ENTER" ? "default" : "outline"} className="text-xs">
+                    <Badge variant={l.decision.startsWith("ENTER") ? "default" : "outline"} className="text-xs">
                       {l.decision}
                     </Badge>
                   </td>
                   <td className="py-2 pr-2 text-xs text-muted-foreground max-w-[200px] truncate">
-                    {l.reasons?.join(", ") || "—"}
+                    {l.holdReason || (l.reasons?.join(", ")) || "—"}
                   </td>
                 </tr>
               ))}

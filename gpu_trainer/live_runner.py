@@ -93,10 +93,12 @@ def _get_exchange_time_offset() -> float:
 
 
 def _load_model(device: str, symbol: Optional[str] = None):
-    """Load the trained ENTER QUALITY model, scaler, and feature columns.
+    """Load the trained ENTER QUALITY model, scaler, feature columns, and temperature.
 
     If symbol is provided, first checks checkpoints/deployed/{symbol}/ for a
     per-symbol model. Falls back to the global checkpoints/ directory.
+
+    Returns: (model, engineer, feature_columns, temperature, symbol_map)
     """
     import torch
     from models.simple_mlp import EnhancedMultiHeadMLP, EnhancedMultiHeadMLP_Config
@@ -137,6 +139,10 @@ def _load_model(device: str, symbol: Optional[str] = None):
         sys.exit(1)
 
     cfg = checkpoint.get('model_config', {})
+    n_symbols = cfg.get('n_symbols', 1)
+    symbol_embed_dim = cfg.get('symbol_embed_dim', 0)
+    enable_value_head = cfg.get('enable_value_head', False)
+
     mlp_config = EnhancedMultiHeadMLP_Config(
         input_dim=cfg.get('input_dim', 63),
         hidden_dims=cfg.get('hidden_dims', [512, 256, 128, 64]),
@@ -149,6 +155,9 @@ def _load_model(device: str, symbol: Optional[str] = None):
         enable_vol_state_head=False,
         enable_mu_head=False,
         enable_sigma_head=False,
+        enable_value_head=enable_value_head,
+        n_symbols=n_symbols,
+        symbol_embed_dim=symbol_embed_dim,
     )
     model = EnhancedMultiHeadMLP(mlp_config)
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -169,8 +178,24 @@ def _load_model(device: str, symbol: Optional[str] = None):
     else:
         log.warning("No saved scaler — prediction quality may be reduced")
 
-    log.info(f"Model loaded: {len(feature_columns)} features, version {saved_version}")
-    return model, engineer, feature_columns
+    temperature = 1.0
+    for d in search_dirs:
+        tp = d / "temp_scale_v5.0.json"
+        if tp.exists():
+            try:
+                with open(tp) as f:
+                    temp_data = json.load(f)
+                temperature = float(temp_data.get("temperature", 1.0))
+                log.info(f"[INFER] using_temperature={temperature:.4f} (from {tp})")
+            except Exception as e:
+                log.warning(f"Failed to load temperature: {e}")
+            break
+
+    symbol_map = checkpoint.get('symbol_map', None)
+
+    log.info(f"Model loaded: {len(feature_columns)} features, version {saved_version}, "
+             f"value_head={enable_value_head}, n_symbols={n_symbols}, temperature={temperature:.4f}")
+    return model, engineer, feature_columns, temperature, symbol_map
 
 
 def _fetch_candles_for_symbol(fetcher, symbol: str, timeframe: str = "15m",
@@ -313,14 +338,37 @@ def _compute_features_for_symbol(df: pd.DataFrame, engineer, feature_columns: li
         return None, None
 
 
-def _run_inference(model, scaled_features: np.ndarray, device: str) -> float:
-    """Run single-row ENTER model inference, returning p_enter."""
+def _run_inference(model, scaled_features: np.ndarray, device: str,
+                   temperature: float = 1.0, symbol_id: Optional[int] = None) -> dict:
+    """Run single-row ENTER model inference with temperature calibration.
+    
+    Returns dict with:
+      p_enter: calibrated probability
+      e_net_pred: predicted E[net R] (0.0 if no value head)
+      enter_logit: raw logit before calibration
+    """
     import torch
     with torch.no_grad():
         x = torch.FloatTensor(scaled_features).to(device)
-        output = model.forward_multihead(x)
-    p_enter = float(torch.sigmoid(output.enter_logits).cpu().item())
-    return p_enter
+        sym_ids = None
+        if symbol_id is not None and model.symbol_embedding is not None:
+            sym_ids = torch.tensor([symbol_id], dtype=torch.long, device=device)
+        output = model.forward_multihead(x, symbol_ids=sym_ids)
+        
+    enter_logit = float(output.enter_logits.cpu().item())
+    calibrated_logit = enter_logit / max(temperature, 0.01)
+    p_enter = float(torch.sigmoid(torch.tensor(calibrated_logit)).item())
+    
+    e_net_pred = 0.0
+    if output.value_logits is not None:
+        e_net_pred = float(output.value_logits.cpu().item())
+    
+    return {
+        'p_enter': p_enter,
+        'e_net_pred': e_net_pred,
+        'enter_logit': enter_logit,
+        'temperature_used': temperature,
+    }
 
 
 def _apply_htf_gates(features_df: pd.DataFrame) -> dict:
@@ -669,7 +717,9 @@ class LiveRunner:
 
     def _push_cycle_log(self, symbol: str, price: float, p_enter: float,
                         htf: dict, direction: str, decision: str, reasons: list,
-                        lane_info: Optional[dict] = None):
+                        lane_info: Optional[dict] = None,
+                        e_net_pred: float = None, enter_logit: float = None,
+                        temperature_used: float = None):
         url = f"{self.replit_url.rstrip('/')}/api/live/cycle-log"
         li = lane_info or {}
         payload = {
@@ -694,6 +744,9 @@ class LiveRunner:
             "lane_budget_remaining_r": li.get('lane_budget_remaining_r'),
             "hold_reason": li.get('hold_reason'),
             "quota_step": li.get('quota_step'),
+            "e_net_pred": round(float(e_net_pred), 4) if e_net_pred is not None else li.get('e_net_pred'),
+            "enter_logit": round(float(enter_logit), 4) if enter_logit is not None else None,
+            "temperature_used": round(float(temperature_used), 4) if temperature_used is not None else None,
         }
         payload_keys = [k for k, v in payload.items() if v is not None]
         log.debug(f"[CYCLE_PAYLOAD] sym={symbol} fields_present={payload_keys}")
@@ -780,13 +833,13 @@ class LiveRunner:
         if self.per_symbol_models:
             if symbol not in self.symbol_models:
                 try:
-                    m, e, fc = _load_model(self.device, symbol=symbol)
-                    self.symbol_models[symbol] = (m, e, fc)
+                    m, e, fc, temp, sm = _load_model(self.device, symbol=symbol)
+                    self.symbol_models[symbol] = (m, e, fc, temp, sm)
                 except SystemExit:
                     log.warning(f"No per-symbol model for {symbol}, using global model")
-                    self.symbol_models[symbol] = (self.model, self.engineer, self.feature_columns)
+                    self.symbol_models[symbol] = (self.model, self.engineer, self.feature_columns, self.temperature, self.symbol_map)
             return self.symbol_models[symbol]
-        return self.model, self.engineer, self.feature_columns
+        return self.model, self.engineer, self.feature_columns, self.temperature, self.symbol_map
 
     def _update_candle_cache(self, symbol: str, new_df: pd.DataFrame) -> pd.DataFrame:
         if symbol not in self.candle_cache:
@@ -834,7 +887,7 @@ class LiveRunner:
         self.exchange_time_offset = _get_exchange_time_offset()
         log.info(f"Exchange time offset: {self.exchange_time_offset*1000:.0f}ms")
 
-        self.model, self.engineer, self.feature_columns = _load_model(self.device)
+        self.model, self.engineer, self.feature_columns, self.temperature, self.symbol_map = _load_model(self.device)
         self._init_fetcher()
 
         for sym in self.symbols:
@@ -1046,12 +1099,13 @@ class LiveRunner:
 
     def _select_lane(self, symbol: str, p_enter: float, htf: dict,
                      htf_score: int, features_df: pd.DataFrame,
-                     df_candles: pd.DataFrame, atr: float) -> dict:
+                     df_candles: pd.DataFrame, atr: float,
+                     e_net_pred: float = 0.0) -> dict:
         """Triple-lane router: CORE > FLOW > SCALP > HOLD.
 
         Returns dict with lane selection info including:
         lane_selected, threshold_used, lane_size_mult, lane_horizon,
-        core_thr, flow_thr, scalp_thr, hold_reason, quota_step
+        core_thr, flow_thr, scalp_thr, hold_reason, quota_step, e_net_pred
         """
         range_ok = htf.get('range_ok', False)
         side = htf.get('side', 'NEUTRAL')
@@ -1103,17 +1157,24 @@ class LiveRunner:
                  f"target_tpd=3 step={quota_step} pressure={quota_step} "
                  f"flow_pct={flow_pct} flow_size_mult={flow_size_mult:.2f}")
 
+        min_enet_core = getattr(self, 'min_enet_core', 0.00)
+        min_enet_flow = getattr(self, 'min_enet_flow', -0.05)
+        min_enet_scalp = getattr(self, 'min_enet_scalp', -0.02)
+
         result_base = {
             'htf_score': htf_score,
             'core_thr': round(core_thr, 4),
             'flow_thr': round(flow_thr, 4),
             'scalp_thr': round(scalp_thr, 4),
             'quota_step': quota_step,
+            'e_net_pred': round(e_net_pred, 4),
         }
 
         if htf_score >= 3 and range_ok:
             if p_enter >= core_thr:
-                if self._check_lane_budget(symbol, "CORE", 1.0):
+                if e_net_pred < min_enet_core:
+                    log.info(f"[ENET_GATE] CORE blocked: e_net={e_net_pred:.4f} < min={min_enet_core:.4f}")
+                elif self._check_lane_budget(symbol, "CORE", 1.0):
                     return {**result_base,
                         'lane_selected': 'CORE', 'lane': 'CORE',
                         'threshold_used': core_thr, 'lane_size_mult': 1.0,
@@ -1121,12 +1182,12 @@ class LiveRunner:
                         'lane_budget_remaining_r': self._get_lane_budget_remaining(symbol, "CORE"),
                         'hold_reason': None,
                     }
-                else:
-                    pass
 
         if htf_score >= 2 and (range_ok or momentum_ok):
             if p_enter >= flow_thr:
-                if self._check_lane_budget(symbol, "FLOW", flow_size_mult):
+                if e_net_pred < min_enet_flow:
+                    log.info(f"[ENET_GATE] FLOW blocked: e_net={e_net_pred:.4f} < min={min_enet_flow:.4f}")
+                elif self._check_lane_budget(symbol, "FLOW", flow_size_mult):
                     return {**result_base,
                         'lane_selected': 'FLOW', 'lane': 'FLOW',
                         'threshold_used': flow_thr, 'lane_size_mult': flow_size_mult,
@@ -1134,12 +1195,12 @@ class LiveRunner:
                         'lane_budget_remaining_r': self._get_lane_budget_remaining(symbol, "FLOW"),
                         'hold_reason': None,
                     }
-                else:
-                    pass
 
         if htf_score >= 1 and volatility_ok and momentum_ok:
             if p_enter >= scalp_thr:
-                if self._check_lane_budget(symbol, "SCALP", SCALP_SIZE_MULT):
+                if e_net_pred < min_enet_scalp:
+                    log.info(f"[ENET_GATE] SCALP blocked: e_net={e_net_pred:.4f} < min={min_enet_scalp:.4f}")
+                elif self._check_lane_budget(symbol, "SCALP", SCALP_SIZE_MULT):
                     return {**result_base,
                         'lane_selected': 'SCALP', 'lane': 'SCALP',
                         'threshold_used': scalp_thr, 'lane_size_mult': SCALP_SIZE_MULT,
@@ -1147,8 +1208,6 @@ class LiveRunner:
                         'lane_budget_remaining_r': self._get_lane_budget_remaining(symbol, "SCALP"),
                         'hold_reason': None,
                     }
-                else:
-                    pass
 
         hold_reasons = []
         if htf_score < 1:
@@ -1166,6 +1225,8 @@ class LiveRunner:
         else:
             if p_enter < core_thr:
                 hold_reasons.append(f"p_enter={p_enter:.4f}<core_thr={core_thr:.4f}")
+        if e_net_pred < min_enet_scalp:
+            hold_reasons.append(f"e_net={e_net_pred:.4f}<min_enet_scalp={min_enet_scalp:.4f}")
 
         total_remaining = sum(self._get_lane_budget_remaining(symbol, l) for l in ["CORE", "FLOW", "SCALP"])
         return {**result_base,
@@ -1308,7 +1369,7 @@ class LiveRunner:
             else:
                 self.warmup_logged[symbol] = False
 
-        model, engineer, feature_columns = self._get_model_for_symbol(symbol)
+        model, engineer, feature_columns, temperature, symbol_map = self._get_model_for_symbol(symbol)
 
         scaled, features_df = _compute_features_for_symbol(
             df_candles, engineer, feature_columns, symbol
@@ -1316,7 +1377,16 @@ class LiveRunner:
         if scaled is None:
             return None
 
-        p_enter = _run_inference(model, scaled, self.device)
+        sym_id = None
+        if symbol_map and symbol in symbol_map:
+            sym_id = symbol_map[symbol]
+
+        infer_result = _run_inference(model, scaled, self.device,
+                                      temperature=temperature, symbol_id=sym_id)
+        p_enter = infer_result['p_enter']
+        e_net_pred = infer_result['e_net_pred']
+        enter_logit = infer_result['enter_logit']
+        temperature_used = infer_result['temperature_used']
 
         if use_direct_htf and htf_direct:
             htf = self._compute_htf_from_direct(htf_direct, df_candles)
@@ -1339,7 +1409,8 @@ class LiveRunner:
             dir_for_score = side
         htf_score = _compute_htf_score(htf, dir_for_score)
 
-        log.info(f"  {symbol}: price={current_price:.2f} p_enter={p_enter:.4f} "
+        log.info(f"  {symbol}: price={current_price:.2f} p_enter={p_enter:.4f} e_net={e_net_pred:.4f} "
+                 f"logit={enter_logit:.3f} T={temperature_used:.3f} "
                  f"side={side} htf_score={htf_score} "
                  f"slope_ok={htf['slope_ok']} range_ok={htf['range_ok']}")
 
@@ -1360,7 +1431,9 @@ class LiveRunner:
             try:
                 self._push_cycle_log(symbol=symbol, price=current_price, p_enter=p_enter,
                     htf=htf, direction=side, decision=decision, reasons=reasons,
-                    lane_info=lane_info)
+                    lane_info=lane_info,
+                    e_net_pred=e_net_pred, enter_logit=enter_logit,
+                    temperature_used=temperature_used)
             except Exception as e:
                 log.warning(f"Failed to push cycle log for {symbol}: {e}")
             return None
@@ -1370,6 +1443,7 @@ class LiveRunner:
             symbol=symbol, p_enter=p_enter, htf=htf,
             htf_score=htf_score, features_df=features_df,
             df_candles=df_candles, atr=atr,
+            e_net_pred=e_net_pred,
         )
 
         lane_selected = lane_result['lane_selected']
@@ -1424,7 +1498,9 @@ class LiveRunner:
             try:
                 self._push_cycle_log(symbol=symbol, price=current_price, p_enter=p_enter,
                     htf=htf, direction=side, decision=decision, reasons=reasons,
-                    lane_info=lane_result)
+                    lane_info=lane_result,
+                    e_net_pred=e_net_pred, enter_logit=enter_logit,
+                    temperature_used=temperature_used)
             except Exception as e:
                 log.warning(f"Failed to push cycle log for {symbol}: {e}")
             return None
@@ -1440,7 +1516,9 @@ class LiveRunner:
         try:
             self._push_cycle_log(symbol=symbol, price=current_price, p_enter=p_enter,
                 htf=htf, direction=side, decision=decision, reasons=reasons,
-                lane_info=lane_result)
+                lane_info=lane_result,
+                e_net_pred=e_net_pred, enter_logit=enter_logit,
+                temperature_used=temperature_used)
         except Exception as e:
             log.warning(f"Failed to push cycle log for {symbol}: {e}")
 

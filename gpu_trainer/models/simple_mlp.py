@@ -547,6 +547,10 @@ class EnhancedMultiHeadMLP_Config:
     enable_mu_head: bool = True
     enable_sigma_head: bool = True
     enable_enter_head: bool = False  # Binary entry quality head
+    enable_value_head: bool = False  # E[net R] regression head
+
+    n_symbols: int = 1  # Number of distinct symbols for multi-asset embedding
+    symbol_embed_dim: int = 4  # Embedding dimension per symbol
     
     def __post_init__(self):
         if self.hidden_dims is None:
@@ -587,9 +591,17 @@ class EnhancedMultiHeadMLP(nn.Module):
         self.best_val_loss = float('inf')
         self.epochs_trained = 0
         
+        # Symbol embedding for multi-asset training
+        if config.n_symbols > 1:
+            self.symbol_embedding = nn.Embedding(config.n_symbols, config.symbol_embed_dim)
+            trunk_input_dim = config.input_dim + config.symbol_embed_dim
+        else:
+            self.symbol_embedding = None
+            trunk_input_dim = config.input_dim
+        
         # Build trunk with residual connections
         trunk_layers = []
-        prev_dim = config.input_dim
+        prev_dim = trunk_input_dim
         
         for hidden_dim in config.hidden_dims:
             if config.use_residual:
@@ -676,6 +688,18 @@ class EnhancedMultiHeadMLP(nn.Module):
         else:
             self.enter_head = None
         
+        # === HEAD 7: Value Head (E[net R] regression) ===
+        if config.enable_value_head:
+            self.value_head = nn.Sequential(
+                nn.Linear(self.trunk_dim, 32),
+                nn.LayerNorm(32),
+                nn.GELU(),
+                nn.Dropout(0.2),
+                nn.Linear(32, 1)
+            )
+        else:
+            self.value_head = None
+        
         self.n_candle_steps = config.n_candle_steps
         self._init_weights()
         
@@ -686,6 +710,7 @@ class EnhancedMultiHeadMLP(nn.Module):
             'enable_mu': config.enable_mu_head,
             'enable_sigma': config.enable_sigma_head,
             'enable_enter': config.enable_enter_head,
+            'enable_value': config.enable_value_head,
         }
     
     def _init_weights(self):
@@ -699,21 +724,28 @@ class EnhancedMultiHeadMLP(nn.Module):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, symbol_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Simple forward for classification only (legacy trainer compatibility)."""
         if x.dim() == 3:
             x = x[:, -1, :]
+        if self.symbol_embedding is not None and symbol_ids is not None:
+            sym_emb = self.symbol_embedding(symbol_ids)
+            x = torch.cat([x, sym_emb], dim=-1)
         features = self.trunk(x)
         logits = self.classifier(features)
         return torch.clamp(logits, -10, 10)
     
-    def forward_multihead(self, x: torch.Tensor) -> MultiHeadOutput:
+    def forward_multihead(self, x: torch.Tensor, symbol_ids: Optional[torch.Tensor] = None) -> MultiHeadOutput:
         """Multi-head forward pass with output clamping."""
         batch_size = x.size(0)
         device = x.device
         
         if x.dim() == 3:
             x = x[:, -1, :]
+        
+        if self.symbol_embedding is not None and symbol_ids is not None:
+            sym_emb = self.symbol_embedding(symbol_ids)
+            x = torch.cat([x, sym_emb], dim=-1)
         
         # Shared trunk
         features = self.trunk(x)
@@ -762,6 +794,13 @@ class EnhancedMultiHeadMLP(nn.Module):
         else:
             enter_logits = None
         
+        # === Value Head (E[net R]) ===
+        if self.value_head is not None:
+            value_logits = self.value_head(features)
+            value_logits = torch.clamp(value_logits, -3.0, 3.0)
+        else:
+            value_logits = None
+        
         # Placeholders for unused heads
         entry_offset = torch.zeros(batch_size, 1, device=device)
         sl_distance = torch.ones(batch_size, 1, device=device) * 0.01
@@ -780,7 +819,8 @@ class EnhancedMultiHeadMLP(nn.Module):
             candle_deltas=candle_deltas,
             vol_state_logits=vol_state_logits,
             acceleration=acceleration,
-            enter_logits=enter_logits
+            enter_logits=enter_logits,
+            value_logits=value_logits,
         )
     
     def parameters_count(self) -> int:
