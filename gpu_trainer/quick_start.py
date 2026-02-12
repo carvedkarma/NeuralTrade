@@ -270,75 +270,104 @@ def compute_funding_features(candle_df, funding_df):
     return result
 
 
-def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m", symbol: str = "BTCUSDT"):
-    """Fetch historical Open Interest from Binance Futures API, paginating to cover full candle range."""
+def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "15m", symbol: str = "BTCUSDT"):
+    """Fetch historical Open Interest from Binance Futures API.
+
+    Binance only provides ~30 days of OI history via /futures/data/openInterestHist.
+    We use 15m period (matching candle TF) for clean 1:1 alignment, and paginate
+    through the full 30-day window to get ~2880 records instead of the 500 limit per call.
+
+    For candle data older than 30 days, OI features will be zero (Binance limitation).
+    Coverage is measured against the 30-day OI window, not the full candle range.
+    """
     import requests
     import pandas as pd
+    import time as _time
 
-    cache_path = data_dir / "open_interest_hist.parquet"
+    cache_path = data_dir / f"open_interest_hist_{symbol}.parquet"
+    legacy_cache = data_dir / "open_interest_hist.parquet"
 
-    candle_start_ms = int(candle_df['timestamp'].min())
-    candle_end_ms = int(candle_df['timestamp'].max())
-
-    max_oi_lookback_ms = 30 * 24 * 60 * 60 * 1000
     now_ms = int(datetime.now().timestamp() * 1000)
-    oi_earliest_ms = now_ms - max_oi_lookback_ms
-    if candle_start_ms < oi_earliest_ms:
-        log.info(f"OI: clamping start from {candle_start_ms} to {oi_earliest_ms} (~30d lookback, Binance limit)")
-        candle_start_ms = oi_earliest_ms
+    max_oi_lookback_ms = 30 * 24 * 60 * 60 * 1000
+    oi_window_start_ms = now_ms - max_oi_lookback_ms
+    oi_window_end_ms = now_ms
+
+    candle_end_ms = int(candle_df['timestamp'].max())
+    fetch_start_ms = max(oi_window_start_ms, int(candle_df['timestamp'].min()))
+    fetch_end_ms = min(oi_window_end_ms, candle_end_ms)
+
+    if fetch_start_ms >= fetch_end_ms:
+        log.warning(f"OI: No overlap between candle range and 30-day OI window for {symbol}")
+        return pd.DataFrame(columns=["oi_time_ms", "sumOpenInterest", "symbol", "period"])
+
+    oi_window_days = (fetch_end_ms - fetch_start_ms) / (24 * 60 * 60 * 1000)
+    log.info(f"OI: fetching {oi_window_days:.1f} days of data for {symbol} (Binance 30d limit)")
 
     if cache_path.exists():
         existing = pd.read_parquet(cache_path)
         if len(existing) > 0:
             cached_start = existing['oi_time_ms'].min()
             cached_end = existing['oi_time_ms'].max()
+            cached_n_nonzero = (existing['sumOpenInterest'] > 0).sum()
             cached_period = existing.iloc[0].get('period', 'unknown') if 'period' in existing.columns else 'unknown'
             period_ms = {"5m": 5*60*1000, "15m": 15*60*1000, "1h": 3600*1000}.get(cached_period, 15*60*1000)
-            if cached_start <= candle_start_ms and cached_end >= candle_end_ms - period_ms:
-                if cached_period != period:
-                    log.info(f"Cached OI uses period={cached_period} (requested {period}) - using cached data as-is")
-                log.info(f"Using cached OI data: {len(existing)} records (period={cached_period})")
+            cache_age_hours = (now_ms - cached_end) / (3600 * 1000)
+            if (cached_n_nonzero > 100
+                    and cached_start <= fetch_start_ms + period_ms
+                    and cached_end >= fetch_end_ms - 2 * period_ms
+                    and cache_age_hours < 24):
+                log.info(f"Using cached OI data: {len(existing)} records ({cached_n_nonzero} non-zero, "
+                         f"period={cached_period}, age={cache_age_hours:.1f}h)")
                 return existing
+            else:
+                log.info(f"OI cache stale or low quality (non-zero={cached_n_nonzero}, age={cache_age_hours:.1f}h) — re-fetching")
 
-    periods_to_try = {"5m": ["5m", "15m", "1h"], "15m": ["15m", "1h"], "1h": ["1h"]}
-    try_periods = periods_to_try.get(period, [period])
+    if legacy_cache.exists():
+        try:
+            legacy = pd.read_parquet(legacy_cache)
+            legacy_nonzero = (legacy['sumOpenInterest'] > 0).sum() if 'sumOpenInterest' in legacy.columns else 0
+            if legacy_nonzero < 100:
+                log.info(f"Removing stale legacy OI cache ({legacy_nonzero} non-zero records)")
+                legacy_cache.unlink()
+        except Exception:
+            legacy_cache.unlink(missing_ok=True)
+
+    periods_to_try = ["15m", "5m", "1h"]
+    if period not in periods_to_try:
+        periods_to_try = [period] + periods_to_try
 
     url = "https://fapi.binance.com/futures/data/openInterestHist"
-    all_records = []
-    period_failed = False
 
-    for try_period in try_periods:
-        log.info(f"Fetching historical Open Interest from Binance Futures (period={try_period})...")
+    for try_period in periods_to_try:
+        log.info(f"Fetching OI from Binance Futures for {symbol} (period={try_period})...")
         all_records = []
-        current_start = candle_start_ms
+        current_start = fetch_start_ms
         page = 0
         period_failed = False
-        use_time_params = True
+        consecutive_errors = 0
 
-        while current_start < candle_end_ms:
+        while current_start < fetch_end_ms:
             params = {
                 "symbol": symbol,
                 "period": try_period,
                 "limit": 500,
+                "startTime": int(current_start),
+                "endTime": int(fetch_end_ms),
             }
-            if use_time_params:
-                params["startTime"] = int(current_start)
-                params["endTime"] = int(candle_end_ms)
             try:
                 resp = requests.get(url, params=params, timeout=30)
                 if resp.status_code == 429:
-                    import time as _time
-                    log.warning("OI rate limited - sleeping 3s")
-                    _time.sleep(3)
+                    wait = min(2 ** consecutive_errors, 10)
+                    log.warning(f"OI rate limited - sleeping {wait}s")
+                    _time.sleep(wait)
+                    consecutive_errors += 1
+                    if consecutive_errors > 5:
+                        period_failed = True
+                        break
                     continue
                 if resp.status_code == 400:
                     resp_text = resp.text[:200] if resp.text else "no body"
-                    if "startTime" in resp_text or "invalid" in resp_text.lower():
-                        if use_time_params:
-                            log.warning(f"OI period={try_period}: startTime rejected, retrying without time params")
-                            use_time_params = False
-                            continue
-                    log.warning(f"OI period={try_period} blocked (HTTP 400): {resp_text}")
+                    log.warning(f"OI period={try_period} HTTP 400: {resp_text}")
                     period_failed = True
                     break
                 if resp.status_code in (403, 418, 451):
@@ -348,14 +377,23 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m", symb
                     break
                 resp.raise_for_status()
                 data = resp.json()
+                consecutive_errors = 0
             except requests.exceptions.HTTPError as e:
                 log.warning(f"OI period={try_period} error: {e}")
-                period_failed = True
-                break
+                consecutive_errors += 1
+                if consecutive_errors > 3:
+                    period_failed = True
+                    break
+                _time.sleep(1)
+                continue
             except Exception as e:
                 log.warning(f"OI fetch error (page {page}): {e}")
-                period_failed = True
-                break
+                consecutive_errors += 1
+                if consecutive_errors > 3:
+                    period_failed = True
+                    break
+                _time.sleep(1)
+                continue
 
             if not data:
                 break
@@ -368,19 +406,17 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m", symb
                     "period": try_period,
                 })
 
-            if not use_time_params:
-                break
-
             last_ts = int(data[-1]["timestamp"])
             if last_ts <= current_start:
                 break
-            current_start = last_ts + 1
+
+            period_ms_step = {"5m": 5*60*1000, "15m": 15*60*1000, "1h": 3600*1000}.get(try_period, 15*60*1000)
+            current_start = last_ts + period_ms_step
             page += 1
 
-            if page % 10 == 0:
-                log.info(f"  Fetched {len(all_records)} OI records so far (page {page})...")
-            import time as _time
-            _time.sleep(0.2)
+            if page % 5 == 0:
+                log.info(f"  OI page {page}: {len(all_records)} records so far...")
+            _time.sleep(0.3)
 
         if not period_failed and all_records:
             period = try_period
@@ -389,29 +425,37 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "5m", symb
             log.warning(f"OI period={try_period} unavailable, trying next fallback...")
             continue
         if not all_records:
-            break
-
-    if period_failed and not all_records:
-        log.warning(f"OI endpoint blocked for {symbol} (all periods failed) — OI features will be zero")
-        return pd.DataFrame(columns=["oi_time_ms", "sumOpenInterest", "symbol", "period"])
+            log.warning(f"OI period={try_period} returned no data, trying next fallback...")
+            continue
 
     if not all_records:
-        log.warning("No OI data fetched - OI features will be zero")
+        log.warning(f"OI: all periods failed for {symbol} — OI features will be zero")
         return pd.DataFrame(columns=["oi_time_ms", "sumOpenInterest", "symbol", "period"])
 
     oi_df = pd.DataFrame(all_records)
     oi_df = oi_df.drop_duplicates(subset=["oi_time_ms"]).sort_values("oi_time_ms").reset_index(drop=True)
 
+    n_nonzero = (oi_df['sumOpenInterest'] > 0).sum()
+
     period_minutes = {"5m": 5, "15m": 15, "1h": 60}.get(period, 15)
-    total_minutes = (candle_end_ms - candle_start_ms) / (60 * 1000)
-    expected_records = total_minutes / period_minutes
+    oi_span_minutes = (fetch_end_ms - fetch_start_ms) / (60 * 1000)
+    expected_records = oi_span_minutes / period_minutes
     coverage_pct = len(oi_df) / max(expected_records, 1) * 100
-    log.info(f"OI coverage: {coverage_pct:.0f}% ({len(oi_df)} records for ~{expected_records:.0f} expected {period} intervals)")
-    if coverage_pct < 95:
-        log.warning(f"Low OI coverage ({coverage_pct:.0f}%) - some candles may have zero OI features")
+
+    log.info(f"OI fetched: {len(oi_df)} records ({n_nonzero} non-zero), period={period}")
+    log.info(f"OI coverage: {coverage_pct:.0f}% of {oi_window_days:.1f}-day window "
+             f"({len(oi_df)}/{expected_records:.0f} expected {period} intervals)")
+
+    if coverage_pct < 50:
+        log.warning(f"Low OI coverage ({coverage_pct:.0f}%) — check Binance API availability")
+    elif coverage_pct < 90:
+        log.info(f"OI coverage {coverage_pct:.0f}% — acceptable, some gaps expected near window edges")
+
+    if n_nonzero < 10:
+        log.warning(f"OI: only {n_nonzero} non-zero records out of {len(oi_df)} — API may be returning empty data")
 
     oi_df.to_parquet(cache_path, index=False)
-    log.info(f"Fetched {len(oi_df)} OI records (period={period}, cached to {cache_path})")
+    log.info(f"OI cached to {cache_path}")
 
     return oi_df
 
@@ -421,22 +465,31 @@ def compute_oi_features(candle_df, oi_df):
 
     Returns DataFrame with 3 columns: open_interest, oi_delta_1h, oi_zscore_30d
     All features computed on OI event series BEFORE alignment (leak-free).
+
+    Because Binance OI history covers only ~30 days, candles outside that window
+    will have zero OI features. Coverage is reported for the overlapping window.
     """
     import pandas as pd
     import numpy as np
 
     n = len(candle_df)
+    zero_result = pd.DataFrame(
+        np.zeros((n, OI_FEATURE_COUNT)),
+        columns=OI_FEATURE_NAMES,
+        index=candle_df.index,
+    )
 
     if oi_df.empty or len(oi_df) < 2:
         log.warning("Empty/insufficient OI data - returning zero features")
-        return pd.DataFrame(
-            np.zeros((n, OI_FEATURE_COUNT)),
-            columns=OI_FEATURE_NAMES,
-            index=candle_df.index,
-        )
+        return zero_result
 
-    oi_sorted = oi_df[['oi_time_ms', 'sumOpenInterest']].copy()
-    oi_sorted = oi_sorted.sort_values('oi_time_ms').reset_index(drop=True)
+    oi_nonzero = oi_df[oi_df['sumOpenInterest'] > 0].copy()
+    if len(oi_nonzero) < 2:
+        log.warning(f"OI data has {len(oi_nonzero)} non-zero records — returning zero features")
+        return zero_result
+
+    oi_sorted = oi_nonzero[['oi_time_ms', 'sumOpenInterest']].copy()
+    oi_sorted = oi_sorted.sort_values('oi_time_ms').drop_duplicates('oi_time_ms').reset_index(drop=True)
 
     period = oi_df['period'].iloc[0] if 'period' in oi_df.columns else '15m'
     if period == '5m':
@@ -451,8 +504,9 @@ def compute_oi_features(candle_df, oi_df):
 
     oi_sorted['oi_delta_1h'] = oi_sorted['sumOpenInterest'] - oi_sorted['sumOpenInterest'].shift(delta_lookback)
 
-    rolling_mean = oi_sorted['oi_delta_1h'].rolling(zscore_window, min_periods=max(delta_lookback + 1, 10)).mean()
-    rolling_std = oi_sorted['oi_delta_1h'].rolling(zscore_window, min_periods=max(delta_lookback + 1, 10)).std().clip(lower=1e-8)
+    min_periods_zscore = max(delta_lookback + 1, 20)
+    rolling_mean = oi_sorted['oi_delta_1h'].rolling(zscore_window, min_periods=min_periods_zscore).mean()
+    rolling_std = oi_sorted['oi_delta_1h'].rolling(zscore_window, min_periods=min_periods_zscore).std().clip(lower=1e-8)
     oi_sorted['oi_zscore_30d'] = (oi_sorted['oi_delta_1h'] - rolling_mean) / rolling_std
 
     oi_sorted = oi_sorted.fillna(0)
@@ -475,11 +529,17 @@ def compute_oi_features(candle_df, oi_df):
     oi_for_merge = oi_sorted[['oi_time_ms', 'open_interest_scaled', 'oi_delta_1h_scaled', 'oi_zscore_30d']].copy()
     oi_for_merge = oi_for_merge.rename(columns={'oi_time_ms': 'timestamp'})
 
+    oi_min_ts = oi_for_merge['timestamp'].min()
+    oi_max_ts = oi_for_merge['timestamp'].max()
+    period_ms = {"5m": 5*60*1000, "15m": 15*60*1000, "1h": 3600*1000}.get(period, 15*60*1000)
+    tolerance_ms = period_ms * 2
+
     merged = pd.merge_asof(
         candle_ts.sort_values('timestamp'),
         oi_for_merge.sort_values('timestamp'),
         on='timestamp',
         direction='backward',
+        tolerance=tolerance_ms,
     )
 
     merged = merged.sort_values('_candle_idx').reset_index(drop=True)
@@ -495,15 +555,28 @@ def compute_oi_features(candle_df, oi_df):
     n_nonzero = (result.abs() > 1e-8).any(axis=1).sum()
     log.info(f"OI features: {n_nonzero}/{n} rows with non-zero OI data")
 
-    import random
-    if n > 10:
-        start_idx = min(100, n - 1)
-        sample_pool = list(range(start_idx, n))
-        sample_size = min(10, len(sample_pool))
-        sample_indices = sorted(random.sample(sample_pool, sample_size)) if sample_size > 0 else []
+    candle_in_oi_window = candle_df[(candle_df['timestamp'] >= oi_min_ts) & (candle_df['timestamp'] <= oi_max_ts)]
+    n_in_window = len(candle_in_oi_window)
+    if n_in_window > 0:
+        window_indices = candle_in_oi_window.index
+        n_window_nonzero = (result.loc[window_indices].abs() > 1e-8).any(axis=1).sum()
+        window_coverage = n_window_nonzero / n_in_window * 100
+        log.info(f"OI window coverage: {window_coverage:.0f}% ({n_window_nonzero}/{n_in_window} candles in 30d OI window)")
+        if window_coverage < 50:
+            log.warning(f"Poor OI alignment within 30d window ({window_coverage:.0f}%) — check timestamp alignment")
     else:
-        sample_indices = list(range(n))
-    log.info("OI ALIGNMENT CHECK (10 random rows):")
+        log.warning("No candles fall within OI data window")
+
+    import random
+    oi_window_candle_indices = list(candle_df[candle_df['timestamp'] >= oi_min_ts].index)
+    if len(oi_window_candle_indices) > 10:
+        sample_indices = sorted(random.sample(oi_window_candle_indices, 10))
+    elif len(oi_window_candle_indices) > 0:
+        sample_indices = oi_window_candle_indices
+    else:
+        sample_indices = sorted(random.sample(list(range(n)), min(10, n)))
+
+    log.info("OI ALIGNMENT CHECK (sampled from OI window):")
     log.info(f"{'Row':>8} | {'Candle TS':>15} | {'OI':>10} | {'Delta1h':>10} | {'Z30d':>10}")
     log.info("-" * 65)
     for idx in sample_indices:
