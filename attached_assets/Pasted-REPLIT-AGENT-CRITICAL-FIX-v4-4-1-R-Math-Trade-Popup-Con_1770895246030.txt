@@ -1,0 +1,127 @@
+REPLIT AGENT — CRITICAL FIX (v4.4.1) “R Math + Trade Popup Consistency”
+
+Problem:
+Trade Detail popup shows inconsistent numbers:
+- Exit price doesn’t match GrossR/NetR math
+- CostR shows N/A
+- Bars Held shows N/A
+This breaks lane budgets, quota, and performance stats.
+
+GOAL:
+Make trade PnL math deterministic and auditable:
+GrossR and NetR MUST match entry/exit prices using ORIGINAL risk at entry.
+
+========================================================
+A) GPU TRAINER — LOCK ORIGINAL RISK (DO NOT RECALC ON TRAIL)
+========================================================
+1) When opening a position, store:
+- initial_sl (the SL at entry)
+- original_risk_abs = abs(entry_price - initial_sl)
+- original_risk_r = 1.0 by definition (R units)
+- entry_bar_index (or entry_ts)
+
+2) When updating SL (breakeven/trail):
+- DO NOT change original_risk_abs
+- DO NOT recompute R denominator
+
+3) On CLOSE:
+Compute realized GrossR from prices ONLY:
+- For LONG: gross_r = (exit_price - entry_price) / original_risk_abs
+- For SHORT: gross_r = (entry_price - exit_price) / original_risk_abs
+
+Compute cost_r using existing cost model (or 0 in paper if that’s current design):
+- net_r = gross_r - cost_r
+
+Store and send BOTH:
+- gross_r, net_r, cost_r
+- gross_usd, net_usd, cost_usd (see section C)
+
+========================================================
+B) INTRABAR EXIT — ENSURE EXIT_PRICE IS THE ACTUAL TRIGGER
+========================================================
+When resolving TP/SL via candle high/low:
+- If TP hit: exit_price = TP level (not candle close)
+- If SL hit: exit_price = SL level (not candle close)
+- If both hit same bar: exit SL (worst-case), exit_price = SL level
+
+This exit_price must be the SAME exit_price:
+- used for gross_r calculation
+- sent to dashboard
+- shown in popup
+
+========================================================
+C) USD PROFIT — REMOVE N/A FOREVER
+========================================================
+Add “account sizing” fields to each trade update payload:
+Required:
+- risk_usd (the $ risk allocated for that trade, ex: 10 or 25)
+- gross_usd = gross_r * risk_usd
+- cost_usd = cost_r * risk_usd
+- net_usd = net_r * risk_usd
+
+If paper mode or unknown, send 0.0 — NOT null.
+UI should never render N/A for:
+- CostR, Cost$, NetPnL$, Risk$Used, BarsHeld
+
+========================================================
+D) BARS HELD — ALWAYS FILLED
+========================================================
+Compute bars_held:
+- If you have bar indexes: exit_bar_index - entry_bar_index
+- Else: floor((exit_ts - entry_ts) / timeframe_seconds)
+
+Send bars_held with close payload and store in DB.
+
+========================================================
+E) DASHBOARD — TRADE DETAIL POPUP FIX
+========================================================
+1) Trade Detail modal must display:
+- Entry, Exit, SL, TP
+- initial_sl (optional but recommended)
+- bars_held (required)
+- gross_r, cost_r, net_r
+- gross_usd, cost_usd, net_usd
+- MFE_r, MAE_r (already present)
+- exit_reason, trail_updates, breakeven_moved
+
+2) Add a validation line in popup (small text):
+“PnL check: (exit-entry)/orig_risk = X.XXR”
+This should match gross_r within 0.01R.
+
+========================================================
+F) ADD HARD ASSERT / WARNING (NON-BREAKING)
+========================================================
+On every close, log:
+
+[R_CHECK]
+symbol=...
+side=...
+entry=...
+exit=...
+initial_sl=...
+orig_risk_abs=...
+gross_r_calc=...
+gross_r_stored=...
+cost_r=...
+net_r=...
+
+If abs(gross_r_calc - gross_r_stored) > 0.01:
+log WARNING + include full payload dump.
+
+========================================================
+G) TEST (MUST PASS)
+========================================================
+Create a unit/integration test that simulates:
+- LONG entry 65000, initial_sl 64000, tp 67000
+Case 1: exit at 65450 => gross_r = 0.45R
+Case 2: TP hit intrabar => exit_price=67000 => gross_r=2.0R
+Case 3: both hit same bar => exit_price=SL => gross_r=-1.0R
+
+Verify:
+- popup shows same exit_price
+- gross_r matches math
+- cost fields show 0.0 not N/A
+- bars_held not N/A
+
+DELIVERABLE:
+PR with v4.4.1 fixes + tests + no more N/A + correct PnL math.
