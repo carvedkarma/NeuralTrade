@@ -192,10 +192,12 @@ class PortfolioManager:
         if symbol not in self.open_positions:
             return
         pos = self.open_positions.pop(symbol)
+        initial_sl = pos.original_sl if pos.original_sl is not None else pos.sl_price
+        original_risk_abs = abs(pos.entry_price - initial_sl)
         if pos.is_long:
-            gross_r = (exit_price - pos.entry_price) / (pos.entry_price - pos.sl_price) if pos.entry_price != pos.sl_price else 0
+            gross_r = (exit_price - pos.entry_price) / original_risk_abs if original_risk_abs > 0 else 0
         else:
-            gross_r = (pos.entry_price - exit_price) / (pos.sl_price - pos.entry_price) if pos.sl_price != pos.entry_price else 0
+            gross_r = (pos.entry_price - exit_price) / original_risk_abs if original_risk_abs > 0 else 0
 
         record = TradeRecord(
             symbol=symbol, side=pos.side,

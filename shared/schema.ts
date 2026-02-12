@@ -1199,6 +1199,7 @@ export const liveTradeRecords = pgTable("live_trade_records", {
   exitPrice: real("exit_price"),
   stopLoss: real("stop_loss"),
   takeProfit: real("take_profit"),
+  initialSl: real("initial_sl"),
   sizePct: real("size_pct"),
   pEnter: real("p_enter"),
   costsBps: real("costs_bps"),

@@ -571,21 +571,54 @@ class LiveRunner:
         """Callback when portfolio closes a position — push trade update to dashboard."""
         from portfolio import Position as _Pos
 
+        initial_sl = pos.original_sl if pos.original_sl is not None else pos.sl_price
+        original_risk_abs = abs(pos.entry_price - initial_sl)
+
+        if pos.is_long:
+            gross_r_calc = (exit_price - pos.entry_price) / original_risk_abs if original_risk_abs > 0 else 0
+        else:
+            gross_r_calc = (pos.entry_price - exit_price) / original_risk_abs if original_risk_abs > 0 else 0
+
+        if abs(gross_r_calc - gross_r) > 0.01:
+            log.warning(f"[R_CHECK] MISMATCH sym={pos.symbol} side={pos.side} "
+                        f"entry={pos.entry_price} exit={exit_price} initial_sl={initial_sl} "
+                        f"orig_risk_abs={original_risk_abs:.4f} "
+                        f"gross_r_calc={gross_r_calc:.6f} gross_r_stored={gross_r:.6f}")
+            gross_r = gross_r_calc
+
         cost_bps = COST_BPS
-        cost_r = (cost_bps / 10000) * 2 / (abs(pos.entry_price - pos.sl_price) / pos.entry_price) if pos.entry_price != pos.sl_price else 0
+        cost_r = (cost_bps / 10000) * 2 / (original_risk_abs / pos.entry_price) if original_risk_abs > 0 else 0.0
         net_r = gross_r - cost_r
         sized_r = net_r * pos.size_mult
+
+        log.info(f"[R_CHECK] sym={pos.symbol} side={pos.side} entry={pos.entry_price:.2f} "
+                 f"exit={exit_price:.2f} initial_sl={initial_sl:.2f} orig_risk_abs={original_risk_abs:.4f} "
+                 f"gross_r_calc={gross_r_calc:.6f} gross_r_stored={gross_r:.6f} "
+                 f"cost_r={cost_r:.6f} net_r={net_r:.6f}")
 
         check = abs(net_r - (gross_r - cost_r))
         if check > 1e-6:
             log.error(f"[NET_CHECK] INVARIANT VIOLATED: net_r={net_r:.6f} != gross_r={gross_r:.6f} - cost_r={cost_r:.6f} (diff={check:.8f})")
-        else:
-            log.debug(f"[NET_CHECK] net_r={net_r:.6f} == gross_r={gross_r:.6f} - cost_r={cost_r:.6f} (tolerance OK)")
 
         if hasattr(self, 'verifier') and self.verifier:
             vf = self.verifier
             fs = vf.verify_net_r(vf.stats.total_cycles, gross_r, cost_r, net_r)
             vf.add_failures(fs)
+
+        risk_usd = 0.0
+        try:
+            import requests as _req
+            money_resp = _req.get(f"{self.replit_url.rstrip('/')}/api/money-config", timeout=5)
+            if money_resp.status_code == 200:
+                mc = money_resp.json()
+                equity = mc.get('account_equity_usd', 1500)
+                risk_pct = mc.get('risk_per_trade_pct', 1.0)
+                risk_usd = equity * (risk_pct / 100) * pos.size_mult
+        except Exception:
+            pass
+        gross_usd = round(gross_r * risk_usd, 2)
+        cost_usd = round(cost_r * risk_usd, 2)
+        net_usd = round(net_r * risk_usd, 2)
 
         exit_reason = outcome
         if outcome == "TIME_EXIT":
@@ -596,6 +629,10 @@ class LiveRunner:
         mae = tm_state['max_adverse_r'] if tm_state else None
         be_moved = tm_state['breakeven_moved'] if tm_state else pos.breakeven_moved
         bars_held = self.cycle_count - pos.bar_index if pos.bar_index > 0 else None
+        if bars_held is None and pos.entry_time > 0:
+            bars_held = max(1, int((time.time() - pos.entry_time) / (15 * 60)))
+        if bars_held is None:
+            bars_held = 0
         is_time_exit = outcome == "TIME_EXIT"
 
         self.trade_manager.clear_position(pos.symbol)
@@ -608,12 +645,18 @@ class LiveRunner:
                 gross_r=gross_r,
                 net_r=net_r,
                 sized_r=sized_r,
+                cost_r=cost_r,
                 exit_reason=exit_reason,
                 max_favorable_r=mfe,
                 max_adverse_r=mae,
                 time_exit=is_time_exit,
                 breakeven_moved=be_moved,
                 bars_held=bars_held,
+                initial_sl=initial_sl,
+                risk_usd=risk_usd,
+                gross_usd=gross_usd,
+                cost_usd=cost_usd,
+                net_usd=net_usd,
             )
         except Exception as e:
             log.warning(f"Failed to update trade record {pos.dashboard_trade_id}: {e}")
@@ -666,6 +709,7 @@ class LiveRunner:
             "entry_price": entry_price,
             "stop_loss": sl_price,
             "take_profit": tp_price,
+            "initial_sl": sl_price,
             "p_enter": p_enter,
             "size_pct": size_pct,
             "status": "open",
@@ -683,23 +727,37 @@ class LiveRunner:
 
     def _update_trade_record(self, trade_id: int, exit_price: float,
                              outcome: str, gross_r: float, net_r: float, sized_r: float,
+                             cost_r: float = 0.0,
                              exit_reason: Optional[str] = None,
                              max_favorable_r: Optional[float] = None,
                              max_adverse_r: Optional[float] = None,
                              time_exit: Optional[bool] = None,
                              breakeven_moved: Optional[bool] = None,
-                             bars_held: Optional[int] = None):
+                             bars_held: Optional[int] = None,
+                             initial_sl: Optional[float] = None,
+                             risk_usd: float = 0.0,
+                             gross_usd: float = 0.0,
+                             cost_usd: float = 0.0,
+                             net_usd: float = 0.0):
         url = f"{self.replit_url.rstrip('/')}/api/live/trade/{trade_id}"
         payload = {
             "exit_time": int(time.time() * 1000),
             "exit_price": exit_price,
             "outcome": outcome,
-            "gross_r": gross_r,
-            "net_r": net_r,
-            "sized_r": sized_r,
+            "gross_r": round(gross_r, 6),
+            "net_r": round(net_r, 6),
+            "sized_r": round(sized_r, 6),
+            "cost_r": round(cost_r, 6),
             "status": "closed",
             "exit_reason": exit_reason or outcome,
+            "bars_held": bars_held if bars_held is not None else 0,
+            "risk_usd_used": round(risk_usd, 2),
+            "pnl_usd_gross": round(gross_usd, 2),
+            "pnl_usd_cost": round(cost_usd, 2),
+            "pnl_usd": round(net_usd, 2),
         }
+        if initial_sl is not None:
+            payload["initial_sl"] = round(initial_sl, 6)
         if max_favorable_r is not None:
             payload["max_favorable_r"] = round(max_favorable_r, 4)
         if max_adverse_r is not None:
@@ -708,8 +766,6 @@ class LiveRunner:
             payload["time_exit"] = time_exit
         if breakeven_moved is not None:
             payload["breakeven_moved"] = breakeven_moved
-        if bars_held is not None:
-            payload["bars_held"] = bars_held
         _retry_request("PATCH", url, json=payload)
 
     def _update_trade_sl(self, trade_id: int, new_sl: float):
