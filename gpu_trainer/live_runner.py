@@ -573,6 +573,17 @@ class LiveRunner:
         net_r = gross_r - cost_r
         sized_r = net_r * pos.size_mult
 
+        check = abs(net_r - (gross_r - cost_r))
+        if check > 1e-6:
+            log.error(f"[NET_CHECK] INVARIANT VIOLATED: net_r={net_r:.6f} != gross_r={gross_r:.6f} - cost_r={cost_r:.6f} (diff={check:.8f})")
+        else:
+            log.debug(f"[NET_CHECK] net_r={net_r:.6f} == gross_r={gross_r:.6f} - cost_r={cost_r:.6f} (tolerance OK)")
+
+        if hasattr(self, 'verifier') and self.verifier:
+            vf = self.verifier
+            fs = vf.verify_net_r(vf.stats.total_cycles, gross_r, cost_r, net_r)
+            vf.add_failures(fs)
+
         exit_reason = outcome
         if outcome == "TIME_EXIT":
             exit_reason = f"SCALP_TIME_STOP ({pos.horizon} bars)"
@@ -622,6 +633,8 @@ class LiveRunner:
             "hold_reason": li.get('hold_reason'),
             "quota_step": li.get('quota_step'),
         }
+        payload_keys = [k for k, v in payload.items() if v is not None]
+        log.debug(f"[CYCLE_PAYLOAD] sym={symbol} fields_present={payload_keys}")
         _retry_request("POST", url, json=payload)
 
     def _push_trade_record(self, symbol: str, side: str, entry_price: float,
@@ -733,9 +746,14 @@ class LiveRunner:
             self._run_dry()
             return
 
+        self._should_stop = False
         try:
-            while True:
+            while not self._should_stop:
                 self._run_cycle()
+
+                if self._should_stop:
+                    log.info("Verification cycle limit reached — exiting run loop.")
+                    break
 
                 if hasattr(self, 'learning_manager') and self.learning_manager:
                     try:
@@ -919,6 +937,11 @@ class LiveRunner:
         flow_size_mult = flow_config["size_mult"]
         flow_thr_val = self._get_percentile(symbol, flow_pct)
         flow_thr = flow_thr_val if flow_thr_val is not None else 0.75
+
+        flow_budget_used = LANE_BUDGET["FLOW"] - self._get_lane_budget_remaining(symbol, "FLOW")
+        log.info(f"[QUOTA] sym={symbol} trades_today={flow_budget_used:.2f}R_used "
+                 f"target_tpd=3 step={quota_step} pressure={quota_step} "
+                 f"flow_pct={flow_pct} flow_size_mult={flow_size_mult:.2f}")
 
         result_base = {
             'htf_score': htf_score,
@@ -1190,11 +1213,41 @@ class LiveRunner:
         )
 
         lane_selected = lane_result['lane_selected']
+
+        if hasattr(self, 'verifier') and self.verifier:
+            vf = self.verifier
+            vf.stats.total_cycles += 1
+            cycle_n = vf.stats.total_cycles
+            fs = vf.verify_lane_routing(cycle_n, lane_result, p_enter, htf_score, htf)
+            vf.add_failures(fs)
+            payload_for_check = {
+                'lane_selected': lane_result.get('lane_selected'),
+                'htf_score': lane_result.get('htf_score'),
+                'hold_reason': lane_result.get('hold_reason'),
+                'quota_step': lane_result.get('quota_step'),
+                'core_thr': lane_result.get('core_thr'),
+                'flow_thr': lane_result.get('flow_thr'),
+                'scalp_thr': lane_result.get('scalp_thr'),
+                'lane_size_mult': lane_result.get('lane_size_mult'),
+                'lane_budget_remaining_r': lane_result.get('lane_budget_remaining_r'),
+            }
+            fs2 = vf.verify_payload(cycle_n, payload_for_check)
+            vf.add_failures(fs2)
+            qs = lane_result.get('quota_step')
+            if qs is not None:
+                vf.record_quota_step(qs)
+            if cycle_n >= vf.max_cycles:
+                log.info(f"[VERIFY] Reached {vf.max_cycles} cycles -- stopping for report generation")
+                self._should_stop = True
+
         if lane_selected == 'HOLD':
             decision = "HOLD"
             hold_reason = lane_result.get('hold_reason', 'NO_LANE_MATCH')
             reasons.append(hold_reason)
-            log.info(f"  {symbol}: HOLD — {hold_reason}")
+            log.info(f"[LANE_DECISION] sym={symbol} lane=HOLD p={p_enter:.4f} "
+                     f"htf_score={htf_score} core_thr={lane_result.get('core_thr','?')} "
+                     f"flow_thr={lane_result.get('flow_thr','?')} scalp_thr={lane_result.get('scalp_thr','?')} "
+                     f"reason={hold_reason}")
 
             sym_hist = self.p_enter_history.get(symbol, [])
             if len(sym_hist) >= 20:
@@ -1218,8 +1271,10 @@ class LiveRunner:
 
         decision = f"ENTER {lane_selected}"
         reasons.append(f"p_enter={p_enter:.1%} side={side} lane={lane_selected}")
-        log.info(f"  LANE DECISION: ENTER {lane_selected} | "
-                 f"thr={lane_result['threshold_used']:.4f} size_mult={lane_result['lane_size_mult']:.2f} "
+        log.info(f"[LANE_DECISION] sym={symbol} lane={lane_selected} p={p_enter:.4f} "
+                 f"htf_score={htf_score} core_thr={lane_result.get('core_thr','?')} "
+                 f"flow_thr={lane_result.get('flow_thr','?')} scalp_thr={lane_result.get('scalp_thr','?')} "
+                 f"reason=ENTER size_mult={lane_result['lane_size_mult']:.2f} "
                  f"horizon={lane_result['lane_horizon']}")
 
         try:

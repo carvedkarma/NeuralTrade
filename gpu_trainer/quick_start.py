@@ -2149,6 +2149,10 @@ Examples:
                         help="Number of 15m candles to fetch per symbol (default: 800, ~50 H4 bars)")
     parser.add_argument("--direct-htf", action="store_true", default=False,
                         help="Fetch 1H/4H candles directly from exchange instead of resampling")
+    parser.add_argument("--verify-system", action="store_true", default=False,
+                        help="Run system verification mode: N cycles of assertions on lane routing, CROSS, quota, payloads")
+    parser.add_argument("--cycles", type=int, default=30,
+                        help="Number of cycles for --verify-system mode (default: 30)")
 
     args = parser.parse_args()
 
@@ -2266,7 +2270,27 @@ Examples:
             direct_htf=args.direct_htf,
         )
         runner.learning_manager = learning_mgr
-        runner.run()
+
+        if args.verify_system:
+            from verify_system import SystemVerifier, run_static_audit
+            verifier = SystemVerifier(max_cycles=args.cycles)
+            runner.verifier = verifier
+            portfolio.verifier = verifier
+            print(f"\n  VERIFICATION MODE: Running {args.cycles} cycles with assertions")
+            print(f"  Running static code audit first...\n")
+            static_report = run_static_audit()
+            print(static_report)
+            runner.run()
+            report = verifier.generate_report()
+            full_report = static_report + "\n\n" + report
+            with open("verify_report.md", 'w') as f:
+                f.write(full_report)
+            print(f"\n{'='*60}")
+            print(report)
+            print(f"{'='*60}")
+            print(f"\nFull report saved to verify_report.md")
+        else:
+            runner.run()
         return
 
     if args.regime_eval:

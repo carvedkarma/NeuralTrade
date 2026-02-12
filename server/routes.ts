@@ -4014,6 +4014,11 @@ export async function registerRoutes(
         sizedR: t.sized_r ?? null,
         status: t.status || "open",
         reasons: t.reasons ?? [],
+        lane: t.lane ?? null,
+        htfScore: t.htf_score ?? null,
+        laneThresholdUsed: t.lane_threshold_used ?? null,
+        laneSizeMult: t.lane_size_mult ?? null,
+        laneHorizon: t.lane_horizon ?? null,
         createdAt: Date.now(),
       });
       console.log(`[Live Trade] Recorded ${t.side} ${t.symbol} @ ${t.entry_price} (id=${record.id})`);
@@ -4036,6 +4041,7 @@ export async function registerRoutes(
         netR: update.net_r ?? undefined,
         sizedR: update.sized_r ?? undefined,
         status: update.status ?? undefined,
+        exitReason: update.exit_reason ?? undefined,
       });
       console.log(`[Live Trade] Updated trade ${id}: ${update.outcome ?? update.status}`);
       res.json({ success: true });
@@ -4152,6 +4158,15 @@ export async function registerRoutes(
         thresholdUsed: c.threshold_used ?? null,
         decision: c.decision,
         reasons: c.reasons ?? [],
+        laneSelected: c.lane_selected ?? null,
+        htfScore: c.htf_score ?? null,
+        coreThr: c.core_thr ?? null,
+        flowThr: c.flow_thr ?? null,
+        scalpThr: c.scalp_thr ?? null,
+        laneSizeMult: c.lane_size_mult ?? null,
+        laneBudgetRemainingR: c.lane_budget_remaining_r ?? null,
+        holdReason: c.hold_reason ?? null,
+        quotaStep: c.quota_step ?? null,
         createdAt: Date.now(),
       });
       res.json({ success: true, id: record.id });
@@ -4198,6 +4213,93 @@ export async function registerRoutes(
     } catch (error) {
       console.error("[Live Summary] Error:", error);
       res.status(500).json({ error: "Failed to get summary" });
+    }
+  });
+
+  app.get("/api/debug/latest-cycle", async (req, res) => {
+    try {
+      const symbol = req.query.symbol as string | undefined;
+      const logs = await storage.getLiveCycleLogs(symbol, 1);
+      if (logs.length === 0) {
+        return res.json({ found: false, message: "No cycle logs yet" });
+      }
+      const latest = logs[0];
+      const laneFields = {
+        lane_selected: latest.laneSelected,
+        htf_score: latest.htfScore,
+        core_thr: latest.coreThr,
+        flow_thr: latest.flowThr,
+        scalp_thr: latest.scalpThr,
+        lane_size_mult: latest.laneSizeMult,
+        lane_budget_remaining_r: latest.laneBudgetRemainingR,
+        hold_reason: latest.holdReason,
+        quota_step: latest.quotaStep,
+      };
+      const populatedFields = Object.entries(laneFields).filter(([, v]) => v !== null && v !== undefined);
+      const missingFields = Object.entries(laneFields).filter(([, v]) => v === null || v === undefined).map(([k]) => k);
+      res.json({
+        found: true,
+        id: latest.id,
+        symbol: latest.symbol,
+        decision: latest.decision,
+        p_enter: latest.pEnter,
+        lane_fields: laneFields,
+        populated_count: populatedFields.length,
+        missing_fields: missingFields,
+        is_hold: latest.decision === "HOLD" || latest.decision === "COOLDOWN" || latest.decision === "WARMUP",
+        timestamp: latest.createdAt,
+      });
+    } catch (error) {
+      console.error("[Debug Latest Cycle] Error:", error);
+      res.status(500).json({ error: "Failed to get latest cycle" });
+    }
+  });
+
+  app.get("/api/debug/verify-db", async (req, res) => {
+    try {
+      const cycleLogs = await storage.getLiveCycleLogs(undefined, 50);
+      const trades = await storage.getLiveTradeRecords(50);
+
+      const cycleChecks = {
+        total: cycleLogs.length,
+        with_lane_selected: cycleLogs.filter(c => c.laneSelected !== null).length,
+        with_htf_score: cycleLogs.filter(c => c.htfScore !== null).length,
+        with_quota_step: cycleLogs.filter(c => c.quotaStep !== null).length,
+        with_core_thr: cycleLogs.filter(c => c.coreThr !== null).length,
+        with_flow_thr: cycleLogs.filter(c => c.flowThr !== null).length,
+        with_scalp_thr: cycleLogs.filter(c => c.scalpThr !== null).length,
+        with_hold_reason: cycleLogs.filter(c => c.holdReason !== null).length,
+      };
+
+      const tradeChecks = {
+        total: trades.length,
+        with_lane: trades.filter((t: any) => t.lane !== null && t.lane !== undefined).length,
+        with_htf_score: trades.filter((t: any) => t.htfScore !== null && t.htfScore !== undefined).length,
+        with_exit_reason: trades.filter((t: any) => t.exitReason !== null && t.exitReason !== undefined).length,
+        with_lane_size_mult: trades.filter((t: any) => t.laneSizeMult !== null && t.laneSizeMult !== undefined).length,
+        with_lane_threshold: trades.filter((t: any) => t.laneThresholdUsed !== null && t.laneThresholdUsed !== undefined).length,
+      };
+
+      const laneDistribution: Record<string, number> = {};
+      cycleLogs.forEach(c => {
+        const lane = c.laneSelected || "null";
+        laneDistribution[lane] = (laneDistribution[lane] || 0) + 1;
+      });
+
+      const allCycleFieldsPresent = cycleChecks.with_lane_selected >= cycleChecks.total * 0.5;
+
+      res.json({
+        status: allCycleFieldsPresent ? "OK" : "WARNING",
+        cycle_log_checks: cycleChecks,
+        trade_checks: tradeChecks,
+        lane_distribution: laneDistribution,
+        message: allCycleFieldsPresent
+          ? "Lane fields are being populated in cycle logs"
+          : "Warning: Many cycle logs are missing lane_selected field",
+      });
+    } catch (error) {
+      console.error("[Debug Verify DB] Error:", error);
+      res.status(500).json({ error: "Failed to verify DB" });
     }
   });
 

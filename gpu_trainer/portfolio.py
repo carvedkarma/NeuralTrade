@@ -90,6 +90,7 @@ class PortfolioManager:
         self.correlated_pairs = correlated_pairs or [("BTCUSDT", "ETHUSDT")]
 
         self.on_close_callback: Optional[callable] = None
+        self.verifier = None
         self.open_positions: Dict[str, Position] = {}
         self.last_trade_bar: Dict[str, int] = {}
         self.trade_history: List[TradeRecord] = []
@@ -148,7 +149,20 @@ class PortfolioManager:
 
         blocked_by = self._correlated_block(symbol, side)
         if blocked_by:
+            log.info(f"[CROSS_BLOCK] sym={symbol} blocked_with={blocked_by} dir={side} "
+                     f"reason=same_direction_correlated_exposure")
+            if self.verifier:
+                fs = self.verifier.verify_cross_blocking(
+                    self.verifier.stats.total_cycles, symbol, side,
+                    True, blocked_by, self.open_positions)
+                self.verifier.add_failures(fs)
             return False, f"correlated pair {blocked_by} already has same-direction ({side}) position"
+
+        if self.verifier:
+            fs = self.verifier.verify_cross_blocking(
+                self.verifier.stats.total_cycles, symbol, side,
+                False, None, self.open_positions)
+            self.verifier.add_failures(fs)
 
         return True, "OK"
 
