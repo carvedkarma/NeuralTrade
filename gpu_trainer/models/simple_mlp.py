@@ -548,6 +548,7 @@ class EnhancedMultiHeadMLP_Config:
     enable_sigma_head: bool = True
     enable_enter_head: bool = False  # Binary entry quality head
     enable_value_head: bool = False  # E[net R] regression head
+    enable_edge_head: bool = False   # Edge regression head (net MFE - MAE proxy)
 
     n_symbols: int = 1  # Number of distinct symbols for multi-asset embedding
     symbol_embed_dim: int = 4  # Embedding dimension per symbol
@@ -700,6 +701,18 @@ class EnhancedMultiHeadMLP(nn.Module):
         else:
             self.value_head = None
         
+        # === HEAD 8: Edge Head (net MFE - MAE quality regression) ===
+        if config.enable_edge_head:
+            self.edge_head = nn.Sequential(
+                nn.Linear(self.trunk_dim, 32),
+                nn.LayerNorm(32),
+                nn.GELU(),
+                nn.Dropout(0.2),
+                nn.Linear(32, 1)
+            )
+        else:
+            self.edge_head = None
+        
         self.n_candle_steps = config.n_candle_steps
         self._init_weights()
         
@@ -711,6 +724,7 @@ class EnhancedMultiHeadMLP(nn.Module):
             'enable_sigma': config.enable_sigma_head,
             'enable_enter': config.enable_enter_head,
             'enable_value': config.enable_value_head,
+            'enable_edge': config.enable_edge_head,
         }
     
     def _init_weights(self):
@@ -801,6 +815,14 @@ class EnhancedMultiHeadMLP(nn.Module):
         else:
             value_logits = None
         
+        # === Edge Head (net MFE - MAE quality) ===
+        edge_head = getattr(self, 'edge_head', None)
+        if edge_head is not None:
+            edge_logits = edge_head(features)
+            edge_logits = torch.clamp(edge_logits, -5.0, 5.0)
+        else:
+            edge_logits = None
+        
         # Placeholders for unused heads
         entry_offset = torch.zeros(batch_size, 1, device=device)
         sl_distance = torch.ones(batch_size, 1, device=device) * 0.01
@@ -821,6 +843,7 @@ class EnhancedMultiHeadMLP(nn.Module):
             acceleration=acceleration,
             enter_logits=enter_logits,
             value_logits=value_logits,
+            edge_logits=edge_logits,
         )
     
     def parameters_count(self) -> int:

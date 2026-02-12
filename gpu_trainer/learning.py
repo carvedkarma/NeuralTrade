@@ -37,7 +37,7 @@ class LearningConfig:
     retrain_interval_hours: int = 24
     min_new_bars: int = 96
     training_epochs: int = 300
-    min_prauc_threshold: float = 0.35
+    min_prauc_threshold: float = 0.42
     min_pf_net: float = 1.05
     min_profitable_regimes: int = 3
     min_tpd: float = 0.3

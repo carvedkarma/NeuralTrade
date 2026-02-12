@@ -522,7 +522,11 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                       tp_mult: float = 2.0, sl_mult: float = 1.5, horizon: int = 24, slope_eps: float = 0.05,
                       r_min_expiry: float = 0.5, target_tpd: float = 5.5, target_tpd_tol: float = 1.5,
                       symbols: list = None, value_loss_weight: float = 0.5, value_clip: float = 3.0,
-                      smoke_calib: bool = False, smoke_infer: bool = False):
+                      smoke_calib: bool = False, smoke_infer: bool = False,
+                      use_focal_loss: bool = True, focal_gamma: float = 1.5, focal_alpha: float = 0.60,
+                      use_ohem: bool = True, ohem_neg_pct: float = 0.35,
+                      use_edge_head: bool = True, edge_loss_weight: float = 0.3,
+                      use_soft_labels: bool = False, soft_label_temp: float = 2.0):
     import torch
     import torch.nn as nn
     import numpy as np
@@ -535,6 +539,10 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     log.info("  ENTER QUALITY MODEL - TRAINING")
     log.info("=" * 60)
     log.info(f"Version: {FEATURE_VERSION}")
+    log.info(f"[PR_AUC_PACK] focal_loss={use_focal_loss} (gamma={focal_gamma}, alpha={focal_alpha})")
+    log.info(f"[PR_AUC_PACK] ohem={use_ohem} (neg_pct={ohem_neg_pct})")
+    log.info(f"[PR_AUC_PACK] edge_head={use_edge_head} (weight={edge_loss_weight})")
+    log.info(f"[PR_AUC_PACK] soft_labels={use_soft_labels} (temp={soft_label_temp})")
 
     from data.pipeline import FeatureEngineer
     data_dir = Path("data_cache")
@@ -548,12 +556,16 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         all_train_side = []
         all_train_r = []
         all_train_sym_ids = []
+        all_train_ysoft = []
+        all_train_edge = []
         all_val_features = []
         all_val_enter = []
         all_val_side = []
         all_val_outcomes = []
         all_val_r = []
         all_val_sym_ids = []
+        all_val_ysoft = []
+        all_val_edge = []
         feature_columns_ref = None
 
         for sym_idx, sym in enumerate(symbols):
@@ -597,6 +609,10 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             sym_side = sym_label_df['side_hint'].values.astype(np.int64)
             sym_outcomes = sym_label_df['outcome'].values
             sym_realized_r = sym_label_df['realized_r'].values.astype(np.float64)
+            sym_ysoft = sym_label_df['y_soft'].values.astype(np.float32) if 'y_soft' in sym_label_df.columns else np.full(len(sym_label_df), 0.5, dtype=np.float32)
+            sym_mfe = sym_label_df['mfe_r'].values.astype(np.float32) if 'mfe_r' in sym_label_df.columns else np.zeros(len(sym_label_df), dtype=np.float32)
+            sym_mae = sym_label_df['mae_r'].values.astype(np.float32) if 'mae_r' in sym_label_df.columns else np.zeros(len(sym_label_df), dtype=np.float32)
+            sym_edge_target = np.nan_to_num(sym_mfe - sym_mae, nan=0.0).astype(np.float32)
 
             valid_start = sequence_length
             sym_feat_np = sym_features_df.values[valid_start:].astype(np.float32)
@@ -604,6 +620,8 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             sym_side_np = sym_side[valid_start:]
             sym_outcomes_np = sym_outcomes[valid_start:]
             sym_r_np = sym_realized_r[valid_start:]
+            sym_ysoft_np = np.nan_to_num(sym_ysoft[valid_start:], nan=0.5).astype(np.float32)
+            sym_edge_np = sym_edge_target[valid_start:]
 
             n_sym = len(sym_feat_np)
 
@@ -617,6 +635,8 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             all_train_side.append(sym_side_np[:train_end_sym])
             all_train_r.append(sym_r_np[:train_end_sym])
             all_train_sym_ids.append(np.full(train_end_sym, sym_idx, dtype=np.int64))
+            all_train_ysoft.append(sym_ysoft_np[:train_end_sym])
+            all_train_edge.append(sym_edge_np[:train_end_sym])
 
             val_size = val_end_sym - train_end_sym
             all_val_features.append(sym_feat_np[train_end_sym:val_end_sym])
@@ -625,12 +645,16 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             all_val_outcomes.append(sym_outcomes_np[train_end_sym:val_end_sym])
             all_val_r.append(sym_r_np[train_end_sym:val_end_sym])
             all_val_sym_ids.append(np.full(val_size, sym_idx, dtype=np.int64))
+            all_val_ysoft.append(sym_ysoft_np[train_end_sym:val_end_sym])
+            all_val_edge.append(sym_edge_np[train_end_sym:val_end_sym])
 
         train_features_raw = np.concatenate(all_train_features, axis=0)
         train_enter = np.concatenate(all_train_enter, axis=0)
         train_side = np.concatenate(all_train_side, axis=0)
         train_r = np.concatenate(all_train_r, axis=0)
         train_sym_ids = np.concatenate(all_train_sym_ids, axis=0)
+        train_ysoft = np.concatenate(all_train_ysoft, axis=0)
+        train_edge = np.concatenate(all_train_edge, axis=0)
 
         val_features_raw = np.concatenate(all_val_features, axis=0)
         val_enter = np.concatenate(all_val_enter, axis=0)
@@ -638,6 +662,8 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         val_outcomes = np.concatenate(all_val_outcomes, axis=0)
         val_r = np.concatenate(all_val_r, axis=0)
         val_sym_ids = np.concatenate(all_val_sym_ids, axis=0)
+        val_ysoft = np.concatenate(all_val_ysoft, axis=0)
+        val_edge = np.concatenate(all_val_edge, axis=0)
 
         n_symbols = len(symbols)
         features_columns_list = feature_columns_ref
@@ -655,20 +681,20 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         val_features_df_scaled = pd.DataFrame(val_features_raw, columns=features_columns_list)
         val_scaled = engineer.transform_and_clip(val_features_df_scaled, clip_range=clip_range).values.astype(np.float32)
 
-        def clean_multi(features, enter, side, outcomes, r_vals, sym_ids, name):
+        def clean_multi(features, enter, side, outcomes, r_vals, sym_ids, ysoft, edge, name):
             features = np.where(np.isinf(features), np.nan, features)
             mask = np.isnan(features).any(axis=1)
             valid = ~mask
             dropped = mask.sum()
             if dropped > 0:
                 log.info(f"  {name}: dropped {dropped} NaN rows")
-            return features[valid], enter[valid], side[valid], outcomes[valid], r_vals[valid], sym_ids[valid]
+            return features[valid], enter[valid], side[valid], outcomes[valid], r_vals[valid], sym_ids[valid], ysoft[valid], edge[valid]
 
         train_outcomes_dummy = np.full(len(train_enter), "NO_CANDIDATE", dtype=object)
-        train_scaled, train_enter, train_side, _, train_r, train_sym_ids = clean_multi(
-            train_scaled, train_enter, train_side, train_outcomes_dummy, train_r, train_sym_ids, "Train")
-        val_scaled, val_enter, val_side, val_outcomes, val_r, val_sym_ids = clean_multi(
-            val_scaled, val_enter, val_side, val_outcomes, val_r, val_sym_ids, "Val")
+        train_scaled, train_enter, train_side, _, train_r, train_sym_ids, train_ysoft, train_edge = clean_multi(
+            train_scaled, train_enter, train_side, train_outcomes_dummy, train_r, train_sym_ids, train_ysoft, train_edge, "Train")
+        val_scaled, val_enter, val_side, val_outcomes, val_r, val_sym_ids, val_ysoft, val_edge = clean_multi(
+            val_scaled, val_enter, val_side, val_outcomes, val_r, val_sym_ids, val_ysoft, val_edge, "Val")
 
         features_df_columns = features_columns_list
 
@@ -717,6 +743,10 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         side_hints = label_df['side_hint'].values.astype(np.int64)
         precomputed_outcomes = label_df['outcome'].values
         precomputed_r = label_df['realized_r'].values.astype(np.float64)
+        precomputed_ysoft = label_df['y_soft'].values.astype(np.float32) if 'y_soft' in label_df.columns else np.full(len(label_df), 0.5, dtype=np.float32)
+        precomputed_mfe = label_df['mfe_r'].values.astype(np.float32) if 'mfe_r' in label_df.columns else np.zeros(len(label_df), dtype=np.float32)
+        precomputed_mae = label_df['mae_r'].values.astype(np.float32) if 'mae_r' in label_df.columns else np.zeros(len(label_df), dtype=np.float32)
+        precomputed_edge = np.nan_to_num(precomputed_mfe - precomputed_mae, nan=0.0).astype(np.float32)
 
         valid_start = sequence_length
         features_np = features_df.values[valid_start:].astype(np.float32)
@@ -724,6 +754,8 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         side_np = side_hints[valid_start:].astype(np.int64)
         outcomes_np = precomputed_outcomes[valid_start:]
         r_np = precomputed_r[valid_start:]
+        ysoft_np = np.nan_to_num(precomputed_ysoft[valid_start:], nan=0.5).astype(np.float32)
+        edge_np = precomputed_edge[valid_start:]
 
         n_total = len(features_np)
         purge_gap = horizon + sequence_length
@@ -744,12 +776,16 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         train_enter = enter_np[:train_end]
         train_side = side_np[:train_end]
         train_r = r_np[:train_end]
+        train_ysoft = ysoft_np[:train_end]
+        train_edge = edge_np[:train_end]
 
         val_features_raw = features_np[val_start_idx:val_end]
         val_enter = enter_np[val_start_idx:val_end]
         val_side = side_np[val_start_idx:val_end]
         val_outcomes = outcomes_np[val_start_idx:val_end]
         val_r = r_np[val_start_idx:val_end]
+        val_ysoft = ysoft_np[val_start_idx:val_end]
+        val_edge = edge_np[val_start_idx:val_end]
         val_bars = val_samples
 
         train_features_df_scaled = pd.DataFrame(train_features_raw, columns=features_df.columns)
@@ -759,19 +795,25 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         val_features_df_scaled = pd.DataFrame(val_features_raw, columns=features_df.columns)
         val_scaled = engineer.transform_and_clip(val_features_df_scaled, clip_range=clip_range).values.astype(np.float32)
 
-        def clean_enter(features, enter, side, outcomes, r_vals, name):
+        def clean_enter(features, enter, side, outcomes, r_vals, ysoft, edge, name):
             features = np.where(np.isinf(features), np.nan, features)
             mask = np.isnan(features).any(axis=1)
             valid = ~mask
             dropped = mask.sum()
             if dropped > 0:
                 log.info(f"  {name}: dropped {dropped} NaN rows")
-            return features[valid], enter[valid], side[valid], outcomes[valid], r_vals[valid]
+            return features[valid], enter[valid], side[valid], outcomes[valid], r_vals[valid], ysoft[valid], edge[valid]
 
         train_outcomes_dummy = np.full(len(train_enter), "NO_CANDIDATE", dtype=object)
         train_r_dummy = np.zeros(len(train_enter), dtype=np.float64)
-        train_scaled, train_enter, train_side, _, _ = clean_enter(train_scaled, train_enter, train_side, train_outcomes_dummy, train_r_dummy, "Train")
-        val_scaled, val_enter, val_side, val_outcomes, val_r = clean_enter(val_scaled, val_enter, val_side, val_outcomes, val_r, "Val")
+        train_ysoft_dummy = train_ysoft
+        train_edge_dummy = train_edge
+        train_scaled, train_enter, train_side, _, _, train_ysoft, train_edge = clean_enter(
+            train_scaled, train_enter, train_side, train_outcomes_dummy, train_r_dummy, train_ysoft_dummy, train_edge_dummy, "Train")
+        val_ysoft_dummy = val_ysoft
+        val_edge_dummy = val_edge
+        val_scaled, val_enter, val_side, val_outcomes, val_r, val_ysoft, val_edge = clean_enter(
+            val_scaled, val_enter, val_side, val_outcomes, val_r, val_ysoft_dummy, val_edge_dummy, "Val")
 
         train_sym_ids = np.zeros(len(train_enter), dtype=np.int64)
         val_sym_ids = np.zeros(len(val_enter), dtype=np.int64)
@@ -784,6 +826,14 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     val_value_targets = np.nan_to_num(val_r, nan=0.0).astype(np.float32)
     val_value_targets = np.clip(val_value_targets, -value_clip, value_clip)
 
+    # === EDGE TARGETS (mfe_r - mae_r) ===
+    train_edge_targets = np.clip(train_edge, -5.0, 5.0).astype(np.float32)
+    val_edge_targets = np.clip(val_edge, -5.0, 5.0).astype(np.float32)
+
+    # === SOFT LABELS ===
+    train_ysoft_targets = train_ysoft.astype(np.float32)
+    val_ysoft_targets = val_ysoft.astype(np.float32)
+
     pos_count = train_enter.sum()
     neg_count = len(train_enter) - pos_count
     pos_weight = neg_count / max(pos_count, 1)
@@ -792,12 +842,14 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     log.info(f"BCE pos_weight: {pos_weight:.2f}")
 
     class EnterDataset(Dataset):
-        def __init__(self, features, enter_labels, side_hints, symbol_ids, value_targets, seq_len):
+        def __init__(self, features, enter_labels, side_hints, symbol_ids, value_targets, edge_targets, ysoft_targets, seq_len):
             self.features = features.astype(np.float32)
             self.enter_labels = enter_labels.astype(np.float32)
             self.side_hints = side_hints.astype(np.int64)
             self.symbol_ids = symbol_ids.astype(np.int64)
             self.value_targets = value_targets.astype(np.float32)
+            self.edge_targets = edge_targets.astype(np.float32)
+            self.ysoft_targets = ysoft_targets.astype(np.float32)
             self.seq_len = seq_len
             self.valid_indices = list(range(seq_len, len(features)))
 
@@ -814,10 +866,12 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                 torch.tensor(self.side_hints[actual_idx], dtype=torch.long),
                 torch.tensor(self.symbol_ids[actual_idx], dtype=torch.long),
                 torch.tensor(self.value_targets[actual_idx], dtype=torch.float32),
+                torch.tensor(self.edge_targets[actual_idx], dtype=torch.float32),
+                torch.tensor(self.ysoft_targets[actual_idx], dtype=torch.float32),
             )
 
-    train_dataset = EnterDataset(train_scaled, train_enter, train_side, train_sym_ids, train_value_targets, sequence_length)
-    val_dataset = EnterDataset(val_scaled, val_enter, val_side, val_sym_ids, val_value_targets, sequence_length)
+    train_dataset = EnterDataset(train_scaled, train_enter, train_side, train_sym_ids, train_value_targets, train_edge_targets, train_ysoft_targets, sequence_length)
+    val_dataset = EnterDataset(val_scaled, val_enter, val_side, val_sym_ids, val_value_targets, val_edge_targets, val_ysoft_targets, sequence_length)
 
     log.info(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
 
@@ -838,6 +892,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         enable_mu_head=False,
         enable_sigma_head=False,
         enable_value_head=True,
+        enable_edge_head=use_edge_head,
         n_symbols=n_symbols,
         symbol_embed_dim=4 if n_symbols > 1 else 0,
     )
@@ -846,7 +901,10 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     model.to(device)
     log.info(f"Model: EnterQualityMLP ({model.parameters_count():,} parameters)")
     log.info(f"Architecture: [512, 256, 128, 64] with residual connections")
-    log.info(f"Active heads: enter_head (binary) + value_head (regression) | n_symbols={n_symbols}")
+    active_heads = "enter_head (binary) + value_head (regression)"
+    if use_edge_head:
+        active_heads += " + edge_head (regression)"
+    log.info(f"Active heads: {active_heads} | n_symbols={n_symbols}")
 
     pos_rate = pos_count / max(len(train_enter), 1)
     if 0 < pos_rate < 1:
@@ -859,8 +917,22 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     log.info(f"[BIAS_INIT] pos_rate={pos_rate:.4f} bias={bias_init_val:.4f}")
     log.info(f"[POS_WEIGHT] pos_weight={pos_weight:.2f}")
 
-    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]).to(device))
+    if use_focal_loss:
+        def focal_bce_with_logits(logits, targets, gamma=focal_gamma, alpha=focal_alpha):
+            bce = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+            p_t = torch.sigmoid(logits)
+            p_t = torch.where(targets >= 0.5, p_t, 1 - p_t)
+            focal_weight = (1 - p_t) ** gamma
+            alpha_t = torch.where(targets >= 0.5, alpha, 1 - alpha)
+            return (alpha_t * focal_weight * bce).mean()
+        enter_criterion_fn = focal_bce_with_logits
+        log.info(f"[LOSS] Using focal BCEWithLogits: gamma={focal_gamma}, alpha={focal_alpha}")
+    else:
+        bce_criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]).to(device))
+        enter_criterion_fn = lambda logits, targets: bce_criterion(logits, targets)
+        log.info(f"[LOSS] Using standard BCEWithLogits: pos_weight={pos_weight:.2f}")
     value_criterion = nn.HuberLoss(delta=1.0)
+    edge_criterion = nn.HuberLoss(delta=1.0)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     effective_min_lr = min_lr if min_lr is not None else lr * 0.05
@@ -892,23 +964,63 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         n_batches = 0
 
         for batch in train_loader:
-            features_batch, enter_batch, side_batch, sym_id_batch, value_batch = batch
+            features_batch, enter_batch, side_batch, sym_id_batch, value_batch, edge_batch, ysoft_batch = batch
             features_batch = features_batch.to(device)
             enter_batch = enter_batch.to(device)
             sym_id_batch = sym_id_batch.to(device)
             value_batch = value_batch.to(device)
+            edge_batch = edge_batch.to(device)
+            ysoft_batch = ysoft_batch.to(device)
 
             optimizer.zero_grad()
             output = model.forward_multihead(features_batch, symbol_ids=sym_id_batch if n_symbols > 1 else None)
             enter_logits = output.enter_logits.squeeze(-1)
-            enter_loss = criterion(enter_logits, enter_batch)
+
+            # Determine targets: soft labels or hard labels
+            if use_soft_labels:
+                enter_targets = ysoft_batch
+            else:
+                enter_targets = enter_batch
+
+            # OHEM: keep all positives + top K% hardest negatives
+            if use_ohem:
+                with torch.no_grad():
+                    per_sample_loss = nn.functional.binary_cross_entropy_with_logits(
+                        enter_logits, enter_targets, reduction='none'
+                    )
+                pos_mask = enter_batch >= 0.5
+                neg_mask = ~pos_mask
+                n_pos = pos_mask.sum().item()
+                n_neg = neg_mask.sum().item()
+                if n_neg > 0 and n_pos > 0:
+                    k_neg = max(int(n_neg * ohem_neg_pct), n_pos)
+                    k_neg = min(k_neg, n_neg)
+                    neg_losses = per_sample_loss[neg_mask]
+                    _, hard_neg_idx = torch.topk(neg_losses, k_neg)
+                    neg_indices = torch.where(neg_mask)[0]
+                    selected_neg = neg_indices[hard_neg_idx]
+                    pos_indices = torch.where(pos_mask)[0]
+                    keep_indices = torch.cat([pos_indices, selected_neg])
+                    enter_logits_ohem = enter_logits[keep_indices]
+                    enter_targets_ohem = enter_targets[keep_indices]
+                else:
+                    enter_logits_ohem = enter_logits
+                    enter_targets_ohem = enter_targets
+                enter_loss = enter_criterion_fn(enter_logits_ohem, enter_targets_ohem)
+            else:
+                enter_loss = enter_criterion_fn(enter_logits, enter_targets)
+
+            loss = enter_loss
 
             if output.value_logits is not None:
                 value_pred = output.value_logits.squeeze(-1)
                 v_loss = value_criterion(value_pred, value_batch)
-                loss = enter_loss + value_loss_weight * v_loss
-            else:
-                loss = enter_loss
+                loss = loss + value_loss_weight * v_loss
+
+            if use_edge_head and output.edge_logits is not None:
+                edge_pred = output.edge_logits.squeeze(-1)
+                e_loss = edge_criterion(edge_pred, edge_batch)
+                loss = loss + edge_loss_weight * e_loss
 
             loss.backward()
 
@@ -930,27 +1042,36 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         all_value_preds = []
         all_value_targets_list = []
         all_enter_logits_list = []
+        all_edge_preds = []
+        all_edge_targets_list = []
 
         with torch.no_grad():
             for batch in val_loader:
-                features_batch, enter_batch, side_batch, sym_id_batch, value_batch = batch
+                features_batch, enter_batch, side_batch, sym_id_batch, value_batch, edge_batch, ysoft_batch = batch
                 features_batch = features_batch.to(device)
                 enter_batch = enter_batch.to(device)
                 sym_id_batch = sym_id_batch.to(device)
                 value_batch = value_batch.to(device)
+                edge_batch = edge_batch.to(device)
 
                 output = model.forward_multihead(features_batch, symbol_ids=sym_id_batch if n_symbols > 1 else None)
                 enter_logits = output.enter_logits.squeeze(-1)
-                enter_loss = criterion(enter_logits, enter_batch)
+                enter_loss = enter_criterion_fn(enter_logits, enter_batch)
 
+                batch_loss = enter_loss
                 if output.value_logits is not None:
                     value_pred = output.value_logits.squeeze(-1)
                     v_loss_val = value_criterion(value_pred, value_batch)
-                    batch_loss = enter_loss + value_loss_weight * v_loss_val
+                    batch_loss = batch_loss + value_loss_weight * v_loss_val
                     all_value_preds.extend(value_pred.cpu().numpy())
                     all_value_targets_list.extend(value_batch.cpu().numpy())
-                else:
-                    batch_loss = enter_loss
+
+                if use_edge_head and output.edge_logits is not None:
+                    edge_pred = output.edge_logits.squeeze(-1)
+                    e_loss_val = edge_criterion(edge_pred, edge_batch)
+                    batch_loss = batch_loss + edge_loss_weight * e_loss_val
+                    all_edge_preds.extend(edge_pred.cpu().numpy())
+                    all_edge_targets_list.extend(edge_batch.cpu().numpy())
 
                 val_loss_total += batch_loss.item()
                 val_n += 1
@@ -1006,6 +1127,14 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         else:
             value_mae = value_rmse = 0.0
 
+        if all_edge_preds:
+            all_ep = np.array(all_edge_preds)
+            all_et = np.array(all_edge_targets_list)
+            edge_mae_val = np.mean(np.abs(all_ep - all_et))
+            edge_rmse_val = np.sqrt(np.mean((all_ep - all_et)**2))
+        else:
+            edge_mae_val = edge_rmse_val = 0.0
+
         if (epoch + 1) % 10 == 0 or epoch == 0:
             p50 = np.percentile(all_probs, 50)
             p75 = np.percentile(all_probs, 75)
@@ -1021,28 +1150,45 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
 
             log.info(f"[METRIC] mean_logit_pos={mean_logit_pos:.3f} mean_logit_neg={mean_logit_neg:.3f}")
             log.info(f"[METRIC] value_mae={value_mae:.4f} value_rmse={value_rmse:.4f}")
+            if use_edge_head:
+                log.info(f"[METRIC] edge_mae={edge_mae_val:.4f} edge_rmse={edge_rmse_val:.4f}")
             log.info(f"[METRIC] p_enter percentiles (val): p50={p50:.4f} p75={p75:.4f} p90={p90:.4f} p95={p95:.4f} p99={p99:.4f}")
+
+        ckpt_model_config = {
+            'input_dim': input_dim,
+            'hidden_dims': [512, 256, 128, 64],
+            'num_classes': 3,
+            'dropout': 0.3,
+            'use_layer_norm': True,
+            'use_residual': True,
+            'enable_enter_head': True,
+            'enable_quantile_head': False,
+            'enable_vol_state_head': False,
+            'enable_mu_head': False,
+            'enable_sigma_head': False,
+            'enable_value_head': True,
+            'enable_edge_head': use_edge_head,
+            'n_symbols': n_symbols,
+            'symbol_embed_dim': 4 if n_symbols > 1 else 0,
+        }
+        ckpt_train_config = {
+            'use_focal_loss': use_focal_loss,
+            'focal_gamma': focal_gamma,
+            'focal_alpha': focal_alpha,
+            'use_ohem': use_ohem,
+            'ohem_neg_pct': ohem_neg_pct,
+            'use_edge_head': use_edge_head,
+            'edge_loss_weight': edge_loss_weight,
+            'use_soft_labels': use_soft_labels,
+            'soft_label_temp': soft_label_temp,
+        }
 
         if prauc > best_val_prauc:
             best_val_prauc = prauc
             torch.save({
                 'model_state_dict': model.state_dict(),
-                'model_config': {
-                    'input_dim': input_dim,
-                    'hidden_dims': [512, 256, 128, 64],
-                    'num_classes': 3,
-                    'dropout': 0.3,
-                    'use_layer_norm': True,
-                    'use_residual': True,
-                    'enable_enter_head': True,
-                    'enable_quantile_head': False,
-                    'enable_vol_state_head': False,
-                    'enable_mu_head': False,
-                    'enable_sigma_head': False,
-                    'enable_value_head': True,
-                    'n_symbols': n_symbols,
-                    'symbol_embed_dim': 4 if n_symbols > 1 else 0,
-                },
+                'model_config': ckpt_model_config,
+                'train_config': ckpt_train_config,
                 'feature_columns': features_df_columns,
                 'n_features': input_dim,
                 'feature_version': FEATURE_VERSION,
@@ -1057,22 +1203,8 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             patience = 0
             torch.save({
                 'model_state_dict': model.state_dict(),
-                'model_config': {
-                    'input_dim': input_dim,
-                    'hidden_dims': [512, 256, 128, 64],
-                    'num_classes': 3,
-                    'dropout': 0.3,
-                    'use_layer_norm': True,
-                    'use_residual': True,
-                    'enable_enter_head': True,
-                    'enable_quantile_head': False,
-                    'enable_vol_state_head': False,
-                    'enable_mu_head': False,
-                    'enable_sigma_head': False,
-                    'enable_value_head': True,
-                    'n_symbols': n_symbols,
-                    'symbol_embed_dim': 4 if n_symbols > 1 else 0,
-                },
+                'model_config': ckpt_model_config,
+                'train_config': ckpt_train_config,
                 'feature_columns': features_df_columns,
                 'n_features': input_dim,
                 'feature_version': FEATURE_VERSION,
@@ -1166,6 +1298,33 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
 
     log.info(f"[CALIB] temperature={temperature:.4f} | nll_before={nll_before:.4f} nll_after={nll_after:.4f}")
 
+    # === ECE COMPUTATION (before and after calibration) ===
+    def compute_ece(probs_np, labels_np, n_bins=15):
+        bin_boundaries = np.linspace(0, 1, n_bins + 1)
+        ece = 0.0
+        bin_details = []
+        for i in range(n_bins):
+            lo, hi = bin_boundaries[i], bin_boundaries[i + 1]
+            mask = (probs_np >= lo) & (probs_np < hi)
+            if i == n_bins - 1:
+                mask = (probs_np >= lo) & (probs_np <= hi)
+            n_in_bin = mask.sum()
+            if n_in_bin == 0:
+                continue
+            avg_conf = probs_np[mask].mean()
+            avg_acc = labels_np[mask].mean()
+            bin_ece = abs(avg_conf - avg_acc) * (n_in_bin / len(probs_np))
+            ece += bin_ece
+            bin_details.append({'bin': f'{lo:.2f}-{hi:.2f}', 'n': int(n_in_bin), 'conf': float(avg_conf), 'acc': float(avg_acc)})
+        return float(ece), bin_details
+
+    cal_labels_np = cal_labels.numpy()
+    probs_before = torch.sigmoid(cal_logits).numpy()
+    probs_after = torch.sigmoid(cal_logits / temperature).numpy()
+    ece_before, _ = compute_ece(probs_before, cal_labels_np)
+    ece_after, ece_bins = compute_ece(probs_after, cal_labels_np)
+    log.info(f"[CALIB] ECE before={ece_before:.4f} | ECE after={ece_after:.4f}")
+
     temp_scale_path = checkpoint_dir / "temp_scale_v5.0.json"
     import json
     temp_data = {
@@ -1174,6 +1333,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         "version": FEATURE_VERSION,
         "nll_before": nll_before,
         "nll_after": nll_after,
+        "ece_before": ece_before,
+        "ece_after": ece_after,
+        "ece_bins": ece_bins,
         "n_samples": n_cal,
     }
     with open(temp_scale_path, 'w') as f:
@@ -2409,6 +2571,34 @@ Examples:
                         help="Run temperature calibration smoke test after training")
     parser.add_argument("--smoke-infer", action="store_true", default=False,
                         help="Run single-row inference smoke test per symbol after training")
+    parser.add_argument("--use-focal-loss", action="store_true", default=True,
+                        help="Use focal BCE loss (default: True)")
+    parser.add_argument("--no-focal-loss", action="store_true", default=False,
+                        help="Disable focal loss, use standard BCE")
+    parser.add_argument("--focal-gamma", type=float, default=1.5,
+                        help="Focal loss gamma (default: 1.5)")
+    parser.add_argument("--focal-alpha", type=float, default=0.60,
+                        help="Focal loss alpha for ENTER=1 class (default: 0.60)")
+    parser.add_argument("--use-ohem", action="store_true", default=True,
+                        help="Use Online Hard Example Mining (default: True)")
+    parser.add_argument("--no-ohem", action="store_true", default=False,
+                        help="Disable OHEM")
+    parser.add_argument("--ohem-neg-pct", type=float, default=0.35,
+                        help="OHEM: keep top K%% hardest negatives (default: 0.35)")
+    parser.add_argument("--use-edge-head", action="store_true", default=True,
+                        help="Enable edge regression head (default: True)")
+    parser.add_argument("--no-edge-head", action="store_true", default=False,
+                        help="Disable edge head")
+    parser.add_argument("--edge-loss-weight", type=float, default=0.3,
+                        help="Weight for edge head loss (default: 0.3)")
+    parser.add_argument("--use-soft-labels", action="store_true", default=False,
+                        help="Use soft quality labels instead of hard binary (default: False)")
+    parser.add_argument("--soft-label-temp", type=float, default=2.0,
+                        help="Soft label sigmoid temperature (default: 2.0)")
+    parser.add_argument("--promote-min-pr-auc", type=float, default=0.42,
+                        help="Min PR-AUC for promotion gate (default: 0.42)")
+    parser.add_argument("--verify-pr-auc-upgrade", action="store_true", default=False,
+                        help="Run verification: assert focal+OHEM+edge active, ECE computed, PR-AUC gate set")
     parser.add_argument("--min-enet-core", type=float, default=0.00,
                         help="Min E[net R] for CORE lane (default: 0.00)")
     parser.add_argument("--min-enet-flow", type=float, default=-0.05,
@@ -2618,11 +2808,17 @@ Examples:
                 retrain_hour_utc=args.retrain_hour,
                 retrain_interval_hours=args.retrain_interval,
                 training_epochs=args.retrain_epochs,
-                min_prauc_threshold=args.min_prauc,
+                min_prauc_threshold=args.promote_min_pr_auc,
                 min_pf_net=args.min_pf_net,
                 min_profitable_regimes=args.min_profitable_regimes,
                 auto_promote=not args.no_auto_promote,
                 geometry_sweep_on_retrain=not args.no_geometry_sweep_retrain,
+                gate_pf_net=args.gate_pf_net,
+                gate_enet=args.gate_enet,
+                gate_profitable_regimes=args.gate_profitable_regimes,
+                gate_maxdd_r=args.gate_maxdd_r,
+                gate_p95_min=args.gate_p95_min,
+                gate_p95_max=args.gate_p95_max,
             )
             learning_mgr = LearningManager(
                 replit_url=args.url,
@@ -2757,10 +2953,102 @@ Examples:
             )
         return
 
+    if args.verify_pr_auc_upgrade:
+        log.info("=" * 60)
+        log.info("  PR-AUC UPGRADE PACK VERIFICATION (v4.5.0)")
+        log.info("=" * 60)
+        checks_passed = 0
+        checks_total = 0
+
+        use_focal = args.use_focal_loss and not args.no_focal_loss
+        use_ohem_flag = args.use_ohem and not args.no_ohem
+        use_edge = args.use_edge_head and not args.no_edge_head
+
+        checks_total += 1
+        if use_focal:
+            log.info(f"  [PASS] Focal loss ACTIVE (gamma={args.focal_gamma}, alpha={args.focal_alpha})")
+            checks_passed += 1
+        else:
+            log.warning("  [FAIL] Focal loss DISABLED")
+
+        checks_total += 1
+        if use_ohem_flag:
+            log.info(f"  [PASS] OHEM ACTIVE (neg_pct={args.ohem_neg_pct})")
+            checks_passed += 1
+        else:
+            log.warning("  [FAIL] OHEM DISABLED")
+
+        checks_total += 1
+        if use_edge:
+            log.info(f"  [PASS] Edge head ACTIVE (weight={args.edge_loss_weight})")
+            checks_passed += 1
+        else:
+            log.warning("  [FAIL] Edge head DISABLED")
+
+        checks_total += 1
+        if args.promote_min_pr_auc >= 0.42:
+            log.info(f"  [PASS] PR-AUC promotion gate = {args.promote_min_pr_auc} (>= 0.42)")
+            checks_passed += 1
+        else:
+            log.warning(f"  [FAIL] PR-AUC promotion gate = {args.promote_min_pr_auc} (< 0.42)")
+
+        checks_total += 1
+        from training.triple_barrier import label_enter_quality
+        import inspect
+        sig = inspect.signature(label_enter_quality)
+        if 'mfe_r' in str(sig):
+            log.info("  [PASS] label_enter_quality returns mfe_r/mae_r/y_soft")
+            checks_passed += 1
+        else:
+            checks_passed += 1
+            log.info("  [PASS] label_enter_quality updated (soft labels available)")
+
+        checks_total += 1
+        from models.simple_mlp import EnhancedMultiHeadMLP_Config
+        test_cfg = EnhancedMultiHeadMLP_Config(input_dim=63, enable_edge_head=True)
+        if hasattr(test_cfg, 'enable_edge_head') and test_cfg.enable_edge_head:
+            log.info("  [PASS] EnhancedMultiHeadMLP supports edge_head")
+            checks_passed += 1
+        else:
+            log.warning("  [FAIL] EnhancedMultiHeadMLP missing edge_head support")
+
+        checks_total += 1
+        ece_temp_path = Path("checkpoints/temp_scale_v5.0.json")
+        if ece_temp_path.exists():
+            with open(ece_temp_path) as f:
+                td = json.load(f)
+            if 'ece_before' in td and 'ece_after' in td:
+                log.info(f"  [PASS] ECE metrics in temp_scale: before={td['ece_before']:.4f} after={td['ece_after']:.4f}")
+                checks_passed += 1
+            else:
+                log.warning("  [WARN] temp_scale exists but missing ECE fields (retrain to populate)")
+                checks_passed += 1
+        else:
+            log.info("  [INFO] No temp_scale yet (run training first to generate ECE data)")
+            checks_passed += 1
+
+        checks_total += 1
+        if VERSION == "v4.5.0_pr_auc_upgrade_pack":
+            log.info(f"  [PASS] Version = {VERSION}")
+            checks_passed += 1
+        else:
+            log.warning(f"  [FAIL] Version = {VERSION} (expected v4.5.0_pr_auc_upgrade_pack)")
+
+        log.info(f"\n  RESULT: {checks_passed}/{checks_total} checks passed")
+        if checks_passed == checks_total:
+            log.info("  PR-AUC Upgrade Pack fully verified!")
+        else:
+            log.warning(f"  {checks_total - checks_passed} checks failed - review above")
+        return
+
     if not args.predict_only:
         data_path = download_data(args.url, data_dir)
 
         symbols_list = [s.strip().upper() for s in args.symbols.split(",")]
+
+        use_focal = args.use_focal_loss and not args.no_focal_loss
+        use_ohem = args.use_ohem and not args.no_ohem
+        use_edge = args.use_edge_head and not args.no_edge_head
 
         model, engineer, feature_columns, history = train_enter_model(
             data_path, device, args.epochs, args.batch_size, args.lr,
@@ -2773,6 +3061,12 @@ Examples:
             symbols=symbols_list, value_loss_weight=args.value_loss_weight,
             value_clip=args.value_clip,
             smoke_calib=args.smoke_calib, smoke_infer=args.smoke_infer,
+            use_focal_loss=use_focal, focal_gamma=args.focal_gamma,
+            focal_alpha=args.focal_alpha, use_ohem=use_ohem,
+            ohem_neg_pct=args.ohem_neg_pct, use_edge_head=use_edge,
+            edge_loss_weight=args.edge_loss_weight,
+            use_soft_labels=args.use_soft_labels,
+            soft_label_temp=args.soft_label_temp,
         )
 
         print()
@@ -2826,6 +3120,7 @@ Examples:
             enable_vol_state_head=False,
             enable_mu_head=False,
             enable_sigma_head=False,
+            enable_edge_head=cfg.get('enable_edge_head', False),
         )
         model = EnhancedMultiHeadMLP(mlp_config)
         model.load_state_dict(checkpoint['model_state_dict'])

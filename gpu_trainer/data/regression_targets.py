@@ -310,7 +310,10 @@ class RegressionTargetGenerator:
             - tp_price: take profit price level
             - sl_price: stop loss price level
         """
-        from training.triple_barrier import compute_atr_14, triple_barrier_outcome_for_index
+        from training.triple_barrier import (
+            compute_atr_14, triple_barrier_outcome_for_index,
+            compute_mfe_mae_for_index, compute_trade_cost_r, compute_soft_quality,
+        )
         
         n = len(df)
         prices = df['close'].values
@@ -330,6 +333,11 @@ class RegressionTargetGenerator:
         realized_r = np.full(n, np.nan)
         tp_prices = np.full(n, np.nan)
         sl_prices = np.full(n, np.nan)
+        mfe_r_arr = np.full(n, np.nan)
+        mae_r_arr = np.full(n, np.nan)
+        y_soft_arr = np.full(n, np.nan)
+        
+        soft_label_temp = getattr(self, '_soft_label_temp', 2.0)
         
         n_candidates = 0
         n_tp = 0
@@ -374,6 +382,16 @@ class RegressionTargetGenerator:
             outcomes[i] = outcome
             realized_r[i] = r
             
+            mfe, mae = compute_mfe_mae_for_index(
+                highs, lows, prices, i, side, a,
+                sl_atr_mult, horizon_bars,
+            )
+            mfe_r_arr[i] = mfe
+            mae_r_arr[i] = mae
+            
+            cost_r_val = compute_trade_cost_r(prices[i], a, sl_atr_mult)
+            y_soft_arr[i] = compute_soft_quality(mfe, mae, cost_r_val, soft_label_temp)
+            
             if outcome == "TP":
                 enter_labels[i] = 1
                 n_tp += 1
@@ -408,6 +426,14 @@ class RegressionTargetGenerator:
         
         self._debug_htf_timestamps(df, htf_features, n_samples=10)
         
+        valid_soft = y_soft_arr[~np.isnan(y_soft_arr)]
+        if len(valid_soft) > 0:
+            logger.info(f"Soft labels: mean={np.mean(valid_soft):.3f}, median={np.median(valid_soft):.3f}, "
+                       f"std={np.std(valid_soft):.3f}, min={np.min(valid_soft):.3f}, max={np.max(valid_soft):.3f}")
+            valid_mfe = mfe_r_arr[~np.isnan(mfe_r_arr)]
+            valid_mae = mae_r_arr[~np.isnan(mae_r_arr)]
+            logger.info(f"MFE_R: mean={np.mean(valid_mfe):.2f}, MAE_R: mean={np.mean(valid_mae):.2f}")
+        
         result = pd.DataFrame({
             'enter_label': enter_labels,
             'side_hint': side_hints,
@@ -415,6 +441,9 @@ class RegressionTargetGenerator:
             'realized_r': realized_r,
             'tp_price': tp_prices,
             'sl_price': sl_prices,
+            'mfe_r': mfe_r_arr,
+            'mae_r': mae_r_arr,
+            'y_soft': y_soft_arr,
         }, index=df.index)
         
         return result

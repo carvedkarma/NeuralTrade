@@ -142,6 +142,7 @@ def _load_model(device: str, symbol: Optional[str] = None):
     n_symbols = cfg.get('n_symbols', 1)
     symbol_embed_dim = cfg.get('symbol_embed_dim', 0)
     enable_value_head = cfg.get('enable_value_head', False)
+    enable_edge_head = cfg.get('enable_edge_head', False)
 
     mlp_config = EnhancedMultiHeadMLP_Config(
         input_dim=cfg.get('input_dim', 63),
@@ -156,6 +157,7 @@ def _load_model(device: str, symbol: Optional[str] = None):
         enable_mu_head=False,
         enable_sigma_head=False,
         enable_value_head=enable_value_head,
+        enable_edge_head=enable_edge_head,
         n_symbols=n_symbols,
         symbol_embed_dim=symbol_embed_dim,
     )
@@ -194,7 +196,7 @@ def _load_model(device: str, symbol: Optional[str] = None):
     symbol_map = checkpoint.get('symbol_map', None)
 
     log.info(f"Model loaded: {len(feature_columns)} features, version {saved_version}, "
-             f"value_head={enable_value_head}, n_symbols={n_symbols}, temperature={temperature:.4f}")
+             f"value_head={enable_value_head}, edge_head={enable_edge_head}, n_symbols={n_symbols}, temperature={temperature:.4f}")
     return model, engineer, feature_columns, temperature, symbol_map
 
 

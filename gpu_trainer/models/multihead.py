@@ -235,6 +235,9 @@ class MultiHeadOutput:
     # Value head (regression: predicted E[net R])
     value_logits: Optional[torch.Tensor] = None  # [batch, 1] predicted net R expectation
 
+    # Edge head (regression: net MFE - MAE quality proxy)
+    edge_logits: Optional[torch.Tensor] = None  # [batch, 1] predicted edge quality
+
 
 class QuantileHead(nn.Module):
     """

@@ -179,6 +179,74 @@ def compute_trade_cost_r(
     return total_cost_pct / sl_pct
 
 
+def compute_mfe_mae_for_index(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    i: int,
+    side: int,
+    atr_i: float,
+    sl_mult: float = 1.5,
+    horizon: int = 24,
+) -> tuple:
+    """Compute MFE and MAE in R-units for a trade at index i.
+
+    MFE = max favorable excursion in R-units (positive)
+    MAE = max adverse excursion in R-units (positive = how far against)
+
+    R-unit = price distance / (sl_mult * ATR).
+
+    Returns (mfe_r, mae_r).  Both >= 0.
+    """
+    n = len(closes)
+    entry = closes[i]
+    a = atr_i
+    if np.isnan(a) or a <= 0:
+        a = entry * 0.005
+    sl_dist = sl_mult * a
+    if sl_dist <= 0:
+        return (0.0, 0.0)
+
+    max_favorable = 0.0
+    max_adverse = 0.0
+
+    for j in range(1, horizon + 1):
+        idx = i + j
+        if idx >= n:
+            break
+        if side > 0:
+            fav = highs[idx] - entry
+            adv = entry - lows[idx]
+        else:
+            fav = entry - lows[idx]
+            adv = highs[idx] - entry
+        max_favorable = max(max_favorable, fav)
+        max_adverse = max(max_adverse, adv)
+
+    mfe_r = max_favorable / sl_dist
+    mae_r = max_adverse / sl_dist
+    return (mfe_r, mae_r)
+
+
+def compute_soft_quality(
+    mfe_r: float,
+    mae_r: float,
+    cost_r: float,
+    temperature: float = 2.0,
+) -> float:
+    """Compute soft quality score and y_soft label.
+
+    quality = net_mfe_r - mae_r  where net_mfe_r = mfe_r - cost_r
+    y_soft  = sigmoid(quality / temperature)
+
+    Higher quality => y_soft closer to 1.
+    """
+    net_mfe_r = mfe_r - cost_r
+    quality = net_mfe_r - mae_r
+    y_soft = 1.0 / (1.0 + np.exp(-quality / max(temperature, 0.01)))
+    return float(y_soft)
+
+
 def triple_barrier_batch(
     df: pd.DataFrame,
     indices: np.ndarray,
