@@ -647,8 +647,8 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                       r_min_expiry: float = 1.0, target_tpd: float = 5.5, target_tpd_tol: float = 1.5,
                       symbols: list = None, value_loss_weight: float = 0.5, value_clip: float = 3.0,
                       smoke_calib: bool = False, smoke_infer: bool = False,
-                      use_focal_loss: bool = True, focal_gamma: float = 1.5, focal_alpha: float = 0.35,
-                      use_ohem: bool = False, ohem_neg_pct: float = 0.25,
+                      use_focal_loss: bool = True, focal_gamma: float = 1.0, focal_alpha: float = 0.35,
+                      use_ohem: bool = False, ohem_neg_pct: float = 0.20,
                       use_edge_head: bool = True, edge_loss_weight: float = 0.3,
                       use_soft_labels: bool = True, soft_label_temp: float = 1.5):
     import torch
@@ -2722,7 +2722,7 @@ Examples:
     parser.add_argument("--url", required=True, help="Your Replit dashboard URL")
     parser.add_argument("--epochs", type=int, default=300, help="Training epochs (default: 300)")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size (default: 64)")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 0.0001)")
+    parser.add_argument("--lr", type=float, default=6e-5, help="Learning rate (default: 6e-5)")
     parser.add_argument("--warmup-epochs", type=int, default=5, help="LR warmup epochs (default: 5)")
     parser.add_argument("--min-lr", type=float, default=None, help="Min LR for cosine annealing")
     parser.add_argument("--predict-only", action="store_true", help="Skip training, predict from saved model")
@@ -2749,16 +2749,16 @@ Examples:
                         help="Use focal BCE loss (default: True)")
     parser.add_argument("--no-focal-loss", action="store_true", default=False,
                         help="Disable focal loss, use standard BCE")
-    parser.add_argument("--focal-gamma", type=float, default=1.5,
-                        help="Focal loss gamma (default: 1.5)")
+    parser.add_argument("--focal-gamma", type=float, default=1.0,
+                        help="Focal loss gamma (default: 1.0)")
     parser.add_argument("--focal-alpha", type=float, default=0.35,
                         help="Focal loss alpha for ENTER=1 class (default: 0.40)")
     parser.add_argument("--use-ohem", action="store_true", default=False,
                         help="Use Online Hard Example Mining (default: False, temporarily disabled)")
     parser.add_argument("--no-ohem", action="store_true", default=False,
                         help="Disable OHEM")
-    parser.add_argument("--ohem-neg-pct", type=float, default=0.25,
-                        help="OHEM: keep top K%% hardest negatives (default: 0.25)")
+    parser.add_argument("--ohem-neg-pct", type=float, default=0.20,
+                        help="OHEM: keep top K%% hardest negatives (default: 0.20)")
     parser.add_argument("--use-edge-head", action="store_true", default=True,
                         help="Enable edge regression head (default: True)")
     parser.add_argument("--no-edge-head", action="store_true", default=False,
@@ -3162,11 +3162,11 @@ Examples:
             checks_passed += 1
 
         checks_total += 1
-        if args.ohem_neg_pct <= 0.25:
-            log.info(f"  [PASS] OHEM neg_pct={args.ohem_neg_pct} (<= 0.25)")
+        if args.ohem_neg_pct <= 0.20:
+            log.info(f"  [PASS] OHEM neg_pct={args.ohem_neg_pct} (<= 0.20)")
             checks_passed += 1
         else:
-            log.warning(f"  [FAIL] OHEM neg_pct={args.ohem_neg_pct} (expected <= 0.25)")
+            log.warning(f"  [FAIL] OHEM neg_pct={args.ohem_neg_pct} (expected <= 0.20)")
             failures.append(f"ohem_neg_pct={args.ohem_neg_pct}")
 
         checks_total += 1

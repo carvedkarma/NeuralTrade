@@ -804,7 +804,7 @@ class EnhancedMultiHeadMLP(nn.Module):
         # === Enter Quality ===
         if self.enter_head is not None:
             enter_logits = self.enter_head(features)
-            enter_logits = torch.clamp(enter_logits, -10, 10)
+            enter_logits = torch.clamp(enter_logits, -5, 5)
         else:
             enter_logits = None
         
