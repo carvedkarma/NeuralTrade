@@ -590,23 +590,30 @@ def compute_oi_features(candle_df, oi_df):
     return result
 
 
-def _oi_sanity_check(candle_df, oi_df, symbol: str = "BTCUSDT"):
-    """Pre-training OI sanity check: verify sufficient coverage within 30-day window."""
+def _oi_sanity_check(candle_df, oi_df, symbol: str = "BTCUSDT", coverage_threshold: float = 80.0):
+    """Pre-training OI coverage check with auto-disable.
+
+    Returns oi_enabled (bool): True only if OI coverage within 30-day window >= threshold.
+    Default behavior: OI is disabled unless coverage passes threshold.
+    Logs decision once per symbol.
+    """
     import numpy as np
     now_ms = int(datetime.now().timestamp() * 1000)
     oi_window_start = now_ms - 30 * 24 * 60 * 60 * 1000
 
     if oi_df.empty or len(oi_df) < 2:
-        log.warning(f"[OI_CHECK] FAIL – no OI data for {symbol} (coverage=0%, nonzero=0)")
-        return
+        log.warning(f"[OI_CHECK] DISABLED for {symbol} – no OI data (coverage=0%, nonzero=0). "
+                    f"OI features zeroed out. Funding remains enabled.")
+        return False
 
     n_nonzero = int((oi_df['sumOpenInterest'] > 0).sum())
     candle_in_window = candle_df[candle_df['timestamp'] >= oi_window_start]
     n_candles_in_window = len(candle_in_window)
 
     if n_candles_in_window == 0:
-        log.info(f"[OI_CHECK] SKIP – no candles within 30-day OI window for {symbol}")
-        return
+        log.info(f"[OI_CHECK] DISABLED for {symbol} – no candles within 30-day OI window. "
+                 f"OI features zeroed out.")
+        return False
 
     oi_in_window = oi_df[oi_df['oi_time_ms'] >= oi_window_start]
     period = oi_df['period'].iloc[0] if 'period' in oi_df.columns else '15m'
@@ -615,12 +622,14 @@ def _oi_sanity_check(candle_df, oi_df, symbol: str = "BTCUSDT"):
     expected = window_minutes / period_minutes
     coverage_pct = len(oi_in_window) / max(expected, 1) * 100
 
-    if coverage_pct < 70 or n_nonzero < 2000:
-        log.warning(f"[OI_CHECK] FAIL – insufficient OI coverage for {symbol} "
-                    f"(coverage={coverage_pct:.0f}%, nonzero={n_nonzero})")
+    if coverage_pct < coverage_threshold:
+        log.warning(f"[OI_CHECK] DISABLED for {symbol} – coverage {coverage_pct:.0f}% < {coverage_threshold:.0f}% threshold "
+                    f"(nonzero={n_nonzero}). OI features zeroed out. Funding remains enabled.")
+        return False
     else:
-        log.info(f"[OI_CHECK] PASS – coverage OK for {symbol} "
-                 f"(coverage={coverage_pct:.0f}%, nonzero={n_nonzero})")
+        log.info(f"[OI_CHECK] ENABLED for {symbol} – coverage {coverage_pct:.0f}% >= {coverage_threshold:.0f}% "
+                 f"(nonzero={n_nonzero}). OI features active.")
+        return True
 
 
 def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float,
@@ -703,11 +712,17 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             sym_features_df = sym_features_df.fillna(0)
 
             sym_oi_df = fetch_open_interest_hist(sym_df, data_dir, symbol=sym)
-            sym_oi_features = compute_oi_features(sym_df, sym_oi_df)
+            sym_oi_enabled = _oi_sanity_check(sym_df, sym_oi_df, symbol=sym)
+            if sym_oi_enabled:
+                sym_oi_features = compute_oi_features(sym_df, sym_oi_df)
+            else:
+                sym_oi_features = pd.DataFrame(
+                    np.zeros((len(sym_df), OI_FEATURE_COUNT)),
+                    columns=OI_FEATURE_NAMES,
+                    index=sym_df.index,
+                )
             sym_features_df = pd.concat([sym_features_df, sym_oi_features], axis=1)
             sym_features_df = sym_features_df.fillna(0)
-
-            _oi_sanity_check(sym_df, sym_oi_df, symbol=sym)
 
             if feature_columns_ref is None:
                 feature_columns_ref = list(sym_features_df.columns)
@@ -832,11 +847,17 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         features_df = features_df.fillna(0)
 
         oi_df = fetch_open_interest_hist(df, data_dir)
-        oi_features = compute_oi_features(df, oi_df)
+        oi_enabled = _oi_sanity_check(df, oi_df)
+        if oi_enabled:
+            oi_features = compute_oi_features(df, oi_df)
+        else:
+            oi_features = pd.DataFrame(
+                np.zeros((len(df), OI_FEATURE_COUNT)),
+                columns=OI_FEATURE_NAMES,
+                index=df.index,
+            )
         features_df = pd.concat([features_df, oi_features], axis=1)
         features_df = features_df.fillna(0)
-
-        _oi_sanity_check(df, oi_df)
 
         total_features = engineer.STF_FEATURE_COUNT + engineer.HTF_FEATURE_COUNT + FUNDING_FEATURE_COUNT + OI_FEATURE_COUNT
         actual_cols = len(features_df.columns)
