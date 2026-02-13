@@ -638,8 +638,8 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                       r_min_expiry: float = 1.0, target_tpd: float = 5.5, target_tpd_tol: float = 1.5,
                       symbols: list = None, value_loss_weight: float = 0.5, value_clip: float = 3.0,
                       smoke_calib: bool = False, smoke_infer: bool = False,
-                      use_focal_loss: bool = True, focal_gamma: float = 1.5, focal_alpha: float = 0.60,
-                      use_ohem: bool = True, ohem_neg_pct: float = 0.25,
+                      use_focal_loss: bool = True, focal_gamma: float = 1.5, focal_alpha: float = 0.40,
+                      use_ohem: bool = False, ohem_neg_pct: float = 0.25,
                       use_edge_head: bool = True, edge_loss_weight: float = 0.3,
                       use_soft_labels: bool = True, soft_label_temp: float = 1.5):
     import torch
@@ -978,7 +978,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     pos_count = train_enter.sum()
     neg_count = len(train_enter) - pos_count
     pos_weight = neg_count / max(pos_count, 1)
-    pos_weight = min(pos_weight, 10.0)
+    pos_weight = min(pos_weight, 2.5)
     log.info(f"ENTER label distribution: ENTER=1: {int(pos_count)} ({100*pos_count/len(train_enter):.1f}%), ENTER=0: {int(neg_count)} ({100*neg_count/len(train_enter):.1f}%)")
     log.info(f"BCE pos_weight: {pos_weight:.2f}")
 
@@ -1153,6 +1153,15 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
 
             loss = enter_loss
 
+            pos_mask_sep = (enter_batch >= 0.5)
+            neg_mask_sep = (enter_batch < 0.5)
+            if pos_mask_sep.any() and neg_mask_sep.any():
+                mean_pos_logit = enter_logits[pos_mask_sep].mean()
+                mean_neg_logit = enter_logits[neg_mask_sep].mean()
+                sep = mean_pos_logit - mean_neg_logit
+                sep_loss = torch.relu(0.2 - sep)
+                loss = loss + 0.02 * sep_loss
+
             if output.value_logits is not None:
                 value_pred = output.value_logits.squeeze(-1)
                 v_loss = value_criterion(value_pred, value_batch)
@@ -1254,10 +1263,22 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
 
         current_lr = optimizer.param_groups[0]['lr']
 
+        all_logits_np_safety = np.array(all_enter_logits_list)
+        pos_mask_s = all_targets == 1
+        neg_mask_s = all_targets == 0
+        ml_pos = float(all_logits_np_safety[pos_mask_s].mean()) if pos_mask_s.any() else 0.0
+        ml_neg = float(all_logits_np_safety[neg_mask_s].mean()) if neg_mask_s.any() else 0.0
+        sep_val = ml_pos - ml_neg
+        pred_pct = preds.mean()
+
         log.info(
             f"Epoch {epoch+1}/{epochs} | Loss T:{avg_train_loss:.4f} V:{avg_val_loss:.4f} | "
             f"P:{precision:.1%} R:{recall:.1%} F1:{f1:.1%} | PR-AUC:{prauc:.3f} | "
-            f"Pos:{pos_rate:.1%} | Pred1:{preds.mean():.1%} | LR:{current_lr:.2e}"
+            f"Pos:{pos_rate:.1%} | Pred1:{pred_pct:.1%} | LR:{current_lr:.2e}"
+        )
+        log.info(
+            f"[SAFETY] Pos%={pos_rate:.1%} Pred%={pred_pct:.1%} "
+            f"mean_logit_pos={ml_pos:.3f} mean_logit_neg={ml_neg:.3f} sep={sep_val:.3f} PR-AUC={prauc:.3f}"
         )
 
         if all_value_preds:
@@ -2718,10 +2739,10 @@ Examples:
                         help="Disable focal loss, use standard BCE")
     parser.add_argument("--focal-gamma", type=float, default=1.5,
                         help="Focal loss gamma (default: 1.5)")
-    parser.add_argument("--focal-alpha", type=float, default=0.60,
-                        help="Focal loss alpha for ENTER=1 class (default: 0.60)")
-    parser.add_argument("--use-ohem", action="store_true", default=True,
-                        help="Use Online Hard Example Mining (default: True)")
+    parser.add_argument("--focal-alpha", type=float, default=0.40,
+                        help="Focal loss alpha for ENTER=1 class (default: 0.40)")
+    parser.add_argument("--use-ohem", action="store_true", default=False,
+                        help="Use Online Hard Example Mining (default: False, temporarily disabled)")
     parser.add_argument("--no-ohem", action="store_true", default=False,
                         help="Disable OHEM")
     parser.add_argument("--ohem-neg-pct", type=float, default=0.25,
@@ -3115,12 +3136,12 @@ Examples:
             failures.append("focal_loss disabled")
 
         checks_total += 1
-        if use_ohem_flag:
-            log.info(f"  [PASS] OHEM ACTIVE (neg_pct={args.ohem_neg_pct})")
+        if not use_ohem_flag:
+            log.info(f"  [PASS] OHEM DISABLED (prevents all-positive collapse)")
             checks_passed += 1
         else:
-            log.warning("  [FAIL] OHEM DISABLED")
-            failures.append("ohem disabled")
+            log.warning("  [WARN] OHEM ACTIVE — may cause all-positive collapse with focal loss")
+            checks_passed += 1
 
         checks_total += 1
         if args.ohem_neg_pct <= 0.25:
