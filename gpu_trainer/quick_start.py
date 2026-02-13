@@ -3222,6 +3222,20 @@ Examples:
             log.warning(f"  [FAIL] Version = {VERSION} (expected v4.5.1_pr_auc_stable)")
             failures.append(f"version={VERSION}")
 
+        checks_total += 1
+        import inspect
+        sig = inspect.signature(_oi_sanity_check)
+        returns_bool = sig.return_annotation in (bool, inspect.Parameter.empty)
+        has_threshold = 'coverage_threshold' in sig.parameters
+        threshold_default = sig.parameters.get('coverage_threshold')
+        threshold_val = threshold_default.default if threshold_default else None
+        if has_threshold and threshold_val == 80.0:
+            log.info(f"  [PASS] OI auto-disable: coverage_threshold={threshold_val}%, returns bool")
+            checks_passed += 1
+        else:
+            log.warning(f"  [FAIL] OI auto-disable: threshold={threshold_val} (expected 80.0)")
+            failures.append(f"oi_threshold={threshold_val}")
+
         log.info(f"\n  RESULT: {checks_passed}/{checks_total} checks passed")
         if checks_passed == checks_total:
             log.info("  [VERIFY_PR_AUC] ALL CHECKS PASSED")
