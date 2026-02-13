@@ -25,6 +25,8 @@ The v5.0 training pipeline supports multi-asset training with per-symbol time-ba
 
 Training stability improvements include fixes for logit polarity and PR-AUC stabilization. The v4.5.3 stabilization patch reduces focal loss gamma from 1.5 to 1.0, OHEM hardest negative fraction from 25% to 20%, max learning rate from 1e-4 to 6e-5, and tightens enter logit clamp from [-10,10] to [-5,5]. Earlier patches added soft labels, edge regression head, and logit separation regularizer.
 
+Multi-asset data ingestion: download_data() supports per-symbol downloads (data_cache/{SYMBOL}_15m.parquet). A preflight_data_check() verifies all requested symbols have parquet files with >= 20k bars before training, with [DATA_CHECK] log lines per symbol. CLI flags: --download-missing-data auto-fetches missing parquets from the dashboard API; --allow-partial-data trains on available symbols only instead of aborting.
+
 A HTF Warmup & Candle History mechanism ensures sufficient historical data for indicator computation, with a strict WARMUP gate checking minimum bar counts before trading. An optional direct HTF fetch provides more stable indicators.
 
 ### System Design Choices

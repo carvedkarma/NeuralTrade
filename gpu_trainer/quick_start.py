@@ -56,35 +56,34 @@ def check_gpu():
         sys.exit(1)
 
 
-def download_data(replit_url: str, data_dir: Path, force_fresh: bool = False):
+def download_data(replit_url: str, data_dir: Path, force_fresh: bool = False, symbol: str = "BTCUSDT"):
+    """Download 15m candle data for a single symbol from the dashboard API."""
     import requests
 
     data_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = data_dir / "BTCUSDT_15m.csv"
-    parquet_path = data_dir / "BTCUSDT_15m.parquet"
+    csv_path = data_dir / f"{symbol}_15m.csv"
+    parquet_path = data_dir / f"{symbol}_15m.parquet"
 
     if parquet_path.exists() and not force_fresh:
         import pandas as pd
         existing = pd.read_parquet(parquet_path)
-        log.info(f"Found existing data: {len(existing)} candles")
-        resp = input("Re-download fresh data? (y/N): ").strip().lower()
-        if resp != 'y':
-            return parquet_path
+        log.info(f"[DOWNLOAD] {symbol}: found existing data ({len(existing)} candles), skipping download")
+        return parquet_path
 
-    url = f"{replit_url.rstrip('/')}/api/data/export-csv?symbol=BTCUSDT&timeframe=15m"
-    log.info(f"Downloading BTC 15m data from dashboard...")
+    url = f"{replit_url.rstrip('/')}/api/data/export-csv?symbol={symbol}&timeframe=15m"
+    log.info(f"[DOWNLOAD] {symbol}: fetching 15m data from dashboard...")
     log.info(f"  URL: {url}")
 
     try:
-        resp = requests.get(url, timeout=120, stream=True)
+        resp = requests.get(url, timeout=180, stream=True)
         resp.raise_for_status()
     except requests.exceptions.ConnectionError:
         log.error(f"Cannot connect to {replit_url}")
         log.error("Make sure your Replit dashboard is running!")
-        sys.exit(1)
+        return None
     except requests.exceptions.HTTPError as e:
-        log.error(f"Server returned error: {e}")
-        sys.exit(1)
+        log.error(f"[DOWNLOAD] {symbol}: server returned error: {e}")
+        return None
 
     with open(csv_path, 'wb') as f:
         total = 0
@@ -95,22 +94,100 @@ def download_data(replit_url: str, data_dir: Path, force_fresh: bool = False):
 
     import pandas as pd
     df = pd.read_csv(csv_path)
-    log.info(f"  Loaded {len(df)} candles")
+    log.info(f"  {symbol}: loaded {len(df)} candles")
 
-    if len(df) < 1000:
-        log.error(f"Only {len(df)} candles - need at least 1,000 for training")
-        log.error("Go to your dashboard's Neural Network tab and download more historical data first")
-        sys.exit(1)
+    if len(df) < 100:
+        log.error(f"[DOWNLOAD] {symbol}: only {len(df)} candles - insufficient data")
+        csv_path.unlink(missing_ok=True)
+        return None
 
     date_min = datetime.fromtimestamp(df['timestamp'].min() / 1000).strftime('%Y-%m-%d')
     date_max = datetime.fromtimestamp(df['timestamp'].max() / 1000).strftime('%Y-%m-%d')
-    log.info(f"  Date range: {date_min} to {date_max}")
+    log.info(f"  {symbol}: date range {date_min} to {date_max}")
 
     df.to_parquet(parquet_path, index=False)
     log.info(f"  Saved to {parquet_path}")
 
     csv_path.unlink(missing_ok=True)
     return parquet_path
+
+
+MIN_BARS_FOR_TRAINING = 20000
+
+
+def download_missing_data(replit_url: str, data_dir: Path, symbols: list, force_fresh: bool = False):
+    """Download 15m candle data for all requested symbols."""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    results = {}
+    for sym in symbols:
+        parquet_path = data_dir / f"{sym}_15m.parquet"
+        if parquet_path.exists() and not force_fresh:
+            import pandas as pd
+            existing = pd.read_parquet(parquet_path)
+            results[sym] = len(existing)
+            log.info(f"[DOWNLOAD] {sym}: already cached ({len(existing)} candles)")
+        else:
+            path = download_data(replit_url, data_dir, force_fresh=force_fresh, symbol=sym)
+            if path and path.exists():
+                import pandas as pd
+                df = pd.read_parquet(path)
+                results[sym] = len(df)
+            else:
+                results[sym] = 0
+                log.error(f"[DOWNLOAD] {sym}: FAILED to download data")
+    return results
+
+
+def preflight_data_check(data_dir: Path, symbols: list, allow_partial: bool = False, min_bars: int = MIN_BARS_FOR_TRAINING):
+    """Preflight check: verify all requested symbol parquets exist and have sufficient rows.
+    
+    Returns list of valid symbols. Aborts if any missing and allow_partial is False.
+    """
+    import pandas as pd
+    valid_symbols = []
+    any_missing = False
+
+    log.info("=" * 60)
+    log.info("  PREFLIGHT DATA CHECK")
+    log.info("=" * 60)
+
+    for sym in symbols:
+        sym_path = data_dir / f"{sym}_15m.parquet"
+        exists = sym_path.exists()
+        rows = 0
+        if exists:
+            try:
+                df = pd.read_parquet(sym_path)
+                rows = len(df)
+            except Exception as e:
+                log.error(f"[DATA_CHECK] sym={sym} file={sym_path} exists=True rows=ERROR ({e})")
+                any_missing = True
+                continue
+
+        status = "OK" if (exists and rows >= min_bars) else "MISSING" if not exists else f"LOW ({rows} < {min_bars})"
+        log.info(f"[DATA_CHECK] sym={sym} file={sym_path} exists={exists} rows={rows} status={status}")
+
+        if exists and rows >= min_bars:
+            valid_symbols.append(sym)
+        elif exists and rows > 0:
+            log.warning(f"[DATA_CHECK] {sym}: only {rows} bars (min={min_bars}), including with warning")
+            valid_symbols.append(sym)
+        else:
+            any_missing = True
+            log.error(f"[DATA_CHECK] {sym}: NO USABLE DATA at {sym_path}")
+
+    if any_missing and not allow_partial:
+        log.error("[DATA_CHECK] ABORTING: missing data for one or more symbols.")
+        log.error("[DATA_CHECK] Use --download-missing-data to auto-fetch, or --allow-partial-data to train on available symbols only.")
+        sys.exit(1)
+
+    if not valid_symbols:
+        log.error("[DATA_CHECK] ABORTING: no valid symbol data found at all.")
+        sys.exit(1)
+
+    log.info(f"[DATA_CHECK] Proceeding with {len(valid_symbols)} symbols: {valid_symbols}")
+    log.info("-" * 60)
+    return valid_symbols
 
 
 def fetch_funding_rates(candle_df, data_dir: Path):
@@ -705,11 +782,11 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         for sym_idx, sym in enumerate(symbols):
             sym_data_path = data_dir / f"{sym}_15m.parquet"
             if not sym_data_path.exists():
-                log.warning(f"[DATA] No data for {sym} at {sym_data_path}, skipping")
+                log.error(f"[DATA] No data for {sym} at {sym_data_path} — skipping (use --download-missing-data to auto-fetch)")
                 continue
 
             sym_df = pd.read_parquet(sym_data_path)
-            log.info(f"[DATA] {sym}: {len(sym_df)} candles")
+            log.info(f"[DATA] {sym} (sym_idx={sym_idx}): {len(sym_df)} candles loaded from {sym_data_path}")
 
             sym_engineer = FeatureEngineer()
             sym_features_df = sym_engineer.compute_all_features(sym_df)
@@ -2830,6 +2907,11 @@ Examples:
     parser.add_argument("--debug-costs", action="store_true",
                         help="Print 5 random trades per regime and assert cost accounting")
 
+    parser.add_argument("--download-missing-data", action="store_true", default=False,
+                        help="Auto-download missing 15m parquet data for all symbols before training")
+    parser.add_argument("--allow-partial-data", action="store_true", default=False,
+                        help="Allow training on subset of symbols if some data is missing (default: abort)")
+
     parser.add_argument("--live", action="store_true",
                         help="Run continuous live multi-asset inference loop")
     parser.add_argument("--symbols", type=str, default="BTCUSDT,ETHUSDT,SOLUSDT",
@@ -3283,9 +3365,23 @@ Examples:
         return
 
     if not args.predict_only:
-        data_path = download_data(args.url, data_dir)
-
         symbols_list = [s.strip().upper() for s in args.symbols.split(",")]
+
+        if args.download_missing_data:
+            log.info(f"[DOWNLOAD] Auto-downloading data for {symbols_list}...")
+            dl_results = download_missing_data(args.url, data_dir, symbols_list)
+            for sym, count in dl_results.items():
+                log.info(f"[DOWNLOAD] {sym}: {count} candles available")
+        else:
+            data_path = download_data(args.url, data_dir, symbol=symbols_list[0])
+
+        symbols_list = preflight_data_check(
+            data_dir, symbols_list,
+            allow_partial=args.allow_partial_data,
+            min_bars=MIN_BARS_FOR_TRAINING
+        )
+
+        data_path = data_dir / f"{symbols_list[0]}_15m.parquet"
 
         use_focal = args.use_focal_loss and not args.no_focal_loss
         use_ohem = args.use_ohem and not args.no_ohem
