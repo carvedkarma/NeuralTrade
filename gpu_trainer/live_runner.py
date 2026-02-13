@@ -1,4 +1,4 @@
-"""Multi-asset live inference loop (v4.3.0 — Triple-Lane Aggression Engine).
+"""Multi-asset live inference loop (v4.5.2 — Triple-Lane Aggression Engine).
 
 Monitors multiple symbols in parallel on 15m intervals, runs the ENTER QUALITY
 model inference, applies HTF gates, computes HTF score, routes trades through
@@ -31,6 +31,8 @@ import pandas as pd
 
 log = logging.getLogger("LiveRunner")
 
+
+SYSTEM_VERSION = "v4.5.2_directional_sep_fix"
 
 REQUIRED_CANDLES = 800
 MAX_CACHE_BARS = 2000
@@ -629,6 +631,7 @@ class LiveRunner:
         cooldown_bars: int = 8,
         paper: bool = False,
         execution_mode: str = "signal_only",
+        record_trades: bool = False,
         portfolio_manager=None,
         execution_module=None,
         dry_run: bool = False,
@@ -650,6 +653,7 @@ class LiveRunner:
         self.cooldown_bars = cooldown_bars
         self.paper = paper
         self.execution_mode = execution_mode
+        self.record_trades = record_trades
         self.portfolio = portfolio_manager
         self.execution = execution_module
         self.dry_run = dry_run
@@ -663,6 +667,8 @@ class LiveRunner:
             "FLOW": budget_flow if budget_flow is not None else LANE_BUDGET["FLOW"],
             "SCALP": budget_scalp if budget_scalp is not None else LANE_BUDGET["SCALP"],
         }
+        log.info(f"[INIT] LiveRunner {SYSTEM_VERSION} execution_mode={execution_mode} "
+                 f"record_trades={record_trades} symbols={symbols}")
         log.info(f"[CONFIG] Lane budgets: CORE={self.lane_budgets['CORE']:.2f}R "
                  f"FLOW={self.lane_budgets['FLOW']:.2f}R SCALP={self.lane_budgets['SCALP']:.2f}R")
 
@@ -959,8 +965,9 @@ class LiveRunner:
         """Main loop — runs continuously until interrupted."""
         mode_label = {"signal_only": "SIGNAL_ONLY", "paper": "PAPER", "live": "LIVE"}.get(self.execution_mode, "UNKNOWN")
         log.info("=" * 80)
-        log.info(f"  LIVE RUNNER v4.3.0 ({mode_label})")
-        log.info(f"  [MODE] execution_mode={self.execution_mode} paper_enabled={self.paper} live_enabled={self.execution_mode == 'live'}")
+        log.info(f"  LIVE RUNNER v4.5.2 ({mode_label})")
+        log.info(f"  [MODE] execution_mode={self.execution_mode} record_trades={self.record_trades} "
+                 f"paper={self.paper} live={self.execution_mode == 'live'}")
         log.info(f"  Symbols: {', '.join(self.symbols)}")
         log.info(f"  Interval: {self.interval} | Threshold: {self.enter_threshold}")
         log.info(f"  TP={self.tp_mult}x SL={self.sl_mult}x | Cooldown: {self.cooldown_bars} bars")
@@ -1125,7 +1132,7 @@ class LiveRunner:
                 if 'low' in df.columns:
                     lows[symbol] = float(df.iloc[-1]['low'])
                 candle_dfs[symbol] = df
-        if self.execution_mode in ("paper", "live"):
+        if self.execution_mode in ("paper", "live") and self.record_trades:
             self.portfolio.check_exits(prices, highs=highs, lows=lows)
             self._run_trade_manager(prices, highs, lows)
 
@@ -1699,7 +1706,7 @@ class LiveRunner:
         horizon = lane_info.get('lane_horizon', 24)
         htf_score = lane_info.get('htf_score', 0)
 
-        if self.execution_mode == "signal_only":
+        if self.execution_mode == "signal_only" or not self.record_trades:
             if lane == "SCALP":
                 sig_sl_dist = SCALP_SL_R * atr
                 sig_tp_dist = SCALP_TP_R * atr
@@ -1712,13 +1719,14 @@ class LiveRunner:
             else:
                 sig_sl = current_price + sig_sl_dist
                 sig_tp = current_price - sig_tp_dist
-            log.info(f"  [NO_EXEC] would_open_trade symbol={symbol} side={side} lane={lane} "
+            no_exec_reason = "SIGNAL_ONLY" if self.execution_mode == "signal_only" else "RECORD_TRADES_OFF"
+            log.info(f"  [NO_EXEC] {no_exec_reason} would_open_trade symbol={symbol} side={side} lane={lane} "
                      f"p={p_enter:.4f} entry={current_price:.2f} sl={sig_sl:.2f} tp={sig_tp:.2f} "
                      f"htf_score={htf_score} size_mult={size_mult:.2f} horizon={horizon}")
             try:
                 self._push_cycle_log(
                     symbol=symbol, price=current_price, p_enter=p_enter,
-                    htf=htf, direction=side, decision="SIGNAL_ONLY",
+                    htf=htf, direction=side, decision=no_exec_reason,
                     reasons=[
                         f"would_enter=true",
                         f"side={side} entry={current_price:.2f} sl={sig_sl:.2f} tp={sig_tp:.2f}",
@@ -1727,7 +1735,7 @@ class LiveRunner:
                     lane_info=lane_info,
                 )
             except Exception as e:
-                log.warning(f"Failed to push SIGNAL_ONLY cycle log for {symbol}: {e}")
+                log.warning(f"Failed to push {no_exec_reason} cycle log for {symbol}: {e}")
             return
 
         entry_price = current_price

@@ -301,26 +301,33 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "15m", sym
         return pd.DataFrame(columns=["oi_time_ms", "sumOpenInterest", "symbol", "period"])
 
     oi_window_days = (fetch_end_ms - fetch_start_ms) / (24 * 60 * 60 * 1000)
-    log.info(f"OI: fetching {oi_window_days:.1f} days of data for {symbol} (Binance 30d limit)")
+    log.info(f"[OI_FETCH] symbol={symbol} period={period} window=30d target_records=~2880")
 
     if cache_path.exists():
         existing = pd.read_parquet(cache_path)
         if len(existing) > 0:
             cached_start = existing['oi_time_ms'].min()
             cached_end = existing['oi_time_ms'].max()
-            cached_n_nonzero = (existing['sumOpenInterest'] > 0).sum()
+            cached_n_nonzero = int((existing['sumOpenInterest'] > 0).sum())
             cached_period = existing.iloc[0].get('period', 'unknown') if 'period' in existing.columns else 'unknown'
             period_ms = {"5m": 5*60*1000, "15m": 15*60*1000, "1h": 3600*1000}.get(cached_period, 15*60*1000)
             cache_age_hours = (now_ms - cached_end) / (3600 * 1000)
+            stale = cache_age_hours >= 24
+            log.info(f"[OI_CACHE] symbol={symbol} path={cache_path} stale={stale} "
+                     f"nonzero={cached_n_nonzero} age={cache_age_hours:.1f}h")
             if (cached_n_nonzero > 100
                     and cached_start <= fetch_start_ms + period_ms
                     and cached_end >= fetch_end_ms - 2 * period_ms
-                    and cache_age_hours < 24):
-                log.info(f"Using cached OI data: {len(existing)} records ({cached_n_nonzero} non-zero, "
-                         f"period={cached_period}, age={cache_age_hours:.1f}h)")
+                    and not stale):
+                log.info(f"[OI_CACHE] symbol={symbol} REUSING cached OI data: {len(existing)} records")
                 return existing
             else:
-                log.info(f"OI cache stale or low quality (non-zero={cached_n_nonzero}, age={cache_age_hours:.1f}h) — re-fetching")
+                reasons = []
+                if cached_n_nonzero <= 100:
+                    reasons.append(f"low_nonzero={cached_n_nonzero}")
+                if stale:
+                    reasons.append(f"stale={cache_age_hours:.1f}h")
+                log.info(f"[OI_CACHE] symbol={symbol} REFETCHING — {', '.join(reasons)}")
 
     if legacy_cache.exists():
         try:
@@ -442,8 +449,8 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "15m", sym
     expected_records = oi_span_minutes / period_minutes
     coverage_pct = len(oi_df) / max(expected_records, 1) * 100
 
-    log.info(f"OI fetched: {len(oi_df)} records ({n_nonzero} non-zero), period={period}")
-    log.info(f"OI coverage: {coverage_pct:.0f}% of {oi_window_days:.1f}-day window "
+    log.info(f"[OI_FETCH] symbol={symbol} period={period} window=30d fetched_records={len(oi_df)} nonzero={n_nonzero}")
+    log.info(f"[OI_FETCH] coverage={coverage_pct:.0f}% of {oi_window_days:.1f}-day window "
              f"({len(oi_df)}/{expected_records:.0f} expected {period} intervals)")
 
     if coverage_pct < 50:
@@ -451,11 +458,11 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "15m", sym
     elif coverage_pct < 90:
         log.info(f"OI coverage {coverage_pct:.0f}% — acceptable, some gaps expected near window edges")
 
-    if n_nonzero < 10:
-        log.warning(f"OI: only {n_nonzero} non-zero records out of {len(oi_df)} — API may be returning empty data")
+    if n_nonzero < 100:
+        log.warning(f"[OI_FETCH] symbol={symbol} WARNING: only {n_nonzero} non-zero records (<100 minimum) — OI features may be unreliable")
 
     oi_df.to_parquet(cache_path, index=False)
-    log.info(f"OI cached to {cache_path}")
+    log.info(f"[OI_CACHE] symbol={symbol} saved {len(oi_df)} records to {cache_path}")
 
     return oi_df
 
@@ -552,8 +559,9 @@ def compute_oi_features(candle_df, oi_df):
     result = result.fillna(0)
     result = result.clip(lower=-5, upper=5)
 
+    symbol_tag = oi_df['symbol'].iloc[0] if 'symbol' in oi_df.columns and len(oi_df) > 0 else "UNKNOWN"
     n_nonzero = (result.abs() > 1e-8).any(axis=1).sum()
-    log.info(f"OI features: {n_nonzero}/{n} rows with non-zero OI data")
+    log.info(f"[OI_ALIGN] symbol={symbol_tag} features_nonzero={n_nonzero}/{n} tolerance={tolerance_ms}ms")
 
     candle_in_oi_window = candle_df[(candle_df['timestamp'] >= oi_min_ts) & (candle_df['timestamp'] <= oi_max_ts)]
     n_in_window = len(candle_in_oi_window)
@@ -561,11 +569,12 @@ def compute_oi_features(candle_df, oi_df):
         window_indices = candle_in_oi_window.index
         n_window_nonzero = (result.loc[window_indices].abs() > 1e-8).any(axis=1).sum()
         window_coverage = n_window_nonzero / n_in_window * 100
-        log.info(f"OI window coverage: {window_coverage:.0f}% ({n_window_nonzero}/{n_in_window} candles in 30d OI window)")
+        log.info(f"[OI_ALIGN] symbol={symbol_tag} coverage_in_window={window_coverage:.0f}% "
+                 f"({n_window_nonzero}/{n_in_window} candles in OI window) tolerance={tolerance_ms}ms")
         if window_coverage < 50:
-            log.warning(f"Poor OI alignment within 30d window ({window_coverage:.0f}%) — check timestamp alignment")
+            log.warning(f"[OI_ALIGN] symbol={symbol_tag} POOR alignment ({window_coverage:.0f}%) — check timestamps")
     else:
-        log.warning("No candles fall within OI data window")
+        log.warning(f"[OI_ALIGN] symbol={symbol_tag} NO candles in OI data window")
 
     import random
     oi_window_candle_indices = list(candle_df[candle_df['timestamp'] >= oi_min_ts].index)
@@ -576,7 +585,7 @@ def compute_oi_features(candle_df, oi_df):
     else:
         sample_indices = sorted(random.sample(list(range(n)), min(10, n)))
 
-    log.info("OI ALIGNMENT CHECK (sampled from OI window):")
+    log.info(f"[OI_ALIGN] symbol={symbol_tag} ALIGNMENT SAMPLE (from OI window):")
     log.info(f"{'Row':>8} | {'Candle TS':>15} | {'OI':>10} | {'Delta1h':>10} | {'Z30d':>10}")
     log.info("-" * 65)
     for idx in sample_indices:
@@ -2829,6 +2838,8 @@ Examples:
                         help="Signal timeframe interval (default: 15m)")
     parser.add_argument("--paper", action="store_true", default=False,
                         help="Paper mode — simulate positions + record trades (default: off)")
+    parser.add_argument("--record-trades", action="store_true", default=False,
+                        help="Enable trade recording (POST to /api/live/trade). Default: off unless --paper or --live")
     parser.add_argument("--execution-mode", type=str, default=None,
                         choices=["signal_only", "paper", "live"],
                         help="Explicit execution mode override (default: derived from --paper/--live flags)")
@@ -3001,6 +3012,9 @@ Examples:
         else:
             exec_mode = "signal_only"
 
+        record_trades = args.record_trades or args.paper or (exec_mode in ("paper", "live"))
+        log.info(f"[MODE] execution_mode={exec_mode} record_trades={record_trades} paper={args.paper} live={exec_mode == 'live'}")
+
         runner = LiveRunner(
             replit_url=args.url,
             symbols=symbols,
@@ -3012,6 +3026,7 @@ Examples:
             cooldown_bars=live_cooldown,
             paper=args.paper,
             execution_mode=exec_mode,
+            record_trades=record_trades,
             portfolio_manager=portfolio,
             execution_module=execution,
             dry_run=args.dry_run,

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-System Verification Module (v4.3.x)
+System Verification Module (v4.5.2)
 ====================================
 Runs N cycles of assertions to prove that the Triple-Lane Aggression Engine,
-CROSS correlation blocking, quota controller, and payload completeness are
-all wired correctly end-to-end.
+CROSS correlation blocking, quota controller, payload completeness, HTF warmup,
+OI integration, trade recording gating, and PR-AUC pack wiring are all
+wired correctly end-to-end.
 
 Usage:
-    python quick_start.py --paper --verify-system --cycles 30 --url <URL>
+    python quick_start.py --live --verify-system --cycles 30 --url <URL>
 """
 
 import logging
@@ -216,7 +217,7 @@ class SystemVerifier:
         status = "PASSED" if passed else "FAILED"
 
         lines = []
-        lines.append("# System Verification Report (v4.3.x)")
+        lines.append("# System Verification Report (v4.5.2)")
         lines.append(f"")
         lines.append(f"## Overall Status: **VERIFICATION {status}**")
         lines.append(f"")
@@ -385,6 +386,77 @@ def run_static_audit() -> str:
     lines.append(f"- ema20_slope check: {'YES' if 'ema20_slope' in scalp_src else 'NO'}")
     lines.append(f"- volume_ratio check: {'YES' if 'volume_ratio' in scalp_src else 'NO'}")
     lines.append(f"- macd_hist check: {'YES' if 'macd_hist' in scalp_src else 'NO'}")
+    lines.append("")
+
+    lines.append("### HTF Warmup Gate")
+    process_src = inspect.getsource(LiveRunner._process_symbol)
+    has_warmup = "WARMUP" in process_src and ("MIN_H1_BARS" in process_src or "min_h1" in process_src.lower())
+    lines.append(f"- WARMUP gate in _process_symbol: {'FOUND' if has_warmup else 'MISSING'}")
+    from live_runner import MIN_H1_BARS, MIN_H4_BARS
+    lines.append(f"- MIN_H1_BARS={MIN_H1_BARS} MIN_H4_BARS={MIN_H4_BARS}")
+    lines.append("")
+
+    lines.append("### Trade Recording Gate (--record-trades)")
+    exec_src = inspect.getsource(LiveRunner._execute_candidate)
+    has_record_gate = "record_trades" in exec_src
+    has_no_exec_reason = "RECORD_TRADES_OFF" in exec_src
+    lines.append(f"- record_trades gate in _execute_candidate: {'FOUND' if has_record_gate else 'MISSING'}")
+    lines.append(f"- RECORD_TRADES_OFF decision logged: {'YES' if has_no_exec_reason else 'NO'}")
+    cycle_src = inspect.getsource(LiveRunner._run_cycle)
+    has_cycle_gate = "record_trades" in cycle_src
+    lines.append(f"- record_trades gate in _run_cycle (exits): {'FOUND' if has_cycle_gate else 'MISSING'}")
+    lines.append("")
+
+    lines.append("### OI Integration (v2)")
+    from quick_start import fetch_open_interest_hist, compute_oi_features, _oi_sanity_check
+    oi_fetch_src = inspect.getsource(fetch_open_interest_hist)
+    oi_compute_src = inspect.getsource(compute_oi_features)
+    has_oi_fetch_log = "[OI_FETCH]" in oi_fetch_src
+    has_oi_cache_log = "[OI_CACHE]" in oi_fetch_src
+    has_oi_align_log = "[OI_ALIGN]" in oi_compute_src
+    has_tolerance = "tolerance" in oi_compute_src
+    has_nonzero_filter = "oi_nonzero" in oi_compute_src or "sumOpenInterest'] > 0" in oi_compute_src
+    has_pagination = "page" in oi_fetch_src and "current_start" in oi_fetch_src
+    lines.append(f"- [OI_FETCH] log: {'FOUND' if has_oi_fetch_log else 'MISSING'}")
+    lines.append(f"- [OI_CACHE] log: {'FOUND' if has_oi_cache_log else 'MISSING'}")
+    lines.append(f"- [OI_ALIGN] log: {'FOUND' if has_oi_align_log else 'MISSING'}")
+    lines.append(f"- merge_asof tolerance (2x period): {'YES' if has_tolerance else 'NO'}")
+    lines.append(f"- Zero OI rows filtered: {'YES' if has_nonzero_filter else 'NO'}")
+    lines.append(f"- Pagination over 30d window: {'YES' if has_pagination else 'NO'}")
+    oi_sanity_src = inspect.getsource(_oi_sanity_check)
+    has_coverage_threshold = "coverage_threshold" in oi_sanity_src
+    lines.append(f"- OI auto-disable with coverage threshold: {'YES' if has_coverage_threshold else 'NO'}")
+    lines.append("")
+
+    lines.append("### PR-AUC Pack Wiring")
+    from quick_start import FEATURE_VERSION
+    lines.append(f"- FEATURE_VERSION: {FEATURE_VERSION}")
+    try:
+        from quick_start import train_enter_model
+        train_src = inspect.getsource(train_enter_model)
+        has_focal = "focal_bce_with_logits" in train_src or "focal_loss" in train_src
+        has_sep_loss = "sep_loss" in train_src
+        has_flip_penalty = "flip_penalty" in train_src
+        has_safety_log = "[SAFETY]" in train_src
+        has_sep_check = "[SEP_CHECK]" in train_src
+        lines.append(f"- Focal BCE loss: {'ACTIVE' if has_focal else 'MISSING'}")
+        lines.append(f"- Separation regularizer: {'ACTIVE' if has_sep_loss else 'MISSING'}")
+        lines.append(f"- Flip penalty (v4.5.2): {'ACTIVE' if has_flip_penalty else 'MISSING'}")
+        lines.append(f"- [SAFETY] per-epoch log: {'ACTIVE' if has_safety_log else 'MISSING'}")
+        lines.append(f"- [SEP_CHECK] per-epoch log: {'ACTIVE' if has_sep_check else 'MISSING'}")
+    except Exception as e:
+        lines.append(f"- ERROR inspecting train_enter_model: {e}")
+    lines.append("")
+
+    lines.append("### Version Consistency")
+    try:
+        from quick_start import FEATURE_VERSION, SYSTEM_VERSION
+        version_match = FEATURE_VERSION == SYSTEM_VERSION
+        lines.append(f"- FEATURE_VERSION: {FEATURE_VERSION}")
+        lines.append(f"- SYSTEM_VERSION: {SYSTEM_VERSION}")
+        lines.append(f"- Versions match: {'YES' if version_match else 'NO'}")
+    except Exception as e:
+        lines.append(f"- ERROR checking versions: {e}")
     lines.append("")
 
     return "\n".join(lines)
