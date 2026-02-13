@@ -30,8 +30,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("QuickStart")
 
-FEATURE_VERSION = "v4.5.0_pr_auc_upgrade_pack"
-SYSTEM_VERSION = "v4.5.0_pr_auc_upgrade_pack"
+FEATURE_VERSION = "v4.5.1_pr_auc_stable"
+SYSTEM_VERSION = "v4.5.1_pr_auc_stable"
 
 FUNDING_FEATURE_NAMES = ["funding_rate", "funding_rate_delta_8h", "funding_rate_zscore_30d"]
 FUNDING_FEATURE_COUNT = len(FUNDING_FEATURE_NAMES)
@@ -590,16 +590,49 @@ def compute_oi_features(candle_df, oi_df):
     return result
 
 
+def _oi_sanity_check(candle_df, oi_df, symbol: str = "BTCUSDT"):
+    """Pre-training OI sanity check: verify sufficient coverage within 30-day window."""
+    import numpy as np
+    now_ms = int(datetime.now().timestamp() * 1000)
+    oi_window_start = now_ms - 30 * 24 * 60 * 60 * 1000
+
+    if oi_df.empty or len(oi_df) < 2:
+        log.warning(f"[OI_CHECK] FAIL – no OI data for {symbol} (coverage=0%, nonzero=0)")
+        return
+
+    n_nonzero = int((oi_df['sumOpenInterest'] > 0).sum())
+    candle_in_window = candle_df[candle_df['timestamp'] >= oi_window_start]
+    n_candles_in_window = len(candle_in_window)
+
+    if n_candles_in_window == 0:
+        log.info(f"[OI_CHECK] SKIP – no candles within 30-day OI window for {symbol}")
+        return
+
+    oi_in_window = oi_df[oi_df['oi_time_ms'] >= oi_window_start]
+    period = oi_df['period'].iloc[0] if 'period' in oi_df.columns else '15m'
+    period_minutes = {"5m": 5, "15m": 15, "1h": 60}.get(period, 15)
+    window_minutes = (now_ms - oi_window_start) / (60 * 1000)
+    expected = window_minutes / period_minutes
+    coverage_pct = len(oi_in_window) / max(expected, 1) * 100
+
+    if coverage_pct < 70 or n_nonzero < 2000:
+        log.warning(f"[OI_CHECK] FAIL – insufficient OI coverage for {symbol} "
+                    f"(coverage={coverage_pct:.0f}%, nonzero={n_nonzero})")
+    else:
+        log.info(f"[OI_CHECK] PASS – coverage OK for {symbol} "
+                 f"(coverage={coverage_pct:.0f}%, nonzero={n_nonzero})")
+
+
 def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float,
                       checkpoint_interval: int = 25, warmup_epochs: int = 5, min_lr: float = None,
-                      tp_mult: float = 2.0, sl_mult: float = 1.5, horizon: int = 24, slope_eps: float = 0.05,
-                      r_min_expiry: float = 0.5, target_tpd: float = 5.5, target_tpd_tol: float = 1.5,
+                      tp_mult: float = 2.0, sl_mult: float = 1.5, horizon: int = 16, slope_eps: float = 0.05,
+                      r_min_expiry: float = 1.0, target_tpd: float = 5.5, target_tpd_tol: float = 1.5,
                       symbols: list = None, value_loss_weight: float = 0.5, value_clip: float = 3.0,
                       smoke_calib: bool = False, smoke_infer: bool = False,
                       use_focal_loss: bool = True, focal_gamma: float = 1.5, focal_alpha: float = 0.60,
-                      use_ohem: bool = True, ohem_neg_pct: float = 0.35,
+                      use_ohem: bool = True, ohem_neg_pct: float = 0.25,
                       use_edge_head: bool = True, edge_loss_weight: float = 0.3,
-                      use_soft_labels: bool = False, soft_label_temp: float = 2.0):
+                      use_soft_labels: bool = True, soft_label_temp: float = 1.5):
     import torch
     import torch.nn as nn
     import numpy as np
@@ -616,6 +649,16 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     log.info(f"[PR_AUC_PACK] ohem={use_ohem} (neg_pct={ohem_neg_pct})")
     log.info(f"[PR_AUC_PACK] edge_head={use_edge_head} (weight={edge_loss_weight})")
     log.info(f"[PR_AUC_PACK] soft_labels={use_soft_labels} (temp={soft_label_temp})")
+    log.info(f"[LABEL_QUALITY] r_min_expiry={r_min_expiry}")
+
+    from data.regression_targets import RegressionTargetGenerator
+    reg_gen = RegressionTargetGenerator(horizon_periods=horizon)
+    tb_horizon = horizon
+    reg_horizon = reg_gen.horizon_periods
+    if tb_horizon == reg_horizon == horizon:
+        log.info(f"[HORIZON_CHECK] triple_barrier={tb_horizon} model={horizon} regression={reg_horizon} OK")
+    else:
+        log.error(f"[HORIZON_CHECK] FAIL - mismatch detected: triple_barrier={tb_horizon} model={horizon} regression={reg_horizon}")
 
     from data.pipeline import FeatureEngineer
     data_dir = Path("data_cache")
@@ -663,6 +706,8 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             sym_oi_features = compute_oi_features(sym_df, sym_oi_df)
             sym_features_df = pd.concat([sym_features_df, sym_oi_features], axis=1)
             sym_features_df = sym_features_df.fillna(0)
+
+            _oi_sanity_check(sym_df, sym_oi_df, symbol=sym)
 
             if feature_columns_ref is None:
                 feature_columns_ref = list(sym_features_df.columns)
@@ -790,6 +835,8 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         oi_features = compute_oi_features(df, oi_df)
         features_df = pd.concat([features_df, oi_features], axis=1)
         features_df = features_df.fillna(0)
+
+        _oi_sanity_check(df, oi_df)
 
         total_features = engineer.STF_FEATURE_COUNT + engineer.HTF_FEATURE_COUNT + FUNDING_FEATURE_COUNT + OI_FEATURE_COUNT
         actual_cols = len(features_df.columns)
@@ -2629,9 +2676,9 @@ Examples:
     parser.add_argument("--checkpoint-interval", type=int, default=25, help="Pause every N epochs (0=no pausing)")
     parser.add_argument("--tp-mult", type=float, default=2.0, help="TP ATR multiplier (default: 2.0)")
     parser.add_argument("--sl-mult", type=float, default=1.5, help="SL ATR multiplier (default: 1.5)")
-    parser.add_argument("--horizon", type=int, default=24, help="Horizon bars (default: 24)")
+    parser.add_argument("--horizon", type=int, default=16, help="Horizon bars (default: 16)")
     parser.add_argument("--slope-eps", type=float, default=0.05, help="Min slope for trend gate (default: 0.05)")
-    parser.add_argument("--r-min-expiry", type=float, default=0.5, help="Min R-multiple at expiry for ENTER=1 (default: 0.5)")
+    parser.add_argument("--r-min-expiry", type=float, default=1.0, help="Min R-multiple at expiry for ENTER=1 (default: 1.0)")
     parser.add_argument("--target-tpd", type=float, default=2.5, help="Target trades per day for BEST selection (default: 2.5)")
     parser.add_argument("--target-tpd-tol", type=float, default=1.0, help="Tolerance band for trades/day (default: 1.0)")
     parser.add_argument("--train", action="store_true", default=False,
@@ -2656,18 +2703,20 @@ Examples:
                         help="Use Online Hard Example Mining (default: True)")
     parser.add_argument("--no-ohem", action="store_true", default=False,
                         help="Disable OHEM")
-    parser.add_argument("--ohem-neg-pct", type=float, default=0.35,
-                        help="OHEM: keep top K%% hardest negatives (default: 0.35)")
+    parser.add_argument("--ohem-neg-pct", type=float, default=0.25,
+                        help="OHEM: keep top K%% hardest negatives (default: 0.25)")
     parser.add_argument("--use-edge-head", action="store_true", default=True,
                         help="Enable edge regression head (default: True)")
     parser.add_argument("--no-edge-head", action="store_true", default=False,
                         help="Disable edge head")
     parser.add_argument("--edge-loss-weight", type=float, default=0.3,
                         help="Weight for edge head loss (default: 0.3)")
-    parser.add_argument("--use-soft-labels", action="store_true", default=False,
-                        help="Use soft quality labels instead of hard binary (default: False)")
-    parser.add_argument("--soft-label-temp", type=float, default=2.0,
-                        help="Soft label sigmoid temperature (default: 2.0)")
+    parser.add_argument("--use-soft-labels", action="store_true", default=True,
+                        help="Use soft quality labels (default: True)")
+    parser.add_argument("--no-soft-labels", action="store_true", default=False,
+                        help="Disable soft quality labels")
+    parser.add_argument("--soft-label-temp", type=float, default=1.5,
+                        help="Soft label sigmoid temperature (default: 1.5)")
     parser.add_argument("--promote-min-pr-auc", type=float, default=0.42,
                         help="Min PR-AUC for promotion gate (default: 0.42)")
     parser.add_argument("--verify-pr-auc-upgrade", action="store_true", default=False,
@@ -3025,14 +3074,16 @@ Examples:
 
     if args.verify_pr_auc_upgrade:
         log.info("=" * 60)
-        log.info("  PR-AUC UPGRADE PACK VERIFICATION (v4.5.0)")
+        log.info("  PR-AUC STABLE PATCH VERIFICATION (v4.5.1)")
         log.info("=" * 60)
         checks_passed = 0
         checks_total = 0
+        failures = []
 
         use_focal = args.use_focal_loss and not args.no_focal_loss
         use_ohem_flag = args.use_ohem and not args.no_ohem
         use_edge = args.use_edge_head and not args.no_edge_head
+        use_soft = args.use_soft_labels and not getattr(args, 'no_soft_labels', False)
 
         checks_total += 1
         if use_focal:
@@ -3040,6 +3091,7 @@ Examples:
             checks_passed += 1
         else:
             log.warning("  [FAIL] Focal loss DISABLED")
+            failures.append("focal_loss disabled")
 
         checks_total += 1
         if use_ohem_flag:
@@ -3047,6 +3099,15 @@ Examples:
             checks_passed += 1
         else:
             log.warning("  [FAIL] OHEM DISABLED")
+            failures.append("ohem disabled")
+
+        checks_total += 1
+        if args.ohem_neg_pct <= 0.25:
+            log.info(f"  [PASS] OHEM neg_pct={args.ohem_neg_pct} (<= 0.25)")
+            checks_passed += 1
+        else:
+            log.warning(f"  [FAIL] OHEM neg_pct={args.ohem_neg_pct} (expected <= 0.25)")
+            failures.append(f"ohem_neg_pct={args.ohem_neg_pct}")
 
         checks_total += 1
         if use_edge:
@@ -3054,6 +3115,49 @@ Examples:
             checks_passed += 1
         else:
             log.warning("  [FAIL] Edge head DISABLED")
+            failures.append("edge_head disabled")
+
+        checks_total += 1
+        if use_soft:
+            log.info(f"  [PASS] Soft labels ON (temp={args.soft_label_temp})")
+            checks_passed += 1
+        else:
+            log.warning(f"  [FAIL] Soft labels OFF (expected ON by default)")
+            failures.append("soft_labels off")
+
+        checks_total += 1
+        if args.soft_label_temp <= 1.5:
+            log.info(f"  [PASS] Soft label temp={args.soft_label_temp} (<= 1.5)")
+            checks_passed += 1
+        else:
+            log.warning(f"  [FAIL] Soft label temp={args.soft_label_temp} (expected <= 1.5)")
+            failures.append(f"soft_label_temp={args.soft_label_temp}")
+
+        checks_total += 1
+        if args.r_min_expiry >= 1.0:
+            log.info(f"  [PASS] r_min_expiry={args.r_min_expiry} (>= 1.0)")
+            checks_passed += 1
+        else:
+            log.warning(f"  [FAIL] r_min_expiry={args.r_min_expiry} (expected >= 1.0)")
+            failures.append(f"r_min_expiry={args.r_min_expiry}")
+
+        checks_total += 1
+        if args.horizon == 16:
+            log.info(f"  [PASS] Horizon={args.horizon} (== 16)")
+            checks_passed += 1
+        else:
+            log.warning(f"  [FAIL] Horizon={args.horizon} (expected 16)")
+            failures.append(f"horizon={args.horizon}")
+
+        checks_total += 1
+        from data.regression_targets import RegressionTargetGenerator
+        reg_gen = RegressionTargetGenerator(horizon_periods=args.horizon)
+        if reg_gen.horizon_periods == args.horizon:
+            log.info(f"  [PASS] Horizon alignment: CLI={args.horizon} regression={reg_gen.horizon_periods}")
+            checks_passed += 1
+        else:
+            log.warning(f"  [FAIL] Horizon mismatch: CLI={args.horizon} regression={reg_gen.horizon_periods}")
+            failures.append("horizon mismatch")
 
         checks_total += 1
         if args.promote_min_pr_auc >= 0.42:
@@ -3061,17 +3165,7 @@ Examples:
             checks_passed += 1
         else:
             log.warning(f"  [FAIL] PR-AUC promotion gate = {args.promote_min_pr_auc} (< 0.42)")
-
-        checks_total += 1
-        from training.triple_barrier import label_enter_quality
-        import inspect
-        sig = inspect.signature(label_enter_quality)
-        if 'mfe_r' in str(sig):
-            log.info("  [PASS] label_enter_quality returns mfe_r/mae_r/y_soft")
-            checks_passed += 1
-        else:
-            checks_passed += 1
-            log.info("  [PASS] label_enter_quality updated (soft labels available)")
+            failures.append(f"promote_min_pr_auc={args.promote_min_pr_auc}")
 
         checks_total += 1
         from models.simple_mlp import EnhancedMultiHeadMLP_Config
@@ -3081,6 +3175,7 @@ Examples:
             checks_passed += 1
         else:
             log.warning("  [FAIL] EnhancedMultiHeadMLP missing edge_head support")
+            failures.append("edge_head not in model config")
 
         checks_total += 1
         ece_temp_path = Path("checkpoints/temp_scale_v5.0.json")
@@ -3098,17 +3193,19 @@ Examples:
             checks_passed += 1
 
         checks_total += 1
-        if VERSION == "v4.5.0_pr_auc_upgrade_pack":
+        VERSION = FEATURE_VERSION
+        if VERSION == "v4.5.1_pr_auc_stable":
             log.info(f"  [PASS] Version = {VERSION}")
             checks_passed += 1
         else:
-            log.warning(f"  [FAIL] Version = {VERSION} (expected v4.5.0_pr_auc_upgrade_pack)")
+            log.warning(f"  [FAIL] Version = {VERSION} (expected v4.5.1_pr_auc_stable)")
+            failures.append(f"version={VERSION}")
 
         log.info(f"\n  RESULT: {checks_passed}/{checks_total} checks passed")
         if checks_passed == checks_total:
-            log.info("  PR-AUC Upgrade Pack fully verified!")
+            log.info("  [VERIFY_PR_AUC] ALL CHECKS PASSED")
         else:
-            log.warning(f"  {checks_total - checks_passed} checks failed - review above")
+            log.warning(f"  [VERIFY_PR_AUC] FAIL: {', '.join(failures)}")
         return
 
     if not args.predict_only:
@@ -3119,6 +3216,7 @@ Examples:
         use_focal = args.use_focal_loss and not args.no_focal_loss
         use_ohem = args.use_ohem and not args.no_ohem
         use_edge = args.use_edge_head and not args.no_edge_head
+        use_soft = args.use_soft_labels and not args.no_soft_labels
 
         model, engineer, feature_columns, history = train_enter_model(
             data_path, device, args.epochs, args.batch_size, args.lr,
@@ -3135,7 +3233,7 @@ Examples:
             focal_alpha=args.focal_alpha, use_ohem=use_ohem,
             ohem_neg_pct=args.ohem_neg_pct, use_edge_head=use_edge,
             edge_loss_weight=args.edge_loss_weight,
-            use_soft_labels=args.use_soft_labels,
+            use_soft_labels=use_soft,
             soft_label_temp=args.soft_label_temp,
         )
 

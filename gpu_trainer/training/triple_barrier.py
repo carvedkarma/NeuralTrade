@@ -58,8 +58,8 @@ def triple_barrier_outcome_for_index(
     atr_i: float,
     tp_mult: float = 2.0,
     sl_mult: float = 1.5,
-    horizon: int = 24,
-    r_min_expiry: float = 0.5,
+    horizon: int = 16,
+    r_min_expiry: float = 1.0,
 ):
     """Simulate a single triple-barrier trade at index i.
     
@@ -187,7 +187,7 @@ def compute_mfe_mae_for_index(
     side: int,
     atr_i: float,
     sl_mult: float = 1.5,
-    horizon: int = 24,
+    horizon: int = 16,
 ) -> tuple:
     """Compute MFE and MAE in R-units for a trade at index i.
 
@@ -253,8 +253,8 @@ def triple_barrier_batch(
     sides: np.ndarray,
     tp_mult: float = 2.0,
     sl_mult: float = 1.5,
-    horizon: int = 24,
-    r_min_expiry: float = 0.5,
+    horizon: int = 16,
+    r_min_expiry: float = 1.0,
     atr: np.ndarray = None,
 ):
     """Run triple-barrier simulation for a batch of trade entries.

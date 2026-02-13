@@ -75,8 +75,8 @@ class RegressionTargetGenerator:
     """
     
     def __init__(self, 
-                 horizon_periods: int = 24,  # 6 hours in 15-minute candles (production default)
-                 lookback_periods: int = 48,  # 12 hours = 2x horizon for volatility
+                 horizon_periods: int = 16,  # 4 hours in 15-minute candles (v4.5.1 default)
+                 lookback_periods: int = 48,  # 12 hours for volatility
                  costs: Optional[TradingCosts] = None):
         self.horizon_periods = horizon_periods
         self.lookback_periods = lookback_periods
@@ -275,9 +275,9 @@ class RegressionTargetGenerator:
         htf_features: pd.DataFrame,
         tp_atr_mult: float = 2.0,
         sl_atr_mult: float = 1.5,
-        horizon_bars: int = 24,
+        horizon_bars: int = 16,
         slope_eps: float = 0.05,
-        r_min_expiry: float = 0.5,
+        r_min_expiry: float = 1.0,
     ) -> pd.DataFrame:
         """
         HTF-gated Triple Barrier labeling for ENTER quality model.
@@ -1298,11 +1298,11 @@ def generate_multihead_targets(
 def generate_enter_quality_targets(
     df: pd.DataFrame,
     htf_features: pd.DataFrame,
-    horizon_periods: int = 24,
+    horizon_periods: int = 16,
     tp_atr_mult: float = 2.0,
     sl_atr_mult: float = 1.5,
     slope_eps: float = 0.05,
-    r_min_expiry: float = 0.5,
+    r_min_expiry: float = 1.0,
 ) -> pd.DataFrame:
     """Convenience function for ENTER quality labeling."""
     generator = RegressionTargetGenerator(horizon_periods=horizon_periods)

@@ -1,0 +1,91 @@
+You are working in the gpu_trainer project. Goal: fix PR-AUC collapse and stabilize training (Pred% going to 0%, PR-AUC stuck ~0.26). Implement a v4.5.1 patch called:
+
+v4.5.1_pr_auc_stable
+
+DO NOT add new features or change model architecture. Only stabilize the existing PR-AUC upgrade pack behavior.
+
+========================
+A) SOFT LABELS (ENABLE + DEFAULT ON)
+========================
+1) Ensure soft labels are actually ON by default:
+- Add CLI flags (if missing): --soft-labels, --soft-temp
+- Defaults: soft_labels=True, soft_temp=1.5
+- Wire these into LearningConfig and train_enter_model()
+- Ensure y_soft is used when soft_labels=True (not ignored)
+- Add log line:
+  [PR_AUC_PACK] soft_labels=True (temp=1.5)
+
+========================
+B) OHEM TOO AGGRESSIVE (REDUCE)
+========================
+2) Reduce OHEM default hard-negative mining:
+- Change default neg_pct from 0.35 -> 0.25
+- Ensure OHEM still keeps ALL positives + top neg_pct hardest negatives
+- Add log line:
+  [PR_AUC_PACK] ohem_neg_pct=0.25
+
+========================
+C) HORIZON CONSISTENCY (CRITICAL)
+========================
+3) Verify horizon is consistent across:
+- triple_barrier labeling (horizon bars)
+- RegressionTargetGenerator / edge/value head target generator horizon
+- TimeFrameConfig default horizon
+- Training loop uses same horizon
+If mismatch exists, standardize ALL to horizon=16.
+Add a single explicit log line before training starts:
+  [HORIZON_CHECK] triple_barrier=16 model=16 regression=16 OK
+If any mismatch is detected, print:
+  [HORIZON_CHECK] FAIL - mismatch detected: (show values)
+
+========================
+D) LABEL PURITY (REMOVE WEAK EXPIRY WINS)
+========================
+4) Tighten label purity in triple_barrier:
+- change r_min_expiry from 0.5 -> 1.0 (default)
+- Keep parity logic unchanged.
+Add log:
+  [LABEL_QUALITY] r_min_expiry=1.0
+
+========================
+E) OI PIPELINE SANITY ASSERT
+========================
+5) Before training begins, add an OI sanity check:
+- If OI coverage within the available 30-day OI window is < 70% OR non-zero OI records < 2000:
+    print [OI_CHECK] FAIL – insufficient OI coverage (show coverage %, nonzero count)
+  else:
+    print [OI_CHECK] PASS – coverage OK (show coverage %, nonzero count)
+This must not crash training, but must clearly warn.
+
+========================
+F) VERIFY MODE EXTENSION
+========================
+6) Extend --verify-pr-auc-upgrade to include checks for:
+- soft_labels default ON (temp=1.5)
+- ohem_neg_pct default 0.25
+- r_min_expiry default 1.0
+- horizon alignment (must pass)
+- edge_head active if enabled in config
+Output at end:
+  [VERIFY_PR_AUC] ALL CHECKS PASSED
+or list failing checks with [VERIFY_PR_AUC] FAIL: ...
+
+========================
+G) VERSION BUMP
+========================
+7) Update version strings everywhere versions are tracked:
+v4.5.1_pr_auc_stable
+
+========================
+H) WHAT TO DELIVER
+========================
+- Commit code changes
+- Print the exact files changed + line ranges
+- Provide the exact command to retrain cleanly (and mention deleting old checkpoints)
+- Provide expected logs that confirm the patch is active
+
+IMPORTANT:
+- Do not change feature set
+- Do not change model heads or architecture
+- Do not change triple-barrier parity rules
+- Only stabilize learning + verify wiring
