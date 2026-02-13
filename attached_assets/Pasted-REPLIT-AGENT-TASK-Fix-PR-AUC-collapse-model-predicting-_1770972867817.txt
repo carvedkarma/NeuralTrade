@@ -1,0 +1,65 @@
+REPLIT AGENT TASK: Fix PR-AUC collapse (model predicting 100% positives) in v4.5.1_pr_auc_stable.
+
+PROBLEM (from logs):
+- Pos ≈ 14.4% but Pred = 100.0%
+- Precision ~14%, Recall 100%, PR-AUC ~0.09
+- mean_logit_pos ≈ mean_logit_neg → no separation
+
+GOAL:
+Stop the “all-positive” collapse and force logit separation so PR-AUC improves.
+
+CHANGES TO MAKE (do exactly these, nothing extra):
+
+1) Reduce positive pressure
+- Set pos_weight to a capped value:
+    pos_weight = min(pos_weight, 2.5)
+  (or just hard-set pos_weight=2.5 for now)
+
+- Focal loss alpha:
+    alpha: 0.60 → 0.40
+  Keep gamma=1.5 unchanged.
+
+2) Temporarily disable OHEM
+- ohem: True → False
+Reason: focal + high pos_weight + OHEM causes all-positive collapse.
+
+3) Add logit separation regularizer (critical)
+After computing enter_head logits (before sigmoid), add:
+
+    pos_mask = (y == 1)
+    neg_mask = (y == 0)
+    if pos_mask.any() and neg_mask.any():
+        mean_pos = logits[pos_mask].mean()
+        mean_neg = logits[neg_mask].mean()
+        sep = mean_pos - mean_neg
+        sep_loss = torch.relu(0.2 - sep)      # enforce at least 0.2 separation
+        total_loss = total_loss + 0.02 * sep_loss
+
+This forces the model to differentiate positives vs negatives.
+
+4) Add safety logging each epoch (to confirm fix)
+Print these each epoch:
+- Pos% (label positive ratio)
+- Pred% (fraction sigmoid(logits) > 0.5)
+- mean_logit_pos, mean_logit_neg, sep
+- PR-AUC
+
+SUCCESS CRITERIA (must be visible in logs within 5–15 epochs):
+- Pred% drops from ~100% → ~20–60% (not all-positive)
+- sep (mean_logit_pos - mean_logit_neg) becomes > 0.2
+- PR-AUC rises above ~0.20 early (then continue improving)
+
+FILES LIKELY TO TOUCH:
+- enter_quality training loop (where focal_bce_with_logits is applied)
+- config/CLI defaults if alpha/pos_weight are wired there
+
+DO NOT:
+- change labeling logic
+- change horizon defaults
+- remove edge head or soft labels
+- change data pipeline
+
+DELIVERABLE:
+Open a PR/commit with:
+- code changes
+- before/after log snippet showing Pred% no longer 100% and sep > 0.2
