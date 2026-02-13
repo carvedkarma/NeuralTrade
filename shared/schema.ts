@@ -462,6 +462,22 @@ export const dashboardDataSchema = z.object({
 });
 export type DashboardData = z.infer<typeof dashboardDataSchema>;
 
+export const openInterestHistory = pgTable("open_interest_history", {
+  id: serial("id").primaryKey(),
+  symbol: varchar("symbol", { length: 20 }).notNull(),
+  timestamp: bigint("timestamp", { mode: "number" }).notNull(),
+  period: varchar("period", { length: 10 }).notNull().default("15m"),
+  sumOpenInterest: real("sum_open_interest").notNull(),
+}, (table) => ({
+  symbolIdx: index("oi_history_symbol_idx").on(table.symbol),
+  timestampIdx: index("oi_history_timestamp_idx").on(table.timestamp),
+  uniqueOi: uniqueIndex("oi_history_unique_idx").on(table.symbol, table.timestamp, table.period),
+}));
+
+export const insertOpenInterestHistorySchema = createInsertSchema(openInterestHistory).omit({ id: true });
+export type InsertOpenInterestHistory = z.infer<typeof insertOpenInterestHistorySchema>;
+export type OpenInterestHistory = typeof openInterestHistory.$inferSelect;
+
 export const candles = pgTable("candles", {
   id: serial("id").primaryKey(),
   symbol: varchar("symbol", { length: 20 }).notNull().default("BTCUSDT"),

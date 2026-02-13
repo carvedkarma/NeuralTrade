@@ -4,7 +4,7 @@ import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
 import ingestRouter from "./ingest";
 import { db } from "./db";
-import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema } from "@shared/schema";
+import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema, openInterestHistory } from "@shared/schema";
 import type { ModelLearningStatsEntry, MoneyConfig } from "@shared/schema";
 import { and, eq, gte, lte, asc, desc, sql, count } from "drizzle-orm";
 import { z } from "zod";
@@ -4366,6 +4366,171 @@ export async function registerRoutes(
     } catch (error) {
       console.error("[Debug Verify DB] Error:", error);
       res.status(500).json({ error: "Failed to verify DB" });
+    }
+  });
+
+  app.post("/api/oi/download", async (req, res) => {
+    try {
+      const symbols = (req.body.symbols as string[] | undefined) || ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
+      const period = (req.body.period as string) || "15m";
+      const results: Record<string, { fetched: number; inserted: number; nonzero: number }> = {};
+
+      const nowMs = Date.now();
+      const maxLookbackMs = 30 * 24 * 60 * 60 * 1000;
+      const windowStartMs = nowMs - maxLookbackMs;
+
+      const periodMsMap: Record<string, number> = { "5m": 300000, "15m": 900000, "1h": 3600000 };
+      const periodMs = periodMsMap[period] || 900000;
+      const BINANCE_OI_ENDPOINTS = [
+        "https://www.binance.com/futures/data/openInterestHist",
+        "https://fapi.binance.com/futures/data/openInterestHist",
+      ];
+      let url = BINANCE_OI_ENDPOINTS[0];
+
+      for (const symbol of symbols) {
+        let allRecords: { timestamp: number; sumOpenInterest: number; symbol: string; period: string }[] = [];
+        let currentStart = windowStartMs;
+        let page = 0;
+        let consecutiveErrors = 0;
+        let success = false;
+
+        const periodsToTry = [period, "5m", "15m", "1h"].filter((v, i, a) => a.indexOf(v) === i);
+
+        for (const tryPeriod of periodsToTry) {
+          allRecords = [];
+          currentStart = windowStartMs;
+          page = 0;
+          consecutiveErrors = 0;
+          let periodFailed = false;
+
+          while (currentStart < nowMs) {
+            try {
+              const params = new URLSearchParams({
+                symbol,
+                period: tryPeriod,
+                limit: "500",
+                startTime: String(Math.floor(currentStart)),
+                endTime: String(Math.floor(nowMs)),
+              });
+              const resp = await fetch(`${url}?${params}`, { signal: AbortSignal.timeout(30000) });
+
+              if (resp.status === 429) {
+                const wait = Math.min(2 ** consecutiveErrors, 10) * 1000;
+                await new Promise(r => setTimeout(r, wait));
+                consecutiveErrors++;
+                if (consecutiveErrors > 5) { periodFailed = true; break; }
+                continue;
+              }
+              if (resp.status === 400 || resp.status === 403 || resp.status === 418) {
+                periodFailed = true; break;
+              }
+
+              const data = await resp.json() as Array<{ timestamp: number; sumOpenInterest: string; symbol?: string }>;
+              consecutiveErrors = 0;
+
+              if (!data || !Array.isArray(data) || data.length === 0) break;
+
+              for (const item of data) {
+                allRecords.push({
+                  timestamp: Number(item.timestamp),
+                  sumOpenInterest: parseFloat(item.sumOpenInterest),
+                  symbol: (item.symbol as string) || symbol,
+                  period: tryPeriod,
+                });
+              }
+
+              const lastTs = Number(data[data.length - 1].timestamp);
+              console.log(`[OI Download] ${symbol} page=${page} got=${data.length} lastTs=${lastTs} currentStart=${Math.floor(currentStart)} total=${allRecords.length}`);
+              if (lastTs <= currentStart) break;
+
+              const stepMs = periodMsMap[tryPeriod] || 900000;
+              currentStart = lastTs + stepMs;
+              page++;
+
+              if (data.length < 500) break;
+
+              await new Promise(r => setTimeout(r, 350));
+            } catch (e) {
+              consecutiveErrors++;
+              if (consecutiveErrors > 3) { periodFailed = true; break; }
+              await new Promise(r => setTimeout(r, 1000));
+            }
+          }
+
+          if (!periodFailed && allRecords.length > 0) {
+            success = true;
+            break;
+          }
+        }
+
+        if (!success || allRecords.length === 0) {
+          results[symbol] = { fetched: 0, inserted: 0, nonzero: 0 };
+          continue;
+        }
+
+        const seen = new Set<string>();
+        const unique = allRecords.filter(r => {
+          const key = `${r.timestamp}_${r.period}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+
+        let inserted = 0;
+        const batchSize = 200;
+        for (let i = 0; i < unique.length; i += batchSize) {
+          const batch = unique.slice(i, i + batchSize).map(r => ({
+            symbol: r.symbol,
+            timestamp: r.timestamp,
+            period: r.period,
+            sumOpenInterest: r.sumOpenInterest,
+          }));
+          try {
+            await db.insert(openInterestHistory)
+              .values(batch)
+              .onConflictDoUpdate({
+                target: [openInterestHistory.symbol, openInterestHistory.timestamp, openInterestHistory.period],
+                set: { sumOpenInterest: sql`EXCLUDED.sum_open_interest` },
+              });
+            inserted += batch.length;
+          } catch (e) {
+            console.error(`[OI Download] batch insert error for ${symbol}:`, e);
+          }
+        }
+
+        const nonzero = unique.filter(r => r.sumOpenInterest > 0).length;
+        results[symbol] = { fetched: unique.length, inserted, nonzero };
+      }
+
+      const totals = await db.select({
+        symbol: openInterestHistory.symbol,
+        count: count(),
+      }).from(openInterestHistory).groupBy(openInterestHistory.symbol);
+
+      res.json({
+        download_results: results,
+        db_totals: totals,
+        message: "OI download complete",
+      });
+    } catch (error) {
+      console.error("[OI Download] Error:", error);
+      res.status(500).json({ error: "Failed to download OI data" });
+    }
+  });
+
+  app.get("/api/oi/stats", async (_req, res) => {
+    try {
+      const totals = await db.select({
+        symbol: openInterestHistory.symbol,
+        count: count(),
+        minTimestamp: sql<number>`MIN(${openInterestHistory.timestamp})`,
+        maxTimestamp: sql<number>`MAX(${openInterestHistory.timestamp})`,
+      }).from(openInterestHistory).groupBy(openInterestHistory.symbol);
+
+      res.json({ totals });
+    } catch (error) {
+      console.error("[OI Stats] Error:", error);
+      res.status(500).json({ error: "Failed to get OI stats" });
     }
   });
 
