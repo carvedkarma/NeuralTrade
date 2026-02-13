@@ -25,6 +25,12 @@ The v5.0 training pipeline supports multi-asset training with per-symbol time-ba
 
 Training stability improvements include fixes for logit polarity and PR-AUC stabilization. The v4.5.3 stabilization patch reduces focal loss gamma from 1.5 to 1.0, OHEM hardest negative fraction from 25% to 20%, max learning rate from 1e-4 to 6e-5, and tightens enter logit clamp from [-10,10] to [-5,5]. Earlier patches added soft labels, edge regression head, and logit separation regularizer.
 
+A two-stage loss schedule prevents ENTER classifier early collapse (Pred%=0). During warmup (default 10 epochs), training uses plain BCEWithLogitsLoss with capped pos_weight (default 2.0), no focal loss, and no OHEM. After warmup, training transitions to the full loss configuration (focal loss, OHEM if enabled, uncapped pos_weight). CLI flags: --loss-warmup-epochs, --warmup-pos-weight. Each epoch logs [LOSS_STAGE] with stage=WARMUP or stage=FULL and active settings.
+
+p_enter percentiles are computed from the exact same sigmoid(enter_logits) tensor used for PR-AUC computation, with no calibration or policy mapping applied. Each eval epoch logs [PENTER_AUDIT] with p_min/p_max/p_mean/logits_min/logits_max and [PENTER_PCTL] with p50/p75/p90/p95/p99. NaN/Inf in logits or p_enter raises RuntimeError immediately.
+
+A --verify-enter-metrics mode runs 3 validation passes after training, computes Pred%/PR-AUC/sep/p75/p99 per pass, asserts: (A) Pred% in [2%,60%], (B) sep increases from epoch 1 to epoch 10, (C) p99 > p75. Writes verify_enter_metrics.md report with pass results table and assertion outcomes.
+
 Multi-asset data ingestion: download_data() supports per-symbol downloads (data_cache/{SYMBOL}_15m.parquet). A preflight_data_check() verifies all requested symbols have parquet files with >= 20k bars before training, with [DATA_CHECK] log lines per symbol. CLI flags: --download-missing-data auto-fetches missing parquets from the dashboard API; --allow-partial-data trains on available symbols only instead of aborting.
 
 A HTF Warmup & Candle History mechanism ensures sufficient historical data for indicator computation, with a strict WARMUP gate checking minimum bar counts before trading. An optional direct HTF fetch provides more stable indicators.

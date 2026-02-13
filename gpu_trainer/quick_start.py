@@ -727,7 +727,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                       use_focal_loss: bool = True, focal_gamma: float = 1.0, focal_alpha: float = 0.35,
                       use_ohem: bool = False, ohem_neg_pct: float = 0.20,
                       use_edge_head: bool = True, edge_loss_weight: float = 0.3,
-                      use_soft_labels: bool = True, soft_label_temp: float = 1.5):
+                      use_soft_labels: bool = True, soft_label_temp: float = 1.5,
+                      loss_warmup_epochs: int = 10, warmup_pos_weight: float = 2.0,
+                      verify_enter_metrics: bool = False):
     import torch
     import torch.nn as nn
     import numpy as np
@@ -1144,20 +1146,30 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     log.info(f"[BIAS_INIT] pos_rate={pos_rate:.4f} bias={bias_init_val:.4f}")
     log.info(f"[POS_WEIGHT] pos_weight={pos_weight:.2f}")
 
-    if use_focal_loss:
-        def focal_bce_with_logits(logits, targets, gamma=focal_gamma, alpha=focal_alpha):
-            bce = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction='none')
-            p_t = torch.sigmoid(logits)
-            p_t = torch.where(targets >= 0.5, p_t, 1 - p_t)
-            focal_weight = (1 - p_t) ** gamma
-            alpha_t = torch.where(targets >= 0.5, alpha, 1 - alpha)
-            return (alpha_t * focal_weight * bce).mean()
-        enter_criterion_fn = focal_bce_with_logits
-        log.info(f"[LOSS] Using focal BCEWithLogits: gamma={focal_gamma}, alpha={focal_alpha}")
-    else:
-        bce_criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]).to(device))
-        enter_criterion_fn = lambda logits, targets: bce_criterion(logits, targets)
-        log.info(f"[LOSS] Using standard BCEWithLogits: pos_weight={pos_weight:.2f}")
+    def focal_bce_with_logits(logits, targets, gamma=focal_gamma, alpha=focal_alpha):
+        bce = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+        p_t = torch.sigmoid(logits)
+        p_t = torch.where(targets >= 0.5, p_t, 1 - p_t)
+        focal_weight = (1 - p_t) ** gamma
+        alpha_t = torch.where(targets >= 0.5, alpha, 1 - alpha)
+        return (alpha_t * focal_weight * bce).mean()
+
+    configured_pos_weight = pos_weight
+    warmup_pw = min(configured_pos_weight, warmup_pos_weight)
+
+    def make_warmup_criterion(pw):
+        return nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pw]).to(device))
+
+    def make_full_criterion():
+        if use_focal_loss:
+            return focal_bce_with_logits
+        else:
+            c = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([configured_pos_weight]).to(device))
+            return lambda logits, targets: c(logits, targets)
+
+    log.info(f"[LOSS] Two-stage schedule: warmup={loss_warmup_epochs} epochs (plain BCE, pos_weight={warmup_pw:.2f}) -> full (focal={'on' if use_focal_loss else 'off'}, ohem={'on' if use_ohem else 'off'})")
+    log.info(f"[LOSS] Full stage: focal gamma={focal_gamma}, alpha={focal_alpha}, pos_weight={configured_pos_weight:.2f}")
+
     value_criterion = nn.HuberLoss(delta=1.0)
     edge_criterion = nn.HuberLoss(delta=1.0)
 
@@ -1180,12 +1192,25 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     patience = 0
     max_patience = 50
     min_epochs = 40
-    history = {'train_loss': [], 'val_loss': [], 'val_precision': [], 'val_recall': [], 'val_f1': [], 'val_prauc': []}
+    history = {'train_loss': [], 'val_loss': [], 'val_precision': [], 'val_recall': [], 'val_f1': [], 'val_prauc': [], '_sep_history': []}
 
     checkpoint_dir = Path("checkpoints")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(epochs):
+        is_warmup_stage = (epoch < loss_warmup_epochs)
+
+        if is_warmup_stage:
+            enter_criterion_fn = make_warmup_criterion(warmup_pw)
+            epoch_use_ohem = False
+            epoch_pw = warmup_pw
+            log.info(f"[LOSS_STAGE] stage=WARMUP epoch={epoch+1} pos_weight={warmup_pw:.2f}")
+        else:
+            enter_criterion_fn = make_full_criterion()
+            epoch_use_ohem = use_ohem
+            epoch_pw = configured_pos_weight
+            log.info(f"[LOSS_STAGE] stage=FULL epoch={epoch+1} pos_weight={configured_pos_weight:.2f} focal={'on' if use_focal_loss else 'off'} ohem={'on' if use_ohem else 'off'}")
+
         model.train()
         total_loss = 0
         n_batches = 0
@@ -1203,14 +1228,14 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             output = model.forward_multihead(features_batch, symbol_ids=sym_id_batch if n_symbols > 1 else None)
             enter_logits = output.enter_logits.squeeze(-1)
 
-            # Determine targets: soft labels or hard labels
-            if use_soft_labels:
+            if is_warmup_stage:
+                enter_targets = enter_batch
+            elif use_soft_labels:
                 enter_targets = ysoft_batch
             else:
                 enter_targets = enter_batch
 
-            # OHEM: keep all positives + top K% hardest negatives
-            if use_ohem:
+            if epoch_use_ohem:
                 with torch.no_grad():
                     per_sample_loss = nn.functional.binary_cross_entropy_with_logits(
                         enter_logits, enter_targets, reduction='none'
@@ -1322,9 +1347,22 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
 
         avg_val_loss = val_loss_total / max(val_n, 1)
 
-        all_probs = np.array(all_probs)
+        all_logits_np = np.array(all_enter_logits_list)
         all_targets = np.array(all_targets)
         all_sides = np.array(all_sides)
+
+        if np.any(np.isnan(all_logits_np)) or np.any(np.isinf(all_logits_np)):
+            raise RuntimeError(f"[PENTER_AUDIT] FATAL: NaN/Inf detected in enter_logits at epoch {epoch+1}! "
+                               f"nan_count={np.isnan(all_logits_np).sum()} inf_count={np.isinf(all_logits_np).sum()}")
+
+        all_probs = 1.0 / (1.0 + np.exp(-all_logits_np))
+
+        if np.any(np.isnan(all_probs)) or np.any(np.isinf(all_probs)):
+            raise RuntimeError(f"[PENTER_AUDIT] FATAL: NaN/Inf detected in p_enter (sigmoid of logits) at epoch {epoch+1}! "
+                               f"nan_count={np.isnan(all_probs).sum()} inf_count={np.isinf(all_probs).sum()}")
+
+        log.info(f"[PENTER_AUDIT] p_min={all_probs.min():.6f} p_max={all_probs.max():.6f} p_mean={all_probs.mean():.6f} "
+                 f"logits_min={all_logits_np.min():.4f} logits_max={all_logits_np.max():.4f}")
 
         threshold = 0.5
         preds = (all_probs >= threshold).astype(int)
@@ -1351,11 +1389,10 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
 
         current_lr = optimizer.param_groups[0]['lr']
 
-        all_logits_np_safety = np.array(all_enter_logits_list)
         pos_mask_s = all_targets == 1
         neg_mask_s = all_targets == 0
-        ml_pos = float(all_logits_np_safety[pos_mask_s].mean()) if pos_mask_s.any() else 0.0
-        ml_neg = float(all_logits_np_safety[neg_mask_s].mean()) if neg_mask_s.any() else 0.0
+        ml_pos = float(all_logits_np[pos_mask_s].mean()) if pos_mask_s.any() else 0.0
+        ml_neg = float(all_logits_np[neg_mask_s].mean()) if neg_mask_s.any() else 0.0
         sep_val = ml_pos - ml_neg
         pred_pct = preds.mean()
 
@@ -1369,6 +1406,14 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             f"mean_logit_pos={ml_pos:.3f} mean_logit_neg={ml_neg:.3f} sep={sep_val:.3f} PR-AUC={prauc:.3f}"
         )
         log.info(f"[SEP_CHECK] mean_pos={ml_pos:.3f} mean_neg={ml_neg:.3f} sep={sep_val:.3f}")
+        history['_sep_history'].append(sep_val)
+
+        p50 = np.percentile(all_probs, 50)
+        p75 = np.percentile(all_probs, 75)
+        p90 = np.percentile(all_probs, 90)
+        p95 = np.percentile(all_probs, 95)
+        p99 = np.percentile(all_probs, 99)
+        log.info(f"[PENTER_PCTL] p50={p50:.4f} p75={p75:.4f} p90={p90:.4f} p95={p95:.4f} p99={p99:.4f}")
 
         if all_value_preds:
             all_vp = np.array(all_value_preds)
@@ -1387,19 +1432,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             edge_mae_val = edge_rmse_val = 0.0
 
         if (epoch + 1) % 10 == 0 or epoch == 0:
-            p50 = np.percentile(all_probs, 50)
-            p75 = np.percentile(all_probs, 75)
-            p90 = np.percentile(all_probs, 90)
-            p95 = np.percentile(all_probs, 95)
-            p99 = np.percentile(all_probs, 99)
-
-            all_logits_np = np.array(all_enter_logits_list)
-            pos_mask = all_targets == 1
-            neg_mask = all_targets == 0
-            mean_logit_pos = all_logits_np[pos_mask].mean() if pos_mask.any() else 0.0
-            mean_logit_neg = all_logits_np[neg_mask].mean() if neg_mask.any() else 0.0
-
-            log.info(f"[METRIC] mean_logit_pos={mean_logit_pos:.3f} mean_logit_neg={mean_logit_neg:.3f}")
+            log.info(f"[METRIC] mean_logit_pos={ml_pos:.3f} mean_logit_neg={ml_neg:.3f}")
             log.info(f"[METRIC] value_mae={value_mae:.4f} value_rmse={value_rmse:.4f}")
             if use_edge_head:
                 log.info(f"[METRIC] edge_mae={edge_mae_val:.4f} edge_rmse={edge_rmse_val:.4f}")
@@ -1432,6 +1465,8 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             'edge_loss_weight': edge_loss_weight,
             'use_soft_labels': use_soft_labels,
             'soft_label_temp': soft_label_temp,
+            'loss_warmup_epochs': loss_warmup_epochs,
+            'warmup_pos_weight': warmup_pos_weight,
         }
 
         if prauc > best_val_prauc:
@@ -1518,7 +1553,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     cal_labels = []
     with torch.no_grad():
         for batch in val_loader:
-            features_batch, enter_batch, side_batch, sym_id_batch, value_batch = batch
+            features_batch, enter_batch, side_batch, sym_id_batch, value_batch, edge_batch, ysoft_batch = batch
             features_batch = features_batch.to(device)
             enter_batch = enter_batch.to(device)
             sym_id_batch = sym_id_batch.to(device)
@@ -1622,6 +1657,110 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
 
                 log.info(f"[SMOKE] sym={sym} logit={logit:.4f} T={temperature:.4f} p={p:.4f} e_net_pred={e_net:.4f}")
                 log.info(f"[SMOKE] z_min={z_min:.4f} z_max={z_max:.4f} clipped={clipped}/{len(z_vals)}")
+
+    if verify_enter_metrics:
+        log.info("=" * 60)
+        log.info("  VERIFY-ENTER-METRICS MODE")
+        log.info("=" * 60)
+        model.eval()
+        pass_results = []
+        for pass_i in range(3):
+            v_logits_list = []
+            v_targets_list = []
+            with torch.no_grad():
+                for batch in val_loader:
+                    fb, eb, sb, si, vb, edb, ysb = batch
+                    fb = fb.to(device)
+                    si = si.to(device)
+                    out = model.forward_multihead(fb, symbol_ids=si if n_symbols > 1 else None)
+                    v_logits_list.extend(out.enter_logits.squeeze(-1).cpu().numpy())
+                    v_targets_list.extend(eb.numpy())
+
+            v_logits = np.array(v_logits_list)
+            v_targets = np.array(v_targets_list)
+            v_probs = 1.0 / (1.0 + np.exp(-v_logits))
+
+            pred_pct_v = (v_probs >= 0.5).mean()
+            pos_m = v_targets == 1
+            neg_m = v_targets == 0
+            ml_p = float(v_logits[pos_m].mean()) if pos_m.any() else 0.0
+            ml_n = float(v_logits[neg_m].mean()) if neg_m.any() else 0.0
+            sep_v = ml_p - ml_n
+
+            try:
+                from sklearn.metrics import average_precision_score
+                prauc_v = average_precision_score(v_targets, v_probs) if v_targets.sum() > 0 else 0.0
+            except ImportError:
+                prauc_v = 0.0
+
+            p75_v = float(np.percentile(v_probs, 75))
+            p99_v = float(np.percentile(v_probs, 99))
+
+            pass_results.append({
+                'pass': pass_i + 1,
+                'pred_pct': float(pred_pct_v),
+                'prauc': float(prauc_v),
+                'sep': float(sep_v),
+                'p75': p75_v,
+                'p99': p99_v,
+                'p_min': float(v_probs.min()),
+                'p_max': float(v_probs.max()),
+                'p_mean': float(v_probs.mean()),
+                'logits_min': float(v_logits.min()),
+                'logits_max': float(v_logits.max()),
+            })
+            log.info(f"[VERIFY] pass={pass_i+1} Pred%={pred_pct_v:.4f} PR-AUC={prauc_v:.3f} sep={sep_v:.3f} p75={p75_v:.4f} p99={p99_v:.4f}")
+
+        assertions = []
+
+        avg_pred_pct = np.mean([r['pred_pct'] for r in pass_results])
+        a_pred = 0.02 <= avg_pred_pct <= 0.60
+        assertions.append(('A', f"Pred% in [2%, 60%] (avg={avg_pred_pct:.4f})", 'PASS' if a_pred else 'FAIL'))
+
+        sep_hist = history.get('_sep_history', [])
+        if len(sep_hist) >= 10:
+            sep_e1 = sep_hist[0]
+            sep_e10 = sep_hist[9]
+            b_sep = sep_e10 > sep_e1
+            assertions.append(('B', f"sep increase e1->e10 ({sep_e1:.3f} -> {sep_e10:.3f})", 'PASS' if b_sep else 'FAIL'))
+        else:
+            assertions.append(('B', f"sep increase (not enough epochs: {len(sep_hist)})", 'SKIP'))
+
+        avg_p75 = np.mean([r['p75'] for r in pass_results])
+        avg_p99 = np.mean([r['p99'] for r in pass_results])
+        c_mono = avg_p99 > avg_p75
+        assertions.append(('C', f"p99 > p75 (p99={avg_p99:.4f} > p75={avg_p75:.4f})", 'PASS' if c_mono else 'FAIL'))
+
+        report_lines = [
+            "# ENTER Metrics Verification Report",
+            f"Generated: {datetime.now().isoformat()}",
+            f"Epochs trained: {len(history['val_prauc'])}",
+            "",
+            "## Pass Results",
+            "| Pass | Pred% | PR-AUC | sep | p75 | p99 |",
+            "|------|-------|--------|-----|-----|-----|",
+        ]
+        for r in pass_results:
+            report_lines.append(f"| {r['pass']} | {r['pred_pct']:.4f} | {r['prauc']:.3f} | {r['sep']:.3f} | {r['p75']:.4f} | {r['p99']:.4f} |")
+
+        report_lines.extend(["", "## Assertions"])
+        for aid, desc, result in assertions:
+            report_lines.append(f"- **{aid}**: {desc} -> **{result}**")
+
+        last_audit = pass_results[-1]
+        report_lines.extend([
+            "",
+            "## Last PENTER_AUDIT",
+            f"p_min={last_audit['p_min']:.6f} p_max={last_audit['p_max']:.6f} p_mean={last_audit['p_mean']:.6f} "
+            f"logits_min={last_audit['logits_min']:.4f} logits_max={last_audit['logits_max']:.4f}",
+        ])
+
+        report_path = Path("verify_enter_metrics.md")
+        report_path.write_text("\n".join(report_lines))
+        log.info(f"[VERIFY] Report written to {report_path}")
+
+        for aid, desc, result in assertions:
+            log.info(f"[VERIFY] Assertion {aid}: {result} — {desc}")
 
     return model, engineer, features_df_columns, history
 
@@ -2911,6 +3050,12 @@ Examples:
                         help="Auto-download missing 15m parquet data for all symbols before training")
     parser.add_argument("--allow-partial-data", action="store_true", default=False,
                         help="Allow training on subset of symbols if some data is missing (default: abort)")
+    parser.add_argument("--loss-warmup-epochs", type=int, default=10,
+                        help="Number of warmup epochs using plain BCE before switching to focal/OHEM (default: 10)")
+    parser.add_argument("--warmup-pos-weight", type=float, default=2.0,
+                        help="Max pos_weight during loss warmup stage (default: 2.0)")
+    parser.add_argument("--verify-enter-metrics", action="store_true", default=False,
+                        help="Run 3-pass validation verification with assertions and generate report")
 
     parser.add_argument("--live", action="store_true",
                         help="Run continuous live multi-asset inference loop")
@@ -3405,6 +3550,9 @@ Examples:
             edge_loss_weight=args.edge_loss_weight,
             use_soft_labels=use_soft,
             soft_label_temp=args.soft_label_temp,
+            loss_warmup_epochs=args.loss_warmup_epochs,
+            warmup_pos_weight=args.warmup_pos_weight,
+            verify_enter_metrics=args.verify_enter_metrics,
         )
 
         print()
