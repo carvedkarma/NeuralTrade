@@ -30,8 +30,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("QuickStart")
 
-FEATURE_VERSION = "v4.5.1_pr_auc_stable"
-SYSTEM_VERSION = "v4.5.1_pr_auc_stable"
+FEATURE_VERSION = "v4.5.2_directional_sep_fix"
+SYSTEM_VERSION = "v4.5.2_directional_sep_fix"
 
 FUNDING_FEATURE_NAMES = ["funding_rate", "funding_rate_delta_8h", "funding_rate_zscore_30d"]
 FUNDING_FEATURE_COUNT = len(FUNDING_FEATURE_NAMES)
@@ -638,7 +638,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                       r_min_expiry: float = 1.0, target_tpd: float = 5.5, target_tpd_tol: float = 1.5,
                       symbols: list = None, value_loss_weight: float = 0.5, value_clip: float = 3.0,
                       smoke_calib: bool = False, smoke_infer: bool = False,
-                      use_focal_loss: bool = True, focal_gamma: float = 1.5, focal_alpha: float = 0.40,
+                      use_focal_loss: bool = True, focal_gamma: float = 1.5, focal_alpha: float = 0.35,
                       use_ohem: bool = False, ohem_neg_pct: float = 0.25,
                       use_edge_head: bool = True, edge_loss_weight: float = 0.3,
                       use_soft_labels: bool = True, soft_label_temp: float = 1.5):
@@ -1153,14 +1153,16 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
 
             loss = enter_loss
 
+            # === v4.5.2 Directional Separation Fix ===
             pos_mask_sep = (enter_batch >= 0.5)
             neg_mask_sep = (enter_batch < 0.5)
             if pos_mask_sep.any() and neg_mask_sep.any():
                 mean_pos_logit = enter_logits[pos_mask_sep].mean()
                 mean_neg_logit = enter_logits[neg_mask_sep].mean()
                 sep = mean_pos_logit - mean_neg_logit
-                sep_loss = torch.relu(0.2 - sep)
-                loss = loss + 0.02 * sep_loss
+                sep_loss = torch.relu(0.30 - sep)
+                flip_penalty = torch.relu(mean_neg_logit - mean_pos_logit)
+                loss = loss + 0.03 * sep_loss + 0.05 * flip_penalty
 
             if output.value_logits is not None:
                 value_pred = output.value_logits.squeeze(-1)
@@ -1280,6 +1282,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             f"[SAFETY] Pos%={pos_rate:.1%} Pred%={pred_pct:.1%} "
             f"mean_logit_pos={ml_pos:.3f} mean_logit_neg={ml_neg:.3f} sep={sep_val:.3f} PR-AUC={prauc:.3f}"
         )
+        log.info(f"[SEP_CHECK] mean_pos={ml_pos:.3f} mean_neg={ml_neg:.3f} sep={sep_val:.3f}")
 
         if all_value_preds:
             all_vp = np.array(all_value_preds)
@@ -2739,7 +2742,7 @@ Examples:
                         help="Disable focal loss, use standard BCE")
     parser.add_argument("--focal-gamma", type=float, default=1.5,
                         help="Focal loss gamma (default: 1.5)")
-    parser.add_argument("--focal-alpha", type=float, default=0.40,
+    parser.add_argument("--focal-alpha", type=float, default=0.35,
                         help="Focal loss alpha for ENTER=1 class (default: 0.40)")
     parser.add_argument("--use-ohem", action="store_true", default=False,
                         help="Use Online Hard Example Mining (default: False, temporarily disabled)")
@@ -3236,11 +3239,11 @@ Examples:
 
         checks_total += 1
         VERSION = FEATURE_VERSION
-        if VERSION == "v4.5.1_pr_auc_stable":
+        if VERSION == "v4.5.2_directional_sep_fix":
             log.info(f"  [PASS] Version = {VERSION}")
             checks_passed += 1
         else:
-            log.warning(f"  [FAIL] Version = {VERSION} (expected v4.5.1_pr_auc_stable)")
+            log.warning(f"  [FAIL] Version = {VERSION} (expected v4.5.2_directional_sep_fix)")
             failures.append(f"version={VERSION}")
 
         checks_total += 1
