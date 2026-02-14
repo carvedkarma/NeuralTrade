@@ -1465,11 +1465,13 @@ def _auto_calibrate_r_min_enter(
     search_steps: int = 30,
     search_lo: float = 0.3,
     search_hi: float = 1.5,
+    tp_mult: float = 2.0,
+    sl_mult: float = 1.5,
 ) -> float:
     """Search r_min_enter to get ENTER positive rate closest to target.
 
-    Uses the v4.7 strict criteria: TP-first OR strong-expiry, AND best_R >= threshold.
-    Clamps chosen threshold to max_feasible_best_R - 1e-3 to prevent zero-positive collapse.
+    Uses the v4.7 strict criteria: TP-first (no R gate) OR strong-expiry (R >= r_min_expiry_strict).
+    r_min_enter only gates expiry path. Clamps to tp_r - 1e-3 as hard ceiling.
     """
     valid = ~np.isnan(best_r_all)
     br = best_r_all[valid]
@@ -1479,21 +1481,24 @@ def _auto_calibrate_r_min_enter(
     if n == 0:
         return 0.8
 
+    tp_r = float(tp_mult) / float(sl_mult)
+
     eligible = br[tp | ew]
     if len(eligible) > 0:
         max_feasible = float(np.percentile(eligible, 99.9))
     else:
         max_feasible = float(np.percentile(br, 99.9)) if len(br) > 0 else 0.8
 
-    feasible_cap = max_feasible - 1e-3
+    feasible_cap = min(max_feasible - 1e-3, tp_r - 1e-3)
 
     effective_hi = min(search_hi, max(feasible_cap, search_lo))
 
     logger.info(f"[LABEL_BALANCE] max_feasible_best_R={max_feasible:.4f} "
-                f"feasible_cap={feasible_cap:.4f} search_range=[{search_lo:.2f}, {effective_hi:.4f}]")
+                f"tp_r={tp_r:.4f} feasible_cap={feasible_cap:.4f} "
+                f"search_range=[{search_lo:.2f}, {effective_hi:.4f}]")
 
     def rate_for_threshold(thresh):
-        enters = ((tp | ew) & (br >= thresh)).sum()
+        enters = (tp | (ew & (br >= thresh))).sum()
         return enters / n
 
     best_thresh = min(0.8, effective_hi)
@@ -1521,11 +1526,15 @@ def _auto_calibrate_r_min_enter(
                 best_thresh = t
                 break
 
-    clamped = best_thresh > feasible_cap
-    if clamped:
+    clamped_feasible = best_thresh > feasible_cap
+    if clamped_feasible:
         best_thresh = feasible_cap
+    best_thresh = max(best_thresh, search_lo)
 
-    logger.info(f"[LABEL_BALANCE] chosen_r_min_enter={best_thresh:.4f} (clamped={clamped})")
+    if best_thresh >= tp_r - 1e-3:
+        logger.info(f"[LABEL_BALANCE] clamped_r_min_enter={best_thresh:.4f} tp_r={tp_r:.4f}")
+
+    logger.info(f"[LABEL_BALANCE] chosen_r_min_enter={best_thresh:.4f} (clamped={clamped_feasible})")
 
     return round(float(best_thresh), 4)
 
@@ -1631,6 +1640,8 @@ def generate_v47_quality_targets(
             target_min=target_enter_rate_min,
             target_max=target_enter_rate_max,
             search_steps=balance_search_steps,
+            tp_mult=tp_atr_mult,
+            sl_mult=sl_atr_mult,
         )
         logger.info(f"[LABEL_BALANCE] target={target_enter_rate:.2f} "
                      f"range=[{target_enter_rate_min:.2f}, {target_enter_rate_max:.2f}]")
@@ -1673,7 +1684,7 @@ def generate_v47_quality_targets(
                 a = closes[i] * 0.005
 
             is_enter = 0
-            if tp_first_all[i] and best_r_all[i] >= r_min_enter:
+            if tp_first_all[i]:
                 is_enter = 1
                 n_tp_first += 1
             elif exp_win_all[i] and best_r_all[i] >= r_min_enter:

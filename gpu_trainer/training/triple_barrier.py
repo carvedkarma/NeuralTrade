@@ -367,16 +367,15 @@ def bidirectional_outcome_v47_for_index(
     y_quality = 0
     best_outcome_type = 'LOSS'
 
-    if best_r >= r_min_enter:
-        if best_side_tp_first:
-            y_quality = 1
-            best_outcome_type = 'TP_FIRST'
-        elif best_side_exp_win:
-            y_quality = 1
-            best_outcome_type = 'EXPIRY_STRONG'
+    if best_side_tp_first:
+        y_quality = 1
+        best_outcome_type = 'TP_FIRST'
+    elif best_side_exp_win and best_r >= r_min_expiry_strict:
+        y_quality = 1
+        best_outcome_type = 'EXPIRY_STRONG'
 
-    if best_r < r_min_enter:
-        best_outcome_type = 'WEAK'
+    if y_quality == 0 and not best_side_tp_first:
+        best_outcome_type = 'WEAK' if best_r < r_min_enter else 'LOSS'
 
     margin = float(long_r - short_r)
     margin_clamped = max(-2.0, min(2.0, margin))
