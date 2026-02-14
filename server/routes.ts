@@ -1583,27 +1583,49 @@ export async function registerRoutes(
     }
 
     const days = req.body.days || 370;
+    const validSymbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"];
+    const requestedSymbols: string[] = req.body.symbols
+      ? (Array.isArray(req.body.symbols) ? req.body.symbols : [req.body.symbols])
+          .map((s: string) => s.toUpperCase())
+          .filter((s: string) => validSymbols.includes(s))
+      : req.body.symbol
+        ? [req.body.symbol.toUpperCase()].filter((s: string) => validSymbols.includes(s))
+        : ["BTCUSDT"];
+
+    if (requestedSymbols.length === 0) {
+      return res.status(400).json({ error: `Invalid symbols. Allowed: ${validSymbols.join(", ")}` });
+    }
+
     backfillState.inProgress = true;
     backfillState.progress = 0;
-    backfillState.message = "Starting backfill...";
+    backfillState.message = `Starting backfill for ${requestedSymbols.join(", ")}...`;
 
-    res.json({ status: "started", days });
+    res.json({ status: "started", days, symbols: requestedSymbols });
 
-    backfillHistoricalData("BTCUSDT", "15m", days, (progress, message) => {
-      backfillState.progress = progress;
-      backfillState.message = message;
-    }).then(result => {
-      console.log("[Historical] Backfill finished:", result);
-      backfillState.inProgress = false;
-      backfillState.progress = 100;
-      backfillState.message = `Complete! ${result.totalCandles} candles stored.`;
-      
-      storage.reloadHistoricalCandles();
-    }).catch(error => {
-      console.error("[Historical] Backfill error:", error);
-      backfillState.inProgress = false;
-      backfillState.message = `Error: ${error.message}`;
-    });
+    (async () => {
+      try {
+        for (let i = 0; i < requestedSymbols.length; i++) {
+          const sym = requestedSymbols[i];
+          const symbolProgress = (i / requestedSymbols.length) * 100;
+          backfillState.message = `Backfilling ${sym} (${i + 1}/${requestedSymbols.length})...`;
+
+          const result = await backfillHistoricalData(sym, "15m", days, (progress, message) => {
+            const overallProgress = Math.round(symbolProgress + (progress / requestedSymbols.length));
+            backfillState.progress = overallProgress;
+            backfillState.message = `[${sym}] ${message}`;
+          });
+          console.log(`[Historical] Backfill finished for ${sym}:`, result);
+        }
+        backfillState.inProgress = false;
+        backfillState.progress = 100;
+        backfillState.message = `Complete! Backfilled ${requestedSymbols.join(", ")}.`;
+        storage.reloadHistoricalCandles();
+      } catch (error: any) {
+        console.error("[Historical] Backfill error:", error);
+        backfillState.inProgress = false;
+        backfillState.message = `Error: ${error.message}`;
+      }
+    })();
   });
 
   app.get("/api/historical/backfill/progress", async (req, res) => {
