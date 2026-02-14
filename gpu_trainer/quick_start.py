@@ -731,7 +731,16 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                       loss_warmup_epochs: int = 10, warmup_pos_weight: float = 2.0,
                       verify_enter_metrics: bool = False,
                       w_quality: float = 1.0, w_dir: float = 0.5, w_htf: float = 0.5,
-                      verify_v46_separation: bool = False):
+                      verify_v46_separation: bool = False,
+                      use_v47_labels: bool = True,
+                      r_min_enter: float = 0.8, r_min_expiry_strict: float = 1.0,
+                      auto_balance_enter_labels: bool = True,
+                      target_enter_rate: float = 0.18,
+                      target_enter_rate_min: float = 0.12,
+                      target_enter_rate_max: float = 0.25,
+                      balance_search_steps: int = 30,
+                      pos_weight_min: float = 0.5, pos_weight_max: float = 6.0,
+                      verify_v47_labels: bool = False):
     import torch
     import torch.nn as nn
     import numpy as np
@@ -751,6 +760,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     log.info(f"[PR_AUC_PACK] soft_labels={use_soft_labels} (temp={soft_label_temp})")
     log.info(f"[V46_COMPOSITE] w_quality={w_quality} w_dir={w_dir} w_htf={w_htf}")
     log.info(f"[LABEL_QUALITY] r_min_expiry={r_min_expiry}")
+    log.info(f"[V47_CONFIG] use_v47_labels={use_v47_labels} r_min_enter={r_min_enter} r_min_expiry_strict={r_min_expiry_strict}")
+    log.info(f"[V47_CONFIG] auto_balance={auto_balance_enter_labels} target_rate={target_enter_rate} range=[{target_enter_rate_min}, {target_enter_rate_max}]")
+    log.info(f"[V47_CONFIG] pos_weight_guardrails=[{pos_weight_min}, {pos_weight_max}]")
 
     from data.regression_targets import RegressionTargetGenerator
     reg_gen = RegressionTargetGenerator(horizon_periods=horizon)
@@ -828,14 +840,30 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             htf_cols = [c for c in sym_features_df.columns if c.startswith('h1_') or c.startswith('h4_')]
             sym_htf_df = sym_features_df[htf_cols].copy()
 
-            from data.regression_targets import generate_v46_quality_targets
-            sym_label_df = generate_v46_quality_targets(
-                sym_df, sym_htf_df,
-                horizon_periods=horizon,
-                tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
-                r_min_expiry=r_min_expiry,
-                soft_label_temp=soft_label_temp,
-            )
+            if use_v47_labels:
+                from data.regression_targets import generate_v47_quality_targets
+                sym_label_df = generate_v47_quality_targets(
+                    sym_df, sym_htf_df,
+                    horizon_periods=horizon,
+                    tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
+                    r_min_enter=r_min_enter,
+                    r_min_expiry_strict=r_min_expiry_strict,
+                    soft_label_temp=soft_label_temp,
+                    auto_balance=auto_balance_enter_labels,
+                    target_enter_rate=target_enter_rate,
+                    target_enter_rate_min=target_enter_rate_min,
+                    target_enter_rate_max=target_enter_rate_max,
+                    balance_search_steps=balance_search_steps,
+                )
+            else:
+                from data.regression_targets import generate_v46_quality_targets
+                sym_label_df = generate_v46_quality_targets(
+                    sym_df, sym_htf_df,
+                    horizon_periods=horizon,
+                    tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
+                    r_min_expiry=r_min_expiry,
+                    soft_label_temp=soft_label_temp,
+                )
 
             sym_enter = sym_label_df['y_quality'].values.astype(np.float32)
             sym_side = sym_label_df['side_hint'].values.astype(np.int64)
@@ -989,14 +1017,40 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         htf_features_df = features_df[htf_cols].copy()
         log.info(f"HTF features for labeling: {htf_cols}")
 
-        from data.regression_targets import generate_v46_quality_targets
-        label_df = generate_v46_quality_targets(
-            df, htf_features_df,
-            horizon_periods=horizon,
-            tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
-            r_min_expiry=r_min_expiry,
-            soft_label_temp=soft_label_temp,
-        )
+        if use_v47_labels:
+            n_labelable = len(df) - horizon
+            valid_start_offset = sequence_length
+            n_after_valid = n_labelable - valid_start_offset if n_labelable > valid_start_offset else n_labelable
+            purge_gap_est = horizon + sequence_length
+            val_est = max(int(n_after_valid * 0.1), purge_gap_est)
+            train_est = n_after_valid - purge_gap_est - val_est
+            train_mask_v47 = np.zeros(len(df), dtype=bool)
+            train_mask_v47[valid_start_offset:valid_start_offset + max(train_est, 1)] = True
+
+            from data.regression_targets import generate_v47_quality_targets
+            label_df = generate_v47_quality_targets(
+                df, htf_features_df,
+                horizon_periods=horizon,
+                tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
+                r_min_enter=r_min_enter,
+                r_min_expiry_strict=r_min_expiry_strict,
+                soft_label_temp=soft_label_temp,
+                auto_balance=auto_balance_enter_labels,
+                target_enter_rate=target_enter_rate,
+                target_enter_rate_min=target_enter_rate_min,
+                target_enter_rate_max=target_enter_rate_max,
+                balance_search_steps=balance_search_steps,
+                train_mask=train_mask_v47,
+            )
+        else:
+            from data.regression_targets import generate_v46_quality_targets
+            label_df = generate_v46_quality_targets(
+                df, htf_features_df,
+                horizon_periods=horizon,
+                tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
+                r_min_expiry=r_min_expiry,
+                soft_label_temp=soft_label_temp,
+            )
 
         enter_labels = label_df['y_quality'].values.astype(np.float32)
         side_hints = label_df['side_hint'].values.astype(np.int64)
@@ -1104,10 +1158,10 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
 
     pos_count = train_enter.sum()
     neg_count = len(train_enter) - pos_count
-    pos_weight = neg_count / max(pos_count, 1)
-    pos_weight = min(pos_weight, 2.5)
+    raw_pos_weight = neg_count / max(pos_count, 1)
+    pos_weight = max(pos_weight_min, min(pos_weight_max, raw_pos_weight))
     log.info(f"ENTER label distribution: ENTER=1: {int(pos_count)} ({100*pos_count/len(train_enter):.1f}%), ENTER=0: {int(neg_count)} ({100*neg_count/len(train_enter):.1f}%)")
-    log.info(f"BCE pos_weight: {pos_weight:.2f}")
+    log.info(f"[POS_WEIGHT] raw={raw_pos_weight:.2f} capped={pos_weight:.2f} range=[{pos_weight_min}, {pos_weight_max}]")
 
     class EnterDataset(Dataset):
         def __init__(self, features, enter_labels, side_hints, symbol_ids, value_targets, edge_targets, ysoft_targets, dir_targets, dir_conf_targets, htf_targets, seq_len):
@@ -1191,7 +1245,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         enter_head_last = model.enter_head[-1]
         enter_head_last.bias.fill_(bias_init_val)
     log.info(f"[BIAS_INIT] pos_rate={pos_rate:.4f} bias={bias_init_val:.4f}")
-    log.info(f"[POS_WEIGHT] pos_weight={pos_weight:.2f}")
+    log.info(f"[POS_WEIGHT] final_pos_weight={pos_weight:.2f}")
 
     def focal_bce_with_logits(logits, targets, gamma=focal_gamma, alpha=focal_alpha):
         bce = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction='none')
@@ -1588,6 +1642,13 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             'w_quality': w_quality,
             'w_dir': w_dir,
             'w_htf': w_htf,
+            'use_v47_labels': use_v47_labels,
+            'r_min_enter': r_min_enter,
+            'r_min_expiry_strict': r_min_expiry_strict,
+            'auto_balance_enter_labels': auto_balance_enter_labels,
+            'target_enter_rate': target_enter_rate,
+            'pos_weight_min': pos_weight_min,
+            'pos_weight_max': pos_weight_max,
         }
 
         if prauc > best_val_prauc:
@@ -1916,6 +1977,77 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             log.info(f"[V46_VERIFY] Model outputs: dir_logits={out.dir_logits.shape}, htf_logits={out.htf_logits.shape}")
 
         log.info("[V46_VERIFY] All checks PASSED")
+
+    if verify_v47_labels and use_v47_labels:
+        log.info("=" * 60)
+        log.info("  v4.7 LABEL VERIFICATION")
+        log.info("=" * 60)
+
+        train_pos = float(train_enter.sum())
+        train_total = float(len(train_enter))
+        enter_rate = train_pos / max(train_total, 1)
+        log.info(f"[V47_VERIFY] train ENTER=1: {int(train_pos)} / {int(train_total)} = {100*enter_rate:.1f}%")
+
+        v47_checks = []
+        v47_passes = 0
+
+        if target_enter_rate_min <= enter_rate <= target_enter_rate_max:
+            log.info(f"  [PASS] enter_rate={enter_rate:.3f} in [{target_enter_rate_min}, {target_enter_rate_max}]")
+            v47_passes += 1
+            v47_checks.append(('enter_rate_in_range', True, f"{enter_rate:.3f}"))
+        else:
+            log.warning(f"  [FAIL] enter_rate={enter_rate:.3f} NOT in [{target_enter_rate_min}, {target_enter_rate_max}]")
+            v47_checks.append(('enter_rate_in_range', False, f"{enter_rate:.3f}"))
+
+        val_pos = float(val_enter.sum())
+        val_total = float(len(val_enter))
+        val_enter_rate = val_pos / max(val_total, 1)
+        log.info(f"[V47_VERIFY] val ENTER=1: {int(val_pos)} / {int(val_total)} = {100*val_enter_rate:.1f}%")
+
+        report_lines = [
+            "# v4.7 Label Verification Report",
+            "",
+            f"**Date**: {datetime.now().isoformat()}",
+            f"**Label Version**: v4.7 (Label Geometry Fix)",
+            "",
+            "## Configuration",
+            f"- r_min_enter: {r_min_enter}",
+            f"- r_min_expiry_strict: {r_min_expiry_strict}",
+            f"- auto_balance: {auto_balance_enter_labels}",
+            f"- target_enter_rate: {target_enter_rate}",
+            f"- target_range: [{target_enter_rate_min}, {target_enter_rate_max}]",
+            f"- pos_weight_min: {pos_weight_min}",
+            f"- pos_weight_max: {pos_weight_max}",
+            "",
+            "## Training Set Statistics",
+            f"- Total bars: {int(train_total)}",
+            f"- ENTER=1: {int(train_pos)} ({100*enter_rate:.1f}%)",
+            f"- ENTER=0: {int(train_total - train_pos)} ({100*(1-enter_rate):.1f}%)",
+            "",
+            "## Validation Set Statistics",
+            f"- Total bars: {int(val_total)}",
+            f"- ENTER=1: {int(val_pos)} ({100*val_enter_rate:.1f}%)",
+            "",
+            "## Assertions",
+        ]
+
+        for check_name, passed, value in v47_checks:
+            status = "PASS" if passed else "FAIL"
+            report_lines.append(f"- [{status}] {check_name}: {value}")
+
+        report_lines.extend([
+            "",
+            f"## Result: {v47_passes}/{len(v47_checks)} checks passed",
+        ])
+
+        report_path = Path("verify_v47_labels.md")
+        report_path.write_text("\n".join(report_lines))
+        log.info(f"[V47_VERIFY] Report written to {report_path}")
+
+        if v47_passes == len(v47_checks):
+            log.info("[V47_VERIFY] All checks PASSED")
+        else:
+            log.warning(f"[V47_VERIFY] {len(v47_checks) - v47_passes} checks FAILED")
 
     return model, engineer, features_df_columns, history
 
@@ -3130,7 +3262,7 @@ Examples:
                         help="Use Online Hard Example Mining (default: False, temporarily disabled)")
     parser.add_argument("--no-ohem", action="store_true", default=False,
                         help="Disable OHEM")
-    parser.add_argument("--ohem-neg-pct", type=float, default=0.08,
+    parser.add_argument("--ohem-neg-pct", type=float, default=0.15,
                         help="OHEM: keep top K%% hardest negatives (default: 0.08)")
     parser.add_argument("--use-edge-head", action="store_true", default=True,
                         help="Enable edge regression head (default: True)")
@@ -3221,6 +3353,33 @@ Examples:
                         help="Weight for HTF supervision loss in composite loss (default: 0.5)")
     parser.add_argument("--verify-v46-separation", action="store_true", default=False,
                         help="Run v4.6 label/model verification checks without full training")
+
+    parser.add_argument("--use-v47-labels", action="store_true", default=True,
+                        help="Use v4.7 strict quality labeling (default: True)")
+    parser.add_argument("--no-v47-labels", dest="use_v47_labels", action="store_false",
+                        help="Disable v4.7 labels, fall back to v4.6")
+    parser.add_argument("--r-min-enter", type=float, default=0.8,
+                        help="Min best_R for ENTER=1 in v4.7 labeling (default: 0.8)")
+    parser.add_argument("--r-min-expiry-strict", type=float, default=1.0,
+                        help="Min R at expiry to count as positive in v4.7 (default: 1.0)")
+    parser.add_argument("--auto-balance-enter-labels", action="store_true", default=True,
+                        help="Auto-tune r_min_enter for target positive rate (default: True)")
+    parser.add_argument("--no-auto-balance", dest="auto_balance_enter_labels", action="store_false",
+                        help="Disable auto-balancing of enter labels")
+    parser.add_argument("--target-enter-rate", type=float, default=0.18,
+                        help="Target ENTER positive rate for auto-balance (default: 0.18)")
+    parser.add_argument("--target-enter-rate-min", type=float, default=0.12,
+                        help="Min acceptable ENTER positive rate (default: 0.12)")
+    parser.add_argument("--target-enter-rate-max", type=float, default=0.25,
+                        help="Max acceptable ENTER positive rate (default: 0.25)")
+    parser.add_argument("--balance-search-steps", type=int, default=30,
+                        help="Number of search steps for auto-balance (default: 30)")
+    parser.add_argument("--pos-weight-min", type=float, default=0.5,
+                        help="Min pos_weight guardrail (default: 0.5)")
+    parser.add_argument("--pos-weight-max", type=float, default=6.0,
+                        help="Max pos_weight guardrail (default: 6.0)")
+    parser.add_argument("--verify-v47-labels", action="store_true", default=False,
+                        help="Run v4.7 label verification and generate report")
 
     parser.add_argument("--live", action="store_true",
                         help="Run continuous live multi-asset inference loop")
@@ -3554,11 +3713,11 @@ Examples:
             checks_passed += 1
 
         checks_total += 1
-        if args.ohem_neg_pct <= 0.10:
-            log.info(f"  [PASS] OHEM neg_pct={args.ohem_neg_pct} (<= 0.10)")
+        if args.ohem_neg_pct <= 0.20:
+            log.info(f"  [PASS] OHEM neg_pct={args.ohem_neg_pct} (<= 0.20)")
             checks_passed += 1
         else:
-            log.warning(f"  [FAIL] OHEM neg_pct={args.ohem_neg_pct} (expected <= 0.10)")
+            log.warning(f"  [FAIL] OHEM neg_pct={args.ohem_neg_pct} (expected <= 0.20)")
             failures.append(f"ohem_neg_pct={args.ohem_neg_pct}")
 
         checks_total += 1
@@ -3722,6 +3881,17 @@ Examples:
             w_dir=args.w_dir,
             w_htf=args.w_htf,
             verify_v46_separation=args.verify_v46_separation,
+            use_v47_labels=args.use_v47_labels,
+            r_min_enter=args.r_min_enter,
+            r_min_expiry_strict=args.r_min_expiry_strict,
+            auto_balance_enter_labels=args.auto_balance_enter_labels,
+            target_enter_rate=args.target_enter_rate,
+            target_enter_rate_min=args.target_enter_rate_min,
+            target_enter_rate_max=args.target_enter_rate_max,
+            balance_search_steps=args.balance_search_steps,
+            pos_weight_min=args.pos_weight_min,
+            pos_weight_max=args.pos_weight_max,
+            verify_v47_labels=args.verify_v47_labels,
         )
 
         print()

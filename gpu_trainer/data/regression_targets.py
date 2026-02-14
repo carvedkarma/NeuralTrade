@@ -1452,3 +1452,301 @@ def generate_v46_quality_targets(
         'mae_r': mae_r_arr,
         'y_soft': y_soft_arr,
     }, index=df.index)
+
+
+def _auto_calibrate_r_min_enter(
+    best_r_all: np.ndarray,
+    tp_first_all: np.ndarray,
+    exp_win_all: np.ndarray,
+    r_min_expiry_strict: float = 1.0,
+    target_rate: float = 0.18,
+    target_min: float = 0.12,
+    target_max: float = 0.25,
+    search_steps: int = 30,
+    search_lo: float = 0.3,
+    search_hi: float = 1.5,
+) -> float:
+    """Binary-search r_min_enter to get ENTER positive rate closest to target.
+
+    Uses the v4.7 strict criteria: TP-first OR strong-expiry, AND best_R >= threshold.
+    """
+    valid = ~np.isnan(best_r_all)
+    br = best_r_all[valid]
+    tp = tp_first_all[valid]
+    ew = exp_win_all[valid]
+    n = len(br)
+    if n == 0:
+        return 0.8
+
+    def rate_for_threshold(thresh):
+        enters = ((tp | ew) & (br >= thresh)).sum()
+        return enters / n
+
+    best_thresh = 0.8
+    best_dist = abs(rate_for_threshold(best_thresh) - target_rate)
+
+    for step in range(search_steps):
+        t = search_lo + (search_hi - search_lo) * step / max(search_steps - 1, 1)
+        r = rate_for_threshold(t)
+        d = abs(r - target_rate)
+        if d < best_dist:
+            best_dist = d
+            best_thresh = t
+
+    final_rate = rate_for_threshold(best_thresh)
+    if final_rate < target_min and best_thresh > search_lo:
+        for t in np.linspace(search_lo, best_thresh, 20):
+            r = rate_for_threshold(t)
+            if target_min <= r <= target_max:
+                best_thresh = t
+                break
+    elif final_rate > target_max and best_thresh < search_hi:
+        for t in np.linspace(best_thresh, search_hi, 20):
+            r = rate_for_threshold(t)
+            if target_min <= r <= target_max:
+                best_thresh = t
+                break
+
+    return round(float(best_thresh), 4)
+
+
+def generate_v47_quality_targets(
+    df: pd.DataFrame,
+    htf_features: pd.DataFrame,
+    horizon_periods: int = 16,
+    tp_atr_mult: float = 2.0,
+    sl_atr_mult: float = 1.5,
+    r_min_enter: float = 0.8,
+    r_min_expiry_strict: float = 1.0,
+    soft_label_temp: float = 1.2,
+    auto_balance: bool = True,
+    target_enter_rate: float = 0.18,
+    target_enter_rate_min: float = 0.12,
+    target_enter_rate_max: float = 0.25,
+    balance_search_steps: int = 30,
+    train_mask: np.ndarray = None,
+) -> pd.DataFrame:
+    """v4.7 Label Geometry Fix — strict, tradeable quality labeling.
+
+    ENTER=1 only if:
+      (A) TP was hit BEFORE SL within horizon, OR
+      (B) Expiry with R >= r_min_expiry_strict
+    AND best_R >= r_min_enter.
+
+    If auto_balance=True, searches r_min_enter on training bars to achieve
+    target_enter_rate (~18% positive rate).
+
+    Returns same columns as v4.6 plus diagnostics logging.
+    """
+    from training.triple_barrier import (
+        compute_atr_14, bidirectional_outcome_v47_for_index,
+        compute_htf_score_target, compute_mfe_mae_for_index,
+        compute_trade_cost_r, compute_soft_quality,
+    )
+
+    n = len(df)
+    highs = df['high'].values.astype(np.float64)
+    lows = df['low'].values.astype(np.float64)
+    closes = df['close'].values.astype(np.float64)
+    atr_vals = compute_atr_14(df)
+
+    h1_trend = htf_features['h1_trend_sign'].values if 'h1_trend_sign' in htf_features.columns else np.zeros(n)
+    h4_trend = htf_features['h4_trend_sign'].values if 'h4_trend_sign' in htf_features.columns else np.zeros(n)
+
+    best_r_all = np.full(n, np.nan, dtype=np.float64)
+    tp_first_all = np.zeros(n, dtype=bool)
+    exp_win_all = np.zeros(n, dtype=bool)
+    long_r_arr = np.full(n, np.nan, dtype=np.float64)
+    short_r_arr = np.full(n, np.nan, dtype=np.float64)
+    y_dir_arr = np.zeros(n, dtype=np.int64)
+    y_dir_conf_arr = np.full(n, 0.5, dtype=np.float64)
+
+    outcome_types = np.full(n, 'SKIP', dtype=object)
+    long_outcomes = np.full(n, 'SKIP', dtype=object)
+    short_outcomes = np.full(n, 'SKIP', dtype=object)
+
+    labeled_count = n - horizon_periods
+    for i in range(labeled_count):
+        a = float(atr_vals[i])
+        if np.isnan(a) or a <= 0:
+            a = closes[i] * 0.005
+
+        result = bidirectional_outcome_v47_for_index(
+            highs, lows, closes, i, a,
+            tp_atr_mult, sl_atr_mult, horizon_periods,
+            r_min_enter, r_min_expiry_strict,
+        )
+
+        best_r_all[i] = result['best_outcome_r']
+        long_r_arr[i] = result['long_r']
+        short_r_arr[i] = result['short_r']
+        y_dir_arr[i] = result['y_dir']
+        y_dir_conf_arr[i] = result['y_dir_conf']
+        outcome_types[i] = result['best_outcome_type']
+        long_outcomes[i] = result['long_outcome']
+        short_outcomes[i] = result['short_outcome']
+
+        best_side = +1 if result['y_dir'] == 1 else -1
+        tp_first_all[i] = (result['long_tp_first'] if best_side > 0 else result['short_tp_first'])
+        exp_win_all[i] = (
+            (result['long_outcome'] == 'EXP_WIN' and result['long_r'] >= r_min_expiry_strict)
+            if best_side > 0 else
+            (result['short_outcome'] == 'EXP_WIN' and result['short_r'] >= r_min_expiry_strict)
+        )
+
+    if auto_balance:
+        if train_mask is not None:
+            cal_br = best_r_all[train_mask]
+            cal_tp = tp_first_all[train_mask]
+            cal_ew = exp_win_all[train_mask]
+        else:
+            cal_br = best_r_all[:labeled_count]
+            cal_tp = tp_first_all[:labeled_count]
+            cal_ew = exp_win_all[:labeled_count]
+
+        chosen_r_min = _auto_calibrate_r_min_enter(
+            cal_br, cal_tp, cal_ew,
+            r_min_expiry_strict=r_min_expiry_strict,
+            target_rate=target_enter_rate,
+            target_min=target_enter_rate_min,
+            target_max=target_enter_rate_max,
+            search_steps=balance_search_steps,
+        )
+        logger.info(f"[LABEL_BALANCE] chosen_r_min_enter={chosen_r_min:.4f} "
+                     f"target={target_enter_rate:.2f} "
+                     f"range=[{target_enter_rate_min:.2f}, {target_enter_rate_max:.2f}]")
+        r_min_enter = chosen_r_min
+    else:
+        logger.info(f"[LABEL_BALANCE] using fixed r_min_enter={r_min_enter:.4f} (auto_balance=False)")
+
+    y_quality_arr = np.zeros(n, dtype=np.int64)
+    y_htf_score_arr = np.zeros(n, dtype=np.int64)
+    mfe_r_arr = np.full(n, np.nan, dtype=np.float64)
+    mae_r_arr = np.full(n, np.nan, dtype=np.float64)
+    y_soft_arr = np.full(n, 0.5, dtype=np.float64)
+    enter_labels = np.zeros(n, dtype=np.int64)
+    side_hints = np.zeros(n, dtype=np.int64)
+    outcomes_col = np.full(n, "NO_CANDIDATE", dtype=object)
+    realized_r = np.full(n, np.nan, dtype=np.float64)
+
+    n_tp_first = 0
+    n_expiry_strong = 0
+    n_sl_hit = 0
+    n_tp_hit_total = 0
+    n_expiry_total = 0
+    n_quality_1 = 0
+    n_long_better = 0
+    n_short_better = 0
+    htf_class_counts = [0, 0, 0, 0]
+
+    for i in range(labeled_count):
+        if np.isnan(best_r_all[i]):
+            continue
+
+        a = float(atr_vals[i])
+        if np.isnan(a) or a <= 0:
+            a = closes[i] * 0.005
+
+        is_enter = 0
+        if tp_first_all[i] and best_r_all[i] >= r_min_enter:
+            is_enter = 1
+            n_tp_first += 1
+        elif exp_win_all[i] and best_r_all[i] >= r_min_enter:
+            is_enter = 1
+            n_expiry_strong += 1
+
+        y_quality_arr[i] = is_enter
+        enter_labels[i] = is_enter
+        if is_enter:
+            n_quality_1 += 1
+
+        lo = str(long_outcomes[i])
+        so = str(short_outcomes[i])
+        if lo == 'TP' or so == 'TP':
+            n_tp_hit_total += 1
+        if lo == 'SL' or so == 'SL':
+            n_sl_hit += 1
+        if lo in ('EXP_WIN', 'EXP_LOSS') or so in ('EXP_WIN', 'EXP_LOSS'):
+            n_expiry_total += 1
+
+        best_side = +1 if y_dir_arr[i] == 1 else -1
+        side_hints[i] = best_side
+        realized_r[i] = best_r_all[i]
+
+        if is_enter:
+            outcomes_col[i] = lo if best_side > 0 else so
+        else:
+            outcomes_col[i] = "REJECTED"
+
+        if y_dir_arr[i] == 1:
+            n_long_better += 1
+        else:
+            n_short_better += 1
+
+        htf_score = compute_htf_score_target(float(h1_trend[i]), float(h4_trend[i]))
+        y_htf_score_arr[i] = htf_score
+        htf_class_counts[htf_score] += 1
+
+        mfe, mae = compute_mfe_mae_for_index(
+            highs, lows, closes, i, best_side, a,
+            sl_atr_mult, horizon_periods,
+        )
+        mfe_r_arr[i] = mfe
+        mae_r_arr[i] = mae
+
+        cost_r_val = compute_trade_cost_r(closes[i], a, sl_atr_mult)
+        y_soft_arr[i] = compute_soft_quality(mfe, mae, cost_r_val, soft_label_temp)
+
+    enter_rate = n_quality_1 / max(labeled_count, 1)
+    valid_best = best_r_all[~np.isnan(best_r_all)]
+
+    logger.info("=" * 70)
+    logger.info("v4.7 STRICT QUALITY LABELING (Label Geometry Fix)")
+    logger.info("=" * 70)
+    logger.info(f"[LABEL_V47] Total bars: {n:,}, Labeled: {labeled_count:,}")
+    logger.info(f"[LABEL_V47] TP_hits={n_tp_hit_total:,}, SL_hits={n_sl_hit:,}, Expiry={n_expiry_total:,}")
+    if len(valid_best) > 0:
+        logger.info(f"[LABEL_V47] best_R: mean={np.mean(valid_best):.3f}, median={np.median(valid_best):.3f}, "
+                     f"p75={np.percentile(valid_best, 75):.3f}, p90={np.percentile(valid_best, 90):.3f}, "
+                     f"p95={np.percentile(valid_best, 95):.3f}")
+    logger.info(f"[LABEL_V47] ENTER=1: {n_quality_1:,} (rate={100*enter_rate:.1f}%) "
+                 f"using r_min_enter={r_min_enter:.4f}, r_min_expiry_strict={r_min_expiry_strict:.4f}")
+    logger.info(f"[LABEL_V47] Breakdown: TP_first_enters={n_tp_first:,}, expiry_strong_enters={n_expiry_strong:,}")
+    expiry_pos_share = n_expiry_strong / max(n_quality_1, 1)
+    logger.info(f"[LABEL_V47] Expiry positive share: {100*expiry_pos_share:.1f}%")
+    logger.info(f"[LABEL_V47] y_dir: LONG_better={n_long_better:,} SHORT_better={n_short_better:,}")
+    logger.info(f"[LABEL_V47] HTF score distribution: {dict(enumerate(htf_class_counts))}")
+    logger.info("=" * 70)
+
+    result_df = pd.DataFrame({
+        'enter_label': enter_labels,
+        'side_hint': side_hints,
+        'outcome': outcomes_col,
+        'realized_r': realized_r,
+        'y_quality': y_quality_arr,
+        'y_dir': y_dir_arr,
+        'y_dir_conf': y_dir_conf_arr,
+        'y_htf_score': y_htf_score_arr,
+        'long_r': long_r_arr,
+        'short_r': short_r_arr,
+        'best_r': best_r_all,
+        'mfe_r': mfe_r_arr,
+        'mae_r': mae_r_arr,
+        'y_soft': y_soft_arr,
+    }, index=df.index)
+
+    result_df.attrs['v47_diagnostics'] = {
+        'r_min_enter': r_min_enter,
+        'r_min_expiry_strict': r_min_expiry_strict,
+        'enter_rate': enter_rate,
+        'n_enter_1': n_quality_1,
+        'n_tp_first': n_tp_first,
+        'n_expiry_strong': n_expiry_strong,
+        'n_tp_hit_total': n_tp_hit_total,
+        'n_sl_hit': n_sl_hit,
+        'n_expiry_total': n_expiry_total,
+        'expiry_pos_share': expiry_pos_share,
+        'auto_balanced': auto_balance,
+    }
+
+    return result_df

@@ -310,6 +310,93 @@ def bidirectional_outcome_for_index(
     }
 
 
+def bidirectional_outcome_v47_for_index(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    i: int,
+    atr_i: float,
+    tp_mult: float = 2.0,
+    sl_mult: float = 1.5,
+    horizon: int = 16,
+    r_min_enter: float = 0.8,
+    r_min_expiry_strict: float = 1.0,
+):
+    """v4.7 strict bidirectional labeling — TP-before-SL requirement.
+
+    For each direction (LONG, SHORT), evaluates:
+      - outcome: TP, SL, EXP_WIN, EXP_LOSS
+      - realized R
+      - Whether TP was hit BEFORE SL
+
+    ENTER=1 requires (for the best direction):
+      (A) TP hit before SL within horizon, OR
+      (B) Expiry with R >= r_min_expiry_strict
+      AND in both cases: best_R >= r_min_enter
+
+    Returns dict with all v4.6 keys plus:
+      - long_tp_first (bool): TP hit before SL for long
+      - short_tp_first (bool): TP hit before SL for short
+      - best_outcome_type: 'TP_FIRST', 'EXPIRY_STRONG', 'WEAK', 'LOSS'
+    """
+    long_outcome, long_r = triple_barrier_outcome_for_index(
+        highs, lows, closes, i, +1, atr_i,
+        tp_mult, sl_mult, horizon, r_min_expiry_strict,
+    )
+    short_outcome, short_r = triple_barrier_outcome_for_index(
+        highs, lows, closes, i, -1, atr_i,
+        tp_mult, sl_mult, horizon, r_min_expiry_strict,
+    )
+
+    long_tp_first = long_outcome == "TP"
+    short_tp_first = short_outcome == "TP"
+    long_exp_win = long_outcome == "EXP_WIN" and long_r >= r_min_expiry_strict
+    short_exp_win = short_outcome == "EXP_WIN" and short_r >= r_min_expiry_strict
+
+    best_r = max(long_r, short_r)
+
+    if long_r >= short_r:
+        best_side_tp_first = long_tp_first
+        best_side_exp_win = long_exp_win
+        y_dir = 1
+    else:
+        best_side_tp_first = short_tp_first
+        best_side_exp_win = short_exp_win
+        y_dir = 0
+
+    y_quality = 0
+    best_outcome_type = 'LOSS'
+
+    if best_r >= r_min_enter:
+        if best_side_tp_first:
+            y_quality = 1
+            best_outcome_type = 'TP_FIRST'
+        elif best_side_exp_win:
+            y_quality = 1
+            best_outcome_type = 'EXPIRY_STRONG'
+
+    if best_r < r_min_enter:
+        best_outcome_type = 'WEAK'
+
+    margin = float(long_r - short_r)
+    margin_clamped = max(-2.0, min(2.0, margin))
+    y_dir_conf = 1.0 / (1.0 + np.exp(-margin_clamped))
+
+    return {
+        'long_outcome': long_outcome,
+        'long_r': float(long_r),
+        'long_tp_first': long_tp_first,
+        'short_outcome': short_outcome,
+        'short_r': float(short_r),
+        'short_tp_first': short_tp_first,
+        'y_quality': int(y_quality),
+        'y_dir': int(y_dir),
+        'y_dir_conf': float(y_dir_conf),
+        'best_outcome_r': float(best_r),
+        'best_outcome_type': best_outcome_type,
+    }
+
+
 def compute_htf_score_target(
     h1_trend_sign: float,
     h4_trend_sign: float,
