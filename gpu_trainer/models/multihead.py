@@ -238,6 +238,12 @@ class MultiHeadOutput:
     # Edge head (regression: net MFE - MAE quality proxy)
     edge_logits: Optional[torch.Tensor] = None  # [batch, 1] predicted edge quality
 
+    # v4.6 Direction head (binary: 1=LONG better, 0=SHORT better)
+    dir_logits: Optional[torch.Tensor] = None  # [batch, 1] raw logits for direction BCE
+
+    # v4.6 HTF score head (4-class: 0=none, 1=weak, 2=moderate, 3=strong)
+    htf_logits: Optional[torch.Tensor] = None  # [batch, 4] raw logits for HTF classification
+
 
 class QuantileHead(nn.Module):
     """

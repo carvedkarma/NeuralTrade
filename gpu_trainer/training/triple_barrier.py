@@ -247,6 +247,93 @@ def compute_soft_quality(
     return float(y_soft)
 
 
+def bidirectional_outcome_for_index(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    i: int,
+    atr_i: float,
+    tp_mult: float = 2.0,
+    sl_mult: float = 1.5,
+    horizon: int = 16,
+    r_min_expiry: float = 1.0,
+):
+    """Compute BOTH long and short triple-barrier outcomes at index i.
+
+    No HTF gating — evaluates both directions unconditionally.
+
+    Returns:
+        dict with keys:
+            long_outcome, long_r, long_hit_type,
+            short_outcome, short_r, short_hit_type,
+            y_quality (int 0/1), y_dir (int 0=SHORT, 1=LONG),
+            y_dir_conf (float in [0,1]),
+            best_outcome_r (float)
+    """
+    long_outcome, long_r = triple_barrier_outcome_for_index(
+        highs, lows, closes, i, +1, atr_i,
+        tp_mult, sl_mult, horizon, r_min_expiry,
+    )
+    short_outcome, short_r = triple_barrier_outcome_for_index(
+        highs, lows, closes, i, -1, atr_i,
+        tp_mult, sl_mult, horizon, r_min_expiry,
+    )
+
+    long_hit = long_outcome in ("TP", "EXP_WIN")
+    short_hit = short_outcome in ("TP", "EXP_WIN")
+    best_r = max(long_r, short_r)
+
+    y_quality = 1 if (long_hit or short_hit or best_r >= 0.0) else 0
+    if best_r < 0 and not long_hit and not short_hit:
+        y_quality = 0
+
+    if long_r > short_r:
+        y_dir = 1
+    elif short_r > long_r:
+        y_dir = 0
+    else:
+        y_dir = 1
+
+    margin = float(long_r - short_r)
+    margin_clamped = max(-2.0, min(2.0, margin))
+    y_dir_conf = 1.0 / (1.0 + np.exp(-margin_clamped))
+
+    return {
+        'long_outcome': long_outcome,
+        'long_r': float(long_r),
+        'short_outcome': short_outcome,
+        'short_r': float(short_r),
+        'y_quality': int(y_quality),
+        'y_dir': int(y_dir),
+        'y_dir_conf': float(y_dir_conf),
+        'best_outcome_r': float(best_r),
+    }
+
+
+def compute_htf_score_target(
+    h1_trend_sign: float,
+    h4_trend_sign: float,
+) -> int:
+    """Compute HTF score classification target (0-3) from past HTF features.
+
+    Scoring:
+        0 = no trend (both flat)
+        1 = weak (one timeframe has trend)
+        2 = moderate (both have trend, disagree)
+        3 = strong (both agree on direction)
+    """
+    h1_active = abs(h1_trend_sign) > 0
+    h4_active = abs(h4_trend_sign) > 0
+
+    if not h1_active and not h4_active:
+        return 0
+    if h1_active != h4_active:
+        return 1
+    if h1_trend_sign != h4_trend_sign:
+        return 2
+    return 3
+
+
 def triple_barrier_batch(
     df: pd.DataFrame,
     indices: np.ndarray,

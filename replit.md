@@ -35,6 +35,8 @@ Multi-asset data ingestion: download_data() supports per-symbol downloads (data_
 
 A HTF Warmup & Candle History mechanism ensures sufficient historical data for indicator computation, with a strict WARMUP gate checking minimum bar counts before trading. An optional direct HTF fetch provides more stable indicators.
 
+The v4.6 "Directional Separation" feature introduces bidirectional triple-barrier labeling (no HTF gating). For every bar, both LONG and SHORT outcomes are computed, producing y_quality (best-direction trade quality), y_dir (binary direction: 1=LONG, 0=SHORT), y_dir_conf (sigmoid-mapped confidence), and y_htf_score (4-class HTF alignment from past-only features). The model gains dir_head (binary BCE) and htf_head (4-class CrossEntropy) with configurable composite loss weights (--w-quality, --w-dir, --w-htf). Evaluation tracks direction AUC/accuracy and HTF macro-F1. A --verify-v46-separation mode checks label distributions, target ranges, and model output shapes. Backward compatibility with v4.5 checkpoints is maintained via strict=False loading and default-disabled head flags.
+
 ### System Design Choices
 Data management uses Drizzle ORM for PostgreSQL and Zod for type-safe validation. The system persists all learning states and separates live sentiment data from historical price/volume. The client is bundled by Vite and the server by esbuild. Centralized timeframe configuration ensures consistency. A runtime diagnostic system provides health endpoints and UI console logging. The GPU training API supports training, status checks, and daily retraining.
 

@@ -549,6 +549,8 @@ class EnhancedMultiHeadMLP_Config:
     enable_enter_head: bool = False  # Binary entry quality head
     enable_value_head: bool = False  # E[net R] regression head
     enable_edge_head: bool = False   # Edge regression head (net MFE - MAE proxy)
+    enable_dir_head: bool = False    # v4.6 direction head (binary LONG/SHORT)
+    enable_htf_head: bool = False    # v4.6 HTF score head (4-class)
 
     n_symbols: int = 1  # Number of distinct symbols for multi-asset embedding
     symbol_embed_dim: int = 4  # Embedding dimension per symbol
@@ -713,6 +715,30 @@ class EnhancedMultiHeadMLP(nn.Module):
         else:
             self.edge_head = None
         
+        # === HEAD 9: Direction Head (v4.6 binary LONG/SHORT) ===
+        if config.enable_dir_head:
+            self.dir_head = nn.Sequential(
+                nn.Linear(self.trunk_dim, 32),
+                nn.LayerNorm(32),
+                nn.GELU(),
+                nn.Dropout(0.2),
+                nn.Linear(32, 1)
+            )
+        else:
+            self.dir_head = None
+        
+        # === HEAD 10: HTF Score Head (v4.6 4-class classification) ===
+        if config.enable_htf_head:
+            self.htf_head = nn.Sequential(
+                nn.Linear(self.trunk_dim, 32),
+                nn.LayerNorm(32),
+                nn.GELU(),
+                nn.Dropout(0.2),
+                nn.Linear(32, 4)
+            )
+        else:
+            self.htf_head = None
+        
         self.n_candle_steps = config.n_candle_steps
         self._init_weights()
         
@@ -725,6 +751,8 @@ class EnhancedMultiHeadMLP(nn.Module):
             'enable_enter': config.enable_enter_head,
             'enable_value': config.enable_value_head,
             'enable_edge': config.enable_edge_head,
+            'enable_dir': config.enable_dir_head,
+            'enable_htf': config.enable_htf_head,
         }
     
     def _init_weights(self):
@@ -823,6 +851,22 @@ class EnhancedMultiHeadMLP(nn.Module):
         else:
             edge_logits = None
         
+        # === Direction Head (v4.6 LONG/SHORT) ===
+        dir_head = getattr(self, 'dir_head', None)
+        if dir_head is not None:
+            dir_logits = dir_head(features)
+            dir_logits = torch.clamp(dir_logits, -5.0, 5.0)
+        else:
+            dir_logits = None
+        
+        # === HTF Score Head (v4.6 4-class) ===
+        htf_head = getattr(self, 'htf_head', None)
+        if htf_head is not None:
+            htf_logits = htf_head(features)
+            htf_logits = torch.clamp(htf_logits, -10.0, 10.0)
+        else:
+            htf_logits = None
+        
         # Placeholders for unused heads
         entry_offset = torch.zeros(batch_size, 1, device=device)
         sl_distance = torch.ones(batch_size, 1, device=device) * 0.01
@@ -844,6 +888,8 @@ class EnhancedMultiHeadMLP(nn.Module):
             enter_logits=enter_logits,
             value_logits=value_logits,
             edge_logits=edge_logits,
+            dir_logits=dir_logits,
+            htf_logits=htf_logits,
         )
     
     def parameters_count(self) -> int:
@@ -865,11 +911,19 @@ class EnhancedMultiHeadMLP(nn.Module):
     
     @classmethod
     def load(cls, path: str, device: str = 'cuda'):
-        """Load model from checkpoint."""
-        checkpoint = torch.load(path, map_location=device)
+        """Load model from checkpoint with backward compatibility.
+        
+        v4.5 checkpoints missing dir_head/htf_head will load successfully
+        with those heads disabled (None).
+        """
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
         config = checkpoint['config']
+        if not hasattr(config, 'enable_dir_head'):
+            config.enable_dir_head = False
+        if not hasattr(config, 'enable_htf_head'):
+            config.enable_htf_head = False
         model = cls(config)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         model.created_at = checkpoint.get('created_at', '')
         model.training_history = checkpoint.get('training_history', [])
         model.epochs_trained = checkpoint.get('epochs_trained', 0)

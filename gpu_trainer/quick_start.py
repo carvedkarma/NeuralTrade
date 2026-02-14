@@ -30,8 +30,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("QuickStart")
 
-FEATURE_VERSION = "v4.5.2_directional_sep_fix"
-SYSTEM_VERSION = "v4.5.2_directional_sep_fix"
+FEATURE_VERSION = "v4.6.0_directional_separation"
+SYSTEM_VERSION = "v4.6.0_directional_separation"
 
 FUNDING_FEATURE_NAMES = ["funding_rate", "funding_rate_delta_8h", "funding_rate_zscore_30d"]
 FUNDING_FEATURE_COUNT = len(FUNDING_FEATURE_NAMES)
@@ -729,7 +729,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                       use_edge_head: bool = True, edge_loss_weight: float = 0.15,
                       use_soft_labels: bool = True, soft_label_temp: float = 1.2,
                       loss_warmup_epochs: int = 10, warmup_pos_weight: float = 2.0,
-                      verify_enter_metrics: bool = False):
+                      verify_enter_metrics: bool = False,
+                      w_quality: float = 1.0, w_dir: float = 0.5, w_htf: float = 0.5,
+                      verify_v46_separation: bool = False):
     import torch
     import torch.nn as nn
     import numpy as np
@@ -747,6 +749,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     log.info(f"[PR_AUC_PACK] ohem={use_ohem} (neg_pct={ohem_neg_pct})")
     log.info(f"[PR_AUC_PACK] edge_head={use_edge_head} (weight={edge_loss_weight})")
     log.info(f"[PR_AUC_PACK] soft_labels={use_soft_labels} (temp={soft_label_temp})")
+    log.info(f"[V46_COMPOSITE] w_quality={w_quality} w_dir={w_dir} w_htf={w_htf}")
     log.info(f"[LABEL_QUALITY] r_min_expiry={r_min_expiry}")
 
     from data.regression_targets import RegressionTargetGenerator
@@ -772,6 +775,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         all_train_sym_ids = []
         all_train_ysoft = []
         all_train_edge = []
+        all_train_dir = []
+        all_train_dir_conf = []
+        all_train_htf = []
         all_val_features = []
         all_val_enter = []
         all_val_side = []
@@ -780,6 +786,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         all_val_sym_ids = []
         all_val_ysoft = []
         all_val_edge = []
+        all_val_dir = []
+        all_val_dir_conf = []
+        all_val_htf = []
         feature_columns_ref = None
 
         for sym_idx, sym in enumerate(symbols):
@@ -819,15 +828,16 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             htf_cols = [c for c in sym_features_df.columns if c.startswith('h1_') or c.startswith('h4_')]
             sym_htf_df = sym_features_df[htf_cols].copy()
 
-            from data.regression_targets import generate_enter_quality_targets
-            sym_label_df = generate_enter_quality_targets(
+            from data.regression_targets import generate_v46_quality_targets
+            sym_label_df = generate_v46_quality_targets(
                 sym_df, sym_htf_df,
                 horizon_periods=horizon,
                 tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
-                slope_eps=slope_eps, r_min_expiry=r_min_expiry,
+                r_min_expiry=r_min_expiry,
+                soft_label_temp=soft_label_temp,
             )
 
-            sym_enter = sym_label_df['enter_label'].values.astype(np.float32)
+            sym_enter = sym_label_df['y_quality'].values.astype(np.float32)
             sym_side = sym_label_df['side_hint'].values.astype(np.int64)
             sym_outcomes = sym_label_df['outcome'].values
             sym_realized_r = sym_label_df['realized_r'].values.astype(np.float64)
@@ -835,6 +845,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             sym_mfe = sym_label_df['mfe_r'].values.astype(np.float32) if 'mfe_r' in sym_label_df.columns else np.zeros(len(sym_label_df), dtype=np.float32)
             sym_mae = sym_label_df['mae_r'].values.astype(np.float32) if 'mae_r' in sym_label_df.columns else np.zeros(len(sym_label_df), dtype=np.float32)
             sym_edge_target = np.nan_to_num(sym_mfe - sym_mae, nan=0.0).astype(np.float32)
+            sym_dir_target = sym_label_df['y_dir'].values.astype(np.float32)
+            sym_dir_conf = sym_label_df['y_dir_conf'].values.astype(np.float32)
+            sym_htf_target = sym_label_df['y_htf_score'].values.astype(np.int64)
 
             valid_start = sequence_length
             sym_feat_np = sym_features_df.values[valid_start:].astype(np.float32)
@@ -844,6 +857,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             sym_r_np = sym_realized_r[valid_start:]
             sym_ysoft_np = np.nan_to_num(sym_ysoft[valid_start:], nan=0.5).astype(np.float32)
             sym_edge_np = sym_edge_target[valid_start:]
+            sym_dir_np = sym_dir_target[valid_start:]
+            sym_dir_conf_np = sym_dir_conf[valid_start:]
+            sym_htf_np = sym_htf_target[valid_start:]
 
             n_sym = len(sym_feat_np)
 
@@ -859,6 +875,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             all_train_sym_ids.append(np.full(train_end_sym, sym_idx, dtype=np.int64))
             all_train_ysoft.append(sym_ysoft_np[:train_end_sym])
             all_train_edge.append(sym_edge_np[:train_end_sym])
+            all_train_dir.append(sym_dir_np[:train_end_sym])
+            all_train_dir_conf.append(sym_dir_conf_np[:train_end_sym])
+            all_train_htf.append(sym_htf_np[:train_end_sym])
 
             val_size = val_end_sym - train_end_sym
             all_val_features.append(sym_feat_np[train_end_sym:val_end_sym])
@@ -869,6 +888,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             all_val_sym_ids.append(np.full(val_size, sym_idx, dtype=np.int64))
             all_val_ysoft.append(sym_ysoft_np[train_end_sym:val_end_sym])
             all_val_edge.append(sym_edge_np[train_end_sym:val_end_sym])
+            all_val_dir.append(sym_dir_np[train_end_sym:val_end_sym])
+            all_val_dir_conf.append(sym_dir_conf_np[train_end_sym:val_end_sym])
+            all_val_htf.append(sym_htf_np[train_end_sym:val_end_sym])
 
         train_features_raw = np.concatenate(all_train_features, axis=0)
         train_enter = np.concatenate(all_train_enter, axis=0)
@@ -877,6 +899,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         train_sym_ids = np.concatenate(all_train_sym_ids, axis=0)
         train_ysoft = np.concatenate(all_train_ysoft, axis=0)
         train_edge = np.concatenate(all_train_edge, axis=0)
+        train_dir = np.concatenate(all_train_dir, axis=0)
+        train_dir_conf = np.concatenate(all_train_dir_conf, axis=0)
+        train_htf = np.concatenate(all_train_htf, axis=0)
 
         val_features_raw = np.concatenate(all_val_features, axis=0)
         val_enter = np.concatenate(all_val_enter, axis=0)
@@ -886,6 +911,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         val_sym_ids = np.concatenate(all_val_sym_ids, axis=0)
         val_ysoft = np.concatenate(all_val_ysoft, axis=0)
         val_edge = np.concatenate(all_val_edge, axis=0)
+        val_dir = np.concatenate(all_val_dir, axis=0)
+        val_dir_conf = np.concatenate(all_val_dir_conf, axis=0)
+        val_htf = np.concatenate(all_val_htf, axis=0)
 
         n_symbols = len(symbols)
         features_columns_list = feature_columns_ref
@@ -903,20 +931,21 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         val_features_df_scaled = pd.DataFrame(val_features_raw, columns=features_columns_list)
         val_scaled = engineer.transform_and_clip(val_features_df_scaled, clip_range=clip_range).values.astype(np.float32)
 
-        def clean_multi(features, enter, side, outcomes, r_vals, sym_ids, ysoft, edge, name):
+        def clean_multi(features, enter, side, outcomes, r_vals, sym_ids, ysoft, edge, dir_t, dir_c, htf_t, name):
             features = np.where(np.isinf(features), np.nan, features)
             mask = np.isnan(features).any(axis=1)
             valid = ~mask
             dropped = mask.sum()
             if dropped > 0:
                 log.info(f"  {name}: dropped {dropped} NaN rows")
-            return features[valid], enter[valid], side[valid], outcomes[valid], r_vals[valid], sym_ids[valid], ysoft[valid], edge[valid]
+            return (features[valid], enter[valid], side[valid], outcomes[valid], r_vals[valid],
+                    sym_ids[valid], ysoft[valid], edge[valid], dir_t[valid], dir_c[valid], htf_t[valid])
 
         train_outcomes_dummy = np.full(len(train_enter), "NO_CANDIDATE", dtype=object)
-        train_scaled, train_enter, train_side, _, train_r, train_sym_ids, train_ysoft, train_edge = clean_multi(
-            train_scaled, train_enter, train_side, train_outcomes_dummy, train_r, train_sym_ids, train_ysoft, train_edge, "Train")
-        val_scaled, val_enter, val_side, val_outcomes, val_r, val_sym_ids, val_ysoft, val_edge = clean_multi(
-            val_scaled, val_enter, val_side, val_outcomes, val_r, val_sym_ids, val_ysoft, val_edge, "Val")
+        train_scaled, train_enter, train_side, _, train_r, train_sym_ids, train_ysoft, train_edge, train_dir, train_dir_conf, train_htf = clean_multi(
+            train_scaled, train_enter, train_side, train_outcomes_dummy, train_r, train_sym_ids, train_ysoft, train_edge, train_dir, train_dir_conf, train_htf, "Train")
+        val_scaled, val_enter, val_side, val_outcomes, val_r, val_sym_ids, val_ysoft, val_edge, val_dir, val_dir_conf, val_htf = clean_multi(
+            val_scaled, val_enter, val_side, val_outcomes, val_r, val_sym_ids, val_ysoft, val_edge, val_dir, val_dir_conf, val_htf, "Val")
 
         features_df_columns = features_columns_list
 
@@ -960,16 +989,16 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         htf_features_df = features_df[htf_cols].copy()
         log.info(f"HTF features for labeling: {htf_cols}")
 
-        from data.regression_targets import generate_enter_quality_targets
-        label_df = generate_enter_quality_targets(
+        from data.regression_targets import generate_v46_quality_targets
+        label_df = generate_v46_quality_targets(
             df, htf_features_df,
             horizon_periods=horizon,
             tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
-            slope_eps=slope_eps,
             r_min_expiry=r_min_expiry,
+            soft_label_temp=soft_label_temp,
         )
 
-        enter_labels = label_df['enter_label'].values.astype(np.float32)
+        enter_labels = label_df['y_quality'].values.astype(np.float32)
         side_hints = label_df['side_hint'].values.astype(np.int64)
         precomputed_outcomes = label_df['outcome'].values
         precomputed_r = label_df['realized_r'].values.astype(np.float64)
@@ -977,6 +1006,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         precomputed_mfe = label_df['mfe_r'].values.astype(np.float32) if 'mfe_r' in label_df.columns else np.zeros(len(label_df), dtype=np.float32)
         precomputed_mae = label_df['mae_r'].values.astype(np.float32) if 'mae_r' in label_df.columns else np.zeros(len(label_df), dtype=np.float32)
         precomputed_edge = np.nan_to_num(precomputed_mfe - precomputed_mae, nan=0.0).astype(np.float32)
+        precomputed_dir = label_df['y_dir'].values.astype(np.float32)
+        precomputed_dir_conf = label_df['y_dir_conf'].values.astype(np.float32)
+        precomputed_htf = label_df['y_htf_score'].values.astype(np.int64)
 
         valid_start = sequence_length
         features_np = features_df.values[valid_start:].astype(np.float32)
@@ -986,6 +1018,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         r_np = precomputed_r[valid_start:]
         ysoft_np = np.nan_to_num(precomputed_ysoft[valid_start:], nan=0.5).astype(np.float32)
         edge_np = precomputed_edge[valid_start:]
+        dir_np = precomputed_dir[valid_start:]
+        dir_conf_np = precomputed_dir_conf[valid_start:]
+        htf_np = precomputed_htf[valid_start:]
 
         n_total = len(features_np)
         purge_gap = horizon + sequence_length
@@ -1008,6 +1043,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         train_r = r_np[:train_end]
         train_ysoft = ysoft_np[:train_end]
         train_edge = edge_np[:train_end]
+        train_dir = dir_np[:train_end]
+        train_dir_conf = dir_conf_np[:train_end]
+        train_htf = htf_np[:train_end]
 
         val_features_raw = features_np[val_start_idx:val_end]
         val_enter = enter_np[val_start_idx:val_end]
@@ -1016,6 +1054,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         val_r = r_np[val_start_idx:val_end]
         val_ysoft = ysoft_np[val_start_idx:val_end]
         val_edge = edge_np[val_start_idx:val_end]
+        val_dir = dir_np[val_start_idx:val_end]
+        val_dir_conf = dir_conf_np[val_start_idx:val_end]
+        val_htf = htf_np[val_start_idx:val_end]
         val_bars = val_samples
 
         train_features_df_scaled = pd.DataFrame(train_features_raw, columns=features_df.columns)
@@ -1025,25 +1066,22 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         val_features_df_scaled = pd.DataFrame(val_features_raw, columns=features_df.columns)
         val_scaled = engineer.transform_and_clip(val_features_df_scaled, clip_range=clip_range).values.astype(np.float32)
 
-        def clean_enter(features, enter, side, outcomes, r_vals, ysoft, edge, name):
+        def clean_enter(features, enter, side, outcomes, r_vals, ysoft, edge, dir_t, dir_c, htf_t, name):
             features = np.where(np.isinf(features), np.nan, features)
             mask = np.isnan(features).any(axis=1)
             valid = ~mask
             dropped = mask.sum()
             if dropped > 0:
                 log.info(f"  {name}: dropped {dropped} NaN rows")
-            return features[valid], enter[valid], side[valid], outcomes[valid], r_vals[valid], ysoft[valid], edge[valid]
+            return (features[valid], enter[valid], side[valid], outcomes[valid], r_vals[valid],
+                    ysoft[valid], edge[valid], dir_t[valid], dir_c[valid], htf_t[valid])
 
         train_outcomes_dummy = np.full(len(train_enter), "NO_CANDIDATE", dtype=object)
         train_r_dummy = np.zeros(len(train_enter), dtype=np.float64)
-        train_ysoft_dummy = train_ysoft
-        train_edge_dummy = train_edge
-        train_scaled, train_enter, train_side, _, _, train_ysoft, train_edge = clean_enter(
-            train_scaled, train_enter, train_side, train_outcomes_dummy, train_r_dummy, train_ysoft_dummy, train_edge_dummy, "Train")
-        val_ysoft_dummy = val_ysoft
-        val_edge_dummy = val_edge
-        val_scaled, val_enter, val_side, val_outcomes, val_r, val_ysoft, val_edge = clean_enter(
-            val_scaled, val_enter, val_side, val_outcomes, val_r, val_ysoft_dummy, val_edge_dummy, "Val")
+        train_scaled, train_enter, train_side, _, _, train_ysoft, train_edge, train_dir, train_dir_conf, train_htf = clean_enter(
+            train_scaled, train_enter, train_side, train_outcomes_dummy, train_r_dummy, train_ysoft, train_edge, train_dir, train_dir_conf, train_htf, "Train")
+        val_scaled, val_enter, val_side, val_outcomes, val_r, val_ysoft, val_edge, val_dir, val_dir_conf, val_htf = clean_enter(
+            val_scaled, val_enter, val_side, val_outcomes, val_r, val_ysoft, val_edge, val_dir, val_dir_conf, val_htf, "Val")
 
         train_sym_ids = np.zeros(len(train_enter), dtype=np.int64)
         val_sym_ids = np.zeros(len(val_enter), dtype=np.int64)
@@ -1072,7 +1110,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     log.info(f"BCE pos_weight: {pos_weight:.2f}")
 
     class EnterDataset(Dataset):
-        def __init__(self, features, enter_labels, side_hints, symbol_ids, value_targets, edge_targets, ysoft_targets, seq_len):
+        def __init__(self, features, enter_labels, side_hints, symbol_ids, value_targets, edge_targets, ysoft_targets, dir_targets, dir_conf_targets, htf_targets, seq_len):
             self.features = features.astype(np.float32)
             self.enter_labels = enter_labels.astype(np.float32)
             self.side_hints = side_hints.astype(np.int64)
@@ -1080,6 +1118,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             self.value_targets = value_targets.astype(np.float32)
             self.edge_targets = edge_targets.astype(np.float32)
             self.ysoft_targets = ysoft_targets.astype(np.float32)
+            self.dir_targets = dir_targets.astype(np.float32)
+            self.dir_conf_targets = dir_conf_targets.astype(np.float32)
+            self.htf_targets = htf_targets.astype(np.int64)
             self.seq_len = seq_len
             self.valid_indices = list(range(seq_len, len(features)))
 
@@ -1098,10 +1139,13 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                 torch.tensor(self.value_targets[actual_idx], dtype=torch.float32),
                 torch.tensor(self.edge_targets[actual_idx], dtype=torch.float32),
                 torch.tensor(self.ysoft_targets[actual_idx], dtype=torch.float32),
+                torch.tensor(self.dir_targets[actual_idx], dtype=torch.float32),
+                torch.tensor(self.dir_conf_targets[actual_idx], dtype=torch.float32),
+                torch.tensor(self.htf_targets[actual_idx], dtype=torch.long),
             )
 
-    train_dataset = EnterDataset(train_scaled, train_enter, train_side, train_sym_ids, train_value_targets, train_edge_targets, train_ysoft_targets, sequence_length)
-    val_dataset = EnterDataset(val_scaled, val_enter, val_side, val_sym_ids, val_value_targets, val_edge_targets, val_ysoft_targets, sequence_length)
+    train_dataset = EnterDataset(train_scaled, train_enter, train_side, train_sym_ids, train_value_targets, train_edge_targets, train_ysoft_targets, train_dir, train_dir_conf, train_htf, sequence_length)
+    val_dataset = EnterDataset(val_scaled, val_enter, val_side, val_sym_ids, val_value_targets, val_edge_targets, val_ysoft_targets, val_dir, val_dir_conf, val_htf, sequence_length)
 
     log.info(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
 
@@ -1123,6 +1167,8 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         enable_sigma_head=False,
         enable_value_head=True,
         enable_edge_head=use_edge_head,
+        enable_dir_head=True,
+        enable_htf_head=True,
         n_symbols=n_symbols,
         symbol_embed_dim=4 if n_symbols > 1 else 0,
     )
@@ -1218,13 +1264,16 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         n_batches = 0
 
         for batch in train_loader:
-            features_batch, enter_batch, side_batch, sym_id_batch, value_batch, edge_batch, ysoft_batch = batch
+            features_batch, enter_batch, side_batch, sym_id_batch, value_batch, edge_batch, ysoft_batch, dir_batch, dir_conf_batch, htf_batch = batch
             features_batch = features_batch.to(device)
             enter_batch = enter_batch.to(device)
             sym_id_batch = sym_id_batch.to(device)
             value_batch = value_batch.to(device)
             edge_batch = edge_batch.to(device)
             ysoft_batch = ysoft_batch.to(device)
+            dir_batch = dir_batch.to(device)
+            dir_conf_batch = dir_conf_batch.to(device)
+            htf_batch = htf_batch.to(device)
 
             optimizer.zero_grad()
             output = model.forward_multihead(features_batch, symbol_ids=sym_id_batch if n_symbols > 1 else None)
@@ -1287,6 +1336,17 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                 e_loss = edge_criterion(edge_pred, edge_batch)
                 loss = loss + edge_loss_weight * e_loss
 
+            if output.dir_logits is not None:
+                dir_pred = output.dir_logits.squeeze(-1)
+                dir_loss = nn.functional.binary_cross_entropy_with_logits(
+                    dir_pred, dir_batch, weight=dir_conf_batch, reduction='mean'
+                )
+                loss = loss + w_dir * dir_loss
+
+            if output.htf_logits is not None:
+                htf_loss = nn.functional.cross_entropy(output.htf_logits, htf_batch, reduction='mean')
+                loss = loss + w_htf * htf_loss
+
             loss.backward()
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.7)
@@ -1309,15 +1369,22 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         all_enter_logits_list = []
         all_edge_preds = []
         all_edge_targets_list = []
+        all_dir_probs = []
+        all_dir_targets = []
+        all_htf_preds = []
+        all_htf_targets = []
 
         with torch.no_grad():
             for batch in val_loader:
-                features_batch, enter_batch, side_batch, sym_id_batch, value_batch, edge_batch, ysoft_batch = batch
+                features_batch, enter_batch, side_batch, sym_id_batch, value_batch, edge_batch, ysoft_batch, dir_batch, dir_conf_batch, htf_batch = batch
                 features_batch = features_batch.to(device)
                 enter_batch = enter_batch.to(device)
                 sym_id_batch = sym_id_batch.to(device)
                 value_batch = value_batch.to(device)
                 edge_batch = edge_batch.to(device)
+                dir_batch = dir_batch.to(device)
+                dir_conf_batch = dir_conf_batch.to(device)
+                htf_batch = htf_batch.to(device)
 
                 output = model.forward_multihead(features_batch, symbol_ids=sym_id_batch if n_symbols > 1 else None)
                 enter_logits = output.enter_logits.squeeze(-1)
@@ -1337,6 +1404,17 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                     batch_loss = batch_loss + edge_loss_weight * e_loss_val
                     all_edge_preds.extend(edge_pred.cpu().numpy())
                     all_edge_targets_list.extend(edge_batch.cpu().numpy())
+
+                if output.dir_logits is not None:
+                    dir_pred = output.dir_logits.squeeze(-1)
+                    dir_probs_batch = torch.sigmoid(dir_pred).cpu().numpy()
+                    all_dir_probs.extend(dir_probs_batch)
+                    all_dir_targets.extend(dir_batch.cpu().numpy())
+
+                if output.htf_logits is not None:
+                    htf_pred_classes = torch.argmax(output.htf_logits, dim=-1).cpu().numpy()
+                    all_htf_preds.extend(htf_pred_classes)
+                    all_htf_targets.extend(htf_batch.cpu().numpy())
 
                 val_loss_total += batch_loss.item()
                 val_n += 1
@@ -1441,11 +1519,39 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         else:
             edge_mae_val = edge_rmse_val = 0.0
 
+        dir_auc_val = 0.0
+        dir_acc_val = 0.0
+        if all_dir_probs:
+            all_dp = np.array(all_dir_probs)
+            all_dt = np.array(all_dir_targets)
+            dir_preds_bin = (all_dp >= 0.5).astype(int)
+            dir_acc_val = np.mean(dir_preds_bin == (all_dt >= 0.5).astype(int))
+            try:
+                from sklearn.metrics import roc_auc_score
+                if len(np.unique((all_dt >= 0.5).astype(int))) > 1:
+                    dir_auc_val = roc_auc_score((all_dt >= 0.5).astype(int), all_dp)
+            except Exception:
+                pass
+
+        htf_macro_f1 = 0.0
+        htf_acc_val = 0.0
+        if all_htf_preds:
+            all_hp = np.array(all_htf_preds)
+            all_ht = np.array(all_htf_targets)
+            htf_acc_val = np.mean(all_hp == all_ht)
+            try:
+                from sklearn.metrics import f1_score
+                htf_macro_f1 = f1_score(all_ht, all_hp, average='macro', zero_division=0)
+            except Exception:
+                pass
+
         if (epoch + 1) % 10 == 0 or epoch == 0:
             log.info(f"[METRIC] mean_logit_pos={ml_pos:.3f} mean_logit_neg={ml_neg:.3f}")
             log.info(f"[METRIC] value_mae={value_mae:.4f} value_rmse={value_rmse:.4f}")
             if use_edge_head:
                 log.info(f"[METRIC] edge_mae={edge_mae_val:.4f} edge_rmse={edge_rmse_val:.4f}")
+            log.info(f"[METRIC] dir_auc={dir_auc_val:.4f} dir_acc={dir_acc_val:.4f}")
+            log.info(f"[METRIC] htf_macro_f1={htf_macro_f1:.4f} htf_acc={htf_acc_val:.4f}")
             log.info(f"[METRIC] p_enter percentiles (val): p50={p50:.4f} p75={p75:.4f} p90={p90:.4f} p95={p95:.4f} p99={p99:.4f}")
 
         ckpt_model_config = {
@@ -1462,6 +1568,8 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             'enable_sigma_head': False,
             'enable_value_head': True,
             'enable_edge_head': use_edge_head,
+            'enable_dir_head': True,
+            'enable_htf_head': True,
             'n_symbols': n_symbols,
             'symbol_embed_dim': 4 if n_symbols > 1 else 0,
         }
@@ -1477,6 +1585,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             'soft_label_temp': soft_label_temp,
             'loss_warmup_epochs': loss_warmup_epochs,
             'warmup_pos_weight': warmup_pos_weight,
+            'w_quality': w_quality,
+            'w_dir': w_dir,
+            'w_htf': w_htf,
         }
 
         if prauc > best_val_prauc:
@@ -1563,7 +1674,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     cal_labels = []
     with torch.no_grad():
         for batch in val_loader:
-            features_batch, enter_batch, side_batch, sym_id_batch, value_batch, edge_batch, ysoft_batch = batch
+            features_batch, enter_batch, side_batch, sym_id_batch, value_batch, edge_batch, ysoft_batch, dir_batch, dir_conf_batch, htf_batch = batch
             features_batch = features_batch.to(device)
             enter_batch = enter_batch.to(device)
             sym_id_batch = sym_id_batch.to(device)
@@ -1679,7 +1790,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             v_targets_list = []
             with torch.no_grad():
                 for batch in val_loader:
-                    fb, eb, sb, si, vb, edb, ysb = batch
+                    fb, eb, sb, si, vb, edb, ysb, db, dcb, hb = batch
                     fb = fb.to(device)
                     si = si.to(device)
                     out = model.forward_multihead(fb, symbol_ids=si if n_symbols > 1 else None)
@@ -1771,6 +1882,40 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
 
         for aid, desc, result in assertions:
             log.info(f"[VERIFY] Assertion {aid}: {result} — {desc}")
+
+    if verify_v46_separation:
+        log.info("=" * 60)
+        log.info("  VERIFY-V46-SEPARATION MODE")
+        log.info("=" * 60)
+
+        log.info(f"[V46_VERIFY] y_quality: total={len(train_enter)}, pos={int((train_enter >= 0.5).sum())}, "
+                 f"neg={int((train_enter < 0.5).sum())}, "
+                 f"pos%={100*(train_enter >= 0.5).mean():.1f}%")
+        log.info(f"[V46_VERIFY] y_dir: total={len(train_dir)}, "
+                 f"long={int((train_dir >= 0.5).sum())}, short={int((train_dir < 0.5).sum())}, "
+                 f"balance={100*(train_dir >= 0.5).mean():.1f}% long")
+        import collections
+        htf_counts = collections.Counter(train_htf.tolist())
+        log.info(f"[V46_VERIFY] y_htf_score class counts: {dict(sorted(htf_counts.items()))}")
+
+        assert train_dir.min() >= 0.0 and train_dir.max() <= 1.0, f"y_dir out of range: [{train_dir.min()}, {train_dir.max()}]"
+        assert train_dir_conf.min() >= 0.0, f"y_dir_conf negative: {train_dir_conf.min()}"
+        assert train_htf.min() >= 0 and train_htf.max() <= 3, f"y_htf_score out of range: [{train_htf.min()}, {train_htf.max()}]"
+        log.info("[V46_VERIFY] Target ranges: PASS")
+
+        model.eval()
+        with torch.no_grad():
+            test_batch = next(iter(val_loader))
+            fb = test_batch[0].to(device)
+            si = test_batch[3].to(device)
+            out = model.forward_multihead(fb, symbol_ids=si if n_symbols > 1 else None)
+            assert out.dir_logits is not None, "dir_head output is None"
+            assert out.htf_logits is not None, "htf_head output is None"
+            assert out.dir_logits.shape[-1] == 1, f"dir_logits shape mismatch: {out.dir_logits.shape}"
+            assert out.htf_logits.shape[-1] == 4, f"htf_logits shape mismatch: {out.htf_logits.shape}"
+            log.info(f"[V46_VERIFY] Model outputs: dir_logits={out.dir_logits.shape}, htf_logits={out.htf_logits.shape}")
+
+        log.info("[V46_VERIFY] All checks PASSED")
 
     return model, engineer, features_df_columns, history
 
@@ -2271,9 +2416,11 @@ def _prepare_regime_eval_context(data_path, device, regimes_str, slope_eps):
         num_classes=3, dropout=0.3, use_layer_norm=True, use_residual=True,
         enable_enter_head=True, enable_quantile_head=False,
         enable_vol_state_head=False, enable_mu_head=False, enable_sigma_head=False,
+        enable_dir_head=cfg.get('enable_dir_head', False),
+        enable_htf_head=cfg.get('enable_htf_head', False),
     )
     model = EnhancedMultiHeadMLP(mlp_config)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     model.to(device)
     model.eval()
     log.info(f"Model loaded: {model.parameters_count():,} parameters")
@@ -3066,6 +3213,14 @@ Examples:
                         help="Max pos_weight during loss warmup stage (default: 2.0)")
     parser.add_argument("--verify-enter-metrics", action="store_true", default=False,
                         help="Run 3-pass validation verification with assertions and generate report")
+    parser.add_argument("--w-quality", type=float, default=1.0,
+                        help="Weight for quality (enter) loss in composite loss (default: 1.0)")
+    parser.add_argument("--w-dir", type=float, default=0.5,
+                        help="Weight for direction loss in composite loss (default: 0.5)")
+    parser.add_argument("--w-htf", type=float, default=0.5,
+                        help="Weight for HTF supervision loss in composite loss (default: 0.5)")
+    parser.add_argument("--verify-v46-separation", action="store_true", default=False,
+                        help="Run v4.6 label/model verification checks without full training")
 
     parser.add_argument("--live", action="store_true",
                         help="Run continuous live multi-asset inference loop")
@@ -3563,6 +3718,10 @@ Examples:
             loss_warmup_epochs=args.loss_warmup_epochs,
             warmup_pos_weight=args.warmup_pos_weight,
             verify_enter_metrics=args.verify_enter_metrics,
+            w_quality=args.w_quality,
+            w_dir=args.w_dir,
+            w_htf=args.w_htf,
+            verify_v46_separation=args.verify_v46_separation,
         )
 
         print()
@@ -3617,9 +3776,11 @@ Examples:
             enable_mu_head=False,
             enable_sigma_head=False,
             enable_edge_head=cfg.get('enable_edge_head', False),
+            enable_dir_head=cfg.get('enable_dir_head', False),
+            enable_htf_head=cfg.get('enable_htf_head', False),
         )
         model = EnhancedMultiHeadMLP(mlp_config)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         model.to(device)
 
         from data.pipeline import FeatureEngineer

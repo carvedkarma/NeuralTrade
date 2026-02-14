@@ -1,0 +1,56 @@
+You are working in gpu_trainer. Implement v4.6 “Directional Separation” precisely. Goal: remove structural PR-AUC ceiling by separating HTF gating + direction from ENTER quality.
+
+DO NOT change the live trading engine logic/thresholds yet. Only training pipeline + checkpoint schema additions.
+
+1) Labeling changes (triple_barrier.py / label generator):
+   - Create labels WITHOUT HTF gating:
+     * For each bar, compute two outcomes using future path:
+       - long_outcome_r, long_hit_type {TP, SL, EXP}
+       - short_outcome_r, short_hit_type {TP, SL, EXP}
+     * Define:
+       - y_quality = 1 if max(long_outcome_r, short_outcome_r) >= +r_min (or TP hit), else 0
+       - y_dir = 1 if long_outcome_r > short_outcome_r else 0  (1=LONG, 0=SHORT)
+       - y_dir_conf = sigmoid-like target using margin = (long_outcome_r - short_outcome_r), clamp to [-2,2], map to [0,1]
+   - Keep soft labels: y_soft_quality based on normalized best_outcome_r (temp configurable).
+
+2) HTF supervision head:
+   - Create y_htf_score target from existing HTF computations (0..3) using STRICTLY past completed bars.
+   - Add a new head “htf_head” (classification 4 classes).
+   - Loss: CrossEntropy for htf_head.
+
+3) Model changes:
+   - Network outputs:
+     - enter_quality_logit (binary)
+     - dir_logit (binary) OR 2-class
+     - htf_logits (4-class)
+     - keep value_head and edge_head as-is
+   - Total loss:
+     L = wq * BCE(quality) + wd * BCE(direction) + wh * CE(htf_score) + wv * value_loss + we * edge_loss
+   - Add CLI flags:
+     --w-quality (default 1.0)
+     --w-dir (default 0.5)
+     --w-htf (default 0.5)
+     Save into train_config in checkpoint.
+
+4) Metrics:
+   - Report:
+     - PR-AUC for quality head (main)
+     - Direction AUC / accuracy
+     - HTF score accuracy and macro-F1
+     - Separation checks for quality logits (pos vs neg) like existing sep logs
+   - Percentiles must use p_quality = sigmoid(quality_logits) from val set.
+
+5) Verification mode:
+   Add --verify-v46-separation which runs 10 epochs and asserts:
+     - PR-AUC(quality) >= 0.35 by epoch 10 (soft gate, just warning if <0.35)
+     - HTF head accuracy > 0.45 by epoch 10
+     - direction head accuracy > 0.52 by epoch 10
+   Output verify_v46_separation.md with the three curves and final values.
+
+6) Backward compatibility:
+   - Update checkpoint loader so v4.5 checkpoints still load (missing heads default disabled).
+   - Do NOT break live runner. Live can ignore new heads for now.
+
+After implementing:
+- Run training for 15 epochs on BTC+ETH+SOL.
+- Paste logs for PR-AUC quality, dir acc, htf acc, sep, and p_quality percentiles at epochs 1, 5, 10, 15.

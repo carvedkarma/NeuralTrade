@@ -1314,3 +1314,141 @@ def generate_enter_quality_targets(
         slope_eps=slope_eps,
         r_min_expiry=r_min_expiry,
     )
+
+
+def generate_v46_quality_targets(
+    df: pd.DataFrame,
+    htf_features: pd.DataFrame,
+    horizon_periods: int = 16,
+    tp_atr_mult: float = 2.0,
+    sl_atr_mult: float = 1.5,
+    r_min_expiry: float = 1.0,
+    soft_label_temp: float = 1.2,
+) -> pd.DataFrame:
+    """v4.6 Directional Separation labeling — bidirectional, no HTF gating.
+
+    For EVERY bar, computes both LONG and SHORT triple-barrier outcomes
+    and produces:
+      - y_quality: 1 if max(long_r, short_r) indicates a good trade
+      - y_dir: 1=LONG better, 0=SHORT better
+      - y_dir_conf: sigmoid-mapped confidence from margin
+      - y_htf_score: 0-3 HTF alignment class from past-only features
+      - y_soft_quality: soft label from best-direction MFE/MAE
+      - long_r, short_r, best_r: raw R outcomes
+      - mfe_r, mae_r: from best direction
+      - enter_label, side_hint, outcome, realized_r: backward-compat columns
+    """
+    from training.triple_barrier import (
+        compute_atr_14, bidirectional_outcome_for_index,
+        compute_htf_score_target, compute_mfe_mae_for_index,
+        compute_trade_cost_r, compute_soft_quality,
+    )
+
+    n = len(df)
+    highs = df['high'].values.astype(np.float64)
+    lows = df['low'].values.astype(np.float64)
+    closes = df['close'].values.astype(np.float64)
+    atr_vals = compute_atr_14(df)
+
+    h1_trend = htf_features['h1_trend_sign'].values if 'h1_trend_sign' in htf_features.columns else np.zeros(n)
+    h4_trend = htf_features['h4_trend_sign'].values if 'h4_trend_sign' in htf_features.columns else np.zeros(n)
+
+    y_quality_arr = np.zeros(n, dtype=np.int64)
+    y_dir_arr = np.zeros(n, dtype=np.int64)
+    y_dir_conf_arr = np.full(n, 0.5, dtype=np.float64)
+    y_htf_score_arr = np.zeros(n, dtype=np.int64)
+    long_r_arr = np.full(n, np.nan, dtype=np.float64)
+    short_r_arr = np.full(n, np.nan, dtype=np.float64)
+    best_r_arr = np.full(n, np.nan, dtype=np.float64)
+    mfe_r_arr = np.full(n, np.nan, dtype=np.float64)
+    mae_r_arr = np.full(n, np.nan, dtype=np.float64)
+    y_soft_arr = np.full(n, 0.5, dtype=np.float64)
+
+    enter_labels = np.zeros(n, dtype=np.int64)
+    side_hints = np.zeros(n, dtype=np.int64)
+    outcomes = np.full(n, "NO_CANDIDATE", dtype=object)
+    realized_r = np.full(n, np.nan, dtype=np.float64)
+
+    n_quality_1 = 0
+    n_long_better = 0
+    n_short_better = 0
+    htf_class_counts = [0, 0, 0, 0]
+
+    for i in range(n - horizon_periods):
+        a = float(atr_vals[i])
+        if np.isnan(a) or a <= 0:
+            a = closes[i] * 0.005
+
+        result = bidirectional_outcome_for_index(
+            highs, lows, closes, i, a,
+            tp_atr_mult, sl_atr_mult, horizon_periods, r_min_expiry,
+        )
+
+        y_quality_arr[i] = result['y_quality']
+        y_dir_arr[i] = result['y_dir']
+        y_dir_conf_arr[i] = result['y_dir_conf']
+        long_r_arr[i] = result['long_r']
+        short_r_arr[i] = result['short_r']
+        best_r_arr[i] = result['best_outcome_r']
+
+        htf_score = compute_htf_score_target(float(h1_trend[i]), float(h4_trend[i]))
+        y_htf_score_arr[i] = htf_score
+        htf_class_counts[htf_score] += 1
+
+        best_side = +1 if result['y_dir'] == 1 else -1
+        mfe, mae = compute_mfe_mae_for_index(
+            highs, lows, closes, i, best_side, a,
+            sl_atr_mult, horizon_periods,
+        )
+        mfe_r_arr[i] = mfe
+        mae_r_arr[i] = mae
+
+        cost_r_val = compute_trade_cost_r(closes[i], a, sl_atr_mult)
+        y_soft_arr[i] = compute_soft_quality(mfe, mae, cost_r_val, soft_label_temp)
+
+        enter_labels[i] = result['y_quality']
+        side_hints[i] = best_side
+        if result['y_quality'] == 1:
+            outcomes[i] = result['long_outcome'] if best_side > 0 else result['short_outcome']
+            realized_r[i] = result['best_outcome_r']
+            n_quality_1 += 1
+        else:
+            outcomes[i] = "BOTH_LOSE"
+            realized_r[i] = result['best_outcome_r']
+
+        if result['y_dir'] == 1:
+            n_long_better += 1
+        else:
+            n_short_better += 1
+
+    labeled_bars = n - horizon_periods
+    logger.info("=" * 70)
+    logger.info("v4.6 BIDIRECTIONAL LABELING (no HTF gate)")
+    logger.info("=" * 70)
+    logger.info(f"Total bars: {n:,}, Labeled: {labeled_bars:,}")
+    logger.info(f"y_quality=1: {n_quality_1:,} ({100*n_quality_1/max(labeled_bars,1):.1f}%)")
+    logger.info(f"y_dir: LONG_better={n_long_better:,} SHORT_better={n_short_better:,}")
+    logger.info(f"HTF score distribution: {dict(enumerate(htf_class_counts))}")
+
+    valid_best = best_r_arr[~np.isnan(best_r_arr)]
+    if len(valid_best) > 0:
+        logger.info(f"best_R: mean={np.mean(valid_best):.3f} median={np.median(valid_best):.3f} "
+                     f"p25={np.percentile(valid_best, 25):.3f} p75={np.percentile(valid_best, 75):.3f}")
+    logger.info("=" * 70)
+
+    return pd.DataFrame({
+        'enter_label': enter_labels,
+        'side_hint': side_hints,
+        'outcome': outcomes,
+        'realized_r': realized_r,
+        'y_quality': y_quality_arr,
+        'y_dir': y_dir_arr,
+        'y_dir_conf': y_dir_conf_arr,
+        'y_htf_score': y_htf_score_arr,
+        'long_r': long_r_arr,
+        'short_r': short_r_arr,
+        'best_r': best_r_arr,
+        'mfe_r': mfe_r_arr,
+        'mae_r': mae_r_arr,
+        'y_soft': y_soft_arr,
+    }, index=df.index)
