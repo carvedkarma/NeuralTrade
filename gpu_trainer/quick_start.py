@@ -733,7 +733,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                       w_quality: float = 1.0, w_dir: float = 0.5, w_htf: float = 0.5,
                       verify_v46_separation: bool = False,
                       use_v47_labels: bool = True,
-                      r_min_enter: float = 0.8, r_min_expiry_strict: float = 1.0,
+                      q_min_tp: float = 0.3, r_min_expiry_strict: float = 1.0,
                       auto_balance_enter_labels: bool = True,
                       target_enter_rate: float = 0.18,
                       target_enter_rate_min: float = 0.12,
@@ -760,7 +760,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     log.info(f"[PR_AUC_PACK] soft_labels={use_soft_labels} (temp={soft_label_temp})")
     log.info(f"[V46_COMPOSITE] w_quality={w_quality} w_dir={w_dir} w_htf={w_htf}")
     log.info(f"[LABEL_QUALITY] r_min_expiry={r_min_expiry}")
-    log.info(f"[V47_CONFIG] use_v47_labels={use_v47_labels} r_min_enter={r_min_enter} r_min_expiry_strict={r_min_expiry_strict}")
+    log.info(f"[V47_CONFIG] use_v47_labels={use_v47_labels} q_min_tp={q_min_tp} r_min_expiry_strict={r_min_expiry_strict}")
     log.info(f"[V47_CONFIG] auto_balance={auto_balance_enter_labels} target_rate={target_enter_rate} range=[{target_enter_rate_min}, {target_enter_rate_max}]")
     log.info(f"[V47_CONFIG] pos_weight_guardrails=[{pos_weight_min}, {pos_weight_max}]")
 
@@ -846,7 +846,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                     sym_df, sym_htf_df,
                     horizon_periods=horizon,
                     tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
-                    r_min_enter=r_min_enter,
+                    q_min_tp=q_min_tp,
                     r_min_expiry_strict=r_min_expiry_strict,
                     soft_label_temp=soft_label_temp,
                     auto_balance=auto_balance_enter_labels,
@@ -1032,7 +1032,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                 df, htf_features_df,
                 horizon_periods=horizon,
                 tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
-                r_min_enter=r_min_enter,
+                q_min_tp=q_min_tp,
                 r_min_expiry_strict=r_min_expiry_strict,
                 soft_label_temp=soft_label_temp,
                 auto_balance=auto_balance_enter_labels,
@@ -1163,10 +1163,10 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     if int(pos_count) == 0 or int(val_pos_count) == 0:
         max_train_best_r = float(np.nanmax(train_r)) if len(train_r) > 0 else 0.0
         max_val_best_r = float(np.nanmax(val_r)) if len(val_r) > 0 else 0.0
-        effective_r_min = label_df.attrs.get('v47_diagnostics', {}).get('r_min_enter', r_min_enter) if hasattr(label_df, 'attrs') else r_min_enter
+        effective_q_min = label_df.attrs.get('v47_diagnostics', {}).get('q_min_tp', q_min_tp) if hasattr(label_df, 'attrs') else q_min_tp
         raise ValueError(
             f"[LABEL_ERROR] ENTER positives are zero (train_pos={int(pos_count)}, val_pos={int(val_pos_count)}). "
-            f"r_min_enter={effective_r_min} max_feasible_train={max_train_best_r:.4f} max_feasible_val={max_val_best_r:.4f}"
+            f"q_min_tp={effective_q_min} max_feasible_train={max_train_best_r:.4f} max_feasible_val={max_val_best_r:.4f}"
         )
 
     raw_pos_weight = neg_count / max(pos_count, 1)
@@ -1654,7 +1654,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             'w_dir': w_dir,
             'w_htf': w_htf,
             'use_v47_labels': use_v47_labels,
-            'r_min_enter': r_min_enter,
+            'q_min_tp': q_min_tp,
             'r_min_expiry_strict': r_min_expiry_strict,
             'auto_balance_enter_labels': auto_balance_enter_labels,
             'target_enter_rate': target_enter_rate,
@@ -2016,13 +2016,13 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         log.info(f"[V47_VERIFY] val ENTER=1: {int(val_pos)} / {int(val_total)} = {100*val_enter_rate:.1f}%")
 
         report_lines = [
-            "# v4.7 Label Verification Report",
+            "# v4.7.1 Label Verification Report",
             "",
             f"**Date**: {datetime.now().isoformat()}",
-            f"**Label Version**: v4.7 (Label Geometry Fix)",
+            f"**Label Version**: v4.7.1 (TP Quality Score Balancing)",
             "",
             "## Configuration",
-            f"- r_min_enter: {r_min_enter}",
+            f"- q_min_tp: {q_min_tp}",
             f"- r_min_expiry_strict: {r_min_expiry_strict}",
             f"- auto_balance: {auto_balance_enter_labels}",
             f"- target_enter_rate: {target_enter_rate}",
@@ -3369,12 +3369,12 @@ Examples:
                         help="Use v4.7 strict quality labeling (default: True)")
     parser.add_argument("--no-v47-labels", dest="use_v47_labels", action="store_false",
                         help="Disable v4.7 labels, fall back to v4.6")
-    parser.add_argument("--r-min-enter", type=float, default=0.8,
-                        help="Min best_R for ENTER=1 in v4.7 labeling (default: 0.8)")
+    parser.add_argument("--q-min-tp", type=float, default=0.3,
+                        help="Min TP quality score for ENTER=1 in v4.7.1 labeling (default: 0.3)")
     parser.add_argument("--r-min-expiry-strict", type=float, default=1.0,
                         help="Min R at expiry to count as positive in v4.7 (default: 1.0)")
     parser.add_argument("--auto-balance-enter-labels", action="store_true", default=True,
-                        help="Auto-tune r_min_enter for target positive rate (default: True)")
+                        help="Auto-tune q_min_tp for target positive rate (default: True)")
     parser.add_argument("--no-auto-balance", dest="auto_balance_enter_labels", action="store_false",
                         help="Disable auto-balancing of enter labels")
     parser.add_argument("--target-enter-rate", type=float, default=0.18,
@@ -3893,7 +3893,7 @@ Examples:
             w_htf=args.w_htf,
             verify_v46_separation=args.verify_v46_separation,
             use_v47_labels=args.use_v47_labels,
-            r_min_enter=args.r_min_enter,
+            q_min_tp=args.q_min_tp,
             r_min_expiry_strict=args.r_min_expiry_strict,
             auto_balance_enter_labels=args.auto_balance_enter_labels,
             target_enter_rate=args.target_enter_rate,

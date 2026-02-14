@@ -1454,89 +1454,80 @@ def generate_v46_quality_targets(
     }, index=df.index)
 
 
-def _auto_calibrate_r_min_enter(
-    best_r_all: np.ndarray,
+def _auto_calibrate_q_min_tp(
+    tp_quality_all: np.ndarray,
     tp_first_all: np.ndarray,
     exp_win_all: np.ndarray,
-    r_min_expiry_strict: float = 1.0,
+    n_total: int,
     target_rate: float = 0.18,
     target_min: float = 0.12,
     target_max: float = 0.25,
     search_steps: int = 30,
-    search_lo: float = 0.3,
-    search_hi: float = 1.5,
-    tp_mult: float = 2.0,
-    sl_mult: float = 1.5,
+    search_lo: float = 0.0,
+    search_hi: float = 0.9,
 ) -> float:
-    """Search r_min_enter to get ENTER positive rate closest to target.
+    """v4.7.1: Search q_min_tp to get ENTER positive rate closest to target.
 
-    Uses the v4.7 strict criteria: TP-first (no R gate) OR strong-expiry (R >= r_min_expiry_strict).
-    r_min_enter only gates expiry path. Clamps to tp_r - 1e-3 as hard ceiling.
+    ENTER=1 if (TP-first AND q >= q_min_tp) OR (EXP_WIN strong).
+    q_min_tp only gates the TP-first path (the dominant population).
     """
-    valid = ~np.isnan(best_r_all)
-    br = best_r_all[valid]
-    tp = tp_first_all[valid]
-    ew = exp_win_all[valid]
-    n = len(br)
-    if n == 0:
-        return 0.8
+    n_exp_win = int(exp_win_all.sum())
 
-    tp_r = float(tp_mult) / float(sl_mult)
+    tp_q_valid = tp_quality_all[tp_first_all & ~np.isnan(tp_quality_all)]
+    n_tp = len(tp_q_valid)
 
-    eligible = br[tp | ew]
-    if len(eligible) > 0:
-        max_feasible = float(np.percentile(eligible, 99.9))
-    else:
-        max_feasible = float(np.percentile(br, 99.9)) if len(br) > 0 else 0.8
+    if n_total == 0:
+        return 0.3
 
-    feasible_cap = min(max_feasible - 1e-3, tp_r - 1e-3)
+    logger.info(f"[LABEL_BALANCE] v4.7.1 q_min_tp search: n_total={n_total} "
+                f"n_tp_first={n_tp} n_exp_win={n_exp_win} "
+                f"search_range=[{search_lo:.2f}, {search_hi:.2f}]")
 
-    effective_hi = min(search_hi, max(feasible_cap, search_lo))
+    if n_tp > 0:
+        pcts = np.percentile(tp_q_valid, [10, 25, 50, 75, 90, 95, 99])
+        logger.info(f"[TP_QUAL] q: min={tp_q_valid.min():.3f} p10={pcts[0]:.3f} p25={pcts[1]:.3f} "
+                    f"p50={pcts[2]:.3f} p75={pcts[3]:.3f} p90={pcts[4]:.3f} "
+                    f"p95={pcts[5]:.3f} p99={pcts[6]:.3f} max={tp_q_valid.max():.3f}")
 
-    logger.info(f"[LABEL_BALANCE] max_feasible_best_R={max_feasible:.4f} "
-                f"tp_r={tp_r:.4f} feasible_cap={feasible_cap:.4f} "
-                f"search_range=[{search_lo:.2f}, {effective_hi:.4f}]")
+    def rate_for_q(q_thresh):
+        tp_kept = int((tp_q_valid >= q_thresh).sum()) if n_tp > 0 else 0
+        return (tp_kept + n_exp_win) / n_total
 
-    def rate_for_threshold(thresh):
-        enters = (tp | (ew & (br >= thresh))).sum()
-        return enters / n
-
-    best_thresh = min(0.8, effective_hi)
-    best_dist = abs(rate_for_threshold(best_thresh) - target_rate)
+    best_q = search_lo
+    best_dist = abs(rate_for_q(best_q) - target_rate)
 
     for step in range(search_steps):
-        t = search_lo + (effective_hi - search_lo) * step / max(search_steps - 1, 1)
-        r = rate_for_threshold(t)
+        q = search_lo + (search_hi - search_lo) * step / max(search_steps - 1, 1)
+        r = rate_for_q(q)
         d = abs(r - target_rate)
         if d < best_dist:
             best_dist = d
-            best_thresh = t
+            best_q = q
 
-    final_rate = rate_for_threshold(best_thresh)
-    if final_rate < target_min and best_thresh > search_lo:
-        for t in np.linspace(search_lo, best_thresh, 20):
-            r = rate_for_threshold(t)
+    final_rate = rate_for_q(best_q)
+    if final_rate < target_min and best_q > search_lo:
+        for q in np.linspace(search_lo, best_q, 20):
+            r = rate_for_q(q)
             if target_min <= r <= target_max:
-                best_thresh = t
+                best_q = q
                 break
-    elif final_rate > target_max and best_thresh < effective_hi:
-        for t in np.linspace(best_thresh, effective_hi, 20):
-            r = rate_for_threshold(t)
+    elif final_rate > target_max and best_q < search_hi:
+        for q in np.linspace(best_q, search_hi, 20):
+            r = rate_for_q(q)
             if target_min <= r <= target_max:
-                best_thresh = t
+                best_q = q
                 break
 
-    clamped_feasible = best_thresh > feasible_cap
-    if clamped_feasible:
-        best_thresh = feasible_cap
-    best_thresh = max(best_thresh, search_lo)
+    best_q = max(search_lo, min(best_q, search_hi))
+    chosen_rate = rate_for_q(best_q)
+    tp_kept = int((tp_q_valid >= best_q).sum()) if n_tp > 0 else 0
 
-    if best_thresh >= tp_r - 1e-3:
-        logger.info(f"[LABEL_BALANCE] clamped_r_min_enter={best_thresh:.4f} tp_r={tp_r:.4f}")
+    logger.info(f"[LABEL_BALANCE] chosen_q_min_tp={best_q:.4f} "
+                f"tp_first_rate_raw={n_tp/n_total:.3f} "
+                f"tp_kept_after_q={tp_kept} enter_rate_train={chosen_rate:.3f} "
+                f"target={target_rate:.2f}")
 
-    logger.info(f"[LABEL_BALANCE] chosen_r_min_enter={best_thresh:.4f} (clamped={clamped_feasible})")
-
-    return round(float(best_thresh), 4)
+    return round(float(best_q), 4)
 
 
 def generate_v47_quality_targets(
@@ -1545,7 +1536,7 @@ def generate_v47_quality_targets(
     horizon_periods: int = 16,
     tp_atr_mult: float = 2.0,
     sl_atr_mult: float = 1.5,
-    r_min_enter: float = 0.8,
+    q_min_tp: float = 0.3,
     r_min_expiry_strict: float = 1.0,
     soft_label_temp: float = 1.2,
     auto_balance: bool = True,
@@ -1555,17 +1546,16 @@ def generate_v47_quality_targets(
     balance_search_steps: int = 30,
     train_mask: np.ndarray = None,
 ) -> pd.DataFrame:
-    """v4.7 Label Geometry Fix — strict, tradeable quality labeling.
+    """v4.7.1 TP Quality Score Balancing — continuous discriminator for TP-first bars.
 
     ENTER=1 only if:
-      (A) TP was hit BEFORE SL within horizon, OR
+      (A) TP was hit BEFORE SL AND tp_quality >= q_min_tp, OR
       (B) Expiry with R >= r_min_expiry_strict
-    AND best_R >= r_min_enter.
 
-    If auto_balance=True, searches r_min_enter on training bars to achieve
-    target_enter_rate (~18% positive rate).
+    If auto_balance=True, searches q_min_tp in [0.0, 0.9] on training bars
+    to achieve target_enter_rate.
 
-    Returns same columns as v4.6 plus diagnostics logging.
+    Returns same columns as v4.7 plus tp_quality column and updated diagnostics.
     """
     from training.triple_barrier import (
         compute_atr_14, bidirectional_outcome_v47_for_index,
@@ -1584,6 +1574,7 @@ def generate_v47_quality_targets(
 
     best_r_all = np.full(n, np.nan, dtype=np.float64)
     tp_first_all = np.zeros(n, dtype=bool)
+    tp_quality_all = np.full(n, np.nan, dtype=np.float64)
     exp_win_all = np.zeros(n, dtype=bool)
     long_r_arr = np.full(n, np.nan, dtype=np.float64)
     short_r_arr = np.full(n, np.nan, dtype=np.float64)
@@ -1603,7 +1594,7 @@ def generate_v47_quality_targets(
         result = bidirectional_outcome_v47_for_index(
             highs, lows, closes, i, a,
             tp_atr_mult, sl_atr_mult, horizon_periods,
-            r_min_enter, r_min_expiry_strict,
+            r_min_expiry_strict,
         )
 
         best_r_all[i] = result['best_outcome_r']
@@ -1617,41 +1608,50 @@ def generate_v47_quality_targets(
 
         best_side = +1 if result['y_dir'] == 1 else -1
         tp_first_all[i] = (result['long_tp_first'] if best_side > 0 else result['short_tp_first'])
+        tp_quality_all[i] = result['tp_quality']
         exp_win_all[i] = (
             (result['long_outcome'] == 'EXP_WIN' and result['long_r'] >= r_min_expiry_strict)
             if best_side > 0 else
             (result['short_outcome'] == 'EXP_WIN' and result['short_r'] >= r_min_expiry_strict)
         )
 
+    valid_best = best_r_all[~np.isnan(best_r_all)]
+    if len(valid_best) > 0:
+        pcts = np.percentile(valid_best, [0, 10, 25, 50, 75, 90, 95, 99, 100])
+        n_unique = len(np.unique(valid_best))
+        logger.info(f"[BEST_R_HIST] ALL: min={pcts[0]:.4f} p10={pcts[1]:.4f} p25={pcts[2]:.4f} "
+                    f"p50={pcts[3]:.4f} p75={pcts[4]:.4f} p90={pcts[5]:.4f} "
+                    f"p95={pcts[6]:.4f} p99={pcts[7]:.4f} max={pcts[8]:.4f} "
+                    f"n_unique={n_unique}")
+
     if auto_balance:
         if train_mask is not None:
-            cal_br = best_r_all[train_mask]
+            cal_tq = tp_quality_all[train_mask]
             cal_tp = tp_first_all[train_mask]
             cal_ew = exp_win_all[train_mask]
+            cal_n = int(train_mask.sum())
         else:
-            cal_br = best_r_all[:labeled_count]
+            cal_tq = tp_quality_all[:labeled_count]
             cal_tp = tp_first_all[:labeled_count]
             cal_ew = exp_win_all[:labeled_count]
+            cal_n = labeled_count
 
-        chosen_r_min = _auto_calibrate_r_min_enter(
-            cal_br, cal_tp, cal_ew,
-            r_min_expiry_strict=r_min_expiry_strict,
+        chosen_q = _auto_calibrate_q_min_tp(
+            cal_tq, cal_tp, cal_ew, cal_n,
             target_rate=target_enter_rate,
             target_min=target_enter_rate_min,
             target_max=target_enter_rate_max,
             search_steps=balance_search_steps,
-            tp_mult=tp_atr_mult,
-            sl_mult=sl_atr_mult,
         )
         logger.info(f"[LABEL_BALANCE] target={target_enter_rate:.2f} "
                      f"range=[{target_enter_rate_min:.2f}, {target_enter_rate_max:.2f}]")
-        r_min_enter = chosen_r_min
+        q_min_tp = chosen_q
     else:
-        logger.info(f"[LABEL_BALANCE] using fixed r_min_enter={r_min_enter:.4f} (auto_balance=False)")
+        logger.info(f"[LABEL_BALANCE] using fixed q_min_tp={q_min_tp:.4f} (auto_balance=False)")
 
     BACKOFF_STEP = 0.05
-    BACKOFF_FLOOR = 0.3
-    MAX_BACKOFF_ATTEMPTS = 25
+    BACKOFF_FLOOR = 0.0
+    MAX_BACKOFF_ATTEMPTS = 20
 
     for backoff_attempt in range(MAX_BACKOFF_ATTEMPTS + 1):
 
@@ -1665,7 +1665,8 @@ def generate_v47_quality_targets(
         outcomes_col = np.full(n, "NO_CANDIDATE", dtype=object)
         realized_r = np.full(n, np.nan, dtype=np.float64)
 
-        n_tp_first = 0
+        n_tp_first_total = 0
+        n_tp_kept = 0
         n_expiry_strong = 0
         n_sl_hit = 0
         n_tp_hit_total = 0
@@ -1685,9 +1686,11 @@ def generate_v47_quality_targets(
 
             is_enter = 0
             if tp_first_all[i]:
-                is_enter = 1
-                n_tp_first += 1
-            elif exp_win_all[i] and best_r_all[i] >= r_min_enter:
+                n_tp_first_total += 1
+                if not np.isnan(tp_quality_all[i]) and tp_quality_all[i] >= q_min_tp:
+                    is_enter = 1
+                    n_tp_kept += 1
+            elif exp_win_all[i]:
                 is_enter = 1
                 n_expiry_strong += 1
 
@@ -1736,44 +1739,50 @@ def generate_v47_quality_targets(
         if n_quality_1 > 0:
             if backoff_attempt > 0:
                 logger.info(f"[LABEL_BALANCE] safety backoff succeeded after {backoff_attempt} step(s), "
-                             f"r_min_enter={r_min_enter:.4f}, ENTER=1={n_quality_1}")
+                             f"q_min_tp={q_min_tp:.4f}, ENTER=1={n_quality_1}")
             break
 
-        if r_min_enter <= BACKOFF_FLOOR:
-            logger.error(f"[LABEL_BALANCE] ENTER=1 count is 0 even at floor r_min_enter={BACKOFF_FLOOR:.2f}")
+        if q_min_tp <= BACKOFF_FLOOR:
+            logger.error(f"[LABEL_BALANCE] ENTER=1 count is 0 even at floor q_min_tp={BACKOFF_FLOOR:.2f}")
             break
 
-        new_r = max(r_min_enter - BACKOFF_STEP, BACKOFF_FLOOR)
-        logger.warning(f"[LABEL_BALANCE] ENTER=1 count is 0 with r_min_enter={r_min_enter:.4f}, "
-                        f"backing off to {new_r:.4f} (attempt {backoff_attempt + 1})")
-        r_min_enter = round(new_r, 4)
+        new_q = max(q_min_tp - BACKOFF_STEP, BACKOFF_FLOOR)
+        logger.warning(f"[LABEL_BALANCE] ENTER=1 count is 0 with q_min_tp={q_min_tp:.4f}, "
+                        f"backing off to {new_q:.4f} (attempt {backoff_attempt + 1})")
+        q_min_tp = round(new_q, 4)
 
     enter_rate = n_quality_1 / max(labeled_count, 1)
-    valid_best = best_r_all[~np.isnan(best_r_all)]
     max_best_r = float(np.max(valid_best)) if len(valid_best) > 0 else 0.0
 
     logger.info("=" * 70)
-    logger.info("v4.7 STRICT QUALITY LABELING (Label Geometry Fix)")
+    logger.info("v4.7.1 TP QUALITY SCORE BALANCING")
     logger.info("=" * 70)
-    logger.info(f"[LABEL_V47] Total bars: {n:,}, Labeled: {labeled_count:,}")
-    logger.info(f"[LABEL_V47] TP_hits={n_tp_hit_total:,}, SL_hits={n_sl_hit:,}, Expiry={n_expiry_total:,}")
+    logger.info(f"[LABEL_V471] Total bars: {n:,}, Labeled: {labeled_count:,}")
+    logger.info(f"[LABEL_V471] TP_hits={n_tp_hit_total:,}, SL_hits={n_sl_hit:,}, Expiry={n_expiry_total:,}")
     if len(valid_best) > 0:
-        logger.info(f"[LABEL_V47] best_R: mean={np.mean(valid_best):.3f}, median={np.median(valid_best):.3f}, "
+        logger.info(f"[LABEL_V471] best_R: mean={np.mean(valid_best):.3f}, median={np.median(valid_best):.3f}, "
                      f"p75={np.percentile(valid_best, 75):.3f}, p90={np.percentile(valid_best, 90):.3f}, "
                      f"p95={np.percentile(valid_best, 95):.3f}, max={max_best_r:.4f}")
-    logger.info(f"[LABEL_V47] ENTER=1: {n_quality_1:,} (rate={100*enter_rate:.1f}%) "
-                 f"using r_min_enter={r_min_enter:.4f}, r_min_expiry_strict={r_min_expiry_strict:.4f}")
-    logger.info(f"[LABEL_V47] Breakdown: TP_first_enters={n_tp_first:,}, expiry_strong_enters={n_expiry_strong:,}")
+
+    tp_q_valid = tp_quality_all[tp_first_all & ~np.isnan(tp_quality_all)]
+    if len(tp_q_valid) > 0:
+        tpcts = np.percentile(tp_q_valid, [50, 75, 90, 95, 100])
+        logger.info(f"[TP_QUAL] q: p50={tpcts[0]:.3f} p75={tpcts[1]:.3f} p90={tpcts[2]:.3f} "
+                    f"p95={tpcts[3]:.3f} max={tpcts[4]:.3f}")
+
+    logger.info(f"[LABEL_V471] TP_first_total={n_tp_first_total:,}, TP_kept_after_q={n_tp_kept:,}, "
+                f"Expiry_strong={n_expiry_strong:,}, ENTER_rate={100*enter_rate:.1f}%")
+    logger.info(f"[LABEL_V471] q_min_tp={q_min_tp:.4f}, r_min_expiry_strict={r_min_expiry_strict:.4f}")
     expiry_pos_share = n_expiry_strong / max(n_quality_1, 1)
-    logger.info(f"[LABEL_V47] Expiry positive share: {100*expiry_pos_share:.1f}%")
-    logger.info(f"[LABEL_V47] y_dir: LONG_better={n_long_better:,} SHORT_better={n_short_better:,}")
-    logger.info(f"[LABEL_V47] HTF score distribution: {dict(enumerate(htf_class_counts))}")
+    logger.info(f"[LABEL_V471] Expiry positive share: {100*expiry_pos_share:.1f}%")
+    logger.info(f"[LABEL_V471] y_dir: LONG_better={n_long_better:,} SHORT_better={n_short_better:,}")
+    logger.info(f"[LABEL_V471] HTF score distribution: {dict(enumerate(htf_class_counts))}")
     logger.info("=" * 70)
 
     if n_quality_1 == 0:
         raise ValueError(
             f"[LABEL_ERROR] ENTER positives are zero after all backoff attempts. "
-            f"r_min_enter={r_min_enter:.4f} max_feasible_best_R={max_best_r:.4f} "
+            f"q_min_tp={q_min_tp:.4f} max_best_R={max_best_r:.4f} "
             f"labeled_count={labeled_count} tp_first_any={tp_first_all.sum()} "
             f"exp_win_any={exp_win_all.sum()}"
         )
@@ -1790,17 +1799,19 @@ def generate_v47_quality_targets(
         'long_r': long_r_arr,
         'short_r': short_r_arr,
         'best_r': best_r_all,
+        'tp_quality': tp_quality_all,
         'mfe_r': mfe_r_arr,
         'mae_r': mae_r_arr,
         'y_soft': y_soft_arr,
     }, index=df.index)
 
     result_df.attrs['v47_diagnostics'] = {
-        'r_min_enter': r_min_enter,
+        'q_min_tp': q_min_tp,
         'r_min_expiry_strict': r_min_expiry_strict,
         'enter_rate': enter_rate,
         'n_enter_1': n_quality_1,
-        'n_tp_first': n_tp_first,
+        'n_tp_first_total': n_tp_first_total,
+        'n_tp_kept': n_tp_kept,
         'n_expiry_strong': n_expiry_strong,
         'n_tp_hit_total': n_tp_hit_total,
         'n_sl_hit': n_sl_hit,

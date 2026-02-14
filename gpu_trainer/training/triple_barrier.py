@@ -310,6 +310,117 @@ def bidirectional_outcome_for_index(
     }
 
 
+def triple_barrier_outcome_detailed(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    i: int,
+    side: int,
+    atr_i: float,
+    tp_mult: float = 2.0,
+    sl_mult: float = 1.5,
+    horizon: int = 16,
+    r_min_expiry: float = 1.0,
+):
+    """Detailed triple-barrier outcome with t_hit, MFE, MAE diagnostics.
+
+    Returns dict:
+        hit_type: 'TP', 'SL', 'EXP_WIN', 'EXP_LOSS'
+        r: realized R-multiple
+        t_hit: bars until barrier hit (1..horizon)
+        mfe: max favorable excursion in price units over full horizon
+        mae: max adverse excursion in price units over full horizon
+    """
+    n = len(closes)
+    entry = closes[i]
+    a = atr_i
+    if np.isnan(a) or a <= 0:
+        a = entry * 0.005
+
+    tp_dist = tp_mult * a
+    sl_dist = sl_mult * a
+
+    if side > 0:
+        tp_price = entry + tp_dist
+        sl_price = entry - sl_dist
+    else:
+        tp_price = entry - tp_dist
+        sl_price = entry + sl_dist
+
+    hit_type = None
+    t_hit = horizon
+    r_val = 0.0
+    max_favorable = 0.0
+    max_adverse = 0.0
+
+    for j in range(1, horizon + 1):
+        idx = i + j
+        if idx >= n:
+            break
+
+        if side > 0:
+            fav = highs[idx] - entry
+            adv = entry - lows[idx]
+            tp_hit = highs[idx] >= tp_price
+            sl_hit = lows[idx] <= sl_price
+        else:
+            fav = entry - lows[idx]
+            adv = highs[idx] - entry
+            tp_hit = lows[idx] <= tp_price
+            sl_hit = highs[idx] >= sl_price
+
+        max_favorable = max(max_favorable, fav)
+        max_adverse = max(max_adverse, adv)
+
+        if hit_type is None:
+            if tp_hit and sl_hit:
+                if side > 0:
+                    tp_exc = highs[idx] - entry
+                    sl_exc = entry - lows[idx]
+                else:
+                    tp_exc = entry - lows[idx]
+                    sl_exc = highs[idx] - entry
+                if tp_exc >= sl_exc:
+                    hit_type = 'TP'
+                    r_val = tp_mult / sl_mult
+                    t_hit = j
+                else:
+                    hit_type = 'SL'
+                    r_val = -1.0
+                    t_hit = j
+            elif tp_hit:
+                hit_type = 'TP'
+                r_val = tp_mult / sl_mult
+                t_hit = j
+            elif sl_hit:
+                hit_type = 'SL'
+                r_val = -1.0
+                t_hit = j
+
+    if hit_type is None:
+        end_idx = min(i + horizon, n - 1)
+        exit_price = closes[end_idx]
+        if side > 0:
+            pnl = exit_price - entry
+        else:
+            pnl = entry - exit_price
+        r_at_expiry = pnl / sl_dist if sl_dist > 0 else 0.0
+        if r_at_expiry >= r_min_expiry:
+            hit_type = 'EXP_WIN'
+        else:
+            hit_type = 'EXP_LOSS'
+        r_val = r_at_expiry
+        t_hit = horizon
+
+    return {
+        'hit_type': hit_type,
+        'r': float(r_val),
+        't_hit': int(t_hit),
+        'mfe': float(max_favorable),
+        'mae': float(max_adverse),
+    }
+
+
 def bidirectional_outcome_v47_for_index(
     highs: np.ndarray,
     lows: np.ndarray,
@@ -319,50 +430,59 @@ def bidirectional_outcome_v47_for_index(
     tp_mult: float = 2.0,
     sl_mult: float = 1.5,
     horizon: int = 16,
-    r_min_enter: float = 0.8,
     r_min_expiry_strict: float = 1.0,
 ):
-    """v4.7 strict bidirectional labeling — TP-before-SL requirement.
+    """v4.7.1 bidirectional labeling with TP quality score.
 
-    For each direction (LONG, SHORT), evaluates:
-      - outcome: TP, SL, EXP_WIN, EXP_LOSS
-      - realized R
-      - Whether TP was hit BEFORE SL
+    For each direction (LONG, SHORT), evaluates detailed outcomes
+    including t_hit, MFE, MAE. Computes a continuous TP quality score
+    for TP-first bars to enable meaningful auto-balance.
 
-    ENTER=1 requires (for the best direction):
-      (A) TP hit before SL within horizon, OR
-      (B) Expiry with R >= r_min_expiry_strict
-      AND in both cases: best_R >= r_min_enter
+    TP quality score (for TP-first bars only):
+        q = 0.50*(1 - t_hit/horizon) + 0.25*clamp(mfe/tp_dist, 0, 1) + 0.25*(1 - clamp(mae/sl_dist, 0, 1))
 
-    Returns dict with all v4.6 keys plus:
-      - long_tp_first (bool): TP hit before SL for long
-      - short_tp_first (bool): TP hit before SL for short
-      - best_outcome_type: 'TP_FIRST', 'EXPIRY_STRONG', 'WEAK', 'LOSS'
+    Returns dict with all prior keys plus:
+      - long_tp_first, short_tp_first (bool)
+      - tp_quality: float in [0,1] for the best-side TP (NaN if not TP-first)
+      - long_t_hit, short_t_hit, long_mfe, short_mfe, long_mae, short_mae
     """
-    long_outcome, long_r = triple_barrier_outcome_for_index(
+    long_d = triple_barrier_outcome_detailed(
         highs, lows, closes, i, +1, atr_i,
         tp_mult, sl_mult, horizon, r_min_expiry_strict,
     )
-    short_outcome, short_r = triple_barrier_outcome_for_index(
+    short_d = triple_barrier_outcome_detailed(
         highs, lows, closes, i, -1, atr_i,
         tp_mult, sl_mult, horizon, r_min_expiry_strict,
     )
 
-    long_tp_first = long_outcome == "TP"
-    short_tp_first = short_outcome == "TP"
-    long_exp_win = long_outcome == "EXP_WIN" and long_r >= r_min_expiry_strict
-    short_exp_win = short_outcome == "EXP_WIN" and short_r >= r_min_expiry_strict
+    long_tp_first = long_d['hit_type'] == 'TP'
+    short_tp_first = short_d['hit_type'] == 'TP'
+    long_exp_win = long_d['hit_type'] == 'EXP_WIN' and long_d['r'] >= r_min_expiry_strict
+    short_exp_win = short_d['hit_type'] == 'EXP_WIN' and short_d['r'] >= r_min_expiry_strict
 
-    best_r = max(long_r, short_r)
+    best_r = max(long_d['r'], short_d['r'])
 
-    if long_r >= short_r:
+    if long_d['r'] >= short_d['r']:
         best_side_tp_first = long_tp_first
         best_side_exp_win = long_exp_win
+        best_d = long_d
         y_dir = 1
     else:
         best_side_tp_first = short_tp_first
         best_side_exp_win = short_exp_win
+        best_d = short_d
         y_dir = 0
+
+    tp_dist = tp_mult * atr_i if atr_i > 0 else 1.0
+    sl_dist = sl_mult * atr_i if atr_i > 0 else 1.0
+
+    tp_quality = float('nan')
+    if best_side_tp_first:
+        ttp = best_d['t_hit']
+        mfe_frac = min(max(best_d['mfe'] / tp_dist, 0.0), 1.5)
+        mae_frac = min(max(best_d['mae'] / sl_dist, 0.0), 1.5)
+        q = 0.50 * (1.0 - ttp / horizon) + 0.25 * min(mfe_frac, 1.0) + 0.25 * (1.0 - min(mae_frac, 1.0))
+        tp_quality = max(0.0, min(1.0, q))
 
     y_quality = 0
     best_outcome_type = 'LOSS'
@@ -370,29 +490,36 @@ def bidirectional_outcome_v47_for_index(
     if best_side_tp_first:
         y_quality = 1
         best_outcome_type = 'TP_FIRST'
-    elif best_side_exp_win and best_r >= r_min_expiry_strict:
+    elif best_side_exp_win:
         y_quality = 1
         best_outcome_type = 'EXPIRY_STRONG'
 
-    if y_quality == 0 and not best_side_tp_first:
-        best_outcome_type = 'WEAK' if best_r < r_min_enter else 'LOSS'
+    if y_quality == 0:
+        best_outcome_type = 'WEAK' if best_r < 0 else 'LOSS'
 
-    margin = float(long_r - short_r)
+    margin = float(long_d['r'] - short_d['r'])
     margin_clamped = max(-2.0, min(2.0, margin))
     y_dir_conf = 1.0 / (1.0 + np.exp(-margin_clamped))
 
     return {
-        'long_outcome': long_outcome,
-        'long_r': float(long_r),
+        'long_outcome': long_d['hit_type'],
+        'long_r': float(long_d['r']),
         'long_tp_first': long_tp_first,
-        'short_outcome': short_outcome,
-        'short_r': float(short_r),
+        'long_t_hit': long_d['t_hit'],
+        'long_mfe': long_d['mfe'],
+        'long_mae': long_d['mae'],
+        'short_outcome': short_d['hit_type'],
+        'short_r': float(short_d['r']),
         'short_tp_first': short_tp_first,
+        'short_t_hit': short_d['t_hit'],
+        'short_mfe': short_d['mfe'],
+        'short_mae': short_d['mae'],
         'y_quality': int(y_quality),
         'y_dir': int(y_dir),
         'y_dir_conf': float(y_dir_conf),
         'best_outcome_r': float(best_r),
         'best_outcome_type': best_outcome_type,
+        'tp_quality': float(tp_quality),
     }
 
 
