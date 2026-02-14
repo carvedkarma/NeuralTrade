@@ -31,6 +31,7 @@ logging.basicConfig(
 log = logging.getLogger("QuickStart")
 
 FEATURE_VERSION = "v4.6.0_directional_separation"
+DIST_FEATURE_VERSION = "v4.9.1_enhanced_distributional"
 SYSTEM_VERSION = "v4.6.0_directional_separation"
 
 FUNDING_FEATURE_NAMES = ["funding_rate", "funding_rate_delta_8h", "funding_rate_zscore_30d"]
@@ -3471,14 +3472,25 @@ def _run_distributional_sweep(scores, sides, precomputed_outcomes, precomputed_r
         best_pct = 0.0
 
     score_arr = np.array(scores)
-    sp50 = float(np.percentile(score_arr, 50))
-    sp75 = float(np.percentile(score_arr, 75))
-    sp90 = float(np.percentile(score_arr, 90))
-    sp95 = float(np.percentile(score_arr, 95))
-    sp99 = float(np.percentile(score_arr, 99))
+    if candidate_mask is not None:
+        scores_eligible = score_arr[candidate_mask]
+    else:
+        scores_eligible = score_arr
+    scores_finite = scores_eligible[np.isfinite(scores_eligible)]
     val_days = val_bars / 96.0
     log.info("-" * 120)
-    log.info("score percentiles (val): p50=%.4f p75=%.4f p90=%.4f p95=%.4f p99=%.4f", sp50, sp75, sp90, sp95, sp99)
+    log.info("[SCORE_DIAG] total=%d eligible=%d finite=%d nan_or_inf=%d",
+             len(score_arr), len(scores_eligible), len(scores_finite),
+             len(scores_eligible) - len(scores_finite))
+    if len(scores_finite) > 0:
+        sp50 = float(np.percentile(scores_finite, 50))
+        sp75 = float(np.percentile(scores_finite, 75))
+        sp90 = float(np.percentile(scores_finite, 90))
+        sp95 = float(np.percentile(scores_finite, 95))
+        sp99 = float(np.percentile(scores_finite, 99))
+        log.info("score percentiles (val): p50=%.4f p75=%.4f p90=%.4f p95=%.4f p99=%.4f", sp50, sp75, sp90, sp95, sp99)
+    else:
+        log.info("score percentiles: EMPTY (no finite candidate scores)")
     log.info("DISTRIBUTIONAL SWEEP (epoch %d) | cooldown=%d | TP=%.1fx SL=%.1fx ATR | val_days=%.1f | target=%.1f±%.1f tpd",
              epoch, COOLDOWN, tp_mult, sl_mult, val_days, target_tpd, target_tpd_tol)
     log.info("%-8s %5s %8s %6s %6s %5s | %6s %6s %6s | %4s %4s %4s | %5s",
@@ -3565,7 +3577,7 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
     log.info("=" * 60)
     log.info("  v4.9.1 DISTRIBUTIONAL TRADE FORECASTER - TRAINING")
     log.info("=" * 60)
-    log.info(f"Version: {FEATURE_VERSION}")
+    log.info(f"Version: {DIST_FEATURE_VERSION}")
     log.info(f"[DIST_CONFIG] w_mse={w_mse} w_quantile={w_quantile} w_bce={w_bce} w_regime={w_regime}")
     log.info(f"[DIST_CONFIG] score_lambda={score_lambda} value_clip={value_clip}")
     log.info(f"[DIST_CONFIG] target_tpd={target_tpd} tpd_tol={target_tpd_tol}")
@@ -3576,7 +3588,8 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
     if use_multi_horizon:
         log.info(f"[DIST_CONFIG] horizons={horizons}")
     if use_multi_preset:
-        log.info(f"[DIST_CONFIG] presets={[p['label'] for p in presets]}")
+        preset_mode_str = preset_config.mode if preset_config else "fixed:standard"
+        log.info(f"[DIST_CONFIG] presets={[p['label'] for p in presets]} mode={preset_mode_str}")
 
     from data.regression_targets import RegressionTargetGenerator
     reg_gen = RegressionTargetGenerator(horizon_periods=horizon)
@@ -3670,19 +3683,48 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
                     target_enter_rate_max=target_enter_rate_max,
                     balance_search_steps=balance_search_steps,
                 )
-                sym_best_r = np.full(len(sym_df), np.nan, dtype=np.float32)
-                sym_best_side = np.zeros(len(sym_df), dtype=np.int64)
-                sym_best_outcome = np.full(len(sym_df), "NO_CANDIDATE", dtype=object)
+                sym_preset_targets = {}
                 for pi, preset in enumerate(presets):
                     plabel = preset['label']
-                    pr = sym_label_df[f'realized_r_{plabel}'].values.astype(np.float32)
-                    for j in range(len(sym_df)):
-                        if not np.isnan(pr[j]) and (np.isnan(sym_best_r[j]) or pr[j] > sym_best_r[j]):
-                            sym_best_r[j] = pr[j]
-                            sym_best_outcome[j] = sym_label_df[f'outcome_{plabel}'].values[j]
-                            sym_best_side[j] = sym_label_df[f'side_hint_{plabel}'].values[j]
-                sym_best_r = np.nan_to_num(sym_best_r, nan=0.0)
-                sym_realized_r = sym_best_r
+                    sym_preset_targets[plabel] = {
+                        'realized_r': sym_label_df[f'realized_r_{plabel}'].values.astype(np.float32),
+                        'outcome': sym_label_df[f'outcome_{plabel}'].values,
+                        'side_hint': sym_label_df[f'side_hint_{plabel}'].values.astype(np.int64),
+                    }
+
+                if preset_config and preset_config.is_oracle:
+                    sym_best_r = np.full(len(sym_df), np.nan, dtype=np.float32)
+                    sym_best_side = np.zeros(len(sym_df), dtype=np.int64)
+                    sym_best_outcome = np.full(len(sym_df), "NO_CANDIDATE", dtype=object)
+                    for pi, preset in enumerate(presets):
+                        plabel = preset['label']
+                        pr = sym_label_df[f'realized_r_{plabel}'].values.astype(np.float32)
+                        for j in range(len(sym_df)):
+                            if not np.isnan(pr[j]) and (np.isnan(sym_best_r[j]) or pr[j] > sym_best_r[j]):
+                                sym_best_r[j] = pr[j]
+                                sym_best_outcome[j] = sym_label_df[f'outcome_{plabel}'].values[j]
+                                sym_best_side[j] = sym_label_df[f'side_hint_{plabel}'].values[j]
+                    sym_best_r = np.nan_to_num(sym_best_r, nan=0.0)
+                    sym_realized_r = sym_best_r
+                elif preset_config and preset_config.is_fixed:
+                    fixed_name = preset_config.fixed_preset_name
+                    if fixed_name not in sym_preset_targets:
+                        fixed_name = 'standard'
+                    sym_realized_r = np.nan_to_num(sym_preset_targets[fixed_name]['realized_r'], nan=0.0)
+                    sym_best_outcome = sym_preset_targets[fixed_name]['outcome']
+                    sym_best_side = sym_preset_targets[fixed_name]['side_hint']
+                elif preset_config and preset_config.is_learnable:
+                    fixed_name = 'standard'
+                    if fixed_name not in sym_preset_targets:
+                        fixed_name = list(sym_preset_targets.keys())[0]
+                    sym_realized_r = np.nan_to_num(sym_preset_targets[fixed_name]['realized_r'], nan=0.0)
+                    sym_best_outcome = sym_preset_targets[fixed_name]['outcome']
+                    sym_best_side = sym_preset_targets[fixed_name]['side_hint']
+                else:
+                    fixed_name = 'standard'
+                    sym_realized_r = np.nan_to_num(sym_preset_targets[fixed_name]['realized_r'], nan=0.0)
+                    sym_best_outcome = sym_preset_targets[fixed_name]['outcome']
+                    sym_best_side = sym_preset_targets[fixed_name]['side_hint']
                 sym_win = (sym_realized_r > 0).astype(np.float32)
                 sym_side = sym_best_side.astype(np.int64)
                 sym_outcomes = sym_best_outcome
@@ -3846,6 +3888,7 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
 
         if use_multi_preset and len(presets) > 1:
             from data.regression_targets import generate_multi_preset_targets
+            preset_mode = preset_config.mode if preset_config else "fixed:standard"
             label_df = generate_multi_preset_targets(
                 df, htf_features_df,
                 presets=presets,
@@ -3859,28 +3902,6 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
                 target_enter_rate_max=target_enter_rate_max,
                 balance_search_steps=balance_search_steps,
             )
-            best_r = np.full(len(df), np.nan, dtype=np.float32)
-            best_preset_idx = np.zeros(len(df), dtype=np.int64)
-            best_outcome = np.full(len(df), "NO_CANDIDATE", dtype=object)
-            best_side = np.zeros(len(df), dtype=np.int64)
-
-            for pi, preset in enumerate(presets):
-                plabel = preset['label']
-                pr = label_df[f'realized_r_{plabel}'].values.astype(np.float32)
-                for j in range(len(df)):
-                    if not np.isnan(pr[j]) and (np.isnan(best_r[j]) or pr[j] > best_r[j]):
-                        best_r[j] = pr[j]
-                        best_preset_idx[j] = pi
-                        best_outcome[j] = label_df[f'outcome_{plabel}'].values[j]
-                        best_side[j] = label_df[f'side_hint_{plabel}'].values[j]
-
-            best_r = np.nan_to_num(best_r, nan=0.0)
-            realized_r = best_r
-            win_labels = (realized_r > 0).astype(np.float32)
-            side_hints = best_side.astype(np.int64)
-            precomputed_outcomes = best_outcome
-            dir_target = label_df['y_dir'].values.astype(np.float32)
-            dir_conf = label_df['y_dir_conf'].values.astype(np.float32)
 
             preset_targets = {}
             for pi, preset in enumerate(presets):
@@ -3890,7 +3911,57 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
                     'outcome': label_df[f'outcome_{plabel}'].values,
                     'side_hint': label_df[f'side_hint_{plabel}'].values.astype(np.int64),
                 }
-            log.info(f"[MULTI_PRESET] {len(presets)} presets loaded, best preset per bar selected")
+
+            if preset_config and preset_config.is_oracle:
+                best_r = np.full(len(df), np.nan, dtype=np.float32)
+                best_preset_idx = np.zeros(len(df), dtype=np.int64)
+                best_outcome = np.full(len(df), "NO_CANDIDATE", dtype=object)
+                best_side = np.zeros(len(df), dtype=np.int64)
+                for pi, preset in enumerate(presets):
+                    plabel = preset['label']
+                    pr = label_df[f'realized_r_{plabel}'].values.astype(np.float32)
+                    for j in range(len(df)):
+                        if not np.isnan(pr[j]) and (np.isnan(best_r[j]) or pr[j] > best_r[j]):
+                            best_r[j] = pr[j]
+                            best_preset_idx[j] = pi
+                            best_outcome[j] = label_df[f'outcome_{plabel}'].values[j]
+                            best_side[j] = label_df[f'side_hint_{plabel}'].values[j]
+                best_r = np.nan_to_num(best_r, nan=0.0)
+                realized_r = best_r
+                log.info(f"[MULTI_PRESET] mode=oracle | {len(presets)} presets | WARNING: hindsight leakage, research only")
+            elif preset_config and preset_config.is_fixed:
+                fixed_name = preset_config.fixed_preset_name
+                if fixed_name not in preset_targets:
+                    log.warning(f"[MULTI_PRESET] fixed preset '{fixed_name}' not found, falling back to 'standard'")
+                    fixed_name = 'standard'
+                realized_r = np.nan_to_num(preset_targets[fixed_name]['realized_r'], nan=0.0)
+                best_outcome = preset_targets[fixed_name]['outcome']
+                best_side = preset_targets[fixed_name]['side_hint']
+                best_preset_idx = np.full(len(df), list(preset_targets.keys()).index(fixed_name), dtype=np.int64)
+                log.info(f"[MULTI_PRESET] mode=fixed:{fixed_name} | using single preset for labels (no leakage)")
+            elif preset_config and preset_config.is_learnable:
+                log.warning("[MULTI_PRESET] mode=learnable is not yet implemented (preset_head not wired). "
+                            "Falling back to fixed:standard")
+                fixed_name = 'standard'
+                if fixed_name not in preset_targets:
+                    fixed_name = list(preset_targets.keys())[0]
+                realized_r = np.nan_to_num(preset_targets[fixed_name]['realized_r'], nan=0.0)
+                best_outcome = preset_targets[fixed_name]['outcome']
+                best_side = preset_targets[fixed_name]['side_hint']
+                best_preset_idx = np.full(len(df), list(preset_targets.keys()).index(fixed_name), dtype=np.int64)
+            else:
+                fixed_name = 'standard'
+                realized_r = np.nan_to_num(preset_targets[fixed_name]['realized_r'], nan=0.0)
+                best_outcome = preset_targets[fixed_name]['outcome']
+                best_side = preset_targets[fixed_name]['side_hint']
+                best_preset_idx = np.zeros(len(df), dtype=np.int64)
+                log.info(f"[MULTI_PRESET] mode=fixed:standard (default fallback)")
+
+            win_labels = (realized_r > 0).astype(np.float32)
+            side_hints = best_side.astype(np.int64) if hasattr(best_side, 'astype') else np.array(best_side, dtype=np.int64)
+            precomputed_outcomes = best_outcome
+            dir_target = label_df['y_dir'].values.astype(np.float32)
+            dir_conf = label_df['y_dir_conf'].values.astype(np.float32)
         else:
             from data.regression_targets import generate_v47_quality_targets
             label_df = generate_v47_quality_targets(
@@ -4379,6 +4450,7 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
                 'multi_horizon': use_multi_horizon,
                 'horizons': horizons,
                 'multi_preset': use_multi_preset,
+                'multi_preset_mode': preset_config.mode if preset_config else 'fixed:standard',
                 'presets': [p['label'] for p in presets],
                 'money_score': use_money_score,
                 'kelly_sizing': use_kelly_sizing,
@@ -4397,7 +4469,7 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
                 'train_config': ckpt_train_config,
                 'feature_columns': features_df_columns,
                 'n_features': input_dim,
-                'feature_version': FEATURE_VERSION,
+                'feature_version': DIST_FEATURE_VERSION,
                 'model_type': 'distributional_trade_forecaster',
                 'barrier_config': {
                     'tp_mult': primary_tp, 'sl_mult': primary_sl,
@@ -4420,7 +4492,7 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
                 'train_config': ckpt_train_config,
                 'feature_columns': features_df_columns,
                 'n_features': input_dim,
-                'feature_version': FEATURE_VERSION,
+                'feature_version': DIST_FEATURE_VERSION,
                 'model_type': 'distributional_trade_forecaster',
                 'barrier_config': {
                     'tp_mult': primary_tp, 'sl_mult': primary_sl,
@@ -4704,6 +4776,11 @@ Examples:
                         help="Enable fee/spread gate in candidate filter")
     parser.add_argument("--cand-round-trip-cost", type=float, default=0.0009,
                         help="Round-trip cost for fee gate (default: 0.0009)")
+
+    parser.add_argument("--multi-preset-mode", type=str, default="fixed:standard",
+                        help="Multi-preset mode: 'oracle' (best-of hindsight, research only), "
+                             "'fixed:<preset>' (e.g. fixed:standard), or 'learnable' (preset_head). "
+                             "Default: fixed:standard")
 
     parser.add_argument("--multi-horizon", action="store_true", default=False,
                         help="Train multiple horizons (8,16,32) and select best per bar")

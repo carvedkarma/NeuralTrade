@@ -129,11 +129,19 @@ def compute_adx(df: pd.DataFrame, period: int = 14) -> np.ndarray:
             pdm_s[i] = pdm_s[i - 1] - pdm_s[i - 1] / period + plus_dm[i]
             mdm_s[i] = mdm_s[i - 1] - mdm_s[i - 1] / period + minus_dm[i]
 
-    with np.errstate(divide='ignore', invalid='ignore'):
-        plus_di = np.where(atr_s > 0, 100 * pdm_s / atr_s, 0.0)
-        minus_di = np.where(atr_s > 0, 100 * mdm_s / atr_s, 0.0)
-        di_sum = plus_di + minus_di
-        dx = np.where(di_sum > 0, 100 * np.abs(plus_di - minus_di) / di_sum, 0.0)
+    plus_di = np.zeros(n, dtype=np.float64)
+    minus_di = np.zeros(n, dtype=np.float64)
+    np.divide(pdm_s, atr_s, out=plus_di, where=atr_s > 0)
+    plus_di *= 100.0
+    np.divide(mdm_s, atr_s, out=minus_di, where=atr_s > 0)
+    minus_di *= 100.0
+    di_sum = plus_di + minus_di
+    dx = np.zeros(n, dtype=np.float64)
+    np.divide(np.abs(plus_di - minus_di), di_sum, out=dx, where=di_sum > 0)
+    dx *= 100.0
+    assert np.all(np.isfinite(plus_di)), "plus_di contains NaN/Inf"
+    assert np.all(np.isfinite(minus_di)), "minus_di contains NaN/Inf"
+    assert np.all(np.isfinite(dx)), "dx contains NaN/Inf"
 
     adx = np.zeros(n, dtype=np.float64)
     start = 2 * period
@@ -320,15 +328,35 @@ class MultiHorizonConfig:
 class PresetConfig:
     presets: list = field(default_factory=lambda: DEFAULT_PRESETS)
     preset_defs: dict = field(default_factory=lambda: BARRIER_PRESETS)
+    mode: str = "fixed:standard"
 
     @classmethod
     def from_cli_args(cls, args) -> "PresetConfig":
         presets_str = getattr(args, 'barrier_presets', 'tight,standard,wide,asymmetric')
         presets = [p.strip() for p in presets_str.split(',')]
-        return cls(presets=presets)
+        mode = getattr(args, 'multi_preset_mode', 'fixed:standard')
+        return cls(presets=presets, mode=mode)
 
     def get_preset_params(self, name: str) -> Dict:
         return self.preset_defs.get(name, self.preset_defs['standard'])
+
+    @property
+    def is_oracle(self) -> bool:
+        return self.mode == "oracle"
+
+    @property
+    def is_fixed(self) -> bool:
+        return self.mode.startswith("fixed:")
+
+    @property
+    def fixed_preset_name(self) -> str:
+        if self.is_fixed:
+            return self.mode.split(":", 1)[1]
+        return "standard"
+
+    @property
+    def is_learnable(self) -> bool:
+        return self.mode == "learnable"
 
 
 def compute_money_score(

@@ -1,0 +1,34 @@
+You are working inside my gpu_trainer repo.
+
+GOAL:
+Fix (1) score percentile NaNs, and (2) multi-preset "best-of hindsight" leakage causing unrealistic win_rate~0.98, PF>100, Sharpe>80.
+
+TASK 1 — Fix NaN score percentiles:
+- In the validation sweep code (distributional sweep), compute score percentiles ONLY on eligible candidate bars:
+  - scores_cand = scores[candidate_mask]
+  - scores_cand = scores_cand[np.isfinite(scores_cand)]
+  - If len(scores_cand)==0, print "score percentiles: EMPTY" and skip percentiles safely.
+- Log counts: total_scores, eligible_scores, finite_scores, nan_or_inf_scores.
+- Ensure percentile printing NEVER shows nan unless array is empty.
+
+TASK 2 — Fix ADX/DI runtime warnings (candidate_generator.py):
+- Replace np.where divisions that still emit RuntimeWarning with np.divide(..., where=den>0, out=zeros_like).
+- Specifically fix pdm_s/atr_s, mdm_s/atr_s, abs(plus_di-minus_di)/di_sum using np.divide with where masks.
+- Ensure plus_di, minus_di, dx contain no NaNs or infs; assert np.isfinite on outputs after compute.
+
+TASK 3 — Remove hindsight "best-of" preset leakage (multi_preset):
+Implement one of these modes with a flag:
+(A) --multi-preset-mode oracle (current behavior) [keep for research only, default OFF]
+(B) --multi-preset-mode fixed:<preset> (e.g. fixed:standard) -> labels computed from that preset only
+(C) --multi-preset-mode learnable -> add preset_head (3-class). During training, store labels per preset; during validation, choose preset by argmax(preset_head) then compute trade outcome using that chosen preset only.
+Set default to (B) fixed:standard to be executable and realistic.
+
+TASK 4 — Make logs truthful:
+Currently it prints Version: v4.6.0_directional_separation even in v4.9.1 mode. Fix version string so distributional training reports correct version.
+
+DELIVERABLES:
+- Code changes + brief notes of files edited
+- Confirm with a short dry-run that:
+  - percentiles are not nan
+  - runtime warnings disappear
+  - baseline (no oracle preset) produces non-crazy metrics
