@@ -1466,9 +1466,10 @@ def _auto_calibrate_r_min_enter(
     search_lo: float = 0.3,
     search_hi: float = 1.5,
 ) -> float:
-    """Binary-search r_min_enter to get ENTER positive rate closest to target.
+    """Search r_min_enter to get ENTER positive rate closest to target.
 
     Uses the v4.7 strict criteria: TP-first OR strong-expiry, AND best_R >= threshold.
+    Clamps chosen threshold to max_feasible_best_R - 1e-3 to prevent zero-positive collapse.
     """
     valid = ~np.isnan(best_r_all)
     br = best_r_all[valid]
@@ -1478,15 +1479,28 @@ def _auto_calibrate_r_min_enter(
     if n == 0:
         return 0.8
 
+    eligible = br[tp | ew]
+    if len(eligible) > 0:
+        max_feasible = float(np.percentile(eligible, 99.9))
+    else:
+        max_feasible = float(np.percentile(br, 99.9)) if len(br) > 0 else 0.8
+
+    feasible_cap = max_feasible - 1e-3
+
+    effective_hi = min(search_hi, max(feasible_cap, search_lo))
+
+    logger.info(f"[LABEL_BALANCE] max_feasible_best_R={max_feasible:.4f} "
+                f"feasible_cap={feasible_cap:.4f} search_range=[{search_lo:.2f}, {effective_hi:.4f}]")
+
     def rate_for_threshold(thresh):
         enters = ((tp | ew) & (br >= thresh)).sum()
         return enters / n
 
-    best_thresh = 0.8
+    best_thresh = min(0.8, effective_hi)
     best_dist = abs(rate_for_threshold(best_thresh) - target_rate)
 
     for step in range(search_steps):
-        t = search_lo + (search_hi - search_lo) * step / max(search_steps - 1, 1)
+        t = search_lo + (effective_hi - search_lo) * step / max(search_steps - 1, 1)
         r = rate_for_threshold(t)
         d = abs(r - target_rate)
         if d < best_dist:
@@ -1500,12 +1514,18 @@ def _auto_calibrate_r_min_enter(
             if target_min <= r <= target_max:
                 best_thresh = t
                 break
-    elif final_rate > target_max and best_thresh < search_hi:
-        for t in np.linspace(best_thresh, search_hi, 20):
+    elif final_rate > target_max and best_thresh < effective_hi:
+        for t in np.linspace(best_thresh, effective_hi, 20):
             r = rate_for_threshold(t)
             if target_min <= r <= target_max:
                 best_thresh = t
                 break
+
+    clamped = best_thresh > feasible_cap
+    if clamped:
+        best_thresh = feasible_cap
+
+    logger.info(f"[LABEL_BALANCE] chosen_r_min_enter={best_thresh:.4f} (clamped={clamped})")
 
     return round(float(best_thresh), 4)
 
@@ -1612,93 +1632,114 @@ def generate_v47_quality_targets(
             target_max=target_enter_rate_max,
             search_steps=balance_search_steps,
         )
-        logger.info(f"[LABEL_BALANCE] chosen_r_min_enter={chosen_r_min:.4f} "
-                     f"target={target_enter_rate:.2f} "
+        logger.info(f"[LABEL_BALANCE] target={target_enter_rate:.2f} "
                      f"range=[{target_enter_rate_min:.2f}, {target_enter_rate_max:.2f}]")
         r_min_enter = chosen_r_min
     else:
         logger.info(f"[LABEL_BALANCE] using fixed r_min_enter={r_min_enter:.4f} (auto_balance=False)")
 
-    y_quality_arr = np.zeros(n, dtype=np.int64)
-    y_htf_score_arr = np.zeros(n, dtype=np.int64)
-    mfe_r_arr = np.full(n, np.nan, dtype=np.float64)
-    mae_r_arr = np.full(n, np.nan, dtype=np.float64)
-    y_soft_arr = np.full(n, 0.5, dtype=np.float64)
-    enter_labels = np.zeros(n, dtype=np.int64)
-    side_hints = np.zeros(n, dtype=np.int64)
-    outcomes_col = np.full(n, "NO_CANDIDATE", dtype=object)
-    realized_r = np.full(n, np.nan, dtype=np.float64)
+    BACKOFF_STEP = 0.05
+    BACKOFF_FLOOR = 0.3
+    MAX_BACKOFF_ATTEMPTS = 25
 
-    n_tp_first = 0
-    n_expiry_strong = 0
-    n_sl_hit = 0
-    n_tp_hit_total = 0
-    n_expiry_total = 0
-    n_quality_1 = 0
-    n_long_better = 0
-    n_short_better = 0
-    htf_class_counts = [0, 0, 0, 0]
+    for backoff_attempt in range(MAX_BACKOFF_ATTEMPTS + 1):
 
-    for i in range(labeled_count):
-        if np.isnan(best_r_all[i]):
-            continue
+        y_quality_arr = np.zeros(n, dtype=np.int64)
+        y_htf_score_arr = np.zeros(n, dtype=np.int64)
+        mfe_r_arr = np.full(n, np.nan, dtype=np.float64)
+        mae_r_arr = np.full(n, np.nan, dtype=np.float64)
+        y_soft_arr = np.full(n, 0.5, dtype=np.float64)
+        enter_labels = np.zeros(n, dtype=np.int64)
+        side_hints = np.zeros(n, dtype=np.int64)
+        outcomes_col = np.full(n, "NO_CANDIDATE", dtype=object)
+        realized_r = np.full(n, np.nan, dtype=np.float64)
 
-        a = float(atr_vals[i])
-        if np.isnan(a) or a <= 0:
-            a = closes[i] * 0.005
+        n_tp_first = 0
+        n_expiry_strong = 0
+        n_sl_hit = 0
+        n_tp_hit_total = 0
+        n_expiry_total = 0
+        n_quality_1 = 0
+        n_long_better = 0
+        n_short_better = 0
+        htf_class_counts = [0, 0, 0, 0]
 
-        is_enter = 0
-        if tp_first_all[i] and best_r_all[i] >= r_min_enter:
-            is_enter = 1
-            n_tp_first += 1
-        elif exp_win_all[i] and best_r_all[i] >= r_min_enter:
-            is_enter = 1
-            n_expiry_strong += 1
+        for i in range(labeled_count):
+            if np.isnan(best_r_all[i]):
+                continue
 
-        y_quality_arr[i] = is_enter
-        enter_labels[i] = is_enter
-        if is_enter:
-            n_quality_1 += 1
+            a = float(atr_vals[i])
+            if np.isnan(a) or a <= 0:
+                a = closes[i] * 0.005
 
-        lo = str(long_outcomes[i])
-        so = str(short_outcomes[i])
-        if lo == 'TP' or so == 'TP':
-            n_tp_hit_total += 1
-        if lo == 'SL' or so == 'SL':
-            n_sl_hit += 1
-        if lo in ('EXP_WIN', 'EXP_LOSS') or so in ('EXP_WIN', 'EXP_LOSS'):
-            n_expiry_total += 1
+            is_enter = 0
+            if tp_first_all[i] and best_r_all[i] >= r_min_enter:
+                is_enter = 1
+                n_tp_first += 1
+            elif exp_win_all[i] and best_r_all[i] >= r_min_enter:
+                is_enter = 1
+                n_expiry_strong += 1
 
-        best_side = +1 if y_dir_arr[i] == 1 else -1
-        side_hints[i] = best_side
-        realized_r[i] = best_r_all[i]
+            y_quality_arr[i] = is_enter
+            enter_labels[i] = is_enter
+            if is_enter:
+                n_quality_1 += 1
 
-        if is_enter:
-            outcomes_col[i] = lo if best_side > 0 else so
-        else:
-            outcomes_col[i] = "REJECTED"
+            lo = str(long_outcomes[i])
+            so = str(short_outcomes[i])
+            if lo == 'TP' or so == 'TP':
+                n_tp_hit_total += 1
+            if lo == 'SL' or so == 'SL':
+                n_sl_hit += 1
+            if lo in ('EXP_WIN', 'EXP_LOSS') or so in ('EXP_WIN', 'EXP_LOSS'):
+                n_expiry_total += 1
 
-        if y_dir_arr[i] == 1:
-            n_long_better += 1
-        else:
-            n_short_better += 1
+            best_side = +1 if y_dir_arr[i] == 1 else -1
+            side_hints[i] = best_side
+            realized_r[i] = best_r_all[i]
 
-        htf_score = compute_htf_score_target(float(h1_trend[i]), float(h4_trend[i]))
-        y_htf_score_arr[i] = htf_score
-        htf_class_counts[htf_score] += 1
+            if is_enter:
+                outcomes_col[i] = lo if best_side > 0 else so
+            else:
+                outcomes_col[i] = "REJECTED"
 
-        mfe, mae = compute_mfe_mae_for_index(
-            highs, lows, closes, i, best_side, a,
-            sl_atr_mult, horizon_periods,
-        )
-        mfe_r_arr[i] = mfe
-        mae_r_arr[i] = mae
+            if y_dir_arr[i] == 1:
+                n_long_better += 1
+            else:
+                n_short_better += 1
 
-        cost_r_val = compute_trade_cost_r(closes[i], a, sl_atr_mult)
-        y_soft_arr[i] = compute_soft_quality(mfe, mae, cost_r_val, soft_label_temp)
+            htf_score = compute_htf_score_target(float(h1_trend[i]), float(h4_trend[i]))
+            y_htf_score_arr[i] = htf_score
+            htf_class_counts[htf_score] += 1
+
+            mfe, mae = compute_mfe_mae_for_index(
+                highs, lows, closes, i, best_side, a,
+                sl_atr_mult, horizon_periods,
+            )
+            mfe_r_arr[i] = mfe
+            mae_r_arr[i] = mae
+
+            cost_r_val = compute_trade_cost_r(closes[i], a, sl_atr_mult)
+            y_soft_arr[i] = compute_soft_quality(mfe, mae, cost_r_val, soft_label_temp)
+
+        if n_quality_1 > 0:
+            if backoff_attempt > 0:
+                logger.info(f"[LABEL_BALANCE] safety backoff succeeded after {backoff_attempt} step(s), "
+                             f"r_min_enter={r_min_enter:.4f}, ENTER=1={n_quality_1}")
+            break
+
+        if r_min_enter <= BACKOFF_FLOOR:
+            logger.error(f"[LABEL_BALANCE] ENTER=1 count is 0 even at floor r_min_enter={BACKOFF_FLOOR:.2f}")
+            break
+
+        new_r = max(r_min_enter - BACKOFF_STEP, BACKOFF_FLOOR)
+        logger.warning(f"[LABEL_BALANCE] ENTER=1 count is 0 with r_min_enter={r_min_enter:.4f}, "
+                        f"backing off to {new_r:.4f} (attempt {backoff_attempt + 1})")
+        r_min_enter = round(new_r, 4)
 
     enter_rate = n_quality_1 / max(labeled_count, 1)
     valid_best = best_r_all[~np.isnan(best_r_all)]
+    max_best_r = float(np.max(valid_best)) if len(valid_best) > 0 else 0.0
 
     logger.info("=" * 70)
     logger.info("v4.7 STRICT QUALITY LABELING (Label Geometry Fix)")
@@ -1708,7 +1749,7 @@ def generate_v47_quality_targets(
     if len(valid_best) > 0:
         logger.info(f"[LABEL_V47] best_R: mean={np.mean(valid_best):.3f}, median={np.median(valid_best):.3f}, "
                      f"p75={np.percentile(valid_best, 75):.3f}, p90={np.percentile(valid_best, 90):.3f}, "
-                     f"p95={np.percentile(valid_best, 95):.3f}")
+                     f"p95={np.percentile(valid_best, 95):.3f}, max={max_best_r:.4f}")
     logger.info(f"[LABEL_V47] ENTER=1: {n_quality_1:,} (rate={100*enter_rate:.1f}%) "
                  f"using r_min_enter={r_min_enter:.4f}, r_min_expiry_strict={r_min_expiry_strict:.4f}")
     logger.info(f"[LABEL_V47] Breakdown: TP_first_enters={n_tp_first:,}, expiry_strong_enters={n_expiry_strong:,}")
@@ -1717,6 +1758,14 @@ def generate_v47_quality_targets(
     logger.info(f"[LABEL_V47] y_dir: LONG_better={n_long_better:,} SHORT_better={n_short_better:,}")
     logger.info(f"[LABEL_V47] HTF score distribution: {dict(enumerate(htf_class_counts))}")
     logger.info("=" * 70)
+
+    if n_quality_1 == 0:
+        raise ValueError(
+            f"[LABEL_ERROR] ENTER positives are zero after all backoff attempts. "
+            f"r_min_enter={r_min_enter:.4f} max_feasible_best_R={max_best_r:.4f} "
+            f"labeled_count={labeled_count} tp_first_any={tp_first_all.sum()} "
+            f"exp_win_any={exp_win_all.sum()}"
+        )
 
     result_df = pd.DataFrame({
         'enter_label': enter_labels,

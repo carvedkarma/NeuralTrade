@@ -1158,6 +1158,17 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
 
     pos_count = train_enter.sum()
     neg_count = len(train_enter) - pos_count
+    val_pos_count = val_enter.sum()
+
+    if int(pos_count) == 0 or int(val_pos_count) == 0:
+        max_train_best_r = float(np.nanmax(train_r)) if len(train_r) > 0 else 0.0
+        max_val_best_r = float(np.nanmax(val_r)) if len(val_r) > 0 else 0.0
+        effective_r_min = label_df.attrs.get('v47_diagnostics', {}).get('r_min_enter', r_min_enter) if hasattr(label_df, 'attrs') else r_min_enter
+        raise ValueError(
+            f"[LABEL_ERROR] ENTER positives are zero (train_pos={int(pos_count)}, val_pos={int(val_pos_count)}). "
+            f"r_min_enter={effective_r_min} max_feasible_train={max_train_best_r:.4f} max_feasible_val={max_val_best_r:.4f}"
+        )
+
     raw_pos_weight = neg_count / max(pos_count, 1)
     pos_weight = max(pos_weight_min, min(pos_weight_max, raw_pos_weight))
     log.info(f"ENTER label distribution: ENTER=1: {int(pos_count)} ({100*pos_count/len(train_enter):.1f}%), ENTER=0: {int(neg_count)} ({100*neg_count/len(train_enter):.1f}%)")
