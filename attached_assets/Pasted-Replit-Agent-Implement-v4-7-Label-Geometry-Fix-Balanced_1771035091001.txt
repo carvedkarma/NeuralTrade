@@ -1,0 +1,113 @@
+Replit Agent — Implement “v4.7 Label Geometry Fix (Balanced + Tradeable)”
+Goal: Fix the label generator so ENTER=1 is not ~90% (broken) and the model learns real separation. Do NOT change live trading thresholds/policies. Only change TRAINING label generation + metrics prints.
+
+Context:
+Current training log shows ENTER=1 ≈ 89.8% and pos_weight ≈ 0.11 with Pred% ≈ 100% and sep ≈ 0.0. This is a label-definition bug (labels too easy). We need ENTER positive rate ~12–25% for 15m crypto.
+
+WHAT TO DO (precise tasks):
+
+1) Add a new labeling mode: v4.7 “Balanced Quality Labeling”
+Files likely involved:
+- gpu_trainer/triple_barrier.py (or wherever generate_*_quality_targets lives)
+- gpu_trainer/labeling/*.py (if separated)
+- gpu_trainer/train_enter_model.py (wiring)
+- any config / argparse area for new flags
+
+Create a function:
+generate_v47_quality_targets(...)
+that outputs:
+- y_enter (0/1)
+- y_soft (0..1) optional
+- best_R (float)
+- diagnostics counts
+
+Label definition v4.7 (strict, tradeable):
+For each bar, compute best_R exactly as before (TP/SL/expiry within horizon; same TP=2.0*ATR, SL=1.5*ATR, horizon=16 bars default).
+Then set:
+- ENTER=1 only if:
+   (A) TP was hit BEFORE SL within horizon
+   OR
+   (B) expiry happened but best_R >= r_min_expiry_strict
+And ALSO require:
+   best_R >= r_min_enter (default 0.8)
+This blocks weak “almost wins” and reduces positives.
+
+Defaults:
+- r_min_enter = 0.8
+- r_min_expiry_strict = 1.0
+- disable counting “expiry small win” as positive
+
+2) Add a POSITIVE-RATE TARGETER (auto-calibration)
+We need positive rate in [0.12, 0.25]. Add an option to auto-tune r_min_enter on the training set only.
+
+Implement:
+--auto-balance-enter-labels (bool, default True)
+--target-enter-rate (float, default 0.18)
+--target-enter-rate-min (float, default 0.12)
+--target-enter-rate-max (float, default 0.25)
+--balance-search-steps (int, default 30)
+
+Logic:
+- After computing best_R for all training bars, search r_min_enter in a range (0.3 .. 1.5) to get ENTER positive rate closest to target.
+- Keep r_min_expiry_strict fixed at 1.0.
+- Do NOT use validation set for tuning.
+- Save chosen r_min_enter to train_config and print it:
+  [LABEL_BALANCE] chosen_r_min_enter=... pos_rate_train=... target=...
+
+3) Add label diagnostics printout at start (must be super clear)
+Print:
+- total bars
+- candidate bars (if you have any prefilter)
+- TP hit count, SL hit count, expiry count
+- ENTER=1 count, ENTER=0 count, enter_rate
+- mean/median best_R, p50/p75/p90/p95 best_R
+- chosen r_min_enter if auto-balanced
+
+Example log lines:
+[LABEL_V47] TP_hits=..., SL_hits=..., Expiry=...
+[LABEL_V47] best_R: mean=..., median=..., p75=..., p90=...
+[LABEL_V47] ENTER=1: N (rate=xx.x%) using r_min_enter=..., r_min_expiry_strict=...
+
+4) Fix pos_weight computation (guardrails)
+pos_weight should be:
+pos_weight = (neg/pos)
+But cap it:
+--pos-weight-min 0.5
+--pos-weight-max 6.0
+During warmup still cap to warmup-pos-weight (already exists).
+Log:
+[POS_WEIGHT] raw=... capped=...
+
+5) Keep the 2-stage loss schedule you already added (warmup BCE then focal+OHEM), but ensure OHEM neg_pct uses a sane default:
+--ohem-neg-pct default 0.15 (not 0.20 if it destabilizes)
+OHEM must NOT drop ALL easy negatives early. Keep “all positives + top X% hardest negatives” exactly.
+
+6) Verification mode for labels (new)
+Add:
+--verify-v47-labels
+It should run label generation on train split and assert:
+- enter_rate between target-enter-rate-min and target-enter-rate-max
+- TP hit rate NOT > 60%
+- ENTER not dominated by expiry wins: expiry_positive_share < 25%
+Write verify_v47_labels.md with the stats.
+
+7) After implementation: run 15 epochs and paste these lines:
+- [LABEL_BALANCE] (chosen threshold)
+- [LABEL_V47] distribution
+- each eval: PR-AUC, Pos%, Pred%, sep, p_enter percentiles
+We expect:
+- Pos% ~ 12–25%
+- Pred% not 0% and not 100% (ideally 5–50% during warmup)
+- sep increasing during warmup
+- PR-AUC stabilizing (even 0.32–0.45 is fine initially)
+
+RULES:
+- Do NOT change live_runner, lane thresholds, trade manager, or dashboard policies.
+- Training-only changes: labeling + metrics + configs.
+- Save all new flags into train_config in checkpoints.
+- Keep backward compatibility: if no v4.7 flags, default to current v4.5/v4.6 behavior.
+
+Deliverables:
+- Code changes
+- verify_v47_labels.md
+- Training log excerpt (15 epochs) showing improved behavior
