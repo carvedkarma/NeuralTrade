@@ -129,10 +129,11 @@ def compute_adx(df: pd.DataFrame, period: int = 14) -> np.ndarray:
             pdm_s[i] = pdm_s[i - 1] - pdm_s[i - 1] / period + plus_dm[i]
             mdm_s[i] = mdm_s[i - 1] - mdm_s[i - 1] / period + minus_dm[i]
 
-    plus_di = np.where(atr_s > 0, 100 * pdm_s / atr_s, 0.0)
-    minus_di = np.where(atr_s > 0, 100 * mdm_s / atr_s, 0.0)
-    di_sum = plus_di + minus_di
-    dx = np.where(di_sum > 0, 100 * np.abs(plus_di - minus_di) / di_sum, 0.0)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        plus_di = np.where(atr_s > 0, 100 * pdm_s / atr_s, 0.0)
+        minus_di = np.where(atr_s > 0, 100 * mdm_s / atr_s, 0.0)
+        di_sum = plus_di + minus_di
+        dx = np.where(di_sum > 0, 100 * np.abs(plus_di - minus_di) / di_sum, 0.0)
 
     adx = np.zeros(n, dtype=np.float64)
     start = 2 * period
