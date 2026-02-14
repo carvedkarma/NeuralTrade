@@ -1821,3 +1821,200 @@ def generate_v47_quality_targets(
     }
 
     return result_df
+
+
+def generate_multi_preset_targets(
+    df: pd.DataFrame,
+    htf_features: pd.DataFrame,
+    presets: list,
+    horizon_periods: int = 16,
+    q_min_tp: float = 0.3,
+    r_min_expiry_strict: float = 1.0,
+    soft_label_temp: float = 1.0,
+    auto_balance: bool = True,
+    target_enter_rate: float = 0.18,
+    target_enter_rate_min: float = 0.12,
+    target_enter_rate_max: float = 0.25,
+    balance_search_steps: int = 30,
+) -> pd.DataFrame:
+    """Multi-preset triple-barrier label generation.
+
+    Computes triple-barrier outcomes for MULTIPLE barrier presets (TP/SL
+    combinations) per bar, reusing ``bidirectional_outcome_v47_for_index``
+    once per preset.
+
+    Args:
+        df: OHLCV DataFrame with close/high/low columns.
+        htf_features: DataFrame with HTF feature columns (h1_trend_sign,
+            h4_trend_sign, etc.).
+        presets: List of dicts, each containing:
+            - ``tp_mult`` (float): ATR multiplier for take-profit barrier.
+            - ``sl_mult`` (float): ATR multiplier for stop-loss barrier.
+            - ``label``  (str):  Short name used as column suffix
+              (e.g. ``'tight'``, ``'standard'``, ``'wide'``, ``'asymmetric'``).
+        horizon_periods: Maximum bars to hold before time expiry.
+        q_min_tp: Minimum TP quality score for ENTER=1 (may be auto-calibrated).
+        r_min_expiry_strict: Minimum realized R at expiry for ENTER=1.
+        soft_label_temp: Temperature for soft quality label.
+        auto_balance: If True, search ``q_min_tp`` per preset to achieve
+            ``target_enter_rate``.
+        target_enter_rate: Target ENTER=1 positive rate.
+        target_enter_rate_min: Lower bound for acceptable enter rate.
+        target_enter_rate_max: Upper bound for acceptable enter rate.
+        balance_search_steps: Number of search steps for auto-balance.
+
+    Returns:
+        DataFrame with per-preset columns:
+            - ``realized_r_{label}``, ``outcome_{label}``, ``side_hint_{label}``
+        Plus shared columns: ``y_dir``, ``y_dir_conf``, ``y_htf_score``.
+    """
+    from training.triple_barrier import (
+        compute_atr_14, bidirectional_outcome_v47_for_index,
+        compute_htf_score_target, compute_mfe_mae_for_index,
+        compute_trade_cost_r, compute_soft_quality,
+    )
+
+    n = len(df)
+    highs = df['high'].values.astype(np.float64)
+    lows = df['low'].values.astype(np.float64)
+    closes = df['close'].values.astype(np.float64)
+    atr_vals = compute_atr_14(df)
+
+    h1_trend = htf_features['h1_trend_sign'].values if 'h1_trend_sign' in htf_features.columns else np.zeros(n)
+    h4_trend = htf_features['h4_trend_sign'].values if 'h4_trend_sign' in htf_features.columns else np.zeros(n)
+
+    labeled_count = n - horizon_periods
+
+    y_dir_arr = np.zeros(n, dtype=np.int64)
+    y_dir_conf_arr = np.full(n, 0.5, dtype=np.float64)
+    y_htf_score_arr = np.zeros(n, dtype=np.int64)
+
+    first_preset = True
+
+    result_cols: dict = {}
+
+    for preset in presets:
+        tp_mult = float(preset['tp_mult'])
+        sl_mult = float(preset['sl_mult'])
+        plabel = str(preset['label'])
+
+        best_r_all = np.full(n, np.nan, dtype=np.float64)
+        tp_first_all = np.zeros(n, dtype=bool)
+        tp_quality_all = np.full(n, np.nan, dtype=np.float64)
+        exp_win_all = np.zeros(n, dtype=bool)
+        long_r_arr = np.full(n, np.nan, dtype=np.float64)
+        short_r_arr = np.full(n, np.nan, dtype=np.float64)
+        preset_dir_arr = np.zeros(n, dtype=np.int64)
+        preset_dir_conf_arr = np.full(n, 0.5, dtype=np.float64)
+        long_outcomes = np.full(n, 'SKIP', dtype=object)
+        short_outcomes = np.full(n, 'SKIP', dtype=object)
+
+        for i in range(labeled_count):
+            a = float(atr_vals[i])
+            if np.isnan(a) or a <= 0:
+                a = closes[i] * 0.005
+
+            result = bidirectional_outcome_v47_for_index(
+                highs, lows, closes, i, a,
+                tp_mult, sl_mult, horizon_periods,
+                r_min_expiry_strict,
+            )
+
+            best_r_all[i] = result['best_outcome_r']
+            long_r_arr[i] = result['long_r']
+            short_r_arr[i] = result['short_r']
+            preset_dir_arr[i] = result['y_dir']
+            preset_dir_conf_arr[i] = result['y_dir_conf']
+            long_outcomes[i] = result['long_outcome']
+            short_outcomes[i] = result['short_outcome']
+
+            best_side = +1 if result['y_dir'] == 1 else -1
+            tp_first_all[i] = (result['long_tp_first'] if best_side > 0 else result['short_tp_first'])
+            tp_quality_all[i] = result['tp_quality']
+            exp_win_all[i] = (
+                (result['long_outcome'] == 'EXP_WIN' and result['long_r'] >= r_min_expiry_strict)
+                if best_side > 0 else
+                (result['short_outcome'] == 'EXP_WIN' and result['short_r'] >= r_min_expiry_strict)
+            )
+
+            if first_preset:
+                y_dir_arr[i] = result['y_dir']
+                y_dir_conf_arr[i] = result['y_dir_conf']
+                htf_score = compute_htf_score_target(float(h1_trend[i]), float(h4_trend[i]))
+                y_htf_score_arr[i] = htf_score
+
+        preset_q_min = q_min_tp
+        if auto_balance:
+            cal_tq = tp_quality_all[:labeled_count]
+            cal_tp = tp_first_all[:labeled_count]
+            cal_ew = exp_win_all[:labeled_count]
+            cal_n = labeled_count
+
+            preset_q_min = _auto_calibrate_q_min_tp(
+                cal_tq, cal_tp, cal_ew, cal_n,
+                target_rate=target_enter_rate,
+                target_min=target_enter_rate_min,
+                target_max=target_enter_rate_max,
+                search_steps=balance_search_steps,
+            )
+
+        realized_r = np.full(n, np.nan, dtype=np.float64)
+        side_hints = np.zeros(n, dtype=np.int64)
+        outcomes_col = np.full(n, "NO_CANDIDATE", dtype=object)
+
+        n_quality_1 = 0
+        n_tp_kept = 0
+        n_expiry_strong = 0
+
+        for i in range(labeled_count):
+            if np.isnan(best_r_all[i]):
+                continue
+
+            best_side = +1 if preset_dir_arr[i] == 1 else -1
+            side_hints[i] = best_side
+            realized_r[i] = best_r_all[i]
+
+            is_enter = 0
+            if tp_first_all[i]:
+                if not np.isnan(tp_quality_all[i]) and tp_quality_all[i] >= preset_q_min:
+                    is_enter = 1
+                    n_tp_kept += 1
+            elif exp_win_all[i]:
+                is_enter = 1
+                n_expiry_strong += 1
+
+            if is_enter:
+                n_quality_1 += 1
+                outcomes_col[i] = str(long_outcomes[i]) if best_side > 0 else str(short_outcomes[i])
+            else:
+                outcomes_col[i] = "REJECTED"
+
+        enter_rate = n_quality_1 / max(labeled_count, 1)
+        valid_r = realized_r[~np.isnan(realized_r)]
+        mean_r = float(np.mean(valid_r)) if len(valid_r) > 0 else 0.0
+        median_r = float(np.median(valid_r)) if len(valid_r) > 0 else 0.0
+
+        logger.info("=" * 70)
+        logger.info(f"MULTI-PRESET [{plabel}] TP={tp_mult:.2f}x SL={sl_mult:.2f}x")
+        logger.info(f"  Labeled bars: {labeled_count:,}")
+        logger.info(f"  ENTER=1: {n_quality_1:,} ({100*enter_rate:.1f}%)")
+        logger.info(f"  TP kept: {n_tp_kept:,}, Expiry strong: {n_expiry_strong:,}")
+        logger.info(f"  q_min_tp: {preset_q_min:.4f}")
+        logger.info(f"  Realized R: mean={mean_r:.4f}, median={median_r:.4f}")
+        if len(valid_r) > 0:
+            pcts = np.percentile(valid_r, [25, 50, 75, 90])
+            logger.info(f"  R percentiles: p25={pcts[0]:.4f} p50={pcts[1]:.4f} "
+                        f"p75={pcts[2]:.4f} p90={pcts[3]:.4f}")
+        logger.info("=" * 70)
+
+        result_cols[f'realized_r_{plabel}'] = realized_r
+        result_cols[f'outcome_{plabel}'] = outcomes_col
+        result_cols[f'side_hint_{plabel}'] = side_hints
+
+        first_preset = False
+
+    result_cols['y_dir'] = y_dir_arr
+    result_cols['y_dir_conf'] = y_dir_conf_arr
+    result_cols['y_htf_score'] = y_htf_score_arr
+
+    return pd.DataFrame(result_cols, index=df.index)

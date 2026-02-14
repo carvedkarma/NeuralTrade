@@ -3386,9 +3386,16 @@ def _select_trades_by_score(scores, sides, precomputed_outcomes, precomputed_r, 
 
 def _run_distributional_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                                val_bars, epoch, tp_mult, sl_mult,
-                               target_tpd=6.5, target_tpd_tol=1.5, min_trades=30):
-    """Score-based sweep for distributional model: rank by score, evaluate top percentiles."""
+                               target_tpd=6.5, target_tpd_tol=1.5, min_trades=30,
+                               candidate_mask=None, risk_controls=None,
+                               symbol_ids=None, horizon_bars=16):
+    """Score-based sweep for distributional model: rank by score, evaluate top percentiles.
+
+    If candidate_mask is provided, only candidate bars are considered for ranking.
+    If risk_controls is provided, applies daily loss limit, max concurrent, symbol exposure caps.
+    """
     import numpy as np
+    from data.candidate_generator import apply_risk_controls, RiskControls
 
     TOP_PCTS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
     COOLDOWN = 4
@@ -3400,12 +3407,29 @@ def _run_distributional_sweep(scores, sides, precomputed_outcomes, precomputed_r
     )
     safe_r = np.where(np.isnan(precomputed_r.astype(float)), 0.0, precomputed_r.astype(float))
 
+    if candidate_mask is not None:
+        non_cand = ~candidate_mask
+        scores = scores.copy()
+        scores[non_cand] = float('-inf')
+        n_eligible = int(candidate_mask.sum())
+        log.info(f"[SWEEP] Candidate mask applied: {n_eligible}/{len(candidate_mask)} bars eligible")
+        if n_eligible == 0:
+            log.warning("[SWEEP] WARNING: Zero candidate bars! Sweep will produce empty results. Consider relaxing candidate filters.")
+
     sweep_results = []
 
     for pct in TOP_PCTS:
         sel_outcomes, sel_r, sel_idx = _select_trades_by_score(
             scores, sides, safe_outcomes, safe_r, pct, COOLDOWN
         )
+
+        if risk_controls is not None and len(sel_idx) > 0:
+            sel_symbols = symbol_ids[sel_idx] if symbol_ids is not None else None
+            sel_idx, sel_r = apply_risk_controls(
+                sel_idx, sel_r, sel_symbols, risk_controls
+            )
+            sel_outcomes = safe_outcomes[sel_idx] if len(sel_idx) > 0 else np.array([])
+
         m = _compute_sweep_metrics(sel_outcomes, sel_r, val_bars)
         m['label'] = f"top{int(pct*100)}%"
         m['pct'] = pct
@@ -3489,8 +3513,14 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
                                 target_enter_rate_min=0.12,
                                 target_enter_rate_max=0.25,
                                 balance_search_steps=30,
-                                w_dir=0.3):
-    """v4.9.0 Distributional Trade Forecaster.
+                                w_dir=0.3,
+                                candidate_config=None,
+                                multi_horizon_config=None,
+                                preset_config=None,
+                                use_money_score=False,
+                                risk_controls=None,
+                                use_kelly_sizing=False):
+    """v4.9.1 Distributional Trade Forecaster with Candidate Engine + Multi-Horizon + Multi-Preset.
 
     Replaces binary ENTER classification with distributional outputs:
     - value_head -> E[R] (Huber loss)
@@ -3498,7 +3528,12 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
     - win_head -> p(R > 0) (BCE loss)
     - optional regime_head -> chop/trend/highvol (CE loss)
 
-    Scoring: score = sigmoid(win) * E_R - lambda * max(0, -q10)
+    v4.9.1 additions:
+    - Candidate engine: filter bars by ATR/vol/breakout/fee gate
+    - Multi-horizon: train separate models per horizon, select best
+    - Multi-preset: evaluate multiple barrier presets, select best
+    - Money-score: p_win*q50 - lambda*downside, with efficiency and regime weight
+    - Kelly sizing + risk controls
     """
     import torch
     import torch.nn as nn
@@ -3507,9 +3542,28 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
     from torch.utils.data import Dataset, DataLoader
     from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
     from config import config
+    from data.candidate_generator import (
+        CandidateConfig, generate_candidate_mask, compute_money_score,
+        compute_kelly_size, apply_risk_controls, RiskControls,
+        BARRIER_PRESETS, MultiHorizonConfig, PresetConfig,
+    )
+
+    if candidate_config is None:
+        candidate_config = CandidateConfig(enabled=False)
+    if risk_controls is None:
+        risk_controls = RiskControls()
+
+    use_multi_horizon = multi_horizon_config is not None
+    use_multi_preset = preset_config is not None
+    horizons = multi_horizon_config.horizons if use_multi_horizon else [horizon]
+    presets = []
+    if use_multi_preset:
+        presets = [preset_config.get_preset_params(p) for p in preset_config.presets]
+    else:
+        presets = [{'tp_mult': tp_mult, 'sl_mult': sl_mult, 'label': 'default'}]
 
     log.info("=" * 60)
-    log.info("  v4.9.0 DISTRIBUTIONAL TRADE FORECASTER - TRAINING")
+    log.info("  v4.9.1 DISTRIBUTIONAL TRADE FORECASTER - TRAINING")
     log.info("=" * 60)
     log.info(f"Version: {FEATURE_VERSION}")
     log.info(f"[DIST_CONFIG] w_mse={w_mse} w_quantile={w_quantile} w_bce={w_bce} w_regime={w_regime}")
@@ -3517,6 +3571,12 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
     log.info(f"[DIST_CONFIG] target_tpd={target_tpd} tpd_tol={target_tpd_tol}")
     log.info(f"[DIST_CONFIG] use_regime_head={use_regime_head}")
     log.info(f"[DIST_CONFIG] quantile_taus=[0.10, 0.50, 0.90]")
+    log.info(f"[DIST_CONFIG] candidates={candidate_config.enabled} multi_horizon={use_multi_horizon} multi_preset={use_multi_preset}")
+    log.info(f"[DIST_CONFIG] money_score={use_money_score} kelly_sizing={use_kelly_sizing}")
+    if use_multi_horizon:
+        log.info(f"[DIST_CONFIG] horizons={horizons}")
+    if use_multi_preset:
+        log.info(f"[DIST_CONFIG] presets={[p['label'] for p in presets]}")
 
     from data.regression_targets import RegressionTargetGenerator
     reg_gen = RegressionTargetGenerator(horizon_periods=horizon)
@@ -3526,6 +3586,10 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
     sequence_length = config.data.sequence_length
 
     QUANTILE_TAUS = [0.10, 0.50, 0.90]
+
+    primary_horizon = horizons[0] if use_multi_horizon else horizon
+    primary_tp = presets[0]['tp_mult']
+    primary_sl = presets[0]['sl_mult']
 
     # === DATA LOADING (reuse existing pipeline) ===
     if symbols and len(symbols) > 1:
@@ -3544,6 +3608,8 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
         all_val_sym_ids = []
         all_val_dir = []
         all_val_dir_conf = []
+        all_val_cand = []
+        all_train_cand = []
         feature_columns_ref = None
 
         for sym_idx, sym in enumerate(symbols):
@@ -3583,27 +3649,66 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
             htf_cols = [c for c in sym_features_df.columns if c.startswith('h1_') or c.startswith('h4_')]
             sym_htf_df = sym_features_df[htf_cols].copy()
 
-            from data.regression_targets import generate_v47_quality_targets
-            sym_label_df = generate_v47_quality_targets(
-                sym_df, sym_htf_df,
-                horizon_periods=horizon,
-                tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
-                q_min_tp=q_min_tp,
-                r_min_expiry_strict=r_min_expiry_strict,
-                soft_label_temp=1.0,
-                auto_balance=auto_balance_enter_labels,
-                target_enter_rate=target_enter_rate,
-                target_enter_rate_min=target_enter_rate_min,
-                target_enter_rate_max=target_enter_rate_max,
-                balance_search_steps=balance_search_steps,
-            )
+            sym_cand_mask = None
+            if candidate_config.enabled:
+                sym_cand_mask, sym_cand_diag = generate_candidate_mask(
+                    sym_df, candidate_config, symbol=sym
+                )
 
-            sym_realized_r = sym_label_df['realized_r'].values.astype(np.float32)
-            sym_win = (sym_realized_r > 0).astype(np.float32)
-            sym_side = sym_label_df['side_hint'].values.astype(np.int64)
-            sym_outcomes = sym_label_df['outcome'].values
-            sym_dir_target = sym_label_df['y_dir'].values.astype(np.float32)
-            sym_dir_conf = sym_label_df['y_dir_conf'].values.astype(np.float32)
+            if use_multi_preset and len(presets) > 1:
+                from data.regression_targets import generate_multi_preset_targets
+                sym_label_df = generate_multi_preset_targets(
+                    sym_df, sym_htf_df,
+                    presets=presets,
+                    horizon_periods=primary_horizon,
+                    q_min_tp=q_min_tp,
+                    r_min_expiry_strict=r_min_expiry_strict,
+                    soft_label_temp=1.0,
+                    auto_balance=auto_balance_enter_labels,
+                    target_enter_rate=target_enter_rate,
+                    target_enter_rate_min=target_enter_rate_min,
+                    target_enter_rate_max=target_enter_rate_max,
+                    balance_search_steps=balance_search_steps,
+                )
+                sym_best_r = np.full(len(sym_df), np.nan, dtype=np.float32)
+                sym_best_side = np.zeros(len(sym_df), dtype=np.int64)
+                sym_best_outcome = np.full(len(sym_df), "NO_CANDIDATE", dtype=object)
+                for pi, preset in enumerate(presets):
+                    plabel = preset['label']
+                    pr = sym_label_df[f'realized_r_{plabel}'].values.astype(np.float32)
+                    for j in range(len(sym_df)):
+                        if not np.isnan(pr[j]) and (np.isnan(sym_best_r[j]) or pr[j] > sym_best_r[j]):
+                            sym_best_r[j] = pr[j]
+                            sym_best_outcome[j] = sym_label_df[f'outcome_{plabel}'].values[j]
+                            sym_best_side[j] = sym_label_df[f'side_hint_{plabel}'].values[j]
+                sym_best_r = np.nan_to_num(sym_best_r, nan=0.0)
+                sym_realized_r = sym_best_r
+                sym_win = (sym_realized_r > 0).astype(np.float32)
+                sym_side = sym_best_side.astype(np.int64)
+                sym_outcomes = sym_best_outcome
+                sym_dir_target = sym_label_df['y_dir'].values.astype(np.float32)
+                sym_dir_conf = sym_label_df['y_dir_conf'].values.astype(np.float32)
+            else:
+                from data.regression_targets import generate_v47_quality_targets
+                sym_label_df = generate_v47_quality_targets(
+                    sym_df, sym_htf_df,
+                    horizon_periods=primary_horizon,
+                    tp_atr_mult=primary_tp, sl_atr_mult=primary_sl,
+                    q_min_tp=q_min_tp,
+                    r_min_expiry_strict=r_min_expiry_strict,
+                    soft_label_temp=1.0,
+                    auto_balance=auto_balance_enter_labels,
+                    target_enter_rate=target_enter_rate,
+                    target_enter_rate_min=target_enter_rate_min,
+                    target_enter_rate_max=target_enter_rate_max,
+                    balance_search_steps=balance_search_steps,
+                )
+                sym_realized_r = sym_label_df['realized_r'].values.astype(np.float32)
+                sym_win = (sym_realized_r > 0).astype(np.float32)
+                sym_side = sym_label_df['side_hint'].values.astype(np.int64)
+                sym_outcomes = sym_label_df['outcome'].values
+                sym_dir_target = sym_label_df['y_dir'].values.astype(np.float32)
+                sym_dir_conf = sym_label_df['y_dir_conf'].values.astype(np.float32)
 
             valid_start = sequence_length
             sym_feat_np = sym_features_df.values[valid_start:].astype(np.float32)
@@ -3613,6 +3718,7 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
             sym_outcomes_np = sym_outcomes[valid_start:]
             sym_dir_np = sym_dir_target[valid_start:]
             sym_dir_conf_np = sym_dir_conf[valid_start:]
+            sym_cand_np = sym_cand_mask[valid_start:] if sym_cand_mask is not None else None
 
             n_sym = len(sym_feat_np)
             train_end_sym = int(n_sym * 0.70)
@@ -3637,6 +3743,10 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
             all_val_dir.append(sym_dir_np[train_end_sym:val_end_sym])
             all_val_dir_conf.append(sym_dir_conf_np[train_end_sym:val_end_sym])
 
+            if sym_cand_np is not None:
+                all_train_cand.append(sym_cand_np[:train_end_sym])
+                all_val_cand.append(sym_cand_np[train_end_sym:val_end_sym])
+
         train_features_raw = np.concatenate(all_train_features, axis=0)
         train_r = np.concatenate(all_train_r, axis=0)
         train_win = np.concatenate(all_train_win, axis=0)
@@ -3652,6 +3762,8 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
         val_sym_ids = np.concatenate(all_val_sym_ids, axis=0)
         val_dir = np.concatenate(all_val_dir, axis=0)
         val_dir_conf = np.concatenate(all_val_dir_conf, axis=0)
+
+        cand_np = np.concatenate(all_val_cand, axis=0) if all_val_cand else None
 
         n_symbols = len(symbols)
         features_columns_list = feature_columns_ref
@@ -3691,6 +3803,8 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
         val_dir_conf = val_dir_conf[val_clean_mask]
         val_outcomes = val_outcomes[val_clean_mask]
         val_sides = val_sides[val_clean_mask]
+        if cand_np is not None:
+            cand_np = cand_np[val_clean_mask]
 
         features_df_columns = features_columns_list
 
@@ -3724,27 +3838,81 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
         htf_cols = [c for c in features_df.columns if c.startswith('h1_') or c.startswith('h4_')]
         htf_features_df = features_df[htf_cols].copy()
 
-        from data.regression_targets import generate_v47_quality_targets
-        label_df = generate_v47_quality_targets(
-            df, htf_features_df,
-            horizon_periods=horizon,
-            tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
-            q_min_tp=q_min_tp,
-            r_min_expiry_strict=r_min_expiry_strict,
-            soft_label_temp=1.0,
-            auto_balance=auto_balance_enter_labels,
-            target_enter_rate=target_enter_rate,
-            target_enter_rate_min=target_enter_rate_min,
-            target_enter_rate_max=target_enter_rate_max,
-            balance_search_steps=balance_search_steps,
-        )
+        cand_mask_full = None
+        if candidate_config.enabled:
+            cand_mask_full, cand_diag = generate_candidate_mask(
+                df, candidate_config, symbol=symbols[0] if symbols else "BTCUSDT"
+            )
 
-        realized_r = label_df['realized_r'].values.astype(np.float32)
-        win_labels = (realized_r > 0).astype(np.float32)
-        side_hints = label_df['side_hint'].values.astype(np.int64)
-        precomputed_outcomes = label_df['outcome'].values
-        dir_target = label_df['y_dir'].values.astype(np.float32)
-        dir_conf = label_df['y_dir_conf'].values.astype(np.float32)
+        if use_multi_preset and len(presets) > 1:
+            from data.regression_targets import generate_multi_preset_targets
+            label_df = generate_multi_preset_targets(
+                df, htf_features_df,
+                presets=presets,
+                horizon_periods=primary_horizon,
+                q_min_tp=q_min_tp,
+                r_min_expiry_strict=r_min_expiry_strict,
+                soft_label_temp=1.0,
+                auto_balance=auto_balance_enter_labels,
+                target_enter_rate=target_enter_rate,
+                target_enter_rate_min=target_enter_rate_min,
+                target_enter_rate_max=target_enter_rate_max,
+                balance_search_steps=balance_search_steps,
+            )
+            best_r = np.full(len(df), np.nan, dtype=np.float32)
+            best_preset_idx = np.zeros(len(df), dtype=np.int64)
+            best_outcome = np.full(len(df), "NO_CANDIDATE", dtype=object)
+            best_side = np.zeros(len(df), dtype=np.int64)
+
+            for pi, preset in enumerate(presets):
+                plabel = preset['label']
+                pr = label_df[f'realized_r_{plabel}'].values.astype(np.float32)
+                for j in range(len(df)):
+                    if not np.isnan(pr[j]) and (np.isnan(best_r[j]) or pr[j] > best_r[j]):
+                        best_r[j] = pr[j]
+                        best_preset_idx[j] = pi
+                        best_outcome[j] = label_df[f'outcome_{plabel}'].values[j]
+                        best_side[j] = label_df[f'side_hint_{plabel}'].values[j]
+
+            best_r = np.nan_to_num(best_r, nan=0.0)
+            realized_r = best_r
+            win_labels = (realized_r > 0).astype(np.float32)
+            side_hints = best_side.astype(np.int64)
+            precomputed_outcomes = best_outcome
+            dir_target = label_df['y_dir'].values.astype(np.float32)
+            dir_conf = label_df['y_dir_conf'].values.astype(np.float32)
+
+            preset_targets = {}
+            for pi, preset in enumerate(presets):
+                plabel = preset['label']
+                preset_targets[plabel] = {
+                    'realized_r': label_df[f'realized_r_{plabel}'].values.astype(np.float32),
+                    'outcome': label_df[f'outcome_{plabel}'].values,
+                    'side_hint': label_df[f'side_hint_{plabel}'].values.astype(np.int64),
+                }
+            log.info(f"[MULTI_PRESET] {len(presets)} presets loaded, best preset per bar selected")
+        else:
+            from data.regression_targets import generate_v47_quality_targets
+            label_df = generate_v47_quality_targets(
+                df, htf_features_df,
+                horizon_periods=primary_horizon,
+                tp_atr_mult=primary_tp, sl_atr_mult=primary_sl,
+                q_min_tp=q_min_tp,
+                r_min_expiry_strict=r_min_expiry_strict,
+                soft_label_temp=1.0,
+                auto_balance=auto_balance_enter_labels,
+                target_enter_rate=target_enter_rate,
+                target_enter_rate_min=target_enter_rate_min,
+                target_enter_rate_max=target_enter_rate_max,
+                balance_search_steps=balance_search_steps,
+            )
+            realized_r = label_df['realized_r'].values.astype(np.float32)
+            win_labels = (realized_r > 0).astype(np.float32)
+            side_hints = label_df['side_hint'].values.astype(np.int64)
+            precomputed_outcomes = label_df['outcome'].values
+            dir_target = label_df['y_dir'].values.astype(np.float32)
+            dir_conf = label_df['y_dir_conf'].values.astype(np.float32)
+            preset_targets = None
 
         valid_start = sequence_length
         features_np = features_df.values[valid_start:].astype(np.float32)
@@ -3754,9 +3922,11 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
         outcomes_np = precomputed_outcomes[valid_start:]
         dir_np = dir_target[valid_start:]
         dir_conf_np = dir_conf[valid_start:]
+        cand_np = cand_mask_full[valid_start:] if cand_mask_full is not None else None
 
         n_total = len(features_np)
-        purge_gap = horizon + sequence_length
+        max_horizon = max(horizons) if use_multi_horizon else horizon
+        purge_gap = max_horizon + sequence_length
         val_samples = max(int(n_total * 0.1), purge_gap)
         train_samples = n_total - purge_gap - val_samples
 
@@ -3783,6 +3953,7 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
         val_sides = side_np[val_start_idx:val_end]
         val_dir = dir_np[val_start_idx:val_end]
         val_dir_conf = dir_conf_np[val_start_idx:val_end]
+        val_cand = cand_np[val_start_idx:val_end] if cand_np is not None else None
         val_bars = val_samples
 
         train_features_df_scaled = pd.DataFrame(train_features_raw, columns=features_df.columns)
@@ -3812,6 +3983,9 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
         val_sides = val_sides[val_clean_mask]
         val_dir = val_dir[val_clean_mask]
         val_dir_conf = val_dir_conf[val_clean_mask]
+        if val_cand is not None:
+            val_cand = val_cand[val_clean_mask]
+        cand_np = val_cand
 
         train_sym_ids = np.zeros(len(train_r), dtype=np.int64)
         val_sym_ids = np.zeros(len(val_r), dtype=np.int64)
@@ -4082,7 +4256,15 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
             win_auc = 0.5
 
         # === COMPUTE SCORE ===
-        scores = win_probs * all_vp - score_lambda * np.maximum(0, -q10_preds)
+        if use_money_score:
+            scores = compute_money_score(
+                win_probs, all_vp, q10_preds, q50_preds, q90_preds,
+                horizon_bars=primary_horizon if not use_multi_horizon else horizons[0],
+                score_lambda=score_lambda,
+                use_efficiency=True,
+            )
+        else:
+            scores = win_probs * all_vp - score_lambda * np.maximum(0, -q10_preds)
 
         dir_auc = 0.0
         if all_dir_probs:
@@ -4126,11 +4308,28 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
             sweep_r = val_r[sweep_start:]
 
             n_sweep = min(len(sweep_scores), len(sweep_outcomes))
+
+            sweep_cand_mask = None
+            if cand_np is not None:
+                sweep_cand_mask = cand_np[sweep_start:sweep_start + n_sweep] if len(cand_np) > sweep_start else None
+
+            has_custom_risk = (risk_controls.daily_loss_limit_r != -3.0 or
+                               risk_controls.max_concurrent_trades != 6 or
+                               risk_controls.max_symbol_exposure != 3)
+
+            sweep_sym_ids = None
+            if has_custom_risk:
+                sweep_sym_ids = val_sym_ids[sweep_start:sweep_start + n_sweep] if len(val_sym_ids) > sweep_start else None
+
             sweep_results, best_label, best_score_val, best_pct_val = _run_distributional_sweep(
                 sweep_scores[:n_sweep], sweep_sides[:n_sweep],
                 sweep_outcomes[:n_sweep], sweep_r[:n_sweep],
-                val_bars, epoch + 1, tp_mult, sl_mult,
+                val_bars, epoch + 1, primary_tp, primary_sl,
                 target_tpd=target_tpd, target_tpd_tol=target_tpd_tol,
+                candidate_mask=sweep_cand_mask,
+                risk_controls=risk_controls if has_custom_risk else None,
+                symbol_ids=sweep_sym_ids,
+                horizon_bars=primary_horizon,
             )
             sweep_expect = best_score_val if best_score_val > float('-inf') else 0.0
             sweep_pct = best_pct_val
@@ -4163,7 +4362,7 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
         }
         ckpt_train_config = {
             'model_type': 'distributional_trade_forecaster',
-            'version': 'v4.9.0',
+            'version': 'v4.9.1',
             'w_mse': w_mse,
             'w_quantile': w_quantile,
             'w_bce': w_bce,
@@ -4174,6 +4373,19 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
             'quantile_taus': QUANTILE_TAUS,
             'target_tpd': target_tpd,
             'target_tpd_tol': target_tpd_tol,
+            'v491_config': {
+                'candidate_engine': candidate_config.enabled,
+                'candidate_min_atr_pct': candidate_config.min_atr_pct,
+                'multi_horizon': use_multi_horizon,
+                'horizons': horizons,
+                'multi_preset': use_multi_preset,
+                'presets': [p['label'] for p in presets],
+                'money_score': use_money_score,
+                'kelly_sizing': use_kelly_sizing,
+                'daily_loss_limit_r': risk_controls.daily_loss_limit_r,
+                'max_concurrent_trades': risk_controls.max_concurrent_trades,
+                'max_symbol_exposure': risk_controls.max_symbol_exposure,
+            },
         }
 
         if sweep_expect > best_expectancy:
@@ -4187,7 +4399,12 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
                 'n_features': input_dim,
                 'feature_version': FEATURE_VERSION,
                 'model_type': 'distributional_trade_forecaster',
-                'barrier_config': {'tp_mult': tp_mult, 'sl_mult': sl_mult, 'horizon': horizon},
+                'barrier_config': {
+                    'tp_mult': primary_tp, 'sl_mult': primary_sl,
+                    'horizon': primary_horizon,
+                    'presets': [p['label'] for p in presets] if use_multi_preset else ['default'],
+                    'horizons': horizons if use_multi_horizon else [primary_horizon],
+                },
                 'best_expectancy': best_expectancy,
                 'best_expectancy_pct': best_expectancy_pct,
                 'trained_at': datetime.now().isoformat(),
@@ -4205,7 +4422,12 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
                 'n_features': input_dim,
                 'feature_version': FEATURE_VERSION,
                 'model_type': 'distributional_trade_forecaster',
-                'barrier_config': {'tp_mult': tp_mult, 'sl_mult': sl_mult, 'horizon': horizon},
+                'barrier_config': {
+                    'tp_mult': primary_tp, 'sl_mult': primary_sl,
+                    'horizon': primary_horizon,
+                    'presets': [p['label'] for p in presets] if use_multi_preset else ['default'],
+                    'horizons': horizons if use_multi_horizon else [primary_horizon],
+                },
                 'best_val_loss': best_val_loss,
                 'trained_at': datetime.now().isoformat(),
             }, checkpoint_dir / "best_dist_loss.pt")
@@ -4468,6 +4690,45 @@ Examples:
                         help="Target trades/day for distributional sweep (default: 6.5)")
     parser.add_argument("--dist-target-tpd-tol", type=float, default=1.5,
                         help="Tolerance for distributional target tpd (default: 1.5)")
+
+    parser.add_argument("--use-candidates", action="store_true", default=False,
+                        help="Enable candidate engine: filter bars by ATR/vol/breakout/fee gate")
+    parser.add_argument("--no-candidates", dest="use_candidates", action="store_false")
+    parser.add_argument("--cand-min-atr-pct", type=float, default=0.0015,
+                        help="Min ATR%% for candidate filter (default: 0.0015)")
+    parser.add_argument("--cand-breakout", action="store_true", default=True,
+                        help="Enable breakout trigger in candidate filter")
+    parser.add_argument("--cand-mean-reversion", action="store_true", default=True,
+                        help="Enable mean-reversion trigger in candidate filter")
+    parser.add_argument("--cand-fee-gate", action="store_true", default=True,
+                        help="Enable fee/spread gate in candidate filter")
+    parser.add_argument("--cand-round-trip-cost", type=float, default=0.0009,
+                        help="Round-trip cost for fee gate (default: 0.0009)")
+
+    parser.add_argument("--multi-horizon", action="store_true", default=False,
+                        help="Train multiple horizons (8,16,32) and select best per bar")
+    parser.add_argument("--multi-horizons", type=str, default="8,16,32",
+                        help="Comma-separated horizon bars (default: 8,16,32)")
+    parser.add_argument("--cooldown-per-horizon", action="store_true", default=False,
+                        help="Use separate cooldown per horizon instead of unified")
+    parser.add_argument("--cooldown", type=int, default=4,
+                        help="Unified cooldown bars between trades (default: 4)")
+
+    parser.add_argument("--multi-preset", action="store_true", default=False,
+                        help="Train with multiple barrier presets and select best per bar")
+    parser.add_argument("--barrier-presets", type=str, default="tight,standard,wide,asymmetric",
+                        help="Comma-separated barrier preset names (default: tight,standard,wide,asymmetric)")
+
+    parser.add_argument("--money-score", action="store_true", default=False,
+                        help="Use enhanced money-score formula with efficiency and regime weight")
+    parser.add_argument("--kelly-sizing", action="store_true", default=False,
+                        help="Enable Kelly-like position sizing")
+    parser.add_argument("--daily-loss-limit", type=float, default=-3.0,
+                        help="Daily loss limit in R-units (default: -3.0)")
+    parser.add_argument("--max-concurrent", type=int, default=6,
+                        help="Max concurrent trades (default: 6)")
+    parser.add_argument("--max-symbol-exposure", type=int, default=3,
+                        help="Max trades per symbol (default: 3)")
 
     parser.add_argument("--live", action="store_true",
                         help="Run continuous live multi-asset inference loop")
@@ -4942,6 +5203,14 @@ Examples:
 
         if args.train_distributional:
             log.info("[MODE] v4.9.0 Distributional Trade Forecaster training")
+            from data.candidate_generator import (
+                CandidateConfig, MultiHorizonConfig, PresetConfig, RiskControls,
+            )
+            cand_cfg = CandidateConfig.from_cli_args(args) if args.use_candidates else CandidateConfig(enabled=False)
+            mh_cfg = MultiHorizonConfig.from_cli_args(args) if getattr(args, 'multi_horizon', False) else None
+            preset_cfg = PresetConfig.from_cli_args(args) if getattr(args, 'multi_preset', False) else None
+            risk_cfg = RiskControls.from_cli_args(args)
+
             model, engineer, feature_columns, history = train_distributional_model(
                 data_path, device, args.epochs, args.batch_size, args.lr,
                 checkpoint_interval=args.checkpoint_interval,
@@ -4965,6 +5234,12 @@ Examples:
                 target_enter_rate_max=args.target_enter_rate_max,
                 balance_search_steps=args.balance_search_steps,
                 w_dir=args.dist_w_dir,
+                candidate_config=cand_cfg,
+                multi_horizon_config=mh_cfg,
+                preset_config=preset_cfg,
+                use_money_score=getattr(args, 'money_score', False),
+                risk_controls=risk_cfg,
+                use_kelly_sizing=getattr(args, 'kelly_sizing', False),
             )
         else:
             use_focal = args.use_focal_loss and not args.no_focal_loss

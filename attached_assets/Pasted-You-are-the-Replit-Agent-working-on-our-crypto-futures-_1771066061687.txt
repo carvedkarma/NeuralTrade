@@ -1,0 +1,68 @@
+You are the Replit Agent working on our crypto futures ML trading system.
+
+GOAL:
+Increase trades/day to 5–10 while increasing accuracy and net profitability.
+We already have v4.9 distributional forecaster (win_head + quantiles q10/q50/q90 + regime head) and score-based ranking + sweep.
+
+IMPLEMENT NEXT (in this exact order):
+
+PHASE 1 — Candidate Engine (Increase trades/day without lowering quality)
+1) Add a candidate_generator.py that marks candidate bars using lightweight rules:
+   - ATR or realized volatility above min threshold
+   - exclude ultra-low-vol chop unless regime allows it
+   - optional triggers: breakout (close > n-bar high), mean-reversion (zscore extremes)
+   - fees/spread gate using existing cost/fee estimates
+2) Modify training + validation sweeps so ranking/sweep happens ONLY on candidates (not all bars).
+3) Log candidate_rate%, and trades/day after ranking, per symbol and total.
+
+PHASE 2 — Multi-Horizon (More opportunities + better accuracy)
+4) Train 3 horizons: 8, 16, 32 bars using same distributional pipeline.
+   - Create config structures so horizon is a parameter.
+   - Save checkpoints per horizon and allow ensemble inference.
+5) In sweep/inference, compute score for each horizon and choose the best horizon per bar.
+   - Keep separate cooldown per horizon OR unified cooldown configurable.
+
+PHASE 3 — Adaptive Exit Geometry (Biggest profitability unlock)
+6) Implement “barrier preset selection”:
+   - Define 4–6 barrier presets (TP_mult, SL_mult).
+   - For each candidate bar, evaluate/predict score per preset.
+   - Choose preset with highest money-score.
+7) Update label generation to support preset training:
+   - For each bar+direction, compute outcomes for each preset (TP/SL/expiry) and store targets.
+   - Keep it efficient (vectorize where possible).
+8) Extend model to output either:
+   A) separate heads per preset, OR
+   B) one head + preset embedding input.
+   Choose the simplest reliable approach.
+
+PHASE 4 — Money Scoring + Sizing (More money, controlled risk)
+9) Replace current score with money-score:
+   p_win = sigmoid(win_logit)
+   downside = max(0, -q10)
+   base = p_win*q50 - lambda*downside
+   efficiency = base / (expected_hold_bars+1)
+   final_score = efficiency * regime_weight
+10) Add position sizing:
+   - size = clip(kelly_like, min,max)
+   - kelly_like derived from p_win and win/loss magnitude from quantiles
+11) Add risk controls:
+   - daily loss limit
+   - max concurrent trades
+   - symbol exposure caps
+   - skip high funding / extreme regime if configured
+
+DELIVERABLES:
+- All code changes committed and runnable.
+- New CLI flags to enable: candidates, multi-horizon, preset selection, sizing.
+- Updated sweep logs: trades/day, expectancy, PF, Sharpe, drawdown proxy, per regime and per symbol.
+- Keep backward compatibility: old v4.9 single-horizon fixed barrier mode still works.
+
+DO NOT:
+- Remove existing features.
+- Use synthetic data.
+- Change dashboard unless explicitly required for inference outputs.
+
+After implementing, run a full validation sweep and report:
+- Best trades/day setting within 5–10/day
+- Expectancy and PF
+- Breakdown by regime and horizon
