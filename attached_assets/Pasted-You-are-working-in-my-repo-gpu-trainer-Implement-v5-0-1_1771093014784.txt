@@ -1,0 +1,53 @@
+You are working in my repo (gpu_trainer). Implement v5.0.1 fixes for 3 critical issues: unit mismatch in score, HOLD class collapse, and over-aggressive candidate eligibility. Make minimal, clean changes with logs and backward compatibility.
+
+1) FIX SCORE UNIT MISMATCH (CRITICAL)
+- Current v5 score mixes ret_mu (log-return scale ~1e-4) with mae_pred (R-units ~0.2-0.5), forcing scores negative.
+- Change v5 targets so ALL continuous targets are in R-units:
+  - In gpu_trainer/data/v5_target_generator.py compute:
+    ret_R = (close[t+h] - close[t]) / (atr[t] + eps)
+    mfe_R = MFE_price / (atr[t] + eps)
+    mae_R = MAE_price / (atr[t] + eps)
+  - Ensure no leakage: only use future bars up to horizon for these targets.
+  - Valid mask excludes atr<=0, missing horizon, NaNs.
+- Update model + loss accordingly so the ret head predicts mu_R (and sigma_R if present) in R units.
+- Update scoring in gpu_trainer/train/v5_train.py:
+  edge_long  = p_long  * (mu_R / (mae_R + 1e-3))
+  edge_short = p_short * (-mu_R / (mae_R + 1e-3))
+  penalty    = v5_score_lambda * max(0, -mu_R)   (or use sigma_R if available)
+  score = max(edge_long, edge_short) - penalty
+- Add [V5_SCORE_DIAG] logging: mu_R mean/std, mae_R mean/std, p_long mean, score p50/p90/p95/p99 computed on eligible+finite bars only.
+
+2) FIX ACTION HOLD-COLLAPSE (~49% accuracy)
+- Replace fixed deadzone with adaptive deadzone to target HOLD share ~30%:
+  - Compute deadzone_R from train distribution: deadzone_R = quantile(abs(ret_R_train), hold_target)
+  - Add CLI args: --v5-hold-target (default 0.30) and log chosen deadzone_R.
+- Reduce mfe_min gating by switching it to R units and default 0.05 (CLI --v5-mfe-min).
+- Implement class-balanced action loss:
+  - Compute class weights inverse to frequency on training set and use weighted cross-entropy.
+  - Keep CLI --v5-w-action and default to 2.0.
+- Add log: [V5_ACTION_DIST] counts and ratios for LONG/SHORT/HOLD in train/val.
+
+3) FIX CANDIDATE ELIGIBILITY TOO LOW
+- Candidate engine is too strict (eligible ~18%). Add auto-relax to target rate.
+- In candidate generator:
+  - Add CLI: --cand-target-rate (default 0.40) and --cand-min-rate (default 0.25).
+  - If candidate_rate < cand-min-rate, relax in order:
+    (a) lower cand_min_atr_pct stepwise
+    (b) disable chop rejection
+    (c) disable trigger gating
+    Keep fee-gate on if possible.
+  - Log each relaxation step clearly.
+- Add warmup behavior in v5 training: disable candidates for first 3 epochs then enable.
+
+4) SAFETY + TESTS
+- Ensure no RuntimeWarnings (use np.divide with where masks).
+- Add asserts for finite outputs where appropriate.
+- Run a quick smoke test:
+  - Print one training batch forward pass.
+  - Confirm score percentiles are finite and not all negative by construction.
+  - Confirm action label distribution is not >50% HOLD.
+
+Deliver:
+- Updated files with clean diffs.
+- Updated CLI help text.
+- A one-line example command to train v5 on BTC/ETH/SOL 15m, horizon 16, 60 epochs, candidates enabled, hold_target 0.30.

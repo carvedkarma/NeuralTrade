@@ -47,6 +47,9 @@ class CandidateConfig:
     min_candidate_rate: float = 0.10
     max_candidate_rate: float = 0.80
 
+    target_candidate_rate: float = 0.40
+    auto_relax_min_rate: float = 0.25
+
     @classmethod
     def from_cli_args(cls, args) -> "CandidateConfig":
         return cls(
@@ -56,6 +59,8 @@ class CandidateConfig:
             mean_reversion_enabled=getattr(args, 'cand_mean_reversion', True),
             fee_gate_enabled=getattr(args, 'cand_fee_gate', True),
             round_trip_cost=getattr(args, 'cand_round_trip_cost', 0.0009),
+            target_candidate_rate=getattr(args, 'cand_target_rate', 0.40),
+            auto_relax_min_rate=getattr(args, 'cand_min_rate', 0.25),
         )
 
 
@@ -257,16 +262,41 @@ def generate_candidate_mask(
 
     candidate_mask = vol_pass & (~chop_reject) & trigger_pass & fee_pass
 
-    candidate_rate = float(np.nanmean(candidate_mask[~np.isnan(atr_pct)]))
+    non_nan = ~np.isnan(atr_pct)
+    candidate_rate = float(np.nanmean(candidate_mask[non_nan])) if np.any(non_nan) else 0.0
+    relaxation_steps = []
 
-    if candidate_rate < config.min_candidate_rate:
-        logger.warning(f"[CANDIDATE] {symbol}: rate={candidate_rate:.3f} below min={config.min_candidate_rate:.3f}, relaxing filters")
-        candidate_mask = vol_pass & (~chop_reject) & fee_pass
-        candidate_rate = float(np.nanmean(candidate_mask[~np.isnan(atr_pct)]))
+    target_rate = config.auto_relax_min_rate
 
-        if candidate_rate < config.min_candidate_rate:
-            candidate_mask = vol_pass & fee_pass
-            candidate_rate = float(np.nanmean(candidate_mask[~np.isnan(atr_pct)]))
+    if candidate_rate < target_rate:
+        atr_steps = [0.0012, 0.0010, 0.0007, 0.0005]
+        for step_atr in atr_steps:
+            if candidate_rate >= target_rate:
+                break
+            if step_atr < config.min_atr_pct:
+                vol_pass_relaxed = (atr_pct >= step_atr) | np.isnan(atr_pct)
+                vol_pass_relaxed &= (realized_vol >= config.min_realized_vol_pct) | np.isnan(realized_vol)
+                candidate_mask = vol_pass_relaxed & (~chop_reject) & trigger_pass & fee_pass
+                candidate_rate = float(np.nanmean(candidate_mask[non_nan])) if np.any(non_nan) else 0.0
+                relaxation_steps.append(f"lower_atr_pct={step_atr}")
+                logger.info(f"[CANDIDATE_RELAX] {symbol}: lowered min_atr_pct to {step_atr} -> rate={candidate_rate:.3f}")
+
+    if candidate_rate < target_rate and config.chop_filter_enabled:
+        candidate_mask = vol_pass & trigger_pass & fee_pass
+        if not np.isnan(atr_pct).all():
+            candidate_rate = float(np.nanmean(candidate_mask[non_nan]))
+        relaxation_steps.append("disable_chop")
+        logger.info(f"[CANDIDATE_RELAX] {symbol}: disabled chop filter -> rate={candidate_rate:.3f}")
+
+    if candidate_rate < target_rate and has_any_trigger:
+        candidate_mask = vol_pass & fee_pass
+        if not np.isnan(atr_pct).all():
+            candidate_rate = float(np.nanmean(candidate_mask[non_nan]))
+        relaxation_steps.append("disable_triggers")
+        logger.info(f"[CANDIDATE_RELAX] {symbol}: disabled trigger gating -> rate={candidate_rate:.3f}")
+
+    if relaxation_steps:
+        logger.info(f"[CANDIDATE_RELAX] {symbol}: relaxation path: {' -> '.join(relaxation_steps)} final_rate={candidate_rate:.3f}")
 
     if candidate_rate > config.max_candidate_rate:
         pass

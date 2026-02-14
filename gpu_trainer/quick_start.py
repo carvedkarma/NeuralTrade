@@ -4776,6 +4776,10 @@ Examples:
                         help="Enable fee/spread gate in candidate filter")
     parser.add_argument("--cand-round-trip-cost", type=float, default=0.0009,
                         help="Round-trip cost for fee gate (default: 0.0009)")
+    parser.add_argument("--cand-target-rate", type=float, default=0.40,
+                        help="Target candidate eligibility rate (default: 0.40)")
+    parser.add_argument("--cand-min-rate", type=float, default=0.25,
+                        help="Min candidate rate before auto-relax triggers (default: 0.25)")
 
     parser.add_argument("--multi-preset-mode", type=str, default="fixed:standard",
                         help="Multi-preset mode: 'oracle' (best-of hindsight, research only), "
@@ -4790,8 +4794,8 @@ Examples:
                         help="v5 weight for MFE Huber loss (default: 0.25)")
     parser.add_argument("--v5-w-mae", type=float, default=0.25,
                         help="v5 weight for MAE Huber loss (default: 0.25)")
-    parser.add_argument("--v5-w-action", type=float, default=0.5,
-                        help="v5 weight for action CE loss (default: 0.5)")
+    parser.add_argument("--v5-w-action", type=float, default=2.0,
+                        help="v5 weight for action CE loss (default: 2.0)")
     parser.add_argument("--v5-w-barrier", type=float, default=0.25,
                         help="v5 weight for barrier CE loss (default: 0.25)")
     parser.add_argument("--v5-w-regime", type=float, default=0.1,
@@ -4800,10 +4804,12 @@ Examples:
                         help="v5 downside penalty lambda in score formula (default: 0.5)")
     parser.add_argument("--v5-risk-proxy", type=str, default="mae", choices=["mae", "sigma"],
                         help="v5 risk denominator in score: 'mae' or 'sigma' (default: mae)")
-    parser.add_argument("--v5-deadzone", type=float, default=0.0005,
-                        help="v5 min |ret_h| for directional action label (default: 0.0005)")
-    parser.add_argument("--v5-mfe-min", type=float, default=0.2,
-                        help="v5 min MFE in R-units for non-HOLD label (default: 0.2)")
+    parser.add_argument("--v5-hold-target", type=float, default=0.30,
+                        help="v5 target HOLD fraction for adaptive deadzone (default: 0.30)")
+    parser.add_argument("--v5-mfe-min", type=float, default=0.05,
+                        help="v5 min MFE in R-units for non-HOLD label (default: 0.05)")
+    parser.add_argument("--v5-cand-warmup", type=int, default=3,
+                        help="v5 epochs before enabling candidate mask in sweep (default: 3)")
     parser.add_argument("--v5-barrier-mode", type=str, default="fixed",
                         choices=["fixed", "oracle", "learnable"],
                         help="v5 barrier mode: fixed (single preset), oracle (hindsight, research), learnable (default: fixed)")
@@ -5333,8 +5339,9 @@ Examples:
                 risk_proxy=args.v5_risk_proxy,
                 target_tpd=args.dist_target_tpd,
                 target_tpd_tol=args.dist_target_tpd_tol,
-                deadzone=args.v5_deadzone,
+                hold_target=args.v5_hold_target,
                 mfe_min=args.v5_mfe_min,
+                cand_warmup_epochs=args.v5_cand_warmup,
                 barrier_mode=args.v5_barrier_mode,
                 barrier_presets=v5_barrier_presets,
                 use_regime_head=args.use_regime_head,

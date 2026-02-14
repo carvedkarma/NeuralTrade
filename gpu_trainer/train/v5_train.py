@@ -1,11 +1,13 @@
 """
-V5 Training Pipeline: Separating Market Forecasting from Decision Layer
+V5.0.1 Training Pipeline: Fixes for unit mismatch, HOLD collapse, candidate eligibility
 
-train_v5_model() implements:
-- V5Forecaster model with trunk + heads
-- Composite loss (ret_nll + mfe/mae Huber + action CE + barrier CE + regime CE)
-- V5 scoring: execution-aware score from predicted distributions
-- Validation sweep with candidate mask and risk controls
+Changes from v5.0:
+- All targets in R-units (ret_R, mfe_R, mae_R) — no more log-return/R-unit mixing
+- Adaptive deadzone targeting ~30% HOLD rate (--v5-hold-target)
+- Class-balanced action CE loss (inverse frequency weighting)
+- Score formula uses R-units consistently: edge = p_dir * (mu_R / (mae_R + eps))
+- Candidate warmup: disable candidates for first N epochs
+- Enhanced diagnostics: [V5_ACTION_DIST], [V5_SCORE_DIAG] with component breakdown
 """
 
 import torch
@@ -23,16 +25,16 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 log = logging.getLogger("QuickStart")
 
-V5_FEATURE_VERSION = "v5.0_forecaster"
+V5_FEATURE_VERSION = "v5.0.1_forecaster"
 
 
 class V5Dataset(Dataset):
-    def __init__(self, features, ret_h, mfe_h, mae_h, vol_h, action_labels,
+    def __init__(self, features, ret_R, mfe_R, mae_R, vol_h, action_labels,
                  valid_mask, symbol_ids=None, barrier_labels=None, barrier_soft=None):
         self.features = torch.tensor(features, dtype=torch.float32)
-        self.ret_h = torch.tensor(ret_h, dtype=torch.float32)
-        self.mfe_h = torch.tensor(mfe_h, dtype=torch.float32)
-        self.mae_h = torch.tensor(mae_h, dtype=torch.float32)
+        self.ret_R = torch.tensor(ret_R, dtype=torch.float32)
+        self.mfe_R = torch.tensor(mfe_R, dtype=torch.float32)
+        self.mae_R = torch.tensor(mae_R, dtype=torch.float32)
         self.vol_h = torch.tensor(vol_h, dtype=torch.float32)
         self.action_labels = torch.tensor(action_labels, dtype=torch.long)
         self.valid_mask = torch.tensor(valid_mask, dtype=torch.bool)
@@ -46,9 +48,9 @@ class V5Dataset(Dataset):
     def __getitem__(self, idx):
         item = {
             'features': self.features[idx],
-            'ret_h': self.ret_h[idx],
-            'mfe_h': self.mfe_h[idx],
-            'mae_h': self.mae_h[idx],
+            'ret_R': self.ret_R[idx],
+            'mfe_R': self.mfe_R[idx],
+            'mae_R': self.mae_R[idx],
             'vol_h': self.vol_h[idx],
             'action_label': self.action_labels[idx],
             'valid': self.valid_mask[idx],
@@ -63,16 +65,16 @@ class V5Dataset(Dataset):
 
 
 def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
-                    w_action=0.5, w_barrier=0.25, w_regime=0.1,
-                    barrier_mode='fixed'):
-    """Compute v5 composite loss."""
+                    w_action=2.0, w_barrier=0.25, w_regime=0.1,
+                    barrier_mode='fixed', action_weights=None):
+    """Compute v5 composite loss with class-balanced action CE."""
     valid = batch['valid']
     if valid.sum() == 0:
         return torch.tensor(0.0, device=outputs['ret_mu'].device, requires_grad=True), {}
 
     ret_mu = outputs['ret_mu'][valid].squeeze(-1)
     ret_log_sigma = outputs['ret_log_sigma'][valid].squeeze(-1)
-    ret_true = batch['ret_h'][valid]
+    ret_true = batch['ret_R'][valid]
 
     sigma = torch.exp(ret_log_sigma)
     nll = 0.5 * torch.log(2 * torch.pi * sigma ** 2 + 1e-8) + \
@@ -81,16 +83,19 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
 
     huber = nn.SmoothL1Loss()
     mfe_pred = outputs['mfe'][valid].squeeze(-1)
-    mfe_true = batch['mfe_h'][valid]
+    mfe_true = batch['mfe_R'][valid]
     L_mfe = huber(mfe_pred, mfe_true)
 
     mae_pred = outputs['mae'][valid].squeeze(-1)
-    mae_true = batch['mae_h'][valid]
+    mae_true = batch['mae_R'][valid]
     L_mae = huber(mae_pred, mae_true)
 
     action_logits = outputs['action_logits'][valid]
     action_true = batch['action_label'][valid]
-    L_action = F.cross_entropy(action_logits, action_true)
+    if action_weights is not None:
+        L_action = F.cross_entropy(action_logits, action_true, weight=action_weights)
+    else:
+        L_action = F.cross_entropy(action_logits, action_true)
 
     losses = {
         'L_ret': L_ret.item(),
@@ -129,9 +134,16 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
 
 
 def compute_v5_scores(outputs, horizon_bars=16, score_lambda=0.5, risk_proxy='mae'):
-    """Compute execution-aware v5 scores for ranking."""
-    ret_mu = outputs['ret_mu'].detach().cpu().numpy().squeeze(-1)
+    """Compute execution-aware v5 scores -- all in R-units.
+
+    Score = max(edge_long, edge_short) - penalty
+    edge_long  = p_long  * mu_R / (mae_R + eps)
+    edge_short = p_short * (-mu_R) / (mae_R + eps)
+    penalty    = lambda * max(0, -mu_R)
+    """
+    mu_R = outputs['ret_mu'].detach().cpu().numpy().squeeze(-1)
     mae_pred = outputs['mae'].detach().cpu().numpy().squeeze(-1)
+    mfe_pred = outputs['mfe'].detach().cpu().numpy().squeeze(-1)
     action_logits = outputs['action_logits'].detach().cpu().numpy()
 
     action_probs = np.exp(action_logits - np.max(action_logits, axis=1, keepdims=True))
@@ -139,22 +151,28 @@ def compute_v5_scores(outputs, horizon_bars=16, score_lambda=0.5, risk_proxy='ma
     p_long = action_probs[:, 1]
     p_short = action_probs[:, 2]
 
-    if risk_proxy == 'mae':
-        risk = np.maximum(mae_pred, 1e-6)
-    else:
-        ret_log_sigma = outputs['ret_log_sigma'].detach().cpu().numpy().squeeze(-1)
-        risk = np.maximum(np.exp(ret_log_sigma), 1e-6)
+    risk = np.maximum(mae_pred, 1e-3)
 
-    downside_penalty = score_lambda * np.maximum(0, mae_pred)
+    edge_long = p_long * np.divide(mu_R, risk, out=np.zeros_like(mu_R), where=risk > 0)
+    edge_short = p_short * np.divide(-mu_R, risk, out=np.zeros_like(mu_R), where=risk > 0)
 
-    e_long = p_long * (ret_mu / risk) - downside_penalty
-    e_short = p_short * (-ret_mu / risk) - downside_penalty
-    scores = np.maximum(e_long, e_short)
-    scores = scores / max(horizon_bars, 1)
+    penalty = score_lambda * np.maximum(0.0, -mu_R)
 
-    sides = np.where(e_long >= e_short, 1, -1)
+    scores = np.maximum(edge_long, edge_short) - penalty
 
-    return scores, sides
+    sides = np.where(edge_long >= edge_short, 1, -1)
+
+    return scores, sides, {
+        'mu_R_mean': float(np.nanmean(mu_R)),
+        'mu_R_std': float(np.nanstd(mu_R)),
+        'mae_R_mean': float(np.nanmean(mae_pred)),
+        'mfe_R_mean': float(np.nanmean(mfe_pred)),
+        'p_long_mean': float(np.nanmean(p_long)),
+        'p_short_mean': float(np.nanmean(p_short)),
+        'edge_long_mean': float(np.nanmean(edge_long)),
+        'edge_short_mean': float(np.nanmean(edge_short)),
+        'penalty_mean': float(np.nanmean(penalty)),
+    }
 
 
 def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
@@ -172,7 +190,8 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
         np.isin(precomputed_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]),
         precomputed_outcomes, "NO_CANDIDATE"
     )
-    safe_r = np.where(np.isnan(precomputed_r.astype(float)), 0.0, precomputed_r.astype(float))
+    safe_r = precomputed_r.copy().astype(float)
+    safe_r = np.where(np.isnan(safe_r), 0.0, safe_r)
 
     if candidate_mask is not None:
         non_cand = ~candidate_mask
@@ -324,11 +343,11 @@ def train_v5_model(
     checkpoint_interval=25, warmup_epochs=5, min_lr=None,
     tp_mult=2.0, sl_mult=1.5, horizon=16,
     symbols=None,
-    w_ret=1.0, w_mfe=0.25, w_mae=0.25, w_action=0.5,
+    w_ret=1.0, w_mfe=0.25, w_mae=0.25, w_action=2.0,
     w_barrier=0.25, w_regime=0.1,
     score_lambda=0.5, risk_proxy='mae',
     target_tpd=6.5, target_tpd_tol=1.5,
-    deadzone=0.0005, mfe_min=0.2,
+    hold_target=0.30, mfe_min=0.05,
     barrier_mode='fixed',
     barrier_presets=None,
     use_regime_head=False,
@@ -340,8 +359,9 @@ def train_v5_model(
     target_enter_rate_min=0.12,
     target_enter_rate_max=0.25,
     balance_search_steps=30,
+    cand_warmup_epochs=3,
 ):
-    """V5 Forecaster training pipeline."""
+    """V5.0.1 Forecaster training pipeline."""
     from config import config as app_config
     from data.candidate_generator import (
         CandidateConfig, generate_candidate_mask,
@@ -367,17 +387,19 @@ def train_v5_model(
         min_lr = lr * 0.01
 
     log.info("=" * 60)
-    log.info("  V5.0 FORECASTER - TRAINING")
+    log.info("  V5.0.1 FORECASTER - TRAINING")
     log.info("=" * 60)
     log.info(f"Version: {V5_FEATURE_VERSION}")
     log.info(f"[V5_CONFIG] w_ret={w_ret} w_mfe={w_mfe} w_mae={w_mae} w_action={w_action}")
     log.info(f"[V5_CONFIG] w_barrier={w_barrier} w_regime={w_regime}")
     log.info(f"[V5_CONFIG] score_lambda={score_lambda} risk_proxy={risk_proxy}")
-    log.info(f"[V5_CONFIG] deadzone={deadzone} mfe_min={mfe_min}")
+    log.info(f"[V5_CONFIG] hold_target={hold_target} mfe_min={mfe_min}")
     log.info(f"[V5_CONFIG] barrier_mode={barrier_mode} presets={[p.get('label','?') for p in presets]}")
     log.info(f"[V5_CONFIG] target_tpd={target_tpd} tpd_tol={target_tpd_tol}")
     log.info(f"[V5_CONFIG] candidates={candidate_config.enabled} regime_head={use_regime_head}")
+    log.info(f"[V5_CONFIG] cand_warmup_epochs={cand_warmup_epochs}")
     log.info(f"[V5_CONFIG] horizon={horizon} epochs={epochs} batch={batch_size} lr={lr}")
+    log.info(f"[V5_CONFIG] ALL targets in R-units (price_change / ATR)")
 
     if barrier_mode == 'oracle':
         log.warning("[V5] barrier_mode=oracle: WARNING hindsight leakage, research only!")
@@ -389,9 +411,9 @@ def train_v5_model(
         symbols = ["BTCUSDT"]
 
     all_features = []
-    all_ret_h = []
-    all_mfe_h = []
-    all_mae_h = []
+    all_ret_R = []
+    all_mfe_R = []
+    all_mae_R = []
     all_vol_h = []
     all_action = []
     all_valid = []
@@ -425,7 +447,7 @@ def train_v5_model(
 
         v5_targets = build_v5_targets(
             sym_df, horizon=horizon, atr_period=14,
-            deadzone=deadzone, mfe_min_r=mfe_min
+            hold_target=hold_target, mfe_min_r=mfe_min
         )
 
         sym_cand_mask = None
@@ -465,9 +487,9 @@ def train_v5_model(
         cand_arr = sym_cand_mask if sym_cand_mask is not None else np.ones(n, dtype=bool)
 
         all_features.append(sym_features_df.values.astype(np.float32))
-        all_ret_h.append(v5_targets['ret_h'][:n])
-        all_mfe_h.append(v5_targets['mfe_h'][:n])
-        all_mae_h.append(v5_targets['mae_h'][:n])
+        all_ret_R.append(v5_targets['ret_R'][:n])
+        all_mfe_R.append(v5_targets['mfe_R'][:n])
+        all_mae_R.append(v5_targets['mae_R'][:n])
         all_vol_h.append(v5_targets['vol_h'][:n])
         all_action.append(v5_targets['action_label'][:n])
         all_valid.append(v5_targets['valid_mask'][:n])
@@ -479,9 +501,9 @@ def train_v5_model(
         all_barrier_soft.append(barrier_soft[:n])
 
     features_all = np.concatenate(all_features, axis=0)
-    ret_h_all = np.concatenate(all_ret_h, axis=0)
-    mfe_h_all = np.concatenate(all_mfe_h, axis=0)
-    mae_h_all = np.concatenate(all_mae_h, axis=0)
+    ret_R_all = np.concatenate(all_ret_R, axis=0)
+    mfe_R_all = np.concatenate(all_mfe_R, axis=0)
+    mae_R_all = np.concatenate(all_mae_R, axis=0)
     vol_h_all = np.concatenate(all_vol_h, axis=0)
     action_all = np.concatenate(all_action, axis=0)
     valid_all = np.concatenate(all_valid, axis=0)
@@ -500,20 +522,57 @@ def train_v5_model(
     train_idx = np.arange(split_idx)
     val_idx = np.arange(split_idx, total_bars)
 
-    ret_h_all = np.nan_to_num(ret_h_all, nan=0.0)
-    mfe_h_all = np.nan_to_num(mfe_h_all, nan=0.0)
-    mae_h_all = np.nan_to_num(mae_h_all, nan=0.0)
+    ret_R_all = np.nan_to_num(ret_R_all, nan=0.0)
+    mfe_R_all = np.nan_to_num(mfe_R_all, nan=0.0)
+    mae_R_all = np.nan_to_num(mae_R_all, nan=0.0)
     vol_h_all = np.nan_to_num(vol_h_all, nan=0.0)
 
+    train_action = action_all[train_idx]
+    train_valid = valid_all[train_idx]
+    valid_train_action = train_action[train_valid]
+    n_hold = int(np.sum(valid_train_action == 0))
+    n_long = int(np.sum(valid_train_action == 1))
+    n_short = int(np.sum(valid_train_action == 2))
+    n_total_act = max(n_hold + n_long + n_short, 1)
+
+    log.info(f"[V5_ACTION_DIST] TRAIN: HOLD={n_hold} ({n_hold/n_total_act:.1%}) "
+             f"LONG={n_long} ({n_long/n_total_act:.1%}) SHORT={n_short} ({n_short/n_total_act:.1%})")
+
+    action_class_weights = np.ones(3, dtype=np.float32)
+    if n_hold > 0 and n_long > 0 and n_short > 0:
+        counts = np.array([n_hold, n_long, n_short], dtype=np.float64)
+        inv_freq = n_total_act / (3.0 * counts)
+        inv_freq = np.clip(inv_freq, 0.5, 3.0)
+        action_class_weights = inv_freq.astype(np.float32)
+    log.info(f"[V5_ACTION_DIST] Class weights: HOLD={action_class_weights[0]:.3f} "
+             f"LONG={action_class_weights[1]:.3f} SHORT={action_class_weights[2]:.3f}")
+
+    action_weights_tensor = torch.tensor(action_class_weights, dtype=torch.float32).to(device)
+
+    val_action = action_all[val_idx]
+    val_valid = valid_all[val_idx]
+    valid_val_action = val_action[val_valid]
+    vn_hold = int(np.sum(valid_val_action == 0))
+    vn_long = int(np.sum(valid_val_action == 1))
+    vn_short = int(np.sum(valid_val_action == 2))
+    vn_total = max(vn_hold + vn_long + vn_short, 1)
+    log.info(f"[V5_ACTION_DIST] VAL: HOLD={vn_hold} ({vn_hold/vn_total:.1%}) "
+             f"LONG={vn_long} ({vn_long/vn_total:.1%}) SHORT={vn_short} ({vn_short/vn_total:.1%})")
+
+    train_ret_valid = ret_R_all[train_idx][train_valid]
+    log.info(f"[V5_DATA_DIAG] ret_R train: mean={np.mean(train_ret_valid):.4f} "
+             f"std={np.std(train_ret_valid):.4f} p5={np.percentile(train_ret_valid,5):.4f} "
+             f"p95={np.percentile(train_ret_valid,95):.4f}")
+
     train_ds = V5Dataset(
-        features_all[train_idx], ret_h_all[train_idx], mfe_h_all[train_idx],
-        mae_h_all[train_idx], vol_h_all[train_idx], action_all[train_idx],
+        features_all[train_idx], ret_R_all[train_idx], mfe_R_all[train_idx],
+        mae_R_all[train_idx], vol_h_all[train_idx], action_all[train_idx],
         valid_all[train_idx], sym_ids_all[train_idx],
         barrier_oracle_all[train_idx], barrier_soft_all[train_idx],
     )
     val_ds = V5Dataset(
-        features_all[val_idx], ret_h_all[val_idx], mfe_h_all[val_idx],
-        mae_h_all[val_idx], vol_h_all[val_idx], action_all[val_idx],
+        features_all[val_idx], ret_R_all[val_idx], mfe_R_all[val_idx],
+        mae_R_all[val_idx], vol_h_all[val_idx], action_all[val_idx],
         valid_all[val_idx], sym_ids_all[val_idx],
         barrier_oracle_all[val_idx], barrier_soft_all[val_idx],
     )
@@ -556,7 +615,39 @@ def train_v5_model(
     val_sym_ids = sym_ids_all[val_idx]
     val_bars = len(val_idx)
 
+    ckpt_model_config = {
+        'input_dim': input_dim,
+        'hidden_dims': model_config.hidden_dims,
+        'dropout': model_config.dropout,
+        'n_barrier_presets': model_config.n_barrier_presets,
+        'enable_regime_head': model_config.enable_regime_head,
+        'n_symbols': model_config.n_symbols,
+        'symbol_embed_dim': model_config.symbol_embed_dim,
+    }
+    ckpt_train_config = {
+        'w_ret': w_ret, 'w_mfe': w_mfe, 'w_mae': w_mae,
+        'w_action': w_action, 'w_barrier': w_barrier, 'w_regime': w_regime,
+        'score_lambda': score_lambda, 'risk_proxy': risk_proxy,
+        'hold_target': hold_target, 'mfe_min': mfe_min,
+        'barrier_mode': barrier_mode,
+        'target_tpd': target_tpd, 'target_tpd_tol': target_tpd_tol,
+        'action_class_weights': action_class_weights.tolist(),
+        'v5_config': {
+            'candidate_engine': candidate_config.enabled,
+            'barrier_presets': [p.get('label', 'default') for p in presets],
+            'risk_controls': {
+                'daily_loss_limit_r': risk_controls.daily_loss_limit_r,
+                'max_concurrent_trades': risk_controls.max_concurrent_trades,
+                'max_symbol_exposure': risk_controls.max_symbol_exposure,
+            },
+        },
+    }
+
     for epoch in range(1, epochs + 1):
+        use_candidates_this_epoch = candidate_config.enabled and epoch > cand_warmup_epochs
+        if candidate_config.enabled and epoch == cand_warmup_epochs + 1:
+            log.info(f"[V5] Candidate warmup complete (epoch {epoch}), enabling candidate mask for sweep")
+
         model.train()
         train_losses = []
         loss_breakdown = {}
@@ -576,6 +667,7 @@ def train_v5_model(
                 w_ret=w_ret, w_mfe=w_mfe, w_mae=w_mae,
                 w_action=w_action, w_barrier=w_barrier, w_regime=w_regime,
                 barrier_mode=barrier_mode,
+                action_weights=action_weights_tensor,
             )
 
             optimizer.zero_grad()
@@ -612,6 +704,7 @@ def train_v5_model(
                     w_ret=w_ret, w_mfe=w_mfe, w_mae=w_mae,
                     w_action=w_action, w_barrier=w_barrier, w_regime=w_regime,
                     barrier_mode=barrier_mode,
+                    action_weights=action_weights_tensor,
                 )
                 val_losses.append(vloss.item())
 
@@ -627,10 +720,16 @@ def train_v5_model(
         action_all_val = action_all[val_idx]
         action_logits_cat = torch.cat(all_val_outputs['action_logits'], dim=0).numpy()
         action_preds = np.argmax(action_logits_cat, axis=1)
-        action_acc = np.mean(action_preds[:len(action_all_val)] == action_all_val[:len(action_preds)])
+        n_pred = min(len(action_preds), len(action_all_val))
+        action_acc = np.mean(action_preds[:n_pred] == action_all_val[:n_pred])
+
+        pred_hold = np.sum(action_preds[:n_pred] == 0)
+        pred_long = np.sum(action_preds[:n_pred] == 1)
+        pred_short = np.sum(action_preds[:n_pred] == 2)
 
         log.info(f"[V5] Epoch {epoch:03d}/{epochs} | train={avg_train_loss:.4f} val={avg_val_loss:.4f} "
-                 f"lr={current_lr:.2e} act_acc={action_acc:.3f} | {lb_str}")
+                 f"lr={current_lr:.2e} act_acc={action_acc:.3f} "
+                 f"pred[H/L/S]={pred_hold}/{pred_long}/{pred_short} | {lb_str}")
 
         do_sweep = (epoch % 5 == 0) or (epoch == epochs) or (epoch <= 3)
         if do_sweep:
@@ -639,47 +738,28 @@ def train_v5_model(
                 if all_val_outputs[k]:
                     concat_outputs[k] = torch.cat(all_val_outputs[k], dim=0)
 
-            scores, sides = compute_v5_scores(
+            scores, sides, score_diag = compute_v5_scores(
                 concat_outputs, horizon_bars=horizon,
                 score_lambda=score_lambda, risk_proxy=risk_proxy
             )
+
+            log.info(f"[V5_SCORE_DIAG] mu_R: mean={score_diag['mu_R_mean']:.4f} std={score_diag['mu_R_std']:.4f} | "
+                     f"mae_R: mean={score_diag['mae_R_mean']:.3f} mfe_R: mean={score_diag['mfe_R_mean']:.3f} | "
+                     f"p_long={score_diag['p_long_mean']:.3f} p_short={score_diag['p_short_mean']:.3f} | "
+                     f"edge_L={score_diag['edge_long_mean']:.4f} edge_S={score_diag['edge_short_mean']:.4f} "
+                     f"penalty={score_diag['penalty_mean']:.4f}")
+
+            sweep_cand_mask = val_cand_mask if use_candidates_this_epoch else None
 
             sweep_results, sweep_label, sweep_expect, sweep_pct = _run_v5_sweep(
                 scores, sides, val_outcomes, val_realized_r,
                 val_bars, epoch, tp_mult, sl_mult,
                 target_tpd=target_tpd, target_tpd_tol=target_tpd_tol,
-                candidate_mask=val_cand_mask if candidate_config.enabled else None,
+                candidate_mask=sweep_cand_mask,
                 risk_controls=risk_controls,
                 symbol_ids=val_sym_ids,
                 horizon_bars=horizon,
             )
-
-            ckpt_model_config = {
-                'input_dim': input_dim,
-                'hidden_dims': model_config.hidden_dims,
-                'dropout': model_config.dropout,
-                'n_barrier_presets': model_config.n_barrier_presets,
-                'enable_regime_head': model_config.enable_regime_head,
-                'n_symbols': model_config.n_symbols,
-                'symbol_embed_dim': model_config.symbol_embed_dim,
-            }
-            ckpt_train_config = {
-                'w_ret': w_ret, 'w_mfe': w_mfe, 'w_mae': w_mae,
-                'w_action': w_action, 'w_barrier': w_barrier, 'w_regime': w_regime,
-                'score_lambda': score_lambda, 'risk_proxy': risk_proxy,
-                'deadzone': deadzone, 'mfe_min': mfe_min,
-                'barrier_mode': barrier_mode,
-                'target_tpd': target_tpd, 'target_tpd_tol': target_tpd_tol,
-                'v5_config': {
-                    'candidate_engine': candidate_config.enabled,
-                    'barrier_presets': [p.get('label', 'default') for p in presets],
-                    'risk_controls': {
-                        'daily_loss_limit_r': risk_controls.daily_loss_limit_r,
-                        'max_concurrent_trades': risk_controls.max_concurrent_trades,
-                        'max_symbol_exposure': risk_controls.max_symbol_exposure,
-                    },
-                },
-            }
 
             if sweep_expect > best_expectancy:
                 best_expectancy = sweep_expect
@@ -708,8 +788,8 @@ def train_v5_model(
             patience = 0
             torch.save({
                 'model_state_dict': model.state_dict(),
-                'model_config': ckpt_model_config if do_sweep else {'input_dim': input_dim},
-                'train_config': ckpt_train_config if do_sweep else {},
+                'model_config': ckpt_model_config,
+                'train_config': ckpt_train_config,
                 'feature_columns': features_df_columns,
                 'n_features': input_dim,
                 'feature_version': V5_FEATURE_VERSION,

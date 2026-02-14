@@ -1,13 +1,14 @@
 """
-V5 Target Generator: Continuous, Execution-Aware Targets
+V5.0.1 Target Generator: All Continuous Targets in R-Units
 
 Computes for each bar (given a horizon):
-- ret_h: close-to-close log-return at horizon
-- mfe_h: max favorable excursion within horizon (in R-units based on ATR)
-- mae_h: max adverse excursion within horizon (in R-units based on ATR)
+- ret_R: close-to-close return at horizon, in R-units (normalized by ATR)
+- mfe_R: max favorable excursion within horizon (in R-units)
+- mae_R: max adverse excursion within horizon (in R-units)
 - vol_h: realized volatility within horizon (std of bar-to-bar returns)
 
 All targets use ONLY future bars within [i+1 .. i+horizon] -- no leakage.
+All continuous targets (ret_R, mfe_R, mae_R) are in R-units for unit consistency.
 """
 
 import numpy as np
@@ -23,8 +24,8 @@ logger = logging.getLogger(__name__)
 class V5TargetConfig:
     horizon: int = 16
     atr_period: int = 14
-    deadzone: float = 0.0005
-    mfe_min: float = 0.2
+    hold_target: float = 0.30
+    mfe_min: float = 0.05
 
 
 def compute_atr(df: pd.DataFrame, period: int = 14) -> np.ndarray:
@@ -54,22 +55,21 @@ def build_v5_targets(
     df: pd.DataFrame,
     horizon: int = 16,
     atr_period: int = 14,
-    deadzone: float = 0.0005,
-    mfe_min_r: float = 0.2,
+    hold_target: float = 0.30,
+    mfe_min_r: float = 0.05,
 ) -> Dict[str, np.ndarray]:
-    """Build v5 continuous targets from OHLCV data.
+    """Build v5 continuous targets from OHLCV data -- ALL in R-units.
 
     Args:
         df: DataFrame with 'open', 'high', 'low', 'close', 'volume' columns
         horizon: forward-looking window in bars
         atr_period: ATR lookback for R-unit normalization
-        deadzone: minimum |ret_h| to classify as directional (for action labels)
+        hold_target: target fraction of HOLD labels (adaptive deadzone)
         mfe_min_r: minimum MFE in R-units required to classify as non-HOLD
 
     Returns:
-        Dict with keys: ret_h, mfe_h, mae_h, vol_h, action_label, valid_mask, atr
-        Each is a numpy array of length len(df).
-        valid_mask is True where targets are computable (not tail bars).
+        Dict with keys: ret_R, mfe_R, mae_R, vol_h, action_label, valid_mask, atr
+        ret_R, mfe_R, mae_R are ALL in R-units (price_change / ATR).
     """
     n = len(df)
     closes = df['close'].values.astype(np.float64)
@@ -77,12 +77,12 @@ def build_v5_targets(
     lows = df['low'].values.astype(np.float64)
 
     atr = compute_atr(df, atr_period)
+    eps = 1e-10
 
-    ret_h = np.full(n, np.nan, dtype=np.float64)
-    mfe_h = np.full(n, np.nan, dtype=np.float64)
-    mae_h = np.full(n, np.nan, dtype=np.float64)
+    ret_R = np.full(n, np.nan, dtype=np.float64)
+    mfe_R = np.full(n, np.nan, dtype=np.float64)
+    mae_R = np.full(n, np.nan, dtype=np.float64)
     vol_h = np.full(n, np.nan, dtype=np.float64)
-    action_label = np.full(n, 0, dtype=np.int64)
 
     for i in range(n - horizon):
         entry_price = closes[i]
@@ -94,38 +94,48 @@ def build_v5_targets(
         future_lows = lows[i + 1: i + 1 + horizon]
 
         exit_price = future_closes[-1]
-        ret = np.log(exit_price / entry_price)
-        ret_h[i] = ret
+        ret_R[i] = (exit_price - entry_price) / (atr[i] + eps)
 
         max_high = np.max(future_highs)
         min_low = np.min(future_lows)
-        long_mfe = (max_high - entry_price) / atr[i]
-        long_mae = (entry_price - min_low) / atr[i]
-        short_mfe = (entry_price - min_low) / atr[i]
-        short_mae = (max_high - entry_price) / atr[i]
+        long_mfe = (max_high - entry_price) / (atr[i] + eps)
+        long_mae = (entry_price - min_low) / (atr[i] + eps)
+        short_mfe = (entry_price - min_low) / (atr[i] + eps)
+        short_mae = (max_high - entry_price) / (atr[i] + eps)
 
-        if ret >= 0:
-            mfe_h[i] = long_mfe
-            mae_h[i] = long_mae
+        if ret_R[i] >= 0:
+            mfe_R[i] = long_mfe
+            mae_R[i] = long_mae
         else:
-            mfe_h[i] = short_mfe
-            mae_h[i] = short_mae
+            mfe_R[i] = short_mfe
+            mae_R[i] = short_mae
 
-        bar_returns = np.diff(np.log(future_closes))
+        bar_returns = np.diff(np.log(np.maximum(future_closes, eps)))
         if len(bar_returns) > 1:
             vol_h[i] = np.std(bar_returns, ddof=1)
         else:
             vol_h[i] = 0.0
 
-        if abs(ret) < deadzone or mfe_h[i] < mfe_min_r:
+    valid_mask = (np.isfinite(ret_R) & np.isfinite(mfe_R) & np.isfinite(mae_R)
+                  & np.isfinite(vol_h) & (atr > 0))
+
+    abs_ret_valid = np.abs(ret_R[valid_mask])
+    if len(abs_ret_valid) > 0:
+        deadzone_R = float(np.percentile(abs_ret_valid, hold_target * 100))
+    else:
+        deadzone_R = 0.1
+    logger.info(f"[V5_TARGETS] Adaptive deadzone: hold_target={hold_target:.0%} -> deadzone_R={deadzone_R:.4f}")
+
+    action_label = np.full(n, 0, dtype=np.int64)
+    for i in range(n):
+        if not valid_mask[i]:
+            continue
+        if np.abs(ret_R[i]) < deadzone_R or mfe_R[i] < mfe_min_r:
             action_label[i] = 0
-        elif ret > 0:
+        elif ret_R[i] > 0:
             action_label[i] = 1
         else:
             action_label[i] = 2
-
-    valid_mask = (np.isfinite(ret_h) & np.isfinite(mfe_h) & np.isfinite(mae_h) 
-                  & np.isfinite(vol_h) & (atr > 0))
 
     n_valid = int(np.sum(valid_mask))
     n_hold = int(np.sum(action_label[valid_mask] == 0))
@@ -138,28 +148,29 @@ def build_v5_targets(
                 f"SHORT={n_short} ({n_short/max(n_valid,1):.1%})")
 
     if n_valid > 0:
-        ret_valid = ret_h[valid_mask]
-        mfe_valid = mfe_h[valid_mask]
-        mae_valid = mae_h[valid_mask]
+        ret_valid = ret_R[valid_mask]
+        mfe_valid = mfe_R[valid_mask]
+        mae_valid = mae_R[valid_mask]
         vol_valid = vol_h[valid_mask]
-        logger.info(f"[V5_TARGETS] ret_h: mean={np.mean(ret_valid):.6f} std={np.std(ret_valid):.6f} "
-                     f"p5={np.percentile(ret_valid,5):.6f} p95={np.percentile(ret_valid,95):.6f}")
-        logger.info(f"[V5_TARGETS] mfe_h: mean={np.mean(mfe_valid):.3f} mae_h: mean={np.mean(mae_valid):.3f} "
+        logger.info(f"[V5_TARGETS] ret_R: mean={np.mean(ret_valid):.4f} std={np.std(ret_valid):.4f} "
+                     f"p5={np.percentile(ret_valid,5):.4f} p95={np.percentile(ret_valid,95):.4f}")
+        logger.info(f"[V5_TARGETS] mfe_R: mean={np.mean(mfe_valid):.3f} mae_R: mean={np.mean(mae_valid):.3f} "
                      f"vol_h: mean={np.mean(vol_valid):.6f}")
 
-    assert np.all(np.isfinite(ret_h[valid_mask])), "ret_h contains NaN/Inf in valid region"
-    assert np.all(np.isfinite(mfe_h[valid_mask])), "mfe_h contains NaN/Inf in valid region"
-    assert np.all(np.isfinite(mae_h[valid_mask])), "mae_h contains NaN/Inf in valid region"
+    assert np.all(np.isfinite(ret_R[valid_mask])), "ret_R contains NaN/Inf in valid region"
+    assert np.all(np.isfinite(mfe_R[valid_mask])), "mfe_R contains NaN/Inf in valid region"
+    assert np.all(np.isfinite(mae_R[valid_mask])), "mae_R contains NaN/Inf in valid region"
     assert np.all(np.isfinite(vol_h[valid_mask])), "vol_h contains NaN/Inf in valid region"
 
     return {
-        'ret_h': ret_h.astype(np.float32),
-        'mfe_h': mfe_h.astype(np.float32),
-        'mae_h': mae_h.astype(np.float32),
+        'ret_R': ret_R.astype(np.float32),
+        'mfe_R': mfe_R.astype(np.float32),
+        'mae_R': mae_R.astype(np.float32),
         'vol_h': vol_h.astype(np.float32),
         'action_label': action_label,
         'valid_mask': valid_mask,
         'atr': atr.astype(np.float32),
+        'deadzone_R': deadzone_R,
     }
 
 
