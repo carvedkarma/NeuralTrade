@@ -724,10 +724,10 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                       r_min_expiry: float = 1.0, target_tpd: float = 5.5, target_tpd_tol: float = 1.5,
                       symbols: list = None, value_loss_weight: float = 0.5, value_clip: float = 3.0,
                       smoke_calib: bool = False, smoke_infer: bool = False,
-                      use_focal_loss: bool = True, focal_gamma: float = 1.0, focal_alpha: float = 0.35,
-                      use_ohem: bool = False, ohem_neg_pct: float = 0.20,
-                      use_edge_head: bool = True, edge_loss_weight: float = 0.3,
-                      use_soft_labels: bool = True, soft_label_temp: float = 1.5,
+                      use_focal_loss: bool = True, focal_gamma: float = 1.0, focal_alpha: float = 0.45,
+                      use_ohem: bool = False, ohem_neg_pct: float = 0.08,
+                      use_edge_head: bool = True, edge_loss_weight: float = 0.15,
+                      use_soft_labels: bool = True, soft_label_temp: float = 1.2,
                       loss_warmup_epochs: int = 10, warmup_pos_weight: float = 2.0,
                       verify_enter_metrics: bool = False):
     import torch
@@ -742,6 +742,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     log.info("  ENTER QUALITY MODEL - TRAINING")
     log.info("=" * 60)
     log.info(f"Version: {FEATURE_VERSION}")
+    log.info(f"[PR_TUNE] focal(gamma={focal_gamma}, alpha={focal_alpha}) ohem(neg_pct={ohem_neg_pct}) edge_head(weight={edge_loss_weight}) soft_labels(temp={soft_label_temp})")
     log.info(f"[PR_AUC_PACK] focal_loss={use_focal_loss} (gamma={focal_gamma}, alpha={focal_alpha})")
     log.info(f"[PR_AUC_PACK] ohem={use_ohem} (neg_pct={ohem_neg_pct})")
     log.info(f"[PR_AUC_PACK] edge_head={use_edge_head} (weight={edge_loss_weight})")
@@ -1192,6 +1193,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     patience = 0
     max_patience = 50
     min_epochs = 40
+    last_warmup_prauc = None
     history = {'train_loss': [], 'val_loss': [], 'val_precision': [], 'val_recall': [], 'val_f1': [], 'val_prauc': [], '_sep_history': []}
 
     checkpoint_dir = Path("checkpoints")
@@ -1386,6 +1388,14 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         history['val_recall'].append(recall)
         history['val_f1'].append(f1)
         history['val_prauc'].append(prauc)
+
+        if is_warmup_stage:
+            last_warmup_prauc = prauc
+        elif epoch == loss_warmup_epochs and last_warmup_prauc is not None:
+            prauc_drop = last_warmup_prauc - prauc
+            if prauc_drop > 0.06:
+                log.warning(f"[ALERT] PR-AUC collapse after FULL switch — check OHEM/edge/soft/focal config. "
+                            f"warmup_prauc={last_warmup_prauc:.3f} full_prauc={prauc:.3f} drop={prauc_drop:.3f}")
 
         current_lr = optimizer.param_groups[0]['lr']
 
@@ -2967,26 +2977,26 @@ Examples:
                         help="Disable focal loss, use standard BCE")
     parser.add_argument("--focal-gamma", type=float, default=1.0,
                         help="Focal loss gamma (default: 1.0)")
-    parser.add_argument("--focal-alpha", type=float, default=0.35,
-                        help="Focal loss alpha for ENTER=1 class (default: 0.40)")
+    parser.add_argument("--focal-alpha", type=float, default=0.45,
+                        help="Focal loss alpha for ENTER=1 class (default: 0.45)")
     parser.add_argument("--use-ohem", action="store_true", default=False,
                         help="Use Online Hard Example Mining (default: False, temporarily disabled)")
     parser.add_argument("--no-ohem", action="store_true", default=False,
                         help="Disable OHEM")
-    parser.add_argument("--ohem-neg-pct", type=float, default=0.20,
-                        help="OHEM: keep top K%% hardest negatives (default: 0.20)")
+    parser.add_argument("--ohem-neg-pct", type=float, default=0.08,
+                        help="OHEM: keep top K%% hardest negatives (default: 0.08)")
     parser.add_argument("--use-edge-head", action="store_true", default=True,
                         help="Enable edge regression head (default: True)")
     parser.add_argument("--no-edge-head", action="store_true", default=False,
                         help="Disable edge head")
-    parser.add_argument("--edge-loss-weight", type=float, default=0.3,
-                        help="Weight for edge head loss (default: 0.3)")
+    parser.add_argument("--edge-loss-weight", type=float, default=0.15,
+                        help="Weight for edge head loss (default: 0.15)")
     parser.add_argument("--use-soft-labels", action="store_true", default=True,
                         help="Use soft quality labels (default: True)")
     parser.add_argument("--no-soft-labels", action="store_true", default=False,
                         help="Disable soft quality labels")
-    parser.add_argument("--soft-label-temp", type=float, default=1.5,
-                        help="Soft label sigmoid temperature (default: 1.5)")
+    parser.add_argument("--soft-label-temp", type=float, default=1.2,
+                        help="Soft label sigmoid temperature (default: 1.2)")
     parser.add_argument("--promote-min-pr-auc", type=float, default=0.42,
                         help="Min PR-AUC for promotion gate (default: 0.42)")
     parser.add_argument("--verify-pr-auc-upgrade", action="store_true", default=False,
@@ -3389,11 +3399,11 @@ Examples:
             checks_passed += 1
 
         checks_total += 1
-        if args.ohem_neg_pct <= 0.20:
-            log.info(f"  [PASS] OHEM neg_pct={args.ohem_neg_pct} (<= 0.20)")
+        if args.ohem_neg_pct <= 0.10:
+            log.info(f"  [PASS] OHEM neg_pct={args.ohem_neg_pct} (<= 0.10)")
             checks_passed += 1
         else:
-            log.warning(f"  [FAIL] OHEM neg_pct={args.ohem_neg_pct} (expected <= 0.20)")
+            log.warning(f"  [FAIL] OHEM neg_pct={args.ohem_neg_pct} (expected <= 0.10)")
             failures.append(f"ohem_neg_pct={args.ohem_neg_pct}")
 
         checks_total += 1
@@ -3413,11 +3423,11 @@ Examples:
             failures.append("soft_labels off")
 
         checks_total += 1
-        if args.soft_label_temp <= 1.5:
-            log.info(f"  [PASS] Soft label temp={args.soft_label_temp} (<= 1.5)")
+        if args.soft_label_temp <= 1.2:
+            log.info(f"  [PASS] Soft label temp={args.soft_label_temp} (<= 1.2)")
             checks_passed += 1
         else:
-            log.warning(f"  [FAIL] Soft label temp={args.soft_label_temp} (expected <= 1.5)")
+            log.warning(f"  [FAIL] Soft label temp={args.soft_label_temp} (expected <= 1.2)")
             failures.append(f"soft_label_temp={args.soft_label_temp}")
 
         checks_total += 1
