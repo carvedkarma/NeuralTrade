@@ -1399,20 +1399,42 @@ async function downloadSingleStream(
     return { symbol, tf, fetched: 0, skipped: true };
   }
   
-  // Smart resume: start from where we left off
-  let cursor = targetStartTime;
-  // Validate maxTs is a valid number before using it
+  // Smart resume: determine download ranges
+  // We may need TWO ranges: historical backfill (targetStart -> minTs) and forward fill (maxTs -> now)
   const maxTsValid = existing.maxTs !== null && 
     typeof existing.maxTs === 'number' && 
     !isNaN(existing.maxTs) && 
     existing.maxTs > 0;
-    
-  if (maxTsValid && existing.maxTs! > targetStartTime) {
-    cursor = existing.maxTs! + msPerCandle;
-    console.log(`[NN Download] Resuming ${symbol} ${tf}: from ${new Date(cursor).toISOString().split('T')[0]} (have ${existing.count} candles)`);
-  } else {
-    console.log(`[NN Download] Starting ${symbol} ${tf}: full download from ${new Date(targetStartTime).toISOString().split('T')[0]}`);
+  const minTsValid = existing.minTs !== null && 
+    typeof existing.minTs === 'number' && 
+    !isNaN(existing.minTs) && 
+    existing.minTs > 0;
+
+  type DownloadRange = { start: number; end: number; label: string };
+  const ranges: DownloadRange[] = [];
+
+  if (minTsValid && existing.minTs! > targetStartTime + msPerCandle * 100) {
+    ranges.push({ start: targetStartTime, end: existing.minTs!, label: "historical backfill" });
+    console.log(`[NN Download] ${symbol} ${tf}: need historical backfill ${new Date(targetStartTime).toISOString().split('T')[0]} -> ${new Date(existing.minTs!).toISOString().split('T')[0]}`);
   }
+  
+  if (maxTsValid && existing.maxTs! > targetStartTime) {
+    if (existing.maxTs! + msPerCandle < now) {
+      ranges.push({ start: existing.maxTs! + msPerCandle, end: now, label: "forward fill" });
+    }
+    if (ranges.length === 0) {
+      console.log(`[NN Download] ${symbol} ${tf}: data is current, nothing to download`);
+    }
+  } else if (!maxTsValid) {
+    ranges.push({ start: targetStartTime, end: now, label: "full download" });
+  }
+
+  if (ranges.length === 0 && !minTsValid && !maxTsValid) {
+    ranges.push({ start: targetStartTime, end: now, label: "full download" });
+  }
+
+  let cursor = ranges.length > 0 ? ranges[0].start : now;
+  console.log(`[NN Download] ${symbol} ${tf}: ${ranges.length} range(s) to process, have ${existing.count} candles`);
   
   nnDownloadProgress.set(key, {
     symbol,
@@ -1437,17 +1459,21 @@ async function downloadSingleStream(
   }> = [];
   
   const downloadStartTime = Date.now();
+  const totalTimeSpan = now - targetStartTime;
   
-  while (cursor < now) {
+  for (const range of ranges) {
+    cursor = range.start;
+    console.log(`[NN Download] ${symbol} ${tf}: processing range "${range.label}" ${new Date(range.start).toISOString().split('T')[0]} -> ${new Date(range.end).toISOString().split('T')[0]}`);
+    
+  while (cursor < range.end) {
     if (nnDownloadCancelled) {
-      // Flush remaining buffer before exiting
       if (candleBuffer.length > 0) {
         await batchInsertCandles(candleBuffer);
       }
       return { symbol, tf, fetched, skipped: false };
     }
     
-    const batchEnd = Math.min(cursor + (CANDLES_PER_REQUEST * msPerCandle), now);
+    const batchEnd = Math.min(cursor + (CANDLES_PER_REQUEST * msPerCandle), range.end);
     
     try {
       const klines = await fetchKlinesBatch(symbol, tf, cursor, batchEnd);
@@ -1466,7 +1492,6 @@ async function downloadSingleStream(
         
         candleBuffer.push(...candleInserts);
         
-        // Batch insert when buffer is full
         if (candleBuffer.length >= BATCH_INSERT_SIZE) {
           await batchInsertCandles(candleBuffer);
           candleBuffer = [];
@@ -1475,7 +1500,6 @@ async function downloadSingleStream(
         fetched += klines.length;
         cursor = klines[klines.length - 1].openTime + msPerCandle;
         
-        // Update global stats for ETA
         if (globalDownloadStats) {
           globalDownloadStats.totalCandlesDownloaded += klines.length;
           const elapsed = (Date.now() - globalDownloadStats.startTime) / 1000;
@@ -1485,10 +1509,9 @@ async function downloadSingleStream(
         cursor = batchEnd + msPerCandle;
       }
       
-      const progress = Math.min(((cursor - targetStartTime) / (now - targetStartTime)) * 100, 100);
+      const progress = Math.min(((fetched + existing.count) / (totalTimeSpan / msPerCandle)) * 100, 100);
       const elapsedSec = (Date.now() - downloadStartTime) / 1000;
-      const remainingMs = now - cursor;
-      const estimatedRemaining = fetched > 0 ? (remainingMs / msPerCandle) / (fetched / elapsedSec) : 0;
+      const estimatedRemaining = fetched > 0 ? ((totalTimeSpan / msPerCandle - existing.count - fetched) / (fetched / elapsedSec)) : 0;
       
       nnDownloadProgress.set(key, {
         symbol,
@@ -1497,7 +1520,7 @@ async function downloadSingleStream(
         progress,
         candlesFetched: fetched,
         existingCandles: existing.count,
-        estimatedTimeRemaining: Math.ceil(estimatedRemaining),
+        estimatedTimeRemaining: Math.ceil(Math.max(0, estimatedRemaining)),
         currentDate: new Date(cursor).toISOString().split('T')[0]
       });
       
@@ -1505,7 +1528,6 @@ async function downloadSingleStream(
         onProgress(symbol, tf, progress);
       }
       
-      // Small delay between requests
       await new Promise(resolve => setTimeout(resolve, 30));
     } catch (error) {
       console.error(`[NN Download] Error fetching ${symbol} ${tf}:`, error);
@@ -1513,6 +1535,7 @@ async function downloadSingleStream(
       cursor = batchEnd + msPerCandle;
     }
   }
+  } // end for range
   
   // Flush remaining buffer
   if (candleBuffer.length > 0) {
