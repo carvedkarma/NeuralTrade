@@ -4782,6 +4782,32 @@ Examples:
                              "'fixed:<preset>' (e.g. fixed:standard), or 'learnable' (preset_head). "
                              "Default: fixed:standard")
 
+    parser.add_argument("--train-v5", action="store_true", default=False,
+                        help="v5.0: Train V5 Forecaster (continuous market predictions + decision layer)")
+    parser.add_argument("--v5-w-ret", type=float, default=1.0,
+                        help="v5 weight for ret_h NLL loss (default: 1.0)")
+    parser.add_argument("--v5-w-mfe", type=float, default=0.25,
+                        help="v5 weight for MFE Huber loss (default: 0.25)")
+    parser.add_argument("--v5-w-mae", type=float, default=0.25,
+                        help="v5 weight for MAE Huber loss (default: 0.25)")
+    parser.add_argument("--v5-w-action", type=float, default=0.5,
+                        help="v5 weight for action CE loss (default: 0.5)")
+    parser.add_argument("--v5-w-barrier", type=float, default=0.25,
+                        help="v5 weight for barrier CE loss (default: 0.25)")
+    parser.add_argument("--v5-w-regime", type=float, default=0.1,
+                        help="v5 weight for regime CE loss (default: 0.1)")
+    parser.add_argument("--v5-score-lambda", type=float, default=0.5,
+                        help="v5 downside penalty lambda in score formula (default: 0.5)")
+    parser.add_argument("--v5-risk-proxy", type=str, default="mae", choices=["mae", "sigma"],
+                        help="v5 risk denominator in score: 'mae' or 'sigma' (default: mae)")
+    parser.add_argument("--v5-deadzone", type=float, default=0.0005,
+                        help="v5 min |ret_h| for directional action label (default: 0.0005)")
+    parser.add_argument("--v5-mfe-min", type=float, default=0.2,
+                        help="v5 min MFE in R-units for non-HOLD label (default: 0.2)")
+    parser.add_argument("--v5-barrier-mode", type=str, default="fixed",
+                        choices=["fixed", "oracle", "learnable"],
+                        help="v5 barrier mode: fixed (single preset), oracle (hindsight, research), learnable (default: fixed)")
+
     parser.add_argument("--multi-horizon", action="store_true", default=False,
                         help="Train multiple horizons (8,16,32) and select best per bar")
     parser.add_argument("--multi-horizons", type=str, default="8,16,32",
@@ -5276,7 +5302,59 @@ Examples:
 
         data_path = data_dir / f"{symbols_list[0]}_15m.parquet"
 
-        if args.train_distributional:
+        if args.train_v5:
+            log.info("[MODE] v5.0 Forecaster training (continuous predictions + decision layer)")
+            from data.candidate_generator import (
+                CandidateConfig, RiskControls,
+            )
+            from train.v5_train import train_v5_model
+
+            cand_cfg = CandidateConfig.from_cli_args(args) if args.use_candidates else CandidateConfig(enabled=False)
+            risk_cfg = RiskControls.from_cli_args(args)
+
+            v5_barrier_presets = None
+            if args.v5_barrier_mode != 'fixed':
+                v5_barrier_presets = [p.strip() for p in args.barrier_presets.split(",")]
+
+            train_v5_model(
+                data_path, device, args.epochs, args.batch_size, args.lr,
+                checkpoint_interval=args.checkpoint_interval,
+                warmup_epochs=args.warmup_epochs, min_lr=args.min_lr,
+                tp_mult=args.tp_mult, sl_mult=args.sl_mult,
+                horizon=args.horizon,
+                symbols=symbols_list,
+                w_ret=args.v5_w_ret,
+                w_mfe=args.v5_w_mfe,
+                w_mae=args.v5_w_mae,
+                w_action=args.v5_w_action,
+                w_barrier=args.v5_w_barrier,
+                w_regime=args.v5_w_regime,
+                score_lambda=args.v5_score_lambda,
+                risk_proxy=args.v5_risk_proxy,
+                target_tpd=args.dist_target_tpd,
+                target_tpd_tol=args.dist_target_tpd_tol,
+                deadzone=args.v5_deadzone,
+                mfe_min=args.v5_mfe_min,
+                barrier_mode=args.v5_barrier_mode,
+                barrier_presets=v5_barrier_presets,
+                use_regime_head=args.use_regime_head,
+                candidate_config=cand_cfg,
+                risk_controls=risk_cfg,
+                q_min_tp=args.q_min_tp,
+                r_min_expiry_strict=args.r_min_expiry_strict,
+                auto_balance_enter_labels=args.auto_balance_enter_labels,
+                target_enter_rate=args.target_enter_rate,
+                target_enter_rate_min=args.target_enter_rate_min,
+                target_enter_rate_max=args.target_enter_rate_max,
+                balance_search_steps=args.balance_search_steps,
+            )
+
+            log.info("=" * 60)
+            log.info("  V5 TRAINING COMPLETE")
+            log.info("=" * 60)
+            return
+
+        elif args.train_distributional:
             log.info("[MODE] v4.9.0 Distributional Trade Forecaster training")
             from data.candidate_generator import (
                 CandidateConfig, MultiHorizonConfig, PresetConfig, RiskControls,
