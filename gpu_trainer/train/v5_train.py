@@ -415,7 +415,7 @@ def train_v5_model(
         log.info(f"[V5] {sym}: {len(sym_df)} bars loaded")
 
         fe = FeatureEngineer()
-        sym_features_df = fe.compute_features(sym_df)
+        sym_features_df = fe.compute_all_features(sym_df)
         sym_features_df = sym_features_df.fillna(0)
 
         if features_df_columns is None:
