@@ -4711,8 +4711,6 @@ Examples:
                         help="Comma-separated horizon bars (default: 8,16,32)")
     parser.add_argument("--cooldown-per-horizon", action="store_true", default=False,
                         help="Use separate cooldown per horizon instead of unified")
-    parser.add_argument("--cooldown", type=int, default=4,
-                        help="Unified cooldown bars between trades (default: 4)")
 
     parser.add_argument("--multi-preset", action="store_true", default=False,
                         help="Train with multiple barrier presets and select best per bar")
