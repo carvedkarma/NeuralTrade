@@ -3320,6 +3320,932 @@ def run_geometry_sweep(data_path: Path, device: str, regimes_str: str,
     return all_summaries
 
 
+def _quantile_pinball_loss(preds, targets, taus):
+    """Pinball (quantile) loss for multiple quantiles.
+
+    Args:
+        preds: [batch, n_quantiles] predicted quantile values
+        targets: [batch] realized R values
+        taus: list of quantile levels, e.g. [0.1, 0.5, 0.9]
+    Returns:
+        scalar loss averaged over batch and quantiles
+    """
+    import torch
+    targets_expanded = targets.unsqueeze(-1).expand_as(preds)
+    errors = targets_expanded - preds
+    tau_tensor = torch.tensor(taus, device=preds.device, dtype=preds.dtype).unsqueeze(0)
+    loss = torch.where(errors >= 0, tau_tensor * errors, (tau_tensor - 1.0) * errors)
+    return loss.mean()
+
+
+def _select_trades_by_score(scores, sides, precomputed_outcomes, precomputed_r, top_pct, cooldown=4):
+    """Select top X% of CANDIDATE bars by score with cooldown, return precomputed outcomes.
+
+    Ranks only candidate bars (side != 0 and valid outcome) by score,
+    selects the top `top_pct` fraction, then applies cooldown.
+    """
+    import numpy as np
+
+    n = len(scores)
+    if n == 0:
+        return np.array([]), np.array([]), np.array([], dtype=int)
+
+    candidate_mask = (sides != 0) & (~np.isnan(precomputed_r.astype(float)))
+    candidate_indices = np.where(candidate_mask)[0]
+
+    if len(candidate_indices) == 0:
+        return np.array([]), np.array([]), np.array([], dtype=int)
+
+    candidate_scores = scores[candidate_indices]
+    n_to_select = max(int(len(candidate_indices) * top_pct), 1)
+    top_in_candidates = np.argsort(-candidate_scores)[:n_to_select]
+    top_indices = candidate_indices[top_in_candidates]
+    top_indices = np.sort(top_indices)
+
+    selected_indices = []
+    last_trade = -cooldown - 1
+    for idx in top_indices:
+        if (idx - last_trade) > cooldown:
+            selected_indices.append(idx)
+            last_trade = idx
+
+    if not selected_indices:
+        return np.array([]), np.array([]), np.array([], dtype=int)
+
+    sel = np.array(selected_indices)
+    sel_outcomes = precomputed_outcomes[sel]
+    sel_r = precomputed_r[sel]
+
+    valid_mask = ~np.isnan(sel_r.astype(float))
+    sel_outcomes = sel_outcomes[valid_mask]
+    sel_r = sel_r[valid_mask]
+    sel = sel[valid_mask]
+
+    return sel_outcomes, sel_r, sel
+
+
+def _run_distributional_sweep(scores, sides, precomputed_outcomes, precomputed_r,
+                               val_bars, epoch, tp_mult, sl_mult,
+                               target_tpd=6.5, target_tpd_tol=1.5, min_trades=30):
+    """Score-based sweep for distributional model: rank by score, evaluate top percentiles."""
+    import numpy as np
+
+    TOP_PCTS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+    COOLDOWN = 4
+
+    safe_outcomes = np.where(
+        np.isin(precomputed_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]),
+        precomputed_outcomes,
+        "NO_CANDIDATE"
+    )
+    safe_r = np.where(np.isnan(precomputed_r.astype(float)), 0.0, precomputed_r.astype(float))
+
+    sweep_results = []
+
+    for pct in TOP_PCTS:
+        sel_outcomes, sel_r, sel_idx = _select_trades_by_score(
+            scores, sides, safe_outcomes, safe_r, pct, COOLDOWN
+        )
+        m = _compute_sweep_metrics(sel_outcomes, sel_r, val_bars)
+        m['label'] = f"top{int(pct*100)}%"
+        m['pct'] = pct
+        sweep_results.append(m)
+
+    tpd_lo = target_tpd - target_tpd_tol
+    tpd_hi = target_tpd + target_tpd_tol
+    best_freq_score = float('-inf')
+    best_freq_label = ""
+    best_freq_pct = 0.0
+    best_any_score = float('-inf')
+    best_any_label = ""
+    best_any_pct = 0.0
+
+    for m in sweep_results:
+        if m['trades'] < min_trades:
+            continue
+        if tpd_lo <= m['trades_per_day'] <= tpd_hi:
+            if m['expect'] > best_freq_score:
+                best_freq_score = m['expect']
+                best_freq_label = m['label']
+                best_freq_pct = m['pct']
+        if m['expect'] > best_any_score:
+            best_any_score = m['expect']
+            best_any_label = m['label']
+            best_any_pct = m['pct']
+
+    if best_freq_label:
+        best_label = best_freq_label
+        best_score_val = best_freq_score
+        best_pct = best_freq_pct
+    elif best_any_label:
+        best_label = best_any_label
+        best_score_val = best_any_score
+        best_pct = best_any_pct
+    else:
+        best_label = ""
+        best_score_val = float('-inf')
+        best_pct = 0.0
+
+    score_arr = np.array(scores)
+    sp50 = float(np.percentile(score_arr, 50))
+    sp75 = float(np.percentile(score_arr, 75))
+    sp90 = float(np.percentile(score_arr, 90))
+    sp95 = float(np.percentile(score_arr, 95))
+    sp99 = float(np.percentile(score_arr, 99))
+    val_days = val_bars / 96.0
+    log.info("-" * 120)
+    log.info("score percentiles (val): p50=%.4f p75=%.4f p90=%.4f p95=%.4f p99=%.4f", sp50, sp75, sp90, sp95, sp99)
+    log.info("DISTRIBUTIONAL SWEEP (epoch %d) | cooldown=%d | TP=%.1fx SL=%.1fx ATR | val_days=%.1f | target=%.1f±%.1f tpd",
+             epoch, COOLDOWN, tp_mult, sl_mult, val_days, target_tpd, target_tpd_tol)
+    log.info("%-8s %5s %8s %6s %6s %5s | %6s %6s %6s | %4s %4s %4s | %5s",
+             "Select", "Trds", "Expect", "WR", "Shrpe", "PF",
+             "WinR", "LosR", "MedR", "%TP", "%SL", "%EX", "T/Day")
+    log.info("-" * 120)
+    for m in sweep_results:
+        in_freq = tpd_lo <= m['trades_per_day'] <= tpd_hi
+        marker = ""
+        if m['label'] == best_label and m['trades'] >= min_trades and best_score_val > float('-inf'):
+            marker = " <<< BEST"
+        log.info("%-8s %5d %+8.3f %5.1f%% %6.2f %5.2f | %+6.3f %+6.3f %+6.3f | %3.0f%% %3.0f%% %3.0f%% | %5.1f%s",
+                 m['label'], m['trades'], m['expect'], m['winrate']*100, m['sharpe'], m['pf'],
+                 m['avg_win_r'], m['avg_loss_r'], m['median_r'],
+                 m['pct_tp']*100, m['pct_sl']*100, m['pct_exp']*100, m['trades_per_day'], marker)
+    log.info("-" * 120)
+
+    return sweep_results, best_label, best_score_val, best_pct
+
+
+def train_distributional_model(data_path, device, epochs, batch_size, lr,
+                                checkpoint_interval=25, warmup_epochs=5, min_lr=None,
+                                tp_mult=2.0, sl_mult=1.5, horizon=16,
+                                symbols=None,
+                                w_mse=1.0, w_quantile=0.5, w_bce=0.5, w_regime=0.0,
+                                score_lambda=0.5, value_clip=3.0,
+                                target_tpd=6.5, target_tpd_tol=1.5,
+                                use_regime_head=False,
+                                q_min_tp=0.3, r_min_expiry_strict=1.0,
+                                auto_balance_enter_labels=True,
+                                target_enter_rate=0.18,
+                                target_enter_rate_min=0.12,
+                                target_enter_rate_max=0.25,
+                                balance_search_steps=30,
+                                w_dir=0.3):
+    """v4.9.0 Distributional Trade Forecaster.
+
+    Replaces binary ENTER classification with distributional outputs:
+    - value_head -> E[R] (Huber loss)
+    - quantile_head -> q10, q50, q90 of realized R (pinball loss)
+    - win_head -> p(R > 0) (BCE loss)
+    - optional regime_head -> chop/trend/highvol (CE loss)
+
+    Scoring: score = sigmoid(win) * E_R - lambda * max(0, -q10)
+    """
+    import torch
+    import torch.nn as nn
+    import numpy as np
+    import pandas as pd
+    from torch.utils.data import Dataset, DataLoader
+    from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+    from config import config
+
+    log.info("=" * 60)
+    log.info("  v4.9.0 DISTRIBUTIONAL TRADE FORECASTER - TRAINING")
+    log.info("=" * 60)
+    log.info(f"Version: {FEATURE_VERSION}")
+    log.info(f"[DIST_CONFIG] w_mse={w_mse} w_quantile={w_quantile} w_bce={w_bce} w_regime={w_regime}")
+    log.info(f"[DIST_CONFIG] score_lambda={score_lambda} value_clip={value_clip}")
+    log.info(f"[DIST_CONFIG] target_tpd={target_tpd} tpd_tol={target_tpd_tol}")
+    log.info(f"[DIST_CONFIG] use_regime_head={use_regime_head}")
+    log.info(f"[DIST_CONFIG] quantile_taus=[0.10, 0.50, 0.90]")
+
+    from data.regression_targets import RegressionTargetGenerator
+    reg_gen = RegressionTargetGenerator(horizon_periods=horizon)
+
+    from data.pipeline import FeatureEngineer
+    data_dir = Path("data_cache")
+    sequence_length = config.data.sequence_length
+
+    QUANTILE_TAUS = [0.10, 0.50, 0.90]
+
+    # === DATA LOADING (reuse existing pipeline) ===
+    if symbols and len(symbols) > 1:
+        log.info(f"[DATA] Multi-asset distributional training: symbols={symbols}")
+        all_train_features = []
+        all_train_r = []
+        all_train_win = []
+        all_train_sym_ids = []
+        all_train_dir = []
+        all_train_dir_conf = []
+        all_val_features = []
+        all_val_r = []
+        all_val_win = []
+        all_val_outcomes = []
+        all_val_sides = []
+        all_val_sym_ids = []
+        all_val_dir = []
+        all_val_dir_conf = []
+        feature_columns_ref = None
+
+        for sym_idx, sym in enumerate(symbols):
+            sym_data_path = data_dir / f"{sym}_15m.parquet"
+            if not sym_data_path.exists():
+                log.error(f"[DATA] No data for {sym} at {sym_data_path} — skipping")
+                continue
+
+            sym_df = pd.read_parquet(sym_data_path)
+            log.info(f"[DATA] {sym} (sym_idx={sym_idx}): {len(sym_df)} candles loaded")
+
+            sym_engineer = FeatureEngineer()
+            sym_features_df = sym_engineer.compute_all_features(sym_df)
+            sym_features_df = sym_features_df.fillna(0)
+
+            sym_funding_df = fetch_funding_rates(sym_df, data_dir)
+            sym_funding_features = compute_funding_features(sym_df, sym_funding_df)
+            sym_features_df = pd.concat([sym_features_df, sym_funding_features], axis=1)
+            sym_features_df = sym_features_df.fillna(0)
+
+            sym_oi_df = fetch_open_interest_hist(sym_df, data_dir, symbol=sym)
+            sym_oi_enabled = _oi_sanity_check(sym_df, sym_oi_df, symbol=sym)
+            if sym_oi_enabled:
+                sym_oi_features = compute_oi_features(sym_df, sym_oi_df)
+            else:
+                sym_oi_features = pd.DataFrame(
+                    np.zeros((len(sym_df), OI_FEATURE_COUNT)),
+                    columns=OI_FEATURE_NAMES,
+                    index=sym_df.index,
+                )
+            sym_features_df = pd.concat([sym_features_df, sym_oi_features], axis=1)
+            sym_features_df = sym_features_df.fillna(0)
+
+            if feature_columns_ref is None:
+                feature_columns_ref = list(sym_features_df.columns)
+
+            htf_cols = [c for c in sym_features_df.columns if c.startswith('h1_') or c.startswith('h4_')]
+            sym_htf_df = sym_features_df[htf_cols].copy()
+
+            from data.regression_targets import generate_v47_quality_targets
+            sym_label_df = generate_v47_quality_targets(
+                sym_df, sym_htf_df,
+                horizon_periods=horizon,
+                tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
+                q_min_tp=q_min_tp,
+                r_min_expiry_strict=r_min_expiry_strict,
+                soft_label_temp=1.0,
+                auto_balance=auto_balance_enter_labels,
+                target_enter_rate=target_enter_rate,
+                target_enter_rate_min=target_enter_rate_min,
+                target_enter_rate_max=target_enter_rate_max,
+                balance_search_steps=balance_search_steps,
+            )
+
+            sym_realized_r = sym_label_df['realized_r'].values.astype(np.float32)
+            sym_win = (sym_realized_r > 0).astype(np.float32)
+            sym_side = sym_label_df['side_hint'].values.astype(np.int64)
+            sym_outcomes = sym_label_df['outcome'].values
+            sym_dir_target = sym_label_df['y_dir'].values.astype(np.float32)
+            sym_dir_conf = sym_label_df['y_dir_conf'].values.astype(np.float32)
+
+            valid_start = sequence_length
+            sym_feat_np = sym_features_df.values[valid_start:].astype(np.float32)
+            sym_r_np = sym_realized_r[valid_start:]
+            sym_win_np = sym_win[valid_start:]
+            sym_side_np = sym_side[valid_start:]
+            sym_outcomes_np = sym_outcomes[valid_start:]
+            sym_dir_np = sym_dir_target[valid_start:]
+            sym_dir_conf_np = sym_dir_conf[valid_start:]
+
+            n_sym = len(sym_feat_np)
+            train_end_sym = int(n_sym * 0.70)
+            val_end_sym = int(n_sym * 0.85)
+
+            log.info(f"[SPLIT] sym={sym} total={n_sym} train={train_end_sym} val={val_end_sym - train_end_sym}")
+
+            all_train_features.append(sym_feat_np[:train_end_sym])
+            all_train_r.append(sym_r_np[:train_end_sym])
+            all_train_win.append(sym_win_np[:train_end_sym])
+            all_train_sym_ids.append(np.full(train_end_sym, sym_idx, dtype=np.int64))
+            all_train_dir.append(sym_dir_np[:train_end_sym])
+            all_train_dir_conf.append(sym_dir_conf_np[:train_end_sym])
+
+            val_size = val_end_sym - train_end_sym
+            all_val_features.append(sym_feat_np[train_end_sym:val_end_sym])
+            all_val_r.append(sym_r_np[train_end_sym:val_end_sym])
+            all_val_win.append(sym_win_np[train_end_sym:val_end_sym])
+            all_val_outcomes.append(sym_outcomes_np[train_end_sym:val_end_sym])
+            all_val_sides.append(sym_side_np[train_end_sym:val_end_sym])
+            all_val_sym_ids.append(np.full(val_size, sym_idx, dtype=np.int64))
+            all_val_dir.append(sym_dir_np[train_end_sym:val_end_sym])
+            all_val_dir_conf.append(sym_dir_conf_np[train_end_sym:val_end_sym])
+
+        train_features_raw = np.concatenate(all_train_features, axis=0)
+        train_r = np.concatenate(all_train_r, axis=0)
+        train_win = np.concatenate(all_train_win, axis=0)
+        train_sym_ids = np.concatenate(all_train_sym_ids, axis=0)
+        train_dir = np.concatenate(all_train_dir, axis=0)
+        train_dir_conf = np.concatenate(all_train_dir_conf, axis=0)
+
+        val_features_raw = np.concatenate(all_val_features, axis=0)
+        val_r = np.concatenate(all_val_r, axis=0)
+        val_win = np.concatenate(all_val_win, axis=0)
+        val_outcomes = np.concatenate(all_val_outcomes, axis=0)
+        val_sides = np.concatenate(all_val_sides, axis=0)
+        val_sym_ids = np.concatenate(all_val_sym_ids, axis=0)
+        val_dir = np.concatenate(all_val_dir, axis=0)
+        val_dir_conf = np.concatenate(all_val_dir_conf, axis=0)
+
+        n_symbols = len(symbols)
+        features_columns_list = feature_columns_ref
+        input_dim = train_features_raw.shape[1]
+        val_bars = len(val_r)
+
+        engineer = FeatureEngineer()
+        train_features_df_scaled = pd.DataFrame(train_features_raw, columns=features_columns_list)
+        engineer.fit_scalers(train_features_df_scaled)
+        clip_range = 5.0
+        train_scaled = engineer.transform_and_clip(train_features_df_scaled, clip_range=clip_range).values.astype(np.float32)
+        val_features_df_scaled = pd.DataFrame(val_features_raw, columns=features_columns_list)
+        val_scaled = engineer.transform_and_clip(val_features_df_scaled, clip_range=clip_range).values.astype(np.float32)
+
+        def clean_dist(features, r_vals, win_vals, sym_ids, dir_t, dir_c, name):
+            features = np.where(np.isinf(features), np.nan, features)
+            mask = np.isnan(features).any(axis=1)
+            valid = ~mask
+            dropped = mask.sum()
+            if dropped > 0:
+                log.info(f"  {name}: dropped {dropped} NaN rows")
+            return features[valid], r_vals[valid], win_vals[valid], sym_ids[valid], dir_t[valid], dir_c[valid]
+
+        train_scaled, train_r, train_win, train_sym_ids, train_dir, train_dir_conf = clean_dist(
+            train_scaled, train_r, train_win, train_sym_ids, train_dir, train_dir_conf, "Train")
+
+        val_r_raw = val_r.copy()
+        val_outcomes_raw = val_outcomes.copy()
+        val_sides_raw = val_sides.copy()
+
+        val_clean_mask = ~np.isnan(np.where(np.isinf(val_scaled), np.nan, val_scaled)).any(axis=1)
+        val_scaled = val_scaled[val_clean_mask]
+        val_r = val_r[val_clean_mask]
+        val_win = val_win[val_clean_mask]
+        val_sym_ids = val_sym_ids[val_clean_mask]
+        val_dir = val_dir[val_clean_mask]
+        val_dir_conf = val_dir_conf[val_clean_mask]
+        val_outcomes = val_outcomes[val_clean_mask]
+        val_sides = val_sides[val_clean_mask]
+
+        features_df_columns = features_columns_list
+
+    else:
+        n_symbols = 1
+        df = pd.read_parquet(data_path)
+        log.info(f"Loaded {len(df)} candles")
+
+        engineer = FeatureEngineer()
+        features_df = engineer.compute_all_features(df)
+        features_df = features_df.fillna(0)
+
+        funding_df = fetch_funding_rates(df, data_dir)
+        funding_features = compute_funding_features(df, funding_df)
+        features_df = pd.concat([features_df, funding_features], axis=1)
+        features_df = features_df.fillna(0)
+
+        oi_df = fetch_open_interest_hist(df, data_dir)
+        oi_enabled = _oi_sanity_check(df, oi_df)
+        if oi_enabled:
+            oi_features = compute_oi_features(df, oi_df)
+        else:
+            oi_features = pd.DataFrame(
+                np.zeros((len(df), OI_FEATURE_COUNT)),
+                columns=OI_FEATURE_NAMES,
+                index=df.index,
+            )
+        features_df = pd.concat([features_df, oi_features], axis=1)
+        features_df = features_df.fillna(0)
+
+        htf_cols = [c for c in features_df.columns if c.startswith('h1_') or c.startswith('h4_')]
+        htf_features_df = features_df[htf_cols].copy()
+
+        from data.regression_targets import generate_v47_quality_targets
+        label_df = generate_v47_quality_targets(
+            df, htf_features_df,
+            horizon_periods=horizon,
+            tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
+            q_min_tp=q_min_tp,
+            r_min_expiry_strict=r_min_expiry_strict,
+            soft_label_temp=1.0,
+            auto_balance=auto_balance_enter_labels,
+            target_enter_rate=target_enter_rate,
+            target_enter_rate_min=target_enter_rate_min,
+            target_enter_rate_max=target_enter_rate_max,
+            balance_search_steps=balance_search_steps,
+        )
+
+        realized_r = label_df['realized_r'].values.astype(np.float32)
+        win_labels = (realized_r > 0).astype(np.float32)
+        side_hints = label_df['side_hint'].values.astype(np.int64)
+        precomputed_outcomes = label_df['outcome'].values
+        dir_target = label_df['y_dir'].values.astype(np.float32)
+        dir_conf = label_df['y_dir_conf'].values.astype(np.float32)
+
+        valid_start = sequence_length
+        features_np = features_df.values[valid_start:].astype(np.float32)
+        r_np = realized_r[valid_start:]
+        win_np = win_labels[valid_start:]
+        side_np = side_hints[valid_start:]
+        outcomes_np = precomputed_outcomes[valid_start:]
+        dir_np = dir_target[valid_start:]
+        dir_conf_np = dir_conf[valid_start:]
+
+        n_total = len(features_np)
+        purge_gap = horizon + sequence_length
+        val_samples = max(int(n_total * 0.1), purge_gap)
+        train_samples = n_total - purge_gap - val_samples
+
+        if train_samples < sequence_length * 3:
+            log.error(f"Not enough data for training: {train_samples} samples")
+            sys.exit(1)
+
+        train_end = train_samples
+        val_start_idx = train_end + purge_gap
+        val_end = val_start_idx + val_samples
+
+        log.info(f"Data split: train={train_samples}, purge={purge_gap}, val={val_samples}")
+
+        train_features_raw = features_np[:train_end]
+        train_r = r_np[:train_end]
+        train_win = win_np[:train_end]
+        train_dir = dir_np[:train_end]
+        train_dir_conf = dir_conf_np[:train_end]
+
+        val_features_raw = features_np[val_start_idx:val_end]
+        val_r = r_np[val_start_idx:val_end]
+        val_win = win_np[val_start_idx:val_end]
+        val_outcomes = outcomes_np[val_start_idx:val_end]
+        val_sides = side_np[val_start_idx:val_end]
+        val_dir = dir_np[val_start_idx:val_end]
+        val_dir_conf = dir_conf_np[val_start_idx:val_end]
+        val_bars = val_samples
+
+        train_features_df_scaled = pd.DataFrame(train_features_raw, columns=features_df.columns)
+        engineer.fit_scalers(train_features_df_scaled)
+        clip_range = 5.0
+        train_scaled = engineer.transform_and_clip(train_features_df_scaled, clip_range=clip_range).values.astype(np.float32)
+        val_features_df_scaled = pd.DataFrame(val_features_raw, columns=features_df.columns)
+        val_scaled = engineer.transform_and_clip(val_features_df_scaled, clip_range=clip_range).values.astype(np.float32)
+
+        def clean_dist_single(features, r_vals, win_vals, dir_t, dir_c, name):
+            features = np.where(np.isinf(features), np.nan, features)
+            mask = np.isnan(features).any(axis=1)
+            valid = ~mask
+            dropped = mask.sum()
+            if dropped > 0:
+                log.info(f"  {name}: dropped {dropped} NaN rows")
+            return features[valid], r_vals[valid], win_vals[valid], dir_t[valid], dir_c[valid]
+
+        train_scaled, train_r, train_win, train_dir, train_dir_conf = clean_dist_single(
+            train_scaled, train_r, train_win, train_dir, train_dir_conf, "Train")
+
+        val_clean_mask = ~np.isnan(np.where(np.isinf(val_scaled), np.nan, val_scaled)).any(axis=1)
+        val_scaled = val_scaled[val_clean_mask]
+        val_r = val_r[val_clean_mask]
+        val_win = val_win[val_clean_mask]
+        val_outcomes = val_outcomes[val_clean_mask]
+        val_sides = val_sides[val_clean_mask]
+        val_dir = val_dir[val_clean_mask]
+        val_dir_conf = val_dir_conf[val_clean_mask]
+
+        train_sym_ids = np.zeros(len(train_r), dtype=np.int64)
+        val_sym_ids = np.zeros(len(val_r), dtype=np.int64)
+        features_df_columns = list(features_df.columns)
+        input_dim = features_np.shape[1]
+
+    # === TARGET PREPARATION ===
+    train_value_targets = np.clip(np.nan_to_num(train_r, nan=0.0), -value_clip, value_clip).astype(np.float32)
+    val_value_targets = np.clip(np.nan_to_num(val_r, nan=0.0), -value_clip, value_clip).astype(np.float32)
+    train_quantile_targets = np.clip(np.nan_to_num(train_r, nan=0.0), -value_clip, value_clip).astype(np.float32)
+    val_quantile_targets = np.clip(np.nan_to_num(val_r, nan=0.0), -value_clip, value_clip).astype(np.float32)
+    train_win_targets = train_win.astype(np.float32)
+    val_win_targets = val_win.astype(np.float32)
+
+    win_rate = float(train_win_targets.mean())
+    r_mean = float(train_value_targets.mean())
+    r_std = float(train_value_targets.std())
+    log.info(f"[DIST_DATA] train_samples={len(train_value_targets)} val_samples={len(val_value_targets)}")
+    log.info(f"[DIST_DATA] win_rate={win_rate:.3f} R_mean={r_mean:.4f} R_std={r_std:.4f}")
+    log.info(f"[DIST_DATA] R quantiles: q10={np.percentile(train_value_targets, 10):.4f} "
+             f"q50={np.percentile(train_value_targets, 50):.4f} q90={np.percentile(train_value_targets, 90):.4f}")
+
+    # === DATASET ===
+    class DistDataset(Dataset):
+        def __init__(self, features, r_targets, q_targets, win_targets, symbol_ids, dir_targets, dir_conf_targets, seq_len):
+            self.features = features.astype(np.float32)
+            self.r_targets = r_targets.astype(np.float32)
+            self.q_targets = q_targets.astype(np.float32)
+            self.win_targets = win_targets.astype(np.float32)
+            self.symbol_ids = symbol_ids.astype(np.int64)
+            self.dir_targets = dir_targets.astype(np.float32)
+            self.dir_conf_targets = dir_conf_targets.astype(np.float32)
+            self.seq_len = seq_len
+            self.valid_indices = list(range(seq_len, len(features)))
+
+        def __len__(self):
+            return len(self.valid_indices)
+
+        def __getitem__(self, idx):
+            actual_idx = self.valid_indices[idx]
+            start = actual_idx - self.seq_len
+            seq = self.features[start:actual_idx]
+            return (
+                torch.from_numpy(seq),
+                torch.tensor(self.r_targets[actual_idx], dtype=torch.float32),
+                torch.tensor(self.q_targets[actual_idx], dtype=torch.float32),
+                torch.tensor(self.win_targets[actual_idx], dtype=torch.float32),
+                torch.tensor(self.symbol_ids[actual_idx], dtype=torch.long),
+                torch.tensor(self.dir_targets[actual_idx], dtype=torch.float32),
+                torch.tensor(self.dir_conf_targets[actual_idx], dtype=torch.float32),
+            )
+
+    train_dataset = DistDataset(train_scaled, train_value_targets, train_quantile_targets, train_win_targets,
+                                train_sym_ids, train_dir, train_dir_conf, sequence_length)
+    val_dataset = DistDataset(val_scaled, val_value_targets, val_quantile_targets, val_win_targets,
+                              val_sym_ids, val_dir, val_dir_conf, sequence_length)
+
+    log.info(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+
+    # === MODEL ===
+    from models.simple_mlp import EnhancedMultiHeadMLP, EnhancedMultiHeadMLP_Config
+    mlp_config = EnhancedMultiHeadMLP_Config(
+        input_dim=input_dim,
+        hidden_dims=[512, 256, 128, 64],
+        num_classes=3,
+        dropout=0.3,
+        use_layer_norm=True,
+        use_residual=True,
+        enable_enter_head=False,
+        enable_quantile_head=False,
+        enable_vol_state_head=False,
+        enable_mu_head=False,
+        enable_sigma_head=False,
+        enable_value_head=True,
+        enable_edge_head=False,
+        enable_dir_head=True,
+        enable_htf_head=False,
+        enable_win_head=True,
+        enable_dist_quantile_head=True,
+        enable_regime_head=use_regime_head,
+        n_symbols=n_symbols,
+        symbol_embed_dim=4 if n_symbols > 1 else 0,
+    )
+    model = EnhancedMultiHeadMLP(mlp_config)
+    model.name = "DistributionalForecaster"
+    model.to(device)
+    log.info(f"Model: DistributionalForecaster ({model.parameters_count():,} parameters)")
+    log.info(f"Active heads: value_head (E[R]) + dist_quantile_head (q10/q50/q90) + win_head (p_win) + dir_head")
+    if use_regime_head:
+        log.info(f"  + regime_head (chop/trend/highvol)")
+
+    with torch.no_grad():
+        win_bias = float(np.log(max(win_rate, 0.01) / max(1.0 - win_rate, 0.01)))
+        model.win_head[-1].bias.fill_(win_bias)
+        log.info(f"[BIAS_INIT] win_head bias={win_bias:.4f} (win_rate={win_rate:.3f})")
+
+        model.value_head[-1].bias.fill_(r_mean)
+        log.info(f"[BIAS_INIT] value_head bias={r_mean:.4f} (R_mean)")
+
+        q10_init = float(np.percentile(train_value_targets, 10))
+        q50_init = float(np.percentile(train_value_targets, 50))
+        q90_init = float(np.percentile(train_value_targets, 90))
+        model.dist_quantile_head[-1].bias.data.copy_(
+            torch.tensor([q10_init, q50_init, q90_init])
+        )
+        log.info(f"[BIAS_INIT] dist_quantile_head bias=[{q10_init:.4f}, {q50_init:.4f}, {q90_init:.4f}]")
+
+    # === LOSS FUNCTIONS ===
+    value_criterion = nn.HuberLoss(delta=1.0)
+    win_criterion = nn.BCEWithLogitsLoss()
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    effective_min_lr = min_lr if min_lr is not None else lr * 0.05
+    warmup_sched = LinearLR(optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup_epochs)
+    cosine_sched = CosineAnnealingLR(optimizer, T_max=max(epochs - warmup_epochs, 1), eta_min=effective_min_lr)
+    scheduler = SequentialLR(optimizer, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_epochs])
+    for pg in optimizer.param_groups:
+        pg['lr'] = lr * 1e-3
+
+    log.info(f"Training for {epochs} epochs (lr={lr}, batch={batch_size})")
+    log.info(f"Loss: {w_mse}*Huber(E_R) + {w_quantile}*Pinball(q10/q50/q90) + {w_bce}*BCE(p_win) + {w_dir}*BCE(dir)")
+    log.info(f"Score: sigmoid(win) * E_R - {score_lambda} * max(0, -q10)")
+
+    best_val_loss = float('inf')
+    best_expectancy = float('-inf')
+    best_expectancy_pct = 0.0
+    patience = 0
+    max_patience = 50
+    min_epochs = 40
+    history = {'train_loss': [], 'val_loss': [], 'val_value_mae': [], 'val_win_auc': [],
+               'val_expectancy': [], 'val_best_tpd': []}
+
+    checkpoint_dir = Path("checkpoints")
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    for epoch in range(epochs):
+        current_lr = optimizer.param_groups[0]['lr']
+        log.info(f"[DIST_EPOCH] epoch={epoch+1}/{epochs} lr={current_lr:.2e}")
+
+        model.train()
+        total_loss = 0
+        n_batches = 0
+
+        for batch in train_loader:
+            feat_batch, r_batch, q_batch, win_batch, sym_batch, dir_batch, dir_conf_batch = batch
+            feat_batch = feat_batch.to(device)
+            r_batch = r_batch.to(device)
+            q_batch = q_batch.to(device)
+            win_batch = win_batch.to(device)
+            sym_batch = sym_batch.to(device)
+            dir_batch = dir_batch.to(device)
+            dir_conf_batch = dir_conf_batch.to(device)
+
+            optimizer.zero_grad()
+            output = model.forward_multihead(feat_batch, symbol_ids=sym_batch if n_symbols > 1 else None)
+
+            value_pred = output.value_logits.squeeze(-1)
+            value_loss = value_criterion(value_pred, r_batch)
+
+            quantile_pred = output.dist_quantiles
+            quantile_loss = _quantile_pinball_loss(quantile_pred, q_batch, QUANTILE_TAUS)
+
+            win_pred = output.win_logits.squeeze(-1)
+            win_loss = win_criterion(win_pred, win_batch)
+
+            loss = w_mse * value_loss + w_quantile * quantile_loss + w_bce * win_loss
+
+            if output.dir_logits is not None:
+                dir_pred = output.dir_logits.squeeze(-1)
+                dir_loss = nn.functional.binary_cross_entropy_with_logits(
+                    dir_pred, dir_batch, weight=dir_conf_batch, reduction='mean'
+                )
+                loss = loss + w_dir * dir_loss
+
+            if use_regime_head and output.regime_logits is not None:
+                pass
+
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.7)
+            optimizer.step()
+
+            total_loss += loss.item()
+            n_batches += 1
+
+        scheduler.step()
+        avg_train_loss = total_loss / max(n_batches, 1)
+
+        # === VALIDATION ===
+        model.eval()
+        val_loss_total = 0
+        val_n = 0
+        all_value_preds = []
+        all_value_tgts = []
+        all_q_preds = []
+        all_win_logits = []
+        all_win_tgts = []
+        all_dir_probs = []
+        all_dir_tgts = []
+
+        with torch.no_grad():
+            for batch in val_loader:
+                feat_batch, r_batch, q_batch, win_batch, sym_batch, dir_batch, dir_conf_batch = batch
+                feat_batch = feat_batch.to(device)
+                r_batch = r_batch.to(device)
+                q_batch = q_batch.to(device)
+                win_batch = win_batch.to(device)
+                sym_batch = sym_batch.to(device)
+                dir_batch = dir_batch.to(device)
+                dir_conf_batch = dir_conf_batch.to(device)
+
+                output = model.forward_multihead(feat_batch, symbol_ids=sym_batch if n_symbols > 1 else None)
+
+                vp = output.value_logits.squeeze(-1)
+                v_loss = value_criterion(vp, r_batch)
+                qp = output.dist_quantiles
+                q_loss = _quantile_pinball_loss(qp, q_batch, QUANTILE_TAUS)
+                wp = output.win_logits.squeeze(-1)
+                w_loss = win_criterion(wp, win_batch)
+
+                batch_loss = w_mse * v_loss + w_quantile * q_loss + w_bce * w_loss
+
+                if output.dir_logits is not None:
+                    dp = output.dir_logits.squeeze(-1)
+                    d_loss = nn.functional.binary_cross_entropy_with_logits(
+                        dp, dir_batch, weight=dir_conf_batch, reduction='mean'
+                    )
+                    batch_loss = batch_loss + w_dir * d_loss
+                    all_dir_probs.extend(torch.sigmoid(dp).cpu().numpy())
+                    all_dir_tgts.extend(dir_batch.cpu().numpy())
+
+                val_loss_total += batch_loss.item()
+                val_n += 1
+
+                all_value_preds.extend(vp.cpu().numpy())
+                all_value_tgts.extend(r_batch.cpu().numpy())
+                all_q_preds.extend(qp.cpu().numpy())
+                all_win_logits.extend(wp.cpu().numpy())
+                all_win_tgts.extend(win_batch.cpu().numpy())
+
+        avg_val_loss = val_loss_total / max(val_n, 1)
+
+        all_vp = np.array(all_value_preds)
+        all_vt = np.array(all_value_tgts)
+        value_mae = float(np.mean(np.abs(all_vp - all_vt)))
+        value_rmse = float(np.sqrt(np.mean((all_vp - all_vt)**2)))
+
+        all_qp = np.array(all_q_preds)
+        q10_preds = all_qp[:, 0]
+        q50_preds = all_qp[:, 1]
+        q90_preds = all_qp[:, 2]
+        q10_coverage = float((all_vt >= q10_preds).mean())
+        q50_coverage = float((all_vt >= q50_preds).mean())
+        q90_coverage = float((all_vt >= q90_preds).mean())
+
+        all_wl = np.array(all_win_logits)
+        all_wt = np.array(all_win_tgts)
+        win_probs = 1.0 / (1.0 + np.exp(-all_wl))
+        try:
+            from sklearn.metrics import roc_auc_score
+            if len(np.unique(all_wt)) > 1:
+                win_auc = float(roc_auc_score(all_wt, win_probs))
+            else:
+                win_auc = 0.5
+        except Exception:
+            win_auc = 0.5
+
+        # === COMPUTE SCORE ===
+        scores = win_probs * all_vp - score_lambda * np.maximum(0, -q10_preds)
+
+        dir_auc = 0.0
+        if all_dir_probs:
+            all_dp = np.array(all_dir_probs)
+            all_dt = np.array(all_dir_tgts)
+            try:
+                if len(np.unique((all_dt >= 0.5).astype(int))) > 1:
+                    dir_auc = float(roc_auc_score((all_dt >= 0.5).astype(int), all_dp))
+            except Exception:
+                pass
+
+        history['train_loss'].append(avg_train_loss)
+        history['val_loss'].append(avg_val_loss)
+        history['val_value_mae'].append(value_mae)
+        history['val_win_auc'].append(win_auc)
+
+        log.info(
+            f"Epoch {epoch+1}/{epochs} | Loss T:{avg_train_loss:.4f} V:{avg_val_loss:.4f} | "
+            f"E[R]_MAE:{value_mae:.4f} E[R]_RMSE:{value_rmse:.4f} | "
+            f"WinAUC:{win_auc:.3f} | DirAUC:{dir_auc:.3f}"
+        )
+        log.info(
+            f"[QUANTILE_COV] q10={q10_coverage:.3f}(target=0.90) q50={q50_coverage:.3f}(target=0.50) "
+            f"q90={q90_coverage:.3f}(target=0.10)"
+        )
+        log.info(
+            f"[SCORE] mean={scores.mean():.4f} std={scores.std():.4f} "
+            f"p50={np.percentile(scores, 50):.4f} p90={np.percentile(scores, 90):.4f} "
+            f"p99={np.percentile(scores, 99):.4f}"
+        )
+
+        # === DISTRIBUTIONAL SWEEP ===
+        SWEEP_INTERVAL = 5
+        sweep_expect = 0.0
+        sweep_pct = 0.0
+        if (epoch + 1) % SWEEP_INTERVAL == 0 or epoch == 0:
+            sweep_start = sequence_length
+            sweep_scores = scores[sweep_start:]
+            sweep_sides = val_sides[sweep_start:]
+            sweep_outcomes = val_outcomes[sweep_start:]
+            sweep_r = val_r[sweep_start:]
+
+            n_sweep = min(len(sweep_scores), len(sweep_outcomes))
+            sweep_results, best_label, best_score_val, best_pct_val = _run_distributional_sweep(
+                sweep_scores[:n_sweep], sweep_sides[:n_sweep],
+                sweep_outcomes[:n_sweep], sweep_r[:n_sweep],
+                val_bars, epoch + 1, tp_mult, sl_mult,
+                target_tpd=target_tpd, target_tpd_tol=target_tpd_tol,
+            )
+            sweep_expect = best_score_val if best_score_val > float('-inf') else 0.0
+            sweep_pct = best_pct_val
+
+        history['val_expectancy'].append(sweep_expect)
+        history['val_best_tpd'].append(sweep_pct)
+
+        # === CHECKPOINT SAVING ===
+        ckpt_model_config = {
+            'input_dim': input_dim,
+            'hidden_dims': [512, 256, 128, 64],
+            'num_classes': 3,
+            'dropout': 0.3,
+            'use_layer_norm': True,
+            'use_residual': True,
+            'enable_enter_head': False,
+            'enable_quantile_head': False,
+            'enable_vol_state_head': False,
+            'enable_mu_head': False,
+            'enable_sigma_head': False,
+            'enable_value_head': True,
+            'enable_edge_head': False,
+            'enable_dir_head': True,
+            'enable_htf_head': False,
+            'enable_win_head': True,
+            'enable_dist_quantile_head': True,
+            'enable_regime_head': use_regime_head,
+            'n_symbols': n_symbols,
+            'symbol_embed_dim': 4 if n_symbols > 1 else 0,
+        }
+        ckpt_train_config = {
+            'model_type': 'distributional_trade_forecaster',
+            'version': 'v4.9.0',
+            'w_mse': w_mse,
+            'w_quantile': w_quantile,
+            'w_bce': w_bce,
+            'w_regime': w_regime,
+            'w_dir': w_dir,
+            'score_lambda': score_lambda,
+            'value_clip': value_clip,
+            'quantile_taus': QUANTILE_TAUS,
+            'target_tpd': target_tpd,
+            'target_tpd_tol': target_tpd_tol,
+        }
+
+        if sweep_expect > best_expectancy:
+            best_expectancy = sweep_expect
+            best_expectancy_pct = sweep_pct
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'model_config': ckpt_model_config,
+                'train_config': ckpt_train_config,
+                'feature_columns': features_df_columns,
+                'n_features': input_dim,
+                'feature_version': FEATURE_VERSION,
+                'model_type': 'distributional_trade_forecaster',
+                'barrier_config': {'tp_mult': tp_mult, 'sl_mult': sl_mult, 'horizon': horizon},
+                'best_expectancy': best_expectancy,
+                'best_expectancy_pct': best_expectancy_pct,
+                'trained_at': datetime.now().isoformat(),
+            }, checkpoint_dir / "best_dist_expectancy.pt")
+            log.info(f"[CKPT] New best expectancy={best_expectancy:.4f} at top{int(best_expectancy_pct*100)}%")
+
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            patience = 0
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'model_config': ckpt_model_config,
+                'train_config': ckpt_train_config,
+                'feature_columns': features_df_columns,
+                'n_features': input_dim,
+                'feature_version': FEATURE_VERSION,
+                'model_type': 'distributional_trade_forecaster',
+                'barrier_config': {'tp_mult': tp_mult, 'sl_mult': sl_mult, 'horizon': horizon},
+                'best_val_loss': best_val_loss,
+                'trained_at': datetime.now().isoformat(),
+            }, checkpoint_dir / "best_dist_loss.pt")
+        else:
+            patience += 1
+
+        if epoch + 1 >= min_epochs and patience >= max_patience:
+            log.info(f"Early stopping at epoch {epoch+1} (patience={max_patience})")
+            break
+
+        if checkpoint_interval > 0 and (epoch + 1) % checkpoint_interval == 0 and (epoch + 1) < epochs:
+            log.info(f"  CHECKPOINT @ Epoch {epoch+1}/{epochs} | Val Loss: {avg_val_loss:.4f} | Best Expect: {best_expectancy:.4f}")
+            try:
+                resp = input("Continue training? (Y/n): ").strip().lower()
+                if resp == 'n':
+                    log.info("User stopped training at checkpoint")
+                    break
+            except EOFError:
+                pass
+
+    # === POST-TRAINING: Load best checkpoint ===
+    scaler_path = checkpoint_dir / "scaler_dist.joblib"
+    engineer.save_scalers(str(scaler_path))
+    log.info(f"Scaler saved to {scaler_path}")
+
+    best_ckpt = checkpoint_dir / "best_dist_expectancy.pt"
+    if best_ckpt.exists():
+        ckpt = torch.load(best_ckpt, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt['model_state_dict'])
+        log.info(f"Loaded best expectancy checkpoint (E={best_expectancy:.4f} at top{int(best_expectancy_pct*100)}%)")
+
+    log.info("=" * 60)
+    log.info("  DISTRIBUTIONAL TRAINING COMPLETE")
+    log.info("=" * 60)
+    log.info(f"  Best val loss: {best_val_loss:.4f}")
+    log.info(f"  Best expectancy: {best_expectancy:.4f} at top{int(best_expectancy_pct*100)}%")
+
+    return model, engineer, features_df_columns, history
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=f"BTC Futures GPU Trainer - ENTER QUALITY Model ({SYSTEM_VERSION})",
@@ -3521,6 +4447,27 @@ Examples:
                         help="Max pos_weight guardrail (default: 6.0)")
     parser.add_argument("--verify-v47-labels", action="store_true", default=False,
                         help="Run v4.7 label verification and generate report")
+
+    parser.add_argument("--train-distributional", action="store_true", default=False,
+                        help="v4.9.0: Train distributional trade forecaster instead of binary ENTER model")
+    parser.add_argument("--dist-w-mse", type=float, default=1.0,
+                        help="Weight for E[R] Huber loss in distributional mode (default: 1.0)")
+    parser.add_argument("--dist-w-quantile", type=float, default=0.5,
+                        help="Weight for quantile pinball loss (default: 0.5)")
+    parser.add_argument("--dist-w-bce", type=float, default=0.5,
+                        help="Weight for p(win) BCE loss (default: 0.5)")
+    parser.add_argument("--dist-w-regime", type=float, default=0.0,
+                        help="Weight for regime CE loss (default: 0.0, disabled)")
+    parser.add_argument("--dist-w-dir", type=float, default=0.3,
+                        help="Weight for direction loss in distributional mode (default: 0.3)")
+    parser.add_argument("--score-lambda", type=float, default=0.5,
+                        help="Lambda for downside penalty in score: sigmoid(win)*E_R - lambda*max(0,-q10) (default: 0.5)")
+    parser.add_argument("--use-regime-head", action="store_true", default=False,
+                        help="Enable regime classification head (chop/trend/highvol) in distributional mode")
+    parser.add_argument("--dist-target-tpd", type=float, default=6.5,
+                        help="Target trades/day for distributional sweep (default: 6.5)")
+    parser.add_argument("--dist-target-tpd-tol", type=float, default=1.5,
+                        help="Tolerance for distributional target tpd (default: 1.5)")
 
     parser.add_argument("--live", action="store_true",
                         help="Run continuous live multi-asset inference loop")
@@ -3993,55 +4940,82 @@ Examples:
 
         data_path = data_dir / f"{symbols_list[0]}_15m.parquet"
 
-        use_focal = args.use_focal_loss and not args.no_focal_loss
-        use_ohem = args.use_ohem and not args.no_ohem
-        use_edge = args.use_edge_head and not args.no_edge_head
-        use_soft = args.use_soft_labels and not args.no_soft_labels
+        if args.train_distributional:
+            log.info("[MODE] v4.9.0 Distributional Trade Forecaster training")
+            model, engineer, feature_columns, history = train_distributional_model(
+                data_path, device, args.epochs, args.batch_size, args.lr,
+                checkpoint_interval=args.checkpoint_interval,
+                warmup_epochs=args.warmup_epochs, min_lr=args.min_lr,
+                tp_mult=args.tp_mult, sl_mult=args.sl_mult,
+                horizon=args.horizon,
+                symbols=symbols_list,
+                w_mse=args.dist_w_mse,
+                w_quantile=args.dist_w_quantile,
+                w_bce=args.dist_w_bce,
+                w_regime=args.dist_w_regime,
+                score_lambda=args.score_lambda,
+                target_tpd=args.dist_target_tpd,
+                target_tpd_tol=args.dist_target_tpd_tol,
+                use_regime_head=args.use_regime_head,
+                q_min_tp=args.q_min_tp,
+                r_min_expiry_strict=args.r_min_expiry_strict,
+                auto_balance_enter_labels=args.auto_balance_enter_labels,
+                target_enter_rate=args.target_enter_rate,
+                target_enter_rate_min=args.target_enter_rate_min,
+                target_enter_rate_max=args.target_enter_rate_max,
+                balance_search_steps=args.balance_search_steps,
+                w_dir=args.dist_w_dir,
+            )
+        else:
+            use_focal = args.use_focal_loss and not args.no_focal_loss
+            use_ohem = args.use_ohem and not args.no_ohem
+            use_edge = args.use_edge_head and not args.no_edge_head
+            use_soft = args.use_soft_labels and not args.no_soft_labels
 
-        model, engineer, feature_columns, history = train_enter_model(
-            data_path, device, args.epochs, args.batch_size, args.lr,
-            checkpoint_interval=args.checkpoint_interval,
-            warmup_epochs=args.warmup_epochs, min_lr=args.min_lr,
-            tp_mult=args.tp_mult, sl_mult=args.sl_mult,
-            horizon=args.horizon, slope_eps=args.slope_eps,
-            r_min_expiry=args.r_min_expiry,
-            target_tpd=args.target_tpd, target_tpd_tol=args.target_tpd_tol,
-            symbols=symbols_list, value_loss_weight=args.value_loss_weight,
-            value_clip=args.value_clip,
-            smoke_calib=args.smoke_calib, smoke_infer=args.smoke_infer,
-            use_focal_loss=use_focal, focal_gamma=args.focal_gamma,
-            focal_alpha=args.focal_alpha, use_ohem=use_ohem,
-            ohem_neg_pct=args.ohem_neg_pct, use_edge_head=use_edge,
-            edge_loss_weight=args.edge_loss_weight,
-            use_soft_labels=use_soft,
-            soft_label_temp=args.soft_label_temp,
-            loss_warmup_epochs=args.loss_warmup_epochs,
-            warmup_pos_weight=args.warmup_pos_weight,
-            transition_epochs=args.transition_epochs,
-            focal_gamma_final=args.focal_gamma_final,
-            lr_drop_on_transition=args.lr_drop_on_transition,
-            disable_ohem_during_transition=args.disable_ohem_during_transition and not args.enable_ohem_during_transition,
-            collapse_guard=args.collapse_guard and not args.no_collapse_guard,
-            collapse_guard_pred1=args.collapse_guard_pred1,
-            collapse_guard_sep=args.collapse_guard_sep,
-            collapse_guard_freeze_epochs=args.collapse_guard_freeze_epochs,
-            verify_enter_metrics=args.verify_enter_metrics,
-            w_quality=args.w_quality,
-            w_dir=args.w_dir,
-            w_htf=args.w_htf,
-            verify_v46_separation=args.verify_v46_separation,
-            use_v47_labels=args.use_v47_labels,
-            q_min_tp=args.q_min_tp,
-            r_min_expiry_strict=args.r_min_expiry_strict,
-            auto_balance_enter_labels=args.auto_balance_enter_labels,
-            target_enter_rate=args.target_enter_rate,
-            target_enter_rate_min=args.target_enter_rate_min,
-            target_enter_rate_max=args.target_enter_rate_max,
-            balance_search_steps=args.balance_search_steps,
-            pos_weight_min=args.pos_weight_min,
-            pos_weight_max=args.pos_weight_max,
-            verify_v47_labels=args.verify_v47_labels,
-        )
+            model, engineer, feature_columns, history = train_enter_model(
+                data_path, device, args.epochs, args.batch_size, args.lr,
+                checkpoint_interval=args.checkpoint_interval,
+                warmup_epochs=args.warmup_epochs, min_lr=args.min_lr,
+                tp_mult=args.tp_mult, sl_mult=args.sl_mult,
+                horizon=args.horizon, slope_eps=args.slope_eps,
+                r_min_expiry=args.r_min_expiry,
+                target_tpd=args.target_tpd, target_tpd_tol=args.target_tpd_tol,
+                symbols=symbols_list, value_loss_weight=args.value_loss_weight,
+                value_clip=args.value_clip,
+                smoke_calib=args.smoke_calib, smoke_infer=args.smoke_infer,
+                use_focal_loss=use_focal, focal_gamma=args.focal_gamma,
+                focal_alpha=args.focal_alpha, use_ohem=use_ohem,
+                ohem_neg_pct=args.ohem_neg_pct, use_edge_head=use_edge,
+                edge_loss_weight=args.edge_loss_weight,
+                use_soft_labels=use_soft,
+                soft_label_temp=args.soft_label_temp,
+                loss_warmup_epochs=args.loss_warmup_epochs,
+                warmup_pos_weight=args.warmup_pos_weight,
+                transition_epochs=args.transition_epochs,
+                focal_gamma_final=args.focal_gamma_final,
+                lr_drop_on_transition=args.lr_drop_on_transition,
+                disable_ohem_during_transition=args.disable_ohem_during_transition and not args.enable_ohem_during_transition,
+                collapse_guard=args.collapse_guard and not args.no_collapse_guard,
+                collapse_guard_pred1=args.collapse_guard_pred1,
+                collapse_guard_sep=args.collapse_guard_sep,
+                collapse_guard_freeze_epochs=args.collapse_guard_freeze_epochs,
+                verify_enter_metrics=args.verify_enter_metrics,
+                w_quality=args.w_quality,
+                w_dir=args.w_dir,
+                w_htf=args.w_htf,
+                verify_v46_separation=args.verify_v46_separation,
+                use_v47_labels=args.use_v47_labels,
+                q_min_tp=args.q_min_tp,
+                r_min_expiry_strict=args.r_min_expiry_strict,
+                auto_balance_enter_labels=args.auto_balance_enter_labels,
+                target_enter_rate=args.target_enter_rate,
+                target_enter_rate_min=args.target_enter_rate_min,
+                target_enter_rate_max=args.target_enter_rate_max,
+                balance_search_steps=args.balance_search_steps,
+                pos_weight_min=args.pos_weight_min,
+                pos_weight_max=args.pos_weight_max,
+                verify_v47_labels=args.verify_v47_labels,
+            )
 
         print()
         log.info("=" * 60)

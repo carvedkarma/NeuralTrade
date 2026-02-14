@@ -244,6 +244,11 @@ class MultiHeadOutput:
     # v4.6 HTF score head (4-class: 0=none, 1=weak, 2=moderate, 3=strong)
     htf_logits: Optional[torch.Tensor] = None  # [batch, 4] raw logits for HTF classification
 
+    # v4.9 Distributional heads
+    win_logits: Optional[torch.Tensor] = None  # [batch, 1] raw logits for p(R>0) BCE
+    dist_quantiles: Optional[torch.Tensor] = None  # [batch, 3] q10/q50/q90 of realized R
+    regime_logits: Optional[torch.Tensor] = None  # [batch, 3] chop/trend/highvol classification
+
 
 class QuantileHead(nn.Module):
     """

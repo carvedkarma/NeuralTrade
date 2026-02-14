@@ -552,6 +552,11 @@ class EnhancedMultiHeadMLP_Config:
     enable_dir_head: bool = False    # v4.6 direction head (binary LONG/SHORT)
     enable_htf_head: bool = False    # v4.6 HTF score head (4-class)
 
+    # v4.9 Distributional heads
+    enable_win_head: bool = False    # p(R>0) binary head
+    enable_dist_quantile_head: bool = False  # q10/q50/q90 quantile head (3 outputs)
+    enable_regime_head: bool = False  # chop/trend/highvol classification (3-class)
+
     n_symbols: int = 1  # Number of distinct symbols for multi-asset embedding
     symbol_embed_dim: int = 4  # Embedding dimension per symbol
     
@@ -738,6 +743,42 @@ class EnhancedMultiHeadMLP(nn.Module):
             )
         else:
             self.htf_head = None
+
+        # === HEAD 11: Win Head (v4.9 p(R>0) binary) ===
+        if getattr(config, 'enable_win_head', False):
+            self.win_head = nn.Sequential(
+                nn.Linear(self.trunk_dim, 32),
+                nn.LayerNorm(32),
+                nn.GELU(),
+                nn.Dropout(0.2),
+                nn.Linear(32, 1)
+            )
+        else:
+            self.win_head = None
+
+        # === HEAD 12: Distributional Quantile Head (v4.9 q10/q50/q90) ===
+        if getattr(config, 'enable_dist_quantile_head', False):
+            self.dist_quantile_head = nn.Sequential(
+                nn.Linear(self.trunk_dim, 64),
+                nn.LayerNorm(64),
+                nn.GELU(),
+                nn.Dropout(0.2),
+                nn.Linear(64, 3)
+            )
+        else:
+            self.dist_quantile_head = None
+
+        # === HEAD 13: Regime Head (v4.9 chop/trend/highvol 3-class) ===
+        if getattr(config, 'enable_regime_head', False):
+            self.regime_head = nn.Sequential(
+                nn.Linear(self.trunk_dim, 32),
+                nn.LayerNorm(32),
+                nn.GELU(),
+                nn.Dropout(0.2),
+                nn.Linear(32, 3)
+            )
+        else:
+            self.regime_head = None
         
         self.n_candle_steps = config.n_candle_steps
         self._init_weights()
@@ -753,6 +794,9 @@ class EnhancedMultiHeadMLP(nn.Module):
             'enable_edge': config.enable_edge_head,
             'enable_dir': config.enable_dir_head,
             'enable_htf': config.enable_htf_head,
+            'enable_win': getattr(config, 'enable_win_head', False),
+            'enable_dist_quantile': getattr(config, 'enable_dist_quantile_head', False),
+            'enable_regime': getattr(config, 'enable_regime_head', False),
         }
     
     def _init_weights(self):
@@ -867,6 +911,36 @@ class EnhancedMultiHeadMLP(nn.Module):
         else:
             htf_logits = None
         
+        # === Win Head (v4.9 p(R>0)) ===
+        win_head = getattr(self, 'win_head', None)
+        if win_head is not None:
+            win_logits = win_head(features)
+            win_logits = torch.clamp(win_logits, -5.0, 5.0)
+        else:
+            win_logits = None
+
+        # === Distributional Quantile Head (v4.9 q10/q50/q90) ===
+        dist_quantile_head = getattr(self, 'dist_quantile_head', None)
+        if dist_quantile_head is not None:
+            dq_raw = dist_quantile_head(features)
+            q10_raw = dq_raw[:, 0:1]
+            delta_50 = torch.nn.functional.softplus(dq_raw[:, 1:2])
+            delta_90 = torch.nn.functional.softplus(dq_raw[:, 2:3])
+            q10 = torch.clamp(q10_raw, -5.0, 5.0)
+            q50 = torch.clamp(q10 + delta_50, -5.0, 5.0)
+            q90 = torch.clamp(q50 + delta_90, -5.0, 5.0)
+            dist_q_raw = torch.cat([q10, q50, q90], dim=-1)
+        else:
+            dist_q_raw = None
+
+        # === Regime Head (v4.9 chop/trend/highvol) ===
+        regime_head_mod = getattr(self, 'regime_head', None)
+        if regime_head_mod is not None:
+            regime_logits = regime_head_mod(features)
+            regime_logits = torch.clamp(regime_logits, -10.0, 10.0)
+        else:
+            regime_logits = None
+
         # Placeholders for unused heads
         entry_offset = torch.zeros(batch_size, 1, device=device)
         sl_distance = torch.ones(batch_size, 1, device=device) * 0.01
@@ -890,6 +964,9 @@ class EnhancedMultiHeadMLP(nn.Module):
             edge_logits=edge_logits,
             dir_logits=dir_logits,
             htf_logits=htf_logits,
+            win_logits=win_logits,
+            dist_quantiles=dist_q_raw,
+            regime_logits=regime_logits,
         )
     
     def parameters_count(self) -> int:
@@ -922,6 +999,12 @@ class EnhancedMultiHeadMLP(nn.Module):
             config.enable_dir_head = False
         if not hasattr(config, 'enable_htf_head'):
             config.enable_htf_head = False
+        if not hasattr(config, 'enable_win_head'):
+            config.enable_win_head = False
+        if not hasattr(config, 'enable_dist_quantile_head'):
+            config.enable_dist_quantile_head = False
+        if not hasattr(config, 'enable_regime_head'):
+            config.enable_regime_head = False
         model = cls(config)
         model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         model.created_at = checkpoint.get('created_at', '')
