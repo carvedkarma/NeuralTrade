@@ -729,6 +729,13 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                       use_edge_head: bool = True, edge_loss_weight: float = 0.15,
                       use_soft_labels: bool = True, soft_label_temp: float = 1.2,
                       loss_warmup_epochs: int = 10, warmup_pos_weight: float = 2.0,
+                      transition_epochs: int = 15, focal_gamma_final: float = 0.5,
+                      lr_drop_on_transition: float = 0.65,
+                      disable_ohem_during_transition: bool = True,
+                      collapse_guard: bool = True,
+                      collapse_guard_pred1: float = 0.98,
+                      collapse_guard_sep: float = 0.02,
+                      collapse_guard_freeze_epochs: int = 5,
                       verify_enter_metrics: bool = False,
                       w_quality: float = 1.0, w_dir: float = 0.5, w_htf: float = 0.5,
                       verify_v46_separation: bool = False,
@@ -763,6 +770,9 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
     log.info(f"[V47_CONFIG] use_v47_labels={use_v47_labels} q_min_tp={q_min_tp} r_min_expiry_strict={r_min_expiry_strict}")
     log.info(f"[V47_CONFIG] auto_balance={auto_balance_enter_labels} target_rate={target_enter_rate} range=[{target_enter_rate_min}, {target_enter_rate_max}]")
     log.info(f"[V47_CONFIG] pos_weight_guardrails=[{pos_weight_min}, {pos_weight_max}]")
+    log.info(f"[TRANSITION] transition_epochs={transition_epochs} focal_gamma_final={focal_gamma_final} lr_drop={lr_drop_on_transition}")
+    log.info(f"[TRANSITION] disable_ohem_during_transition={disable_ohem_during_transition}")
+    log.info(f"[COLLAPSE_GUARD] enabled={collapse_guard} pred1_thresh={collapse_guard_pred1} sep_thresh={collapse_guard_sep} freeze={collapse_guard_freeze_epochs}")
 
     from data.regression_targets import RegressionTargetGenerator
     reg_gen = RegressionTargetGenerator(horizon_periods=horizon)
@@ -1268,19 +1278,48 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
 
     configured_pos_weight = pos_weight
     warmup_pw = min(configured_pos_weight, warmup_pos_weight)
+    transition_end_epoch = loss_warmup_epochs + transition_epochs
 
     def make_warmup_criterion(pw):
         return nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pw]).to(device))
 
+    def make_transition_criterion(current_pw, current_gamma):
+        if use_focal_loss and current_gamma > 0.01:
+            def transition_focal(logits, targets, _gamma=current_gamma, _alpha=focal_alpha):
+                bce = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+                p_t = torch.sigmoid(logits)
+                p_t = torch.where(targets >= 0.5, p_t, 1 - p_t)
+                focal_weight = (1 - p_t) ** _gamma
+                alpha_t = torch.where(targets >= 0.5, _alpha, 1 - _alpha)
+                pw_weight = torch.where(targets >= 0.5, current_pw, 1.0)
+                return (alpha_t * focal_weight * bce * pw_weight).mean()
+            return transition_focal
+        else:
+            return nn.BCEWithLogitsLoss(pos_weight=torch.tensor([current_pw]).to(device))
+
     def make_full_criterion():
         if use_focal_loss:
-            return focal_bce_with_logits
+            def full_focal(logits, targets, _gamma=focal_gamma_final, _alpha=focal_alpha):
+                bce = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+                p_t = torch.sigmoid(logits)
+                p_t = torch.where(targets >= 0.5, p_t, 1 - p_t)
+                focal_weight = (1 - p_t) ** _gamma
+                alpha_t = torch.where(targets >= 0.5, _alpha, 1 - _alpha)
+                pw_weight = torch.where(targets >= 0.5, configured_pos_weight, 1.0)
+                return (alpha_t * focal_weight * bce * pw_weight).mean()
+            return full_focal
         else:
             c = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([configured_pos_weight]).to(device))
             return lambda logits, targets: c(logits, targets)
 
-    log.info(f"[LOSS] Two-stage schedule: warmup={loss_warmup_epochs} epochs (plain BCE, pos_weight={warmup_pw:.2f}) -> full (focal={'on' if use_focal_loss else 'off'}, ohem={'on' if use_ohem else 'off'})")
-    log.info(f"[LOSS] Full stage: focal gamma={focal_gamma}, alpha={focal_alpha}, pos_weight={configured_pos_weight:.2f}")
+    log.info(f"[LOSS] Three-stage schedule: WARMUP={loss_warmup_epochs}ep (BCE, pw={warmup_pw:.2f}) -> TRANSITION={transition_epochs}ep (ramp pw/gamma) -> FULL (focal={'on' if use_focal_loss else 'off'}, ohem={'on' if use_ohem else 'off'})")
+    log.info(f"[LOSS] TRANSITION: pos_weight {warmup_pw:.2f}->{configured_pos_weight:.2f}, focal_gamma 0.00->{focal_gamma_final:.2f}, ohem={'off' if disable_ohem_during_transition else 'on'}")
+    log.info(f"[LOSS] FULL stage: focal gamma={focal_gamma_final}, alpha={focal_alpha}, pos_weight={configured_pos_weight:.2f}")
+
+    collapse_guard_consecutive_pred1 = 0
+    collapse_guard_active_remaining = 0
+    collapse_guard_pw_backup = configured_pos_weight
+    lr_dropped_at_transition = False
 
     value_criterion = nn.HuberLoss(delta=1.0)
     edge_criterion = nn.HuberLoss(delta=1.0)
@@ -1312,17 +1351,61 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
 
     for epoch in range(epochs):
         is_warmup_stage = (epoch < loss_warmup_epochs)
+        is_transition_stage = (not is_warmup_stage) and (epoch < transition_end_epoch)
+        is_full_stage = (epoch >= transition_end_epoch)
+
+        if collapse_guard_active_remaining > 0:
+            collapse_guard_active_remaining -= 1
 
         if is_warmup_stage:
+            stage_name = "WARMUP"
             enter_criterion_fn = make_warmup_criterion(warmup_pw)
             epoch_use_ohem = False
             epoch_pw = warmup_pw
-            log.info(f"[LOSS_STAGE] stage=WARMUP epoch={epoch+1} pos_weight={warmup_pw:.2f}")
+            epoch_focal_gamma = 0.0
+            epoch_ohem_str = "off"
+        elif is_transition_stage:
+            stage_name = "TRANSITION"
+            t_progress = (epoch - loss_warmup_epochs) / max(transition_epochs - 1, 1)
+            t_progress = min(max(t_progress, 0.0), 1.0)
+            epoch_pw = warmup_pw + t_progress * (configured_pos_weight - warmup_pw)
+            epoch_focal_gamma = t_progress * focal_gamma_final
+
+            if collapse_guard_active_remaining > 0:
+                epoch_pw = min(epoch_pw, 2.5)
+                epoch_use_ohem = False
+                log.info(f"[COLLAPSE_GUARD] active ({collapse_guard_active_remaining} epochs left) — clamping pw to {epoch_pw:.2f}, ohem=off")
+            else:
+                epoch_use_ohem = use_ohem if not disable_ohem_during_transition else False
+
+            enter_criterion_fn = make_transition_criterion(epoch_pw, epoch_focal_gamma)
+            epoch_ohem_str = "on" if epoch_use_ohem else "off"
+
+            if not lr_dropped_at_transition and epoch == loss_warmup_epochs:
+                lr_dropped_at_transition = True
+                for pg in optimizer.param_groups:
+                    old_lr = pg['lr']
+                    pg['lr'] = old_lr * lr_drop_on_transition
+                log.info(f"[LR_DROP] Transition start: LR {old_lr:.2e} -> {pg['lr']:.2e} (x{lr_drop_on_transition})")
         else:
-            enter_criterion_fn = make_full_criterion()
-            epoch_use_ohem = use_ohem
+            stage_name = "FULL"
             epoch_pw = configured_pos_weight
-            log.info(f"[LOSS_STAGE] stage=FULL epoch={epoch+1} pos_weight={configured_pos_weight:.2f} focal={'on' if use_focal_loss else 'off'} ohem={'on' if use_ohem else 'off'}")
+            epoch_focal_gamma = focal_gamma_final
+
+            if collapse_guard_active_remaining > 0:
+                epoch_pw = min(epoch_pw, 2.5)
+                epoch_use_ohem = False
+                log.info(f"[COLLAPSE_GUARD] active ({collapse_guard_active_remaining} epochs left) — clamping pw to {epoch_pw:.2f}, ohem=off")
+                enter_criterion_fn = make_transition_criterion(epoch_pw, epoch_focal_gamma)
+            else:
+                epoch_use_ohem = use_ohem
+                enter_criterion_fn = make_full_criterion()
+
+            epoch_ohem_str = "on" if epoch_use_ohem else "off"
+
+        current_lr_log = optimizer.param_groups[0]['lr']
+        log.info(f"[LOSS_STAGE] stage={stage_name} epoch={epoch+1} pos_weight={epoch_pw:.2f} "
+                 f"focal_gamma={epoch_focal_gamma:.3f} ohem={epoch_ohem_str} lr={current_lr_log:.2e}")
 
         model.train()
         total_loss = 0
@@ -1537,8 +1620,8 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         elif epoch == loss_warmup_epochs and last_warmup_prauc is not None:
             prauc_drop = last_warmup_prauc - prauc
             if prauc_drop > 0.06:
-                log.warning(f"[ALERT] PR-AUC collapse after FULL switch — check OHEM/edge/soft/focal config. "
-                            f"warmup_prauc={last_warmup_prauc:.3f} full_prauc={prauc:.3f} drop={prauc_drop:.3f}")
+                log.warning(f"[ALERT] PR-AUC drop at TRANSITION start — warmup_prauc={last_warmup_prauc:.3f} "
+                            f"transition_prauc={prauc:.3f} drop={prauc_drop:.3f} (expected small dip during ramp)")
 
         current_lr = optimizer.param_groups[0]['lr']
 
@@ -1560,6 +1643,25 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         )
         log.info(f"[SEP_CHECK] mean_pos={ml_pos:.3f} mean_neg={ml_neg:.3f} sep={sep_val:.3f}")
         history['_sep_history'].append(sep_val)
+
+        if collapse_guard and not is_warmup_stage:
+            if pred_pct > collapse_guard_pred1:
+                collapse_guard_consecutive_pred1 += 1
+            else:
+                collapse_guard_consecutive_pred1 = 0
+
+            triggered = False
+            if collapse_guard_consecutive_pred1 >= 2:
+                triggered = True
+                log.warning(f"[COLLAPSE_GUARD] TRIGGERED: Pred1={pred_pct:.1%} for {collapse_guard_consecutive_pred1} consecutive epochs (thresh={collapse_guard_pred1:.0%})")
+            elif sep_val < collapse_guard_sep and pred_pct > 0.95:
+                triggered = True
+                log.warning(f"[COLLAPSE_GUARD] TRIGGERED: sep={sep_val:.3f}<{collapse_guard_sep} AND Pred1={pred_pct:.1%}>95%")
+
+            if triggered and collapse_guard_active_remaining <= 0:
+                collapse_guard_active_remaining = collapse_guard_freeze_epochs + 1
+                collapse_guard_consecutive_pred1 = 0
+                log.warning(f"[COLLAPSE_GUARD] Disabling OHEM and clamping pos_weight<=2.5 for next {collapse_guard_freeze_epochs} epochs")
 
         p50 = np.percentile(all_probs, 50)
         p75 = np.percentile(all_probs, 75)
@@ -1650,6 +1752,14 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             'soft_label_temp': soft_label_temp,
             'loss_warmup_epochs': loss_warmup_epochs,
             'warmup_pos_weight': warmup_pos_weight,
+            'transition_epochs': transition_epochs,
+            'focal_gamma_final': focal_gamma_final,
+            'lr_drop_on_transition': lr_drop_on_transition,
+            'disable_ohem_during_transition': disable_ohem_during_transition,
+            'collapse_guard': collapse_guard,
+            'collapse_guard_pred1': collapse_guard_pred1,
+            'collapse_guard_sep': collapse_guard_sep,
+            'collapse_guard_freeze_epochs': collapse_guard_freeze_epochs,
             'w_quality': w_quality,
             'w_dir': w_dir,
             'w_htf': w_htf,
@@ -3354,6 +3464,26 @@ Examples:
                         help="Number of warmup epochs using plain BCE before switching to focal/OHEM (default: 10)")
     parser.add_argument("--warmup-pos-weight", type=float, default=2.0,
                         help="Max pos_weight during loss warmup stage (default: 2.0)")
+    parser.add_argument("--transition-epochs", type=int, default=15,
+                        help="Number of transition epochs between WARMUP and FULL (default: 15)")
+    parser.add_argument("--focal-gamma-final", type=float, default=0.5,
+                        help="Final focal gamma after transition ramp (default: 0.5)")
+    parser.add_argument("--lr-drop-on-transition", type=float, default=0.65,
+                        help="LR multiplier at WARMUP->TRANSITION boundary (default: 0.65)")
+    parser.add_argument("--disable-ohem-during-transition", action="store_true", default=True,
+                        help="Keep OHEM off during transition (default: True)")
+    parser.add_argument("--enable-ohem-during-transition", action="store_true", default=False,
+                        help="Allow OHEM during transition stage")
+    parser.add_argument("--collapse-guard", action="store_true", default=True,
+                        help="Enable collapse guard (default: True)")
+    parser.add_argument("--no-collapse-guard", action="store_true", default=False,
+                        help="Disable collapse guard")
+    parser.add_argument("--collapse-guard-pred1", type=float, default=0.98,
+                        help="Pred1 threshold for collapse guard (default: 0.98)")
+    parser.add_argument("--collapse-guard-sep", type=float, default=0.02,
+                        help="Separation threshold for collapse guard (default: 0.02)")
+    parser.add_argument("--collapse-guard-freeze-epochs", type=int, default=5,
+                        help="Epochs to freeze OHEM and clamp pos_weight after collapse (default: 5)")
     parser.add_argument("--verify-enter-metrics", action="store_true", default=False,
                         help="Run 3-pass validation verification with assertions and generate report")
     parser.add_argument("--w-quality", type=float, default=1.0,
@@ -3887,6 +4017,14 @@ Examples:
             soft_label_temp=args.soft_label_temp,
             loss_warmup_epochs=args.loss_warmup_epochs,
             warmup_pos_weight=args.warmup_pos_weight,
+            transition_epochs=args.transition_epochs,
+            focal_gamma_final=args.focal_gamma_final,
+            lr_drop_on_transition=args.lr_drop_on_transition,
+            disable_ohem_during_transition=args.disable_ohem_during_transition and not args.enable_ohem_during_transition,
+            collapse_guard=args.collapse_guard and not args.no_collapse_guard,
+            collapse_guard_pred1=args.collapse_guard_pred1,
+            collapse_guard_sep=args.collapse_guard_sep,
+            collapse_guard_freeze_epochs=args.collapse_guard_freeze_epochs,
             verify_enter_metrics=args.verify_enter_metrics,
             w_quality=args.w_quality,
             w_dir=args.w_dir,
