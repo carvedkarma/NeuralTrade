@@ -384,7 +384,6 @@ def train_v5_model(
 
     from data.pipeline import FeatureEngineer
     data_dir = Path("data_cache")
-    sequence_length = app_config.data.sequence_length
 
     if symbols is None or len(symbols) == 0:
         symbols = ["BTCUSDT"]
@@ -415,7 +414,7 @@ def train_v5_model(
         sym_df = sym_df.sort_values('timestamp').reset_index(drop=True)
         log.info(f"[V5] {sym}: {len(sym_df)} bars loaded")
 
-        fe = FeatureEngineer(config=app_config)
+        fe = FeatureEngineer()
         sym_features_df = fe.compute_features(sym_df)
         sym_features_df = sym_features_df.fillna(0)
 
