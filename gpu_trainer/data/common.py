@@ -67,10 +67,10 @@ def generate_v5_sweep_outcomes(
     sl_mult: float = 1.5,
     atr_period: int = 14,
 ) -> dict:
-    """Generate trade outcomes using v5-consistent barrier logic.
+    """Generate side-conditional trade outcomes using v5-consistent barrier logic.
 
     Uses the same ATR computation as v5_target_generator for consistency.
-    Simulates bidirectional trades and returns the best-side outcome.
+    Simulates BOTH LONG and SHORT trades independently per bar.
 
     Args:
         df: DataFrame with 'high', 'low', 'close' columns
@@ -81,8 +81,12 @@ def generate_v5_sweep_outcomes(
 
     Returns:
         dict with:
-            realized_r: (N,) float32 array of realized R per bar
-            outcome: (N,) object array of outcome types (TP, SL, EXP_WIN, EXP_LOSS)
+            r_long: (N,) float32 array -- realized R if LONG at this bar
+            r_short: (N,) float32 array -- realized R if SHORT at this bar
+            out_long: (N,) object array -- outcome type if LONG
+            out_short: (N,) object array -- outcome type if SHORT
+            realized_r: (N,) float32 -- DEPRECATED best-side oracle R (DO NOT USE FOR EVAL)
+            outcome: (N,) object -- DEPRECATED best-side oracle outcome (DO NOT USE FOR EVAL)
     """
     n = len(df)
     closes = df['close'].values.astype(np.float64)
@@ -91,8 +95,12 @@ def generate_v5_sweep_outcomes(
 
     atr = compute_atr(df, atr_period)
 
-    realized_r = np.full(n, np.nan, dtype=np.float64)
-    outcomes = np.full(n, "NO_CANDIDATE", dtype=object)
+    r_long = np.full(n, np.nan, dtype=np.float64)
+    r_short = np.full(n, np.nan, dtype=np.float64)
+    out_long = np.full(n, "NO_CANDIDATE", dtype=object)
+    out_short = np.full(n, "NO_CANDIDATE", dtype=object)
+    realized_r_best = np.full(n, np.nan, dtype=np.float64)
+    outcomes_best = np.full(n, "NO_CANDIDATE", dtype=object)
 
     for i in range(n - horizon):
         if atr[i] <= 0 or closes[i] <= 0:
@@ -102,25 +110,34 @@ def generate_v5_sweep_outcomes(
         tp_dist = atr[i] * tp_mult
         sl_dist = atr[i] * sl_mult
 
-        long_r, long_outcome = _simulate_trade(
+        long_r_val, long_out_val = _simulate_trade(
             highs, lows, closes, i, horizon, n,
             entry, tp_dist, sl_dist, tp_mult, sl_mult, atr[i], side=1
         )
-        short_r, short_outcome = _simulate_trade(
+        short_r_val, short_out_val = _simulate_trade(
             highs, lows, closes, i, horizon, n,
             entry, tp_dist, sl_dist, tp_mult, sl_mult, atr[i], side=-1
         )
 
-        if long_r >= short_r:
-            realized_r[i] = long_r
-            outcomes[i] = long_outcome
+        r_long[i] = long_r_val
+        r_short[i] = short_r_val
+        out_long[i] = long_out_val
+        out_short[i] = short_out_val
+
+        if long_r_val >= short_r_val:
+            realized_r_best[i] = long_r_val
+            outcomes_best[i] = long_out_val
         else:
-            realized_r[i] = short_r
-            outcomes[i] = short_outcome
+            realized_r_best[i] = short_r_val
+            outcomes_best[i] = short_out_val
 
     return {
-        'realized_r': realized_r.astype(np.float32),
-        'outcome': outcomes,
+        'r_long': r_long.astype(np.float32),
+        'r_short': r_short.astype(np.float32),
+        'out_long': out_long,
+        'out_short': out_short,
+        'realized_r': realized_r_best.astype(np.float32),
+        'outcome': outcomes_best,
     }
 
 

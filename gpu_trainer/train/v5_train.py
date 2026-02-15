@@ -580,8 +580,13 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                   target_tpd=6.5, target_tpd_tol=1.5, min_trades=30,
                   candidate_mask=None, risk_controls=None,
                   symbol_ids=None, horizon_bars=16,
-                  quality_mask=None, score_threshold=None):
+                  quality_mask=None, score_threshold=None,
+                  r_long=None, r_short=None, out_long=None, out_short=None):
     """Score-based sweep for v5 model.
+
+    If side-conditional arrays (r_long, r_short, out_long, out_short) are provided,
+    uses predicted side to select outcome. Otherwise falls back to precomputed_r/outcomes
+    (DEPRECATED oracle best-side).
 
     If score_threshold is provided, uses threshold-based selection (TPD controller).
     Otherwise falls back to percentile-based sweep.
@@ -590,12 +595,24 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
 
     COOLDOWN = 4
 
-    safe_outcomes = np.where(
-        np.isin(precomputed_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]),
-        precomputed_outcomes, "NO_CANDIDATE"
-    )
-    safe_r = precomputed_r.copy().astype(float)
-    safe_r = np.where(np.isnan(safe_r), 0.0, safe_r)
+    use_side_conditional = (r_long is not None and r_short is not None
+                           and out_long is not None and out_short is not None)
+
+    if use_side_conditional:
+        side_r = np.where(sides == 1, r_long, r_short).astype(float)
+        side_out = np.where(sides == 1, out_long, out_short)
+        safe_outcomes = np.where(
+            np.isin(side_out, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]),
+            side_out, "NO_CANDIDATE"
+        )
+        safe_r = np.where(np.isnan(side_r), 0.0, side_r)
+    else:
+        safe_outcomes = np.where(
+            np.isin(precomputed_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]),
+            precomputed_outcomes, "NO_CANDIDATE"
+        )
+        safe_r = precomputed_r.copy().astype(float)
+        safe_r = np.where(np.isnan(safe_r), 0.0, safe_r)
 
     scores_work = scores.copy()
     if quality_mask is not None:
@@ -674,7 +691,8 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
         avg_win = np.mean(wins) if len(wins) > 0 else 0.0
         avg_loss = np.mean(losses) if len(losses) > 0 else 0.0
         std_r = np.std(t_r_valid) if n_trades > 1 else 1.0
-        sharpe = expect / max(std_r, 1e-6) * np.sqrt(252 * 96)
+        trades_per_year = (n_trades / max(val_days, 1e-6)) * 252
+        sharpe = expect / max(std_r, 1e-6) * np.sqrt(max(trades_per_year, 1))
 
         total_win = np.sum(wins)
         total_loss = abs(np.sum(losses))
@@ -781,6 +799,7 @@ def run_v5_forward_test(
     test_bars, config: V5ForwardTestConfig,
     test_start_date=None, test_end_date=None,
     test_timestamps=None,
+    r_long=None, r_short=None, out_long=None, out_short=None,
 ):
     """Run forward test with completely frozen decision layer.
 
@@ -866,12 +885,27 @@ def run_v5_forward_test(
             taken.append(idx)
             last_bar = idx
 
-    safe_outcomes = np.where(
-        np.isin(test_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]),
-        test_outcomes, "NO_CANDIDATE"
-    )
-    safe_r = test_realized_r.copy().astype(float)
-    safe_r = np.where(np.isnan(safe_r), 0.0, safe_r)
+    use_side_conditional = (r_long is not None and r_short is not None
+                            and out_long is not None and out_short is not None)
+
+    if use_side_conditional:
+        side_r = np.where(sides == 1, r_long, r_short).astype(float)
+        side_out = np.where(sides == 1, out_long, out_short)
+        safe_outcomes = np.where(
+            np.isin(side_out, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]),
+            side_out, "NO_CANDIDATE"
+        )
+        safe_r = np.where(np.isnan(side_r), 0.0, side_r)
+        log.info("[V5_FWD] Using side-conditional outcomes (predicted side selects LONG/SHORT R)")
+    else:
+        log.warning("[V5_FWD] DEPRECATED: Using oracle best-side outcomes. "
+                    "Pass r_long/r_short/out_long/out_short for correct evaluation.")
+        safe_outcomes = np.where(
+            np.isin(test_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]),
+            test_outcomes, "NO_CANDIDATE"
+        )
+        safe_r = test_realized_r.copy().astype(float)
+        safe_r = np.where(np.isnan(safe_r), 0.0, safe_r)
 
     if len(taken) == 0:
         log.warning("[V5_FWD] No trades taken in forward test!")
@@ -959,9 +993,8 @@ def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_
         sharpe = daily_mean / max(daily_std, 1e-6) * np.sqrt(252)
     else:
         std_r = float(np.std(t_r)) if n > 1 else 1.0
-        daily_r = expect * (n / max(val_days, 1e-6))
-        daily_std = std_r * np.sqrt(n / max(val_days, 1e-6))
-        sharpe = daily_r / max(daily_std, 1e-6) * np.sqrt(252)
+        trades_per_year = (n / max(val_days, 1e-6)) * 252
+        sharpe = float(expect / max(std_r, 1e-6) * np.sqrt(max(trades_per_year, 1)))
 
     n_tp = int(np.sum(t_outcomes == "TP"))
     n_sl = int(np.sum(t_outcomes == "SL"))
@@ -1033,6 +1066,11 @@ def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_
                 'expectancy': float(np.mean(w_r)) if len(w_r) > 0 else 0.0,
                 'total_r': float(np.sum(w_r)),
             })
+
+    if sharpe > 20 and pf > 5 and winrate > 0.85:
+        log.warning("[V5_FWD_SANITY] Metrics unusually high: Sharpe=%.1f PF=%.1f WR=%.1f%%. "
+                    "Check for leakage or oracle-side contamination.",
+                    sharpe, pf, winrate * 100)
 
     return {
         'window_start': start_date,
@@ -1383,6 +1421,10 @@ def train_v5_model(
     val_cand_mask_list = []
     val_outcomes_list = []
     val_realized_r_list = []
+    val_r_long_list = []
+    val_r_short_list = []
+    val_out_long_list = []
+    val_out_short_list = []
     val_barrier_oracle_list = []
     val_barrier_soft_list = []
     val_timestamps_list = []
@@ -1435,9 +1477,17 @@ def train_v5_model(
         )
         sym_realized_r = sweep_result['realized_r']
         sym_outcomes = sweep_result['outcome']
+        sym_r_long = sweep_result['r_long']
+        sym_r_short = sweep_result['r_short']
+        sym_out_long = sweep_result['out_long']
+        sym_out_short = sweep_result['out_short']
 
         sym_realized_r[:max_lookback] = np.nan
         sym_outcomes[:max_lookback] = "NO_CANDIDATE"
+        sym_r_long[:max_lookback] = np.nan
+        sym_r_short[:max_lookback] = np.nan
+        sym_out_long[:max_lookback] = "NO_CANDIDATE"
+        sym_out_short[:max_lookback] = "NO_CANDIDATE"
         if sym_cand_mask is not None:
             sym_cand_mask[:max_lookback] = False
 
@@ -1502,6 +1552,10 @@ def train_v5_model(
         val_cand_mask_list.append(cand_arr[test_idx])
         val_outcomes_list.append(sym_outcomes[test_idx])
         val_realized_r_list.append(sym_realized_r[test_idx])
+        val_r_long_list.append(sym_r_long[test_idx])
+        val_r_short_list.append(sym_r_short[test_idx])
+        val_out_long_list.append(sym_out_long[test_idx])
+        val_out_short_list.append(sym_out_short[test_idx])
         val_barrier_oracle_list.append(barrier_oracle[test_idx])
         val_barrier_soft_list.append(barrier_soft[test_idx])
         val_timestamps_list.append(sym_df['timestamp'].values[test_idx])
@@ -1541,6 +1595,10 @@ def train_v5_model(
     val_cand_mask_arr = _concat_lists(val_cand_mask_list)
     val_outcomes_arr = _concat_lists(val_outcomes_list)
     val_realized_r_arr = _concat_lists(val_realized_r_list)
+    val_r_long_arr = _concat_lists(val_r_long_list)
+    val_r_short_arr = _concat_lists(val_r_short_list)
+    val_out_long_arr = _concat_lists(val_out_long_list)
+    val_out_short_arr = _concat_lists(val_out_short_list)
     val_barrier_oracle = _concat_lists(val_barrier_oracle_list)
     val_barrier_soft = np.concatenate(val_barrier_soft_list, axis=0)
     val_timestamps_arr = np.concatenate(val_timestamps_list, axis=0)
@@ -1857,6 +1915,8 @@ def train_v5_model(
                 horizon_bars=horizon,
                 quality_mask=quality_mask,
                 score_threshold=current_score_threshold,
+                r_long=val_r_long_arr, r_short=val_r_short_arr,
+                out_long=val_out_long_arr, out_short=val_out_short_arr,
             )
 
             if quality_gate_cfg.enable_calib:
@@ -1972,6 +2032,10 @@ def train_v5_model(
                 test_start_date=test_start_date or train_end_date,
                 test_end_date=test_end_date,
                 test_timestamps=val_timestamps_arr,
+                r_long=val_r_long_arr,
+                r_short=val_r_short_arr,
+                out_long=val_out_long_arr,
+                out_short=val_out_short_arr,
             )
 
             report_path = checkpoint_dir / "v5_forward_report.json"

@@ -1,0 +1,96 @@
+You are Replit Agent working inside my repo (gpu_trainer). Goal: fix unrealistic backtest stats caused by “oracle outcomes” (choosing the better of LONG vs SHORT in hindsight). Implement side-conditional outcomes and ensure evaluation uses the model’s predicted side.
+
+HARD REQUIREMENTS
+1) Outcomes/R must be computed for BOTH sides (LONG and SHORT) for each bar.
+2) Forward test must select the outcome/R based on the model’s predicted side, NOT “best side”.
+3) Preserve backward compatibility: if any code expects old keys, keep them but mark as deprecated.
+4) Add unit tests / sanity checks proving win rate/PF/Sharpe return to realistic ranges after fix.
+5) Do NOT change strategy logic beyond fixing leakage/bugs; keep current CLI and outputs unless necessary.
+
+STEP A — FIND & CONFIRM BUG
+- Locate function that generates sweep outcomes (likely gpu_trainer/data/common.py, something like generate_v5_sweep_outcomes).
+- Confirm it currently computes long_r/short_r then selects max(long_r, short_r) per bar (oracle).
+- Confirm forward test (likely gpu_trainer/train/v5_train.py, run_v5_forward_test) uses that oracle realized_r/outcomes rather than side-conditional.
+
+STEP B — IMPLEMENT SIDE-CONDITIONAL OUTCOMES
+In gpu_trainer/data/common.py (or wherever generate_v5_sweep_outcomes is):
+- Change generator to return:
+  - realized_r_long: np.ndarray shape [N]
+  - realized_r_short: np.ndarray shape [N]
+  - outcomes_long: np.ndarray shape [N] (TP/SL/EX codes)
+  - outcomes_short: np.ndarray shape [N]
+- OPTIONAL: keep old outputs:
+  - realized_r_best and outcomes_best (oracle) ONLY for diagnostics, but never used for evaluation. Add comment “DO NOT USE FOR EVAL”.
+
+Return structure must be explicit (dict or dataclass) with clear names:
+{
+  "r_long": ...,
+  "r_short": ...,
+  "out_long": ...,
+  "out_short": ...,
+  "r_best": ... (optional),
+  "out_best": ... (optional)
+}
+
+STEP C — FIX FORWARD TEST TO USE PREDICTED SIDE
+In run_v5_forward_test (gpu_trainer/train/v5_train.py or equivalent):
+- Wherever you currently do:
+  safe_outcomes = sanitize(outcomes)
+  safe_r = sanitize(realized_r)
+  then take subset by `taken` mask
+REPLACE it with:
+  - Use `sides` predicted by the frozen decision layer for taken trades.
+  - Compute:
+    r_eval = np.where(sides==1, r_long, r_short)
+    out_eval = np.where(sides==1, out_long, out_short)
+  - Then apply masks (taken/validity/chronological) to r_eval/out_eval.
+
+Make sure:
+- If side is encoded differently (e.g., LONG=1, SHORT=0 or -1), normalize it.
+- Handle NaNs/infs same way as before (sanitization).
+- Keep the same report format, but now based on r_eval/out_eval.
+
+STEP D — FIX COST UNDERCHARGE BUG (IF PRESENT)
+Search for any trade simulator where fees/slippage are computed with size=1.0 instead of real size.
+Example pattern:
+  calculate_costs(entry_price, 1.0, ...)
+Replace 1.0 with position_size or correct size variable.
+Add a small test that fees scale with size.
+
+STEP E — FIX SHARPE ANNUALIZATION (TRADE-RETURNS VS BAR-RETURNS)
+If Sharpe currently assumes per-bar returns but you pass per-trade returns, it will inflate.
+- Either:
+  1) compute Sharpe on equity curve sampled per bar, OR
+  2) compute Sharpe on per-trade returns without annualization, OR
+  3) annualize using trades/year not bars/year.
+Pick the most consistent with the rest of metrics and document it.
+
+STEP F — ADD TESTS / ASSERTIONS
+Add a test module (pytest) that:
+1) Constructs a tiny synthetic series with known outcomes.
+2) Ensures r_long != r_short in some places.
+3) Ensures evaluation picks r_long when side=LONG and r_short when side=SHORT.
+4) Ensures oracle “best side” is NOT used anywhere in forward test.
+
+Add runtime sanity checks:
+- If Sharpe > 20 AND ProfitFactor > 5 AND WinRate > 85%, log a WARNING:
+  “Metrics unusually high; check for leakage. (This should not happen after side-conditional fix).”
+Do not crash; just warn.
+
+STEP G — UPDATE DOCS / LOGGING
+- Update any README or logs describing the forward test to note:
+  “Forward test evaluates realized outcomes based on predicted trade side; no best-side oracle.”
+- Ensure the summary table still prints the same fields.
+
+DELIVERABLES
+- Code changes committed across relevant files.
+- Tests added and passing.
+- Run the existing CLI backtest/forward test and print a before/after note:
+  - Before: unrealistic (oracle)
+  - After: realistic ranges and stable.
+- Provide me the exact command to re-run training + forward test (use the existing v5 flags).
+
+IMPORTANT
+- Do not refactor unrelated code.
+- Keep outputs backward compatible where possible.
+- Make sure no part of evaluation uses future data or best-side selection.

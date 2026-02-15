@@ -322,18 +322,18 @@ class TradeSimulator:
         entry_candle = candles.iloc[entry_idx]
         entry_price = entry_candle["close"]
         
-        fee, slippage = self.costs.calculate_costs(
-            entry_price, 1.0, predicted_sigma, is_taker=True
-        )
-        
-        entry_price_adjusted = entry_price * (1 + direction * slippage / entry_price)
-        
         position_size = self.calculate_position_size(
             capital, predicted_mu, predicted_sigma, entry_price
         )
         
         if position_size <= 0:
             return None
+
+        fee, slippage = self.costs.calculate_costs(
+            entry_price, position_size, predicted_sigma, is_taker=True
+        )
+        
+        entry_price_adjusted = entry_price * (1 + direction * slippage / (entry_price * position_size))
         
         exit_idx = entry_idx + holding_periods
         exit_candle = candles.iloc[exit_idx]
