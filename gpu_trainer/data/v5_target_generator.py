@@ -61,6 +61,10 @@ def build_v5_targets(
     ret_R = np.full(n, np.nan, dtype=np.float64)
     mfe_R = np.full(n, np.nan, dtype=np.float64)
     mae_R = np.full(n, np.nan, dtype=np.float64)
+    mfe_R_long = np.full(n, np.nan, dtype=np.float64)
+    mae_R_long = np.full(n, np.nan, dtype=np.float64)
+    mfe_R_short = np.full(n, np.nan, dtype=np.float64)
+    mae_R_short = np.full(n, np.nan, dtype=np.float64)
     vol_h = np.full(n, np.nan, dtype=np.float64)
 
     for i in range(n - horizon):
@@ -81,6 +85,11 @@ def build_v5_targets(
         long_mae = (entry_price - min_low) / (atr[i] + eps)
         short_mfe = (entry_price - min_low) / (atr[i] + eps)
         short_mae = (max_high - entry_price) / (atr[i] + eps)
+
+        mfe_R_long[i] = long_mfe
+        mae_R_long[i] = long_mae
+        mfe_R_short[i] = short_mfe
+        mae_R_short[i] = short_mae
 
         if long_mfe >= short_mfe:
             mfe_R[i] = long_mfe
@@ -109,7 +118,11 @@ def build_v5_targets(
     for i in range(n):
         if not valid_mask[i]:
             continue
-        if np.abs(ret_R[i]) < deadzone_R or mfe_R[i] < mfe_min_r:
+        if ret_R[i] > 0:
+            side_mfe = mfe_R_long[i]
+        else:
+            side_mfe = mfe_R_short[i]
+        if np.abs(ret_R[i]) < deadzone_R or side_mfe < mfe_min_r:
             action_label[i] = 0
         elif ret_R[i] > 0:
             action_label[i] = 1
@@ -145,6 +158,10 @@ def build_v5_targets(
         'ret_R': ret_R.astype(np.float32),
         'mfe_R': mfe_R.astype(np.float32),
         'mae_R': mae_R.astype(np.float32),
+        'mfe_R_long': mfe_R_long.astype(np.float32),
+        'mae_R_long': mae_R_long.astype(np.float32),
+        'mfe_R_short': mfe_R_short.astype(np.float32),
+        'mae_R_short': mae_R_short.astype(np.float32),
         'vol_h': vol_h.astype(np.float32),
         'action_label': action_label,
         'valid_mask': valid_mask,

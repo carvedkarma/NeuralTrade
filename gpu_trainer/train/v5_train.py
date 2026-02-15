@@ -53,6 +53,8 @@ class V5ForwardTestConfig:
     horizon: int = 16
     cooldown: int = 4
     quality_gate_cfg: Optional['V5QualityGateConfig'] = None
+    side_mode: str = 'action_head'
+    rr_weight: float = 0.0
 
 
 def _parse_date_to_ms(date_str: str) -> int:
@@ -119,6 +121,8 @@ class V5TPDControllerConfig:
     score_threshold: Optional[float] = None
     score_lambda: float = 0.5
     mae_cap: float = 2.0
+    side_mode: str = 'action_head'
+    rr_weight: float = 0.0
 
 
 class V5Dataset(Dataset):
@@ -432,18 +436,32 @@ def compute_v5_calibration(p_trade, realized_r, n_bins=10):
 
 
 def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
-                      risk_proxy='mae', mae_cap=2.0, _arrays=None):
+                      risk_proxy='mae', mae_cap=2.0, _arrays=None,
+                      side_mode='action_head', rr_weight=0.0):
     """Compute execution-aware v5 scores -- all in R-units.
 
-    Score = max(edge_long, edge_short) - penalty
-    edge_long  = p_long  * mu_R / (mae_R + eps)
-    edge_short = p_short * (-mu_R) / (mae_R + eps)
-    penalty    = lambda * max(0, -mu_R)   [penalize only wrong-side bets]
+    Two side-selection modes:
+      side_mode='mu_sign' (LEGACY, DEPRECATED):
+        edge_long  = p_long  * mu_R / risk       (positive only when mu_R > 0)
+        edge_short = p_short * (-mu_R) / risk     (positive only when mu_R < 0)
+        BUG: when mu_R > 0, edge_short is always negative -> NEVER picks SHORT
 
-    The penalty only activates when mu_R is negative for LONGs or positive
-    for SHORTs -- i.e., when the predicted direction opposes the chosen side.
-    This keeps penalty on the same scale as edge (~0.001-0.01 R-units)
-    instead of raw MAE (~0.9 R-units) which created a 2000x mismatch.
+      side_mode='action_head' (DEFAULT, v5.0.6 fix):
+        abs_mu = |mu_R|                            (magnitude only, direction-agnostic)
+        edge_long  = p_long  * abs_mu / risk       (driven by learned p_long)
+        edge_short = p_short * abs_mu / risk       (driven by learned p_short)
+        Direction comes from action_head probabilities (trained on directional labels),
+        not from mu_R sign. SHORTs fire when p_short > p_long.
+
+    Penalty (both modes):
+        When chosen side conflicts with mu_R sign, apply lambda * |mu_R| / risk penalty.
+        LONG chosen but mu_R < 0 -> penalize. SHORT chosen but mu_R > 0 -> penalize.
+        This discourages but does NOT block counter-mu_R trades.
+
+    Risk/Reward bonus (rr_weight > 0):
+        rr_ratio = mfe_pred / (mae_pred + eps)
+        score += rr_weight * rr_ratio * abs_mu / risk
+        Rewards setups with favorable excursion profiles (high MFE, low MAE).
     """
     if _arrays is not None:
         mu_R = _arrays['mu_R']
@@ -462,19 +480,35 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         p_short = action_probs[:, 2]
 
     risk = np.maximum(mae_pred, 1e-3)
+    abs_mu = np.abs(mu_R)
+    mu_over_risk = np.divide(abs_mu, risk, out=np.zeros_like(mu_R), where=risk > 0)
 
-    edge_long = p_long * np.divide(mu_R, risk, out=np.zeros_like(mu_R), where=risk > 0)
-    edge_short = p_short * np.divide(-mu_R, risk, out=np.zeros_like(mu_R), where=risk > 0)
+    if side_mode == 'action_head':
+        edge_long = p_long * mu_over_risk
+        edge_short = p_short * mu_over_risk
+    else:
+        edge_long = p_long * np.divide(mu_R, risk, out=np.zeros_like(mu_R), where=risk > 0)
+        edge_short = p_short * np.divide(-mu_R, risk, out=np.zeros_like(mu_R), where=risk > 0)
 
     best_edge = np.maximum(edge_long, edge_short)
     sides = np.where(edge_long >= edge_short, 1, -1)
 
     penalty_long = np.maximum(0.0, -mu_R)
     penalty_short = np.maximum(0.0, mu_R)
-    directional_penalty = np.where(sides == 1, penalty_long, penalty_short)
+    penalty_long_scaled = np.divide(penalty_long, risk, out=np.zeros_like(mu_R), where=risk > 0)
+    penalty_short_scaled = np.divide(penalty_short, risk, out=np.zeros_like(mu_R), where=risk > 0)
+    directional_penalty = np.where(sides == 1, penalty_long_scaled, penalty_short_scaled)
     penalty = score_lambda * directional_penalty
 
     scores = best_edge - penalty
+
+    if rr_weight > 0:
+        rr_ratio = np.divide(mfe_pred, risk, out=np.ones_like(mfe_pred), where=risk > 0)
+        rr_bonus = rr_weight * rr_ratio * mu_over_risk
+        scores = scores + rr_bonus
+
+    n_long_sides = int(np.sum(sides == 1))
+    n_short_sides = int(np.sum(sides == -1))
 
     return scores, sides, {
         'mu_R_mean': float(np.nanmean(mu_R)),
@@ -491,6 +525,11 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         'score_p50': float(np.nanpercentile(scores, 50)),
         'score_p90': float(np.nanpercentile(scores, 90)),
         'score_pct_positive': float(np.nanmean(scores > 0) * 100),
+        'side_mode': side_mode,
+        'rr_weight': rr_weight,
+        'n_long_all': n_long_sides,
+        'n_short_all': n_short_sides,
+        'long_pct_all': float(100 * n_long_sides / max(n_long_sides + n_short_sides, 1)),
     }
 
 
@@ -867,8 +906,11 @@ def run_v5_forward_test(
         risk_proxy=config.risk_proxy,
         mae_cap=config.mae_cap,
         _arrays=arrays,
+        side_mode=config.side_mode,
+        rr_weight=config.rr_weight,
     )
 
+    log.info(f"[V5_FWD] side_mode={config.side_mode} rr_weight={config.rr_weight}")
     log.info(f"[V5_FWD] Score stats: mean={score_diag['score_mean']:.4f} "
              f"p50={score_diag['score_p50']:.4f} p90={score_diag['score_p90']:.4f} "
              f"%pos={score_diag['score_pct_positive']:.1f}%")
@@ -1586,11 +1628,16 @@ def train_v5_model(
 
         feat_arr = sym_features_df.values.astype(np.float32)
         ret_arr = v5_targets['ret_R'][:n]
-        mfe_arr = v5_targets['mfe_R'][:n]
-        mae_arr = v5_targets['mae_R'][:n]
         vol_arr = v5_targets['vol_h'][:n]
         act_arr = v5_targets['action_label'][:n]
         val_arr = v5_targets['valid_mask'][:n]
+
+        mfe_long = v5_targets['mfe_R_long'][:n] if 'mfe_R_long' in v5_targets else v5_targets['mfe_R'][:n]
+        mae_long = v5_targets['mae_R_long'][:n] if 'mae_R_long' in v5_targets else v5_targets['mae_R'][:n]
+        mfe_short = v5_targets['mfe_R_short'][:n] if 'mfe_R_short' in v5_targets else v5_targets['mfe_R'][:n]
+        mae_short = v5_targets['mae_R_short'][:n] if 'mae_R_short' in v5_targets else v5_targets['mae_R'][:n]
+        mfe_arr = np.where(act_arr == 2, mfe_short, mfe_long)
+        mae_arr = np.where(act_arr == 2, mae_short, mae_long)
 
         train_features.append(feat_arr[train_idx])
         train_ret_R_list.append(ret_arr[train_idx])
@@ -1941,6 +1988,8 @@ def train_v5_model(
                 risk_proxy=risk_proxy,
                 mae_cap=tpd_ctrl_cfg.mae_cap,
                 _arrays=arrays,
+                side_mode=tpd_ctrl_cfg.side_mode,
+                rr_weight=tpd_ctrl_cfg.rr_weight,
             )
 
             log.info(f"[V5_SCORE_DIAG] mu_R: mean={score_diag['mu_R_mean']:.4f} std={score_diag['mu_R_std']:.4f} | "
@@ -2083,6 +2132,8 @@ def train_v5_model(
                 horizon=horizon,
                 cooldown=4,
                 quality_gate_cfg=quality_gate_cfg,
+                side_mode=tpd_ctrl_cfg.side_mode,
+                rr_weight=tpd_ctrl_cfg.rr_weight,
             )
 
             fwd_report = run_v5_forward_test(

@@ -4856,6 +4856,11 @@ Examples:
                         help="v5: run leakage/overfitting diagnostics after training")
     parser.add_argument("--v5-ema200-regime-gate", action="store_true", default=False,
                         help="v5: EMA200 regime gate - LONG only when close>EMA200, SHORT only when close<EMA200")
+    parser.add_argument("--v5-score-side-mode", type=str, default="action_head",
+                        choices=["action_head", "mu_sign"],
+                        help="v5.0.6: side selection mode. 'action_head' (default) uses |mu_R| with p_long/p_short for direction (fixes zero-SHORT bug). 'mu_sign' is legacy mode where mu_R sign drives direction.")
+    parser.add_argument("--v5-rr-weight", type=float, default=0.0,
+                        help="v5.0.6: risk/reward ratio bonus weight. When >0, adds mfe/mae ratio bonus to score (default: 0.0)")
     parser.add_argument("--v5-walk-forward", action="store_true", default=False,
                         help="v5: run walk-forward analysis with rolling train/test windows")
     parser.add_argument("--v5-wf-train-months", type=int, default=12,
@@ -5398,7 +5403,10 @@ Examples:
                 score_threshold=args.v5_score_threshold,
                 score_lambda=args.v5_score_lambda,
                 mae_cap=args.v5_mae_cap,
+                side_mode=args.v5_score_side_mode,
+                rr_weight=args.v5_rr_weight,
             )
+            log.info(f"[V5] side_mode={args.v5_score_side_mode} rr_weight={args.v5_rr_weight}")
 
             train_end_date = args.v5_train_end_date
             test_start_date = args.v5_test_start_date

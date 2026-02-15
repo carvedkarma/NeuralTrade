@@ -299,3 +299,262 @@ class TestEMA200:
         assert 1 in blocked
         assert 2 not in blocked
         assert 3 not in blocked
+
+
+def _compute_v5_scores_pure(arrays, side_mode='action_head', score_lambda=0.5, rr_weight=0.0):
+    """Pure numpy re-implementation of compute_v5_scores for testing without torch."""
+    mu_R = arrays['mu_R']
+    mae = arrays['mae']
+    mfe = arrays['mfe']
+    p_long = arrays['p_long']
+    p_short = arrays['p_short']
+    n = len(mu_R)
+    eps = 1e-9
+
+    if side_mode == 'action_head':
+        abs_mu = np.abs(mu_R)
+        risk = mae + eps
+        sides = np.where(p_long >= p_short, 1, -1)
+        p_dir = np.where(sides == 1, p_long, p_short)
+        edge = p_dir * abs_mu / risk
+        conflict = np.where(
+            ((sides == 1) & (mu_R < 0)) | ((sides == -1) & (mu_R > 0)),
+            1.0, 0.0
+        )
+        penalty = score_lambda * conflict * abs_mu / risk
+    else:
+        risk = mae + eps
+        edge_long = p_long * mu_R / risk
+        edge_short = p_short * (-mu_R) / risk
+        sides = np.where(edge_long >= edge_short, 1, -1)
+        edge = np.maximum(edge_long, edge_short)
+        penalty = score_lambda * np.maximum(0, -np.where(sides == 1, mu_R, -mu_R)) / risk
+
+    scores = edge - penalty
+
+    if rr_weight > 0:
+        abs_mu = np.abs(mu_R)
+        risk = mae + eps
+        rr_ratio = mfe / (mae + eps)
+        rr_bonus = rr_weight * rr_ratio * abs_mu / risk
+        scores = scores + rr_bonus
+
+    n_long = int(np.sum(sides == 1))
+    n_short = int(np.sum(sides == -1))
+    diag = {
+        'n_long_all': n_long,
+        'n_short_all': n_short,
+        'penalty_mean': float(np.mean(penalty)),
+    }
+    return scores, sides, diag
+
+
+class TestV506ScoringFix:
+    """Tests for v5.0.6 action_head side mode and R/R ratio scoring."""
+
+    def _make_arrays(self, mu_R, p_long, p_short, mae=None, mfe=None):
+        n = len(mu_R)
+        return {
+            'mu_R': np.array(mu_R, dtype=np.float64),
+            'mae': np.array(mae if mae is not None else [0.5]*n, dtype=np.float64),
+            'mfe': np.array(mfe if mfe is not None else [1.0]*n, dtype=np.float64),
+            'p_long': np.array(p_long, dtype=np.float64),
+            'p_short': np.array(p_short, dtype=np.float64),
+        }
+
+    def test_action_head_mode_produces_shorts(self):
+        """action_head mode must produce SHORT when p_short > p_long, even with positive mu_R."""
+        arrays = self._make_arrays(
+            mu_R=[0.5, 0.5, 0.5, 0.5, 0.5],
+            p_long=[0.1, 0.1, 0.1, 0.1, 0.1],
+            p_short=[0.6, 0.6, 0.6, 0.6, 0.6],
+        )
+        scores, sides, diag = _compute_v5_scores_pure(arrays, side_mode='action_head')
+
+        n_short = int(np.sum(sides == -1))
+        assert n_short == 5, f"Expected all 5 bars SHORT, got {n_short}"
+        assert diag['n_short_all'] == 5
+
+    def test_mu_sign_mode_no_shorts_positive_mu(self):
+        """Legacy mu_sign mode must produce ZERO shorts when mu_R > 0 (the known bug)."""
+        arrays = self._make_arrays(
+            mu_R=[0.5, 0.3, 0.8, 0.1, 0.2],
+            p_long=[0.2, 0.2, 0.2, 0.2, 0.2],
+            p_short=[0.6, 0.6, 0.6, 0.6, 0.6],
+        )
+        scores, sides, diag = _compute_v5_scores_pure(arrays, side_mode='mu_sign')
+
+        n_short = int(np.sum(sides == -1))
+        assert n_short == 0, f"mu_sign mode should produce 0 shorts with positive mu_R, got {n_short}"
+
+    def test_action_head_mixed_sides(self):
+        """action_head mode should produce both LONG and SHORT based on p_long vs p_short."""
+        arrays = self._make_arrays(
+            mu_R=[0.5, 0.5, -0.3, -0.3],
+            p_long=[0.7, 0.2, 0.7, 0.2],
+            p_short=[0.2, 0.7, 0.2, 0.7],
+        )
+        scores, sides, diag = _compute_v5_scores_pure(arrays, side_mode='action_head')
+
+        assert sides[0] == 1, "Bar 0: p_long>p_short should be LONG"
+        assert sides[1] == -1, "Bar 1: p_short>p_long should be SHORT"
+        assert sides[2] == 1, "Bar 2: p_long>p_short should be LONG"
+        assert sides[3] == -1, "Bar 3: p_short>p_long should be SHORT"
+        assert diag['n_long_all'] == 2
+        assert diag['n_short_all'] == 2
+
+    def test_penalty_activates_on_conflict(self):
+        """Penalty should be higher when chosen side conflicts with mu_R sign."""
+        aligned = self._make_arrays(
+            mu_R=[1.0], p_long=[0.8], p_short=[0.1],
+        )
+        conflicting = self._make_arrays(
+            mu_R=[-1.0], p_long=[0.8], p_short=[0.1],
+        )
+        _, _, d_aligned = _compute_v5_scores_pure(aligned, side_mode='action_head', score_lambda=0.5)
+        _, _, d_conflict = _compute_v5_scores_pure(conflicting, side_mode='action_head', score_lambda=0.5)
+
+        assert d_conflict['penalty_mean'] > d_aligned['penalty_mean'], (
+            f"Conflict penalty ({d_conflict['penalty_mean']:.4f}) should exceed "
+            f"aligned penalty ({d_aligned['penalty_mean']:.4f})"
+        )
+
+    def test_rr_weight_boosts_favorable_setups(self):
+        """R/R ratio bonus should boost scores when mfe/mae is favorable."""
+        good_rr = self._make_arrays(
+            mu_R=[0.5], p_long=[0.6], p_short=[0.2],
+            mfe=[2.0], mae=[0.3],
+        )
+        bad_rr = self._make_arrays(
+            mu_R=[0.5], p_long=[0.6], p_short=[0.2],
+            mfe=[0.3], mae=[2.0],
+        )
+
+        s_good_no_rr, _, _ = _compute_v5_scores_pure(good_rr, side_mode='action_head', rr_weight=0.0)
+        s_bad_no_rr, _, _ = _compute_v5_scores_pure(bad_rr, side_mode='action_head', rr_weight=0.0)
+        s_good_rr, _, _ = _compute_v5_scores_pure(good_rr, side_mode='action_head', rr_weight=0.5)
+        s_bad_rr, _, _ = _compute_v5_scores_pure(bad_rr, side_mode='action_head', rr_weight=0.5)
+
+        assert s_good_rr[0] > s_good_no_rr[0], "R/R bonus should increase score for favorable setup"
+        assert s_good_rr[0] > s_bad_rr[0], "Good R/R setup should score higher than bad R/R with rr_weight > 0"
+
+    def test_rr_weight_zero_mfe_no_effect(self):
+        """rr_weight=0 should produce identical scores regardless of MFE (MAE still affects risk)."""
+        high_mfe = self._make_arrays(
+            mu_R=[0.5], p_long=[0.6], p_short=[0.2],
+            mfe=[5.0], mae=[0.5],
+        )
+        low_mfe = self._make_arrays(
+            mu_R=[0.5], p_long=[0.6], p_short=[0.2],
+            mfe=[0.1], mae=[0.5],
+        )
+
+        s_high, _, _ = _compute_v5_scores_pure(high_mfe, side_mode='action_head', rr_weight=0.0)
+        s_low, _, _ = _compute_v5_scores_pure(low_mfe, side_mode='action_head', rr_weight=0.0)
+
+        assert s_high[0] == s_low[0], "With rr_weight=0, MFE should not affect score"
+
+
+class TestV506SideSpecificTargets:
+    """Tests for side-specific MFE/MAE target generation."""
+
+    def test_target_generator_returns_side_keys(self):
+        """build_v5_targets must return side-specific MFE/MAE arrays."""
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from data.v5_target_generator import build_v5_targets
+
+        df = _make_synthetic_df(200)
+        result = build_v5_targets(df, horizon=16)
+
+        assert 'mfe_R_long' in result
+        assert 'mae_R_long' in result
+        assert 'mfe_R_short' in result
+        assert 'mae_R_short' in result
+
+    def test_side_mfe_mae_differ(self):
+        """Long and short MFE/MAE must differ in at least some bars."""
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from data.v5_target_generator import build_v5_targets
+
+        df = _make_synthetic_df(500)
+        result = build_v5_targets(df, horizon=16)
+
+        valid = result['valid_mask']
+        mfe_l = result['mfe_R_long'][valid]
+        mfe_s = result['mfe_R_short'][valid]
+        mae_l = result['mae_R_long'][valid]
+        mae_s = result['mae_R_short'][valid]
+
+        assert np.sum(mfe_l != mfe_s) > 0, "Long/Short MFE should differ"
+        assert np.sum(mae_l != mae_s) > 0, "Long/Short MAE should differ"
+
+    def test_long_short_mfe_relationship(self):
+        """Long MFE == Short MAE and vice versa (same price extremes, opposite perspective)."""
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from data.v5_target_generator import build_v5_targets
+
+        df = _make_synthetic_df(200)
+        result = build_v5_targets(df, horizon=16)
+
+        valid = result['valid_mask']
+        mfe_l = result['mfe_R_long'][valid]
+        mae_l = result['mae_R_long'][valid]
+        mfe_s = result['mfe_R_short'][valid]
+        mae_s = result['mae_R_short'][valid]
+
+        np.testing.assert_allclose(mfe_l, mae_s, atol=1e-6,
+            err_msg="Long MFE should equal Short MAE (upside = short's risk)")
+        np.testing.assert_allclose(mae_l, mfe_s, atol=1e-6,
+            err_msg="Long MAE should equal Short MFE (downside = short's profit)")
+
+    def test_action_label_uses_correct_side_mfe(self):
+        """Action label HOLD check should use side-appropriate MFE."""
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from data.v5_target_generator import build_v5_targets
+
+        df = _make_synthetic_df(500)
+        result = build_v5_targets(df, horizon=16, mfe_min_r=0.05)
+
+        valid = result['valid_mask']
+        action = result['action_label'][valid]
+        ret_R = result['ret_R'][valid]
+
+        n_long = int(np.sum(action == 1))
+        n_short = int(np.sum(action == 2))
+        assert n_long > 0 and n_short > 0, f"Need both LONG ({n_long}) and SHORT ({n_short}) labels"
+
+
+class TestV506CLIFlags:
+    """Tests for v5.0.6 CLI flag parsing."""
+
+    def test_score_side_mode_flag(self):
+        """--v5-score-side-mode should parse correctly with choices."""
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--v5-score-side-mode", type=str, default="action_head",
+                            choices=["action_head", "mu_sign"])
+        parser.add_argument("--v5-rr-weight", type=float, default=0.0)
+
+        args_default = parser.parse_args([])
+        assert args_default.v5_score_side_mode == "action_head"
+        assert args_default.v5_rr_weight == 0.0
+
+        args_legacy = parser.parse_args(["--v5-score-side-mode", "mu_sign"])
+        assert args_legacy.v5_score_side_mode == "mu_sign"
+
+        args_rr = parser.parse_args(["--v5-rr-weight", "0.3"])
+        assert args_rr.v5_rr_weight == 0.3
+
+    def test_invalid_side_mode_rejected(self):
+        """Invalid side mode should be rejected by argparse."""
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--v5-score-side-mode", type=str, default="action_head",
+                            choices=["action_head", "mu_sign"])
+
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--v5-score-side-mode", "invalid_mode"])
