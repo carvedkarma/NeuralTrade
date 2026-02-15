@@ -31,6 +31,16 @@ log = logging.getLogger("QuickStart")
 V5_FEATURE_VERSION = "v5.0.1_forecaster"
 
 
+def _compute_ema(close_arr, period=200):
+    """Compute EMA using only past data (no leakage). Returns array same length as input."""
+    alpha = 2.0 / (period + 1)
+    ema = np.empty_like(close_arr, dtype=np.float64)
+    ema[0] = close_arr[0]
+    for i in range(1, len(close_arr)):
+        ema[i] = alpha * close_arr[i] + (1 - alpha) * ema[i - 1]
+    return ema
+
+
 @dataclass
 class V5ForwardTestConfig:
     """Config for frozen decision layer in forward test."""
@@ -800,6 +810,7 @@ def run_v5_forward_test(
     test_start_date=None, test_end_date=None,
     test_timestamps=None,
     r_long=None, r_short=None, out_long=None, out_short=None,
+    close_prices=None, ema200_regime_gate=False,
 ):
     """Run forward test with completely frozen decision layer.
 
@@ -861,6 +872,15 @@ def run_v5_forward_test(
     log.info(f"[V5_FWD] Score stats: mean={score_diag['score_mean']:.4f} "
              f"p50={score_diag['score_p50']:.4f} p90={score_diag['score_p90']:.4f} "
              f"%pos={score_diag['score_pct_positive']:.1f}%")
+    log.info(f"[V5_FWD] Score side analysis: p_long_mean={score_diag['p_long_mean']:.4f} "
+             f"p_short_mean={score_diag['p_short_mean']:.4f} "
+             f"edge_long_mean={score_diag['edge_long_mean']:.4f} "
+             f"edge_short_mean={score_diag['edge_short_mean']:.4f}")
+    all_long = int(np.sum(sides == 1))
+    all_short = int(np.sum(sides == -1))
+    log.info(f"[V5_SIDE_DIAG] ALL bars: long={all_long} short={all_short} "
+             f"long_pct={100*all_long/max(all_long+all_short,1):.1f}% "
+             f"(if >95%% one-sided, this is MODEL BIAS not a bug)")
     log.info(f"[V5_FWD] Quality gate: {qual_diag.get('passed_pct', 0):.1f}% pass "
              f"({qual_diag.get('final', 0)}/{qual_diag.get('total', 0)})")
     log.info(f"[V5_FWD] Fixed threshold={config.score_threshold:.4f} cooldown={config.cooldown}")
@@ -877,13 +897,46 @@ def run_v5_forward_test(
     selected = scores_work >= config.score_threshold
     sel_indices = np.where(selected)[0]
 
+    ema200 = None
+    if ema200_regime_gate and close_prices is not None:
+        ema200 = _compute_ema(close_prices, 200)
+        log.info("[V5_FWD] EMA200 regime gate ENABLED")
+
     chronological_idx = sel_indices[np.argsort(sel_indices)]
     taken = []
+    ema_blocked = 0
     last_bar = -config.cooldown - 1
     for idx in chronological_idx:
-        if idx - last_bar >= config.cooldown:
-            taken.append(idx)
-            last_bar = idx
+        if idx - last_bar < config.cooldown:
+            continue
+        if ema200 is not None:
+            side_val = sides[idx]
+            close_val = close_prices[idx]
+            ema_val = ema200[idx]
+            if side_val == 1 and close_val < ema_val:
+                log.debug("[V5_GATE] blocked_by=ema200 side=LONG close=%.2f ema200=%.2f",
+                          close_val, ema_val)
+                ema_blocked += 1
+                continue
+            if side_val == -1 and close_val > ema_val:
+                log.debug("[V5_GATE] blocked_by=ema200 side=SHORT close=%.2f ema200=%.2f",
+                          close_val, ema_val)
+                ema_blocked += 1
+                continue
+        taken.append(idx)
+        last_bar = idx
+
+    if ema200 is not None:
+        log.info(f"[V5_GATE] EMA200 blocked {ema_blocked} trades")
+
+    n_eligible = len(sel_indices)
+    n_hold_all = int(np.sum(sides[sel_indices] == 0)) if len(sel_indices) > 0 else 0
+    n_long_all = int(np.sum(sides[sel_indices] == 1)) if len(sel_indices) > 0 else 0
+    n_short_all = int(np.sum(sides[sel_indices] == -1)) if len(sel_indices) > 0 else 0
+    unique_sides_eligible = set(np.unique(sides[sel_indices]).tolist()) if len(sel_indices) > 0 else set()
+    log.info(f"[V5_SIDE_DIAG] eligible={n_eligible} "
+             f"long={n_long_all} short={n_short_all} hold={n_hold_all} "
+             f"unique_sides={unique_sides_eligible}")
 
     use_side_conditional = (r_long is not None and r_short is not None
                             and out_long is not None and out_short is not None)
@@ -917,6 +970,16 @@ def run_v5_forward_test(
     t_outcomes = safe_outcomes[taken]
     t_r = safe_r[taken]
     t_sides = sides[taken]
+
+    n_taken_long = int(np.sum(t_sides == 1))
+    n_taken_short = int(np.sum(t_sides == -1))
+    log.info(f"[V5_SIDE_DIAG] taken={len(taken)} long={n_taken_long} short={n_taken_short} "
+             f"unique_sides_taken={set(np.unique(t_sides).tolist())}")
+
+    if n_taken_short == 0 and len(taken) > 10:
+        log.warning("WARNING: SHORT trades = 0 in forward test. Check side encoding or model bias.")
+    if n_taken_long == 0 and len(taken) > 10:
+        log.warning("WARNING: LONG trades = 0 in forward test. Check side encoding or model bias.")
 
     valid_trades = np.isin(t_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"])
 
@@ -1333,6 +1396,7 @@ def train_v5_model(
     run_forward_test=False,
     freeze_decision=True,
     run_diagnostics=False,
+    ema200_regime_gate=False,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -1428,6 +1492,7 @@ def train_v5_model(
     val_barrier_oracle_list = []
     val_barrier_soft_list = []
     val_timestamps_list = []
+    val_close_list = []
 
     features_df_columns = None
 
@@ -1559,6 +1624,7 @@ def train_v5_model(
         val_barrier_oracle_list.append(barrier_oracle[test_idx])
         val_barrier_soft_list.append(barrier_soft[test_idx])
         val_timestamps_list.append(sym_df['timestamp'].values[test_idx])
+        val_close_list.append(sym_df['close'].values[test_idx])
 
     train_feat = np.concatenate(train_features, axis=0)
     val_feat = np.concatenate(val_features, axis=0)
@@ -1602,6 +1668,7 @@ def train_v5_model(
     val_barrier_oracle = _concat_lists(val_barrier_oracle_list)
     val_barrier_soft = np.concatenate(val_barrier_soft_list, axis=0)
     val_timestamps_arr = np.concatenate(val_timestamps_list, axis=0)
+    val_close_arr = np.concatenate(val_close_list, axis=0)
 
     for label, arr, vmask in [
         ('train_ret_R', train_ret_R, train_valid),
@@ -2036,6 +2103,8 @@ def train_v5_model(
                 r_short=val_r_short_arr,
                 out_long=val_out_long_arr,
                 out_short=val_out_short_arr,
+                close_prices=val_close_arr,
+                ema200_regime_gate=ema200_regime_gate,
             )
 
             report_path = checkpoint_dir / "v5_forward_report.json"

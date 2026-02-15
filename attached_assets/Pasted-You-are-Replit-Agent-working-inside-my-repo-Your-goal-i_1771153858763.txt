@@ -1,0 +1,107 @@
+You are Replit Agent working inside my repo. Your goal is to make my V5 forward test STOP losing by (1) reducing trades/day to ~3–4 (higher quality) and (2) fixing the LONG-only issue (either a model bias or a side-encoding bug). Do not refactor unrelated code. Keep CLI/backwards compatibility.
+
+CONTEXT / CURRENT COMMAND I RUN
+python quick_start.py --train-v5 --train --symbols BTCUSDT,ETHUSDT,SOLUSDT --interval 15m --epochs 25 --batch-size 64 --lr 6e-05 --horizon 16 --v5-train-end-date 2025-11-15 --v5-test-start-date 2025-11-15 --v5-test-end-date 2026-02-15 --v5-forward-test --v5-freeze-decision --url <my-url>
+
+CURRENT PROBLEM (FROM FORWARD REPORT)
+- Trades/day ~8.4, Threshold ~0.0258 (too loose)
+- Long/Short = 2304/0 (SHORT never fires)
+- PF 0.87, Expectancy negative, large drawdown
+
+DELIVERABLES
+A) Add configurable Trades/Day controller target to hit 3–4 trades/day
+B) Add diagnostics to prove whether “SHORT=0” is model bias or eval bug
+C) (Optional but recommended) Add a simple candle-only regime gate toggle (EMA200) to avoid longing in down regimes
+D) Provide me the exact command(s) to re-run training + forward test after changes
+
+========================
+A) FIX TRADE FREQUENCY (TARGET 3–4 / DAY)
+========================
+1) Locate where V5’s TPD controller target is set. It prints something like:
+   "target=6.5±1.5" (or similar) in logs.
+2) Make it configurable via CLI flags (DO NOT hardcode):
+   - --v5-target-trades-per-day (float, default keep current behavior)
+   - --v5-target-trades-per-day-band (float, default keep current behavior)
+3) Update the controller to use these values.
+4) Recommended defaults for my case:
+   target = 3.5
+   band = 0.8
+But keep existing default if flags not provided.
+
+Acceptance:
+- Forward test output should show Trades/Day ~3–4 (± ~1) and threshold should increase meaningfully vs 0.0258.
+
+========================
+B) FIX / DIAGNOSE LONG-ONLY (2304/0)
+========================
+We must determine if this is:
+- model output bias, OR
+- a sign/encoding bug in forward evaluation / gating logic.
+
+Add a log line in forward test right after final trade mask is applied (the same mask used to compute metrics):
+  [V5_SIDE_DIAG] eligible=<N> taken=<N> hold=<N> long=<N> short=<N>
+Also print unique values of the side array after masking (e.g., {1, -1} or {0, 1}).
+Make sure the counts align with the metrics report’s direction breakdown.
+
+If the diag shows short>0 but report shows 0, there is an eval/reporting bug.
+If diag shows short=0, it is model bias or gating blocks shorts:
+- Check the threshold action mapping (H/L/S) to side values (ensure SHORT isn’t mistakenly mapped to HOLD or LONG).
+- Check any “only-long” conditions or one-sided gates.
+- Check any sign inversion where negative scores become positive.
+- Fix so predicted SHORT actions produce side=-1 (or whatever canonical short encoding is) and reach evaluation.
+
+Acceptance:
+- For a multi-month crypto window, shorts should not be 0 unless explicitly configured.
+- After fix, direction breakdown should show both long and short (unless the model truly never predicts shorts, in which case proceed to (C) and add class-balancing in training).
+
+========================
+C) OPTIONAL: ADD REGIME GATE (TO IMPROVE SUCCESS RATE)
+========================
+Add a toggle flag (default OFF):
+  --v5-ema200-regime-gate
+
+If enabled:
+- Compute EMA200 on the same candle series (no leakage; only past data).
+- Only allow LONG trades when close > EMA200.
+- Only allow SHORT trades when close < EMA200.
+- If close is near EMA200, optionally skip (configurable later; keep simple for now).
+
+Log when gate filters a trade:
+  [V5_GATE] blocked_by=ema200 side=LONG/SHORT close=... ema200=...
+
+Acceptance:
+- With gate ON, forward test should show fewer trades and improved PF/expectancy relative to baseline, or at minimum reduced drawdown.
+
+========================
+D) COMMANDS TO RUN
+========================
+After implementing, print the exact commands to run:
+
+1) Baseline (no gate), target 3–4/day:
+python quick_start.py ... (same as my command) \
+  --v5-target-trades-per-day 3.5 \
+  --v5-target-trades-per-day-band 0.8 \
+  --v5-forward-test --v5-freeze-decision
+
+2) With EMA200 gate:
+python quick_start.py ... \
+  --v5-target-trades-per-day 3.5 \
+  --v5-target-trades-per-day-band 0.8 \
+  --v5-ema200-regime-gate \
+  --v5-forward-test --v5-freeze-decision
+
+========================
+TESTING / SANITY CHECKS
+========================
+- Add at least one minimal unit/integration test verifying:
+  - side diag counts match direction breakdown
+  - the new CLI flags parse correctly and change controller target
+- Add a runtime warning if all trades are one-sided:
+  "WARNING: SHORT trades = 0 in forward test. Check side encoding or model bias."
+
+DO NOT:
+- Change the dataset split dates logic
+- Remove existing outputs/JSON report
+- Add external dependencies
+
+Implement now.

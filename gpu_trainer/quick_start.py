@@ -4829,6 +4829,10 @@ Examples:
                         help="v5 TPD controller: target trades per day (default: 6.5)")
     parser.add_argument("--v5-tpd-tol", type=float, default=1.5,
                         help="v5 TPD controller: tolerance ± around target (default: 1.5)")
+    parser.add_argument("--v5-target-trades-per-day", type=float, default=None,
+                        help="Override --v5-target-tpd with intuitive trades/day target (e.g. 3.5)")
+    parser.add_argument("--v5-target-trades-per-day-band", type=float, default=None,
+                        help="Override --v5-tpd-tol with intuitive band (e.g. 0.8)")
     parser.add_argument("--v5-thr-warmup-epochs", type=int, default=3,
                         help="v5 TPD controller: epochs before adapting threshold (default: 3)")
     parser.add_argument("--v5-thr-step-mult", type=float, default=0.10,
@@ -4850,6 +4854,8 @@ Examples:
                         help="v5 forward test: freeze decision layer (no TPD adaptation, default: True)")
     parser.add_argument("--v5-diagnostics", action="store_true", default=False,
                         help="v5: run leakage/overfitting diagnostics after training")
+    parser.add_argument("--v5-ema200-regime-gate", action="store_true", default=False,
+                        help="v5: EMA200 regime gate - LONG only when close>EMA200, SHORT only when close<EMA200")
     parser.add_argument("--v5-walk-forward", action="store_true", default=False,
                         help="v5: run walk-forward analysis with rolling train/test windows")
     parser.add_argument("--v5-wf-train-months", type=int, default=12,
@@ -5375,9 +5381,18 @@ Examples:
                 p_trade_min=args.v5_p_trade_min,
                 enable_calib=args.v5_enable_calib,
             )
+            v5_effective_tpd = args.v5_target_tpd
+            v5_effective_tol = args.v5_tpd_tol
+            if args.v5_target_trades_per_day is not None:
+                v5_effective_tpd = args.v5_target_trades_per_day
+                log.info(f"[V5] --v5-target-trades-per-day={v5_effective_tpd} overrides --v5-target-tpd")
+            if args.v5_target_trades_per_day_band is not None:
+                v5_effective_tol = args.v5_target_trades_per_day_band
+                log.info(f"[V5] --v5-target-trades-per-day-band={v5_effective_tol} overrides --v5-tpd-tol")
+
             tpd_cfg = V5TPDControllerConfig(
-                target_tpd=args.v5_target_tpd,
-                tpd_tol=args.v5_tpd_tol,
+                target_tpd=v5_effective_tpd,
+                tpd_tol=v5_effective_tol,
                 thr_warmup_epochs=args.v5_thr_warmup_epochs,
                 thr_step_mult=args.v5_thr_step_mult,
                 score_threshold=args.v5_score_threshold,
@@ -5447,8 +5462,8 @@ Examples:
                 w_regime=args.v5_w_regime,
                 score_lambda=args.v5_score_lambda,
                 risk_proxy=args.v5_risk_proxy,
-                target_tpd=args.v5_target_tpd,
-                target_tpd_tol=args.v5_tpd_tol,
+                target_tpd=v5_effective_tpd,
+                target_tpd_tol=v5_effective_tol,
                 hold_target=args.v5_hold_target,
                 mfe_min=args.v5_mfe_min,
                 cand_warmup_epochs=args.v5_cand_warmup,
@@ -5472,6 +5487,7 @@ Examples:
                 run_forward_test=args.v5_forward_test,
                 freeze_decision=args.v5_freeze_decision,
                 run_diagnostics=args.v5_diagnostics,
+                ema200_regime_gate=args.v5_ema200_regime_gate,
             )
 
             log.info("=" * 60)

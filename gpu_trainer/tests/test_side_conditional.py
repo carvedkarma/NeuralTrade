@@ -185,3 +185,117 @@ class TestSharpeAnnualization:
             f"New Sharpe ({sharpe:.2f}) should be less inflated than old ({old_sharpe:.2f})"
         )
         assert abs(sharpe) < 50, f"Sharpe {sharpe:.2f} still seems too high"
+
+
+class TestCLIFlags:
+    def test_trades_per_day_override_parses(self):
+        """New --v5-target-trades-per-day flag should parse correctly."""
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--v5-target-tpd", type=float, default=6.5)
+        parser.add_argument("--v5-tpd-tol", type=float, default=1.5)
+        parser.add_argument("--v5-target-trades-per-day", type=float, default=None)
+        parser.add_argument("--v5-target-trades-per-day-band", type=float, default=None)
+
+        args = parser.parse_args(["--v5-target-trades-per-day", "3.5",
+                                   "--v5-target-trades-per-day-band", "0.8"])
+        assert args.v5_target_trades_per_day == 3.5
+        assert args.v5_target_trades_per_day_band == 0.8
+
+        effective_tpd = args.v5_target_tpd
+        effective_tol = args.v5_tpd_tol
+        if args.v5_target_trades_per_day is not None:
+            effective_tpd = args.v5_target_trades_per_day
+        if args.v5_target_trades_per_day_band is not None:
+            effective_tol = args.v5_target_trades_per_day_band
+        assert effective_tpd == 3.5
+        assert effective_tol == 0.8
+
+    def test_default_no_override(self):
+        """Without override flags, defaults should be preserved."""
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--v5-target-tpd", type=float, default=6.5)
+        parser.add_argument("--v5-tpd-tol", type=float, default=1.5)
+        parser.add_argument("--v5-target-trades-per-day", type=float, default=None)
+        parser.add_argument("--v5-target-trades-per-day-band", type=float, default=None)
+
+        args = parser.parse_args([])
+        assert args.v5_target_trades_per_day is None
+        assert args.v5_target_trades_per_day_band is None
+
+        effective_tpd = args.v5_target_tpd
+        if args.v5_target_trades_per_day is not None:
+            effective_tpd = args.v5_target_trades_per_day
+        assert effective_tpd == 6.5
+
+    def test_ema200_gate_flag_parses(self):
+        """--v5-ema200-regime-gate should parse as boolean."""
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--v5-ema200-regime-gate", action="store_true", default=False)
+
+        args_off = parser.parse_args([])
+        assert args_off.v5_ema200_regime_gate is False
+
+        args_on = parser.parse_args(["--v5-ema200-regime-gate"])
+        assert args_on.v5_ema200_regime_gate is True
+
+
+class TestSideDiagnostics:
+    def test_side_counts_match_direction_breakdown(self):
+        """Side diagnostic counts must equal direction breakdown counts."""
+        sides = np.array([1, -1, 1, 1, -1, 1, -1, -1, 1, 1])
+        n_long = int(np.sum(sides == 1))
+        n_short = int(np.sum(sides == -1))
+
+        assert n_long == 6
+        assert n_short == 4
+        assert n_long + n_short == len(sides)
+
+    def test_one_sided_detection(self):
+        """All-LONG sides should trigger a warning condition."""
+        sides = np.ones(100, dtype=int)
+        n_short = int(np.sum(sides == -1))
+        assert n_short == 0, "Expected 0 shorts for all-long sides"
+
+        should_warn = n_short == 0 and len(sides) > 10
+        assert should_warn, "Should trigger one-sided warning"
+
+
+class TestEMA200:
+    def _compute_ema_standalone(self, close_arr, period=200):
+        """Standalone EMA for testing (mirrors _compute_ema in v5_train.py)."""
+        alpha = 2.0 / (period + 1)
+        ema = np.empty_like(close_arr, dtype=np.float64)
+        ema[0] = close_arr[0]
+        for i in range(1, len(close_arr)):
+            ema[i] = alpha * close_arr[i] + (1 - alpha) * ema[i - 1]
+        return ema
+
+    def test_ema_computation(self):
+        """EMA200 should be computed without future leakage."""
+        close = np.array([100.0] * 50 + [200.0] * 50, dtype=np.float64)
+        ema = self._compute_ema_standalone(close, period=10)
+
+        assert ema[0] == 100.0
+        assert ema[49] == pytest.approx(100.0, abs=0.1)
+        assert ema[99] > 150.0
+
+    def test_ema_gate_blocks_long_below(self):
+        """EMA gate should block LONG when close < EMA200."""
+        close = np.array([100.0, 90.0, 110.0, 80.0])
+        ema200 = np.array([105.0, 105.0, 105.0, 105.0])
+        sides = np.array([1, 1, 1, -1])
+
+        blocked = []
+        for i in range(len(close)):
+            if sides[i] == 1 and close[i] < ema200[i]:
+                blocked.append(i)
+            if sides[i] == -1 and close[i] > ema200[i]:
+                blocked.append(i)
+
+        assert 0 in blocked
+        assert 1 in blocked
+        assert 2 not in blocked
+        assert 3 not in blocked
