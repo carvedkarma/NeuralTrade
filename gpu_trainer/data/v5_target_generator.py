@@ -17,6 +17,8 @@ import logging
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
 
+from data.common import compute_atr
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,29 +28,6 @@ class V5TargetConfig:
     atr_period: int = 14
     hold_target: float = 0.30
     mfe_min: float = 0.05
-
-
-def compute_atr(df: pd.DataFrame, period: int = 14) -> np.ndarray:
-    highs = df['high'].values.astype(np.float64)
-    lows = df['low'].values.astype(np.float64)
-    closes = df['close'].values.astype(np.float64)
-    n = len(df)
-
-    tr = np.zeros(n, dtype=np.float64)
-    for i in range(1, n):
-        tr[i] = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1])
-        )
-
-    atr = np.zeros(n, dtype=np.float64)
-    if n > period:
-        atr[period] = np.mean(tr[1:period + 1])
-        for i in range(period + 1, n):
-            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
-
-    return atr
 
 
 def build_v5_targets(
@@ -103,7 +82,7 @@ def build_v5_targets(
         short_mfe = (entry_price - min_low) / (atr[i] + eps)
         short_mae = (max_high - entry_price) / (atr[i] + eps)
 
-        if ret_R[i] >= 0:
+        if long_mfe >= short_mfe:
             mfe_R[i] = long_mfe
             mae_R[i] = long_mae
         else:

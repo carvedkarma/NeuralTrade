@@ -65,29 +65,8 @@ class CandidateConfig:
 
 
 def compute_atr_pct(df: pd.DataFrame, period: int = 14) -> np.ndarray:
-    highs = df['high'].values.astype(np.float64)
-    lows = df['low'].values.astype(np.float64)
-    closes = df['close'].values.astype(np.float64)
-
-    n = len(df)
-    tr = np.zeros(n, dtype=np.float64)
-    for i in range(1, n):
-        tr[i] = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1])
-        )
-    tr[0] = highs[0] - lows[0]
-
-    atr = np.zeros(n, dtype=np.float64)
-    atr[:period] = np.nan
-    if n >= period:
-        atr[period - 1] = np.mean(tr[:period])
-        for i in range(period, n):
-            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
-
-    atr_pct = np.where(closes > 0, atr / closes, 0.0)
-    return atr_pct
+    from data.common import compute_atr_pct as _compute_atr_pct
+    return _compute_atr_pct(df, period)
 
 
 def compute_realized_vol(df: pd.DataFrame, lookback: int = 20) -> np.ndarray:

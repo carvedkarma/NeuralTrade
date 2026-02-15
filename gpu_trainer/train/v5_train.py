@@ -89,8 +89,12 @@ class V5Dataset(Dataset):
 
 def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
                     w_action=2.0, w_barrier=0.25, w_regime=0.1,
-                    barrier_mode='fixed', action_weights=None):
-    """Compute v5 composite loss with class-balanced action CE."""
+                    barrier_mode='fixed', action_weights=None, epoch=0):
+    """Compute v5 composite loss with class-balanced action CE.
+
+    Uses clamped Gaussian NLL to prevent log(sigma) term from dominating.
+    Three-stage schedule: epochs 0-5 action-heavy, 6-15 balanced, 16+ full.
+    """
     valid = batch['valid']
     if valid.sum() == 0:
         return torch.tensor(0.0, device=outputs['ret_mu'].device, requires_grad=True), {}
@@ -99,9 +103,10 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
     ret_log_sigma = outputs['ret_log_sigma'][valid].squeeze(-1)
     ret_true = batch['ret_R'][valid]
 
-    sigma = torch.exp(ret_log_sigma)
-    nll = 0.5 * torch.log(2 * torch.pi * sigma ** 2 + 1e-8) + \
-          0.5 * ((ret_true - ret_mu) / (sigma + 1e-8)) ** 2
+    sigma = torch.exp(ret_log_sigma).clamp(min=0.01, max=5.0)
+    squared_error = ((ret_true - ret_mu) / (sigma + 1e-8)) ** 2
+    log_term = torch.log(sigma + 1e-8)
+    nll = log_term + 0.5 * squared_error
     L_ret = nll.mean()
 
     huber = nn.SmoothL1Loss()
@@ -127,7 +132,23 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
         'L_action': L_action.item(),
     }
 
-    total = w_ret * L_ret + w_mfe * L_mfe + w_mae * L_mae + w_action * L_action
+    if epoch <= 5:
+        eff_w_ret = w_ret * 0.3
+        eff_w_mfe = w_mfe * 0.3
+        eff_w_mae = w_mae * 0.3
+        eff_w_action = w_action * 2.0
+    elif epoch <= 15:
+        eff_w_ret = w_ret * 0.7
+        eff_w_mfe = w_mfe * 0.7
+        eff_w_mae = w_mae * 0.7
+        eff_w_action = w_action * 1.0
+    else:
+        eff_w_ret = w_ret
+        eff_w_mfe = w_mfe
+        eff_w_mae = w_mae
+        eff_w_action = w_action
+
+    total = eff_w_ret * L_ret + eff_w_mfe * L_mfe + eff_w_mae * L_mae + eff_w_action * L_action
 
     if 'barrier_logits' in outputs and barrier_mode != 'fixed':
         barrier_logits = outputs['barrier_logits'][valid]
@@ -184,28 +205,48 @@ def _extract_v5_arrays(concat_outputs):
 
 
 def v5_quality_mask(arrays, cfg: V5QualityGateConfig):
-    """Apply quality gates to filter low-confidence predictions.
+    """Apply data-adaptive quality gates to filter low-confidence predictions.
 
-    Gates (all in R-units):
-    - sigma_gate: predicted sigma <= sigma_max
-    - mae_gate: predicted mae <= mae_max
-    - edge_gate: |mu_R| >= mu_R_min
-    - action_gate: max(p_long, p_short) >= p_trade_min
+    Gate thresholds are computed from model output percentiles to ensure
+    meaningful filtering regardless of the model's current output scale:
+    - sigma_gate: predicted sigma <= p75(sigma) [filter top 25% uncertainty]
+    - mae_gate: predicted mae <= p75(mae) [filter top 25% risk]
+    - edge_gate: |mu_R| >= p50(|mu_R|) [filter bottom 50% signal strength]
+    - action_gate: max(p_long, p_short) >= p60(p_trade) [filter low conviction]
+
+    The cfg thresholds serve as absolute maximums (backstop) but the adaptive
+    percentile thresholds do the actual filtering.
 
     Returns: boolean mask, diagnostics dict
     """
     n = len(arrays['mu_R'])
 
     sigma_pass = np.ones(n, dtype=bool)
+    adaptive_sigma = cfg.sigma_max
     if arrays['sigma'] is not None:
-        sigma_pass = np.isfinite(arrays['sigma']) & (arrays['sigma'] <= cfg.sigma_max)
+        finite_sigma = arrays['sigma'][np.isfinite(arrays['sigma'])]
+        if len(finite_sigma) > 100:
+            adaptive_sigma = min(cfg.sigma_max, float(np.percentile(finite_sigma, 75)))
+        sigma_pass = np.isfinite(arrays['sigma']) & (arrays['sigma'] <= adaptive_sigma)
 
-    mae_pass = np.isfinite(arrays['mae']) & (arrays['mae'] <= cfg.mae_max)
+    finite_mae = arrays['mae'][np.isfinite(arrays['mae'])]
+    adaptive_mae = cfg.mae_max
+    if len(finite_mae) > 100:
+        adaptive_mae = min(cfg.mae_max, float(np.percentile(finite_mae, 75)))
+    mae_pass = np.isfinite(arrays['mae']) & (arrays['mae'] <= adaptive_mae)
 
     mu_R = arrays['mu_R']
-    edge_pass = np.isfinite(mu_R) & (np.abs(mu_R) >= cfg.mu_R_min)
+    abs_mu = np.abs(mu_R[np.isfinite(mu_R)])
+    adaptive_mu_min = cfg.mu_R_min
+    if len(abs_mu) > 100:
+        adaptive_mu_min = max(cfg.mu_R_min * 0.1, float(np.percentile(abs_mu, 50)))
+    edge_pass = np.isfinite(mu_R) & (np.abs(mu_R) >= adaptive_mu_min)
 
-    ptrade_pass = arrays['p_trade'] >= cfg.p_trade_min
+    pt = arrays['p_trade']
+    adaptive_ptrade = cfg.p_trade_min
+    if len(pt) > 100:
+        adaptive_ptrade = max(cfg.p_trade_min * 0.5, float(np.percentile(pt, 60)))
+    ptrade_pass = pt >= adaptive_ptrade
 
     final_mask = sigma_pass & mae_pass & edge_pass & ptrade_pass
 
@@ -216,13 +257,19 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig):
         'passed_mu': int(np.sum(edge_pass)),
         'passed_ptrade': int(np.sum(ptrade_pass)),
         'final': int(np.sum(final_mask)),
+        'adaptive_sigma': adaptive_sigma,
+        'adaptive_mae': adaptive_mae,
+        'adaptive_mu_min': adaptive_mu_min,
+        'adaptive_ptrade': adaptive_ptrade,
     }
 
     log.info("[V5_QUAL_DIAG] total=%d passed_sigma=%d passed_mae=%d "
-             "passed_mu=%d passed_ptrade=%d final=%d (%.1f%%)",
+             "passed_mu=%d passed_ptrade=%d final=%d (%.1f%%) | "
+             "adaptive: sigma<=%.3f mae<=%.3f |mu|>=%.4f ptrade>=%.3f",
              diag['total'], diag['passed_sigma'], diag['passed_mae'],
              diag['passed_mu'], diag['passed_ptrade'], diag['final'],
-             100.0 * diag['final'] / max(n, 1))
+             100.0 * diag['final'] / max(n, 1),
+             adaptive_sigma, adaptive_mae, adaptive_mu_min, adaptive_ptrade)
 
     return final_mask, diag
 
@@ -276,7 +323,12 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
     Score = max(edge_long, edge_short) - penalty
     edge_long  = p_long  * mu_R / (mae_R + eps)
     edge_short = p_short * (-mu_R) / (mae_R + eps)
-    penalty    = lambda * clamp(mae, 0, mae_cap)
+    penalty    = lambda * max(0, -mu_R)   [penalize only wrong-side bets]
+
+    The penalty only activates when mu_R is negative for LONGs or positive
+    for SHORTs -- i.e., when the predicted direction opposes the chosen side.
+    This keeps penalty on the same scale as edge (~0.001-0.01 R-units)
+    instead of raw MAE (~0.9 R-units) which created a 2000x mismatch.
     """
     if _arrays is not None:
         mu_R = _arrays['mu_R']
@@ -299,12 +351,15 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
     edge_long = p_long * np.divide(mu_R, risk, out=np.zeros_like(mu_R), where=risk > 0)
     edge_short = p_short * np.divide(-mu_R, risk, out=np.zeros_like(mu_R), where=risk > 0)
 
-    clamped_mae = np.clip(mae_pred, 0.0, mae_cap)
-    penalty = score_lambda * clamped_mae
-
-    scores = np.maximum(edge_long, edge_short) - penalty
-
+    best_edge = np.maximum(edge_long, edge_short)
     sides = np.where(edge_long >= edge_short, 1, -1)
+
+    penalty_long = np.maximum(0.0, -mu_R)
+    penalty_short = np.maximum(0.0, mu_R)
+    directional_penalty = np.where(sides == 1, penalty_long, penalty_short)
+    penalty = score_lambda * directional_penalty
+
+    scores = best_edge - penalty
 
     return scores, sides, {
         'mu_R_mean': float(np.nanmean(mu_R)),
@@ -316,6 +371,11 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         'edge_long_mean': float(np.nanmean(edge_long)),
         'edge_short_mean': float(np.nanmean(edge_short)),
         'penalty_mean': float(np.nanmean(penalty)),
+        'score_mean': float(np.nanmean(scores)),
+        'score_std': float(np.nanstd(scores)),
+        'score_p50': float(np.nanpercentile(scores, 50)),
+        'score_p90': float(np.nanpercentile(scores, 90)),
+        'score_pct_positive': float(np.nanmean(scores > 0) * 100),
     }
 
 
@@ -381,13 +441,16 @@ def _tpd_controller_step(scores, quality_mask, candidate_mask,
         else:
             new_threshold = current_threshold - step
             action = "DOWN"
-        new_threshold = float(np.clip(new_threshold, sp50, sp99))
+        sp5 = float(np.percentile(eligible_finite, 5))
+        new_threshold = float(np.clip(new_threshold, sp5, sp99))
 
     log.info("[V5_TPD_CTRL] epoch=%d tpd=%.1f target=%.1f±%.1f thr=%.4f->%.4f "
-             "step_mult=%.2f score_std=%.4f action=%s trades=%d",
+             "step_mult=%.2f score_std=%.4f action=%s trades=%d clamp=[%.4f,%.4f]",
              epoch, tpd, target_tpd, tol,
              current_threshold, new_threshold,
-             tpd_cfg.thr_step_mult, score_std, action, n_trades)
+             tpd_cfg.thr_step_mult, score_std, action, n_trades,
+             float(np.percentile(eligible_finite, 5)),
+             float(np.percentile(eligible_finite, 99)))
 
     return new_threshold, n_trades, tpd, action
 
@@ -666,20 +729,37 @@ def train_v5_model(
     if symbols is None or len(symbols) == 0:
         symbols = ["BTCUSDT"]
 
-    all_features = []
-    all_ret_R = []
-    all_mfe_R = []
-    all_mae_R = []
-    all_vol_h = []
-    all_action = []
-    all_valid = []
-    all_sym_ids = []
-    all_cand_mask = []
-    all_outcomes = []
-    all_realized_r = []
-    all_barrier_oracle = []
-    all_barrier_soft = []
+    train_features = []
+    train_ret_R_list = []
+    train_mfe_R_list = []
+    train_mae_R_list = []
+    train_vol_h_list = []
+    train_action_list = []
+    train_valid_list = []
+    train_sym_ids_list = []
+    train_cand_mask_list = []
+    train_outcomes_list = []
+    train_realized_r_list = []
+    train_barrier_oracle_list = []
+    train_barrier_soft_list = []
+
+    val_features = []
+    val_ret_R_list = []
+    val_mfe_R_list = []
+    val_mae_R_list = []
+    val_vol_h_list = []
+    val_action_list = []
+    val_valid_list = []
+    val_sym_ids_list = []
+    val_cand_mask_list = []
+    val_outcomes_list = []
+    val_realized_r_list = []
+    val_barrier_oracle_list = []
+    val_barrier_soft_list = []
+
     features_df_columns = None
+
+    from data.common import generate_v5_sweep_outcomes
 
     for si, sym in enumerate(symbols):
         parquet_path = data_dir / f"{sym}_15m.parquet"
@@ -694,6 +774,11 @@ def train_v5_model(
 
         fe = FeatureEngineer()
         sym_features_df = fe.compute_all_features(sym_df)
+
+        max_lookback = 50
+        warmup_mask = np.zeros(len(sym_features_df), dtype=bool)
+        warmup_mask[:max_lookback] = True
+        sym_features_df = sym_features_df.ffill().bfill()
         sym_features_df = sym_features_df.fillna(0)
 
         if features_df_columns is None:
@@ -706,30 +791,25 @@ def train_v5_model(
             hold_target=hold_target, mfe_min_r=mfe_min
         )
 
+        v5_targets['valid_mask'][:max_lookback] = False
+
         sym_cand_mask = None
         if candidate_config.enabled:
             sym_cand_mask, _ = generate_candidate_mask(
                 sym_df, candidate_config, symbol=sym
             )
 
-        from data.regression_targets import generate_v47_quality_targets
-        htf_cols = [c for c in sym_features_df.columns if c.startswith('h1_') or c.startswith('h4_')]
-        htf_features_df = sym_features_df[htf_cols].copy()
-        label_df = generate_v47_quality_targets(
-            sym_df, htf_features_df,
-            horizon_periods=horizon,
-            tp_atr_mult=tp_mult, sl_atr_mult=sl_mult,
-            q_min_tp=q_min_tp,
-            r_min_expiry_strict=r_min_expiry_strict,
-            soft_label_temp=1.0,
-            auto_balance=auto_balance_enter_labels,
-            target_enter_rate=target_enter_rate,
-            target_enter_rate_min=target_enter_rate_min,
-            target_enter_rate_max=target_enter_rate_max,
-            balance_search_steps=balance_search_steps,
+        sweep_result = generate_v5_sweep_outcomes(
+            sym_df, horizon=horizon, tp_mult=tp_mult,
+            sl_mult=sl_mult, atr_period=14,
         )
-        sym_realized_r = label_df['realized_r'].values.astype(np.float32)
-        sym_outcomes = label_df['outcome'].values
+        sym_realized_r = sweep_result['realized_r']
+        sym_outcomes = sweep_result['outcome']
+
+        sym_realized_r[:max_lookback] = np.nan
+        sym_outcomes[:max_lookback] = "NO_CANDIDATE"
+        if sym_cand_mask is not None:
+            sym_cand_mask[:max_lookback] = False
 
         barrier_oracle = np.zeros(len(sym_df), dtype=np.int64)
         barrier_soft = np.zeros((len(sym_df), len(presets)), dtype=np.float32)
@@ -742,49 +822,118 @@ def train_v5_model(
         sym_id_arr = np.full(n, si, dtype=np.int64)
         cand_arr = sym_cand_mask if sym_cand_mask is not None else np.ones(n, dtype=bool)
 
-        all_features.append(sym_features_df.values.astype(np.float32))
-        all_ret_R.append(v5_targets['ret_R'][:n])
-        all_mfe_R.append(v5_targets['mfe_R'][:n])
-        all_mae_R.append(v5_targets['mae_R'][:n])
-        all_vol_h.append(v5_targets['vol_h'][:n])
-        all_action.append(v5_targets['action_label'][:n])
-        all_valid.append(v5_targets['valid_mask'][:n])
-        all_sym_ids.append(sym_id_arr)
-        all_cand_mask.append(cand_arr[:n])
-        all_outcomes.append(sym_outcomes[:n])
-        all_realized_r.append(sym_realized_r[:n])
-        all_barrier_oracle.append(barrier_oracle[:n])
-        all_barrier_soft.append(barrier_soft[:n])
+        sym_split = int(n * 0.8)
+        log.info(f"[V5] {sym}: per-symbol split at bar {sym_split}/{n} "
+                 f"(train={sym_split}, val={n - sym_split})")
 
-    features_all = np.concatenate(all_features, axis=0)
-    ret_R_all = np.concatenate(all_ret_R, axis=0)
-    mfe_R_all = np.concatenate(all_mfe_R, axis=0)
-    mae_R_all = np.concatenate(all_mae_R, axis=0)
-    vol_h_all = np.concatenate(all_vol_h, axis=0)
-    action_all = np.concatenate(all_action, axis=0)
-    valid_all = np.concatenate(all_valid, axis=0)
-    sym_ids_all = np.concatenate(all_sym_ids, axis=0)
-    cand_mask_all = np.concatenate(all_cand_mask, axis=0)
-    outcomes_all = np.concatenate(all_outcomes, axis=0)
-    realized_r_all = np.concatenate(all_realized_r, axis=0)
-    barrier_oracle_all = np.concatenate(all_barrier_oracle, axis=0)
-    barrier_soft_all = np.concatenate(all_barrier_soft, axis=0)
+        feat_arr = sym_features_df.values.astype(np.float32)
+        ret_arr = v5_targets['ret_R'][:n]
+        mfe_arr = v5_targets['mfe_R'][:n]
+        mae_arr = v5_targets['mae_R'][:n]
+        vol_arr = v5_targets['vol_h'][:n]
+        act_arr = v5_targets['action_label'][:n]
+        val_arr = v5_targets['valid_mask'][:n]
 
-    total_bars = len(features_all)
-    input_dim = features_all.shape[1]
-    log.info(f"[V5] Total bars: {total_bars} | Features: {input_dim} | Symbols: {len(symbols)}")
+        train_features.append(feat_arr[:sym_split])
+        train_ret_R_list.append(ret_arr[:sym_split])
+        train_mfe_R_list.append(mfe_arr[:sym_split])
+        train_mae_R_list.append(mae_arr[:sym_split])
+        train_vol_h_list.append(vol_arr[:sym_split])
+        train_action_list.append(act_arr[:sym_split])
+        train_valid_list.append(val_arr[:sym_split])
+        train_sym_ids_list.append(sym_id_arr[:sym_split])
+        train_cand_mask_list.append(cand_arr[:sym_split])
+        train_outcomes_list.append(sym_outcomes[:sym_split])
+        train_realized_r_list.append(sym_realized_r[:sym_split])
+        train_barrier_oracle_list.append(barrier_oracle[:sym_split])
+        train_barrier_soft_list.append(barrier_soft[:sym_split])
 
-    split_idx = int(total_bars * 0.8)
-    train_idx = np.arange(split_idx)
-    val_idx = np.arange(split_idx, total_bars)
+        val_features.append(feat_arr[sym_split:])
+        val_ret_R_list.append(ret_arr[sym_split:])
+        val_mfe_R_list.append(mfe_arr[sym_split:])
+        val_mae_R_list.append(mae_arr[sym_split:])
+        val_vol_h_list.append(vol_arr[sym_split:])
+        val_action_list.append(act_arr[sym_split:])
+        val_valid_list.append(val_arr[sym_split:])
+        val_sym_ids_list.append(sym_id_arr[sym_split:])
+        val_cand_mask_list.append(cand_arr[sym_split:])
+        val_outcomes_list.append(sym_outcomes[sym_split:])
+        val_realized_r_list.append(sym_realized_r[sym_split:])
+        val_barrier_oracle_list.append(barrier_oracle[sym_split:])
+        val_barrier_soft_list.append(barrier_soft[sym_split:])
 
-    ret_R_all = np.nan_to_num(ret_R_all, nan=0.0)
-    mfe_R_all = np.nan_to_num(mfe_R_all, nan=0.0)
-    mae_R_all = np.nan_to_num(mae_R_all, nan=0.0)
-    vol_h_all = np.nan_to_num(vol_h_all, nan=0.0)
+    train_feat = np.concatenate(train_features, axis=0)
+    val_feat = np.concatenate(val_features, axis=0)
 
-    train_action = action_all[train_idx]
-    train_valid = valid_all[train_idx]
+    from sklearn.preprocessing import RobustScaler
+    scaler = RobustScaler()
+    train_feat = scaler.fit_transform(train_feat).astype(np.float32)
+    val_feat = scaler.transform(val_feat).astype(np.float32)
+    log.info(f"[V5] RobustScaler fitted on {len(train_feat)} train bars, applied to {len(val_feat)} val bars")
+
+    def _concat_lists(lst):
+        return np.concatenate(lst, axis=0)
+
+    train_ret_R = _concat_lists(train_ret_R_list)
+    train_mfe_R = _concat_lists(train_mfe_R_list)
+    train_mae_R = _concat_lists(train_mae_R_list)
+    train_vol_h = _concat_lists(train_vol_h_list)
+    train_action = _concat_lists(train_action_list)
+    train_valid = _concat_lists(train_valid_list)
+    train_sym_ids = _concat_lists(train_sym_ids_list)
+    train_cand_mask = _concat_lists(train_cand_mask_list)
+    train_outcomes = _concat_lists(train_outcomes_list)
+    train_realized_r = _concat_lists(train_realized_r_list)
+    train_barrier_oracle = _concat_lists(train_barrier_oracle_list)
+    train_barrier_soft = np.concatenate(train_barrier_soft_list, axis=0)
+
+    val_ret_R = _concat_lists(val_ret_R_list)
+    val_mfe_R = _concat_lists(val_mfe_R_list)
+    val_mae_R = _concat_lists(val_mae_R_list)
+    val_vol_h = _concat_lists(val_vol_h_list)
+    val_action_arr = _concat_lists(val_action_list)
+    val_valid = _concat_lists(val_valid_list)
+    val_sym_ids_arr = _concat_lists(val_sym_ids_list)
+    val_cand_mask_arr = _concat_lists(val_cand_mask_list)
+    val_outcomes_arr = _concat_lists(val_outcomes_list)
+    val_realized_r_arr = _concat_lists(val_realized_r_list)
+    val_barrier_oracle = _concat_lists(val_barrier_oracle_list)
+    val_barrier_soft = np.concatenate(val_barrier_soft_list, axis=0)
+
+    for label, arr, vmask in [
+        ('train_ret_R', train_ret_R, train_valid),
+        ('train_mfe_R', train_mfe_R, train_valid),
+        ('train_mae_R', train_mae_R, train_valid),
+        ('val_ret_R', val_ret_R, val_valid),
+        ('val_mfe_R', val_mfe_R, val_valid),
+        ('val_mae_R', val_mae_R, val_valid),
+    ]:
+        nan_in_valid = np.sum(np.isnan(arr[vmask])) if np.any(vmask) else 0
+        if nan_in_valid > 0:
+            log.warning("[V5_NAN_AUDIT] %s has %d NaNs in %d valid bars (%.1f%%)",
+                        label, nan_in_valid, int(np.sum(vmask)),
+                        100.0 * nan_in_valid / max(int(np.sum(vmask)), 1))
+    nan_feats_train = np.sum(np.isnan(train_feat))
+    nan_feats_val = np.sum(np.isnan(val_feat))
+    if nan_feats_train > 0 or nan_feats_val > 0:
+        log.warning("[V5_NAN_AUDIT] Features NaN: train=%d val=%d", nan_feats_train, nan_feats_val)
+
+    train_ret_R = np.nan_to_num(train_ret_R, nan=0.0)
+    train_mfe_R = np.nan_to_num(train_mfe_R, nan=0.0)
+    train_mae_R = np.nan_to_num(train_mae_R, nan=0.0)
+    train_vol_h = np.nan_to_num(train_vol_h, nan=0.0)
+    val_ret_R = np.nan_to_num(val_ret_R, nan=0.0)
+    val_mfe_R = np.nan_to_num(val_mfe_R, nan=0.0)
+    val_mae_R = np.nan_to_num(val_mae_R, nan=0.0)
+    val_vol_h = np.nan_to_num(val_vol_h, nan=0.0)
+
+    total_train = len(train_feat)
+    total_val = len(val_feat)
+    total_bars = total_train + total_val
+    input_dim = train_feat.shape[1]
+    log.info(f"[V5] Total bars: {total_bars} (train={total_train}, val={total_val}) | "
+             f"Features: {input_dim} | Symbols: {len(symbols)}")
+
     valid_train_action = train_action[train_valid]
     n_hold = int(np.sum(valid_train_action == 0))
     n_long = int(np.sum(valid_train_action == 1))
@@ -805,9 +954,7 @@ def train_v5_model(
 
     action_weights_tensor = torch.tensor(action_class_weights, dtype=torch.float32).to(device)
 
-    val_action = action_all[val_idx]
-    val_valid = valid_all[val_idx]
-    valid_val_action = val_action[val_valid]
+    valid_val_action = val_action_arr[val_valid]
     vn_hold = int(np.sum(valid_val_action == 0))
     vn_long = int(np.sum(valid_val_action == 1))
     vn_short = int(np.sum(valid_val_action == 2))
@@ -815,22 +962,23 @@ def train_v5_model(
     log.info(f"[V5_ACTION_DIST] VAL: HOLD={vn_hold} ({vn_hold/vn_total:.1%}) "
              f"LONG={vn_long} ({vn_long/vn_total:.1%}) SHORT={vn_short} ({vn_short/vn_total:.1%})")
 
-    train_ret_valid = ret_R_all[train_idx][train_valid]
-    log.info(f"[V5_DATA_DIAG] ret_R train: mean={np.mean(train_ret_valid):.4f} "
-             f"std={np.std(train_ret_valid):.4f} p5={np.percentile(train_ret_valid,5):.4f} "
-             f"p95={np.percentile(train_ret_valid,95):.4f}")
+    train_ret_valid = train_ret_R[train_valid]
+    if len(train_ret_valid) > 0:
+        log.info(f"[V5_DATA_DIAG] ret_R train: mean={np.mean(train_ret_valid):.4f} "
+                 f"std={np.std(train_ret_valid):.4f} p5={np.percentile(train_ret_valid,5):.4f} "
+                 f"p95={np.percentile(train_ret_valid,95):.4f}")
 
     train_ds = V5Dataset(
-        features_all[train_idx], ret_R_all[train_idx], mfe_R_all[train_idx],
-        mae_R_all[train_idx], vol_h_all[train_idx], action_all[train_idx],
-        valid_all[train_idx], sym_ids_all[train_idx],
-        barrier_oracle_all[train_idx], barrier_soft_all[train_idx],
+        train_feat, train_ret_R, train_mfe_R,
+        train_mae_R, train_vol_h, train_action,
+        train_valid, train_sym_ids,
+        train_barrier_oracle, train_barrier_soft,
     )
     val_ds = V5Dataset(
-        features_all[val_idx], ret_R_all[val_idx], mfe_R_all[val_idx],
-        mae_R_all[val_idx], vol_h_all[val_idx], action_all[val_idx],
-        valid_all[val_idx], sym_ids_all[val_idx],
-        barrier_oracle_all[val_idx], barrier_soft_all[val_idx],
+        val_feat, val_ret_R, val_mfe_R,
+        val_mae_R, val_vol_h, val_action_arr,
+        val_valid, val_sym_ids_arr,
+        val_barrier_oracle, val_barrier_soft,
     )
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
@@ -865,11 +1013,11 @@ def train_v5_model(
     patience = 0
     max_patience = 25
 
-    val_cand_mask = cand_mask_all[val_idx]
-    val_outcomes = outcomes_all[val_idx]
-    val_realized_r = realized_r_all[val_idx]
-    val_sym_ids = sym_ids_all[val_idx]
-    val_bars = len(val_idx)
+    val_cand_mask = val_cand_mask_arr
+    val_outcomes = val_outcomes_arr
+    val_realized_r = val_realized_r_arr
+    val_sym_ids = val_sym_ids_arr
+    val_bars = total_val
 
     current_score_threshold = tpd_ctrl_cfg.score_threshold
 
@@ -940,6 +1088,7 @@ def train_v5_model(
                 w_action=w_action, w_barrier=w_barrier, w_regime=w_regime,
                 barrier_mode=barrier_mode,
                 action_weights=action_weights_tensor,
+                epoch=epoch,
             )
 
             optimizer.zero_grad()
@@ -978,6 +1127,7 @@ def train_v5_model(
                     w_action=w_action, w_barrier=w_barrier, w_regime=w_regime,
                     barrier_mode=barrier_mode,
                     action_weights=action_weights_tensor,
+                    epoch=epoch,
                 )
                 val_losses.append(vloss.item())
 
@@ -990,11 +1140,10 @@ def train_v5_model(
         lb_str = " | ".join(f"{k}={np.mean(v):.4f}" for k, v in loss_breakdown.items() if v)
         current_lr = optimizer.param_groups[0]['lr']
 
-        action_all_val = action_all[val_idx]
         action_logits_cat = torch.cat(all_val_outputs['action_logits'], dim=0).numpy()
         action_preds = np.argmax(action_logits_cat, axis=1)
-        n_pred = min(len(action_preds), len(action_all_val))
-        action_acc = np.mean(action_preds[:n_pred] == action_all_val[:n_pred])
+        n_pred = min(len(action_preds), len(val_action_arr))
+        action_acc = np.mean(action_preds[:n_pred] == val_action_arr[:n_pred])
 
         pred_hold = np.sum(action_preds[:n_pred] == 0)
         pred_long = np.sum(action_preds[:n_pred] == 1)
@@ -1027,7 +1176,22 @@ def train_v5_model(
                      f"mae_R: mean={score_diag['mae_R_mean']:.3f} mfe_R: mean={score_diag['mfe_R_mean']:.3f} | "
                      f"p_long={score_diag['p_long_mean']:.3f} p_short={score_diag['p_short_mean']:.3f} | "
                      f"edge_L={score_diag['edge_long_mean']:.4f} edge_S={score_diag['edge_short_mean']:.4f} "
-                     f"penalty={score_diag['penalty_mean']:.4f}")
+                     f"penalty={score_diag['penalty_mean']:.4f} | "
+                     f"score: mean={score_diag['score_mean']:.4f} p50={score_diag['score_p50']:.4f} "
+                     f"p90={score_diag['score_p90']:.4f} %pos={score_diag['score_pct_positive']:.1f}%")
+
+            mu_arr = arrays['mu_R']
+            sig_arr = arrays['sigma'] if arrays['sigma'] is not None else np.zeros_like(mu_arr)
+            mae_arr_diag = arrays['mae']
+            pt_arr = arrays['p_trade']
+            log.info(f"[V5_OUTPUT_DIST] mu_R: p5={np.percentile(mu_arr,5):.4f} p50={np.percentile(mu_arr,50):.4f} "
+                     f"p95={np.percentile(mu_arr,95):.4f} | "
+                     f"sigma: p5={np.percentile(sig_arr,5):.4f} p50={np.percentile(sig_arr,50):.4f} "
+                     f"p95={np.percentile(sig_arr,95):.4f} | "
+                     f"mae: p5={np.percentile(mae_arr_diag,5):.3f} p50={np.percentile(mae_arr_diag,50):.3f} "
+                     f"p95={np.percentile(mae_arr_diag,95):.3f} | "
+                     f"p_trade: p5={np.percentile(pt_arr,5):.3f} p50={np.percentile(pt_arr,50):.3f} "
+                     f"p95={np.percentile(pt_arr,95):.3f}")
 
             sweep_cand_mask = val_cand_mask if use_candidates_this_epoch else None
 
@@ -1067,6 +1231,8 @@ def train_v5_model(
                     'n_features': input_dim,
                     'feature_version': V5_FEATURE_VERSION,
                     'model_type': 'v5_forecaster',
+                    'scaler_center': scaler.center_,
+                    'scaler_scale': scaler.scale_,
                     'barrier_config': {
                         'tp_mult': tp_mult, 'sl_mult': sl_mult,
                         'horizon': horizon,
@@ -1089,6 +1255,8 @@ def train_v5_model(
                 'n_features': input_dim,
                 'feature_version': V5_FEATURE_VERSION,
                 'model_type': 'v5_forecaster',
+                'scaler_center': scaler.center_,
+                'scaler_scale': scaler.scale_,
                 'trained_at': datetime.now().isoformat(),
             }, checkpoint_dir / "best_v5_loss.pt")
             log.info(f"[V5_CKPT] New best val_loss={best_val_loss:.4f}")
