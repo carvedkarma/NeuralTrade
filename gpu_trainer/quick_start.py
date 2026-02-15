@@ -4848,6 +4848,8 @@ Examples:
                         help="v5: run forward test on test set after training (frozen decision layer)")
     parser.add_argument("--v5-freeze-decision", action="store_true", default=True,
                         help="v5 forward test: freeze decision layer (no TPD adaptation, default: True)")
+    parser.add_argument("--v5-diagnostics", action="store_true", default=False,
+                        help="v5: run leakage/overfitting diagnostics after training")
     parser.add_argument("--v5-walk-forward", action="store_true", default=False,
                         help="v5: run walk-forward analysis with rolling train/test windows")
     parser.add_argument("--v5-wf-train-months", type=int, default=12,
@@ -5469,6 +5471,7 @@ Examples:
                 test_end_date=test_end_date,
                 run_forward_test=args.v5_forward_test,
                 freeze_decision=args.v5_freeze_decision,
+                run_diagnostics=args.v5_diagnostics,
             )
 
             log.info("=" * 60)

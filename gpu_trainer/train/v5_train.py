@@ -1294,6 +1294,7 @@ def train_v5_model(
     test_end_date=None,
     run_forward_test=False,
     freeze_decision=True,
+    run_diagnostics=False,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -1654,6 +1655,7 @@ def train_v5_model(
     best_val_loss = float('inf')
     best_expectancy = float('-inf')
     best_expectancy_pct = 0.0
+    best_sweep_row = None
     patience = 0
     max_patience = 25
 
@@ -1867,6 +1869,9 @@ def train_v5_model(
             if sweep_expect > best_expectancy:
                 best_expectancy = sweep_expect
                 best_expectancy_pct = sweep_pct
+                best_sweep_row = next(
+                    (m for m in sweep_results if m['label'] == sweep_label), None
+                )
                 torch.save({
                     'model_state_dict': model.state_dict(),
                     'model_config': ckpt_model_config,
@@ -1914,6 +1919,8 @@ def train_v5_model(
     log.info(f"[V5] Training complete. Best expectancy={best_expectancy:.4f} best_loss={best_val_loss:.4f}")
     log.info(f"[V5] Final score_threshold={current_score_threshold}")
     log.info("=" * 60)
+
+    fwd_report = None
 
     if run_forward_test and (test_start_date or train_end_date):
         log.info("=" * 60)
@@ -1974,3 +1981,47 @@ def train_v5_model(
             log.info(f"[V5_FWD] Report saved to {report_path}")
         else:
             log.warning("[V5_FWD] No checkpoint found, skipping forward test")
+
+    if run_diagnostics:
+        from train.v5_diagnostics import run_all_diagnostics
+
+        sweep_metrics = None
+        if best_sweep_row is not None:
+            sweep_metrics = {
+                'win_rate': best_sweep_row.get('winrate', 0),
+                'expectancy_r': best_sweep_row.get('expect', 0),
+                'profit_factor': best_sweep_row.get('pf', 0),
+                'sharpe': best_sweep_row.get('sharpe', 0),
+            }
+
+        n_model_trades = fwd_report.get('total_trades', 100) if fwd_report else 100
+
+        diag_results = run_all_diagnostics(
+            model=model, device=device,
+            val_loader=val_loader, val_action_arr=val_action_arr,
+            val_valid=val_valid,
+            val_feat=val_feat, val_ret_R=val_ret_R,
+            feature_names=features_df_columns,
+            val_outcomes=val_outcomes_arr,
+            val_realized_r=val_realized_r_arr,
+            val_timestamps=val_timestamps_arr,
+            test_bars=total_val, horizon=horizon,
+            sweep_metrics=sweep_metrics,
+            forward_report=fwd_report,
+            n_trades_model=n_model_trades,
+        )
+
+        diag_path = checkpoint_dir / "v5_diagnostics_report.json"
+        import json
+        def _make_serializable(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if isinstance(obj, (np.float32, np.float64)):
+                return float(obj)
+            if isinstance(obj, (np.int32, np.int64)):
+                return int(obj)
+            return str(obj)
+
+        with open(diag_path, 'w') as f:
+            json.dump(diag_results, f, indent=2, default=_make_serializable)
+        log.info(f"[V5_DIAG] Full diagnostics report saved to {diag_path}")
