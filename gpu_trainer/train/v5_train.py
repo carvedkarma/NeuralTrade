@@ -204,51 +204,96 @@ def _extract_v5_arrays(concat_outputs):
     }
 
 
-def v5_quality_mask(arrays, cfg: V5QualityGateConfig):
-    """Apply data-adaptive quality gates to filter low-confidence predictions.
+def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999):
+    """Apply data-adaptive quality gates with warmup bypass and minimum pass rate.
 
-    Gate thresholds are computed from model output percentiles to ensure
-    meaningful filtering regardless of the model's current output scale:
-    - sigma_gate: predicted sigma <= p75(sigma) [filter top 25% uncertainty]
-    - mae_gate: predicted mae <= p75(mae) [filter top 25% risk]
-    - edge_gate: |mu_R| >= p50(|mu_R|) [filter bottom 50% signal strength]
-    - action_gate: max(p_long, p_short) >= p60(p_trade) [filter low conviction]
-
-    The cfg thresholds serve as absolute maximums (backstop) but the adaptive
-    percentile thresholds do the actual filtering.
+    Three safeguards prevent the multiplicative filtering problem:
+    1. Warmup bypass: epochs 0-4 skip quality gates entirely (all pass)
+    2. Lenient percentiles: p90 sigma/mae, p25 |mu_R|, p40 p_trade
+       Each gate independently passes ~60-90% so intersection ≈ 25-40%
+    3. Minimum pass rate: if combined pass rate < 10%, progressively relax
+       all thresholds until at least 10% pass
 
     Returns: boolean mask, diagnostics dict
     """
     n = len(arrays['mu_R'])
+    min_pass_rate = 0.10
+
+    if epoch < 5:
+        log.info("[V5_QUAL_DIAG] epoch=%d WARMUP: bypassing quality gates (all %d bars pass)", epoch, n)
+        return np.ones(n, dtype=bool), {
+            'total': n, 'final': n, 'warmup_bypass': True,
+            'passed_sigma': n, 'passed_mae': n, 'passed_mu': n, 'passed_ptrade': n,
+        }
 
     sigma_pass = np.ones(n, dtype=bool)
     adaptive_sigma = cfg.sigma_max
     if arrays['sigma'] is not None:
         finite_sigma = arrays['sigma'][np.isfinite(arrays['sigma'])]
         if len(finite_sigma) > 100:
-            adaptive_sigma = min(cfg.sigma_max, float(np.percentile(finite_sigma, 75)))
+            adaptive_sigma = min(cfg.sigma_max, float(np.percentile(finite_sigma, 90)))
         sigma_pass = np.isfinite(arrays['sigma']) & (arrays['sigma'] <= adaptive_sigma)
 
     finite_mae = arrays['mae'][np.isfinite(arrays['mae'])]
     adaptive_mae = cfg.mae_max
     if len(finite_mae) > 100:
-        adaptive_mae = min(cfg.mae_max, float(np.percentile(finite_mae, 75)))
+        adaptive_mae = min(cfg.mae_max, float(np.percentile(finite_mae, 90)))
     mae_pass = np.isfinite(arrays['mae']) & (arrays['mae'] <= adaptive_mae)
 
     mu_R = arrays['mu_R']
     abs_mu = np.abs(mu_R[np.isfinite(mu_R)])
     adaptive_mu_min = cfg.mu_R_min
     if len(abs_mu) > 100:
-        adaptive_mu_min = max(cfg.mu_R_min * 0.1, float(np.percentile(abs_mu, 50)))
+        adaptive_mu_min = max(cfg.mu_R_min * 0.01, float(np.percentile(abs_mu, 25)))
     edge_pass = np.isfinite(mu_R) & (np.abs(mu_R) >= adaptive_mu_min)
 
     pt = arrays['p_trade']
     adaptive_ptrade = cfg.p_trade_min
     if len(pt) > 100:
-        adaptive_ptrade = max(cfg.p_trade_min * 0.5, float(np.percentile(pt, 60)))
+        adaptive_ptrade = max(cfg.p_trade_min * 0.3, float(np.percentile(pt, 40)))
     ptrade_pass = pt >= adaptive_ptrade
 
     final_mask = sigma_pass & mae_pass & edge_pass & ptrade_pass
+    n_passed = int(np.sum(final_mask))
+
+    if n_passed < n * min_pass_rate and n > 100:
+        log.info("[V5_QUAL_DIAG] pass_rate=%.1f%% < %.0f%%, relaxing gates...",
+                 100.0 * n_passed / n, 100.0 * min_pass_rate)
+        for relax_step in range(5):
+            relax_factor = 1.0 + 0.2 * (relax_step + 1)
+            relaxed_sigma = adaptive_sigma * relax_factor
+            relaxed_mae = adaptive_mae * relax_factor
+            relaxed_mu = adaptive_mu_min / relax_factor
+            relaxed_ptrade = adaptive_ptrade / relax_factor
+
+            r_sigma = np.ones(n, dtype=bool)
+            if arrays['sigma'] is not None:
+                r_sigma = np.isfinite(arrays['sigma']) & (arrays['sigma'] <= relaxed_sigma)
+            r_mae = np.isfinite(arrays['mae']) & (arrays['mae'] <= relaxed_mae)
+            r_edge = np.isfinite(mu_R) & (np.abs(mu_R) >= relaxed_mu)
+            r_ptrade = pt >= relaxed_ptrade
+
+            relaxed_mask = r_sigma & r_mae & r_edge & r_ptrade
+            n_relaxed = int(np.sum(relaxed_mask))
+
+            if n_relaxed >= n * min_pass_rate:
+                final_mask = relaxed_mask
+                n_passed = n_relaxed
+                adaptive_sigma = relaxed_sigma
+                adaptive_mae = relaxed_mae
+                adaptive_mu_min = relaxed_mu
+                adaptive_ptrade = relaxed_ptrade
+                log.info("[V5_QUAL_DIAG] relaxed at step %d: pass_rate=%.1f%% "
+                         "sigma<=%.3f mae<=%.3f |mu|>=%.4f ptrade>=%.3f",
+                         relax_step + 1, 100.0 * n_passed / n,
+                         adaptive_sigma, adaptive_mae, adaptive_mu_min, adaptive_ptrade)
+                break
+        else:
+            log.info("[V5_QUAL_DIAG] max relaxation reached, using finiteness-only gate")
+            final_mask = np.isfinite(mu_R) & np.isfinite(arrays['mae'])
+            if arrays['sigma'] is not None:
+                final_mask &= np.isfinite(arrays['sigma'])
+            n_passed = int(np.sum(final_mask))
 
     diag = {
         'total': n,
@@ -256,7 +301,7 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig):
         'passed_mae': int(np.sum(mae_pass)),
         'passed_mu': int(np.sum(edge_pass)),
         'passed_ptrade': int(np.sum(ptrade_pass)),
-        'final': int(np.sum(final_mask)),
+        'final': n_passed,
         'adaptive_sigma': adaptive_sigma,
         'adaptive_mae': adaptive_mae,
         'adaptive_mu_min': adaptive_mu_min,
@@ -385,6 +430,9 @@ def _tpd_controller_step(scores, quality_mask, candidate_mask,
                          cooldown=4):
     """Adaptive threshold controller to hit target trades/day.
 
+    Falls back to all-finite-scores when quality/candidate filtering
+    yields too few eligible bars, ensuring the controller never gets stuck.
+
     Returns: new_threshold, n_trades, tpd, action_str
     """
     combined_mask = quality_mask.copy()
@@ -397,17 +445,30 @@ def _tpd_controller_step(scores, quality_mask, candidate_mask,
 
     val_days = val_bars / 96.0
 
-    if len(eligible_finite) < 100:
-        log.warning("[V5_TPD_CTRL] SKIP: only %d eligible finite scores (< 100)", len(eligible_finite))
-        return current_threshold, 0, 0.0, "SKIP"
+    if len(eligible_finite) < 50:
+        all_finite = scores[np.isfinite(scores)]
+        if len(all_finite) >= 50:
+            log.info("[V5_TPD_CTRL] Only %d eligible after gating, falling back to "
+                     "all %d finite scores", len(eligible_finite), len(all_finite))
+            eligible_finite = all_finite
+            combined_mask = np.isfinite(scores)
+        else:
+            log.warning("[V5_TPD_CTRL] SKIP: only %d total finite scores", len(all_finite))
+            return current_threshold, 0, 0.0, "SKIP"
 
     score_std = float(np.std(eligible_finite))
-    sp50 = float(np.percentile(eligible_finite, 50))
+    sp5 = float(np.percentile(eligible_finite, 5))
     sp99 = float(np.percentile(eligible_finite, 99))
 
     if current_threshold is None:
-        current_threshold = float(np.percentile(eligible_finite, 90))
-        log.info("[V5_TPD_CTRL] Initializing threshold to p90=%.4f", current_threshold)
+        current_threshold = float(np.percentile(eligible_finite, 75))
+        log.info("[V5_TPD_CTRL] Initializing threshold to p75=%.4f (from %d scores, "
+                 "p5=%.4f p50=%.4f p95=%.4f p99=%.4f)",
+                 current_threshold, len(eligible_finite),
+                 sp5,
+                 float(np.percentile(eligible_finite, 50)),
+                 float(np.percentile(eligible_finite, 95)),
+                 sp99)
 
     selected_indices = np.where(combined_mask)[0]
     above_thr = scores[selected_indices] >= current_threshold
@@ -441,16 +502,15 @@ def _tpd_controller_step(scores, quality_mask, candidate_mask,
         else:
             new_threshold = current_threshold - step
             action = "DOWN"
-        sp5 = float(np.percentile(eligible_finite, 5))
         new_threshold = float(np.clip(new_threshold, sp5, sp99))
 
     log.info("[V5_TPD_CTRL] epoch=%d tpd=%.1f target=%.1f±%.1f thr=%.4f->%.4f "
-             "step_mult=%.2f score_std=%.4f action=%s trades=%d clamp=[%.4f,%.4f]",
+             "step_mult=%.2f score_std=%.4f action=%s trades=%d eligible=%d "
+             "clamp=[%.4f,%.4f]",
              epoch, tpd, target_tpd, tol,
              current_threshold, new_threshold,
              tpd_cfg.thr_step_mult, score_std, action, n_trades,
-             float(np.percentile(eligible_finite, 5)),
-             float(np.percentile(eligible_finite, 99)))
+             len(eligible_finite), sp5, sp99)
 
     return new_threshold, n_trades, tpd, action
 
@@ -1162,7 +1222,7 @@ def train_v5_model(
 
             arrays = _extract_v5_arrays(concat_outputs)
 
-            quality_mask, qual_diag = v5_quality_mask(arrays, quality_gate_cfg)
+            quality_mask, qual_diag = v5_quality_mask(arrays, quality_gate_cfg, epoch=epoch)
 
             scores, sides, score_diag = compute_v5_scores(
                 None, horizon_bars=horizon,
