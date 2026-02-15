@@ -4838,6 +4838,23 @@ Examples:
     parser.add_argument("--v5-mae-cap", type=float, default=2.0,
                         help="v5 score penalty: clamp MAE to this cap (default: 2.0)")
 
+    parser.add_argument("--v5-train-end-date", type=str, default=None,
+                        help="v5 time-based split: train on data before this date (YYYY-MM-DD)")
+    parser.add_argument("--v5-test-start-date", type=str, default=None,
+                        help="v5 time-based split: test on data from this date (YYYY-MM-DD)")
+    parser.add_argument("--v5-test-end-date", type=str, default=None,
+                        help="v5 time-based split: test on data until this date (YYYY-MM-DD, default: end of data)")
+    parser.add_argument("--v5-forward-test", action="store_true", default=False,
+                        help="v5: run forward test on test set after training (frozen decision layer)")
+    parser.add_argument("--v5-freeze-decision", action="store_true", default=True,
+                        help="v5 forward test: freeze decision layer (no TPD adaptation, default: True)")
+    parser.add_argument("--v5-walk-forward", action="store_true", default=False,
+                        help="v5: run walk-forward analysis with rolling train/test windows")
+    parser.add_argument("--v5-wf-train-months", type=int, default=12,
+                        help="v5 walk-forward: training window in months (default: 12)")
+    parser.add_argument("--v5-wf-test-months", type=int, default=1,
+                        help="v5 walk-forward: test window in months (default: 1)")
+
     parser.add_argument("--multi-horizon", action="store_true", default=False,
                         help="Train multiple horizons (8,16,32) and select best per bar")
     parser.add_argument("--multi-horizons", type=str, default="8,16,32",
@@ -5337,7 +5354,10 @@ Examples:
             from data.candidate_generator import (
                 CandidateConfig, RiskControls,
             )
-            from train.v5_train import train_v5_model, V5QualityGateConfig, V5TPDControllerConfig
+            from train.v5_train import (
+                train_v5_model, V5QualityGateConfig, V5TPDControllerConfig,
+                run_v5_forward_test, run_v5_walk_forward,
+            )
 
             cand_cfg = CandidateConfig.from_cli_args(args) if args.use_candidates else CandidateConfig(enabled=False)
             risk_cfg = RiskControls.from_cli_args(args)
@@ -5362,6 +5382,53 @@ Examples:
                 score_lambda=args.v5_score_lambda,
                 mae_cap=args.v5_mae_cap,
             )
+
+            train_end_date = args.v5_train_end_date
+            test_start_date = args.v5_test_start_date
+            test_end_date = args.v5_test_end_date
+
+            if train_end_date and test_start_date:
+                from datetime import datetime as dt
+                te = dt.strptime(train_end_date, "%Y-%m-%d")
+                ts = dt.strptime(test_start_date, "%Y-%m-%d")
+                if te > ts:
+                    log.error(f"[V5] train_end_date ({train_end_date}) must be <= test_start_date ({test_start_date})")
+                    sys.exit(1)
+                log.info(f"[V5] Time-based split: train < {train_end_date}, test >= {test_start_date}"
+                         + (f" to {test_end_date}" if test_end_date else ""))
+
+            if args.v5_walk_forward:
+                log.info("[MODE] V5 Walk-Forward Analysis")
+                run_v5_walk_forward(
+                    data_dir=data_dir,
+                    device=device,
+                    symbols=symbols_list,
+                    epochs=args.epochs,
+                    batch_size=args.batch_size,
+                    lr=args.lr,
+                    train_months=args.v5_wf_train_months,
+                    test_months=args.v5_wf_test_months,
+                    horizon=args.horizon,
+                    tp_mult=args.tp_mult,
+                    sl_mult=args.sl_mult,
+                    score_lambda=args.v5_score_lambda,
+                    risk_proxy=args.v5_risk_proxy,
+                    quality_gate_cfg=qual_cfg,
+                    tpd_ctrl_cfg=tpd_cfg,
+                    candidate_config=cand_cfg,
+                    risk_controls=risk_cfg,
+                    hold_target=args.v5_hold_target,
+                    mfe_min=args.v5_mfe_min,
+                    w_ret=args.v5_w_ret, w_mfe=args.v5_w_mfe,
+                    w_mae=args.v5_w_mae, w_action=args.v5_w_action,
+                    w_barrier=args.v5_w_barrier, w_regime=args.v5_w_regime,
+                    warmup_epochs=args.warmup_epochs, min_lr=args.min_lr,
+                    barrier_mode=args.v5_barrier_mode,
+                    barrier_presets=v5_barrier_presets,
+                    use_regime_head=args.use_regime_head,
+                    cand_warmup_epochs=args.v5_cand_warmup,
+                )
+                return
 
             train_v5_model(
                 data_path, device, args.epochs, args.batch_size, args.lr,
@@ -5397,6 +5464,11 @@ Examples:
                 balance_search_steps=args.balance_search_steps,
                 quality_gate_cfg=qual_cfg,
                 tpd_ctrl_cfg=tpd_cfg,
+                train_end_date=train_end_date,
+                test_start_date=test_start_date,
+                test_end_date=test_end_date,
+                run_forward_test=args.v5_forward_test,
+                freeze_decision=args.v5_freeze_decision,
             )
 
             log.info("=" * 60)

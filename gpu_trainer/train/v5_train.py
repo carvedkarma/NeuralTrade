@@ -32,6 +32,66 @@ V5_FEATURE_VERSION = "v5.0.1_forecaster"
 
 
 @dataclass
+class V5ForwardTestConfig:
+    """Config for frozen decision layer in forward test."""
+    score_threshold: float = 0.0
+    score_lambda: float = 0.5
+    mae_cap: float = 2.0
+    risk_proxy: str = 'mae'
+    tp_mult: float = 2.0
+    sl_mult: float = 1.5
+    horizon: int = 16
+    cooldown: int = 4
+    quality_gate_cfg: Optional['V5QualityGateConfig'] = None
+
+
+def _parse_date_to_ms(date_str: str) -> int:
+    """Parse YYYY-MM-DD to millisecond timestamp."""
+    from datetime import datetime as dt, timezone
+    d = dt.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return int(d.timestamp() * 1000)
+
+
+def _compute_time_split(sym_df, train_end_date=None, test_start_date=None, test_end_date=None):
+    """Compute train/test indices for a single symbol based on timestamp dates.
+
+    Returns (train_indices, test_indices) as numpy arrays.
+    If no dates provided, falls back to 80/20 percentage split.
+    """
+    timestamps = sym_df['timestamp'].values
+    n = len(sym_df)
+
+    if train_end_date is None and test_start_date is None:
+        split_idx = int(n * 0.8)
+        return np.arange(split_idx), np.arange(split_idx, n)
+
+    train_end_ms = _parse_date_to_ms(train_end_date) if train_end_date else None
+    test_start_ms = _parse_date_to_ms(test_start_date) if test_start_date else train_end_ms
+    test_end_ms = _parse_date_to_ms(test_end_date) if test_end_date else None
+
+    if train_end_ms is not None:
+        train_mask = timestamps < train_end_ms
+    else:
+        train_mask = np.ones(n, dtype=bool)
+
+    test_mask = np.ones(n, dtype=bool)
+    if test_start_ms is not None:
+        test_mask &= timestamps >= test_start_ms
+    if test_end_ms is not None:
+        test_mask &= timestamps <= test_end_ms
+
+    train_indices = np.where(train_mask)[0]
+    test_indices = np.where(test_mask)[0]
+
+    if len(train_indices) == 0:
+        log.warning(f"[V5] Time-based split: EMPTY train set! Check date range.")
+    if len(test_indices) == 0:
+        log.warning(f"[V5] Time-based split: EMPTY test set! Check date range.")
+
+    return train_indices, test_indices
+
+
+@dataclass
 class V5QualityGateConfig:
     sigma_max: float = 1.0
     mae_max: float = 1.0
@@ -714,6 +774,422 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     return sweep_results, best_label, best_score_val, best_pct
 
 
+def run_v5_forward_test(
+    model, device,
+    test_features, test_outcomes, test_realized_r,
+    test_sym_ids, test_cand_mask, test_valid,
+    test_bars, config: V5ForwardTestConfig,
+    test_start_date=None, test_end_date=None,
+):
+    """Run forward test with completely frozen decision layer.
+
+    No TPD adaptation, no calibration tuning, no percentile sweep.
+    Single pass: compute outputs → scores → quality gate → fixed threshold → cooldown → trades.
+    """
+    from data.common import generate_v5_sweep_outcomes
+
+    model.eval()
+
+    test_ds = V5Dataset(
+        test_features,
+        np.zeros(len(test_features), dtype=np.float32),
+        np.zeros(len(test_features), dtype=np.float32),
+        np.zeros(len(test_features), dtype=np.float32),
+        np.zeros(len(test_features), dtype=np.float32),
+        np.zeros(len(test_features), dtype=np.int64),
+        test_valid,
+        test_sym_ids,
+        np.zeros(len(test_features), dtype=np.int64),
+        np.zeros((len(test_features), 1), dtype=np.float32),
+    )
+    test_loader = DataLoader(test_ds, batch_size=512, shuffle=False)
+
+    all_outputs = {
+        'ret_mu': [], 'ret_log_sigma': [], 'ret_sigma': [],
+        'mae': [], 'mfe': [], 'action_logits': []
+    }
+
+    with torch.no_grad():
+        for batch in test_loader:
+            feat = batch['features'].to(device)
+            sym_id = batch.get('symbol_id')
+            if sym_id is not None:
+                sym_id = sym_id.to(device)
+            outputs = model(feat, symbol_ids=sym_id)
+            for k in all_outputs:
+                if k in outputs:
+                    all_outputs[k].append(outputs[k].detach().cpu())
+
+    concat_outputs = {}
+    for k in all_outputs:
+        if all_outputs[k]:
+            concat_outputs[k] = torch.cat(all_outputs[k], dim=0)
+
+    arrays = _extract_v5_arrays(concat_outputs)
+
+    qg_cfg = config.quality_gate_cfg or V5QualityGateConfig()
+    quality_mask, qual_diag = v5_quality_mask(arrays, qg_cfg, epoch=999)
+
+    scores, sides, score_diag = compute_v5_scores(
+        None, horizon_bars=config.horizon,
+        score_lambda=config.score_lambda,
+        risk_proxy=config.risk_proxy,
+        mae_cap=config.mae_cap,
+        _arrays=arrays,
+    )
+
+    log.info(f"[V5_FWD] Score stats: mean={score_diag['score_mean']:.4f} "
+             f"p50={score_diag['score_p50']:.4f} p90={score_diag['score_p90']:.4f} "
+             f"%pos={score_diag['score_pct_positive']:.1f}%")
+    log.info(f"[V5_FWD] Quality gate: {qual_diag.get('passed_pct', 0):.1f}% pass "
+             f"({qual_diag.get('final', 0)}/{qual_diag.get('total', 0)})")
+    log.info(f"[V5_FWD] Fixed threshold={config.score_threshold:.4f} cooldown={config.cooldown}")
+
+    valid_bool = test_valid.astype(bool) if not isinstance(test_valid, np.ndarray) else test_valid.astype(bool)
+
+    scores_work = scores.copy()
+    scores_work[np.isnan(scores_work)] = -np.inf
+    scores_work[~quality_mask] = -np.inf
+    scores_work[~valid_bool] = -np.inf
+    if test_cand_mask is not None:
+        scores_work[~test_cand_mask.astype(bool)] = -np.inf
+
+    selected = scores_work >= config.score_threshold
+    sel_indices = np.where(selected)[0]
+
+    chronological_idx = sel_indices[np.argsort(sel_indices)]
+    taken = []
+    last_bar = -config.cooldown - 1
+    for idx in chronological_idx:
+        if idx - last_bar >= config.cooldown:
+            taken.append(idx)
+            last_bar = idx
+
+    safe_outcomes = np.where(
+        np.isin(test_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]),
+        test_outcomes, "NO_CANDIDATE"
+    )
+    safe_r = test_realized_r.copy().astype(float)
+    safe_r = np.where(np.isnan(safe_r), 0.0, safe_r)
+
+    if len(taken) == 0:
+        log.warning("[V5_FWD] No trades taken in forward test!")
+        report = _build_empty_report(test_start_date, test_end_date, config)
+        _print_forward_report(report)
+        return report
+
+    taken = np.array(taken)
+    t_outcomes = safe_outcomes[taken]
+    t_r = safe_r[taken]
+    t_sides = sides[taken]
+
+    valid_trades = np.isin(t_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"])
+
+    log.info(f"[V5_FWD] Selected {len(sel_indices)} bars above threshold, "
+             f"{len(taken)} after cooldown, {valid_trades.sum()} with valid outcomes")
+
+    t_r_valid = t_r[valid_trades]
+    t_outcomes_valid = t_outcomes[valid_trades]
+    t_sides_valid = t_sides[valid_trades]
+
+    report = _compute_forward_metrics(
+        t_r_valid, t_outcomes_valid, t_sides_valid,
+        test_bars, config, test_start_date, test_end_date,
+    )
+    _print_forward_report(report)
+    return report
+
+
+def _build_empty_report(test_start_date, test_end_date, config):
+    return {
+        'window_start': test_start_date,
+        'window_end': test_end_date,
+        'total_trades': 0,
+        'trades_per_day': 0.0,
+        'win_rate': 0.0,
+        'expectancy_r': 0.0,
+        'profit_factor': 0.0,
+        'max_drawdown_r': 0.0,
+        'avg_win_r': 0.0,
+        'avg_loss_r': 0.0,
+        'pct_tp': 0.0,
+        'pct_sl': 0.0,
+        'pct_exp': 0.0,
+        'sharpe': 0.0,
+        'total_r': 0.0,
+        'score_threshold': config.score_threshold,
+        'tp_mult': config.tp_mult,
+        'sl_mult': config.sl_mult,
+        'horizon': config.horizon,
+        'cooldown': config.cooldown,
+    }
+
+
+def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_date, end_date):
+    n = len(t_r)
+    val_days = test_bars / 96.0
+
+    wins = t_r[t_r > 0]
+    losses = t_r[t_r <= 0]
+
+    winrate = len(wins) / max(n, 1)
+    expect = float(np.mean(t_r)) if n > 0 else 0.0
+    avg_win = float(np.mean(wins)) if len(wins) > 0 else 0.0
+    avg_loss = float(np.mean(losses)) if len(losses) > 0 else 0.0
+    total_win = float(np.sum(wins))
+    total_loss = float(abs(np.sum(losses)))
+    pf = total_win / max(total_loss, 1e-6)
+
+    std_r = float(np.std(t_r)) if n > 1 else 1.0
+    sharpe = expect / max(std_r, 1e-6) * np.sqrt(252 * 96)
+
+    n_tp = int(np.sum(t_outcomes == "TP"))
+    n_sl = int(np.sum(t_outcomes == "SL"))
+    n_exp = int(np.sum(np.isin(t_outcomes, ["EXP_WIN", "EXP_LOSS"])))
+
+    equity_curve = np.cumsum(t_r)
+    running_max = np.maximum.accumulate(equity_curve)
+    drawdowns = equity_curve - running_max
+    max_dd = float(np.min(drawdowns)) if len(drawdowns) > 0 else 0.0
+
+    tpd = n / max(val_days, 1e-6)
+
+    n_long = int(np.sum(t_sides == 1))
+    n_short = int(np.sum(t_sides == -1))
+
+    weekly_stats = []
+    if n > 0:
+        bars_per_week = 96 * 7
+        n_weeks = max(1, int(np.ceil(test_bars / bars_per_week)))
+        week_size = max(1, n // n_weeks) if n_weeks > 0 else n
+        for w in range(n_weeks):
+            w_start = w * week_size
+            w_end = min((w + 1) * week_size, n)
+            if w_start >= n:
+                break
+            w_r = t_r[w_start:w_end]
+            weekly_stats.append({
+                'week': w + 1,
+                'trades': len(w_r),
+                'expectancy': float(np.mean(w_r)) if len(w_r) > 0 else 0.0,
+                'total_r': float(np.sum(w_r)),
+            })
+
+    return {
+        'window_start': start_date,
+        'window_end': end_date,
+        'total_trades': n,
+        'trades_per_day': float(tpd),
+        'n_long': n_long,
+        'n_short': n_short,
+        'win_rate': float(winrate),
+        'expectancy_r': float(expect),
+        'profit_factor': float(pf),
+        'sharpe': float(sharpe),
+        'max_drawdown_r': float(max_dd),
+        'avg_win_r': float(avg_win),
+        'avg_loss_r': float(avg_loss),
+        'total_r': float(np.sum(t_r)),
+        'pct_tp': float(n_tp / max(n, 1)),
+        'pct_sl': float(n_sl / max(n, 1)),
+        'pct_exp': float(n_exp / max(n, 1)),
+        'score_threshold': config.score_threshold,
+        'tp_mult': config.tp_mult,
+        'sl_mult': config.sl_mult,
+        'horizon': config.horizon,
+        'cooldown': config.cooldown,
+        'equity_final_r': float(equity_curve[-1]) if len(equity_curve) > 0 else 0.0,
+        'weekly_stats': weekly_stats,
+    }
+
+
+def _print_forward_report(report):
+    log.info("")
+    log.info("=" * 80)
+    log.info("  FORWARD TEST REPORT")
+    log.info("=" * 80)
+    log.info(f"  Window:         {report['window_start']} → {report['window_end']}")
+    log.info(f"  Threshold:      {report['score_threshold']:.4f}")
+    log.info(f"  TP/SL/Horizon:  {report['tp_mult']:.1f}x / {report['sl_mult']:.1f}x ATR / {report['horizon']} bars")
+    log.info(f"  Cooldown:       {report['cooldown']} bars")
+    log.info("-" * 80)
+    log.info(f"  Total Trades:   {report['total_trades']}")
+    log.info(f"  Trades/Day:     {report['trades_per_day']:.2f}")
+    log.info(f"  Long/Short:     {report.get('n_long', 0)}/{report.get('n_short', 0)}")
+    log.info(f"  Win Rate:       {report['win_rate']:.1%}")
+    log.info(f"  Expectancy:     {report['expectancy_r']:+.4f} R")
+    log.info(f"  Profit Factor:  {report['profit_factor']:.2f}")
+    log.info(f"  Sharpe:         {report['sharpe']:.2f}")
+    log.info(f"  Max Drawdown:   {report['max_drawdown_r']:.4f} R")
+    log.info(f"  Avg Win R:      {report['avg_win_r']:+.4f}")
+    log.info(f"  Avg Loss R:     {report['avg_loss_r']:+.4f}")
+    log.info(f"  Total R:        {report['total_r']:+.4f}")
+    log.info(f"  %%TP/%%SL/%%EX:    {report['pct_tp']:.0%} / {report['pct_sl']:.0%} / {report['pct_exp']:.0%}")
+    log.info(f"  Equity Final:   {report.get('equity_final_r', 0):+.4f} R")
+    log.info("-" * 80)
+    if report.get('weekly_stats'):
+        log.info("  Weekly Breakdown:")
+        log.info(f"  {'Week':>6} {'Trades':>8} {'Expect':>10} {'Total R':>10}")
+        for ws in report['weekly_stats']:
+            log.info(f"  {ws['week']:>6} {ws['trades']:>8} {ws['expectancy']:>+10.4f} {ws['total_r']:>+10.4f}")
+    log.info("=" * 80)
+
+
+def run_v5_walk_forward(
+    data_dir, device, symbols, epochs, batch_size, lr,
+    train_months=12, test_months=1,
+    horizon=16, tp_mult=2.0, sl_mult=1.5,
+    score_lambda=0.5, risk_proxy='mae',
+    quality_gate_cfg=None, tpd_ctrl_cfg=None,
+    candidate_config=None, risk_controls=None,
+    hold_target=0.30, mfe_min=0.05,
+    w_ret=1.0, w_mfe=0.25, w_mae=0.25, w_action=2.0,
+    w_barrier=0.25, w_regime=0.1,
+    warmup_epochs=5, min_lr=None,
+    barrier_mode='fixed', barrier_presets=None,
+    use_regime_head=False, cand_warmup_epochs=3,
+):
+    """Walk-forward analysis: rolling train/test windows."""
+    try:
+        from dateutil.relativedelta import relativedelta
+    except ImportError:
+        log.error("[V5_WF] python-dateutil not installed. Install with: pip install python-dateutil")
+        return
+
+    first_ts = None
+    last_ts = None
+    for sym in symbols:
+        parquet_path = data_dir / f"{sym}_15m.parquet"
+        if parquet_path.exists():
+            df = pd.read_parquet(parquet_path)
+            sym_first = df['timestamp'].min()
+            sym_last = df['timestamp'].max()
+            if first_ts is None or sym_first < first_ts:
+                first_ts = sym_first
+            if last_ts is None or sym_last > last_ts:
+                last_ts = sym_last
+
+    if first_ts is None:
+        log.error("[V5_WF] No data found for any symbol")
+        return
+
+    data_start = datetime.utcfromtimestamp(first_ts / 1000)
+    data_end = datetime.utcfromtimestamp(last_ts / 1000)
+    log.info(f"[V5_WF] Data range: {data_start.strftime('%Y-%m-%d')} → {data_end.strftime('%Y-%m-%d')}")
+
+    first_test_start = data_start + relativedelta(months=train_months)
+    if first_test_start >= data_end:
+        log.error(f"[V5_WF] Not enough data for {train_months}m train + {test_months}m test")
+        return
+
+    folds = []
+    fold_num = 0
+    current_test_start = first_test_start
+
+    while current_test_start < data_end:
+        fold_num += 1
+        train_end = current_test_start
+        test_end = current_test_start + relativedelta(months=test_months)
+        if test_end > data_end:
+            test_end = data_end
+
+        train_start = train_end - relativedelta(months=train_months)
+        if train_start < data_start:
+            train_start = data_start
+
+        folds.append({
+            'fold': fold_num,
+            'train_start': train_start.strftime('%Y-%m-%d'),
+            'train_end': train_end.strftime('%Y-%m-%d'),
+            'test_start': current_test_start.strftime('%Y-%m-%d'),
+            'test_end': test_end.strftime('%Y-%m-%d'),
+        })
+        current_test_start = test_end
+
+    log.info(f"[V5_WF] Generated {len(folds)} folds (train={train_months}m, test={test_months}m)")
+    for f in folds:
+        log.info(f"  Fold {f['fold']}: train {f['train_start']}→{f['train_end']} | test {f['test_start']}→{f['test_end']}")
+
+    all_reports = []
+    data_path = data_dir / f"{symbols[0]}_15m.parquet"
+
+    for fold in folds:
+        log.info(f"\n{'='*80}")
+        log.info(f"  WALK-FORWARD FOLD {fold['fold']}/{len(folds)}")
+        log.info(f"{'='*80}")
+
+        train_v5_model(
+            data_path, device, epochs, batch_size, lr,
+            warmup_epochs=warmup_epochs, min_lr=min_lr,
+            tp_mult=tp_mult, sl_mult=sl_mult, horizon=horizon,
+            symbols=symbols,
+            w_ret=w_ret, w_mfe=w_mfe, w_mae=w_mae, w_action=w_action,
+            w_barrier=w_barrier, w_regime=w_regime,
+            score_lambda=score_lambda, risk_proxy=risk_proxy,
+            hold_target=hold_target, mfe_min=mfe_min,
+            barrier_mode=barrier_mode, barrier_presets=barrier_presets,
+            use_regime_head=use_regime_head,
+            candidate_config=candidate_config, risk_controls=risk_controls,
+            cand_warmup_epochs=cand_warmup_epochs,
+            quality_gate_cfg=quality_gate_cfg, tpd_ctrl_cfg=tpd_ctrl_cfg,
+            train_end_date=fold['train_end'],
+            test_start_date=fold['test_start'],
+            test_end_date=fold['test_end'],
+            run_forward_test=True,
+            freeze_decision=True,
+        )
+
+        report_path = Path("checkpoints") / "v5_forward_report.json"
+        if report_path.exists():
+            import json
+            with open(report_path) as f:
+                fold_report = json.load(f)
+            fold_report['fold'] = fold['fold']
+            all_reports.append(fold_report)
+
+    if all_reports:
+        log.info("\n" + "=" * 100)
+        log.info("  WALK-FORWARD SUMMARY")
+        log.info("=" * 100)
+        log.info(f"{'Fold':>6} {'Window':>25} {'Trades':>8} {'T/Day':>7} {'WR':>7} "
+                 f"{'Expect':>10} {'PF':>7} {'Sharpe':>8} {'MaxDD':>10} {'TotalR':>10}")
+        log.info("-" * 100)
+
+        total_trades = 0
+        total_r = 0.0
+        all_expectancies = []
+
+        for r in all_reports:
+            window = f"{r.get('window_start','?')}→{r.get('window_end','?')}"
+            log.info(f"{r['fold']:>6} {window:>25} {r['total_trades']:>8} {r['trades_per_day']:>7.2f} "
+                     f"{r['win_rate']:>6.1%} {r['expectancy_r']:>+10.4f} {r['profit_factor']:>7.2f} "
+                     f"{r['sharpe']:>8.2f} {r['max_drawdown_r']:>10.4f} {r['total_r']:>+10.4f}")
+            total_trades += r['total_trades']
+            total_r += r['total_r']
+            if r['total_trades'] > 0:
+                all_expectancies.append(r['expectancy_r'])
+
+        log.info("-" * 100)
+        avg_expect = float(np.mean(all_expectancies)) if all_expectancies else 0.0
+        log.info(f"{'AGG':>6} {'':>25} {total_trades:>8} {'':>7} {'':>7} "
+                 f"{avg_expect:>+10.4f} {'':>7} {'':>8} {'':>10} {total_r:>+10.4f}")
+        log.info("=" * 100)
+
+        agg_path = Path("checkpoints") / "v5_walkforward_report.json"
+        import json
+        with open(agg_path, 'w') as f:
+            json.dump({
+                'folds': all_reports,
+                'aggregate': {
+                    'total_trades': total_trades,
+                    'total_r': total_r,
+                    'avg_expectancy_r': avg_expect,
+                    'n_folds': len(all_reports),
+                },
+            }, f, indent=2, default=str)
+        log.info(f"[V5_WF] Walk-forward report saved to {agg_path}")
+
+
 def train_v5_model(
     data_path, device, epochs, batch_size, lr,
     checkpoint_interval=25, warmup_epochs=5, min_lr=None,
@@ -738,6 +1214,11 @@ def train_v5_model(
     cand_warmup_epochs=3,
     quality_gate_cfg=None,
     tpd_ctrl_cfg=None,
+    train_end_date=None,
+    test_start_date=None,
+    test_end_date=None,
+    run_forward_test=False,
+    freeze_decision=True,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -894,9 +1375,22 @@ def train_v5_model(
         sym_id_arr = np.full(n, si, dtype=np.int64)
         cand_arr = sym_cand_mask if sym_cand_mask is not None else np.ones(n, dtype=bool)
 
-        sym_split = int(n * 0.8)
-        log.info(f"[V5] {sym}: per-symbol split at bar {sym_split}/{n} "
-                 f"(train={sym_split}, val={n - sym_split})")
+        train_idx, test_idx = _compute_time_split(
+            sym_df, train_end_date=train_end_date,
+            test_start_date=test_start_date, test_end_date=test_end_date,
+        )
+
+        if train_end_date:
+            train_ts = sym_df['timestamp'].values
+            train_date_min = datetime.utcfromtimestamp(train_ts[train_idx[0]] / 1000).strftime('%Y-%m-%d') if len(train_idx) > 0 else "?"
+            train_date_max = datetime.utcfromtimestamp(train_ts[train_idx[-1]] / 1000).strftime('%Y-%m-%d') if len(train_idx) > 0 else "?"
+            test_date_min = datetime.utcfromtimestamp(train_ts[test_idx[0]] / 1000).strftime('%Y-%m-%d') if len(test_idx) > 0 else "?"
+            test_date_max = datetime.utcfromtimestamp(train_ts[test_idx[-1]] / 1000).strftime('%Y-%m-%d') if len(test_idx) > 0 else "?"
+            log.info(f"[V5] {sym}: TIME-BASED split train={len(train_idx)} ({train_date_min}→{train_date_max}) "
+                     f"val/test={len(test_idx)} ({test_date_min}→{test_date_max})")
+        else:
+            log.info(f"[V5] {sym}: per-symbol split at bar {len(train_idx)}/{n} "
+                     f"(train={len(train_idx)}, val={len(test_idx)})")
 
         feat_arr = sym_features_df.values.astype(np.float32)
         ret_arr = v5_targets['ret_R'][:n]
@@ -906,33 +1400,33 @@ def train_v5_model(
         act_arr = v5_targets['action_label'][:n]
         val_arr = v5_targets['valid_mask'][:n]
 
-        train_features.append(feat_arr[:sym_split])
-        train_ret_R_list.append(ret_arr[:sym_split])
-        train_mfe_R_list.append(mfe_arr[:sym_split])
-        train_mae_R_list.append(mae_arr[:sym_split])
-        train_vol_h_list.append(vol_arr[:sym_split])
-        train_action_list.append(act_arr[:sym_split])
-        train_valid_list.append(val_arr[:sym_split])
-        train_sym_ids_list.append(sym_id_arr[:sym_split])
-        train_cand_mask_list.append(cand_arr[:sym_split])
-        train_outcomes_list.append(sym_outcomes[:sym_split])
-        train_realized_r_list.append(sym_realized_r[:sym_split])
-        train_barrier_oracle_list.append(barrier_oracle[:sym_split])
-        train_barrier_soft_list.append(barrier_soft[:sym_split])
+        train_features.append(feat_arr[train_idx])
+        train_ret_R_list.append(ret_arr[train_idx])
+        train_mfe_R_list.append(mfe_arr[train_idx])
+        train_mae_R_list.append(mae_arr[train_idx])
+        train_vol_h_list.append(vol_arr[train_idx])
+        train_action_list.append(act_arr[train_idx])
+        train_valid_list.append(val_arr[train_idx])
+        train_sym_ids_list.append(sym_id_arr[train_idx])
+        train_cand_mask_list.append(cand_arr[train_idx])
+        train_outcomes_list.append(sym_outcomes[train_idx])
+        train_realized_r_list.append(sym_realized_r[train_idx])
+        train_barrier_oracle_list.append(barrier_oracle[train_idx])
+        train_barrier_soft_list.append(barrier_soft[train_idx])
 
-        val_features.append(feat_arr[sym_split:])
-        val_ret_R_list.append(ret_arr[sym_split:])
-        val_mfe_R_list.append(mfe_arr[sym_split:])
-        val_mae_R_list.append(mae_arr[sym_split:])
-        val_vol_h_list.append(vol_arr[sym_split:])
-        val_action_list.append(act_arr[sym_split:])
-        val_valid_list.append(val_arr[sym_split:])
-        val_sym_ids_list.append(sym_id_arr[sym_split:])
-        val_cand_mask_list.append(cand_arr[sym_split:])
-        val_outcomes_list.append(sym_outcomes[sym_split:])
-        val_realized_r_list.append(sym_realized_r[sym_split:])
-        val_barrier_oracle_list.append(barrier_oracle[sym_split:])
-        val_barrier_soft_list.append(barrier_soft[sym_split:])
+        val_features.append(feat_arr[test_idx])
+        val_ret_R_list.append(ret_arr[test_idx])
+        val_mfe_R_list.append(mfe_arr[test_idx])
+        val_mae_R_list.append(mae_arr[test_idx])
+        val_vol_h_list.append(vol_arr[test_idx])
+        val_action_list.append(act_arr[test_idx])
+        val_valid_list.append(val_arr[test_idx])
+        val_sym_ids_list.append(sym_id_arr[test_idx])
+        val_cand_mask_list.append(cand_arr[test_idx])
+        val_outcomes_list.append(sym_outcomes[test_idx])
+        val_realized_r_list.append(sym_realized_r[test_idx])
+        val_barrier_oracle_list.append(barrier_oracle[test_idx])
+        val_barrier_soft_list.append(barrier_soft[test_idx])
 
     train_feat = np.concatenate(train_features, axis=0)
     val_feat = np.concatenate(val_features, axis=0)
@@ -1342,3 +1836,62 @@ def train_v5_model(
     log.info(f"[V5] Training complete. Best expectancy={best_expectancy:.4f} best_loss={best_val_loss:.4f}")
     log.info(f"[V5] Final score_threshold={current_score_threshold}")
     log.info("=" * 60)
+
+    if run_forward_test and (test_start_date or train_end_date):
+        log.info("=" * 60)
+        log.info("  V5 FORWARD TEST (frozen decision layer)")
+        log.info("=" * 60)
+
+        best_ckpt_path = checkpoint_dir / "best_v5_expectancy.pt"
+        if not best_ckpt_path.exists():
+            best_ckpt_path = checkpoint_dir / "best_v5_loss.pt"
+
+        if best_ckpt_path.exists():
+            ckpt = torch.load(best_ckpt_path, map_location=device, weights_only=False)
+            model.load_state_dict(ckpt['model_state_dict'])
+            log.info(f"[V5_FWD] Loaded best checkpoint from {best_ckpt_path}")
+
+            ckpt_threshold = current_score_threshold
+            if 'train_config' in ckpt:
+                tc = ckpt['train_config']
+                v5c = tc.get('v5_config', {})
+                tpd_c = v5c.get('tpd_controller', {})
+                if 'current_threshold' in tpd_c and tpd_c['current_threshold'] is not None:
+                    ckpt_threshold = tpd_c['current_threshold']
+            if ckpt_threshold is None:
+                ckpt_threshold = 0.0
+
+            fwd_config = V5ForwardTestConfig(
+                score_threshold=ckpt_threshold,
+                score_lambda=tpd_ctrl_cfg.score_lambda,
+                mae_cap=tpd_ctrl_cfg.mae_cap,
+                risk_proxy=risk_proxy,
+                tp_mult=tp_mult,
+                sl_mult=sl_mult,
+                horizon=horizon,
+                cooldown=4,
+                quality_gate_cfg=quality_gate_cfg,
+            )
+
+            fwd_report = run_v5_forward_test(
+                model=model,
+                device=device,
+                test_features=val_feat,
+                test_outcomes=val_outcomes_arr,
+                test_realized_r=val_realized_r_arr,
+                test_sym_ids=val_sym_ids_arr,
+                test_cand_mask=val_cand_mask_arr,
+                test_valid=val_valid,
+                test_bars=total_val,
+                config=fwd_config,
+                test_start_date=test_start_date or train_end_date,
+                test_end_date=test_end_date,
+            )
+
+            report_path = checkpoint_dir / "v5_forward_report.json"
+            import json
+            with open(report_path, 'w') as f:
+                json.dump(fwd_report, f, indent=2, default=str)
+            log.info(f"[V5_FWD] Report saved to {report_path}")
+        else:
+            log.warning("[V5_FWD] No checkpoint found, skipping forward test")

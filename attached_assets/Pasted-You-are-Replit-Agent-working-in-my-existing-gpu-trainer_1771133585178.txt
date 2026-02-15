@@ -1,0 +1,108 @@
+You are Replit Agent working in my existing gpu_trainer codebase (Python). Implement a proper “last 3 months” OUT-OF-SAMPLE forward test for the V5 Forecaster pipeline with ZERO leakage and ZERO tuning on the test window.
+
+GOAL
+- I want to train on historical data BEFORE a cutoff date, and then evaluate ONLY on the last 3 months (>= cutoff date) as a true forward test.
+- Current split is percentage-based (“per-symbol split at bar …”). Replace with time-based split.
+- Add CLI flags to quick_start.py to control train/test by timestamps.
+- Add an evaluation mode that runs the fixed decision layer (quality gates + score threshold + TP/SL + cooldown) on the test set WITHOUT adapting anything.
+
+REQUIREMENTS (MUST)
+1) Time-based split (per symbol)
+- In the V5 data pipeline (v5_train.py), when building train/val/test:
+  - Add a timestamp column if not present (ensure timezone-naive UTC or consistent).
+  - Split by dates, not index percent:
+    - train_df: rows with timestamp < train_end_date
+    - test_df: rows with timestamp >= test_start_date AND <= test_end_date (optional)
+- Do this per symbol, then concat the train across symbols and concat the test across symbols.
+- Keep all existing feature engineering identical. No future data should be used for past rows.
+
+2) New CLI flags (wire end-to-end)
+- In gpu_trainer/quick_start.py add flags:
+  --v5-train-end-date "YYYY-MM-DD"
+  --v5-test-start-date "YYYY-MM-DD"
+  --v5-test-end-date "YYYY-MM-DD" (optional)
+  --v5-forward-test (boolean)  # if set, run forward test after training
+  --v5-freeze-decision (boolean) default True in forward test
+- Validate: train_end_date < test_start_date. If test_end_date omitted, use last timestamp in data.
+
+3) Forward Test execution (NO ADAPTATION)
+- In v5_train.py implement a function run_v5_forward_test(model, test_loader, decision_config):
+  - decision_config includes:
+    - TP multiple, SL multiple, cooldown
+    - quality gates thresholds (sigma_max, mae_max, mu_R_min, p_trade_min)
+    - score_threshold (fixed)
+    - score_lambda (fixed)
+    - mae_cap (fixed)
+  - IMPORTANT: In forward test, DO NOT update:
+    - TPD controller (no threshold changes)
+    - calibration (no ECE fitting / no temperature tuning)
+    - percentile sweep selection logic (no picking “best percentile” based on test)
+  - The forward test must be a single pass evaluation like live trading:
+    - compute outputs per bar
+    - compute score per bar
+    - apply quality gating mask
+    - apply fixed threshold (score >= threshold)
+    - apply cooldown logic
+    - generate trades and simulate outcomes using the same TP/SL/expiry rules used in sweep
+
+4) Decision layer freeze behavior
+- If training used a threshold controller, during forward test:
+  - load the final threshold from the best checkpoint config (saved in checkpoint metadata)
+  - and use it as fixed threshold for all test bars
+- If no threshold exists, use --v5-score-threshold or default 0.0.
+
+5) Metrics to print clearly (these are the only KPIs that matter)
+Print a “FORWARD TEST REPORT” section at the end including:
+- Window: test_start_date → test_end_date
+- Total trades, trades/day
+- Win rate
+- Expectancy in R (avg R per trade) net of fees (use existing fee model)
+- Profit factor
+- Max drawdown (equity curve from sequential trade results)
+- Avg win R / Avg loss R
+- %TP %SL %EX (expiry)
+- Stability: trades/day per week (or per month) and expectancy per week
+
+6) Walk-forward option (bonus but do if easy)
+Add optional flags:
+  --v5-walk-forward (boolean)
+  --v5-wf-train-months (int default 12)
+  --v5-wf-test-months (int default 1)
+If enabled:
+- do rolling windows:
+  Train on previous N months, test next M months, repeat until end of dataset
+- Print a table of each fold metrics + overall aggregated metrics.
+
+7) Make it safe and reproducible
+- Ensure no randomness changes results:
+  - set seeds
+  - deterministic torch where possible
+- Make sure scaler fit uses ONLY train data (already does robust scaler fit on train bars). Confirm test uses the train-fitted scaler ONLY.
+
+FILES TO CHANGE
+- gpu_trainer/quick_start.py
+  - add args
+  - route to v5 training
+  - after training, call forward test if --v5-forward-test
+- gpu_trainer/train/v5_train.py
+  - replace percent split with time split when date flags provided
+  - implement run_v5_forward_test()
+  - implement optional walk-forward
+  - ensure checkpoint stores decision config (threshold, gates) and can be reloaded
+
+OUTPUT / SUCCESS CRITERIA
+- Running command like:
+  python quick_start.py --train-v5 --train --symbols BTCUSDT,ETHUSDT,SOLUSDT --interval 15m --horizon 16 --epochs 25 --v5-forward-test --v5-train-end-date 2025-11-01 --v5-test-start-date 2025-11-01
+  should:
+  - train on data < 2025-11-01
+  - run forward test on >= 2025-11-01
+  - print FORWARD TEST REPORT with metrics listed
+  - NOT adapt any threshold or calibrations during test
+  - produce a saved report JSON in checkpoints/ (e.g., checkpoints/v5_forward_report.json)
+
+DO NOT
+- Do not use the test period for selecting percentiles, tuning thresholds, or modifying gates.
+- Do not change v4.9.x code paths.
+- Do not introduce leakage by using future bars in HTF features or targets.
+
+Implement now and keep logs concise but informative.
