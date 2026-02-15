@@ -780,6 +780,7 @@ def run_v5_forward_test(
     test_sym_ids, test_cand_mask, test_valid,
     test_bars, config: V5ForwardTestConfig,
     test_start_date=None, test_end_date=None,
+    test_timestamps=None,
 ):
     """Run forward test with completely frozen decision layer.
 
@@ -891,10 +892,16 @@ def run_v5_forward_test(
     t_r_valid = t_r[valid_trades]
     t_outcomes_valid = t_outcomes[valid_trades]
     t_sides_valid = t_sides[valid_trades]
+    taken_valid = taken[valid_trades]
+
+    t_timestamps = None
+    if test_timestamps is not None:
+        t_timestamps = test_timestamps[taken_valid]
 
     report = _compute_forward_metrics(
         t_r_valid, t_outcomes_valid, t_sides_valid,
         test_bars, config, test_start_date, test_end_date,
+        trade_timestamps=t_timestamps,
     )
     _print_forward_report(report)
     return report
@@ -925,7 +932,8 @@ def _build_empty_report(test_start_date, test_end_date, config):
     }
 
 
-def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_date, end_date):
+def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_date, end_date,
+                              trade_timestamps=None):
     n = len(t_r)
     val_days = test_bars / 96.0
 
@@ -940,8 +948,20 @@ def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_
     total_loss = float(abs(np.sum(losses)))
     pf = total_win / max(total_loss, 1e-6)
 
-    std_r = float(np.std(t_r)) if n > 1 else 1.0
-    sharpe = expect / max(std_r, 1e-6) * np.sqrt(252 * 96)
+    if trade_timestamps is not None and n > 0:
+        trade_days = np.array([datetime.utcfromtimestamp(ts / 1000).strftime('%Y-%m-%d')
+                               for ts in trade_timestamps])
+        unique_days = np.unique(trade_days)
+        daily_pnl = np.array([float(np.sum(t_r[trade_days == d])) for d in unique_days])
+        n_trading_days = len(unique_days)
+        daily_mean = float(np.mean(daily_pnl))
+        daily_std = float(np.std(daily_pnl, ddof=1)) if n_trading_days > 1 else 1.0
+        sharpe = daily_mean / max(daily_std, 1e-6) * np.sqrt(252)
+    else:
+        std_r = float(np.std(t_r)) if n > 1 else 1.0
+        daily_r = expect * (n / max(val_days, 1e-6))
+        daily_std = std_r * np.sqrt(n / max(val_days, 1e-6))
+        sharpe = daily_r / max(daily_std, 1e-6) * np.sqrt(252)
 
     n_tp = int(np.sum(t_outcomes == "TP"))
     n_sl = int(np.sum(t_outcomes == "SL"))
@@ -954,11 +974,50 @@ def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_
 
     tpd = n / max(val_days, 1e-6)
 
-    n_long = int(np.sum(t_sides == 1))
-    n_short = int(np.sum(t_sides == -1))
+    long_mask = t_sides == 1
+    short_mask = t_sides == -1
+    n_long = int(np.sum(long_mask))
+    n_short = int(np.sum(short_mask))
+
+    long_r = t_r[long_mask]
+    short_r = t_r[short_mask]
+
+    direction_stats = {
+        'long_trades': n_long,
+        'long_win_rate': float(np.sum(long_r > 0) / max(n_long, 1)),
+        'long_expectancy_r': float(np.mean(long_r)) if n_long > 0 else 0.0,
+        'long_total_r': float(np.sum(long_r)),
+        'short_trades': n_short,
+        'short_win_rate': float(np.sum(short_r > 0) / max(n_short, 1)),
+        'short_expectancy_r': float(np.mean(short_r)) if n_short > 0 else 0.0,
+        'short_total_r': float(np.sum(short_r)),
+    }
 
     weekly_stats = []
-    if n > 0:
+    if trade_timestamps is not None and n > 0:
+        from datetime import timedelta
+        trade_dates = np.array([datetime.utcfromtimestamp(ts / 1000) for ts in trade_timestamps])
+        first_date = trade_dates.min()
+        monday = first_date - timedelta(days=first_date.weekday())
+        week_num = 0
+        current_start = monday
+        while current_start < trade_dates.max() + timedelta(days=1):
+            current_end = current_start + timedelta(days=7)
+            week_mask = (trade_dates >= current_start) & (trade_dates < current_end)
+            w_r = t_r[week_mask]
+            if len(w_r) > 0:
+                week_num += 1
+                week_label = current_start.strftime('%m/%d')
+                weekly_stats.append({
+                    'week': week_num,
+                    'week_start': week_label,
+                    'trades': len(w_r),
+                    'expectancy': float(np.mean(w_r)),
+                    'total_r': float(np.sum(w_r)),
+                    'win_rate': float(np.sum(w_r > 0) / len(w_r)),
+                })
+            current_start = current_end
+    elif n > 0:
         bars_per_week = 96 * 7
         n_weeks = max(1, int(np.ceil(test_bars / bars_per_week)))
         week_size = max(1, n // n_weeks) if n_weeks > 0 else n
@@ -999,6 +1058,7 @@ def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_
         'horizon': config.horizon,
         'cooldown': config.cooldown,
         'equity_final_r': float(equity_curve[-1]) if len(equity_curve) > 0 else 0.0,
+        'direction_stats': direction_stats,
         'weekly_stats': weekly_stats,
     }
 
@@ -1019,7 +1079,7 @@ def _print_forward_report(report):
     log.info(f"  Win Rate:       {report['win_rate']:.1%}")
     log.info(f"  Expectancy:     {report['expectancy_r']:+.4f} R")
     log.info(f"  Profit Factor:  {report['profit_factor']:.2f}")
-    log.info(f"  Sharpe:         {report['sharpe']:.2f}")
+    log.info(f"  Sharpe (daily): {report['sharpe']:.2f}")
     log.info(f"  Max Drawdown:   {report['max_drawdown_r']:.4f} R")
     log.info(f"  Avg Win R:      {report['avg_win_r']:+.4f}")
     log.info(f"  Avg Loss R:     {report['avg_loss_r']:+.4f}")
@@ -1027,11 +1087,26 @@ def _print_forward_report(report):
     log.info(f"  %%TP/%%SL/%%EX:    {report['pct_tp']:.0%} / {report['pct_sl']:.0%} / {report['pct_exp']:.0%}")
     log.info(f"  Equity Final:   {report.get('equity_final_r', 0):+.4f} R")
     log.info("-" * 80)
+    ds = report.get('direction_stats', {})
+    if ds:
+        log.info("  Direction Breakdown:")
+        log.info(f"    LONG:  {ds.get('long_trades',0)} trades | WR {ds.get('long_win_rate',0):.1%} | "
+                 f"Expect {ds.get('long_expectancy_r',0):+.4f} R | Total {ds.get('long_total_r',0):+.4f} R")
+        log.info(f"    SHORT: {ds.get('short_trades',0)} trades | WR {ds.get('short_win_rate',0):.1%} | "
+                 f"Expect {ds.get('short_expectancy_r',0):+.4f} R | Total {ds.get('short_total_r',0):+.4f} R")
+    log.info("-" * 80)
     if report.get('weekly_stats'):
         log.info("  Weekly Breakdown:")
-        log.info(f"  {'Week':>6} {'Trades':>8} {'Expect':>10} {'Total R':>10}")
-        for ws in report['weekly_stats']:
-            log.info(f"  {ws['week']:>6} {ws['trades']:>8} {ws['expectancy']:>+10.4f} {ws['total_r']:>+10.4f}")
+        has_week_start = 'week_start' in report['weekly_stats'][0]
+        if has_week_start:
+            log.info(f"  {'Week':>6} {'Start':>8} {'Trades':>8} {'WR':>7} {'Expect':>10} {'Total R':>10}")
+            for ws in report['weekly_stats']:
+                log.info(f"  {ws['week']:>6} {ws.get('week_start',''):>8} {ws['trades']:>8} "
+                         f"{ws.get('win_rate',0):>6.1%} {ws['expectancy']:>+10.4f} {ws['total_r']:>+10.4f}")
+        else:
+            log.info(f"  {'Week':>6} {'Trades':>8} {'Expect':>10} {'Total R':>10}")
+            for ws in report['weekly_stats']:
+                log.info(f"  {ws['week']:>6} {ws['trades']:>8} {ws['expectancy']:>+10.4f} {ws['total_r']:>+10.4f}")
     log.info("=" * 80)
 
 
@@ -1309,6 +1384,7 @@ def train_v5_model(
     val_realized_r_list = []
     val_barrier_oracle_list = []
     val_barrier_soft_list = []
+    val_timestamps_list = []
 
     features_df_columns = None
 
@@ -1427,6 +1503,7 @@ def train_v5_model(
         val_realized_r_list.append(sym_realized_r[test_idx])
         val_barrier_oracle_list.append(barrier_oracle[test_idx])
         val_barrier_soft_list.append(barrier_soft[test_idx])
+        val_timestamps_list.append(sym_df['timestamp'].values[test_idx])
 
     train_feat = np.concatenate(train_features, axis=0)
     val_feat = np.concatenate(val_features, axis=0)
@@ -1465,6 +1542,7 @@ def train_v5_model(
     val_realized_r_arr = _concat_lists(val_realized_r_list)
     val_barrier_oracle = _concat_lists(val_barrier_oracle_list)
     val_barrier_soft = np.concatenate(val_barrier_soft_list, axis=0)
+    val_timestamps_arr = np.concatenate(val_timestamps_list, axis=0)
 
     for label, arr, vmask in [
         ('train_ret_R', train_ret_R, train_valid),
@@ -1886,6 +1964,7 @@ def train_v5_model(
                 config=fwd_config,
                 test_start_date=test_start_date or train_end_date,
                 test_end_date=test_end_date,
+                test_timestamps=val_timestamps_arr,
             )
 
             report_path = checkpoint_dir / "v5_forward_report.json"
