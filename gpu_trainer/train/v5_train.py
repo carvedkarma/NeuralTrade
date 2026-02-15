@@ -474,10 +474,10 @@ def _tpd_controller_step(scores, quality_mask, candidate_mask,
     above_thr = scores[selected_indices] >= current_threshold
     sel_above = selected_indices[above_thr]
 
-    sorted_sel = sel_above[np.argsort(-scores[sel_above])]
+    chronological_sel = sel_above[np.argsort(sel_above)]
     taken = []
     last_bar = -cooldown - 1
-    for idx in sorted_sel:
+    for idx in chronological_sel:
         if idx - last_bar >= cooldown:
             taken.append(idx)
             last_bar = idx
@@ -577,15 +577,20 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
         if len(sel_indices) == 0:
             continue
 
-        sorted_idx = sel_indices[np.argsort(-scores_work[sel_indices])]
+        chronological_idx = sel_indices[np.argsort(sel_indices)]
         taken = []
         last_bar = -COOLDOWN - 1
-        for idx in sorted_idx:
+        for idx in chronological_idx:
             if idx - last_bar >= COOLDOWN:
                 taken.append(idx)
                 last_bar = idx
 
+        n_above_thr = len(sel_indices)
+        n_after_cooldown = len(taken)
+
         if len(taken) < 5:
+            log.debug("[V5_SWEEP_DIAG] %s: above_thr=%d after_cooldown=%d (<5, skipped)",
+                      label, n_above_thr, n_after_cooldown)
             continue
 
         taken = np.array(taken)
@@ -593,7 +598,10 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
         t_r = safe_r[taken]
 
         valid_trades = np.isin(t_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"])
-        if valid_trades.sum() < 5:
+        n_valid_outcome = int(valid_trades.sum())
+        if n_valid_outcome < 5:
+            log.debug("[V5_SWEEP_DIAG] %s: above_thr=%d after_cooldown=%d valid_outcomes=%d (<5, skipped)",
+                      label, n_above_thr, n_after_cooldown, n_valid_outcome)
             continue
 
         t_r_valid = t_r[valid_trades]
@@ -683,6 +691,10 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     else:
         log.info("v5 score percentiles: EMPTY (no finite candidate scores)")
 
+    n_valid_outcomes_total = np.sum(np.isin(safe_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]))
+    n_no_cand = np.sum(safe_outcomes == "NO_CANDIDATE")
+    log.info("[V5_SWEEP_PIPELINE] precomputed_outcomes: valid=%d no_candidate=%d total=%d",
+             n_valid_outcomes_total, n_no_cand, len(safe_outcomes))
     log.info("V5 SWEEP (epoch %d) | cooldown=%d | TP=%.1fx SL=%.1fx ATR | val_days=%.1f | target=%.1f±%.1f tpd",
              epoch, COOLDOWN, tp_mult, sl_mult, val_days, target_tpd, target_tpd_tol)
     log.info("%-10s %5s %8s %6s %6s %5s | %6s %6s %6s | %4s %4s %4s | %5s",
