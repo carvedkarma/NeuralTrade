@@ -178,7 +178,8 @@ class V5Forecaster(nn.Module):
 
         ret_raw = self.ret_dist_head(features)
         ret_mu = torch.clamp(ret_raw[:, 0:1], -10.0, 10.0)
-        ret_log_sigma = torch.clamp(ret_raw[:, 1:2], -5.0, 3.0)
+        ret_log_sigma = torch.clamp(ret_raw[:, 1:2], -8.0, 2.0)
+        ret_sigma = torch.exp(ret_log_sigma)
 
         mfe_pred = self.mfe_head(features)
         mfe_pred = torch.clamp(mfe_pred, 0.0, 20.0)
@@ -192,6 +193,7 @@ class V5Forecaster(nn.Module):
         result = {
             'ret_mu': ret_mu,
             'ret_log_sigma': ret_log_sigma,
+            'ret_sigma': ret_sigma,
             'mfe': mfe_pred,
             'mae': mae_pred,
             'action_logits': action_logits,

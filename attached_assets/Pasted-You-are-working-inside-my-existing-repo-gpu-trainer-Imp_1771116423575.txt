@@ -1,0 +1,153 @@
+You are working inside my existing repo (gpu_trainer). Implement ONLY these two subsystems for v5 training:
+
+(B) Uncertainty/Quality Gating (sigma + MAE gate + calibration)
+(C) Trade Frequency Controller (adaptive threshold to hit target trades/day)
+
+DO NOT change any v4.9.x distributional code paths. Everything must be behind v5 flags or v5 routing only.
+
+========================
+B) UNCERTAINTY / QUALITY GATING
+========================
+
+Context:
+- v5 predicts ret_mu, ret_sigma (Normal), mae_pred (risk proxy), action probs (HOLD/LONG/SHORT).
+- We need to filter low-quality trades and stabilize expectancy by gating on predicted uncertainty + predicted downside.
+
+Implement:
+
+1) In gpu_trainer/models/v5_forecaster.py
+- Ensure ret_dist head outputs (mu, log_sigma) and clamp log_sigma to prevent explosions:
+  - clamp log_sigma to [-8, 2]
+  - ret_sigma = exp(log_sigma)
+- Expose ret_sigma in forward outputs dict.
+
+2) In gpu_trainer/train/v5_train.py
+Add quality gating functions used both in:
+- validation sweep selection
+- live/paper signal selection (if v5 is used there)
+
+Create function:
+  def v5_quality_mask(outputs, cfg):
+    # outputs includes: p_long, p_short, p_hold, mu, sigma, mae
+    # returns boolean mask for eligible trade candidates
+
+Gates:
+- sigma_gate: sigma <= cfg.v5_sigma_max  (default 1.0, tunable)
+- mae_gate: mae <= cfg.v5_mae_max        (default 1.0, tunable)
+- edge_gate: abs(mu) >= cfg.v5_mu_min    (default 0.05 in R-units after normalization; see below)
+- action_gate: max(p_long, p_short) >= cfg.v5_p_trade_min (default 0.40)
+
+IMPORTANT: Unit fix for v5
+- Convert mu (log-return) into R-units BEFORE using in score/gates:
+  mu_R = mu / (mae + eps)     # dimensionless risk-adjusted return proxy
+  (This replaces the broken mixing of log-return and R-units.)
+- Use mu_R everywhere in score + gating. Keep raw mu for loss only.
+
+Log diagnostics each sweep:
+- [V5_QUAL_DIAG] total=..., passed_sigma=..., passed_mae=..., passed_mu=..., passed_ptrade=..., final=...
+
+3) Calibration (lightweight, no extra deps):
+- During validation epoch end (or every sweep), compute:
+  - reliability bins for p_trade = max(p_long, p_short)
+  - expected vs observed win-rate proxy:
+      observed_win = (realized_R > 0)
+  - produce 10-bin ECE (Expected Calibration Error)
+Log:
+- [V5_CALIB] ece=... b0:(n=...,p=...,obs=...) ... b9:(...)
+
+Do NOT block training on calibration. Just log it for now.
+
+Add new CLI flags in gpu_trainer/quick_start.py (v5 only):
+- --v5-sigma-max (float, default 1.0)
+- --v5-mae-max (float, default 1.0)
+- --v5-muR-min (float, default 0.05)
+- --v5-p-trade-min (float, default 0.40)
+- --v5-enable-calib (bool flag)
+
+Save these under checkpoint config:
+  checkpoint['v5_config']['quality_gates'] = {...}
+
+========================
+C) TRADE FREQUENCY CONTROLLER (TPD)
+========================
+
+Goal:
+- Achieve target trades/day (e.g. 6.5 ± 1.5) by adjusting a single scalar threshold on score.
+- This controller runs during validation sweep selection ONLY (training loss unaffected).
+
+Implementation:
+
+1) In v5 validation sweep (gpu_trainer/train/v5_train.py):
+- Compute per-bar score:
+    pL = p_long, pS = p_short
+    mu_R = mu/(mae+eps)
+    risk_penalty = cfg.v5_score_lambda * clamp(mae,0,mae_cap)
+    score_long = pL * mu_R - risk_penalty
+    score_short = pS * (-mu_R) - risk_penalty
+    score = max(score_long, score_short)
+
+- Apply quality mask from (B) BEFORE thresholding.
+
+2) Add adaptive threshold controller:
+- Maintain cfg.v5_score_threshold (float) across epochs in memory and save in checkpoint.
+- Each sweep:
+    current_tpd = trades / val_days
+    error = current_tpd - target_tpd
+    If error > tol => too many trades => increase threshold
+    If error < -tol => too few trades => decrease threshold
+- Step size:
+    delta = cfg.v5_thr_step * max(1.0, abs(error))
+    where v5_thr_step default 0.10 * score_std (computed on eligible scores)
+- Clamp threshold within [p50_score, p99_score] of eligible scores to avoid runaway.
+- Warmup: do not adapt threshold until epoch >= cfg.v5_thr_warmup_epochs (default 3)
+
+Log:
+- [V5_TPD_CTRL] epoch=.. tpd=.. target=..±.. thr=.. step=.. score_std=.. action=UP/DOWN/HOLD
+
+3) Selection rule after threshold:
+- Select bars where score >= threshold
+- Enforce cooldown same as existing code (cooldown=4 default)
+- If still above target due to burstiness, optionally cap max trades/day by subsampling highest scores (keep deterministic by sorting).
+
+Add new CLI flags (v5 only) in quick_start.py:
+- --v5-target-tpd (float default 6.5)
+- --v5-tpd-tol (float default 1.5)
+- --v5-thr-warmup-epochs (int default 3)
+- --v5-thr-step-mult (float default 0.10)  # multiplier on score_std
+- --v5-score-threshold (float default None) # if None initialize to p90 eligible score
+- --v5-score-lambda (float default 0.5)     # risk penalty weight
+- --v5-mae-cap (float default 2.0)
+
+Persist in checkpoint:
+  checkpoint['v5_config']['tpd_controller'] = {...}
+
+========================
+COMPATIBILITY / SAFETY
+========================
+
+- v5 only. Do not change v4.9.x distributional scoring or training.
+- No new heavy dependencies.
+- No data leakage.
+- Ensure np.isfinite() filtering on score arrays before computing percentiles.
+- If eligible bars become < 100, log warning and skip sweep gracefully:
+  [V5_SWEEP] EMPTY eligible after gates; skipping sweep
+
+========================
+ACCEPTANCE CRITERIA
+========================
+
+After implementation, I should see logs like:
+- [V5_QUAL_DIAG] ...
+- [V5_CALIB] ece=...
+- [V5_TPD_CTRL] epoch=.. tpd=.. thr=.. action=...
+- Sweep table shows trades/day converging to target over epochs.
+
+Also fix any unit mismatch: score must use mu_R not raw mu.
+
+Deliverables:
+- Code changes in the listed files
+- Updated argparse help text
+- Checkpoint config saved with new fields
+- No failing runs, no NaN percentiles.
+
+Proceed now.

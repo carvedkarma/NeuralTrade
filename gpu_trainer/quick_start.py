@@ -4814,6 +4814,30 @@ Examples:
                         choices=["fixed", "oracle", "learnable"],
                         help="v5 barrier mode: fixed (single preset), oracle (hindsight, research), learnable (default: fixed)")
 
+    parser.add_argument("--v5-sigma-max", type=float, default=1.0,
+                        help="v5 quality gate: max predicted sigma (default: 1.0)")
+    parser.add_argument("--v5-mae-max", type=float, default=1.0,
+                        help="v5 quality gate: max predicted MAE in R-units (default: 1.0)")
+    parser.add_argument("--v5-muR-min", type=float, default=0.05,
+                        help="v5 quality gate: min |mu_R| edge (default: 0.05)")
+    parser.add_argument("--v5-p-trade-min", type=float, default=0.40,
+                        help="v5 quality gate: min p_trade = max(p_long, p_short) (default: 0.40)")
+    parser.add_argument("--v5-enable-calib", action="store_true", default=False,
+                        help="v5 enable 10-bin ECE calibration logging (default: disabled)")
+
+    parser.add_argument("--v5-target-tpd", type=float, default=6.5,
+                        help="v5 TPD controller: target trades per day (default: 6.5)")
+    parser.add_argument("--v5-tpd-tol", type=float, default=1.5,
+                        help="v5 TPD controller: tolerance ± around target (default: 1.5)")
+    parser.add_argument("--v5-thr-warmup-epochs", type=int, default=3,
+                        help="v5 TPD controller: epochs before adapting threshold (default: 3)")
+    parser.add_argument("--v5-thr-step-mult", type=float, default=0.10,
+                        help="v5 TPD controller: step multiplier on score_std (default: 0.10)")
+    parser.add_argument("--v5-score-threshold", type=float, default=None,
+                        help="v5 TPD controller: initial score threshold (default: auto p90)")
+    parser.add_argument("--v5-mae-cap", type=float, default=2.0,
+                        help="v5 score penalty: clamp MAE to this cap (default: 2.0)")
+
     parser.add_argument("--multi-horizon", action="store_true", default=False,
                         help="Train multiple horizons (8,16,32) and select best per bar")
     parser.add_argument("--multi-horizons", type=str, default="8,16,32",
@@ -5313,7 +5337,7 @@ Examples:
             from data.candidate_generator import (
                 CandidateConfig, RiskControls,
             )
-            from train.v5_train import train_v5_model
+            from train.v5_train import train_v5_model, V5QualityGateConfig, V5TPDControllerConfig
 
             cand_cfg = CandidateConfig.from_cli_args(args) if args.use_candidates else CandidateConfig(enabled=False)
             risk_cfg = RiskControls.from_cli_args(args)
@@ -5321,6 +5345,23 @@ Examples:
             v5_barrier_presets = None
             if args.v5_barrier_mode != 'fixed':
                 v5_barrier_presets = [p.strip() for p in args.barrier_presets.split(",")]
+
+            qual_cfg = V5QualityGateConfig(
+                sigma_max=args.v5_sigma_max,
+                mae_max=args.v5_mae_max,
+                mu_R_min=args.v5_muR_min,
+                p_trade_min=args.v5_p_trade_min,
+                enable_calib=args.v5_enable_calib,
+            )
+            tpd_cfg = V5TPDControllerConfig(
+                target_tpd=args.v5_target_tpd,
+                tpd_tol=args.v5_tpd_tol,
+                thr_warmup_epochs=args.v5_thr_warmup_epochs,
+                thr_step_mult=args.v5_thr_step_mult,
+                score_threshold=args.v5_score_threshold,
+                score_lambda=args.v5_score_lambda,
+                mae_cap=args.v5_mae_cap,
+            )
 
             train_v5_model(
                 data_path, device, args.epochs, args.batch_size, args.lr,
@@ -5337,8 +5378,8 @@ Examples:
                 w_regime=args.v5_w_regime,
                 score_lambda=args.v5_score_lambda,
                 risk_proxy=args.v5_risk_proxy,
-                target_tpd=args.dist_target_tpd,
-                target_tpd_tol=args.dist_target_tpd_tol,
+                target_tpd=args.v5_target_tpd,
+                target_tpd_tol=args.v5_tpd_tol,
                 hold_target=args.v5_hold_target,
                 mfe_min=args.v5_mfe_min,
                 cand_warmup_epochs=args.v5_cand_warmup,
@@ -5354,6 +5395,8 @@ Examples:
                 target_enter_rate_min=args.target_enter_rate_min,
                 target_enter_rate_max=args.target_enter_rate_max,
                 balance_search_steps=args.balance_search_steps,
+                quality_gate_cfg=qual_cfg,
+                tpd_ctrl_cfg=tpd_cfg,
             )
 
             log.info("=" * 60)

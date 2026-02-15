@@ -1,13 +1,15 @@
 """
-V5.0.1 Training Pipeline: Fixes for unit mismatch, HOLD collapse, candidate eligibility
+V5.0.1 Training Pipeline: Forecaster with Quality Gating + TPD Controller
 
 Changes from v5.0:
-- All targets in R-units (ret_R, mfe_R, mae_R) — no more log-return/R-unit mixing
+- All targets in R-units (ret_R, mfe_R, mae_R) -- no more log-return/R-unit mixing
 - Adaptive deadzone targeting ~30% HOLD rate (--v5-hold-target)
 - Class-balanced action CE loss (inverse frequency weighting)
 - Score formula uses R-units consistently: edge = p_dir * (mu_R / (mae_R + eps))
 - Candidate warmup: disable candidates for first N epochs
-- Enhanced diagnostics: [V5_ACTION_DIST], [V5_SCORE_DIAG] with component breakdown
+- (B) Uncertainty/Quality Gating: sigma, mae, mu_R, p_trade gates
+- (B) Lightweight calibration: 10-bin ECE on p_trade vs observed win-rate
+- (C) Trade Frequency Controller: adaptive threshold to hit target TPD
 """
 
 import torch
@@ -22,10 +24,31 @@ from datetime import datetime
 from typing import Optional, Dict, List, Tuple
 from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from dataclasses import dataclass, field
 
 log = logging.getLogger("QuickStart")
 
 V5_FEATURE_VERSION = "v5.0.1_forecaster"
+
+
+@dataclass
+class V5QualityGateConfig:
+    sigma_max: float = 1.0
+    mae_max: float = 1.0
+    mu_R_min: float = 0.05
+    p_trade_min: float = 0.40
+    enable_calib: bool = False
+
+
+@dataclass
+class V5TPDControllerConfig:
+    target_tpd: float = 6.5
+    tpd_tol: float = 1.5
+    thr_warmup_epochs: int = 3
+    thr_step_mult: float = 0.10
+    score_threshold: Optional[float] = None
+    score_lambda: float = 0.5
+    mae_cap: float = 2.0
 
 
 class V5Dataset(Dataset):
@@ -133,30 +156,151 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
     return total, losses
 
 
-def compute_v5_scores(outputs, horizon_bars=16, score_lambda=0.5, risk_proxy='mae'):
+def _extract_v5_arrays(concat_outputs):
+    """Extract numpy arrays from concatenated model outputs for scoring/gating."""
+    mu_R = concat_outputs['ret_mu'].numpy().squeeze(-1)
+    mae_pred = concat_outputs['mae'].numpy().squeeze(-1)
+    mfe_pred = concat_outputs['mfe'].numpy().squeeze(-1)
+    action_logits = concat_outputs['action_logits'].numpy()
+
+    sigma = None
+    if 'ret_sigma' in concat_outputs:
+        sigma = concat_outputs['ret_sigma'].numpy().squeeze(-1)
+    elif 'ret_log_sigma' in concat_outputs:
+        sigma = np.exp(concat_outputs['ret_log_sigma'].numpy().squeeze(-1))
+
+    action_probs = np.exp(action_logits - np.max(action_logits, axis=1, keepdims=True))
+    action_probs = action_probs / (action_probs.sum(axis=1, keepdims=True) + 1e-8)
+    p_hold = action_probs[:, 0]
+    p_long = action_probs[:, 1]
+    p_short = action_probs[:, 2]
+    p_trade = np.maximum(p_long, p_short)
+
+    return {
+        'mu_R': mu_R, 'sigma': sigma, 'mae': mae_pred, 'mfe': mfe_pred,
+        'p_hold': p_hold, 'p_long': p_long, 'p_short': p_short, 'p_trade': p_trade,
+        'action_logits': action_logits,
+    }
+
+
+def v5_quality_mask(arrays, cfg: V5QualityGateConfig):
+    """Apply quality gates to filter low-confidence predictions.
+
+    Gates (all in R-units):
+    - sigma_gate: predicted sigma <= sigma_max
+    - mae_gate: predicted mae <= mae_max
+    - edge_gate: |mu_R| >= mu_R_min
+    - action_gate: max(p_long, p_short) >= p_trade_min
+
+    Returns: boolean mask, diagnostics dict
+    """
+    n = len(arrays['mu_R'])
+
+    sigma_pass = np.ones(n, dtype=bool)
+    if arrays['sigma'] is not None:
+        sigma_pass = np.isfinite(arrays['sigma']) & (arrays['sigma'] <= cfg.sigma_max)
+
+    mae_pass = np.isfinite(arrays['mae']) & (arrays['mae'] <= cfg.mae_max)
+
+    mu_R = arrays['mu_R']
+    edge_pass = np.isfinite(mu_R) & (np.abs(mu_R) >= cfg.mu_R_min)
+
+    ptrade_pass = arrays['p_trade'] >= cfg.p_trade_min
+
+    final_mask = sigma_pass & mae_pass & edge_pass & ptrade_pass
+
+    diag = {
+        'total': n,
+        'passed_sigma': int(np.sum(sigma_pass)),
+        'passed_mae': int(np.sum(mae_pass)),
+        'passed_mu': int(np.sum(edge_pass)),
+        'passed_ptrade': int(np.sum(ptrade_pass)),
+        'final': int(np.sum(final_mask)),
+    }
+
+    log.info("[V5_QUAL_DIAG] total=%d passed_sigma=%d passed_mae=%d "
+             "passed_mu=%d passed_ptrade=%d final=%d (%.1f%%)",
+             diag['total'], diag['passed_sigma'], diag['passed_mae'],
+             diag['passed_mu'], diag['passed_ptrade'], diag['final'],
+             100.0 * diag['final'] / max(n, 1))
+
+    return final_mask, diag
+
+
+def compute_v5_calibration(p_trade, realized_r, n_bins=10):
+    """Compute 10-bin ECE for p_trade vs observed win-rate.
+
+    Args:
+        p_trade: predicted max(p_long, p_short) array
+        realized_r: realized R from trades
+        n_bins: number of calibration bins
+
+    Returns:
+        ece: float, bin_details: list of dicts
+    """
+    finite_mask = np.isfinite(p_trade) & np.isfinite(realized_r)
+    p = p_trade[finite_mask]
+    r = realized_r[finite_mask]
+    observed_win = (r > 0).astype(float)
+
+    if len(p) < 20:
+        log.info("[V5_CALIB] insufficient data (%d bars), skipping", len(p))
+        return 0.0, []
+
+    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+    bin_details = []
+
+    for b in range(n_bins):
+        lo, hi = bin_edges[b], bin_edges[b + 1]
+        in_bin = (p >= lo) & (p < hi) if b < n_bins - 1 else (p >= lo) & (p <= hi)
+        n_bin = int(np.sum(in_bin))
+        if n_bin == 0:
+            bin_details.append({'n': 0, 'p': 0.0, 'obs': 0.0})
+            continue
+        avg_p = float(np.mean(p[in_bin]))
+        avg_obs = float(np.mean(observed_win[in_bin]))
+        ece += (n_bin / len(p)) * abs(avg_p - avg_obs)
+        bin_details.append({'n': n_bin, 'p': round(avg_p, 3), 'obs': round(avg_obs, 3)})
+
+    bin_str = " ".join(f"b{i}:(n={bd['n']},p={bd['p']:.3f},obs={bd['obs']:.3f})" for i, bd in enumerate(bin_details))
+    log.info("[V5_CALIB] ece=%.4f %s", ece, bin_str)
+
+    return ece, bin_details
+
+
+def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
+                      risk_proxy='mae', mae_cap=2.0, _arrays=None):
     """Compute execution-aware v5 scores -- all in R-units.
 
     Score = max(edge_long, edge_short) - penalty
     edge_long  = p_long  * mu_R / (mae_R + eps)
     edge_short = p_short * (-mu_R) / (mae_R + eps)
-    penalty    = lambda * max(0, -mu_R)
+    penalty    = lambda * clamp(mae, 0, mae_cap)
     """
-    mu_R = outputs['ret_mu'].detach().cpu().numpy().squeeze(-1)
-    mae_pred = outputs['mae'].detach().cpu().numpy().squeeze(-1)
-    mfe_pred = outputs['mfe'].detach().cpu().numpy().squeeze(-1)
-    action_logits = outputs['action_logits'].detach().cpu().numpy()
-
-    action_probs = np.exp(action_logits - np.max(action_logits, axis=1, keepdims=True))
-    action_probs = action_probs / (action_probs.sum(axis=1, keepdims=True) + 1e-8)
-    p_long = action_probs[:, 1]
-    p_short = action_probs[:, 2]
+    if _arrays is not None:
+        mu_R = _arrays['mu_R']
+        mae_pred = _arrays['mae']
+        mfe_pred = _arrays['mfe']
+        p_long = _arrays['p_long']
+        p_short = _arrays['p_short']
+    else:
+        mu_R = outputs_or_arrays['ret_mu'].detach().cpu().numpy().squeeze(-1)
+        mae_pred = outputs_or_arrays['mae'].detach().cpu().numpy().squeeze(-1)
+        mfe_pred = outputs_or_arrays['mfe'].detach().cpu().numpy().squeeze(-1)
+        action_logits = outputs_or_arrays['action_logits'].detach().cpu().numpy()
+        action_probs = np.exp(action_logits - np.max(action_logits, axis=1, keepdims=True))
+        action_probs = action_probs / (action_probs.sum(axis=1, keepdims=True) + 1e-8)
+        p_long = action_probs[:, 1]
+        p_short = action_probs[:, 2]
 
     risk = np.maximum(mae_pred, 1e-3)
 
     edge_long = p_long * np.divide(mu_R, risk, out=np.zeros_like(mu_R), where=risk > 0)
     edge_short = p_short * np.divide(-mu_R, risk, out=np.zeros_like(mu_R), where=risk > 0)
 
-    penalty = score_lambda * np.maximum(0.0, -mu_R)
+    clamped_mae = np.clip(mae_pred, 0.0, mae_cap)
+    penalty = score_lambda * clamped_mae
 
     scores = np.maximum(edge_long, edge_short) - penalty
 
@@ -175,15 +319,92 @@ def compute_v5_scores(outputs, horizon_bars=16, score_lambda=0.5, risk_proxy='ma
     }
 
 
+def _tpd_controller_step(scores, quality_mask, candidate_mask,
+                         current_threshold, epoch, val_bars,
+                         tpd_cfg: V5TPDControllerConfig,
+                         cooldown=4):
+    """Adaptive threshold controller to hit target trades/day.
+
+    Returns: new_threshold, n_trades, tpd, action_str
+    """
+    combined_mask = quality_mask.copy()
+    if candidate_mask is not None:
+        combined_mask &= candidate_mask
+
+    eligible_scores = scores[combined_mask]
+    finite_mask = np.isfinite(eligible_scores)
+    eligible_finite = eligible_scores[finite_mask]
+
+    val_days = val_bars / 96.0
+
+    if len(eligible_finite) < 100:
+        log.warning("[V5_TPD_CTRL] SKIP: only %d eligible finite scores (< 100)", len(eligible_finite))
+        return current_threshold, 0, 0.0, "SKIP"
+
+    score_std = float(np.std(eligible_finite))
+    sp50 = float(np.percentile(eligible_finite, 50))
+    sp99 = float(np.percentile(eligible_finite, 99))
+
+    if current_threshold is None:
+        current_threshold = float(np.percentile(eligible_finite, 90))
+        log.info("[V5_TPD_CTRL] Initializing threshold to p90=%.4f", current_threshold)
+
+    selected_indices = np.where(combined_mask)[0]
+    above_thr = scores[selected_indices] >= current_threshold
+    sel_above = selected_indices[above_thr]
+
+    sorted_sel = sel_above[np.argsort(-scores[sel_above])]
+    taken = []
+    last_bar = -cooldown - 1
+    for idx in sorted_sel:
+        if idx - last_bar >= cooldown:
+            taken.append(idx)
+            last_bar = idx
+    n_trades = len(taken)
+    tpd = n_trades / max(val_days, 1e-6)
+
+    target_tpd = tpd_cfg.target_tpd
+    tol = tpd_cfg.tpd_tol
+    error = tpd - target_tpd
+
+    if epoch <= tpd_cfg.thr_warmup_epochs:
+        action = "WARMUP"
+        new_threshold = current_threshold
+    elif abs(error) <= tol:
+        action = "HOLD"
+        new_threshold = current_threshold
+    else:
+        step = tpd_cfg.thr_step_mult * max(score_std, 1e-4) * max(1.0, abs(error))
+        if error > tol:
+            new_threshold = current_threshold + step
+            action = "UP"
+        else:
+            new_threshold = current_threshold - step
+            action = "DOWN"
+        new_threshold = float(np.clip(new_threshold, sp50, sp99))
+
+    log.info("[V5_TPD_CTRL] epoch=%d tpd=%.1f target=%.1f±%.1f thr=%.4f->%.4f "
+             "step_mult=%.2f score_std=%.4f action=%s trades=%d",
+             epoch, tpd, target_tpd, tol,
+             current_threshold, new_threshold,
+             tpd_cfg.thr_step_mult, score_std, action, n_trades)
+
+    return new_threshold, n_trades, tpd, action
+
+
 def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                   val_bars, epoch, tp_mult, sl_mult,
                   target_tpd=6.5, target_tpd_tol=1.5, min_trades=30,
                   candidate_mask=None, risk_controls=None,
-                  symbol_ids=None, horizon_bars=16):
-    """Score-based sweep for v5 model."""
+                  symbol_ids=None, horizon_bars=16,
+                  quality_mask=None, score_threshold=None):
+    """Score-based sweep for v5 model.
+
+    If score_threshold is provided, uses threshold-based selection (TPD controller).
+    Otherwise falls back to percentile-based sweep.
+    """
     from data.candidate_generator import apply_risk_controls, RiskControls
 
-    TOP_PCTS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
     COOLDOWN = 4
 
     safe_outcomes = np.where(
@@ -193,12 +414,11 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     safe_r = precomputed_r.copy().astype(float)
     safe_r = np.where(np.isnan(safe_r), 0.0, safe_r)
 
+    scores_work = scores.copy()
+    if quality_mask is not None:
+        scores_work[~quality_mask] = -np.inf
     if candidate_mask is not None:
-        non_cand = ~candidate_mask
-        scores_work = scores.copy()
-        scores_work[non_cand] = -np.inf
-    else:
-        scores_work = scores.copy()
+        scores_work[~candidate_mask] = -np.inf
 
     tpd_lo = target_tpd - target_tpd_tol
     tpd_hi = target_tpd + target_tpd_tol
@@ -211,12 +431,25 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     best_any_pct = 0.0
     best_any_label = ""
 
+    TOP_PCTS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+
+    if score_threshold is not None:
+        thresholds_to_sweep = [score_threshold]
+        labels_for_thresholds = ["tpd_ctrl"]
+    else:
+        thresholds_to_sweep = []
+        labels_for_thresholds = []
+
     for pct in TOP_PCTS:
         finite_scores = scores_work[np.isfinite(scores_work)]
         if len(finite_scores) == 0:
             continue
         threshold = np.percentile(finite_scores, (1 - pct) * 100)
-        selected = scores_work >= threshold
+        thresholds_to_sweep.append(threshold)
+        labels_for_thresholds.append(f"top{int(pct*100)}%")
+
+    for thr, label in zip(thresholds_to_sweep, labels_for_thresholds):
+        selected = scores_work >= thr
         sel_indices = np.where(selected)[0]
         if len(sel_indices) == 0:
             continue
@@ -265,13 +498,19 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
 
         tpd = n_trades / max(val_days, 1e-6)
 
-        label = f"top{int(pct*100)}%"
+        pct_val = 0.0
+        if label.startswith("top"):
+            try:
+                pct_val = int(label.replace("top", "").replace("%", "")) / 100.0
+            except ValueError:
+                pass
+
         m = {
-            'label': label, 'pct': pct, 'trades': n_trades,
+            'label': label, 'pct': pct_val, 'trades': n_trades,
             'expect': expect, 'winrate': winrate, 'sharpe': sharpe, 'pf': pf,
             'avg_win_r': avg_win, 'avg_loss_r': avg_loss, 'median_r': median_r,
             'pct_tp': pct_tp, 'pct_sl': pct_sl, 'pct_exp': pct_exp,
-            'trades_per_day': tpd,
+            'trades_per_day': tpd, 'threshold': thr,
         }
         sweep_results.append(m)
 
@@ -282,7 +521,7 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                 best_in_freq_label = label
         if composite > best_any_score:
             best_any_score = composite
-            best_any_pct = pct
+            best_any_pct = pct_val
             best_any_label = label
 
     if best_in_freq_label:
@@ -299,10 +538,12 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
         best_pct = 0.0
 
     score_arr = np.array(scores)
+    combined_eligible = np.ones(len(score_arr), dtype=bool)
+    if quality_mask is not None:
+        combined_eligible &= quality_mask
     if candidate_mask is not None:
-        scores_eligible = score_arr[candidate_mask]
-    else:
-        scores_eligible = score_arr
+        combined_eligible &= candidate_mask
+    scores_eligible = score_arr[combined_eligible]
     scores_finite = scores_eligible[np.isfinite(scores_eligible)]
     log.info("-" * 120)
     log.info("[V5_SCORE_DIAG] total=%d eligible=%d finite=%d nan_or_inf=%d",
@@ -321,7 +562,7 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
 
     log.info("V5 SWEEP (epoch %d) | cooldown=%d | TP=%.1fx SL=%.1fx ATR | val_days=%.1f | target=%.1f±%.1f tpd",
              epoch, COOLDOWN, tp_mult, sl_mult, val_days, target_tpd, target_tpd_tol)
-    log.info("%-8s %5s %8s %6s %6s %5s | %6s %6s %6s | %4s %4s %4s | %5s",
+    log.info("%-10s %5s %8s %6s %6s %5s | %6s %6s %6s | %4s %4s %4s | %5s",
              "Select", "Trds", "Expect", "WR", "Shrpe", "PF",
              "WinR", "LosR", "MedR", "%TP", "%SL", "%EX", "T/Day")
     log.info("-" * 120)
@@ -329,7 +570,7 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
         marker = ""
         if m['label'] == best_label and m['trades'] >= min_trades and best_score_val > float('-inf'):
             marker = " <<< BEST"
-        log.info("%-8s %5d %+8.3f %5.1f%% %6.2f %5.2f | %+6.3f %+6.3f %+6.3f | %3.0f%% %3.0f%% %3.0f%% | %5.1f%s",
+        log.info("%-10s %5d %+8.3f %5.1f%% %6.2f %5.2f | %+6.3f %+6.3f %+6.3f | %3.0f%% %3.0f%% %3.0f%% | %5.1f%s",
                  m['label'], m['trades'], m['expect'], m['winrate']*100, m['sharpe'], m['pf'],
                  m['avg_win_r'], m['avg_loss_r'], m['median_r'],
                  m['pct_tp']*100, m['pct_sl']*100, m['pct_exp']*100, m['trades_per_day'], marker)
@@ -360,8 +601,10 @@ def train_v5_model(
     target_enter_rate_max=0.25,
     balance_search_steps=30,
     cand_warmup_epochs=3,
+    quality_gate_cfg=None,
+    tpd_ctrl_cfg=None,
 ):
-    """V5.0.1 Forecaster training pipeline."""
+    """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
     from data.candidate_generator import (
         CandidateConfig, generate_candidate_mask,
@@ -375,6 +618,13 @@ def train_v5_model(
         candidate_config = CandidateConfig(enabled=False)
     if risk_controls is None:
         risk_controls = RiskControls()
+    if quality_gate_cfg is None:
+        quality_gate_cfg = V5QualityGateConfig()
+    if tpd_ctrl_cfg is None:
+        tpd_ctrl_cfg = V5TPDControllerConfig(
+            target_tpd=target_tpd, tpd_tol=target_tpd_tol,
+            score_lambda=score_lambda,
+        )
 
     presets = []
     if barrier_presets:
@@ -400,6 +650,12 @@ def train_v5_model(
     log.info(f"[V5_CONFIG] cand_warmup_epochs={cand_warmup_epochs}")
     log.info(f"[V5_CONFIG] horizon={horizon} epochs={epochs} batch={batch_size} lr={lr}")
     log.info(f"[V5_CONFIG] ALL targets in R-units (price_change / ATR)")
+    log.info(f"[V5_QUAL_CONFIG] sigma_max={quality_gate_cfg.sigma_max} mae_max={quality_gate_cfg.mae_max} "
+             f"mu_R_min={quality_gate_cfg.mu_R_min} p_trade_min={quality_gate_cfg.p_trade_min} "
+             f"enable_calib={quality_gate_cfg.enable_calib}")
+    log.info(f"[V5_TPD_CONFIG] target={tpd_ctrl_cfg.target_tpd}±{tpd_ctrl_cfg.tpd_tol} "
+             f"warmup={tpd_ctrl_cfg.thr_warmup_epochs} step_mult={tpd_ctrl_cfg.thr_step_mult} "
+             f"mae_cap={tpd_ctrl_cfg.mae_cap} init_thr={tpd_ctrl_cfg.score_threshold}")
 
     if barrier_mode == 'oracle':
         log.warning("[V5] barrier_mode=oracle: WARNING hindsight leakage, research only!")
@@ -615,6 +871,8 @@ def train_v5_model(
     val_sym_ids = sym_ids_all[val_idx]
     val_bars = len(val_idx)
 
+    current_score_threshold = tpd_ctrl_cfg.score_threshold
+
     ckpt_model_config = {
         'input_dim': input_dim,
         'hidden_dims': model_config.hidden_dims,
@@ -639,6 +897,20 @@ def train_v5_model(
                 'daily_loss_limit_r': risk_controls.daily_loss_limit_r,
                 'max_concurrent_trades': risk_controls.max_concurrent_trades,
                 'max_symbol_exposure': risk_controls.max_symbol_exposure,
+            },
+            'quality_gates': {
+                'sigma_max': quality_gate_cfg.sigma_max,
+                'mae_max': quality_gate_cfg.mae_max,
+                'mu_R_min': quality_gate_cfg.mu_R_min,
+                'p_trade_min': quality_gate_cfg.p_trade_min,
+                'enable_calib': quality_gate_cfg.enable_calib,
+            },
+            'tpd_controller': {
+                'target_tpd': tpd_ctrl_cfg.target_tpd,
+                'tpd_tol': tpd_ctrl_cfg.tpd_tol,
+                'thr_warmup_epochs': tpd_ctrl_cfg.thr_warmup_epochs,
+                'thr_step_mult': tpd_ctrl_cfg.thr_step_mult,
+                'mae_cap': tpd_ctrl_cfg.mae_cap,
             },
         },
     }
@@ -685,7 +957,8 @@ def train_v5_model(
         model.eval()
         val_losses = []
         all_val_outputs = {
-            'ret_mu': [], 'ret_log_sigma': [], 'mae': [], 'mfe': [], 'action_logits': []
+            'ret_mu': [], 'ret_log_sigma': [], 'ret_sigma': [],
+            'mae': [], 'mfe': [], 'action_logits': []
         }
 
         with torch.no_grad():
@@ -738,9 +1011,16 @@ def train_v5_model(
                 if all_val_outputs[k]:
                     concat_outputs[k] = torch.cat(all_val_outputs[k], dim=0)
 
+            arrays = _extract_v5_arrays(concat_outputs)
+
+            quality_mask, qual_diag = v5_quality_mask(arrays, quality_gate_cfg)
+
             scores, sides, score_diag = compute_v5_scores(
-                concat_outputs, horizon_bars=horizon,
-                score_lambda=score_lambda, risk_proxy=risk_proxy
+                None, horizon_bars=horizon,
+                score_lambda=tpd_ctrl_cfg.score_lambda,
+                risk_proxy=risk_proxy,
+                mae_cap=tpd_ctrl_cfg.mae_cap,
+                _arrays=arrays,
             )
 
             log.info(f"[V5_SCORE_DIAG] mu_R: mean={score_diag['mu_R_mean']:.4f} std={score_diag['mu_R_std']:.4f} | "
@@ -751,6 +1031,12 @@ def train_v5_model(
 
             sweep_cand_mask = val_cand_mask if use_candidates_this_epoch else None
 
+            current_score_threshold, tpd_trades, tpd_val, tpd_action = _tpd_controller_step(
+                scores, quality_mask, sweep_cand_mask,
+                current_score_threshold, epoch, val_bars,
+                tpd_ctrl_cfg,
+            )
+
             sweep_results, sweep_label, sweep_expect, sweep_pct = _run_v5_sweep(
                 scores, sides, val_outcomes, val_realized_r,
                 val_bars, epoch, tp_mult, sl_mult,
@@ -759,7 +1045,16 @@ def train_v5_model(
                 risk_controls=risk_controls,
                 symbol_ids=val_sym_ids,
                 horizon_bars=horizon,
+                quality_mask=quality_mask,
+                score_threshold=current_score_threshold,
             )
+
+            if quality_gate_cfg.enable_calib:
+                val_p_trade = arrays['p_trade'][:len(val_realized_r)]
+                compute_v5_calibration(val_p_trade, val_realized_r)
+
+            ckpt_v5_config = ckpt_train_config['v5_config']
+            ckpt_v5_config['tpd_controller']['current_threshold'] = current_score_threshold
 
             if sweep_expect > best_expectancy:
                 best_expectancy = sweep_expect
@@ -805,4 +1100,5 @@ def train_v5_model(
 
     log.info("=" * 60)
     log.info(f"[V5] Training complete. Best expectancy={best_expectancy:.4f} best_loss={best_val_loss:.4f}")
+    log.info(f"[V5] Final score_threshold={current_score_threshold}")
     log.info("=" * 60)
