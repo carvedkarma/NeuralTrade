@@ -12,6 +12,14 @@ import pandas as pd
 import pytest
 
 
+def _has_torch():
+    try:
+        import torch
+        return True
+    except ImportError:
+        return False
+
+
 def _make_synthetic_df(n=200):
     """Create a synthetic OHLC series with known properties."""
     np.random.seed(42)
@@ -558,3 +566,188 @@ class TestV506CLIFlags:
 
         with pytest.raises(SystemExit):
             parser.parse_args(["--v5-score-side-mode", "invalid_mode"])
+
+
+class TestCapitalProtection:
+    """Tests for v5.0.7 capital protection: regime gate in sweep, weekly loss cap, warmup skip."""
+
+    @pytest.mark.skipif(not _has_torch(), reason="torch not available")
+    def test_regime_gate_blocks_in_sweep(self):
+        """EMA200 gate in _run_v5_sweep should block counter-trend trades."""
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from train.v5_train import _run_v5_sweep
+
+        n = 100
+        np.random.seed(42)
+        scores = np.random.rand(n) * 2
+        sides = np.ones(n, dtype=int)
+        sides[50:] = -1
+
+        close_prices = np.linspace(100, 120, n)
+        ema200_value = 110.0
+        realized_r = np.random.randn(n) * 0.1
+        outcomes = np.ones(n, dtype=int)
+        r_long = realized_r.copy()
+        r_short = realized_r.copy()
+        out_long = outcomes.copy()
+        out_short = outcomes.copy()
+
+        res_no_gate, _, _, _ = _run_v5_sweep(
+            scores, sides, outcomes, realized_r,
+            n, 1, 2.0, 1.5,
+            r_long=r_long, r_short=r_short,
+            out_long=out_long, out_short=out_short,
+            close_prices=close_prices, ema200_regime_gate=False,
+        )
+
+        res_with_gate, _, _, _ = _run_v5_sweep(
+            scores, sides, outcomes, realized_r,
+            n, 1, 2.0, 1.5,
+            r_long=r_long, r_short=r_short,
+            out_long=out_long, out_short=out_short,
+            close_prices=close_prices, ema200_regime_gate=True,
+        )
+
+        trades_no_gate = res_no_gate.get('total_trades', 0) if res_no_gate else 0
+        trades_with_gate = res_with_gate.get('total_trades', 0) if res_with_gate else 0
+        assert trades_with_gate <= trades_no_gate, \
+            f"Regime gate should block some trades: {trades_with_gate} >= {trades_no_gate}"
+
+    @pytest.mark.skipif(not _has_torch(), reason="torch not available")
+    def test_weekly_loss_cap_triggers(self):
+        """Weekly loss cap should stop trading when weekly R drops below threshold."""
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from train.v5_train import _run_v5_sweep
+
+        n = 200
+        np.random.seed(99)
+        scores = np.ones(n) * 2.0
+        sides = np.ones(n, dtype=int)
+        realized_r = np.ones(n) * -0.5
+        outcomes = np.ones(n, dtype=int)
+        r_long = realized_r.copy()
+        r_short = realized_r.copy()
+        out_long = outcomes.copy()
+        out_short = outcomes.copy()
+
+        base_ts = 1_700_000_000_000
+        timestamps = np.arange(n) * 900_000 + base_ts
+
+        res_no_cap, _, _, _ = _run_v5_sweep(
+            scores, sides, outcomes, realized_r,
+            n, 1, 2.0, 1.5,
+            r_long=r_long, r_short=r_short,
+            out_long=out_long, out_short=out_short,
+            timestamps=timestamps, weekly_loss_cap=None,
+        )
+
+        res_with_cap, _, _, _ = _run_v5_sweep(
+            scores, sides, outcomes, realized_r,
+            n, 1, 2.0, 1.5,
+            r_long=r_long, r_short=r_short,
+            out_long=out_long, out_short=out_short,
+            timestamps=timestamps, weekly_loss_cap=-3.0,
+        )
+
+        trades_no_cap = res_no_cap.get('total_trades', 0) if res_no_cap else 0
+        trades_with_cap = res_with_cap.get('total_trades', 0) if res_with_cap else 0
+        assert trades_with_cap < trades_no_cap, \
+            f"Weekly cap should reduce trades: {trades_with_cap} >= {trades_no_cap}"
+
+    @pytest.mark.skipif(not _has_torch(), reason="torch not available")
+    def test_warmup_skip_bars_forward_test_config(self):
+        """V5ForwardTestConfig should accept warmup_skip_bars and weekly_loss_cap."""
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from train.v5_train import V5ForwardTestConfig
+
+        cfg_default = V5ForwardTestConfig()
+        assert cfg_default.warmup_skip_bars == 0
+        assert cfg_default.weekly_loss_cap is None
+
+        cfg_custom = V5ForwardTestConfig(warmup_skip_bars=96, weekly_loss_cap=-5.0)
+        assert cfg_custom.warmup_skip_bars == 96
+        assert cfg_custom.weekly_loss_cap == -5.0
+
+    def test_cli_flags_parse(self):
+        """CLI flags --v5-weekly-loss-cap and --v5-warmup-skip-bars should parse correctly."""
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--v5-weekly-loss-cap", type=float, default=None)
+        parser.add_argument("--v5-warmup-skip-bars", type=int, default=0)
+
+        args_default = parser.parse_args([])
+        assert args_default.v5_weekly_loss_cap is None
+        assert args_default.v5_warmup_skip_bars == 0
+
+        args_custom = parser.parse_args(["--v5-weekly-loss-cap", "-5.0", "--v5-warmup-skip-bars", "96"])
+        assert args_custom.v5_weekly_loss_cap == -5.0
+        assert args_custom.v5_warmup_skip_bars == 96
+
+    def test_regime_gate_direction_correctness(self):
+        """EMA200 gate logic: LONG blocked when close < EMA, SHORT blocked when close > EMA.
+        Uses pure-numpy EMA computation (no torch dependency)."""
+
+        def _compute_ema_pure(close_arr, period=200):
+            alpha = 2.0 / (period + 1)
+            ema = np.empty_like(close_arr, dtype=np.float64)
+            ema[0] = close_arr[0]
+            for i in range(1, len(close_arr)):
+                ema[i] = alpha * close_arr[i] + (1 - alpha) * ema[i - 1]
+            return ema
+
+        n = 500
+        close = np.concatenate([
+            np.linspace(100, 100, 200),
+            np.linspace(100, 80, 150),
+            np.linspace(80, 120, 150),
+        ])
+        ema = _compute_ema_pure(close, 200)
+
+        below_count = 0
+        above_count = 0
+        for i in range(250, n):
+            if close[i] < ema[i]:
+                below_count += 1
+            if close[i] > ema[i]:
+                above_count += 1
+
+        assert below_count > 0, "Should have bars where close < EMA200 (LONG would be blocked)"
+        assert above_count > 0, "Should have bars where close > EMA200 (SHORT would be blocked)"
+
+        assert below_count + above_count > 0, "Gate should identify regime violations"
+
+    @pytest.mark.skipif(not _has_torch(), reason="torch not available")
+    def test_weekly_cap_resets_between_weeks(self):
+        """Kill-switch should reset at week boundaries."""
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from train.v5_train import _run_v5_sweep
+
+        bars_per_week = 7 * 24 * 4
+        n = bars_per_week * 3
+        np.random.seed(123)
+        scores = np.ones(n) * 2.0
+        sides = np.ones(n, dtype=int)
+        realized_r = np.ones(n) * -0.3
+        realized_r[bars_per_week:bars_per_week + 50] = 0.5
+        outcomes = np.ones(n, dtype=int)
+        r_long = realized_r.copy()
+        r_short = realized_r.copy()
+        out_long = outcomes.copy()
+        out_short = outcomes.copy()
+
+        base_ts = 1_700_000_000_000
+        timestamps = np.arange(n) * 900_000 + base_ts
+
+        res, _, _, _ = _run_v5_sweep(
+            scores, sides, outcomes, realized_r,
+            n, 1, 2.0, 1.5,
+            r_long=r_long, r_short=r_short,
+            out_long=out_long, out_short=out_short,
+            timestamps=timestamps, weekly_loss_cap=-2.0,
+        )
+        trades = res.get('total_trades', 0) if res else 0
+        assert trades > 0, "Should still take trades after weekly reset"

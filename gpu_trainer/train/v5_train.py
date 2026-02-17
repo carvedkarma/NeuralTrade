@@ -55,6 +55,8 @@ class V5ForwardTestConfig:
     quality_gate_cfg: Optional['V5QualityGateConfig'] = None
     side_mode: str = 'action_head'
     rr_weight: float = 0.0
+    weekly_loss_cap: Optional[float] = None
+    warmup_skip_bars: int = 0
 
 
 def _parse_date_to_ms(date_str: str) -> int:
@@ -630,7 +632,9 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                   candidate_mask=None, risk_controls=None,
                   symbol_ids=None, horizon_bars=16,
                   quality_mask=None, score_threshold=None,
-                  r_long=None, r_short=None, out_long=None, out_short=None):
+                  r_long=None, r_short=None, out_long=None, out_short=None,
+                  close_prices=None, ema200_regime_gate=False,
+                  timestamps=None, weekly_loss_cap=None):
     """Score-based sweep for v5 model.
 
     If side-conditional arrays (r_long, r_short, out_long, out_short) are provided,
@@ -639,10 +643,19 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
 
     If score_threshold is provided, uses threshold-based selection (TPD controller).
     Otherwise falls back to percentile-based sweep.
+
+    Capital protection:
+    - ema200_regime_gate: hard-blocks LONG when close < EMA200, SHORT when close > EMA200
+    - weekly_loss_cap: stops trading for remainder of week when cumulative weekly R drops below cap
     """
     from data.candidate_generator import apply_risk_controls, RiskControls
 
     COOLDOWN = 4
+
+    ema200 = None
+    if ema200_regime_gate and close_prices is not None:
+        ema200 = _compute_ema(close_prices, 200)
+        log.info("[V5_SWEEP] EMA200 regime gate ENABLED")
 
     use_side_conditional = (r_long is not None and r_short is not None
                            and out_long is not None and out_short is not None)
@@ -697,6 +710,17 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
         thresholds_to_sweep.append(threshold)
         labels_for_thresholds.append(f"top{int(pct*100)}%")
 
+    week_boundaries = None
+    if weekly_loss_cap is not None and timestamps is not None:
+        from datetime import timedelta
+        trade_dates = np.array([datetime.utcfromtimestamp(ts / 1000) for ts in timestamps])
+        week_ids = np.zeros(len(timestamps), dtype=np.int64)
+        first_date = trade_dates[0]
+        monday = first_date - timedelta(days=first_date.weekday())
+        for i in range(len(trade_dates)):
+            week_ids[i] = (trade_dates[i] - monday).days // 7
+        week_boundaries = week_ids
+
     for thr, label in zip(thresholds_to_sweep, labels_for_thresholds):
         selected = scores_work >= thr
         sel_indices = np.where(selected)[0]
@@ -706,13 +730,50 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
         chronological_idx = sel_indices[np.argsort(sel_indices)]
         taken = []
         last_bar = -COOLDOWN - 1
+        ema_blocked = 0
+        weekly_blocked = 0
+        current_week_r = 0.0
+        current_week_id = -1
+        week_killed = False
         for idx in chronological_idx:
-            if idx - last_bar >= COOLDOWN:
-                taken.append(idx)
-                last_bar = idx
+            if idx - last_bar < COOLDOWN:
+                continue
+            if ema200 is not None:
+                side_val = sides[idx]
+                close_val = close_prices[idx]
+                ema_val = ema200[idx]
+                if side_val == 1 and close_val < ema_val:
+                    ema_blocked += 1
+                    continue
+                if side_val == -1 and close_val > ema_val:
+                    ema_blocked += 1
+                    continue
+            if weekly_loss_cap is not None and week_boundaries is not None:
+                wk = week_boundaries[idx]
+                if wk != current_week_id:
+                    current_week_id = wk
+                    current_week_r = 0.0
+                    week_killed = False
+                if week_killed:
+                    weekly_blocked += 1
+                    continue
+            taken.append(idx)
+            last_bar = idx
+            if weekly_loss_cap is not None and week_boundaries is not None:
+                trade_r = safe_r[idx]
+                if not np.isnan(trade_r):
+                    current_week_r += trade_r
+                if current_week_r <= weekly_loss_cap:
+                    week_killed = True
+                    log.debug("[V5_SWEEP_GATE] weekly_cap hit: week=%d cumR=%.2f cap=%.2f",
+                              current_week_id, current_week_r, weekly_loss_cap)
 
         n_above_thr = len(sel_indices)
         n_after_cooldown = len(taken)
+        if ema_blocked > 0 and label == "tpd_ctrl":
+            log.info(f"[V5_SWEEP_GATE] EMA200 blocked {ema_blocked} trades in {label}")
+        if weekly_blocked > 0 and label == "tpd_ctrl":
+            log.info(f"[V5_SWEEP_GATE] Weekly cap blocked {weekly_blocked} trades in {label}")
 
         if len(taken) < 5:
             log.debug("[V5_SWEEP_DIAG] %s: above_thr=%d after_cooldown=%d (<5, skipped)",
@@ -944,11 +1005,37 @@ def run_v5_forward_test(
         ema200 = _compute_ema(close_prices, 200)
         log.info("[V5_FWD] EMA200 regime gate ENABLED")
 
+    week_boundaries = None
+    if config.weekly_loss_cap is not None and test_timestamps is not None:
+        from datetime import timedelta
+        trade_dates = np.array([datetime.utcfromtimestamp(ts / 1000) for ts in test_timestamps])
+        week_ids = np.zeros(len(test_timestamps), dtype=np.int64)
+        first_date = trade_dates[0]
+        monday = first_date - timedelta(days=first_date.weekday())
+        for i in range(len(trade_dates)):
+            week_ids[i] = (trade_dates[i] - monday).days // 7
+        week_boundaries = week_ids
+        log.info(f"[V5_FWD] Weekly loss cap ENABLED: cap={config.weekly_loss_cap:.1f}R")
+
+    if config.warmup_skip_bars > 0:
+        log.info(f"[V5_FWD] Warmup skip ENABLED: first {config.warmup_skip_bars} bars blocked")
+
     chronological_idx = sel_indices[np.argsort(sel_indices)]
     taken = []
     ema_blocked = 0
+    warmup_blocked = 0
+    weekly_blocked = 0
+    current_week_r = 0.0
+    current_week_id = -1
+    week_killed = False
     last_bar = -config.cooldown - 1
+
+    use_side_conditional_for_cap = (r_long is not None and r_short is not None)
+
     for idx in chronological_idx:
+        if config.warmup_skip_bars > 0 and idx < config.warmup_skip_bars:
+            warmup_blocked += 1
+            continue
         if idx - last_bar < config.cooldown:
             continue
         if ema200 is not None:
@@ -965,11 +1052,35 @@ def run_v5_forward_test(
                           close_val, ema_val)
                 ema_blocked += 1
                 continue
+        if config.weekly_loss_cap is not None and week_boundaries is not None:
+            wk = week_boundaries[idx]
+            if wk != current_week_id:
+                current_week_id = wk
+                current_week_r = 0.0
+                week_killed = False
+            if week_killed:
+                weekly_blocked += 1
+                continue
         taken.append(idx)
         last_bar = idx
+        if config.weekly_loss_cap is not None and week_boundaries is not None:
+            if use_side_conditional_for_cap:
+                trade_r = float(r_long[idx]) if sides[idx] == 1 else float(r_short[idx])
+            else:
+                trade_r = float(test_realized_r[idx]) if test_realized_r is not None else 0.0
+            if not np.isnan(trade_r):
+                current_week_r += trade_r
+            if current_week_r <= config.weekly_loss_cap:
+                week_killed = True
+                log.info("[V5_GATE] weekly_cap hit: week=%d cumR=%.2f cap=%.2f",
+                         current_week_id, current_week_r, config.weekly_loss_cap)
 
     if ema200 is not None:
         log.info(f"[V5_GATE] EMA200 blocked {ema_blocked} trades")
+    if warmup_blocked > 0:
+        log.info(f"[V5_GATE] Warmup blocked {warmup_blocked} trades (first {config.warmup_skip_bars} bars)")
+    if weekly_blocked > 0:
+        log.info(f"[V5_GATE] Weekly cap blocked {weekly_blocked} trades")
 
     n_eligible = len(sel_indices)
     n_hold_all = int(np.sum(sides[sel_indices] == 0)) if len(sel_indices) > 0 else 0
@@ -1439,6 +1550,8 @@ def train_v5_model(
     freeze_decision=True,
     run_diagnostics=False,
     ema200_regime_gate=False,
+    weekly_loss_cap=None,
+    warmup_skip_bars=0,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -2033,6 +2146,10 @@ def train_v5_model(
                 score_threshold=current_score_threshold,
                 r_long=val_r_long_arr, r_short=val_r_short_arr,
                 out_long=val_out_long_arr, out_short=val_out_short_arr,
+                close_prices=val_close_arr,
+                ema200_regime_gate=ema200_regime_gate,
+                timestamps=val_timestamps_arr,
+                weekly_loss_cap=weekly_loss_cap,
             )
 
             if quality_gate_cfg.enable_calib:
@@ -2134,6 +2251,8 @@ def train_v5_model(
                 quality_gate_cfg=quality_gate_cfg,
                 side_mode=tpd_ctrl_cfg.side_mode,
                 rr_weight=tpd_ctrl_cfg.rr_weight,
+                weekly_loss_cap=weekly_loss_cap,
+                warmup_skip_bars=warmup_skip_bars,
             )
 
             fwd_report = run_v5_forward_test(

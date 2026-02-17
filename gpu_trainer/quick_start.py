@@ -4861,6 +4861,10 @@ Examples:
                         help="v5.0.6: side selection mode. 'action_head' (default) uses |mu_R| with p_long/p_short for direction (fixes zero-SHORT bug). 'mu_sign' is legacy mode where mu_R sign drives direction.")
     parser.add_argument("--v5-rr-weight", type=float, default=0.0,
                         help="v5.0.6: risk/reward ratio bonus weight. When >0, adds mfe/mae ratio bonus to score (default: 0.0)")
+    parser.add_argument("--v5-weekly-loss-cap", type=float, default=None,
+                        help="v5.0.7: weekly loss cap in R-units. When weekly cumulative R drops below this, stop trading for remainder of week (e.g. -5.0). Default: None (disabled)")
+    parser.add_argument("--v5-warmup-skip-bars", type=int, default=0,
+                        help="v5.0.7: skip trades in first N bars of forward test window to avoid cold-start losses (e.g. 96 = 1 day). Default: 0 (disabled)")
     parser.add_argument("--v5-walk-forward", action="store_true", default=False,
                         help="v5: run walk-forward analysis with rolling train/test windows")
     parser.add_argument("--v5-wf-train-months", type=int, default=12,
@@ -5496,6 +5500,8 @@ Examples:
                 freeze_decision=args.v5_freeze_decision,
                 run_diagnostics=args.v5_diagnostics,
                 ema200_regime_gate=args.v5_ema200_regime_gate,
+                weekly_loss_cap=args.v5_weekly_loss_cap,
+                warmup_skip_bars=args.v5_warmup_skip_bars,
             )
 
             log.info("=" * 60)
