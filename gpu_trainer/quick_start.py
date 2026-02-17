@@ -5456,6 +5456,9 @@ Examples:
                     barrier_presets=v5_barrier_presets,
                     use_regime_head=args.use_regime_head,
                     cand_warmup_epochs=args.v5_cand_warmup,
+                    ema200_regime_gate=args.v5_ema200_regime_gate,
+                    weekly_loss_cap=args.v5_weekly_loss_cap,
+                    warmup_skip_bars=args.v5_warmup_skip_bars,
                 )
                 return
 

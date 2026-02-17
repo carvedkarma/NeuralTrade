@@ -1377,6 +1377,7 @@ def run_v5_walk_forward(
     warmup_epochs=5, min_lr=None,
     barrier_mode='fixed', barrier_presets=None,
     use_regime_head=False, cand_warmup_epochs=3,
+    ema200_regime_gate=False, weekly_loss_cap=None, warmup_skip_bars=0,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -1466,6 +1467,9 @@ def run_v5_walk_forward(
             test_end_date=fold['test_end'],
             run_forward_test=True,
             freeze_decision=True,
+            ema200_regime_gate=ema200_regime_gate,
+            weekly_loss_cap=weekly_loss_cap,
+            warmup_skip_bars=warmup_skip_bars,
         )
 
         report_path = Path("checkpoints") / "v5_forward_report.json"
