@@ -18,6 +18,7 @@ import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 import logging
+from collections import defaultdict
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -57,6 +58,12 @@ class V5ForwardTestConfig:
     rr_weight: float = 0.0
     weekly_loss_cap: Optional[float] = None
     warmup_skip_bars: int = 0
+    corr_block: bool = False
+    corr_window_days: int = 30
+    corr_thresh: float = 0.70
+    corr_same_side_only: bool = True
+    corr_log_matrix: bool = True
+    symbols_list: Optional[list] = None
 
 
 def _parse_date_to_ms(date_str: str) -> int:
@@ -1020,15 +1027,40 @@ def run_v5_forward_test(
     if config.warmup_skip_bars > 0:
         log.info(f"[V5_FWD] Warmup skip ENABLED: first {config.warmup_skip_bars} bars blocked")
 
+    corr_tracker = None
+    corr_blocker = None
+    sym_id_to_name = {}
+    if (config.corr_block and config.symbols_list is not None
+            and len(config.symbols_list) >= 2 and test_sym_ids is not None):
+        from train.v5_correlation import RollingDailyCorr, CorrBlocker, CorrConfig
+        sym_names = list(config.symbols_list)
+        for si, s in enumerate(sym_names):
+            sym_id_to_name[si] = s
+        corr_cfg = CorrConfig(
+            enabled=True,
+            window_days=config.corr_window_days,
+            threshold=config.corr_thresh,
+            same_side_only=config.corr_same_side_only,
+            log_matrix=config.corr_log_matrix,
+        )
+        corr_tracker = RollingDailyCorr(sym_names, window_days=config.corr_window_days)
+        corr_blocker = CorrBlocker(corr_tracker, corr_cfg)
+        log.info(f"[V5_CORR] Correlation blocker ENABLED: thresh={config.corr_thresh:.2f} "
+                 f"window={config.corr_window_days}d same_side={config.corr_same_side_only}")
+
     chronological_idx = sel_indices[np.argsort(sel_indices)]
     taken = []
     ema_blocked = 0
     warmup_blocked = 0
     weekly_blocked = 0
+    corr_blocked = 0
     current_week_r = 0.0
     current_week_id = -1
     week_killed = False
     last_bar = -config.cooldown - 1
+
+    open_positions: dict = {}
+    trade_spans: dict = defaultdict(list)
 
     use_side_conditional_for_cap = (r_long is not None and r_short is not None)
 
@@ -1038,6 +1070,22 @@ def run_v5_forward_test(
             continue
         if idx - last_bar < config.cooldown:
             continue
+
+        expired = [k for k, v in open_positions.items() if v['expiry'] <= idx]
+        for k in expired:
+            pos = open_positions[k]
+            if corr_tracker is not None:
+                entry_idx = pos['entry_bar']
+                if use_side_conditional_for_cap:
+                    tr = float(r_long[entry_idx]) if pos['side'] == 1 else float(r_short[entry_idx])
+                else:
+                    tr = float(test_realized_r[entry_idx]) if test_realized_r is not None else 0.0
+                if not np.isnan(tr) and test_timestamps is not None:
+                    date_str = datetime.utcfromtimestamp(
+                        test_timestamps[entry_idx] / 1000).strftime('%Y-%m-%d')
+                    corr_tracker.record_trade(pos['symbol'], date_str, tr)
+            del open_positions[k]
+
         if ema200 is not None:
             side_val = sides[idx]
             close_val = close_prices[idx]
@@ -1061,8 +1109,31 @@ def run_v5_forward_test(
             if week_killed:
                 weekly_blocked += 1
                 continue
+
+        if corr_blocker is not None and test_sym_ids is not None:
+            sym_name = sym_id_to_name.get(int(test_sym_ids[idx]), None)
+            side_val = int(sides[idx])
+            open_by_sym = {v['symbol']: v['side'] for k, v in open_positions.items()
+                           if v['symbol'] != sym_name}
+            if sym_name and corr_blocker.should_block(sym_name, side_val, open_by_sym):
+                corr_blocked += 1
+                continue
+
         taken.append(idx)
         last_bar = idx
+
+        if corr_tracker is not None and test_sym_ids is not None:
+            sym_name = sym_id_to_name.get(int(test_sym_ids[idx]), None)
+            if sym_name:
+                pos_key = f"{sym_name}_{idx}"
+                open_positions[pos_key] = {
+                    'symbol': sym_name,
+                    'side': int(sides[idx]),
+                    'entry_bar': idx,
+                    'expiry': idx + config.horizon,
+                }
+                trade_spans[sym_name].append((idx, idx + config.horizon))
+
         if config.weekly_loss_cap is not None and week_boundaries is not None:
             if use_side_conditional_for_cap:
                 trade_r = float(r_long[idx]) if sides[idx] == 1 else float(r_short[idx])
@@ -1081,6 +1152,8 @@ def run_v5_forward_test(
         log.info(f"[V5_GATE] Warmup blocked {warmup_blocked} trades (first {config.warmup_skip_bars} bars)")
     if weekly_blocked > 0:
         log.info(f"[V5_GATE] Weekly cap blocked {weekly_blocked} trades")
+    if corr_blocked > 0:
+        log.info(f"[V5_GATE] Correlation blocked {corr_blocked} trades")
 
     n_eligible = len(sel_indices)
     n_hold_all = int(np.sum(sides[sel_indices] == 0)) if len(sel_indices) > 0 else 0
@@ -1153,6 +1226,28 @@ def run_v5_forward_test(
         test_bars, config, test_start_date, test_end_date,
         trade_timestamps=t_timestamps,
     )
+
+    if corr_tracker is not None:
+        for k, pos in open_positions.items():
+            entry_idx = pos['entry_bar']
+            if use_side_conditional_for_cap:
+                tr = float(r_long[entry_idx]) if pos['side'] == 1 else float(r_short[entry_idx])
+            else:
+                tr = float(test_realized_r[entry_idx]) if test_realized_r is not None else 0.0
+            if not np.isnan(tr) and test_timestamps is not None:
+                date_str = datetime.utcfromtimestamp(
+                    test_timestamps[entry_idx] / 1000).strftime('%Y-%m-%d')
+                corr_tracker.record_trade(pos['symbol'], date_str, tr)
+        open_positions.clear()
+
+        from train.v5_correlation import compute_overlap_ratio
+        overlap = compute_overlap_ratio(dict(trade_spans), test_bars)
+        report['_corr_tracker'] = corr_tracker
+        report['_corr_blocker'] = corr_blocker
+        report['_trade_spans'] = dict(trade_spans)
+        report['_overlap_ratio'] = overlap
+        report['corr_blocked_trades'] = corr_blocked
+
     _print_forward_report(report)
     return report
 
@@ -1378,6 +1473,8 @@ def run_v5_walk_forward(
     barrier_mode='fixed', barrier_presets=None,
     use_regime_head=False, cand_warmup_epochs=3,
     ema200_regime_gate=False, weekly_loss_cap=None, warmup_skip_bars=0,
+    corr_block=False, corr_window_days=30, corr_thresh=0.70,
+    corr_same_side_only=True, corr_log_matrix=True,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -1470,6 +1567,11 @@ def run_v5_walk_forward(
             ema200_regime_gate=ema200_regime_gate,
             weekly_loss_cap=weekly_loss_cap,
             warmup_skip_bars=warmup_skip_bars,
+            corr_block=corr_block,
+            corr_window_days=corr_window_days,
+            corr_thresh=corr_thresh,
+            corr_same_side_only=corr_same_side_only,
+            corr_log_matrix=corr_log_matrix,
         )
 
         report_path = Path("checkpoints") / "v5_forward_report.json"
@@ -1556,6 +1658,11 @@ def train_v5_model(
     ema200_regime_gate=False,
     weekly_loss_cap=None,
     warmup_skip_bars=0,
+    corr_block=False,
+    corr_window_days=30,
+    corr_thresh=0.70,
+    corr_same_side_only=True,
+    corr_log_matrix=True,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -2257,6 +2364,12 @@ def train_v5_model(
                 rr_weight=tpd_ctrl_cfg.rr_weight,
                 weekly_loss_cap=weekly_loss_cap,
                 warmup_skip_bars=warmup_skip_bars,
+                corr_block=corr_block,
+                corr_window_days=corr_window_days,
+                corr_thresh=corr_thresh,
+                corr_same_side_only=corr_same_side_only,
+                corr_log_matrix=corr_log_matrix,
+                symbols_list=symbols if symbols else None,
             )
 
             fwd_report = run_v5_forward_test(
@@ -2283,9 +2396,29 @@ def train_v5_model(
 
             report_path = checkpoint_dir / "v5_forward_report.json"
             import json
+            serializable_report = {k: v for k, v in fwd_report.items()
+                                   if not k.startswith('_')}
             with open(report_path, 'w') as f:
-                json.dump(fwd_report, f, indent=2, default=str)
+                json.dump(serializable_report, f, indent=2, default=str)
             log.info(f"[V5_FWD] Report saved to {report_path}")
+
+            if '_corr_tracker' in fwd_report:
+                from train.v5_correlation import (
+                    build_fold_corr_report, log_corr_report, save_corr_report,
+                    compute_overlap_ratio
+                )
+                corr_report = build_fold_corr_report(
+                    fold_id=0,
+                    window_train=train_end_date or "?",
+                    window_test=f"{test_start_date or '?'}→{test_end_date or '?'}",
+                    corr_tracker=fwd_report['_corr_tracker'],
+                    overlap_ratio=fwd_report.get('_overlap_ratio', 0.0),
+                    blocker=fwd_report.get('_corr_blocker'),
+                )
+                if corr_log_matrix:
+                    log_corr_report(corr_report, fold_id=0)
+                save_corr_report(corr_report, fold_id=0,
+                                 output_dir=str(checkpoint_dir))
         else:
             log.warning("[V5_FWD] No checkpoint found, skipping forward test")
 

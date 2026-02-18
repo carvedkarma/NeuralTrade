@@ -4865,6 +4865,20 @@ Examples:
                         help="v5.0.7: weekly loss cap in R-units. When weekly cumulative R drops below this, stop trading for remainder of week (e.g. -5.0). Default: None (disabled)")
     parser.add_argument("--v5-warmup-skip-bars", type=int, default=0,
                         help="v5.0.7: skip trades in first N bars of forward test window to avoid cold-start losses (e.g. 96 = 1 day). Default: 0 (disabled)")
+    parser.add_argument("--v5-corr-block", action="store_true", default=True,
+                        help="v5.0.8: enable smart cross-asset correlation blocking (default: on)")
+    parser.add_argument("--v5-no-corr-block", dest="v5_corr_block", action="store_false",
+                        help="v5.0.8: disable smart cross-asset correlation blocking")
+    parser.add_argument("--v5-corr-window-days", type=int, default=30,
+                        help="v5.0.8: rolling window in days for correlation computation (default: 30)")
+    parser.add_argument("--v5-corr-thresh", type=float, default=0.70,
+                        help="v5.0.8: abs correlation threshold to block entry (default: 0.70)")
+    parser.add_argument("--v5-corr-same-side-only", action="store_true", default=True,
+                        help="v5.0.8: only block when new trade matches open position side (default: on)")
+    parser.add_argument("--v5-corr-any-side", dest="v5_corr_same_side_only", action="store_false",
+                        help="v5.0.8: block correlated entries regardless of side")
+    parser.add_argument("--v5-log-corr-matrix", action="store_true", default=True,
+                        help="v5.0.8: log correlation matrix at fold end (default: on)")
     parser.add_argument("--v5-walk-forward", action="store_true", default=False,
                         help="v5: run walk-forward analysis with rolling train/test windows")
     parser.add_argument("--v5-wf-train-months", type=int, default=12,
@@ -4935,7 +4949,7 @@ Examples:
     parser.add_argument("--dry-run-candles", type=int, default=200,
                         help="Number of bars to replay in dry-run mode (default: 200)")
     parser.add_argument("--no-correlation-block", action="store_true", default=False,
-                        help="Disable same-direction correlation blocking (default: on)")
+                        help="[DEPRECATED: use --v5-no-corr-block] Disable same-direction correlation blocking for live mode (default: on)")
     parser.add_argument("--per-symbol-models", action="store_true", default=False,
                         help="Use per-symbol deployed models from checkpoints/deployed/{symbol}/")
     parser.add_argument("--enable-learning", action="store_true", default=False,
@@ -5459,6 +5473,11 @@ Examples:
                     ema200_regime_gate=args.v5_ema200_regime_gate,
                     weekly_loss_cap=args.v5_weekly_loss_cap,
                     warmup_skip_bars=args.v5_warmup_skip_bars,
+                    corr_block=args.v5_corr_block and not args.no_correlation_block,
+                    corr_window_days=args.v5_corr_window_days,
+                    corr_thresh=args.v5_corr_thresh,
+                    corr_same_side_only=args.v5_corr_same_side_only,
+                    corr_log_matrix=args.v5_log_corr_matrix,
                 )
                 return
 
@@ -5505,6 +5524,11 @@ Examples:
                 ema200_regime_gate=args.v5_ema200_regime_gate,
                 weekly_loss_cap=args.v5_weekly_loss_cap,
                 warmup_skip_bars=args.v5_warmup_skip_bars,
+                corr_block=args.v5_corr_block and not args.no_correlation_block,
+                corr_window_days=args.v5_corr_window_days,
+                corr_thresh=args.v5_corr_thresh,
+                corr_same_side_only=args.v5_corr_same_side_only,
+                corr_log_matrix=args.v5_log_corr_matrix,
             )
 
             log.info("=" * 60)
