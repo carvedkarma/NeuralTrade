@@ -64,6 +64,17 @@ class V5ForwardTestConfig:
     corr_same_side_only: bool = True
     corr_log_matrix: bool = True
     symbols_list: Optional[list] = None
+    adaptive_sizing: bool = False
+    kelly_fraction: float = 0.25
+    max_size_mult: float = 2.5
+    min_size_mult: float = 0.25
+    regime_scaling: bool = False
+    regime_bull_mult: float = 1.5
+    regime_bear_mult: float = 0.5
+    regime_lookback: int = 20
+    daily_loss_cap: Optional[float] = None
+    trailing_equity_stop: Optional[float] = None
+    per_symbol_daily_r_budget: Optional[float] = None
 
 
 def _parse_date_to_ms(date_str: str) -> int:
@@ -1027,6 +1038,53 @@ def run_v5_forward_test(
     if config.warmup_skip_bars > 0:
         log.info(f"[V5_FWD] Warmup skip ENABLED: first {config.warmup_skip_bars} bars blocked")
 
+    position_sizer = None
+    regime_scaler = None
+    daily_tracker = None
+    equity_stop = None
+    size_multipliers = {}
+
+    if config.adaptive_sizing:
+        from train.v5_position_sizer import AdaptivePositionSizer, AdaptiveSizingConfig
+        sizer_cfg = AdaptiveSizingConfig(
+            enabled=True,
+            kelly_fraction=config.kelly_fraction,
+            max_size_mult=config.max_size_mult,
+            min_size_mult=config.min_size_mult,
+        )
+        position_sizer = AdaptivePositionSizer(sizer_cfg)
+        log.info(f"[V5_FWD] Adaptive sizing ENABLED: kelly_f={config.kelly_fraction} "
+                 f"range=[{config.min_size_mult}, {config.max_size_mult}]")
+
+    if config.regime_scaling:
+        from train.v5_position_sizer import RegimeScaler, RegimeScalingConfig
+        regime_cfg = RegimeScalingConfig(
+            enabled=True,
+            bull_mult=config.regime_bull_mult,
+            bear_mult=config.regime_bear_mult,
+            lookback_trades=config.regime_lookback,
+        )
+        regime_scaler = RegimeScaler(regime_cfg)
+        log.info(f"[V5_FWD] Regime scaling ENABLED: bull={config.regime_bull_mult} "
+                 f"bear={config.regime_bear_mult} lookback={config.regime_lookback}")
+
+    if config.daily_loss_cap is not None or config.per_symbol_daily_r_budget is not None:
+        from train.v5_position_sizer import DailyLossTracker, LossManagementConfig
+        loss_cfg = LossManagementConfig(
+            daily_loss_cap=config.daily_loss_cap,
+            per_symbol_daily_r_budget=config.per_symbol_daily_r_budget,
+        )
+        daily_tracker = DailyLossTracker(loss_cfg)
+        if config.daily_loss_cap is not None:
+            log.info(f"[V5_FWD] Daily loss cap ENABLED: {config.daily_loss_cap}R")
+        if config.per_symbol_daily_r_budget is not None:
+            log.info(f"[V5_FWD] Per-symbol daily R budget ENABLED: {config.per_symbol_daily_r_budget}R")
+
+    if config.trailing_equity_stop is not None:
+        from train.v5_position_sizer import TrailingEquityStop
+        equity_stop = TrailingEquityStop(config.trailing_equity_stop)
+        log.info(f"[V5_FWD] Trailing equity stop ENABLED: {config.trailing_equity_stop}R")
+
     corr_tracker = None
     corr_blocker = None
     sym_id_to_name = {}
@@ -1058,11 +1116,21 @@ def run_v5_forward_test(
     current_week_id = -1
     week_killed = False
     last_bar = -config.cooldown - 1
+    daily_blocked = 0
+    equity_blocked = 0
+    symbol_daily_blocked = 0
 
     open_positions: dict = {}
     trade_spans: dict = defaultdict(list)
 
     use_side_conditional_for_cap = (r_long is not None and r_short is not None)
+
+    ema200_for_regime = None
+    atr_for_regime = None
+    if regime_scaler is not None and close_prices is not None:
+        ema200_for_regime = _compute_ema(close_prices, 200)
+        diffs = np.abs(np.diff(close_prices, prepend=close_prices[0]))
+        atr_for_regime = np.convolve(diffs, np.ones(14)/14, mode='same')
 
     for idx in chronological_idx:
         if config.warmup_skip_bars > 0 and idx < config.warmup_skip_bars:
@@ -1119,8 +1187,45 @@ def run_v5_forward_test(
                 corr_blocked += 1
                 continue
 
+        if daily_tracker is not None and test_timestamps is not None:
+            date_str = datetime.utcfromtimestamp(
+                test_timestamps[idx] / 1000).strftime('%Y-%m-%d')
+            daily_tracker.new_bar(date_str)
+            trade_sym = None
+            if test_sym_ids is not None and sym_id_to_name:
+                trade_sym = sym_id_to_name.get(int(test_sym_ids[idx]), None)
+            if daily_tracker.should_block(symbol=trade_sym):
+                daily_blocked += 1
+                continue
+
+        if equity_stop is not None and equity_stop.should_block():
+            equity_blocked += 1
+            continue
+
         taken.append(idx)
         last_bar = idx
+
+        trade_size_mult = 1.0
+        if position_sizer is not None:
+            p_win = float(arrays['p_long'][idx]) if sides[idx] == 1 else float(arrays['p_short'][idx])
+            trade_size_mult = position_sizer.compute_size_multiplier(
+                score=float(scores[idx]),
+                p_win=p_win,
+                mu_r=float(arrays['mu_R'][idx]),
+                mfe=float(arrays['mfe'][idx]),
+                mae=float(arrays['mae'][idx]),
+            )
+
+        if regime_scaler is not None:
+            regime_mult = regime_scaler.compute_regime_multiplier(
+                idx=idx, side=int(sides[idx]),
+                close_prices=close_prices,
+                ema200=ema200_for_regime,
+                atr_values=atr_for_regime,
+            )
+            trade_size_mult *= regime_mult
+
+        size_multipliers[idx] = trade_size_mult
 
         if corr_tracker is not None and test_sym_ids is not None:
             sym_name = sym_id_to_name.get(int(test_sym_ids[idx]), None)
@@ -1146,6 +1251,23 @@ def run_v5_forward_test(
                 log.info("[V5_GATE] weekly_cap hit: week=%d cumR=%.2f cap=%.2f",
                          current_week_id, current_week_r, config.weekly_loss_cap)
 
+        if use_side_conditional_for_cap:
+            post_trade_r = float(r_long[idx]) if sides[idx] == 1 else float(r_short[idx])
+        else:
+            post_trade_r = float(test_realized_r[idx]) if test_realized_r is not None else 0.0
+
+        if daily_tracker is not None and not np.isnan(post_trade_r):
+            trade_sym = None
+            if test_sym_ids is not None and sym_id_to_name:
+                trade_sym = sym_id_to_name.get(int(test_sym_ids[idx]), None)
+            daily_tracker.record_trade(post_trade_r * size_multipliers.get(idx, 1.0), symbol=trade_sym)
+
+        if equity_stop is not None and not np.isnan(post_trade_r):
+            equity_stop.update(post_trade_r * size_multipliers.get(idx, 1.0))
+
+        if regime_scaler is not None and not np.isnan(post_trade_r):
+            regime_scaler.record_trade_result(post_trade_r)
+
     if ema200 is not None:
         log.info(f"[V5_GATE] EMA200 blocked {ema_blocked} trades")
     if warmup_blocked > 0:
@@ -1154,6 +1276,10 @@ def run_v5_forward_test(
         log.info(f"[V5_GATE] Weekly cap blocked {weekly_blocked} trades")
     if corr_blocked > 0:
         log.info(f"[V5_GATE] Correlation blocked {corr_blocked} trades")
+    if daily_blocked > 0:
+        log.info(f"[V5_GATE] Daily loss cap blocked {daily_blocked} trades")
+    if equity_blocked > 0:
+        log.info(f"[V5_GATE] Trailing equity stop blocked {equity_blocked} trades")
 
     n_eligible = len(sel_indices)
     n_hold_all = int(np.sum(sides[sel_indices] == 0)) if len(sel_indices) > 0 else 0
@@ -1194,8 +1320,18 @@ def run_v5_forward_test(
 
     taken = np.array(taken)
     t_outcomes = safe_outcomes[taken]
-    t_r = safe_r[taken]
+    t_r_unsized = safe_r[taken].copy()
     t_sides = sides[taken]
+
+    t_size_mults = np.array([size_multipliers.get(idx, 1.0) for idx in taken])
+    t_r = t_r_unsized * t_size_mults
+
+    has_sizing = position_sizer is not None or regime_scaler is not None
+    if has_sizing:
+        log.info(f"[V5_SIZE] Applied sizing to {len(taken)} trades: "
+                 f"unsized_totalR={np.sum(t_r_unsized):.2f} → sized_totalR={np.sum(t_r):.2f} "
+                 f"avg_mult={np.mean(t_size_mults):.3f} "
+                 f"min_mult={np.min(t_size_mults):.3f} max_mult={np.max(t_size_mults):.3f}")
 
     n_taken_long = int(np.sum(t_sides == 1))
     n_taken_short = int(np.sum(t_sides == -1))
@@ -1213,6 +1349,7 @@ def run_v5_forward_test(
              f"{len(taken)} after cooldown, {valid_trades.sum()} with valid outcomes")
 
     t_r_valid = t_r[valid_trades]
+    t_r_unsized_valid = t_r_unsized[valid_trades]
     t_outcomes_valid = t_outcomes[valid_trades]
     t_sides_valid = t_sides[valid_trades]
     taken_valid = taken[valid_trades]
@@ -1247,6 +1384,33 @@ def run_v5_forward_test(
         report['_trade_spans'] = dict(trade_spans)
         report['_overlap_ratio'] = overlap
         report['corr_blocked_trades'] = corr_blocked
+
+    if position_sizer or regime_scaler or daily_tracker or equity_stop:
+        from train.v5_position_sizer import build_sizing_diagnostics
+        sizing_diag = build_sizing_diagnostics(
+            sizer=position_sizer, regime=regime_scaler,
+            daily_tracker=daily_tracker, equity_stop=equity_stop,
+            sized_r=t_r_valid if has_sizing else None,
+            unsized_r=t_r_unsized_valid if has_sizing else None,
+        )
+        report['sizing_diagnostics'] = sizing_diag
+        report['daily_blocked_trades'] = daily_blocked
+        report['equity_blocked_trades'] = equity_blocked
+
+        if has_sizing:
+            log.info(f"[V5_SIZE] Sizing comparison: "
+                     f"unsized={np.sum(t_r_unsized_valid):.2f}R → sized={np.sum(t_r_valid):.2f}R "
+                     f"(impact: {np.sum(t_r_valid) - np.sum(t_r_unsized_valid):+.2f}R)")
+        if daily_tracker:
+            dt_diag = daily_tracker.get_diagnostics()
+            log.info(f"[V5_GATE] Daily tracker: {dt_diag['days_killed']} days killed, "
+                     f"{dt_diag['trades_blocked_daily_cap']} trades blocked (daily), "
+                     f"{dt_diag['trades_blocked_symbol_cap']} trades blocked (per-symbol)")
+        if equity_stop:
+            es_diag = equity_stop.get_diagnostics()
+            log.info(f"[V5_GATE] Equity stop: {es_diag['stop_triggers']} triggers, "
+                     f"{es_diag['trades_blocked_equity_stop']} blocked, "
+                     f"maxDD={es_diag['max_drawdown_r']:.2f}R")
 
     _print_forward_report(report)
     return report
@@ -1475,6 +1639,9 @@ def run_v5_walk_forward(
     ema200_regime_gate=False, weekly_loss_cap=None, warmup_skip_bars=0,
     corr_block=False, corr_window_days=30, corr_thresh=0.70,
     corr_same_side_only=True, corr_log_matrix=True,
+    adaptive_sizing=False, kelly_fraction=0.25, max_size_mult=2.5, min_size_mult=0.25,
+    regime_scaling=False, regime_bull_mult=1.5, regime_bear_mult=0.5, regime_lookback=20,
+    daily_loss_cap=None, trailing_equity_stop=None, per_symbol_daily_r_budget=None,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -1572,6 +1739,17 @@ def run_v5_walk_forward(
             corr_thresh=corr_thresh,
             corr_same_side_only=corr_same_side_only,
             corr_log_matrix=corr_log_matrix,
+            adaptive_sizing=adaptive_sizing,
+            kelly_fraction=kelly_fraction,
+            max_size_mult=max_size_mult,
+            min_size_mult=min_size_mult,
+            regime_scaling=regime_scaling,
+            regime_bull_mult=regime_bull_mult,
+            regime_bear_mult=regime_bear_mult,
+            regime_lookback=regime_lookback,
+            daily_loss_cap=daily_loss_cap,
+            trailing_equity_stop=trailing_equity_stop,
+            per_symbol_daily_r_budget=per_symbol_daily_r_budget,
         )
 
         report_path = Path("checkpoints") / "v5_forward_report.json"
@@ -1663,6 +1841,17 @@ def train_v5_model(
     corr_thresh=0.70,
     corr_same_side_only=True,
     corr_log_matrix=True,
+    adaptive_sizing=False,
+    kelly_fraction=0.25,
+    max_size_mult=2.5,
+    min_size_mult=0.25,
+    regime_scaling=False,
+    regime_bull_mult=1.5,
+    regime_bear_mult=0.5,
+    regime_lookback=20,
+    daily_loss_cap=None,
+    trailing_equity_stop=None,
+    per_symbol_daily_r_budget=None,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -2370,6 +2559,17 @@ def train_v5_model(
                 corr_same_side_only=corr_same_side_only,
                 corr_log_matrix=corr_log_matrix,
                 symbols_list=symbols if symbols else None,
+                adaptive_sizing=adaptive_sizing,
+                kelly_fraction=kelly_fraction,
+                max_size_mult=max_size_mult,
+                min_size_mult=min_size_mult,
+                regime_scaling=regime_scaling,
+                regime_bull_mult=regime_bull_mult,
+                regime_bear_mult=regime_bear_mult,
+                regime_lookback=regime_lookback,
+                daily_loss_cap=daily_loss_cap,
+                trailing_equity_stop=trailing_equity_stop,
+                per_symbol_daily_r_budget=per_symbol_daily_r_budget,
             )
 
             fwd_report = run_v5_forward_test(

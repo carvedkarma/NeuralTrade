@@ -4879,6 +4879,32 @@ Examples:
                         help="v5.0.8: block correlated entries regardless of side")
     parser.add_argument("--v5-log-corr-matrix", action="store_true", default=True,
                         help="v5.0.8: log correlation matrix at fold end (default: on)")
+
+    parser.add_argument("--v5-adaptive-sizing", action="store_true", default=False,
+                        help="v5.0.8+: enable adaptive position sizing via fractional Kelly criterion (default: off)")
+    parser.add_argument("--v5-kelly-fraction", type=float, default=0.25,
+                        help="v5.0.8+: Kelly fraction for position sizing — 0.25 = quarter-Kelly (default: 0.25)")
+    parser.add_argument("--v5-max-size-mult", type=float, default=2.5,
+                        help="v5.0.8+: maximum position size multiplier cap (default: 2.5)")
+    parser.add_argument("--v5-min-size-mult", type=float, default=0.25,
+                        help="v5.0.8+: minimum position size multiplier floor (default: 0.25)")
+
+    parser.add_argument("--v5-regime-scaling", action="store_true", default=False,
+                        help="v5.0.8+: enable dynamic risk scaling by regime — scales risk up in trending, down in choppy (default: off)")
+    parser.add_argument("--v5-regime-bull-mult", type=float, default=1.5,
+                        help="v5.0.8+: risk multiplier in favorable (bull/trending) regime (default: 1.5)")
+    parser.add_argument("--v5-regime-bear-mult", type=float, default=0.5,
+                        help="v5.0.8+: risk multiplier in hostile (bear/choppy) regime (default: 0.5)")
+    parser.add_argument("--v5-regime-lookback", type=int, default=20,
+                        help="v5.0.8+: lookback trades for rolling equity regime signal (default: 20)")
+
+    parser.add_argument("--v5-daily-loss-cap", type=float, default=None,
+                        help="v5.0.8+: daily loss cap in R-units. Stops trading for rest of day when hit (e.g. -3.0). Default: None (disabled)")
+    parser.add_argument("--v5-trailing-equity-stop", type=float, default=None,
+                        help="v5.0.8+: trailing equity stop in R-units. Pauses trading when equity drops this far from peak (e.g. 15.0). Default: None (disabled)")
+    parser.add_argument("--v5-per-symbol-daily-r", type=float, default=None,
+                        help="v5.0.8+: per-symbol daily R budget cap. Stops trading a symbol for rest of day when hit (e.g. -2.0). Default: None (disabled)")
+
     parser.add_argument("--v5-walk-forward", action="store_true", default=False,
                         help="v5: run walk-forward analysis with rolling train/test windows")
     parser.add_argument("--v5-wf-train-months", type=int, default=12,
@@ -5478,6 +5504,17 @@ Examples:
                     corr_thresh=args.v5_corr_thresh,
                     corr_same_side_only=args.v5_corr_same_side_only,
                     corr_log_matrix=args.v5_log_corr_matrix,
+                    adaptive_sizing=args.v5_adaptive_sizing,
+                    kelly_fraction=args.v5_kelly_fraction,
+                    max_size_mult=args.v5_max_size_mult,
+                    min_size_mult=args.v5_min_size_mult,
+                    regime_scaling=args.v5_regime_scaling,
+                    regime_bull_mult=args.v5_regime_bull_mult,
+                    regime_bear_mult=args.v5_regime_bear_mult,
+                    regime_lookback=args.v5_regime_lookback,
+                    daily_loss_cap=args.v5_daily_loss_cap,
+                    trailing_equity_stop=args.v5_trailing_equity_stop,
+                    per_symbol_daily_r_budget=args.v5_per_symbol_daily_r,
                 )
                 return
 
@@ -5529,6 +5566,17 @@ Examples:
                 corr_thresh=args.v5_corr_thresh,
                 corr_same_side_only=args.v5_corr_same_side_only,
                 corr_log_matrix=args.v5_log_corr_matrix,
+                adaptive_sizing=args.v5_adaptive_sizing,
+                kelly_fraction=args.v5_kelly_fraction,
+                max_size_mult=args.v5_max_size_mult,
+                min_size_mult=args.v5_min_size_mult,
+                regime_scaling=args.v5_regime_scaling,
+                regime_bull_mult=args.v5_regime_bull_mult,
+                regime_bear_mult=args.v5_regime_bear_mult,
+                regime_lookback=args.v5_regime_lookback,
+                daily_loss_cap=args.v5_daily_loss_cap,
+                trailing_equity_stop=args.v5_trailing_equity_stop,
+                per_symbol_daily_r_budget=args.v5_per_symbol_daily_r,
             )
 
             log.info("=" * 60)
