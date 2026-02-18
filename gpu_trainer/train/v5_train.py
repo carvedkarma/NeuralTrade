@@ -1118,7 +1118,6 @@ def run_v5_forward_test(
     last_bar = -config.cooldown - 1
     daily_blocked = 0
     equity_blocked = 0
-    symbol_daily_blocked = 0
 
     open_positions: dict = {}
     trade_spans: dict = defaultdict(list)
@@ -1239,34 +1238,36 @@ def run_v5_forward_test(
                 }
                 trade_spans[sym_name].append((idx, idx + config.horizon))
 
-        if config.weekly_loss_cap is not None and week_boundaries is not None:
+        needs_post_r = (config.weekly_loss_cap is not None
+                        or daily_tracker is not None
+                        or equity_stop is not None
+                        or regime_scaler is not None)
+        if needs_post_r:
             if use_side_conditional_for_cap:
-                trade_r = float(r_long[idx]) if sides[idx] == 1 else float(r_short[idx])
+                post_trade_r = float(r_long[idx]) if sides[idx] == 1 else float(r_short[idx])
             else:
-                trade_r = float(test_realized_r[idx]) if test_realized_r is not None else 0.0
-            if not np.isnan(trade_r):
-                current_week_r += trade_r
-            if current_week_r <= config.weekly_loss_cap:
-                week_killed = True
-                log.info("[V5_GATE] weekly_cap hit: week=%d cumR=%.2f cap=%.2f",
-                         current_week_id, current_week_r, config.weekly_loss_cap)
+                post_trade_r = float(test_realized_r[idx]) if test_realized_r is not None else 0.0
+            post_r_valid = not np.isnan(post_trade_r)
 
-        if use_side_conditional_for_cap:
-            post_trade_r = float(r_long[idx]) if sides[idx] == 1 else float(r_short[idx])
-        else:
-            post_trade_r = float(test_realized_r[idx]) if test_realized_r is not None else 0.0
+            if config.weekly_loss_cap is not None and week_boundaries is not None:
+                if post_r_valid:
+                    current_week_r += post_trade_r
+                if current_week_r <= config.weekly_loss_cap:
+                    week_killed = True
+                    log.info("[V5_GATE] weekly_cap hit: week=%d cumR=%.2f cap=%.2f",
+                             current_week_id, current_week_r, config.weekly_loss_cap)
 
-        if daily_tracker is not None and not np.isnan(post_trade_r):
-            trade_sym = None
-            if test_sym_ids is not None and sym_id_to_name:
-                trade_sym = sym_id_to_name.get(int(test_sym_ids[idx]), None)
-            daily_tracker.record_trade(post_trade_r * size_multipliers.get(idx, 1.0), symbol=trade_sym)
+            if daily_tracker is not None and post_r_valid:
+                trade_sym = None
+                if test_sym_ids is not None and sym_id_to_name:
+                    trade_sym = sym_id_to_name.get(int(test_sym_ids[idx]), None)
+                daily_tracker.record_trade(post_trade_r * size_multipliers.get(idx, 1.0), symbol=trade_sym)
 
-        if equity_stop is not None and not np.isnan(post_trade_r):
-            equity_stop.update(post_trade_r * size_multipliers.get(idx, 1.0))
+            if equity_stop is not None and post_r_valid:
+                equity_stop.update(post_trade_r * size_multipliers.get(idx, 1.0))
 
-        if regime_scaler is not None and not np.isnan(post_trade_r):
-            regime_scaler.record_trade_result(post_trade_r)
+            if regime_scaler is not None and post_r_valid:
+                regime_scaler.record_trade_result(post_trade_r)
 
     if ema200 is not None:
         log.info(f"[V5_GATE] EMA200 blocked {ema_blocked} trades")
@@ -1750,6 +1751,7 @@ def run_v5_walk_forward(
             daily_loss_cap=daily_loss_cap,
             trailing_equity_stop=trailing_equity_stop,
             per_symbol_daily_r_budget=per_symbol_daily_r_budget,
+            fold_id=fold['fold'],
         )
 
         report_path = Path("checkpoints") / "v5_forward_report.json"
@@ -1852,6 +1854,7 @@ def train_v5_model(
     daily_loss_cap=None,
     trailing_equity_stop=None,
     per_symbol_daily_r_budget=None,
+    fold_id=0,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -2608,7 +2611,7 @@ def train_v5_model(
                     compute_overlap_ratio
                 )
                 corr_report = build_fold_corr_report(
-                    fold_id=0,
+                    fold_id=fold_id,
                     window_train=train_end_date or "?",
                     window_test=f"{test_start_date or '?'}→{test_end_date or '?'}",
                     corr_tracker=fwd_report['_corr_tracker'],
@@ -2616,8 +2619,8 @@ def train_v5_model(
                     blocker=fwd_report.get('_corr_blocker'),
                 )
                 if corr_log_matrix:
-                    log_corr_report(corr_report, fold_id=0)
-                save_corr_report(corr_report, fold_id=0,
+                    log_corr_report(corr_report, fold_id=fold_id)
+                save_corr_report(corr_report, fold_id=fold_id,
                                  output_dir=str(checkpoint_dir))
         else:
             log.warning("[V5_FWD] No checkpoint found, skipping forward test")
