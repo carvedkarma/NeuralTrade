@@ -269,6 +269,74 @@ class TestTrailingEquityStop:
         assert diag['stop_triggers'] == 2
 
 
+class TestPercentileThreshold:
+    """Tests for the adaptive percentile-based threshold floor logic."""
+
+    def _compute_effective_threshold(self, calibrated, scores, min_threshold=None,
+                                      min_threshold_pct=None, quality_mask=None):
+        effective = calibrated
+        pct_floor = None
+        if min_threshold_pct is not None:
+            pct_scores = scores.copy()
+            pct_scores[np.isnan(pct_scores)] = -np.inf
+            if quality_mask is not None:
+                pct_scores[~quality_mask] = -np.inf
+            finite = pct_scores[np.isfinite(pct_scores)]
+            if len(finite) > 0:
+                pct_floor = float(np.percentile(finite, min_threshold_pct))
+        if min_threshold is not None and effective < min_threshold:
+            effective = min_threshold
+        if pct_floor is not None and effective < pct_floor:
+            effective = pct_floor
+        return effective, pct_floor
+
+    def test_pct_raises_low_threshold(self):
+        scores = np.array([0.01, 0.02, 0.03, 0.05, 0.08, 0.10, 0.15, 0.20, 0.30, 0.50])
+        eff, pct = self._compute_effective_threshold(0.0358, scores, min_threshold_pct=70)
+        assert pct is not None
+        assert pct == pytest.approx(np.percentile(scores, 70), abs=1e-6)
+        assert eff > 0.0358
+        assert eff == pct
+
+    def test_pct_no_effect_when_calibrated_higher(self):
+        scores = np.array([0.01, 0.02, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40])
+        eff, pct = self._compute_effective_threshold(0.3210, scores, min_threshold_pct=70)
+        assert pct is not None
+        assert eff == 0.3210
+
+    def test_fixed_and_pct_combined_takes_max(self):
+        scores = np.array([0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10])
+        eff, pct = self._compute_effective_threshold(
+            0.02, scores, min_threshold=0.05, min_threshold_pct=80)
+        p80 = float(np.percentile(scores, 80))
+        assert eff == max(0.05, p80)
+
+    def test_pct_ignores_nan_scores(self):
+        scores = np.array([np.nan, np.nan, 0.10, 0.20, 0.30, np.nan, 0.40, 0.50])
+        eff, pct = self._compute_effective_threshold(0.01, scores, min_threshold_pct=50)
+        valid = np.array([0.10, 0.20, 0.30, 0.40, 0.50])
+        assert pct == pytest.approx(np.percentile(valid, 50), abs=1e-6)
+
+    def test_pct_respects_quality_mask(self):
+        scores = np.array([0.90, 0.80, 0.10, 0.20, 0.30])
+        mask = np.array([False, False, True, True, True])
+        eff, pct = self._compute_effective_threshold(
+            0.01, scores, min_threshold_pct=50, quality_mask=mask)
+        assert pct == pytest.approx(np.percentile([0.10, 0.20, 0.30], 50), abs=1e-6)
+
+    def test_pct_disabled_when_none(self):
+        scores = np.array([0.10, 0.20, 0.30])
+        eff, pct = self._compute_effective_threshold(0.05, scores, min_threshold_pct=None)
+        assert pct is None
+        assert eff == 0.05
+
+    def test_pct_all_nan_scores(self):
+        scores = np.array([np.nan, np.nan, np.nan])
+        eff, pct = self._compute_effective_threshold(0.05, scores, min_threshold_pct=70)
+        assert pct is None
+        assert eff == 0.05
+
+
 class TestBuildSizingDiagnostics:
     def test_empty(self):
         diag = build_sizing_diagnostics(None, None, None, None)

@@ -76,6 +76,7 @@ class V5ForwardTestConfig:
     trailing_equity_stop: Optional[float] = None
     per_symbol_daily_r_budget: Optional[float] = None
     min_threshold: Optional[float] = None
+    min_threshold_pct: Optional[float] = None
     max_trades_per_day: Optional[int] = None
 
 
@@ -1007,14 +1008,33 @@ def run_v5_forward_test(
     log.info(f"[V5_FWD] Quality gate: {qual_diag.get('passed_pct', 0):.1f}% pass "
              f"({qual_diag.get('final', 0)}/{qual_diag.get('total', 0)})")
     effective_threshold = config.score_threshold
+    pct_floor = None
+    if config.min_threshold_pct is not None:
+        pct_scores = scores.copy()
+        pct_scores[np.isnan(pct_scores)] = -np.inf
+        if quality_mask is not None:
+            pct_scores[~quality_mask] = -np.inf
+        if test_cand_mask is not None:
+            pct_scores[~test_cand_mask.astype(bool)] = -np.inf
+        finite_scores = pct_scores[np.isfinite(pct_scores)]
+        if len(finite_scores) > 0:
+            pct_floor = float(np.percentile(finite_scores, config.min_threshold_pct))
+            log.info(f"[V5_FWD] Percentile floor: p{config.min_threshold_pct:.0f} of valid scores = {pct_floor:.4f} "
+                     f"(from {len(finite_scores)} valid bars)")
+        else:
+            log.warning("[V5_FWD] No valid scores for percentile calculation — percentile floor disabled")
+
     if config.min_threshold is not None and effective_threshold < config.min_threshold:
-        log.info(f"[V5_FWD] Threshold {effective_threshold:.4f} below min_threshold floor "
-                 f"{config.min_threshold:.4f} → clamped to {config.min_threshold:.4f}")
+        log.info(f"[V5_FWD] Fixed floor: {effective_threshold:.4f} < {config.min_threshold:.4f} → clamped")
         effective_threshold = config.min_threshold
+    if pct_floor is not None and effective_threshold < pct_floor:
+        log.info(f"[V5_FWD] Percentile floor: {effective_threshold:.4f} < p{config.min_threshold_pct:.0f}={pct_floor:.4f} → clamped")
+        effective_threshold = pct_floor
 
     log.info(f"[V5_FWD] Effective threshold={effective_threshold:.4f} "
              f"(calibrated={config.score_threshold:.4f}, "
-             f"min_floor={config.min_threshold}) cooldown={config.cooldown}")
+             f"fixed_floor={config.min_threshold}, "
+             f"pct_floor={pct_floor}) cooldown={config.cooldown}")
     if config.max_trades_per_day is not None:
         if test_timestamps is not None:
             log.info(f"[V5_FWD] Max trades/day cap ENABLED: {config.max_trades_per_day}")
@@ -1677,7 +1697,7 @@ def run_v5_walk_forward(
     adaptive_sizing=False, kelly_fraction=0.25, max_size_mult=2.5, min_size_mult=0.25,
     regime_scaling=False, regime_bull_mult=1.5, regime_bear_mult=0.5, regime_lookback=20,
     daily_loss_cap=None, trailing_equity_stop=None, per_symbol_daily_r_budget=None,
-    min_threshold=None, max_trades_per_day=None,
+    min_threshold=None, min_threshold_pct=None, max_trades_per_day=None,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -1787,6 +1807,7 @@ def run_v5_walk_forward(
             trailing_equity_stop=trailing_equity_stop,
             per_symbol_daily_r_budget=per_symbol_daily_r_budget,
             min_threshold=min_threshold,
+            min_threshold_pct=min_threshold_pct,
             max_trades_per_day=max_trades_per_day,
             fold_id=fold['fold'],
         )
@@ -1892,6 +1913,7 @@ def train_v5_model(
     trailing_equity_stop=None,
     per_symbol_daily_r_budget=None,
     min_threshold=None,
+    min_threshold_pct=None,
     max_trades_per_day=None,
     fold_id=0,
 ):
@@ -2613,6 +2635,7 @@ def train_v5_model(
                 trailing_equity_stop=trailing_equity_stop,
                 per_symbol_daily_r_budget=per_symbol_daily_r_budget,
                 min_threshold=min_threshold,
+                min_threshold_pct=min_threshold_pct,
                 max_trades_per_day=max_trades_per_day,
             )
 
