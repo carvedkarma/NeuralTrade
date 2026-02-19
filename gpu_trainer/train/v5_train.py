@@ -1147,7 +1147,10 @@ def run_v5_forward_test(
     if regime_scaler is not None and close_prices is not None:
         ema200_for_regime = _compute_ema(close_prices, 200)
         diffs = np.abs(np.diff(close_prices, prepend=close_prices[0]))
-        atr_for_regime = np.convolve(diffs, np.ones(14)/14, mode='same')
+        atr_period = 14
+        atr_for_regime = np.full_like(diffs, np.nan)
+        for i in range(atr_period, len(diffs)):
+            atr_for_regime[i] = np.mean(diffs[i - atr_period:i])
 
     for idx in chronological_idx:
         if config.warmup_skip_bars > 0 and idx < config.warmup_skip_bars:

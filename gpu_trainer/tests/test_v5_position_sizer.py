@@ -83,17 +83,17 @@ class TestRegimeScaler:
         assert mult < 1.0
 
     def test_rolling_equity_positive(self):
-        cfg = RegimeScalingConfig(enabled=True, lookback_trades=10)
+        cfg = RegimeScalingConfig(enabled=True, lookback_trades=10, min_equity_trades=15)
         scaler = RegimeScaler(cfg)
-        for _ in range(15):
+        for _ in range(20):
             scaler.record_trade_result(1.0)
         mult = scaler.compute_regime_multiplier(100, side=1)
         assert mult > 1.0
 
     def test_rolling_equity_negative(self):
-        cfg = RegimeScalingConfig(enabled=True, lookback_trades=10)
+        cfg = RegimeScalingConfig(enabled=True, lookback_trades=10, min_equity_trades=15)
         scaler = RegimeScaler(cfg)
-        for _ in range(15):
+        for _ in range(20):
             scaler.record_trade_result(-1.0)
         mult = scaler.compute_regime_multiplier(100, side=1)
         assert mult < 1.0
@@ -124,6 +124,55 @@ class TestRegimeScaler:
         diag = scaler.get_diagnostics()
         assert diag['total_regime_trades'] == 10
         assert 'avg_regime_score' in diag
+
+    def test_equity_below_min_trades_ignored(self):
+        cfg = RegimeScalingConfig(enabled=True, min_equity_trades=15)
+        scaler = RegimeScaler(cfg)
+        for _ in range(10):
+            scaler.record_trade_result(-2.0)
+        mult = scaler.compute_regime_multiplier(100, side=1)
+        assert mult == 1.0
+
+    def test_low_confidence_dampening_single_signal(self):
+        cfg = RegimeScalingConfig(enabled=True, bull_mult=1.5, bear_mult=0.5,
+                                  min_equity_trades=5, low_confidence_dampen=0.5)
+        scaler = RegimeScaler(cfg)
+        for _ in range(10):
+            scaler.record_trade_result(1.0)
+        mult_dampened = scaler.compute_regime_multiplier(100, side=1)
+        assert mult_dampened > 1.0
+        assert mult_dampened <= 1.25
+
+    def test_no_dampening_with_multiple_signals(self):
+        cfg = RegimeScalingConfig(enabled=True, bull_mult=1.5, bear_mult=0.5,
+                                  atr_lookback=50, min_equity_trades=5)
+        scaler = RegimeScaler(cfg)
+        for _ in range(10):
+            scaler.record_trade_result(1.0)
+        atr = np.full(200, 1.0)
+        atr[150:] = 0.5
+        mult = scaler.compute_regime_multiplier(160, side=1, atr_values=atr)
+        assert mult > 1.0
+        history = scaler.regime_history[-1]
+        assert history['n_signals'] >= 2
+
+    def test_atr_nan_early_bars_no_signal(self):
+        cfg = RegimeScalingConfig(enabled=True, atr_lookback=50)
+        scaler = RegimeScaler(cfg)
+        atr = np.full(200, np.nan)
+        atr[100:] = 1.0
+        mult = scaler.compute_regime_multiplier(30, side=1, atr_values=atr)
+        assert mult == 1.0
+
+    def test_equity_signal_capped_at_half(self):
+        cfg = RegimeScalingConfig(enabled=True, bull_mult=1.5, bear_mult=0.5,
+                                  min_equity_trades=5, low_confidence_dampen=1.0)
+        scaler = RegimeScaler(cfg)
+        for _ in range(20):
+            scaler.record_trade_result(5.0)
+        mult = scaler.compute_regime_multiplier(100, side=1)
+        assert mult <= 1.5
+        assert mult > 1.0
 
 
 class TestDailyLossTracker:

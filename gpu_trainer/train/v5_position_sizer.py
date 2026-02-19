@@ -34,6 +34,8 @@ class RegimeScalingConfig:
     atr_lookback: int = 96
     atr_bull_ratio: float = 0.8
     atr_bear_ratio: float = 1.5
+    min_equity_trades: int = 15
+    low_confidence_dampen: float = 0.5
 
 
 @dataclass
@@ -112,13 +114,19 @@ class AdaptivePositionSizer:
 class RegimeScaler:
     """Dynamic risk scaling based on market regime.
 
-    Three signals combined:
+    Three signals combined (all normalized to [-0.5, +0.5]):
       1. ATR ratio:          current ATR vs rolling average ATR (volatility regime)
       2. EMA200 alignment:   is price trending with or against EMA? (trend regime)
       3. Rolling equity:     recent trade performance (model regime)
 
-    Regime score ∈ [-1, +1]:  -1 = hostile, 0 = neutral, +1 = favorable
+    Regime score ∈ [-0.5, +0.5]:  -0.5 = hostile, 0 = neutral, +0.5 = favorable
     Mapped to [bear_mult, bull_mult] via linear interpolation.
+
+    Safety features:
+      - ATR signal gated until full lookback window is available (no zero-padding)
+      - Equity signal requires min_equity_trades (default 15) before activating
+      - When fewer than 2 signals are active, multiplier deviation from 1.0 is
+        dampened by low_confidence_dampen (default 0.5) to prevent single-signal extremes
     """
 
     def __init__(self, config: RegimeScalingConfig):
@@ -136,18 +144,20 @@ class RegimeScaler:
         signals = []
 
         if atr_values is not None and idx >= self.config.atr_lookback:
-            current_atr = atr_values[idx]
-            rolling_atr = np.mean(atr_values[max(0, idx - self.config.atr_lookback):idx])
-            if rolling_atr > 0:
-                atr_ratio = current_atr / rolling_atr
-                if atr_ratio <= self.config.atr_bull_ratio:
-                    signals.append(0.5)
-                elif atr_ratio >= self.config.atr_bear_ratio:
-                    signals.append(-0.5)
-                else:
-                    mid = (self.config.atr_bull_ratio + self.config.atr_bear_ratio) / 2
-                    rng = (self.config.atr_bear_ratio - self.config.atr_bull_ratio) / 2
-                    signals.append(-0.5 * (atr_ratio - mid) / max(rng, 0.01))
+            window = atr_values[idx - self.config.atr_lookback:idx]
+            if len(window) == self.config.atr_lookback:
+                rolling_atr = float(np.mean(window))
+                current_atr = float(atr_values[idx])
+                if rolling_atr > 0 and not np.isnan(current_atr) and not np.isnan(rolling_atr):
+                    atr_ratio = current_atr / rolling_atr
+                    if atr_ratio <= self.config.atr_bull_ratio:
+                        signals.append(0.5)
+                    elif atr_ratio >= self.config.atr_bear_ratio:
+                        signals.append(-0.5)
+                    else:
+                        mid = (self.config.atr_bull_ratio + self.config.atr_bear_ratio) / 2
+                        rng = (self.config.atr_bear_ratio - self.config.atr_bull_ratio) / 2
+                        signals.append(-0.5 * (atr_ratio - mid) / max(rng, 0.01))
 
         if close_prices is not None and ema200 is not None and idx < len(close_prices):
             close_val = close_prices[idx]
@@ -160,31 +170,38 @@ class RegimeScaler:
                 else:
                     signals.append(-trend_strength * 5)
 
-        if len(self.recent_r) >= 5:
+        if len(self.recent_r) >= self.config.min_equity_trades:
             recent = self.recent_r[-self.config.lookback_trades:]
             recent_arr = np.array(recent)
             mean_r = np.mean(recent_arr)
             std_r = np.std(recent_arr) + 1e-6
             rolling_sharpe = mean_r / std_r
-            equity_signal = max(-1, min(1, rolling_sharpe))
+            equity_signal = max(-0.5, min(0.5, rolling_sharpe * 0.5))
             signals.append(equity_signal)
 
         if not signals:
             return 1.0
 
-        regime_score = np.mean(signals)
-        regime_score = max(-1.0, min(1.0, regime_score))
+        n_signals = len(signals)
+        regime_score = float(np.mean(signals))
+        regime_score = max(-0.5, min(0.5, regime_score))
 
-        if regime_score >= 0:
-            mult = 1.0 + regime_score * (self.config.bull_mult - 1.0)
+        norm_score = regime_score * 2.0
+
+        if norm_score >= 0:
+            mult = 1.0 + norm_score * (self.config.bull_mult - 1.0)
         else:
-            mult = 1.0 + regime_score * (1.0 - self.config.bear_mult)
+            mult = 1.0 + norm_score * (1.0 - self.config.bear_mult)
+
+        if n_signals < 2:
+            deviation = mult - 1.0
+            mult = 1.0 + deviation * self.config.low_confidence_dampen
 
         self.regime_history.append({
             'idx': idx,
             'regime_score': float(regime_score),
             'multiplier': float(mult),
-            'n_signals': len(signals),
+            'n_signals': n_signals,
         })
 
         return float(mult)
