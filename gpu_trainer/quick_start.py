@@ -4904,6 +4904,10 @@ Examples:
                         help="v5.0.8+: trailing equity stop in R-units. Pauses trading when equity drops this far from peak (e.g. 15.0). Default: None (disabled)")
     parser.add_argument("--v5-per-symbol-daily-r", type=float, default=None,
                         help="v5.0.8+: per-symbol daily R budget cap. Stops trading a symbol for rest of day when hit (e.g. -2.0). Default: None (disabled)")
+    parser.add_argument("--v5-min-threshold", type=float, default=None,
+                        help="v5.0.8+: minimum score threshold floor. Prevents calibrated threshold from dropping too low (e.g. 0.05). Default: None (disabled)")
+    parser.add_argument("--v5-max-trades-per-day", type=int, default=None,
+                        help="v5.0.8+: maximum trades per day across all symbols. Blocks further entries once reached (e.g. 6). Default: None (disabled)")
 
     parser.add_argument("--v5-walk-forward", action="store_true", default=False,
                         help="v5: run walk-forward analysis with rolling train/test windows")
@@ -5515,6 +5519,8 @@ Examples:
                     daily_loss_cap=args.v5_daily_loss_cap,
                     trailing_equity_stop=args.v5_trailing_equity_stop,
                     per_symbol_daily_r_budget=args.v5_per_symbol_daily_r,
+                    min_threshold=args.v5_min_threshold,
+                    max_trades_per_day=args.v5_max_trades_per_day,
                 )
                 return
 
@@ -5577,6 +5583,8 @@ Examples:
                 daily_loss_cap=args.v5_daily_loss_cap,
                 trailing_equity_stop=args.v5_trailing_equity_stop,
                 per_symbol_daily_r_budget=args.v5_per_symbol_daily_r,
+                min_threshold=args.v5_min_threshold,
+                max_trades_per_day=args.v5_max_trades_per_day,
             )
 
             log.info("=" * 60)

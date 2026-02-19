@@ -75,6 +75,8 @@ class V5ForwardTestConfig:
     daily_loss_cap: Optional[float] = None
     trailing_equity_stop: Optional[float] = None
     per_symbol_daily_r_budget: Optional[float] = None
+    min_threshold: Optional[float] = None
+    max_trades_per_day: Optional[int] = None
 
 
 def _parse_date_to_ms(date_str: str) -> int:
@@ -1004,7 +1006,20 @@ def run_v5_forward_test(
              f"(if >95%% one-sided, this is MODEL BIAS not a bug)")
     log.info(f"[V5_FWD] Quality gate: {qual_diag.get('passed_pct', 0):.1f}% pass "
              f"({qual_diag.get('final', 0)}/{qual_diag.get('total', 0)})")
-    log.info(f"[V5_FWD] Fixed threshold={config.score_threshold:.4f} cooldown={config.cooldown}")
+    effective_threshold = config.score_threshold
+    if config.min_threshold is not None and effective_threshold < config.min_threshold:
+        log.info(f"[V5_FWD] Threshold {effective_threshold:.4f} below min_threshold floor "
+                 f"{config.min_threshold:.4f} → clamped to {config.min_threshold:.4f}")
+        effective_threshold = config.min_threshold
+
+    log.info(f"[V5_FWD] Effective threshold={effective_threshold:.4f} "
+             f"(calibrated={config.score_threshold:.4f}, "
+             f"min_floor={config.min_threshold}) cooldown={config.cooldown}")
+    if config.max_trades_per_day is not None:
+        if test_timestamps is not None:
+            log.info(f"[V5_FWD] Max trades/day cap ENABLED: {config.max_trades_per_day}")
+        else:
+            log.warning("[V5_FWD] Max trades/day cap set but test_timestamps is None — cap will be INACTIVE")
 
     valid_bool = test_valid.astype(bool) if not isinstance(test_valid, np.ndarray) else test_valid.astype(bool)
 
@@ -1015,7 +1030,7 @@ def run_v5_forward_test(
     if test_cand_mask is not None:
         scores_work[~test_cand_mask.astype(bool)] = -np.inf
 
-    selected = scores_work >= config.score_threshold
+    selected = scores_work >= effective_threshold
     sel_indices = np.where(selected)[0]
 
     ema200 = None
@@ -1118,6 +1133,9 @@ def run_v5_forward_test(
     last_bar = -config.cooldown - 1
     daily_blocked = 0
     equity_blocked = 0
+    tpd_blocked = 0
+    tpd_current_date = ""
+    tpd_current_count = 0
 
     open_positions: dict = {}
     trade_spans: dict = defaultdict(list)
@@ -1201,6 +1219,17 @@ def run_v5_forward_test(
             equity_blocked += 1
             continue
 
+        if config.max_trades_per_day is not None and test_timestamps is not None:
+            bar_date = datetime.utcfromtimestamp(
+                test_timestamps[idx] / 1000).strftime('%Y-%m-%d')
+            if bar_date != tpd_current_date:
+                tpd_current_date = bar_date
+                tpd_current_count = 0
+            if tpd_current_count >= config.max_trades_per_day:
+                tpd_blocked += 1
+                continue
+            tpd_current_count += 1
+
         taken.append(idx)
         last_bar = idx
 
@@ -1281,6 +1310,8 @@ def run_v5_forward_test(
         log.info(f"[V5_GATE] Daily loss cap blocked {daily_blocked} trades")
     if equity_blocked > 0:
         log.info(f"[V5_GATE] Trailing equity stop blocked {equity_blocked} trades")
+    if tpd_blocked > 0:
+        log.info(f"[V5_GATE] Max trades/day cap blocked {tpd_blocked} trades")
 
     n_eligible = len(sel_indices)
     n_hold_all = int(np.sum(sides[sel_indices] == 0)) if len(sel_indices) > 0 else 0
@@ -1643,6 +1674,7 @@ def run_v5_walk_forward(
     adaptive_sizing=False, kelly_fraction=0.25, max_size_mult=2.5, min_size_mult=0.25,
     regime_scaling=False, regime_bull_mult=1.5, regime_bear_mult=0.5, regime_lookback=20,
     daily_loss_cap=None, trailing_equity_stop=None, per_symbol_daily_r_budget=None,
+    min_threshold=None, max_trades_per_day=None,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -1751,6 +1783,8 @@ def run_v5_walk_forward(
             daily_loss_cap=daily_loss_cap,
             trailing_equity_stop=trailing_equity_stop,
             per_symbol_daily_r_budget=per_symbol_daily_r_budget,
+            min_threshold=min_threshold,
+            max_trades_per_day=max_trades_per_day,
             fold_id=fold['fold'],
         )
 
@@ -1854,6 +1888,8 @@ def train_v5_model(
     daily_loss_cap=None,
     trailing_equity_stop=None,
     per_symbol_daily_r_budget=None,
+    min_threshold=None,
+    max_trades_per_day=None,
     fold_id=0,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
@@ -2573,6 +2609,8 @@ def train_v5_model(
                 daily_loss_cap=daily_loss_cap,
                 trailing_equity_stop=trailing_equity_stop,
                 per_symbol_daily_r_budget=per_symbol_daily_r_budget,
+                min_threshold=min_threshold,
+                max_trades_per_day=max_trades_per_day,
             )
 
             fwd_report = run_v5_forward_test(
