@@ -746,11 +746,12 @@ class FeatureEngineer:
     # Version string documents the exact computation method
     # Format: major.minor.patch-mode-details
     # Increment when ANY computation changes (windows, formulas, normalization)
-    VERSION = "3.0.0-stf47-htf10"
+    VERSION = "4.0.0-stf47-enh20-htf10"
     
     STF_FEATURE_COUNT = 47
+    ENH_FEATURE_COUNT = 20
     HTF_FEATURE_COUNT = 10
-    TOTAL_FEATURE_COUNT = 57
+    TOTAL_FEATURE_COUNT = 77
     
     HTF_FEATURE_NAMES = [
         "h1_sma20_slope", "h1_trend_sign", "h1_rsi14", "h1_atr_ratio", "h1_range_pos",
@@ -845,6 +846,133 @@ class FeatureEngineer:
         features["close_to_high_ratio"] = (df["close"] - df["low"]) / (df["high"] - df["low"] + 1e-8)
         
         features["volume_delta"] = df.get("taker_buy_base", pd.Series(0, index=df.index)) / df["volume"].clip(lower=1) - 0.5
+        
+        return features
+    
+    ENH_FEATURE_NAMES = [
+        "roc_accel_5", "roc_accel_20",
+        "trend_persistence_20", "trend_persistence_50",
+        "momentum_alignment",
+        "hurst_exponent",
+        "taker_imbalance_20", "taker_pressure_delta",
+        "volume_surge", "trade_intensity",
+        "garman_klass_vol",
+        "vol_regime_ratio", "vol_breakout",
+        "atr_expansion", "atr_contraction_flag",
+        "range_volatility_20",
+        "close_momentum_z",
+        "directional_volume_flow",
+        "price_acceleration",
+        "efficiency_ratio",
+    ]
+    
+    def compute_enhanced_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Compute 20 enhanced features for better trade quality prediction.
+        
+        Groups:
+          1. Momentum/Trend (6): ROC acceleration x2, trend persistence x2,
+             momentum alignment, Hurst exponent
+          2. Microstructure (4): taker imbalance, taker pressure delta, volume surge,
+             trade intensity
+          3. Volatility Regime (6): Garman-Klass vol, vol regime ratio, vol breakout,
+             ATR expansion, ATR contraction flag, range volatility
+          4. Signal Quality (4): close momentum z-score, directional volume flow,
+             price acceleration, efficiency ratio
+        """
+        features = pd.DataFrame(index=df.index)
+        close = df["close"]
+        high = df["high"]
+        low = df["low"]
+        volume = df["volume"]
+        
+        roc_5 = close.pct_change(5)
+        roc_20 = close.pct_change(20)
+        features["roc_accel_5"] = roc_5 - roc_5.shift(5)
+        features["roc_accel_20"] = roc_20 - roc_20.shift(20)
+        
+        returns = close.pct_change()
+        sign_returns = np.sign(returns)
+        features["trend_persistence_20"] = sign_returns.rolling(20, min_periods=5).mean()
+        features["trend_persistence_50"] = sign_returns.rolling(50, min_periods=10).mean()
+        
+        mom_5 = np.sign(close.pct_change(5))
+        mom_20 = np.sign(close.pct_change(20))
+        mom_50 = np.sign(close.pct_change(50))
+        features["momentum_alignment"] = (mom_5 + mom_20 + mom_50) / 3.0
+        
+        log_returns = np.log(close / close.shift(1))
+        rolling_std = log_returns.rolling(100, min_periods=50).std()
+        rolling_mean = log_returns.rolling(100, min_periods=50).mean()
+        demeaned = log_returns - rolling_mean
+        lr_arr = demeaned.values.astype(np.float64)
+        n_pts = len(lr_arr)
+        window = 100
+        cummax_arr = np.full(n_pts, np.nan)
+        cummin_arr = np.full(n_pts, np.nan)
+        for i in range(window, n_pts):
+            seg = lr_arr[i-window:i]
+            valid = ~np.isnan(seg)
+            if valid.sum() < 50:
+                continue
+            seg_clean = np.where(valid, seg, 0.0)
+            cs = np.cumsum(seg_clean)
+            cummax_arr[i] = np.max(cs)
+            cummin_arr[i] = np.min(cs)
+        cumdev_range = pd.Series(cummax_arr - cummin_arr, index=df.index)
+        rs_ratio = cumdev_range / rolling_std.clip(lower=1e-10)
+        hurst_raw = np.log(rs_ratio.clip(lower=1e-10)) / np.log(window)
+        features["hurst_exponent"] = hurst_raw.fillna(0.5).clip(0.0, 1.0)
+        
+        taker_buy = df.get("taker_buy_base", pd.Series(0, index=df.index))
+        taker_sell = volume - taker_buy
+        imbalance = (taker_buy - taker_sell) / volume.clip(lower=1)
+        features["taker_imbalance_20"] = imbalance.rolling(20, min_periods=1).mean().clip(-1.0, 1.0)
+        features["taker_pressure_delta"] = (imbalance - imbalance.rolling(20, min_periods=1).mean()).clip(-1.0, 1.0)
+        
+        vol_sma = volume.rolling(50, min_periods=10).mean()
+        features["volume_surge"] = (volume / vol_sma.clip(lower=1)).clip(0, 10.0)
+        
+        n_trades = df.get("number_of_trades", pd.Series(0, index=df.index))
+        n_trades_sma = n_trades.rolling(20, min_periods=1).mean()
+        features["trade_intensity"] = n_trades / n_trades_sma.clip(lower=1) if n_trades.sum() > 0 else pd.Series(1.0, index=df.index)
+        
+        log_hl = np.log(high / low.clip(lower=1e-10))
+        log_co = np.log(close / df["open"].clip(lower=1e-10))
+        gk_var = 0.5 * log_hl**2 - (2 * np.log(2) - 1) * log_co**2
+        features["garman_klass_vol"] = gk_var.rolling(20, min_periods=5).mean().apply(lambda x: np.sqrt(max(x, 0)))
+        
+        atr_short = self._compute_atr(df, 7)
+        atr_long = self._compute_atr(df, 50)
+        features["vol_regime_ratio"] = (atr_short / atr_long.clip(lower=1e-10)).clip(0.1, 5.0)
+        
+        bb_std_20 = close.rolling(20).std()
+        bb_std_50 = close.rolling(50, min_periods=20).std()
+        features["vol_breakout"] = (bb_std_20 / bb_std_50.clip(lower=1e-10) - 1.0).clip(-2.0, 5.0)
+        
+        atr_14 = self._compute_atr(df, 14)
+        atr_14_sma = atr_14.rolling(50, min_periods=10).mean()
+        features["atr_expansion"] = (atr_14 / atr_14_sma.clip(lower=1e-10)).clip(0.1, 5.0)
+        features["atr_contraction_flag"] = (features["atr_expansion"] < 0.7).astype(float)
+        
+        hl_range = high - low
+        features["range_volatility_20"] = (hl_range.rolling(20, min_periods=5).std() / hl_range.rolling(20, min_periods=5).mean().clip(lower=1e-10)).clip(0, 5.0)
+        
+        mom_20_raw = close.pct_change(20)
+        mom_mean = mom_20_raw.rolling(50, min_periods=10).mean()
+        mom_std = mom_20_raw.rolling(50, min_periods=10).std()
+        features["close_momentum_z"] = ((mom_20_raw - mom_mean) / mom_std.clip(lower=1e-10)).clip(-5.0, 5.0)
+        
+        signed_volume = volume * np.sign(returns)
+        features["directional_volume_flow"] = (signed_volume.rolling(20, min_periods=5).sum() / volume.rolling(20, min_periods=5).sum().clip(lower=1)).clip(-1.0, 1.0)
+        
+        features["price_acceleration"] = (returns - returns.shift(1)).clip(-0.05, 0.05)
+        
+        net_move = (close - close.shift(20)).abs()
+        total_path = returns.abs().rolling(20, min_periods=5).sum() * close.shift(20).clip(lower=1e-10)
+        features["efficiency_ratio"] = (net_move / total_path.clip(lower=1e-10)).clip(0, 5.0)
+        
+        assert len(features.columns) == self.ENH_FEATURE_COUNT, \
+            f"Expected {self.ENH_FEATURE_COUNT} enhanced features, got {len(features.columns)}: {list(features.columns)}"
         
         return features
     
@@ -1024,14 +1152,15 @@ class FeatureEngineer:
         logger.info("=" * 70)
     
     def compute_all_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Compute all features: 47 STF + 10 HTF = 57 total.
+        """Compute all features: 47 STF + 20 ENH + 10 HTF = 77 total.
         
         Returns a single DataFrame with deterministic column order.
         """
         stf = self.compute_technical_features(df)
+        enh = self.compute_enhanced_features(df)
         htf = self.compute_htf_features(df)
         
-        combined = pd.concat([stf, htf], axis=1)
+        combined = pd.concat([stf, enh, htf], axis=1)
         
         assert combined.shape[1] == self.TOTAL_FEATURE_COUNT, \
             f"Expected {self.TOTAL_FEATURE_COUNT} features, got {combined.shape[1]}: {list(combined.columns)}"

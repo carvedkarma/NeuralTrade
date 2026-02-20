@@ -2389,7 +2389,7 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
     expected_count = FeatureEngineer.TOTAL_FEATURE_COUNT + FUNDING_FEATURE_COUNT + OI_FEATURE_COUNT
     if len(feature_columns) != expected_count:
         raise RuntimeError(
-            f"FATAL: feature_columns has {len(feature_columns)} cols, expected {expected_count} (57 base + {FUNDING_FEATURE_COUNT} funding + {OI_FEATURE_COUNT} OI). "
+            f"FATAL: feature_columns has {len(feature_columns)} cols, expected {expected_count} ({FeatureEngineer.TOTAL_FEATURE_COUNT} base + {FUNDING_FEATURE_COUNT} funding + {OI_FEATURE_COUNT} OI). "
             f"Checkpoint mismatch - retrain the model."
         )
 
