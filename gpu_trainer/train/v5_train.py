@@ -78,6 +78,17 @@ class V5ForwardTestConfig:
     min_threshold: Optional[float] = None
     min_threshold_pct: Optional[float] = None
     max_trades_per_day: Optional[int] = None
+    trailing_sl: bool = False
+    trail_activation: float = 1.0
+    trail_distance: float = 1.0
+    allow_runner: bool = False
+    conviction_sizing: bool = False
+    conviction_tier_top_pct: float = 5.0
+    conviction_tier_top_mult: float = 2.5
+    conviction_tier_high_pct: float = 20.0
+    conviction_tier_high_mult: float = 1.5
+    conviction_confidence_threshold: float = 0.65
+    conviction_confidence_boost: float = 1.3
 
 
 def _parse_date_to_ms(date_str: str) -> int:
@@ -1120,6 +1131,23 @@ def run_v5_forward_test(
         equity_stop = TrailingEquityStop(config.trailing_equity_stop)
         log.info(f"[V5_FWD] Trailing equity stop ENABLED: {config.trailing_equity_stop}R")
 
+    conviction_sizer = None
+    if config.conviction_sizing:
+        from train.v5_position_sizer import ConvictionSizer, ConvictionSizingConfig
+        conv_cfg = ConvictionSizingConfig(
+            enabled=True,
+            tier_top_pct=config.conviction_tier_top_pct,
+            tier_top_mult=config.conviction_tier_top_mult,
+            tier_high_pct=config.conviction_tier_high_pct,
+            tier_high_mult=config.conviction_tier_high_mult,
+            confidence_boost_threshold=config.conviction_confidence_threshold,
+            confidence_boost_mult=config.conviction_confidence_boost,
+        )
+        conviction_sizer = ConvictionSizer(conv_cfg)
+        log.info(f"[V5_FWD] Conviction sizing ENABLED: top{config.conviction_tier_top_pct}%→"
+                 f"{config.conviction_tier_top_mult}x, high{config.conviction_tier_high_pct}%→"
+                 f"{config.conviction_tier_high_mult}x, conf_thresh={config.conviction_confidence_threshold}")
+
     corr_tracker = None
     corr_blocker = None
     sym_id_to_name = {}
@@ -1276,6 +1304,15 @@ def run_v5_forward_test(
             )
             trade_size_mult *= regime_mult
 
+        if conviction_sizer is not None:
+            p_dir = float(arrays['p_long'][idx]) if sides[idx] == 1 else float(arrays['p_short'][idx])
+            conv_mult = conviction_sizer.compute_size_multiplier(
+                score=float(scores[idx]),
+                p_directional=p_dir,
+                side=int(sides[idx]),
+            )
+            trade_size_mult *= conv_mult
+
         size_multipliers[idx] = trade_size_mult
 
         if corr_tracker is not None and test_sym_ids is not None:
@@ -1351,8 +1388,9 @@ def run_v5_forward_test(
     if use_side_conditional:
         side_r = np.where(sides == 1, r_long, r_short).astype(float)
         side_out = np.where(sides == 1, out_long, out_short)
+        _valid_outcomes = ["TP", "SL", "EXP_WIN", "EXP_LOSS", "TRAIL_WIN", "TRAIL_BE"]
         safe_outcomes = np.where(
-            np.isin(side_out, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]),
+            np.isin(side_out, _valid_outcomes),
             side_out, "NO_CANDIDATE"
         )
         safe_r = np.where(np.isnan(side_r), 0.0, side_r)
@@ -1360,8 +1398,9 @@ def run_v5_forward_test(
     else:
         log.warning("[V5_FWD] DEPRECATED: Using oracle best-side outcomes. "
                     "Pass r_long/r_short/out_long/out_short for correct evaluation.")
+        _valid_outcomes = ["TP", "SL", "EXP_WIN", "EXP_LOSS", "TRAIL_WIN", "TRAIL_BE"]
         safe_outcomes = np.where(
-            np.isin(test_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]),
+            np.isin(test_outcomes, _valid_outcomes),
             test_outcomes, "NO_CANDIDATE"
         )
         safe_r = test_realized_r.copy().astype(float)
@@ -1381,7 +1420,7 @@ def run_v5_forward_test(
     t_size_mults = np.array([size_multipliers.get(idx, 1.0) for idx in taken])
     t_r = t_r_unsized * t_size_mults
 
-    has_sizing = position_sizer is not None or regime_scaler is not None
+    has_sizing = position_sizer is not None or regime_scaler is not None or conviction_sizer is not None
     if has_sizing:
         log.info(f"[V5_SIZE] Applied sizing to {len(taken)} trades: "
                  f"unsized_totalR={np.sum(t_r_unsized):.2f} → sized_totalR={np.sum(t_r):.2f} "
@@ -1398,7 +1437,7 @@ def run_v5_forward_test(
     if n_taken_long == 0 and len(taken) > 10:
         log.warning("WARNING: LONG trades = 0 in forward test. Check side encoding or model bias.")
 
-    valid_trades = np.isin(t_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"])
+    valid_trades = np.isin(t_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS", "TRAIL_WIN", "TRAIL_BE"])
 
     log.info(f"[V5_FWD] Selected {len(sel_indices)} bars above threshold, "
              f"{len(taken)} after cooldown, {valid_trades.sum()} with valid outcomes")
@@ -1440,13 +1479,14 @@ def run_v5_forward_test(
         report['_overlap_ratio'] = overlap
         report['corr_blocked_trades'] = corr_blocked
 
-    if position_sizer or regime_scaler or daily_tracker or equity_stop:
+    if position_sizer or regime_scaler or daily_tracker or equity_stop or conviction_sizer:
         from train.v5_position_sizer import build_sizing_diagnostics
         sizing_diag = build_sizing_diagnostics(
             sizer=position_sizer, regime=regime_scaler,
             daily_tracker=daily_tracker, equity_stop=equity_stop,
             sized_r=t_r_valid if has_sizing else None,
             unsized_r=t_r_unsized_valid if has_sizing else None,
+            conviction=conviction_sizer,
         )
         report['sizing_diagnostics'] = sizing_diag
         report['daily_blocked_trades'] = daily_blocked
@@ -1529,6 +1569,8 @@ def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_
     n_tp = int(np.sum(t_outcomes == "TP"))
     n_sl = int(np.sum(t_outcomes == "SL"))
     n_exp = int(np.sum(np.isin(t_outcomes, ["EXP_WIN", "EXP_LOSS"])))
+    n_trail_win = int(np.sum(t_outcomes == "TRAIL_WIN"))
+    n_trail_be = int(np.sum(t_outcomes == "TRAIL_BE"))
 
     equity_curve = np.cumsum(t_r)
     running_max = np.maximum.accumulate(equity_curve)
@@ -1620,6 +1662,9 @@ def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_
         'pct_tp': float(n_tp / max(n, 1)),
         'pct_sl': float(n_sl / max(n, 1)),
         'pct_exp': float(n_exp / max(n, 1)),
+        'n_trail_win': n_trail_win,
+        'n_trail_be': n_trail_be,
+        'pct_trail': float((n_trail_win + n_trail_be) / max(n, 1)),
         'score_threshold': config.score_threshold,
         'tp_mult': config.tp_mult,
         'sl_mult': config.sl_mult,
@@ -1652,7 +1697,12 @@ def _print_forward_report(report):
     log.info(f"  Avg Win R:      {report['avg_win_r']:+.4f}")
     log.info(f"  Avg Loss R:     {report['avg_loss_r']:+.4f}")
     log.info(f"  Total R:        {report['total_r']:+.4f}")
-    log.info(f"  %%TP/%%SL/%%EX:    {report['pct_tp']:.0%} / {report['pct_sl']:.0%} / {report['pct_exp']:.0%}")
+    pct_trail = report.get('pct_trail', 0)
+    if pct_trail > 0:
+        log.info(f"  %%TP/%%SL/%%EX/%%TR: {report['pct_tp']:.0%} / {report['pct_sl']:.0%} / {report['pct_exp']:.0%} / {pct_trail:.0%}")
+        log.info(f"  Trail Wins/BE:  {report.get('n_trail_win', 0)} / {report.get('n_trail_be', 0)}")
+    else:
+        log.info(f"  %%TP/%%SL/%%EX:    {report['pct_tp']:.0%} / {report['pct_sl']:.0%} / {report['pct_exp']:.0%}")
     log.info(f"  Equity Final:   {report.get('equity_final_r', 0):+.4f} R")
     log.info("-" * 80)
     ds = report.get('direction_stats', {})
@@ -1698,6 +1748,10 @@ def run_v5_walk_forward(
     regime_scaling=False, regime_bull_mult=1.5, regime_bear_mult=0.5, regime_lookback=20,
     daily_loss_cap=None, trailing_equity_stop=None, per_symbol_daily_r_budget=None,
     min_threshold=None, min_threshold_pct=None, max_trades_per_day=None,
+    trailing_sl=False, trail_activation=1.0, trail_distance=1.0, allow_runner=False,
+    conviction_sizing=False, conviction_tier_top_pct=5.0, conviction_tier_top_mult=2.5,
+    conviction_tier_high_pct=20.0, conviction_tier_high_mult=1.5,
+    conviction_confidence_threshold=0.65, conviction_confidence_boost=1.3,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -1809,6 +1863,17 @@ def run_v5_walk_forward(
             min_threshold=min_threshold,
             min_threshold_pct=min_threshold_pct,
             max_trades_per_day=max_trades_per_day,
+            trailing_sl=trailing_sl,
+            trail_activation=trail_activation,
+            trail_distance=trail_distance,
+            allow_runner=allow_runner,
+            conviction_sizing=conviction_sizing,
+            conviction_tier_top_pct=conviction_tier_top_pct,
+            conviction_tier_top_mult=conviction_tier_top_mult,
+            conviction_tier_high_pct=conviction_tier_high_pct,
+            conviction_tier_high_mult=conviction_tier_high_mult,
+            conviction_confidence_threshold=conviction_confidence_threshold,
+            conviction_confidence_boost=conviction_confidence_boost,
             fold_id=fold['fold'],
         )
 
@@ -1915,6 +1980,10 @@ def train_v5_model(
     min_threshold=None,
     min_threshold_pct=None,
     max_trades_per_day=None,
+    trailing_sl=False, trail_activation=1.0, trail_distance=1.0, allow_runner=False,
+    conviction_sizing=False, conviction_tier_top_pct=5.0, conviction_tier_top_mult=2.5,
+    conviction_tier_high_pct=20.0, conviction_tier_high_mult=1.5,
+    conviction_confidence_threshold=0.65, conviction_confidence_boost=1.3,
     fold_id=0,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
@@ -2016,6 +2085,8 @@ def train_v5_model(
     features_df_columns = None
 
     from data.common import generate_v5_sweep_outcomes
+    if trailing_sl:
+        from data.common import generate_v5_sweep_outcomes_trailing
 
     for si, sym in enumerate(symbols):
         parquet_path = data_dir / f"{sym}_15m.parquet"
@@ -2055,10 +2126,22 @@ def train_v5_model(
                 sym_df, candidate_config, symbol=sym
             )
 
-        sweep_result = generate_v5_sweep_outcomes(
-            sym_df, horizon=horizon, tp_mult=tp_mult,
-            sl_mult=sl_mult, atr_period=14,
-        )
+        if trailing_sl:
+            sweep_result = generate_v5_sweep_outcomes_trailing(
+                sym_df, horizon=horizon, tp_mult=tp_mult,
+                sl_mult=sl_mult, atr_period=14,
+                trail_activation=trail_activation,
+                trail_distance=trail_distance,
+                allow_runner=allow_runner,
+            )
+            if si == 0:
+                log.info(f"[V5] Trailing SL ENABLED: activation={trail_activation}x ATR, "
+                         f"distance={trail_distance}x ATR, runner={allow_runner}")
+        else:
+            sweep_result = generate_v5_sweep_outcomes(
+                sym_df, horizon=horizon, tp_mult=tp_mult,
+                sl_mult=sl_mult, atr_period=14,
+            )
         sym_realized_r = sweep_result['realized_r']
         sym_outcomes = sweep_result['outcome']
         sym_r_long = sweep_result['r_long']
@@ -2637,6 +2720,17 @@ def train_v5_model(
                 min_threshold=min_threshold,
                 min_threshold_pct=min_threshold_pct,
                 max_trades_per_day=max_trades_per_day,
+                trailing_sl=trailing_sl,
+                trail_activation=trail_activation,
+                trail_distance=trail_distance,
+                allow_runner=allow_runner,
+                conviction_sizing=conviction_sizing,
+                conviction_tier_top_pct=conviction_tier_top_pct,
+                conviction_tier_top_mult=conviction_tier_top_mult,
+                conviction_tier_high_pct=conviction_tier_high_pct,
+                conviction_tier_high_mult=conviction_tier_high_mult,
+                conviction_confidence_threshold=conviction_confidence_threshold,
+                conviction_confidence_boost=conviction_confidence_boost,
             )
 
             fwd_report = run_v5_forward_test(

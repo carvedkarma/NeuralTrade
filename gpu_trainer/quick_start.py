@@ -4911,6 +4911,30 @@ Examples:
     parser.add_argument("--v5-max-trades-per-day", type=int, default=None,
                         help="v5.0.8+: maximum trades per day across all symbols. Blocks further entries once reached (e.g. 6). Default: None (disabled)")
 
+    parser.add_argument("--v5-trailing-sl", action="store_true", default=False,
+                        help="v5.0.8+: enable trailing stop-loss. Moves SL to breakeven then trails behind best price. Default: disabled")
+    parser.add_argument("--v5-trail-activation", type=float, default=1.0,
+                        help="v5.0.8+: ATR multiples of favorable move before trailing SL activates (default: 1.0)")
+    parser.add_argument("--v5-trail-distance", type=float, default=1.0,
+                        help="v5.0.8+: ATR multiples behind best price for trailing stop (default: 1.0)")
+    parser.add_argument("--v5-allow-runner", action="store_true", default=False,
+                        help="v5.0.8+: don't exit at TP, let winning trades run with tighter trail. Default: disabled")
+
+    parser.add_argument("--v5-conviction-sizing", action="store_true", default=False,
+                        help="v5.0.8+: enable score-tiered position sizing. Top signals get larger size, weak signals get smaller. Default: disabled")
+    parser.add_argument("--v5-conviction-top-pct", type=float, default=5.0,
+                        help="v5.0.8+: top percentile tier for conviction sizing (default: 5.0)")
+    parser.add_argument("--v5-conviction-top-mult", type=float, default=2.5,
+                        help="v5.0.8+: size multiplier for top tier trades (default: 2.5)")
+    parser.add_argument("--v5-conviction-high-pct", type=float, default=20.0,
+                        help="v5.0.8+: high percentile tier boundary (default: 20.0)")
+    parser.add_argument("--v5-conviction-high-mult", type=float, default=1.5,
+                        help="v5.0.8+: size multiplier for high tier trades (default: 1.5)")
+    parser.add_argument("--v5-conviction-conf-thresh", type=float, default=0.65,
+                        help="v5.0.8+: directional confidence threshold for boost (default: 0.65)")
+    parser.add_argument("--v5-conviction-conf-boost", type=float, default=1.3,
+                        help="v5.0.8+: confidence boost multiplier when p_dir exceeds threshold (default: 1.3)")
+
     parser.add_argument("--v5-walk-forward", action="store_true", default=False,
                         help="v5: run walk-forward analysis with rolling train/test windows")
     parser.add_argument("--v5-wf-train-months", type=int, default=12,
@@ -5524,6 +5548,17 @@ Examples:
                     min_threshold=args.v5_min_threshold,
                     min_threshold_pct=args.v5_min_threshold_pct,
                     max_trades_per_day=args.v5_max_trades_per_day,
+                    trailing_sl=args.v5_trailing_sl,
+                    trail_activation=args.v5_trail_activation,
+                    trail_distance=args.v5_trail_distance,
+                    allow_runner=args.v5_allow_runner,
+                    conviction_sizing=args.v5_conviction_sizing,
+                    conviction_tier_top_pct=args.v5_conviction_top_pct,
+                    conviction_tier_top_mult=args.v5_conviction_top_mult,
+                    conviction_tier_high_pct=args.v5_conviction_high_pct,
+                    conviction_tier_high_mult=args.v5_conviction_high_mult,
+                    conviction_confidence_threshold=args.v5_conviction_conf_thresh,
+                    conviction_confidence_boost=args.v5_conviction_conf_boost,
                 )
                 return
 
@@ -5589,6 +5624,17 @@ Examples:
                 min_threshold=args.v5_min_threshold,
                 min_threshold_pct=args.v5_min_threshold_pct,
                 max_trades_per_day=args.v5_max_trades_per_day,
+                trailing_sl=args.v5_trailing_sl,
+                trail_activation=args.v5_trail_activation,
+                trail_distance=args.v5_trail_distance,
+                allow_runner=args.v5_allow_runner,
+                conviction_sizing=args.v5_conviction_sizing,
+                conviction_tier_top_pct=args.v5_conviction_top_pct,
+                conviction_tier_top_mult=args.v5_conviction_top_mult,
+                conviction_tier_high_pct=args.v5_conviction_high_pct,
+                conviction_tier_high_mult=args.v5_conviction_high_mult,
+                conviction_confidence_threshold=args.v5_conviction_conf_thresh,
+                conviction_confidence_boost=args.v5_conviction_conf_boost,
             )
 
             log.info("=" * 60)

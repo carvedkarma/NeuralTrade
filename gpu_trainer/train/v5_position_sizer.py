@@ -374,12 +374,128 @@ class TrailingEquityStop:
         }
 
 
+@dataclass
+class ConvictionSizingConfig:
+    enabled: bool = False
+    tier_top_pct: float = 5.0
+    tier_top_mult: float = 2.5
+    tier_high_pct: float = 20.0
+    tier_high_mult: float = 1.5
+    tier_mid_mult: float = 1.0
+    tier_low_pct: float = 50.0
+    tier_low_mult: float = 0.5
+    confidence_boost_threshold: float = 0.65
+    confidence_boost_mult: float = 1.3
+    max_combined_mult: float = 3.5
+    window_size: int = 500
+
+
+class ConvictionSizer:
+    """Score-tiered position sizing with directional confidence boost.
+
+    Assigns size multipliers based on where the trade's score falls
+    in the distribution of recent scores (percentile-based tiers):
+      - Top tier_top_pct%:  tier_top_mult  (e.g., top 5% → 2.5x)
+      - Top tier_high_pct%: tier_high_mult (e.g., top 20% → 1.5x)
+      - Middle:             tier_mid_mult  (e.g., 1.0x)
+      - Bottom tier_low_pct%: tier_low_mult (e.g., bottom 50% → 0.5x)
+
+    Additionally, if directional confidence (p_long for LONG, p_short for SHORT)
+    exceeds confidence_boost_threshold, the multiplier gets a confidence_boost_mult.
+
+    Score percentiles are computed from a rolling window of the most recent
+    window_size scores to adapt to changing model output distributions.
+    """
+
+    def __init__(self, config: ConvictionSizingConfig):
+        self.config = config
+        from collections import deque
+        self.score_window: deque = deque(maxlen=config.window_size)
+        self.sizing_history: List[dict] = []
+        self._min_scores_for_tiers = 20
+
+    def compute_size_multiplier(self, score: float, p_directional: float,
+                                 side: int) -> float:
+        if not self.config.enabled:
+            return 1.0
+
+        self.score_window.append(score)
+
+        if len(self.score_window) < self._min_scores_for_tiers:
+            tier_mult = self.config.tier_mid_mult
+            tier_name = "warmup"
+        else:
+            scores_arr = np.array(self.score_window)
+            pct = float(np.sum(scores_arr < score) / len(scores_arr) * 100)
+
+            if pct >= (100 - self.config.tier_top_pct):
+                tier_mult = self.config.tier_top_mult
+                tier_name = "top"
+            elif pct >= (100 - self.config.tier_high_pct):
+                tier_mult = self.config.tier_high_mult
+                tier_name = "high"
+            elif pct < self.config.tier_low_pct:
+                tier_mult = self.config.tier_low_mult
+                tier_name = "low"
+            else:
+                tier_mult = self.config.tier_mid_mult
+                tier_name = "mid"
+
+        confidence_boost = 1.0
+        if p_directional >= self.config.confidence_boost_threshold:
+            confidence_boost = self.config.confidence_boost_mult
+
+        combined = tier_mult * confidence_boost
+        combined = min(combined, self.config.max_combined_mult)
+
+        self.sizing_history.append({
+            'score': score,
+            'tier': tier_name,
+            'tier_mult': tier_mult,
+            'confidence_boost': confidence_boost,
+            'combined_mult': combined,
+            'p_directional': p_directional,
+            'side': side,
+        })
+
+        return combined
+
+    def get_diagnostics(self) -> dict:
+        if not self.sizing_history:
+            return {
+                'conviction_sizing_enabled': self.config.enabled,
+                'total_conviction_trades': 0,
+            }
+        mults = np.array([h['combined_mult'] for h in self.sizing_history])
+        tiers = [h['tier'] for h in self.sizing_history]
+        boosts = [h['confidence_boost'] for h in self.sizing_history]
+        return {
+            'conviction_sizing_enabled': self.config.enabled,
+            'total_conviction_trades': len(self.sizing_history),
+            'avg_conviction_mult': float(np.mean(mults)),
+            'median_conviction_mult': float(np.median(mults)),
+            'min_conviction_mult': float(np.min(mults)),
+            'max_conviction_mult': float(np.max(mults)),
+            'tier_distribution': {
+                'top': tiers.count('top'),
+                'high': tiers.count('high'),
+                'mid': tiers.count('mid'),
+                'low': tiers.count('low'),
+                'warmup': tiers.count('warmup'),
+            },
+            'pct_confidence_boosted': float(np.mean([b > 1.0 for b in boosts]) * 100),
+            'conviction_mult_p10': float(np.percentile(mults, 10)),
+            'conviction_mult_p90': float(np.percentile(mults, 90)),
+        }
+
+
 def build_sizing_diagnostics(sizer: Optional[AdaptivePositionSizer],
                               regime: Optional[RegimeScaler],
                               daily_tracker: Optional[DailyLossTracker],
                               equity_stop: Optional[TrailingEquityStop],
                               sized_r: Optional[np.ndarray] = None,
-                              unsized_r: Optional[np.ndarray] = None) -> dict:
+                              unsized_r: Optional[np.ndarray] = None,
+                              conviction: Optional[ConvictionSizer] = None) -> dict:
     report = {}
     if sizer:
         report['adaptive_sizing'] = sizer.get_diagnostics()
@@ -389,6 +505,8 @@ def build_sizing_diagnostics(sizer: Optional[AdaptivePositionSizer],
         report['daily_loss_management'] = daily_tracker.get_diagnostics()
     if equity_stop:
         report['trailing_equity_stop'] = equity_stop.get_diagnostics()
+    if conviction:
+        report['conviction_sizing'] = conviction.get_diagnostics()
 
     if sized_r is not None and unsized_r is not None and len(sized_r) > 0:
         report['sizing_comparison'] = {

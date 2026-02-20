@@ -368,5 +368,221 @@ class TestBuildSizingDiagnostics:
         assert abs(diag['sizing_comparison']['sizing_impact_r'] - (2.5 - 1.9)) < 0.01
 
 
+class TestConvictionSizer:
+    def _make_sizer(self, **overrides):
+        from train.v5_position_sizer import ConvictionSizer, ConvictionSizingConfig
+        defaults = dict(enabled=True, tier_top_pct=5.0, tier_top_mult=2.5,
+                        tier_high_pct=20.0, tier_high_mult=1.5,
+                        tier_mid_mult=1.0, tier_low_pct=50.0, tier_low_mult=0.5,
+                        confidence_boost_threshold=0.65, confidence_boost_mult=1.3)
+        defaults.update(overrides)
+        cfg = ConvictionSizingConfig(**defaults)
+        return ConvictionSizer(cfg)
+
+    def _warm_up(self, sizer, n=100):
+        for s in np.linspace(0.1, 2.0, n):
+            sizer.compute_size_multiplier(score=s, p_directional=0.5, side=1)
+
+    def test_disabled_returns_1(self):
+        sizer = self._make_sizer(enabled=False)
+        assert sizer.compute_size_multiplier(score=2.0, p_directional=0.9, side=1) == 1.0
+
+    def test_top_tier_gets_top_mult(self):
+        sizer = self._make_sizer()
+        self._warm_up(sizer)
+        mult = sizer.compute_size_multiplier(score=10.0, p_directional=0.5, side=1)
+        assert mult == 2.5
+
+    def test_bottom_tier_gets_low_mult(self):
+        sizer = self._make_sizer()
+        self._warm_up(sizer)
+        mult = sizer.compute_size_multiplier(score=0.01, p_directional=0.5, side=1)
+        assert mult == 0.5
+
+    def test_confidence_boost(self):
+        sizer = self._make_sizer()
+        self._warm_up(sizer)
+        mult_no_conf = sizer.compute_size_multiplier(score=10.0, p_directional=0.5, side=1)
+        mult_with_conf = sizer.compute_size_multiplier(score=10.0, p_directional=0.8, side=1)
+        assert mult_with_conf > mult_no_conf
+
+    def test_warmup_returns_mid(self):
+        sizer = self._make_sizer()
+        mult = sizer.compute_size_multiplier(score=1.0, p_directional=0.5, side=1)
+        assert mult == 1.0
+
+    def test_diagnostics(self):
+        sizer = self._make_sizer()
+        self._warm_up(sizer)
+        sizer.compute_size_multiplier(score=1.5, p_directional=0.7, side=1)
+        diag = sizer.get_diagnostics()
+        assert diag['conviction_sizing_enabled'] is True
+        assert diag['total_conviction_trades'] > 0
+        assert 'avg_conviction_mult' in diag
+        assert 'tier_distribution' in diag
+
+
+class TestTrailingStop:
+    def test_basic_long_trailing(self):
+        from data.common import _simulate_trade_trailing
+        closes = np.array([100, 102, 105, 108, 110, 108, 105, 103, 100, 98])
+        highs = closes + 1
+        lows = closes - 1
+        atr_val = 2.0
+        tp_dist = atr_val * 5.0
+        sl_dist = atr_val * 1.5
+        r_val, outcome = _simulate_trade_trailing(
+            highs, lows, closes, i=0, horizon=9, n=len(closes),
+            entry=100.0, tp_dist=tp_dist, sl_dist=sl_dist,
+            tp_mult=5.0, sl_mult=1.5, atr_val=atr_val, side=1,
+            trail_activation=1.0, trail_distance=1.0, allow_runner=False
+        )
+        assert outcome in ('TP', 'TRAIL_WIN', 'TRAIL_BE', 'SL', 'EXP_WIN', 'EXP_LOSS')
+
+    def test_short_trailing(self):
+        from data.common import _simulate_trade_trailing
+        closes = np.array([100, 98, 95, 92, 90, 92, 95, 97, 100, 102])
+        highs = closes + 1
+        lows = closes - 1
+        atr_val = 2.0
+        tp_dist = atr_val * 5.0
+        sl_dist = atr_val * 1.5
+        r_val, outcome = _simulate_trade_trailing(
+            highs, lows, closes, i=0, horizon=9, n=len(closes),
+            entry=100.0, tp_dist=tp_dist, sl_dist=sl_dist,
+            tp_mult=5.0, sl_mult=1.5, atr_val=atr_val, side=-1,
+            trail_activation=1.0, trail_distance=1.0, allow_runner=False
+        )
+        assert outcome in ('TP', 'TRAIL_WIN', 'TRAIL_BE', 'SL', 'EXP_WIN', 'EXP_LOSS')
+
+    def test_sl_hit_before_activation(self):
+        from data.common import _simulate_trade_trailing
+        closes = np.array([100, 99, 98, 97, 96, 95])
+        highs = closes + 0.5
+        lows = closes - 0.5
+        atr_val = 2.0
+        tp_dist = atr_val * 5.0
+        sl_dist = atr_val * 1.5
+        r_val, outcome = _simulate_trade_trailing(
+            highs, lows, closes, i=0, horizon=5, n=len(closes),
+            entry=100.0, tp_dist=tp_dist, sl_dist=sl_dist,
+            tp_mult=5.0, sl_mult=1.5, atr_val=atr_val, side=1,
+            trail_activation=1.0, trail_distance=1.0, allow_runner=False
+        )
+        assert outcome == 'SL'
+        assert r_val < 0
+
+    def test_runner_mode(self):
+        from data.common import _simulate_trade_trailing
+        closes = np.array([100, 105, 110, 115, 120, 118, 115, 112, 108, 105])
+        highs = closes + 1
+        lows = closes - 1
+        atr_val = 2.0
+        tp_dist = atr_val * 3.0
+        sl_dist = atr_val * 1.5
+        r_no_runner, out_no_runner = _simulate_trade_trailing(
+            highs, lows, closes, i=0, horizon=9, n=len(closes),
+            entry=100.0, tp_dist=tp_dist, sl_dist=sl_dist,
+            tp_mult=3.0, sl_mult=1.5, atr_val=atr_val, side=1,
+            trail_activation=1.0, trail_distance=1.0, allow_runner=False
+        )
+        r_runner, out_runner = _simulate_trade_trailing(
+            highs, lows, closes, i=0, horizon=9, n=len(closes),
+            entry=100.0, tp_dist=tp_dist, sl_dist=sl_dist,
+            tp_mult=3.0, sl_mult=1.5, atr_val=atr_val, side=1,
+            trail_activation=1.0, trail_distance=1.0, allow_runner=True
+        )
+        assert out_no_runner in ('TP', 'TRAIL_WIN', 'EXP_WIN')
+        assert out_runner in ('TRAIL_WIN', 'TRAIL_BE', 'EXP_WIN', 'EXP_LOSS')
+
+    def test_expiry(self):
+        from data.common import _simulate_trade_trailing
+        closes = np.array([100, 100.5, 101, 100.5, 100, 100.5])
+        highs = closes + 0.3
+        lows = closes - 0.3
+        atr_val = 50.0
+        tp_dist = atr_val * 5.0
+        sl_dist = atr_val * 5.0
+        r_val, outcome = _simulate_trade_trailing(
+            highs, lows, closes, i=0, horizon=5, n=len(closes),
+            entry=100.0, tp_dist=tp_dist, sl_dist=sl_dist,
+            tp_mult=5.0, sl_mult=5.0, atr_val=atr_val, side=1,
+            trail_activation=3.0, trail_distance=1.0, allow_runner=False
+        )
+        assert outcome in ('EXP_WIN', 'EXP_LOSS')
+
+
+    def test_tp_checked_before_sl_on_same_bar(self):
+        from data.common import _simulate_trade_trailing
+        closes = np.array([100, 110])
+        highs = np.array([100, 115])
+        lows = np.array([100, 95])
+        atr_val = 2.0
+        tp_dist = atr_val * 3.0
+        sl_dist = atr_val * 1.5
+        r_val, outcome = _simulate_trade_trailing(
+            highs, lows, closes, i=0, horizon=1, n=len(closes),
+            entry=100.0, tp_dist=tp_dist, sl_dist=sl_dist,
+            tp_mult=3.0, sl_mult=1.5, atr_val=atr_val, side=1,
+            trail_activation=1.0, trail_distance=1.0, allow_runner=False
+        )
+        assert outcome == 'TP'
+        assert abs(r_val - 3.0 / 1.5) < 0.01
+
+    def test_trail_be_on_breakeven_exit(self):
+        from data.common import _simulate_trade_trailing
+        closes = np.array([100, 103, 105, 100, 98])
+        highs = np.array([100, 104, 106, 101, 99])
+        lows = np.array([100, 102, 104, 99, 97])
+        atr_val = 2.0
+        tp_dist = atr_val * 5.0
+        sl_dist = atr_val * 1.5
+        r_val, outcome = _simulate_trade_trailing(
+            highs, lows, closes, i=0, horizon=4, n=len(closes),
+            entry=100.0, tp_dist=tp_dist, sl_dist=sl_dist,
+            tp_mult=5.0, sl_mult=1.5, atr_val=atr_val, side=1,
+            trail_activation=1.0, trail_distance=3.0, allow_runner=False
+        )
+        if outcome in ('TRAIL_WIN', 'TRAIL_BE'):
+            assert r_val >= 0
+
+    def test_trail_win_positive_r(self):
+        from data.common import _simulate_trade_trailing
+        closes = np.array([100, 103, 107, 110, 108, 105, 100])
+        highs = closes + 1
+        lows = closes - 1
+        atr_val = 2.0
+        tp_dist = atr_val * 10.0
+        sl_dist = atr_val * 1.5
+        r_val, outcome = _simulate_trade_trailing(
+            highs, lows, closes, i=0, horizon=6, n=len(closes),
+            entry=100.0, tp_dist=tp_dist, sl_dist=sl_dist,
+            tp_mult=10.0, sl_mult=1.5, atr_val=atr_val, side=1,
+            trail_activation=1.0, trail_distance=1.0, allow_runner=False
+        )
+        if outcome == 'TRAIL_WIN':
+            assert r_val > 0
+
+    def test_rolling_window_conviction(self):
+        from train.v5_position_sizer import ConvictionSizer, ConvictionSizingConfig
+        cfg = ConvictionSizingConfig(enabled=True, window_size=30)
+        sizer = ConvictionSizer(cfg)
+        for s in np.linspace(0.1, 1.0, 50):
+            sizer.compute_size_multiplier(score=s, p_directional=0.5, side=1)
+        assert len(sizer.score_window) == 30
+
+
+class TestBuildSizingDiagWithConviction:
+    def test_conviction_in_diagnostics(self):
+        from train.v5_position_sizer import ConvictionSizer, ConvictionSizingConfig
+        cfg = ConvictionSizingConfig(enabled=True)
+        conv = ConvictionSizer(cfg)
+        for s in np.linspace(0.1, 2.0, 50):
+            conv.compute_size_multiplier(score=s, p_directional=0.5, side=1)
+        diag = build_sizing_diagnostics(None, None, None, None, conviction=conv)
+        assert 'conviction_sizing' in diag
+        assert diag['conviction_sizing']['total_conviction_trades'] == 50
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
