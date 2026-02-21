@@ -1,10 +1,12 @@
 import { db } from "./db";
 import { candles } from "./db/schema";
 import { eq, and, desc } from "drizzle-orm";
-import { getBTCCandlesBinanceVision, getBTCPriceBinanceVision } from "./binance-vision";
+import { getCandlesBinanceVision, getBTCPriceBinanceVision } from "./binance-vision";
 
 const FIFTEEN_MIN_MS = 15 * 60 * 1000;
-const SYNC_INTERVAL_MS = 60000; // Check every minute
+const SYNC_INTERVAL_MS = 60000;
+
+const SYNC_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "XRPUSDT", "ADAUSDT"];
 
 interface SyncStatus {
   isRunning: boolean;
@@ -33,6 +35,56 @@ export function getSyncStatus(): SyncStatus {
   return { ...syncStatus };
 }
 
+async function syncSymbolCandles(symbol: string): Promise<number> {
+  const lastCandle = await db.select()
+    .from(candles)
+    .where(and(
+      eq(candles.symbol, symbol),
+      eq(candles.timeframe, "15m")
+    ))
+    .orderBy(desc(candles.timestamp))
+    .limit(1);
+
+  const lastCandleTs = lastCandle[0]?.timestamp || 0;
+  const now = Date.now();
+  const expectedLastCandleTs = Math.floor(now / FIFTEEN_MIN_MS) * FIFTEEN_MIN_MS - FIFTEEN_MIN_MS;
+  const gapMs = expectedLastCandleTs - lastCandleTs;
+  const gapBars = Math.floor(gapMs / FIFTEEN_MIN_MS);
+
+  if (gapBars <= 0) {
+    return 0;
+  }
+
+  const fetchLimit = Math.min(gapBars + 10, 500);
+  const newCandles = await getCandlesBinanceVision(symbol, "15m", fetchLimit);
+
+  if (newCandles.length === 0) {
+    return 0;
+  }
+
+  let inserted = 0;
+  for (const candle of newCandles) {
+    if (candle.timestamp > lastCandleTs) {
+      try {
+        await db.insert(candles).values({
+          symbol,
+          timeframe: "15m",
+          timestamp: candle.timestamp,
+          open: candle.open,
+          high: candle.high,
+          low: candle.low,
+          close: candle.close,
+          volume: candle.volume,
+        }).onConflictDoNothing();
+        inserted++;
+      } catch (e) {
+      }
+    }
+  }
+
+  return inserted;
+}
+
 export async function syncLatest15mCandles(): Promise<{
   success: boolean;
   candlesInserted: number;
@@ -42,11 +94,24 @@ export async function syncLatest15mCandles(): Promise<{
   console.log("[Live Sync] Starting 15m candle sync via Binance Vision...");
   
   try {
-    // Get current price
     const currentPrice = await getBTCPriceBinanceVision();
     syncStatus.currentPrice = currentPrice;
     
-    // Get last candle from database
+    let totalInserted = 0;
+    const perSymbol: string[] = [];
+    
+    for (const symbol of SYNC_SYMBOLS) {
+      try {
+        const inserted = await syncSymbolCandles(symbol);
+        totalInserted += inserted;
+        if (inserted > 0) {
+          perSymbol.push(`${symbol}:${inserted}`);
+        }
+      } catch (err) {
+        console.error(`[Live Sync] Error syncing ${symbol}:`, err);
+      }
+    }
+    
     const lastCandle = await db.select()
       .from(candles)
       .where(and(
@@ -56,16 +121,12 @@ export async function syncLatest15mCandles(): Promise<{
       .orderBy(desc(candles.timestamp))
       .limit(1);
     
-    const lastCandleTs = lastCandle[0]?.timestamp || 0;
+    const latestTs = lastCandle[0]?.timestamp || null;
     
-    // Calculate how many candles we need
     const now = Date.now();
     const expectedLastCandleTs = Math.floor(now / FIFTEEN_MIN_MS) * FIFTEEN_MIN_MS - FIFTEEN_MIN_MS;
-    const gapMs = expectedLastCandleTs - lastCandleTs;
-    const gapBars = Math.floor(gapMs / FIFTEEN_MIN_MS);
-    
-    // Update freshness status
-    const staleDurationMinutes = gapBars * 15;
+    const gapMs = latestTs ? expectedLastCandleTs - latestTs : Infinity;
+    const staleDurationMinutes = Math.floor(gapMs / (60 * 1000));
     syncStatus.staleDurationMinutes = staleDurationMinutes;
     if (staleDurationMinutes <= 15) {
       syncStatus.dataFreshness = "fresh";
@@ -75,77 +136,18 @@ export async function syncLatest15mCandles(): Promise<{
       syncStatus.dataFreshness = "critical";
     }
     
-    if (gapBars <= 0) {
-      const msg = "Data is fresh, no sync needed";
-      console.log(`[Live Sync] ${msg}`);
-      syncStatus.lastSyncTs = Date.now();
-      syncStatus.lastSyncResult = msg;
-      syncStatus.lastCandleTs = lastCandleTs;
-      return { success: true, candlesInserted: 0, latestCandleTs: lastCandleTs, message: msg };
-    }
-    
-    console.log(`[Live Sync] Gap detected: ${gapBars} bars (${staleDurationMinutes} minutes), fetching...`);
-    
-    // Fetch candles from Binance Vision
-    const fetchLimit = Math.min(gapBars + 10, 500);
-    const newCandles = await getBTCCandlesBinanceVision("15m", fetchLimit);
-    
-    if (newCandles.length === 0) {
-      const msg = "Binance Vision returned no candles";
-      console.error(`[Live Sync] ${msg}`);
-      syncStatus.lastSyncResult = msg;
-      return { success: false, candlesInserted: 0, latestCandleTs: lastCandleTs, message: msg };
-    }
-    
-    console.log(`[Live Sync] Fetched ${newCandles.length} candles from Binance Vision`);
-    
-    // Insert new candles
-    let inserted = 0;
-    for (const candle of newCandles) {
-      if (candle.timestamp > lastCandleTs) {
-        try {
-          await db.insert(candles).values({
-            symbol: "BTCUSDT",
-            timeframe: "15m",
-            timestamp: candle.timestamp,
-            open: candle.open,
-            high: candle.high,
-            low: candle.low,
-            close: candle.close,
-            volume: candle.volume,
-          }).onConflictDoNothing();
-          inserted++;
-        } catch (e) {
-          // Ignore duplicate key errors
-        }
-      }
-    }
-    
-    // Get updated last candle
-    const updatedLastCandle = await db.select()
-      .from(candles)
-      .where(and(
-        eq(candles.symbol, "BTCUSDT"),
-        eq(candles.timeframe, "15m")
-      ))
-      .orderBy(desc(candles.timestamp))
-      .limit(1);
-    
-    const latestTs = updatedLastCandle[0]?.timestamp || null;
-    const msg = inserted > 0 
-      ? `Synced ${inserted} new 15m candles` 
-      : "All candles already up to date";
+    const msg = totalInserted > 0 
+      ? `Synced ${totalInserted} new 15m candles (${perSymbol.join(", ")})` 
+      : "Data is fresh, no sync needed";
     
     console.log(`[Live Sync] ${msg}`);
     
     syncStatus.lastSyncTs = Date.now();
     syncStatus.lastSyncResult = msg;
-    syncStatus.candlesSynced += inserted;
+    syncStatus.candlesSynced += totalInserted;
     syncStatus.lastCandleTs = latestTs;
-    syncStatus.dataFreshness = "fresh";
-    syncStatus.staleDurationMinutes = 0;
     
-    return { success: true, candlesInserted: inserted, latestCandleTs: latestTs, message: msg };
+    return { success: true, candlesInserted: totalInserted, latestCandleTs: latestTs, message: msg };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     console.error(`[Live Sync] Error: ${msg}`);
@@ -163,10 +165,8 @@ export function startLiveCandleSync(): void {
   console.log("[Live Sync] Starting continuous 15m candle sync service (every 60s)");
   syncStatus.isRunning = true;
   
-  // Run immediately
   syncLatest15mCandles();
   
-  // Then run every minute
   syncInterval = setInterval(syncLatest15mCandles, SYNC_INTERVAL_MS);
 }
 

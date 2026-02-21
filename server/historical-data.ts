@@ -843,7 +843,7 @@ export async function checkIncompleteBackfillJobs(): Promise<{
 }
 
 // Multi-asset data management
-const SUPPORTED_ASSETS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"];
+const SUPPORTED_ASSETS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "XRPUSDT", "ADAUSDT"];
 
 export interface AssetDataSummary {
   symbol: string;

@@ -265,7 +265,7 @@ export async function exportCrossAssetAligned(
   count: number;
   symbols: string[];
 }> {
-  const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"];
+  const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "XRPUSDT", "ADAUSDT"];
   
   const allCandles: Record<string, Map<number, CandleRow>> = {};
   for (const sym of symbols) {

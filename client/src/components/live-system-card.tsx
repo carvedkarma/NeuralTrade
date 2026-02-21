@@ -125,6 +125,9 @@ function SymbolBadge({ symbol }: { symbol: string }) {
     ETHUSDT: "bg-blue-600 text-white",
     SOLUSDT: "bg-purple-600 text-white",
     BNBUSDT: "bg-yellow-600 text-white",
+    AVAXUSDT: "bg-red-600 text-white",
+    XRPUSDT: "bg-slate-600 text-white",
+    ADAUSDT: "bg-sky-600 text-white",
   };
   return <Badge className={colors[symbol] || "bg-gray-600 text-white"}>{symbol.replace("USDT", "")}</Badge>;
 }
@@ -215,7 +218,7 @@ export function LearningStatsCards() {
     refetchInterval: 60000,
   });
 
-  const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"];
+  const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "XRPUSDT", "ADAUSDT"];
   const hasAny = statsMap && Object.values(statsMap).some(v => v !== null);
 
   if (!hasAny) {

@@ -1583,7 +1583,7 @@ export async function registerRoutes(
     }
 
     const days = req.body.days || 370;
-    const validSymbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"];
+    const validSymbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "XRPUSDT", "ADAUSDT"];
     const requestedSymbols: string[] = req.body.symbols
       ? (Array.isArray(req.body.symbols) ? req.body.symbols : [req.body.symbols])
           .map((s: string) => s.toUpperCase())
@@ -1926,7 +1926,7 @@ export async function registerRoutes(
       const symbol = (req.query.symbol as string || "BTCUSDT").toUpperCase();
       const timeframe = (req.query.timeframe as string) || "15m";
 
-      const validSymbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"];
+      const validSymbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "XRPUSDT", "ADAUSDT"];
       const validTimeframes = ["1m", "5m", "15m", "1h", "4h", "1d"];
       if (!validSymbols.includes(symbol)) {
         return res.status(400).json({ error: `Invalid symbol. Allowed: ${validSymbols.join(", ")}` });
@@ -3580,7 +3580,7 @@ export async function registerRoutes(
   // Cross-asset data endpoint with real correlation calculations
   app.get("/api/cross-asset", async (req, res) => {
     try {
-      const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"];
+      const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "XRPUSDT", "ADAUSDT"];
       
       // Fetch 24hr ticker data for all symbols
       const tickerPromises = symbols.map(async (symbol) => {
@@ -4204,7 +4204,7 @@ export async function registerRoutes(
 
   app.get("/api/live/learning-stats/latest", async (req, res) => {
     try {
-      const symbols = (req.query.symbols as string || "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT").split(",");
+      const symbols = (req.query.symbols as string || "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,AVAXUSDT,XRPUSDT,ADAUSDT").split(",");
       const results: Record<string, ModelLearningStatsEntry | null> = {};
       for (const sym of symbols) {
         results[sym.trim()] = await storage.getLatestModelLearningStats(sym.trim());
@@ -4278,7 +4278,7 @@ export async function registerRoutes(
 
   app.get("/api/live/summary", async (req, res) => {
     try {
-      const symbols = (req.query.symbols as string || "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT").split(",").map(s => s.trim());
+      const symbols = (req.query.symbols as string || "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,AVAXUSDT,XRPUSDT,ADAUSDT").split(",").map(s => s.trim());
       const openTrades = await storage.getOpenLiveTradeRecords();
       const recentTrades = await storage.getLiveTradeRecords(50);
       const learningStats: Record<string, ModelLearningStatsEntry | null> = {};
@@ -4393,7 +4393,7 @@ export async function registerRoutes(
 
   app.post("/api/oi/download", async (req, res) => {
     try {
-      const symbols = (req.body.symbols as string[] | undefined) || ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
+      const symbols = (req.body.symbols as string[] | undefined) || ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "XRPUSDT", "ADAUSDT"];
       const period = (req.body.period as string) || "15m";
       const results: Record<string, { fetched: number; inserted: number; nonzero: number }> = {};
 

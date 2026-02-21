@@ -51,9 +51,9 @@ export async function getBTCPriceBinanceVision(): Promise<number | null> {
   }
 }
 
-export async function getBTCCandlesBinanceVision(interval: string = "15m", limit: number = 500): Promise<Candle[]> {
+export async function getCandlesBinanceVision(symbol: string = "BTCUSDT", interval: string = "15m", limit: number = 500): Promise<Candle[]> {
   try {
-    const data = await fetchBinanceVision(`/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`);
+    const data = await fetchBinanceVision(`/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
     
     if (!Array.isArray(data)) {
       return [];
@@ -68,9 +68,13 @@ export async function getBTCCandlesBinanceVision(interval: string = "15m", limit
       volume: parseFloat(kline[5]),
     }));
   } catch (error) {
-    console.error("Error fetching BTC candles from Binance Vision:", error);
+    console.error(`Error fetching ${symbol} candles from Binance Vision:`, error);
     return [];
   }
+}
+
+export async function getBTCCandlesBinanceVision(interval: string = "15m", limit: number = 500): Promise<Candle[]> {
+  return getCandlesBinanceVision("BTCUSDT", interval, limit);
 }
 
 export async function getBTC24hStatsBinanceVision(): Promise<{ priceChange: number; priceChangePercent: number; volume: number } | null> {
