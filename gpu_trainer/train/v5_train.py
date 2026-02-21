@@ -695,6 +695,8 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         'p_short_mean': float(np.nanmean(p_short)),
         'edge_long_mean': float(np.nanmean(edge_long)),
         'edge_short_mean': float(np.nanmean(edge_short)),
+        'edge_L': edge_long,
+        'edge_S': edge_short,
         'penalty_mean': float(np.nanmean(penalty)),
         'score_mean': float(np.nanmean(scores)),
         'score_std': float(np.nanstd(scores)),
@@ -1170,6 +1172,11 @@ def run_v5_forward_test(
         side_mode=config.side_mode,
         rr_weight=config.rr_weight,
     )
+
+    if 'edge_L' in score_diag:
+        arrays['edge_L'] = score_diag['edge_L']
+    if 'edge_S' in score_diag:
+        arrays['edge_S'] = score_diag['edge_S']
 
     log.info(f"[V5_FWD] side_mode={config.side_mode} rr_weight={config.rr_weight}")
     log.info(f"[V5_FWD] Score stats: mean={score_diag['score_mean']:.4f} "
