@@ -79,7 +79,7 @@ class V5ForwardTestConfig:
     min_threshold_pct: Optional[float] = None
     max_trades_per_day: Optional[int] = None
     trailing_sl: bool = False
-    trail_activation: float = 1.0
+    trail_activation: float = 1.5
     trail_distance: float = 1.0
     allow_runner: bool = False
     conviction_sizing: bool = False
@@ -471,7 +471,8 @@ def compute_v5_calibration(p_trade, realized_r, n_bins=10):
 
 def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
                       risk_proxy='mae', mae_cap=2.0, _arrays=None,
-                      side_mode='action_head', rr_weight=0.0):
+                      side_mode='action_head', rr_weight=0.0,
+                      min_mu_r_score=0.03):
     """Compute execution-aware v5 scores -- all in R-units.
 
     Two side-selection modes:
@@ -496,6 +497,10 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         rr_ratio = mfe_pred / (mae_pred + eps)
         score += rr_weight * rr_ratio * abs_mu / risk
         Rewards setups with favorable excursion profiles (high MFE, low MAE).
+
+    min_mu_r_score: minimum |mu_R| to generate a positive score. Trades with
+        predicted |mu_R| below this floor get score = -inf to prevent taking
+        trades with negligible expected move (even if mae is also tiny).
     """
     if _arrays is not None:
         mu_R = _arrays['mu_R']
@@ -541,6 +546,12 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         rr_bonus = rr_weight * rr_ratio * mu_over_risk
         scores = scores + rr_bonus
 
+    n_suppressed = 0
+    if min_mu_r_score > 0:
+        tiny_mu_mask = abs_mu < min_mu_r_score
+        n_suppressed = int(np.sum(tiny_mu_mask))
+        scores[tiny_mu_mask] = -np.inf
+
     n_long_sides = int(np.sum(sides == 1))
     n_short_sides = int(np.sum(sides == -1))
 
@@ -561,6 +572,8 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         'score_pct_positive': float(np.nanmean(scores > 0) * 100),
         'side_mode': side_mode,
         'rr_weight': rr_weight,
+        'min_mu_r_score': min_mu_r_score,
+        'n_mu_suppressed': n_suppressed,
         'n_long_all': n_long_sides,
         'n_short_all': n_short_sides,
         'long_pct_all': float(100 * n_long_sides / max(n_long_sides + n_short_sides, 1)),
@@ -692,17 +705,19 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     use_side_conditional = (r_long is not None and r_short is not None
                            and out_long is not None and out_short is not None)
 
+    _VALID_OUTCOMES = ["TP", "SL", "EXP_WIN", "EXP_LOSS", "TRAIL_WIN", "TRAIL_BE"]
+
     if use_side_conditional:
         side_r = np.where(sides == 1, r_long, r_short).astype(float)
         side_out = np.where(sides == 1, out_long, out_short)
         safe_outcomes = np.where(
-            np.isin(side_out, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]),
+            np.isin(side_out, _VALID_OUTCOMES),
             side_out, "NO_CANDIDATE"
         )
         safe_r = np.where(np.isnan(side_r), 0.0, side_r)
     else:
         safe_outcomes = np.where(
-            np.isin(precomputed_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]),
+            np.isin(precomputed_outcomes, _VALID_OUTCOMES),
             precomputed_outcomes, "NO_CANDIDATE"
         )
         safe_r = precomputed_r.copy().astype(float)
@@ -816,7 +831,7 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
         t_outcomes = safe_outcomes[taken]
         t_r = safe_r[taken]
 
-        valid_trades = np.isin(t_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"])
+        valid_trades = np.isin(t_outcomes, _VALID_OUTCOMES)
         n_valid_outcome = int(valid_trades.sum())
         if n_valid_outcome < 5:
             log.debug("[V5_SWEEP_DIAG] %s: above_thr=%d after_cooldown=%d valid_outcomes=%d (<5, skipped)",
@@ -911,7 +926,7 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     else:
         log.info("v5 score percentiles: EMPTY (no finite candidate scores)")
 
-    n_valid_outcomes_total = np.sum(np.isin(safe_outcomes, ["TP", "SL", "EXP_WIN", "EXP_LOSS"]))
+    n_valid_outcomes_total = np.sum(np.isin(safe_outcomes, _VALID_OUTCOMES))
     n_no_cand = np.sum(safe_outcomes == "NO_CANDIDATE")
     log.info("[V5_SWEEP_PIPELINE] precomputed_outcomes: valid=%d no_candidate=%d total=%d",
              n_valid_outcomes_total, n_no_cand, len(safe_outcomes))
@@ -1748,7 +1763,7 @@ def run_v5_walk_forward(
     regime_scaling=False, regime_bull_mult=1.5, regime_bear_mult=0.5, regime_lookback=20,
     daily_loss_cap=None, trailing_equity_stop=None, per_symbol_daily_r_budget=None,
     min_threshold=None, min_threshold_pct=None, max_trades_per_day=None,
-    trailing_sl=False, trail_activation=1.0, trail_distance=1.0, allow_runner=False,
+    trailing_sl=False, trail_activation=1.5, trail_distance=1.0, allow_runner=False,
     conviction_sizing=False, conviction_tier_top_pct=5.0, conviction_tier_top_mult=2.5,
     conviction_tier_high_pct=20.0, conviction_tier_high_mult=1.5,
     conviction_confidence_threshold=0.65, conviction_confidence_boost=1.3,
@@ -1980,7 +1995,7 @@ def train_v5_model(
     min_threshold=None,
     min_threshold_pct=None,
     max_trades_per_day=None,
-    trailing_sl=False, trail_activation=1.0, trail_distance=1.0, allow_runner=False,
+    trailing_sl=False, trail_activation=1.5, trail_distance=1.0, allow_runner=False,
     conviction_sizing=False, conviction_tier_top_pct=5.0, conviction_tier_top_mult=2.5,
     conviction_tier_high_pct=20.0, conviction_tier_high_mult=1.5,
     conviction_confidence_threshold=0.65, conviction_confidence_boost=1.3,
@@ -2113,13 +2128,6 @@ def train_v5_model(
         else:
             sym_features_df = sym_features_df.reindex(columns=features_df_columns, fill_value=0)
 
-        v5_targets = build_v5_targets(
-            sym_df, horizon=horizon, atr_period=14,
-            hold_target=hold_target, mfe_min_r=mfe_min
-        )
-
-        v5_targets['valid_mask'][:max_lookback] = False
-
         sym_cand_mask = None
         if candidate_config.enabled:
             sym_cand_mask, _ = generate_candidate_mask(
@@ -2142,6 +2150,14 @@ def train_v5_model(
                 sym_df, horizon=horizon, tp_mult=tp_mult,
                 sl_mult=sl_mult, atr_period=14,
             )
+
+        v5_targets = build_v5_targets(
+            sym_df, horizon=horizon, atr_period=14,
+            hold_target=hold_target, mfe_min_r=mfe_min,
+            barrier_outcomes=sweep_result,
+        )
+
+        v5_targets['valid_mask'][:max_lookback] = False
         sym_realized_r = sweep_result['realized_r']
         sym_outcomes = sweep_result['outcome']
         sym_r_long = sweep_result['r_long']

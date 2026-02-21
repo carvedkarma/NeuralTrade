@@ -36,6 +36,7 @@ def build_v5_targets(
     atr_period: int = 14,
     hold_target: float = 0.30,
     mfe_min_r: float = 0.05,
+    barrier_outcomes: Optional[Dict[str, np.ndarray]] = None,
 ) -> Dict[str, np.ndarray]:
     """Build v5 continuous targets from OHLCV data -- ALL in R-units.
 
@@ -45,6 +46,10 @@ def build_v5_targets(
         atr_period: ATR lookback for R-unit normalization
         hold_target: target fraction of HOLD labels (adaptive deadzone)
         mfe_min_r: minimum MFE in R-units required to classify as non-HOLD
+        barrier_outcomes: optional dict from generate_v5_sweep_outcomes with
+            r_long, r_short, out_long, out_short. When provided, action labels
+            are derived from barrier outcomes instead of ret_R sign, aligning
+            training targets with evaluation.
 
     Returns:
         Dict with keys: ret_R, mfe_R, mae_R, vol_h, action_label, valid_mask, atr
@@ -115,19 +120,67 @@ def build_v5_targets(
     logger.info(f"[V5_TARGETS] Adaptive deadzone: hold_target={hold_target:.0%} -> deadzone_R={deadzone_R:.4f}")
 
     action_label = np.full(n, 0, dtype=np.int64)
-    for i in range(n):
-        if not valid_mask[i]:
-            continue
-        if ret_R[i] > 0:
-            side_mfe = mfe_R_long[i]
-        else:
-            side_mfe = mfe_R_short[i]
-        if np.abs(ret_R[i]) < deadzone_R or side_mfe < mfe_min_r:
-            action_label[i] = 0
-        elif ret_R[i] > 0:
-            action_label[i] = 1
-        else:
-            action_label[i] = 2
+
+    if barrier_outcomes is not None:
+        b_r_long = barrier_outcomes['r_long']
+        b_r_short = barrier_outcomes['r_short']
+        n_barrier_long = 0
+        n_barrier_short = 0
+        n_barrier_hold = 0
+        for i in range(n):
+            if not valid_mask[i]:
+                continue
+            rl = b_r_long[i] if np.isfinite(b_r_long[i]) else -999.0
+            rs = b_r_short[i] if np.isfinite(b_r_short[i]) else -999.0
+            long_positive = rl > 0
+            short_positive = rs > 0
+            if not long_positive and not short_positive:
+                action_label[i] = 0
+                n_barrier_hold += 1
+            elif long_positive and not short_positive:
+                if rl >= deadzone_R:
+                    action_label[i] = 1
+                    n_barrier_long += 1
+                else:
+                    action_label[i] = 0
+                    n_barrier_hold += 1
+            elif short_positive and not long_positive:
+                if rs >= deadzone_R:
+                    action_label[i] = 2
+                    n_barrier_short += 1
+                else:
+                    action_label[i] = 0
+                    n_barrier_hold += 1
+            else:
+                if rl >= rs:
+                    if rl >= deadzone_R:
+                        action_label[i] = 1
+                        n_barrier_long += 1
+                    else:
+                        action_label[i] = 0
+                        n_barrier_hold += 1
+                else:
+                    if rs >= deadzone_R:
+                        action_label[i] = 2
+                        n_barrier_short += 1
+                    else:
+                        action_label[i] = 0
+                        n_barrier_hold += 1
+        logger.info(f"[V5_TARGETS] BARRIER-BASED labels: LONG={n_barrier_long} SHORT={n_barrier_short} HOLD={n_barrier_hold}")
+    else:
+        for i in range(n):
+            if not valid_mask[i]:
+                continue
+            if ret_R[i] > 0:
+                side_mfe = mfe_R_long[i]
+            else:
+                side_mfe = mfe_R_short[i]
+            if np.abs(ret_R[i]) < deadzone_R or side_mfe < mfe_min_r:
+                action_label[i] = 0
+            elif ret_R[i] > 0:
+                action_label[i] = 1
+            else:
+                action_label[i] = 2
 
     n_valid = int(np.sum(valid_mask))
     n_hold = int(np.sum(action_label[valid_mask] == 0))

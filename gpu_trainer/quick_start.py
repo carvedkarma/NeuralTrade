@@ -4913,8 +4913,8 @@ Examples:
 
     parser.add_argument("--v5-trailing-sl", action="store_true", default=False,
                         help="v5.0.8+: enable trailing stop-loss. Moves SL to breakeven then trails behind best price. Default: disabled")
-    parser.add_argument("--v5-trail-activation", type=float, default=1.0,
-                        help="v5.0.8+: ATR multiples of favorable move before trailing SL activates (default: 1.0)")
+    parser.add_argument("--v5-trail-activation", type=float, default=1.5,
+                        help="v5.0.8+: ATR multiples of favorable move before trailing SL activates (default: 1.5)")
     parser.add_argument("--v5-trail-distance", type=float, default=1.0,
                         help="v5.0.8+: ATR multiples behind best price for trailing stop (default: 1.0)")
     parser.add_argument("--v5-allow-runner", action="store_true", default=False,

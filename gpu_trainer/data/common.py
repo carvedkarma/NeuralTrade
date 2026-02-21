@@ -186,15 +186,16 @@ def _simulate_trade(
 def _simulate_trade_trailing(
     highs, lows, closes, i, horizon, n,
     entry, tp_dist, sl_dist, tp_mult, sl_mult, atr_val, side=1,
-    trail_activation=1.0, trail_distance=1.0, allow_runner=False,
+    trail_activation=1.5, trail_distance=1.0, allow_runner=False,
+    min_trail_profit_r=0.15,
 ):
     """Simulate a trade with trailing stop-loss.
 
     The trailing stop works in phases:
       Phase 1 (initial): Fixed SL at entry -/+ sl_dist (same as normal).
       Phase 2 (activated): Once price moves trail_activation * ATR in favor,
-                           SL moves to breakeven, then trails at trail_distance * ATR
-                           behind the best price seen.
+                           SL moves to entry + min_trail_profit floor, then trails
+                           at trail_distance * ATR behind the best price seen.
       Phase 3 (runner, optional): If allow_runner=True, after TP level is reached,
                                   the trade stays open with a tight trail (0.5 * trail_distance * ATR)
                                   to capture extended moves.
@@ -203,6 +204,8 @@ def _simulate_trade_trailing(
         trail_activation: ATR multiples of favorable move before trailing activates
         trail_distance: ATR multiples behind best price for trailing stop
         allow_runner: if True, don't exit at TP, let it run with tighter trail
+        min_trail_profit_r: minimum R profit floor for trailing SL (prevents
+            breakeven/tiny-win exits). Trail SL cannot go below entry + min_trail_profit_r * ATR * sl_mult.
 
     Returns:
         (realized_r, outcome_str)
@@ -216,6 +219,7 @@ def _simulate_trade_trailing(
 
     activation_dist = atr_val * trail_activation
     trail_dist_abs = atr_val * trail_distance
+    min_profit_dist = min_trail_profit_r * atr_val * sl_mult
 
     trailing_active = False
     best_price = entry
@@ -237,20 +241,22 @@ def _simulate_trade_trailing(
                 trailing_active = True
                 trail_dist_abs = atr_val * trail_distance * 0.5
                 new_sl = best_price - trail_dist_abs
+                new_sl = max(new_sl, entry + min_profit_dist)
                 current_sl = max(current_sl, new_sl)
 
             if not trailing_active:
                 if best_price - entry >= activation_dist:
                     trailing_active = True
-                    new_sl = max(entry, best_price - trail_dist_abs)
+                    new_sl = max(entry + min_profit_dist, best_price - trail_dist_abs)
                     current_sl = max(current_sl, new_sl)
             else:
                 new_sl = best_price - trail_dist_abs
+                new_sl = max(new_sl, entry + min_profit_dist)
                 current_sl = max(current_sl, new_sl)
 
             if bar_low <= current_sl:
                 realized_r = (current_sl - entry) / (atr_val * sl_mult)
-                if trailing_active and realized_r > 0:
+                if trailing_active and realized_r > min_trail_profit_r:
                     return realized_r, "TRAIL_WIN"
                 elif trailing_active:
                     return max(realized_r, 0.0), "TRAIL_BE"
@@ -268,20 +274,22 @@ def _simulate_trade_trailing(
                 trailing_active = True
                 trail_dist_abs = atr_val * trail_distance * 0.5
                 new_sl = best_price + trail_dist_abs
+                new_sl = min(new_sl, entry - min_profit_dist)
                 current_sl = min(current_sl, new_sl)
 
             if not trailing_active:
                 if entry - best_price >= activation_dist:
                     trailing_active = True
-                    new_sl = min(entry, best_price + trail_dist_abs)
+                    new_sl = min(entry - min_profit_dist, best_price + trail_dist_abs)
                     current_sl = min(current_sl, new_sl)
             else:
                 new_sl = best_price + trail_dist_abs
+                new_sl = min(new_sl, entry - min_profit_dist)
                 current_sl = min(current_sl, new_sl)
 
             if bar_high >= current_sl:
                 realized_r = (entry - current_sl) / (atr_val * sl_mult)
-                if trailing_active and realized_r > 0:
+                if trailing_active and realized_r > min_trail_profit_r:
                     return realized_r, "TRAIL_WIN"
                 elif trailing_active:
                     return max(realized_r, 0.0), "TRAIL_BE"
@@ -306,9 +314,10 @@ def generate_v5_sweep_outcomes_trailing(
     tp_mult: float = 2.0,
     sl_mult: float = 1.5,
     atr_period: int = 14,
-    trail_activation: float = 1.0,
+    trail_activation: float = 1.5,
     trail_distance: float = 1.0,
     allow_runner: bool = False,
+    min_trail_profit_r: float = 0.15,
 ) -> dict:
     """Generate side-conditional trade outcomes using trailing stop logic.
 
@@ -354,13 +363,13 @@ def generate_v5_sweep_outcomes_trailing(
             highs, lows, closes, i, horizon, n,
             entry, tp_dist, sl_dist, tp_mult, sl_mult, atr[i], side=1,
             trail_activation=trail_activation, trail_distance=trail_distance,
-            allow_runner=allow_runner,
+            allow_runner=allow_runner, min_trail_profit_r=min_trail_profit_r,
         )
         short_r_val, short_out_val = _simulate_trade_trailing(
             highs, lows, closes, i, horizon, n,
             entry, tp_dist, sl_dist, tp_mult, sl_mult, atr[i], side=-1,
             trail_activation=trail_activation, trail_distance=trail_distance,
-            allow_runner=allow_runner,
+            allow_runner=allow_runner, min_trail_profit_r=min_trail_profit_r,
         )
 
         r_long[i] = long_r_val
