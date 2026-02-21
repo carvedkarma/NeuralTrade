@@ -4935,6 +4935,25 @@ Examples:
     parser.add_argument("--v5-conviction-conf-boost", type=float, default=1.3,
                         help="v5.0.8+: confidence boost multiplier when p_dir exceeds threshold (default: 1.3)")
 
+    parser.add_argument("--v5-adx-gate", action="store_true", default=False,
+                        help="v5.0.9+: enable ADX regime gate — blocks trades when ADX < min (choppy market)")
+    parser.add_argument("--v5-adx-period", type=int, default=14,
+                        help="v5.0.9+: ADX indicator period (default: 14)")
+    parser.add_argument("--v5-adx-min", type=float, default=18.0,
+                        help="v5.0.9+: minimum ADX value to allow trades (default: 18.0)")
+    parser.add_argument("--v5-adx-exception-top-pct", type=float, default=10.0,
+                        help="v5.0.9+: top N%% of scores bypass ADX gate (default: 10.0)")
+
+    parser.add_argument("--v5-temp-scale", action="store_true", default=False,
+                        help="v5.0.9+: enable post-training temperature scaling calibration")
+
+    parser.add_argument("--v5-promote-metric", type=str, default="expectancy",
+                        choices=["expectancy", "pf", "val_loss"],
+                        help="v5.0.9+: metric for checkpoint promotion (default: expectancy)")
+
+    parser.add_argument("--v5-staged-training", action="store_true", default=False,
+                        help="v5.0.9+: enable staged training schedule (3 phases)")
+
     parser.add_argument("--v5-walk-forward", action="store_true", default=False,
                         help="v5: run walk-forward analysis with rolling train/test windows")
     parser.add_argument("--v5-wf-train-months", type=int, default=12,
@@ -5559,6 +5578,13 @@ Examples:
                     conviction_tier_high_mult=args.v5_conviction_high_mult,
                     conviction_confidence_threshold=args.v5_conviction_conf_thresh,
                     conviction_confidence_boost=args.v5_conviction_conf_boost,
+                    adx_gate=args.v5_adx_gate,
+                    adx_period=args.v5_adx_period,
+                    adx_min=args.v5_adx_min,
+                    adx_exception_top_pct=args.v5_adx_exception_top_pct,
+                    temp_scale=args.v5_temp_scale,
+                    promote_metric=args.v5_promote_metric,
+                    stage_a_epochs=10 if args.v5_staged_training else 0,
                 )
                 return
 
@@ -5635,6 +5661,13 @@ Examples:
                 conviction_tier_high_mult=args.v5_conviction_high_mult,
                 conviction_confidence_threshold=args.v5_conviction_conf_thresh,
                 conviction_confidence_boost=args.v5_conviction_conf_boost,
+                adx_gate=args.v5_adx_gate,
+                adx_period=args.v5_adx_period,
+                adx_min=args.v5_adx_min,
+                adx_exception_top_pct=args.v5_adx_exception_top_pct,
+                temp_scale=args.v5_temp_scale,
+                promote_metric=args.v5_promote_metric,
+                stage_a_epochs=10 if args.v5_staged_training else 0,
             )
 
             log.info("=" * 60)

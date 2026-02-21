@@ -1,0 +1,76 @@
+You are my Replit Agent working on the v5 trading ML system in this repo. Goal: increase REAL edge (robust out-of-sample expectancy/PF) and eliminate catastrophic months (-9R to -11R) without forcing trade frequency.
+
+IMPORTANT CONTEXT FROM LOGS:
+- Some windows show PF ~1.5 and +5R to +7R, but other windows show PF < 1 and maxDD -9R to -11R even with reasonable thresholds.
+- When threshold collapses (0.03 or negative), performance breaks badly. Add hard floors.
+- ECE calibration is consistently high (~0.45-0.55), so confidence boosts/sizing using p_dir is unreliable.
+- Early epochs sometimes show strong PF, but later epochs degrade (suggests training objective mismatch and gradient conflict).
+
+TASKS (implement + validate):
+
+1) Promotion/Early-stopping based on TRADING METRICS (not val_loss)
+   - In train_v5_model and walk-forward: make "best checkpoint" be determined by:
+     primary: validation expectancy (R/trade) over tpd_ctrl selection
+     secondary: PF
+     tie-break: maxDD (lower is better)
+   - Keep writing best_v5_expectancy.pt as now, but ensure walk-forward uses it by default.
+   - Add a flag: --v5-promote-metric {expectancy,pf,val_loss} (default expectancy)
+   - Output per-epoch summary: epoch, expect, PF, maxDD, trades/day, threshold.
+
+2) Hard participation control (prevent forced bad trades)
+   - Enforce a HARD minimum threshold floor always:
+     use --v5-min-threshold if provided, otherwise default to 0.10
+   - If TPD controller wants to loosen below floor, clamp at floor and allow trades/day to fall.
+   - Also prevent negative thresholds in any mode.
+   - Add logging: "TPD floor clamp engaged" with attempted threshold and final threshold.
+
+3) Regime robustness gating (remove chop/transition months)
+   - Implement an additional trade gate in inference/backtest:
+     a) EMA200 slope gate (already exists): ensure it applies in forward test and training eval consistently.
+     b) Add ADX-based chop filter (lightweight): compute ADX(14) on 15m (or proxy if ADX not available).
+        - If ADX < 18 (configurable), block trades (both sides) unless score is in top percentile (e.g. top 10%).
+   - Add flags:
+     --v5-adx-gate
+     --v5-adx-period 14
+     --v5-adx-min 18
+     --v5-adx-exception-top-pct 10
+   - Report gating stats per forward window: #blocked_by_ema200, #blocked_by_adx, #blocked_by_caps.
+
+4) Fix calibration used for gating/sizing (ECE reduction)
+   - Implement temperature scaling on validation set for p_dir and p_trade (post-training).
+   - Save temperature(s) in checkpoint metadata and apply in forward test / live.
+   - Add flag: --v5-temp-scale (default ON when --v5-enable-calib is ON)
+   - Output ECE before/after scaling.
+
+5) Reduce gradient conflict via staged training (optional but high value)
+   - Add 2-stage training schedule:
+     Stage A (first N epochs, e.g. 30): emphasize direction/regime:
+       increase v5_w_action, v5_w_regime; reduce regression weights (ret/mfe/mae)
+     Stage B (remaining): restore balanced weights
+   - Add flags:
+     --v5-stage-a-epochs 30
+     --v5-stage-a-w-action-mult 2.0
+     --v5-stage-a-w-regime-mult 1.5
+     --v5-stage-a-w-reg-mult 0.5
+   - Log when stage transitions happen.
+
+VALIDATION REQUIRED:
+- Run walk-forward 12/1 for BTCUSDT,ETHUSDT,SOLUSDT (15m) with forward-test frozen decision.
+- Produce a single aggregated report:
+  - avg PF, avg expectancy, worst PF window, worst totalR window, maxDD worst window
+  - trades/day distribution
+  - how often threshold clamp engaged
+  - regime gate block counts
+  - ECE before/after temp scaling
+- Ensure no window shows threshold < 0.10, and catastrophic maxDD improves materially.
+
+DELIVERABLES:
+- Code changes + updated replit.md usage examples.
+- One recommended “high-edge stable” CLI command and one “higher R/month controlled” CLI command.
+- All unit tests must pass.
+
+Start by locating where:
+- thresholds are adjusted (TPD controller)
+- forward-test uses best checkpoint
+- calibration metrics computed
+Then implement tasks in the order 2 -> 1 -> 4 -> 3 -> 5 (safety first).

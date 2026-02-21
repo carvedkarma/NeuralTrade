@@ -42,6 +42,59 @@ def _compute_ema(close_arr, period=200):
     return ema
 
 
+def _compute_adx(high, low, close, period=14):
+    """Compute ADX indicator. Returns array same length as input (NaN-filled for warmup).
+
+    Uses Wilder's smoothing method (EMA with alpha=1/period).
+    """
+    n = len(close)
+    adx = np.full(n, np.nan)
+    if n < period * 3:
+        return adx
+
+    tr = np.zeros(n)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+
+    for i in range(1, n):
+        hl = high[i] - low[i]
+        hpc = abs(high[i] - close[i - 1])
+        lpc = abs(low[i] - close[i - 1])
+        tr[i] = max(hl, hpc, lpc)
+
+        up = high[i] - high[i - 1]
+        down = low[i - 1] - low[i]
+        plus_dm[i] = up if (up > down and up > 0) else 0.0
+        minus_dm[i] = down if (down > up and down > 0) else 0.0
+
+    alpha = 1.0 / period
+    atr = np.zeros(n)
+    plus_di_smooth = np.zeros(n)
+    minus_di_smooth = np.zeros(n)
+
+    atr[period] = np.mean(tr[1:period + 1])
+    plus_di_smooth[period] = np.mean(plus_dm[1:period + 1])
+    minus_di_smooth[period] = np.mean(minus_dm[1:period + 1])
+
+    for i in range(period + 1, n):
+        atr[i] = atr[i - 1] * (1 - alpha) + tr[i] * alpha
+        plus_di_smooth[i] = plus_di_smooth[i - 1] * (1 - alpha) + plus_dm[i] * alpha
+        minus_di_smooth[i] = minus_di_smooth[i - 1] * (1 - alpha) + minus_dm[i] * alpha
+
+    plus_di = np.where(atr > 0, 100 * plus_di_smooth / atr, 0)
+    minus_di = np.where(atr > 0, 100 * minus_di_smooth / atr, 0)
+    di_sum = plus_di + minus_di
+    dx = np.where(di_sum > 0, 100 * np.abs(plus_di - minus_di) / di_sum, 0)
+
+    adx_start = period * 2
+    if adx_start < n:
+        adx[adx_start] = np.mean(dx[period:adx_start + 1])
+        for i in range(adx_start + 1, n):
+            adx[i] = adx[i - 1] * (1 - alpha) + dx[i] * alpha
+
+    return adx
+
+
 @dataclass
 class V5ForwardTestConfig:
     """Config for frozen decision layer in forward test."""
@@ -89,6 +142,11 @@ class V5ForwardTestConfig:
     conviction_tier_high_mult: float = 1.5
     conviction_confidence_threshold: float = 0.65
     conviction_confidence_boost: float = 1.3
+    temperature: float = 1.0
+    adx_gate: bool = False
+    adx_period: int = 14
+    adx_min: float = 18.0
+    adx_exception_top_pct: float = 10.0
 
 
 def _parse_date_to_ms(date_str: str) -> int:
@@ -157,6 +215,7 @@ class V5TPDControllerConfig:
     mae_cap: float = 2.0
     side_mode: str = 'action_head'
     rr_weight: float = 0.0
+    min_threshold_floor: float = 0.10
 
 
 class V5Dataset(Dataset):
@@ -285,7 +344,7 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
     return total, losses
 
 
-def _extract_v5_arrays(concat_outputs):
+def _extract_v5_arrays(concat_outputs, temperature=1.0):
     """Extract numpy arrays from concatenated model outputs for scoring/gating."""
     mu_R = concat_outputs['ret_mu'].numpy().squeeze(-1)
     mae_pred = concat_outputs['mae'].numpy().squeeze(-1)
@@ -298,7 +357,8 @@ def _extract_v5_arrays(concat_outputs):
     elif 'ret_log_sigma' in concat_outputs:
         sigma = np.exp(concat_outputs['ret_log_sigma'].numpy().squeeze(-1))
 
-    action_probs = np.exp(action_logits - np.max(action_logits, axis=1, keepdims=True))
+    scaled_logits = action_logits / max(temperature, 0.1)
+    action_probs = np.exp(scaled_logits - np.max(scaled_logits, axis=1, keepdims=True))
     action_probs = action_probs / (action_probs.sum(axis=1, keepdims=True) + 1e-8)
     p_hold = action_probs[:, 0]
     p_long = action_probs[:, 1]
@@ -467,6 +527,69 @@ def compute_v5_calibration(p_trade, realized_r, n_bins=10):
     log.info("[V5_CALIB] ece=%.4f %s", ece, bin_str)
 
     return ece, bin_details
+
+
+def fit_temperature_scaling(logits, labels, n_classes=3, lr=0.01, max_iter=200):
+    """Fit temperature scaling on validation action logits.
+
+    Args:
+        logits: numpy array of shape (N, n_classes) - raw action logits
+        labels: numpy array of shape (N,) - true action labels
+        n_classes: number of classes
+        lr: learning rate for optimization
+        max_iter: maximum iterations
+
+    Returns:
+        temperature: float, optimal temperature
+        ece_before: float, ECE before scaling
+        ece_after: float, ECE after scaling
+    """
+    logits_t = torch.tensor(logits, dtype=torch.float32)
+    labels_t = torch.tensor(labels, dtype=torch.long)
+
+    probs_before = torch.softmax(logits_t, dim=-1).numpy()
+    preds_before = np.argmax(probs_before, axis=-1)
+    confs_before = np.max(probs_before, axis=-1)
+    correct_before = (preds_before == labels).astype(float)
+    n_bins = 10
+    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+    ece_before = 0.0
+    for b in range(n_bins):
+        lo, hi = bin_edges[b], bin_edges[b + 1]
+        in_bin = (confs_before >= lo) & (confs_before < hi) if b < n_bins - 1 else (confs_before >= lo) & (confs_before <= hi)
+        n_bin = int(np.sum(in_bin))
+        if n_bin == 0:
+            continue
+        ece_before += (n_bin / len(confs_before)) * abs(np.mean(confs_before[in_bin]) - np.mean(correct_before[in_bin]))
+
+    temperature = torch.nn.Parameter(torch.ones(1))
+    optimizer = torch.optim.LBFGS([temperature], lr=lr, max_iter=max_iter)
+
+    def closure():
+        optimizer.zero_grad()
+        scaled = logits_t / temperature.clamp(min=0.1)
+        loss = F.cross_entropy(scaled, labels_t)
+        loss.backward()
+        return loss
+
+    optimizer.step(closure)
+    temp_val = float(temperature.clamp(min=0.1).item())
+
+    probs_after = torch.softmax(logits_t / temp_val, dim=-1).numpy()
+    preds_after = np.argmax(probs_after, axis=-1)
+    confs_after = np.max(probs_after, axis=-1)
+    correct_after = (preds_after == labels).astype(float)
+    ece_after = 0.0
+    for b in range(n_bins):
+        lo, hi = bin_edges[b], bin_edges[b + 1]
+        in_bin = (confs_after >= lo) & (confs_after < hi) if b < n_bins - 1 else (confs_after >= lo) & (confs_after <= hi)
+        n_bin = int(np.sum(in_bin))
+        if n_bin == 0:
+            continue
+        ece_after += (n_bin / len(confs_after)) * abs(np.mean(confs_after[in_bin]) - np.mean(correct_after[in_bin]))
+
+    log.info(f"[V5_TEMP_SCALE] temperature={temp_val:.4f} ECE: before={ece_before:.4f} → after={ece_after:.4f}")
+    return temp_val, ece_before, ece_after
 
 
 def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
@@ -660,13 +783,19 @@ def _tpd_controller_step(scores, quality_mask, candidate_mask,
             action = "DOWN"
         new_threshold = float(np.clip(new_threshold, sp5, sp99))
 
+    floor = tpd_cfg.min_threshold_floor
+    if new_threshold < floor:
+        log.info("[V5_TPD_CTRL] TPD floor clamp engaged: attempted=%.4f floor=%.4f → clamped",
+                 new_threshold, floor)
+        new_threshold = floor
+
     log.info("[V5_TPD_CTRL] epoch=%d tpd=%.1f target=%.1f±%.1f thr=%.4f->%.4f "
              "step_mult=%.2f score_std=%.4f action=%s trades=%d eligible=%d "
-             "clamp=[%.4f,%.4f]",
+             "clamp=[%.4f,%.4f] floor=%.4f",
              epoch, tpd, target_tpd, tol,
              current_threshold, new_threshold,
              tpd_cfg.thr_step_mult, score_std, action, n_trades,
-             len(eligible_finite), sp5, sp99)
+             len(eligible_finite), sp5, sp99, floor)
 
     return new_threshold, n_trades, tpd, action
 
@@ -871,12 +1000,19 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
             except ValueError:
                 pass
 
+        equity = np.cumsum(t_r_valid)
+        running_max = np.maximum.accumulate(equity)
+        drawdowns = equity - running_max
+        max_dd = float(np.min(drawdowns)) if len(drawdowns) > 0 else 0.0
+        total_r = float(np.sum(t_r_valid))
+
         m = {
             'label': label, 'pct': pct_val, 'trades': n_trades,
             'expect': expect, 'winrate': winrate, 'sharpe': sharpe, 'pf': pf,
             'avg_win_r': avg_win, 'avg_loss_r': avg_loss, 'median_r': median_r,
             'pct_tp': pct_tp, 'pct_sl': pct_sl, 'pct_exp': pct_exp,
             'trades_per_day': tpd, 'threshold': thr,
+            'max_dd': max_dd, 'total_r': total_r,
         }
         sweep_results.append(m)
 
@@ -946,7 +1082,13 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                  m['pct_tp']*100, m['pct_sl']*100, m['pct_exp']*100, m['trades_per_day'], marker)
     log.info("-" * 120)
 
-    return sweep_results, best_label, best_score_val, best_pct
+    best_row = next((m for m in sweep_results if m['label'] == best_label), None)
+    best_pf = best_row['pf'] if best_row else 0.0
+    best_max_dd = best_row['max_dd'] if best_row else 0.0
+    best_tpd = best_row['trades_per_day'] if best_row else 0.0
+    best_threshold = best_row['threshold'] if best_row else 0.0
+
+    return sweep_results, best_label, best_score_val, best_pct, best_pf, best_max_dd, best_tpd, best_threshold
 
 
 def run_v5_forward_test(
@@ -958,6 +1100,7 @@ def run_v5_forward_test(
     test_timestamps=None,
     r_long=None, r_short=None, out_long=None, out_short=None,
     close_prices=None, ema200_regime_gate=False,
+    high_prices=None, low_prices=None,
 ):
     """Run forward test with completely frozen decision layer.
 
@@ -1003,7 +1146,9 @@ def run_v5_forward_test(
         if all_outputs[k]:
             concat_outputs[k] = torch.cat(all_outputs[k], dim=0)
 
-    arrays = _extract_v5_arrays(concat_outputs)
+    arrays = _extract_v5_arrays(concat_outputs, temperature=config.temperature)
+    if config.temperature != 1.0:
+        log.info(f"[V5_FWD] Applied temperature={config.temperature:.4f} to action logits")
 
     qg_cfg = config.quality_gate_cfg or V5QualityGateConfig()
     quality_mask, qual_diag = v5_quality_mask(arrays, qg_cfg, epoch=999)
@@ -1033,9 +1178,10 @@ def run_v5_forward_test(
              f"(if >95%% one-sided, this is MODEL BIAS not a bug)")
     log.info(f"[V5_FWD] Quality gate: {qual_diag.get('passed_pct', 0):.1f}% pass "
              f"({qual_diag.get('final', 0)}/{qual_diag.get('total', 0)})")
-    effective_threshold = max(0.0, config.score_threshold)
-    if config.score_threshold < 0.0:
-        log.info(f"[V5_FWD] Hard floor: negative threshold {config.score_threshold:.4f} clamped to 0.0")
+    hard_floor = config.min_threshold if config.min_threshold is not None else 0.10
+    effective_threshold = max(hard_floor, config.score_threshold)
+    if config.score_threshold < hard_floor:
+        log.info(f"[V5_FWD] Hard floor engaged: threshold {config.score_threshold:.4f} < floor {hard_floor:.4f} → clamped to {effective_threshold:.4f}")
     pct_floor = None
     if config.min_threshold_pct is not None:
         pct_scores = scores.copy()
@@ -1207,6 +1353,30 @@ def run_v5_forward_test(
 
     use_side_conditional_for_cap = (r_long is not None and r_short is not None)
 
+    adx_values = None
+    adx_blocked = 0
+    if config.adx_gate and high_prices is not None and low_prices is not None and close_prices is not None:
+        adx_values = _compute_adx(high_prices, low_prices, close_prices, period=config.adx_period)
+        valid_adx = adx_values[~np.isnan(adx_values)]
+        if len(valid_adx) > 0:
+            log.info(f"[V5_FWD] ADX gate ENABLED: min={config.adx_min:.1f} period={config.adx_period} "
+                     f"exception_top_pct={config.adx_exception_top_pct:.1f}% "
+                     f"ADX stats: mean={np.mean(valid_adx):.1f} p25={np.percentile(valid_adx, 25):.1f} "
+                     f"p50={np.percentile(valid_adx, 50):.1f} p75={np.percentile(valid_adx, 75):.1f}")
+        else:
+            log.warning("[V5_FWD] ADX gate enabled but no valid ADX values computed")
+            adx_values = None
+    elif config.adx_gate:
+        log.warning("[V5_FWD] ADX gate enabled but high/low/close prices not available — gate INACTIVE")
+
+    adx_exception_threshold = None
+    if adx_values is not None and config.adx_exception_top_pct > 0:
+        finite_scores_for_pct = scores_work[np.isfinite(scores_work)]
+        if len(finite_scores_for_pct) > 0:
+            adx_exception_threshold = float(np.percentile(finite_scores_for_pct, 100 - config.adx_exception_top_pct))
+            log.info(f"[V5_FWD] ADX exception: top {config.adx_exception_top_pct}% scores "
+                     f"(threshold={adx_exception_threshold:.4f}) bypass ADX gate")
+
     ema200_for_regime = None
     atr_for_regime = None
     if regime_scaler is not None and close_prices is not None:
@@ -1223,6 +1393,13 @@ def run_v5_forward_test(
             continue
         if idx - last_bar < config.cooldown:
             continue
+
+        if adx_values is not None:
+            adx_val = adx_values[idx]
+            is_exception = (adx_exception_threshold is not None and scores_work[idx] >= adx_exception_threshold)
+            if np.isnan(adx_val) or (adx_val < config.adx_min and not is_exception):
+                adx_blocked += 1
+                continue
 
         expired = [k for k, v in open_positions.items() if v['expiry'] <= idx]
         for k in expired:
@@ -1389,6 +1566,8 @@ def run_v5_forward_test(
         log.info(f"[V5_GATE] Trailing equity stop blocked {equity_blocked} trades")
     if tpd_blocked > 0:
         log.info(f"[V5_GATE] Max trades/day cap blocked {tpd_blocked} trades")
+    if adx_blocked > 0:
+        log.info(f"[V5_GATE] ADX regime gate blocked {adx_blocked} trades (min={config.adx_min:.1f})")
 
     n_eligible = len(sel_indices)
     n_hold_all = int(np.sum(sides[sel_indices] == 0)) if len(sel_indices) > 0 else 0
@@ -1769,6 +1948,8 @@ def run_v5_walk_forward(
     conviction_sizing=False, conviction_tier_top_pct=5.0, conviction_tier_top_mult=2.5,
     conviction_tier_high_pct=20.0, conviction_tier_high_mult=1.5,
     conviction_confidence_threshold=0.65, conviction_confidence_boost=1.3,
+    adx_gate=False, adx_period=14, adx_min=18.0, adx_exception_top_pct=10.0,
+    temp_scale=False, promote_metric='expectancy', stage_a_epochs=0,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -1891,6 +2072,13 @@ def run_v5_walk_forward(
             conviction_tier_high_mult=conviction_tier_high_mult,
             conviction_confidence_threshold=conviction_confidence_threshold,
             conviction_confidence_boost=conviction_confidence_boost,
+            adx_gate=adx_gate,
+            adx_period=adx_period,
+            adx_min=adx_min,
+            adx_exception_top_pct=adx_exception_top_pct,
+            temp_scale=temp_scale,
+            promote_metric=promote_metric,
+            stage_a_epochs=stage_a_epochs,
             fold_id=fold['fold'],
         )
 
@@ -2001,6 +2189,10 @@ def train_v5_model(
     conviction_sizing=False, conviction_tier_top_pct=5.0, conviction_tier_top_mult=2.5,
     conviction_tier_high_pct=20.0, conviction_tier_high_mult=1.5,
     conviction_confidence_threshold=0.65, conviction_confidence_boost=1.3,
+    promote_metric='expectancy',
+    adx_gate=False, adx_period=14, adx_min=18.0, adx_exception_top_pct=10.0,
+    temp_scale=False,
+    stage_a_epochs=0, stage_a_w_action_mult=2.0, stage_a_w_regime_mult=1.5, stage_a_w_reg_mult=0.5,
     fold_id=0,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
@@ -2098,6 +2290,8 @@ def train_v5_model(
     val_barrier_soft_list = []
     val_timestamps_list = []
     val_close_list = []
+    val_high_list = []
+    val_low_list = []
 
     features_df_columns = None
 
@@ -2250,6 +2444,8 @@ def train_v5_model(
         val_barrier_soft_list.append(barrier_soft[test_idx])
         val_timestamps_list.append(sym_df['timestamp'].values[test_idx])
         val_close_list.append(sym_df['close'].values[test_idx])
+        val_high_list.append(sym_df['high'].values[test_idx])
+        val_low_list.append(sym_df['low'].values[test_idx])
 
     train_feat = np.concatenate(train_features, axis=0)
     val_feat = np.concatenate(val_features, axis=0)
@@ -2294,6 +2490,8 @@ def train_v5_model(
     val_barrier_soft = np.concatenate(val_barrier_soft_list, axis=0)
     val_timestamps_arr = np.concatenate(val_timestamps_list, axis=0)
     val_close_arr = np.concatenate(val_close_list, axis=0)
+    val_high_arr = np.concatenate(val_high_list, axis=0)
+    val_low_arr = np.concatenate(val_low_list, axis=0)
 
     for label, arr, vmask in [
         ('train_ret_R', train_ret_R, train_valid),
@@ -2405,9 +2603,14 @@ def train_v5_model(
     best_val_loss = float('inf')
     best_expectancy = float('-inf')
     best_expectancy_pct = 0.0
+    best_promote_pf = float('-inf')
+    best_promote_max_dd = 0.0
     best_sweep_row = None
     patience = 0
     max_patience = 25
+    promote_patience = 0
+    max_promote_patience = 25
+    log.info(f"[V5_CONFIG] promote_metric={promote_metric}")
 
     val_cand_mask = val_cand_mask_arr
     val_outcomes = val_outcomes_arr
@@ -2455,14 +2658,35 @@ def train_v5_model(
                 'thr_warmup_epochs': tpd_ctrl_cfg.thr_warmup_epochs,
                 'thr_step_mult': tpd_ctrl_cfg.thr_step_mult,
                 'mae_cap': tpd_ctrl_cfg.mae_cap,
+                'min_threshold_floor': tpd_ctrl_cfg.min_threshold_floor,
             },
         },
     }
+
+    if stage_a_epochs > 0:
+        log.info(f"[V5_STAGED] 3-phase training enabled: "
+                 f"Phase A (epochs 1-{stage_a_epochs}): w_action×{stage_a_w_action_mult}, "
+                 f"w_regime×{stage_a_w_regime_mult}, w_reg×{stage_a_w_reg_mult} | "
+                 f"Phase B (epochs {stage_a_epochs+1}-{epochs}): normal weights")
 
     for epoch in range(1, epochs + 1):
         use_candidates_this_epoch = candidate_config.enabled and epoch > cand_warmup_epochs
         if candidate_config.enabled and epoch == cand_warmup_epochs + 1:
             log.info(f"[V5] Candidate warmup complete (epoch {epoch}), enabling candidate mask for sweep")
+
+        in_stage_a = stage_a_epochs > 0 and epoch <= stage_a_epochs
+        epoch_w_action = w_action * stage_a_w_action_mult if in_stage_a else w_action
+        epoch_w_regime = w_regime * stage_a_w_regime_mult if in_stage_a else w_regime
+        epoch_w_ret = w_ret * stage_a_w_reg_mult if in_stage_a else w_ret
+        epoch_w_mfe = w_mfe * stage_a_w_reg_mult if in_stage_a else w_mfe
+        epoch_w_mae = w_mae * stage_a_w_reg_mult if in_stage_a else w_mae
+
+        if in_stage_a and epoch == 1:
+            log.info(f"[V5_STAGED] Phase A active: w_action={epoch_w_action:.2f} "
+                     f"w_regime={epoch_w_regime:.2f} w_ret={epoch_w_ret:.2f}")
+        if stage_a_epochs > 0 and epoch == stage_a_epochs + 1:
+            log.info(f"[V5_STAGED] Phase B starts: normal weights restored "
+                     f"w_action={w_action:.2f} w_regime={w_regime:.2f} w_ret={w_ret:.2f}")
 
         model.train()
         train_losses = []
@@ -2480,8 +2704,8 @@ def train_v5_model(
             outputs = model(feat, symbol_ids=sym_id)
             loss, ld = compute_v5_loss(
                 outputs, batch_gpu,
-                w_ret=w_ret, w_mfe=w_mfe, w_mae=w_mae,
-                w_action=w_action, w_barrier=w_barrier, w_regime=w_regime,
+                w_ret=epoch_w_ret, w_mfe=epoch_w_mfe, w_mae=epoch_w_mae,
+                w_action=epoch_w_action, w_barrier=w_barrier, w_regime=epoch_w_regime,
                 barrier_mode=barrier_mode,
                 action_weights=action_weights_tensor,
                 epoch=epoch,
@@ -2599,7 +2823,8 @@ def train_v5_model(
                 tpd_ctrl_cfg,
             )
 
-            sweep_results, sweep_label, sweep_expect, sweep_pct = _run_v5_sweep(
+            (sweep_results, sweep_label, sweep_expect, sweep_pct,
+             sweep_pf, sweep_max_dd, sweep_tpd, sweep_threshold) = _run_v5_sweep(
                 scores, sides, val_outcomes, val_realized_r,
                 val_bars, epoch, tp_mult, sl_mult,
                 target_tpd=target_tpd, target_tpd_tol=target_tpd_tol,
@@ -2617,6 +2842,10 @@ def train_v5_model(
                 weekly_loss_cap=weekly_loss_cap,
             )
 
+            log.info(f"[V5_EPOCH_TRADING] epoch={epoch:03d} | expect={sweep_expect:+.4f} PF={sweep_pf:.2f} "
+                     f"maxDD={sweep_max_dd:.2f} T/day={sweep_tpd:.1f} thr={sweep_threshold:.4f} "
+                     f"best_at={sweep_label}")
+
             if quality_gate_cfg.enable_calib:
                 val_p_trade = arrays['p_trade'][:len(val_realized_r)]
                 compute_v5_calibration(val_p_trade, val_realized_r)
@@ -2624,9 +2853,19 @@ def train_v5_model(
             ckpt_v5_config = ckpt_train_config['v5_config']
             ckpt_v5_config['tpd_controller']['current_threshold'] = current_score_threshold
 
-            if sweep_expect > best_expectancy:
+            promote_better = False
+            if promote_metric == 'expectancy':
+                promote_better = sweep_expect > best_expectancy
+            elif promote_metric == 'pf':
+                promote_better = sweep_pf > best_promote_pf
+            else:
+                promote_better = avg_val_loss < best_val_loss
+
+            if promote_better and sweep_expect > -999:
                 best_expectancy = sweep_expect
                 best_expectancy_pct = sweep_pct
+                best_promote_pf = sweep_pf
+                best_promote_max_dd = sweep_max_dd
                 best_sweep_row = next(
                     (m for m in sweep_results if m['label'] == sweep_label), None
                 )
@@ -2647,9 +2886,13 @@ def train_v5_model(
                     },
                     'best_expectancy': best_expectancy,
                     'best_expectancy_pct': best_expectancy_pct,
+                    'best_pf': best_promote_pf,
+                    'best_max_dd': best_promote_max_dd,
+                    'promote_metric': promote_metric,
                     'trained_at': datetime.now().isoformat(),
                 }, checkpoint_dir / "best_v5_expectancy.pt")
-                log.info(f"[V5_CKPT] New best expectancy={best_expectancy:.4f} at {sweep_label}")
+                log.info(f"[V5_CKPT] New best ({promote_metric}): expect={best_expectancy:.4f} "
+                         f"PF={best_promote_pf:.2f} maxDD={best_promote_max_dd:.2f} at {sweep_label}")
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
@@ -2669,14 +2912,54 @@ def train_v5_model(
             log.info(f"[V5_CKPT] New best val_loss={best_val_loss:.4f}")
         else:
             patience += 1
+
+        if promote_metric == 'val_loss':
             if patience >= max_patience:
-                log.info(f"[V5] Early stopping at epoch {epoch} (patience={max_patience})")
+                log.info(f"[V5] Early stopping at epoch {epoch} (val_loss patience={max_patience})")
+                break
+        else:
+            if do_sweep and not promote_better:
+                promote_patience += 1
+            elif do_sweep and promote_better:
+                promote_patience = 0
+            if promote_patience >= max_promote_patience:
+                log.info(f"[V5] Early stopping at epoch {epoch} ({promote_metric} patience={max_promote_patience})")
                 break
 
     log.info("=" * 60)
     log.info(f"[V5] Training complete. Best expectancy={best_expectancy:.4f} best_loss={best_val_loss:.4f}")
     log.info(f"[V5] Final score_threshold={current_score_threshold}")
     log.info("=" * 60)
+
+    fitted_temperature = 1.0
+    if temp_scale:
+        log.info("[V5_TEMP_SCALE] Fitting temperature scaling on validation set...")
+        best_ckpt_for_temp = checkpoint_dir / "best_v5_expectancy.pt"
+        if not best_ckpt_for_temp.exists():
+            best_ckpt_for_temp = checkpoint_dir / "best_v5_loss.pt"
+        if best_ckpt_for_temp.exists():
+            temp_ckpt = torch.load(best_ckpt_for_temp, map_location=device, weights_only=False)
+            model.load_state_dict(temp_ckpt['model_state_dict'])
+            model.eval()
+            all_logits = []
+            with torch.no_grad():
+                for batch in val_loader:
+                    feat = batch['features'].to(device)
+                    sym_id = batch.get('symbol_id')
+                    if sym_id is not None:
+                        sym_id = sym_id.to(device)
+                    outputs = model(feat, symbol_ids=sym_id)
+                    all_logits.append(outputs['action_logits'].cpu())
+            logits_cat = torch.cat(all_logits, dim=0).numpy()
+            n_valid = min(len(logits_cat), len(val_action_arr))
+            fitted_temperature, ece_before, ece_after = fit_temperature_scaling(
+                logits_cat[:n_valid], val_action_arr[:n_valid]
+            )
+            temp_ckpt['temperature'] = fitted_temperature
+            temp_ckpt['ece_before_temp'] = ece_before
+            temp_ckpt['ece_after_temp'] = ece_after
+            torch.save(temp_ckpt, best_ckpt_for_temp)
+            log.info(f"[V5_TEMP_SCALE] Saved temperature={fitted_temperature:.4f} to checkpoint")
 
     fwd_report = None
 
@@ -2702,10 +2985,15 @@ def train_v5_model(
                 if 'current_threshold' in tpd_c and tpd_c['current_threshold'] is not None:
                     ckpt_threshold = tpd_c['current_threshold']
             if ckpt_threshold is None:
-                ckpt_threshold = 0.0
-            if ckpt_threshold < 0.0:
-                log.info(f"[V5_FWD] Clamping negative calibrated threshold {ckpt_threshold:.4f} → 0.0")
-                ckpt_threshold = 0.0
+                ckpt_threshold = 0.10
+            ckpt_floor = min_threshold if min_threshold is not None else 0.10
+            if ckpt_threshold < ckpt_floor:
+                log.info(f"[V5_FWD] Clamping calibrated threshold {ckpt_threshold:.4f} → floor {ckpt_floor:.4f}")
+                ckpt_threshold = ckpt_floor
+
+            ckpt_temperature = ckpt.get('temperature', fitted_temperature)
+            if ckpt_temperature != 1.0:
+                log.info(f"[V5_FWD] Using temperature={ckpt_temperature:.4f} from checkpoint")
 
             fwd_config = V5ForwardTestConfig(
                 score_threshold=ckpt_threshold,
@@ -2752,6 +3040,11 @@ def train_v5_model(
                 conviction_tier_high_mult=conviction_tier_high_mult,
                 conviction_confidence_threshold=conviction_confidence_threshold,
                 conviction_confidence_boost=conviction_confidence_boost,
+                temperature=ckpt_temperature,
+                adx_gate=adx_gate,
+                adx_period=adx_period,
+                adx_min=adx_min,
+                adx_exception_top_pct=adx_exception_top_pct,
             )
 
             fwd_report = run_v5_forward_test(
@@ -2774,6 +3067,8 @@ def train_v5_model(
                 out_short=val_out_short_arr,
                 close_prices=val_close_arr,
                 ema200_regime_gate=ema200_regime_gate,
+                high_prices=val_high_arr,
+                low_prices=val_low_arr,
             )
 
             report_path = checkpoint_dir / "v5_forward_report.json"
