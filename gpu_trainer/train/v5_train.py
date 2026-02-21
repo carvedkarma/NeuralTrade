@@ -1654,6 +1654,31 @@ def run_v5_forward_test(
         trade_timestamps=t_timestamps,
     )
 
+    if test_sym_ids is not None and len(taken_valid) > 0:
+        taken_sym_ids = test_sym_ids[taken_valid]
+        sym_id_map = {i: s for i, s in enumerate(config.symbols_list)} if config.symbols_list else {}
+        if not sym_id_map and sym_id_to_name:
+            sym_id_map = sym_id_to_name
+        per_sym_stats = {}
+        for si_u in np.unique(taken_sym_ids):
+            si_u = int(si_u)
+            sym_name = sym_id_map.get(si_u, f"sym_{si_u}")
+            sym_mask = taken_sym_ids == si_u
+            sym_r = t_r_valid[sym_mask]
+            sym_n = len(sym_r)
+            sym_wr = float(np.sum(sym_r > 0)) / max(sym_n, 1)
+            sym_total_r = float(np.sum(sym_r))
+            sym_expect = float(np.mean(sym_r)) if sym_n > 0 else 0.0
+            per_sym_stats[sym_name] = {
+                'trades': sym_n, 'win_rate': round(sym_wr, 3),
+                'expectancy_r': round(sym_expect, 4), 'total_r': round(sym_total_r, 4),
+            }
+        report['per_symbol_stats'] = per_sym_stats
+        log.info("[V5_FWD] Per-symbol breakdown:")
+        for sn, ss in per_sym_stats.items():
+            log.info(f"  {sn}: {ss['trades']} trades | WR {ss['win_rate']:.1%} | "
+                     f"E[R]={ss['expectancy_r']:+.4f} | Total={ss['total_r']:+.4f}R")
+
     if corr_tracker is not None:
         for k, pos in open_positions.items():
             entry_idx = pos['entry_bar']
@@ -1950,6 +1975,7 @@ def run_v5_walk_forward(
     conviction_confidence_threshold=0.65, conviction_confidence_boost=1.3,
     adx_gate=False, adx_period=14, adx_min=18.0, adx_exception_top_pct=10.0,
     temp_scale=False, promote_metric='expectancy', stage_a_epochs=0,
+    balanced_sampling=True, per_symbol_scaler=False,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -2079,6 +2105,8 @@ def run_v5_walk_forward(
             temp_scale=temp_scale,
             promote_metric=promote_metric,
             stage_a_epochs=stage_a_epochs,
+            balanced_sampling=balanced_sampling,
+            per_symbol_scaler=per_symbol_scaler,
             fold_id=fold['fold'],
         )
 
@@ -2193,6 +2221,7 @@ def train_v5_model(
     adx_gate=False, adx_period=14, adx_min=18.0, adx_exception_top_pct=10.0,
     temp_scale=False,
     stage_a_epochs=0, stage_a_w_action_mult=2.0, stage_a_w_regime_mult=1.5, stage_a_w_reg_mult=0.5,
+    balanced_sampling=True, per_symbol_scaler=False,
     fold_id=0,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
@@ -2241,6 +2270,7 @@ def train_v5_model(
     log.info(f"[V5_CONFIG] cand_warmup_epochs={cand_warmup_epochs}")
     log.info(f"[V5_CONFIG] horizon={horizon} epochs={epochs} batch={batch_size} lr={lr}")
     log.info(f"[V5_CONFIG] ALL targets in R-units (price_change / ATR)")
+    log.info(f"[V5_CONFIG] balanced_sampling={balanced_sampling} per_symbol_scaler={per_symbol_scaler}")
     log.info(f"[V5_QUAL_CONFIG] sigma_max={quality_gate_cfg.sigma_max} mae_max={quality_gate_cfg.mae_max} "
              f"mu_R_min={quality_gate_cfg.mu_R_min} p_trade_min={quality_gate_cfg.p_trade_min} "
              f"enable_calib={quality_gate_cfg.enable_calib}")
@@ -2447,6 +2477,44 @@ def train_v5_model(
         val_high_list.append(sym_df['high'].values[test_idx])
         val_low_list.append(sym_df['low'].values[test_idx])
 
+    per_sym_train_counts = [len(arr) for arr in train_features]
+    per_sym_val_counts = [len(arr) for arr in val_features]
+    for si_log, sym_log in enumerate(symbols):
+        log.info(f"[V5_BALANCE] {sym_log}: train={per_sym_train_counts[si_log]} val={per_sym_val_counts[si_log]}")
+
+    if balanced_sampling and len(symbols) > 1 and len(train_features) > 1:
+        min_train = min(per_sym_train_counts)
+        max_train = max(per_sym_train_counts)
+        if max_train > min_train * 1.05:
+            log.info(f"[V5_BALANCE] Capping per-symbol train samples to min={min_train} "
+                     f"(was max={max_train}, ratio={max_train/min_train:.2f}x)")
+            for i in range(len(train_features)):
+                if len(train_features[i]) > min_train:
+                    train_features[i] = train_features[i][:min_train]
+                    train_ret_R_list[i] = train_ret_R_list[i][:min_train]
+                    train_mfe_R_list[i] = train_mfe_R_list[i][:min_train]
+                    train_mae_R_list[i] = train_mae_R_list[i][:min_train]
+                    train_vol_h_list[i] = train_vol_h_list[i][:min_train]
+                    train_action_list[i] = train_action_list[i][:min_train]
+                    train_valid_list[i] = train_valid_list[i][:min_train]
+                    train_sym_ids_list[i] = train_sym_ids_list[i][:min_train]
+                    train_cand_mask_list[i] = train_cand_mask_list[i][:min_train]
+                    train_outcomes_list[i] = train_outcomes_list[i][:min_train]
+                    train_realized_r_list[i] = train_realized_r_list[i][:min_train]
+                    train_barrier_oracle_list[i] = train_barrier_oracle_list[i][:min_train]
+                    train_barrier_soft_list[i] = train_barrier_soft_list[i][:min_train]
+            balanced_counts = [len(arr) for arr in train_features]
+            log.info(f"[V5_BALANCE] After balancing: {dict(zip(symbols, balanced_counts))}")
+        else:
+            log.info(f"[V5_BALANCE] Symbol sizes within 5% — no capping needed")
+    else:
+        if len(symbols) > 1:
+            log.info(f"[V5_BALANCE] Balanced sampling DISABLED — using all data as-is")
+
+    if per_symbol_scaler:
+        log.warning("[V5_SCALER] --per-symbol-scaler is enabled but NOT YET IMPLEMENTED. "
+                    "Using global scaler. TODO: fit/apply per-symbol scalers.")
+
     train_feat = np.concatenate(train_features, axis=0)
     val_feat = np.concatenate(val_features, axis=0)
 
@@ -2526,6 +2594,12 @@ def train_v5_model(
     input_dim = train_feat.shape[1]
     log.info(f"[V5] Total bars: {total_bars} (train={total_train}, val={total_val}) | "
              f"Features: {input_dim} | Symbols: {len(symbols)}")
+
+    if len(symbols) > 1:
+        for si_log, sym_log in enumerate(symbols):
+            sym_train_n = int(np.sum(train_sym_ids == si_log))
+            sym_val_n = int(np.sum(val_sym_ids_arr == si_log))
+            log.info(f"[V5_SYM_DIST] {sym_log} (id={si_log}): train={sym_train_n} val={sym_val_n}")
 
     valid_train_action = train_action[train_valid]
     n_hold = int(np.sum(valid_train_action == 0))
@@ -2889,6 +2963,7 @@ def train_v5_model(
                     'best_pf': best_promote_pf,
                     'best_max_dd': best_promote_max_dd,
                     'promote_metric': promote_metric,
+                    'symbol_map': {s: i for i, s in enumerate(symbols)},
                     'trained_at': datetime.now().isoformat(),
                 }, checkpoint_dir / "best_v5_expectancy.pt")
                 log.info(f"[V5_CKPT] New best ({promote_metric}): expect={best_expectancy:.4f} "
@@ -2907,6 +2982,7 @@ def train_v5_model(
                 'model_type': 'v5_forecaster',
                 'scaler_center': scaler.center_,
                 'scaler_scale': scaler.scale_,
+                'symbol_map': {s: i for i, s in enumerate(symbols)},
                 'trained_at': datetime.now().isoformat(),
             }, checkpoint_dir / "best_v5_loss.pt")
             log.info(f"[V5_CKPT] New best val_loss={best_val_loss:.4f}")

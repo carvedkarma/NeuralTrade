@@ -4556,7 +4556,7 @@ Examples:
     --target-tpd 2.5 --target-tpd-tol 1.0
 
   # C) Live run using saved best_policy.json (auto-loaded):
-  python quick_start.py --url URL --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT \\
+  python quick_start.py --url URL --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,AVAXUSDT,XRPUSDT,ADAUSDT \\
     --interval 15m --enable-learning
 
   # Other:
@@ -4680,6 +4680,12 @@ Examples:
                         help="Auto-download missing 15m parquet data for all symbols before training")
     parser.add_argument("--allow-partial-data", action="store_true", default=False,
                         help="Allow training on subset of symbols if some data is missing (default: abort)")
+    parser.add_argument("--symbol-balanced-sampling", action="store_true", default=True,
+                        help="Cap per-symbol training samples to smallest symbol's count for balanced training (default: on)")
+    parser.add_argument("--no-symbol-balanced-sampling", action="store_true", default=False,
+                        help="Disable symbol-balanced sampling (allow BTC to dominate training)")
+    parser.add_argument("--per-symbol-scaler", action="store_true", default=False,
+                        help="[TODO] Fit/apply scaler per symbol instead of global (default: off, not yet implemented)")
     parser.add_argument("--loss-warmup-epochs", type=int, default=10,
                         help="Number of warmup epochs using plain BCE before switching to focal/OHEM (default: 10)")
     parser.add_argument("--warmup-pos-weight", type=float, default=2.0,
@@ -4986,8 +4992,8 @@ Examples:
 
     parser.add_argument("--live", action="store_true",
                         help="Run continuous live multi-asset inference loop")
-    parser.add_argument("--symbols", type=str, default="BTCUSDT,ETHUSDT,SOLUSDT",
-                        help="Comma-separated symbols to monitor (default: BTCUSDT,ETHUSDT,SOLUSDT)")
+    parser.add_argument("--symbols", type=str, default="BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,AVAXUSDT,XRPUSDT,ADAUSDT",
+                        help="Comma-separated symbols to monitor (default: BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,AVAXUSDT,XRPUSDT,ADAUSDT)")
     parser.add_argument("--interval", type=str, default="15m",
                         help="Signal timeframe interval (default: 15m)")
     parser.add_argument("--paper", action="store_true", default=False,
@@ -5585,6 +5591,8 @@ Examples:
                     temp_scale=args.v5_temp_scale,
                     promote_metric=args.v5_promote_metric,
                     stage_a_epochs=10 if args.v5_staged_training else 0,
+                    balanced_sampling=args.symbol_balanced_sampling and not args.no_symbol_balanced_sampling,
+                    per_symbol_scaler=args.per_symbol_scaler,
                 )
                 return
 
@@ -5668,6 +5676,8 @@ Examples:
                 temp_scale=args.v5_temp_scale,
                 promote_metric=args.v5_promote_metric,
                 stage_a_epochs=10 if args.v5_staged_training else 0,
+                balanced_sampling=args.symbol_balanced_sampling and not args.no_symbol_balanced_sampling,
+                per_symbol_scaler=args.per_symbol_scaler,
             )
 
             log.info("=" * 60)

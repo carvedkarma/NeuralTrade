@@ -13,7 +13,7 @@ v4.3.0 additions:
   - Enhanced cycle log + trade record payloads
 
 Usage:
-    python quick_start.py --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT
+    python quick_start.py --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,AVAXUSDT,XRPUSDT,ADAUSDT
 """
 
 import sys
