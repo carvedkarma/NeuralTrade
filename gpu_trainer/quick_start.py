@@ -4967,6 +4967,29 @@ Examples:
     parser.add_argument("--v5-ultra-mult", type=float, default=3.0,
                         help="v5.0.9+: size multiplier for ultra trades (default: 3.0)")
 
+    parser.add_argument("--v5-ddt-enable", action="store_true", default=False,
+                        help="v5 DDT: enable Drawdown-Adaptive Throttle (gradually tightens entry & sizing during drawdowns)")
+    parser.add_argument("--v5-ddt-lookback-trades", type=int, default=60,
+                        help="v5 DDT: rolling window of closed trades for throttle (default: 60)")
+    parser.add_argument("--v5-ddt-bad-rollr", type=float, default=6.0,
+                        help="v5 DDT: rolling sum R <= -bad_rollr => max throttle (default: 6.0)")
+    parser.add_argument("--v5-ddt-thr-k", type=float, default=0.60,
+                        help="v5 DDT: threshold multiplier thr_eff = thr_base * (1 + thr_k*throttle) (default: 0.60)")
+    parser.add_argument("--v5-ddt-thr-min", type=float, default=0.08,
+                        help="v5 DDT: minimum effective threshold (default: 0.08)")
+    parser.add_argument("--v5-ddt-thr-max", type=float, default=0.25,
+                        help="v5 DDT: maximum effective threshold hard cap (default: 0.25)")
+    parser.add_argument("--v5-ddt-size-k", type=float, default=0.70,
+                        help="v5 DDT: size dampening size_mult = 1 - size_k*throttle (default: 0.70)")
+    parser.add_argument("--v5-ddt-min-size-mult", type=float, default=0.25,
+                        help="v5 DDT: minimum position size multiplier (default: 0.25)")
+    parser.add_argument("--v5-ddt-alpha-down", type=float, default=0.30,
+                        help="v5 DDT: EMA alpha for tightening (fast) (default: 0.30)")
+    parser.add_argument("--v5-ddt-alpha-up", type=float, default=0.05,
+                        help="v5 DDT: EMA alpha for loosening (slow) (default: 0.05)")
+    parser.add_argument("--v5-ddt-warmup-trades", type=int, default=20,
+                        help="v5 DDT: don't throttle until >= N closed trades (default: 20)")
+
     parser.add_argument("--v5-temp-scale", action="store_true", default=False,
                         help="v5.0.9+: enable post-training temperature scaling calibration")
 
@@ -5618,6 +5641,17 @@ Examples:
                     ultra_dd_max=args.v5_ultra_dd_max,
                     ultra_max_per_day=args.v5_ultra_max_per_day,
                     ultra_mult=args.v5_ultra_mult,
+                    ddt_enable=args.v5_ddt_enable,
+                    ddt_lookback_trades=args.v5_ddt_lookback_trades,
+                    ddt_bad_rollr=args.v5_ddt_bad_rollr,
+                    ddt_thr_k=args.v5_ddt_thr_k,
+                    ddt_thr_min=args.v5_ddt_thr_min,
+                    ddt_thr_max=args.v5_ddt_thr_max,
+                    ddt_size_k=args.v5_ddt_size_k,
+                    ddt_min_size_mult=args.v5_ddt_min_size_mult,
+                    ddt_alpha_down=args.v5_ddt_alpha_down,
+                    ddt_alpha_up=args.v5_ddt_alpha_up,
+                    ddt_warmup_trades=args.v5_ddt_warmup_trades,
                 )
                 return
 
@@ -5711,6 +5745,17 @@ Examples:
                 ultra_dd_max=args.v5_ultra_dd_max,
                 ultra_max_per_day=args.v5_ultra_max_per_day,
                 ultra_mult=args.v5_ultra_mult,
+                ddt_enable=args.v5_ddt_enable,
+                ddt_lookback_trades=args.v5_ddt_lookback_trades,
+                ddt_bad_rollr=args.v5_ddt_bad_rollr,
+                ddt_thr_k=args.v5_ddt_thr_k,
+                ddt_thr_min=args.v5_ddt_thr_min,
+                ddt_thr_max=args.v5_ddt_thr_max,
+                ddt_size_k=args.v5_ddt_size_k,
+                ddt_min_size_mult=args.v5_ddt_min_size_mult,
+                ddt_alpha_down=args.v5_ddt_alpha_down,
+                ddt_alpha_up=args.v5_ddt_alpha_up,
+                ddt_warmup_trades=args.v5_ddt_warmup_trades,
             )
 
             log.info("=" * 60)

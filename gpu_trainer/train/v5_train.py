@@ -155,6 +155,17 @@ class V5ForwardTestConfig:
     ultra_dd_max: float = 0.10
     ultra_max_per_day: int = 1
     ultra_mult: float = 3.0
+    ddt_enable: bool = False
+    ddt_lookback_trades: int = 60
+    ddt_bad_rollr: float = 6.0
+    ddt_thr_k: float = 0.60
+    ddt_thr_min: float = 0.08
+    ddt_thr_max: float = 0.25
+    ddt_size_k: float = 0.70
+    ddt_min_size_mult: float = 0.25
+    ddt_alpha_down: float = 0.30
+    ddt_alpha_up: float = 0.05
+    ddt_warmup_trades: int = 20
 
 
 def _parse_date_to_ms(date_str: str) -> int:
@@ -992,7 +1003,7 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
 
         total_win = np.sum(wins)
         total_loss = abs(np.sum(losses))
-        pf = total_win / max(total_loss, 1e-6)
+        pf = min(total_win / max(total_loss, 1e-6), 999.99)
 
         n_tp = np.sum(t_outcomes[valid_trades] == "TP")
         n_sl = np.sum(t_outcomes[valid_trades] == "SL")
@@ -1239,7 +1250,35 @@ def run_v5_forward_test(
     if test_cand_mask is not None:
         scores_work[~test_cand_mask.astype(bool)] = -np.inf
 
-    selected = scores_work >= effective_threshold
+    ddt = None
+    ddt_base_threshold = effective_threshold
+    if config.ddt_enable:
+        from train.drawdown_throttle import DrawdownAdaptiveThrottle, DDTConfig
+        ddt_cfg = DDTConfig(
+            enabled=True,
+            lookback_trades=config.ddt_lookback_trades,
+            bad_rollr=config.ddt_bad_rollr,
+            thr_k=config.ddt_thr_k,
+            thr_min=config.ddt_thr_min,
+            thr_max=config.ddt_thr_max,
+            size_k=config.ddt_size_k,
+            min_size_mult=config.ddt_min_size_mult,
+            alpha_down=config.ddt_alpha_down,
+            alpha_up=config.ddt_alpha_up,
+            warmup_trades=config.ddt_warmup_trades,
+        )
+        ddt = DrawdownAdaptiveThrottle(ddt_cfg)
+        log.info(f"[V5_DDT] Drawdown-Adaptive Throttle ENABLED: "
+                 f"lookback={config.ddt_lookback_trades} bad_rollr={config.ddt_bad_rollr:.1f} "
+                 f"thr_k={config.ddt_thr_k:.2f} thr_range=[{config.ddt_thr_min:.2f},{config.ddt_thr_max:.2f}] "
+                 f"size_k={config.ddt_size_k:.2f} min_size={config.ddt_min_size_mult:.2f} "
+                 f"alpha_down={config.ddt_alpha_down:.2f} alpha_up={config.ddt_alpha_up:.2f} "
+                 f"warmup={config.ddt_warmup_trades}")
+        ddt_base_threshold = config.ddt_thr_min
+        log.info(f"[V5_DDT] Using relaxed pre-filter threshold={ddt_base_threshold:.4f} "
+                 f"(DDT will dynamically adjust in loop)")
+
+    selected = scores_work >= ddt_base_threshold
     sel_indices = np.where(selected)[0]
 
     ema200 = None
@@ -1372,6 +1411,7 @@ def run_v5_forward_test(
     warmup_blocked = 0
     weekly_blocked = 0
     corr_blocked = 0
+    ddt_blocked = 0
     current_week_r = 0.0
     current_week_id = -1
     week_killed = False
@@ -1509,6 +1549,13 @@ def run_v5_forward_test(
                 continue
             tpd_current_count += 1
 
+        if ddt is not None:
+            ddt_thr = ddt.effective_threshold(effective_threshold)
+            if scores_work[idx] < ddt_thr:
+                ddt_blocked += 1
+                ddt.record_block()
+                continue
+
         taken.append(idx)
         last_bar = idx
 
@@ -1573,6 +1620,10 @@ def run_v5_forward_test(
                 stop_dist_pct = (config.sl_mult * atr_val_here / float(close_prices[idx])) if close_prices is not None and atr_val_here > 0 else 0.01
                 trade_size_mult = ultra_sizer.apply_ultra_sizing(trade_size_mult, stop_dist_pct)
 
+        if ddt is not None:
+            ddt_size = ddt.size_multiplier()
+            trade_size_mult *= ddt_size
+
         size_multipliers[idx] = trade_size_mult
 
         if corr_tracker is not None and test_sym_ids is not None:
@@ -1591,7 +1642,8 @@ def run_v5_forward_test(
                         or daily_tracker is not None
                         or equity_stop is not None
                         or regime_scaler is not None
-                        or ultra_sizer is not None)
+                        or ultra_sizer is not None
+                        or ddt is not None)
         if needs_post_r:
             if use_side_conditional_for_cap:
                 post_trade_r = float(r_long[idx]) if sides[idx] == 1 else float(r_short[idx])
@@ -1622,6 +1674,15 @@ def run_v5_forward_test(
             if ultra_sizer is not None and post_r_valid:
                 ultra_sizer.update_equity(post_trade_r * size_multipliers.get(idx, 1.0))
 
+            if ddt is not None and post_r_valid:
+                sized_r = post_trade_r * size_multipliers.get(idx, 1.0)
+                ddt.update_on_trade_close(sized_r)
+                ddt.log_trade_close(
+                    realized_r=sized_r,
+                    thr_used=ddt.effective_threshold(effective_threshold),
+                    size_mult=ddt.size_multiplier(),
+                )
+
     if ema200 is not None:
         log.info(f"[V5_GATE] EMA200 blocked {ema_blocked} trades")
     if warmup_blocked > 0:
@@ -1638,6 +1699,14 @@ def run_v5_forward_test(
         log.info(f"[V5_GATE] Max trades/day cap blocked {tpd_blocked} trades")
     if adx_blocked > 0:
         log.info(f"[V5_GATE] ADX regime gate blocked {adx_blocked} trades (min={config.adx_min:.1f})")
+    if ddt_blocked > 0:
+        log.info(f"[V5_DDT] Throttle blocked {ddt_blocked} trades")
+    if ddt is not None:
+        ddt_diag = ddt.diagnostics()
+        log.info(f"[V5_DDT] Summary: throttle_now={ddt_diag['throttle_level']:.3f} "
+                 f"rolling_sum_r={ddt_diag['rolling_sum_r']:.2f} "
+                 f"total_trades={ddt_diag['total_trades_seen']} "
+                 f"max_throttle_seen={ddt_diag['max_throttle_seen']:.3f}")
     if ultra_sizer is not None:
         ud = ultra_sizer.get_diagnostics()
         log.info(f"[V5_ULTRA] Summary: applied={ud['ultra_applied']} skipped={ud['ultra_skipped']} "
@@ -1846,7 +1915,7 @@ def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_
     avg_loss = float(np.mean(losses)) if len(losses) > 0 else 0.0
     total_win = float(np.sum(wins))
     total_loss = float(abs(np.sum(losses)))
-    pf = total_win / max(total_loss, 1e-6)
+    pf = min(total_win / max(total_loss, 1e-6), 999.99)
 
     if trade_timestamps is not None and n > 0:
         trade_days = np.array([datetime.utcfromtimestamp(ts / 1000).strftime('%Y-%m-%d')
@@ -1969,6 +2038,8 @@ def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_
         'equity_final_r': float(equity_curve[-1]) if len(equity_curve) > 0 else 0.0,
         'direction_stats': direction_stats,
         'weekly_stats': weekly_stats,
+        'ddt_diagnostics': ddt.diagnostics() if ddt is not None else None,
+        'ddt_blocked': ddt_blocked if ddt is not None else 0,
     }
 
 
@@ -2000,6 +2071,13 @@ def _print_forward_report(report):
     else:
         log.info(f"  %%TP/%%SL/%%EX:    {report['pct_tp']:.0%} / {report['pct_sl']:.0%} / {report['pct_exp']:.0%}")
     log.info(f"  Equity Final:   {report.get('equity_final_r', 0):+.4f} R")
+    ddt_diag = report.get('ddt_diagnostics')
+    if ddt_diag is not None:
+        log.info(f"  DDT Blocked:    {report.get('ddt_blocked', 0)} trades")
+        log.info(f"  DDT Throttle:   {ddt_diag['throttle_level']:.3f} "
+                 f"(peak={ddt_diag['max_throttle_seen']:.3f})")
+        log.info(f"  DDT Roll R:     {ddt_diag['rolling_sum_r']:+.2f} "
+                 f"(lookback={ddt_diag['lookback_trades']})")
     log.info("-" * 80)
     ds = report.get('direction_stats', {})
     if ds:
@@ -2054,6 +2132,10 @@ def run_v5_walk_forward(
     ultra_conviction=False, ultra_risk_cap=0.05, ultra_score_pct=0.95,
     ultra_adx_min=25.0, ultra_edge_min=0.03, ultra_dd_max=0.10,
     ultra_max_per_day=1, ultra_mult=3.0,
+    ddt_enable=False, ddt_lookback_trades=60, ddt_bad_rollr=6.0,
+    ddt_thr_k=0.60, ddt_thr_min=0.08, ddt_thr_max=0.25,
+    ddt_size_k=0.70, ddt_min_size_mult=0.25,
+    ddt_alpha_down=0.30, ddt_alpha_up=0.05, ddt_warmup_trades=20,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -2193,6 +2275,17 @@ def run_v5_walk_forward(
             ultra_dd_max=ultra_dd_max,
             ultra_max_per_day=ultra_max_per_day,
             ultra_mult=ultra_mult,
+            ddt_enable=ddt_enable,
+            ddt_lookback_trades=ddt_lookback_trades,
+            ddt_bad_rollr=ddt_bad_rollr,
+            ddt_thr_k=ddt_thr_k,
+            ddt_thr_min=ddt_thr_min,
+            ddt_thr_max=ddt_thr_max,
+            ddt_size_k=ddt_size_k,
+            ddt_min_size_mult=ddt_min_size_mult,
+            ddt_alpha_down=ddt_alpha_down,
+            ddt_alpha_up=ddt_alpha_up,
+            ddt_warmup_trades=ddt_warmup_trades,
             fold_id=fold['fold'],
         )
 
@@ -2311,6 +2404,10 @@ def train_v5_model(
     ultra_conviction=False, ultra_risk_cap=0.05, ultra_score_pct=0.95,
     ultra_adx_min=25.0, ultra_edge_min=0.03, ultra_dd_max=0.10,
     ultra_max_per_day=1, ultra_mult=3.0,
+    ddt_enable=False, ddt_lookback_trades=60, ddt_bad_rollr=6.0,
+    ddt_thr_k=0.60, ddt_thr_min=0.08, ddt_thr_max=0.25,
+    ddt_size_k=0.70, ddt_min_size_mult=0.25,
+    ddt_alpha_down=0.30, ddt_alpha_up=0.05, ddt_warmup_trades=20,
     fold_id=0,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
@@ -3218,6 +3315,17 @@ def train_v5_model(
                 ultra_dd_max=ultra_dd_max,
                 ultra_max_per_day=ultra_max_per_day,
                 ultra_mult=ultra_mult,
+                ddt_enable=ddt_enable,
+                ddt_lookback_trades=ddt_lookback_trades,
+                ddt_bad_rollr=ddt_bad_rollr,
+                ddt_thr_k=ddt_thr_k,
+                ddt_thr_min=ddt_thr_min,
+                ddt_thr_max=ddt_thr_max,
+                ddt_size_k=ddt_size_k,
+                ddt_min_size_mult=ddt_min_size_mult,
+                ddt_alpha_down=ddt_alpha_down,
+                ddt_alpha_up=ddt_alpha_up,
+                ddt_warmup_trades=ddt_warmup_trades,
             )
 
             fwd_report = run_v5_forward_test(
