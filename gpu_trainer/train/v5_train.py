@@ -147,6 +147,14 @@ class V5ForwardTestConfig:
     adx_period: int = 14
     adx_min: float = 18.0
     adx_exception_top_pct: float = 10.0
+    ultra_conviction: bool = False
+    ultra_risk_cap: float = 0.05
+    ultra_score_pct: float = 0.95
+    ultra_adx_min: float = 25.0
+    ultra_edge_min: float = 0.03
+    ultra_dd_max: float = 0.10
+    ultra_max_per_day: int = 1
+    ultra_mult: float = 3.0
 
 
 def _parse_date_to_ms(date_str: str) -> int:
@@ -1311,6 +1319,25 @@ def run_v5_forward_test(
                  f"{config.conviction_tier_top_mult}x, high{config.conviction_tier_high_pct}%→"
                  f"{config.conviction_tier_high_mult}x, conf_thresh={config.conviction_confidence_threshold}")
 
+    ultra_sizer = None
+    if config.ultra_conviction:
+        from train.v5_position_sizer import UltraConvictionSizer, UltraConvictionConfig
+        ultra_cfg = UltraConvictionConfig(
+            enabled=True,
+            risk_cap=config.ultra_risk_cap,
+            score_pct=config.ultra_score_pct,
+            adx_min=config.ultra_adx_min,
+            edge_min=config.ultra_edge_min,
+            dd_max=config.ultra_dd_max,
+            max_per_day=config.ultra_max_per_day,
+            mult=config.ultra_mult,
+        )
+        ultra_sizer = UltraConvictionSizer(ultra_cfg)
+        log.info(f"[V5_FWD] Ultra-Conviction ENABLED: risk_cap={config.ultra_risk_cap:.2f} "
+                 f"score_pct=p{config.ultra_score_pct*100:.0f} adx_min={config.ultra_adx_min:.1f} "
+                 f"edge_min={config.ultra_edge_min:.3f} dd_max={config.ultra_dd_max:.2f} "
+                 f"max/day={config.ultra_max_per_day} mult={config.ultra_mult:.1f}")
+
     corr_tracker = None
     corr_blocker = None
     sym_id_to_name = {}
@@ -1507,6 +1534,38 @@ def run_v5_forward_test(
             )
             trade_size_mult *= conv_mult
 
+        if ultra_sizer is not None:
+            ultra_sizer.record_score(float(scores[idx]))
+            trade_sym_ultra = ""
+            if test_sym_ids is not None and sym_id_to_name:
+                trade_sym_ultra = sym_id_to_name.get(int(test_sym_ids[idx]), "")
+            ultra_date = ""
+            if test_timestamps is not None:
+                ultra_date = datetime.utcfromtimestamp(
+                    test_timestamps[idx] / 1000).strftime('%Y-%m-%d')
+            ultra_adx = float(adx_values[idx]) if adx_values is not None and idx < len(adx_values) else 0.0
+            edge_l_val = float(arrays.get('edge_L', np.zeros(1))[min(idx, len(arrays.get('edge_L', np.zeros(1)))-1)]) if 'edge_L' in arrays else 0.0
+            edge_s_val = float(arrays.get('edge_S', np.zeros(1))[min(idx, len(arrays.get('edge_S', np.zeros(1)))-1)]) if 'edge_S' in arrays else 0.0
+            ultra_regime = "unknown"
+            if ema200_for_regime is not None and close_prices is not None and idx < len(close_prices):
+                if close_prices[idx] > ema200_for_regime[idx] * 1.01:
+                    ultra_regime = "bull"
+                elif close_prices[idx] < ema200_for_regime[idx] * 0.99:
+                    ultra_regime = "bear"
+                else:
+                    ultra_regime = "neutral"
+            is_ultra = ultra_sizer.evaluate(
+                symbol=trade_sym_ultra, side=int(sides[idx]),
+                score=float(scores[idx]),
+                edge_l=edge_l_val, edge_s=edge_s_val,
+                adx_val=ultra_adx, regime=ultra_regime,
+                date_str=ultra_date, capital_blocked=False,
+            )
+            if is_ultra:
+                atr_val_here = float(atr_for_regime[idx]) if atr_for_regime is not None and idx < len(atr_for_regime) else 0.0
+                stop_dist_pct = (config.sl_mult * atr_val_here / float(close_prices[idx])) if close_prices is not None and atr_val_here > 0 else 0.01
+                trade_size_mult = ultra_sizer.apply_ultra_sizing(trade_size_mult, stop_dist_pct)
+
         size_multipliers[idx] = trade_size_mult
 
         if corr_tracker is not None and test_sym_ids is not None:
@@ -1524,7 +1583,8 @@ def run_v5_forward_test(
         needs_post_r = (config.weekly_loss_cap is not None
                         or daily_tracker is not None
                         or equity_stop is not None
-                        or regime_scaler is not None)
+                        or regime_scaler is not None
+                        or ultra_sizer is not None)
         if needs_post_r:
             if use_side_conditional_for_cap:
                 post_trade_r = float(r_long[idx]) if sides[idx] == 1 else float(r_short[idx])
@@ -1552,6 +1612,9 @@ def run_v5_forward_test(
             if regime_scaler is not None and post_r_valid:
                 regime_scaler.record_trade_result(post_trade_r)
 
+            if ultra_sizer is not None and post_r_valid:
+                ultra_sizer.update_equity(post_trade_r * size_multipliers.get(idx, 1.0))
+
     if ema200 is not None:
         log.info(f"[V5_GATE] EMA200 blocked {ema_blocked} trades")
     if warmup_blocked > 0:
@@ -1568,6 +1631,10 @@ def run_v5_forward_test(
         log.info(f"[V5_GATE] Max trades/day cap blocked {tpd_blocked} trades")
     if adx_blocked > 0:
         log.info(f"[V5_GATE] ADX regime gate blocked {adx_blocked} trades (min={config.adx_min:.1f})")
+    if ultra_sizer is not None:
+        ud = ultra_sizer.get_diagnostics()
+        log.info(f"[V5_ULTRA] Summary: applied={ud['ultra_applied']} skipped={ud['ultra_skipped']} "
+                 f"risk_cap={ud['risk_cap']:.2f} skip_reasons={ud['skip_reasons']}")
 
     n_eligible = len(sel_indices)
     n_hold_all = int(np.sum(sides[sel_indices] == 0)) if len(sel_indices) > 0 else 0
@@ -1616,7 +1683,7 @@ def run_v5_forward_test(
     t_size_mults = np.array([size_multipliers.get(idx, 1.0) for idx in taken])
     t_r = t_r_unsized * t_size_mults
 
-    has_sizing = position_sizer is not None or regime_scaler is not None or conviction_sizer is not None
+    has_sizing = position_sizer is not None or regime_scaler is not None or conviction_sizer is not None or ultra_sizer is not None
     if has_sizing:
         log.info(f"[V5_SIZE] Applied sizing to {len(taken)} trades: "
                  f"unsized_totalR={np.sum(t_r_unsized):.2f} → sized_totalR={np.sum(t_r):.2f} "
@@ -1700,7 +1767,7 @@ def run_v5_forward_test(
         report['_overlap_ratio'] = overlap
         report['corr_blocked_trades'] = corr_blocked
 
-    if position_sizer or regime_scaler or daily_tracker or equity_stop or conviction_sizer:
+    if position_sizer or regime_scaler or daily_tracker or equity_stop or conviction_sizer or ultra_sizer:
         from train.v5_position_sizer import build_sizing_diagnostics
         sizing_diag = build_sizing_diagnostics(
             sizer=position_sizer, regime=regime_scaler,
@@ -1708,6 +1775,7 @@ def run_v5_forward_test(
             sized_r=t_r_valid if has_sizing else None,
             unsized_r=t_r_unsized_valid if has_sizing else None,
             conviction=conviction_sizer,
+            ultra=ultra_sizer,
         )
         report['sizing_diagnostics'] = sizing_diag
         report['daily_blocked_trades'] = daily_blocked
@@ -1976,6 +2044,9 @@ def run_v5_walk_forward(
     adx_gate=False, adx_period=14, adx_min=18.0, adx_exception_top_pct=10.0,
     temp_scale=False, promote_metric='expectancy', stage_a_epochs=0,
     balanced_sampling=True, per_symbol_scaler=False,
+    ultra_conviction=False, ultra_risk_cap=0.05, ultra_score_pct=0.95,
+    ultra_adx_min=25.0, ultra_edge_min=0.03, ultra_dd_max=0.10,
+    ultra_max_per_day=1, ultra_mult=3.0,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -2107,6 +2178,14 @@ def run_v5_walk_forward(
             stage_a_epochs=stage_a_epochs,
             balanced_sampling=balanced_sampling,
             per_symbol_scaler=per_symbol_scaler,
+            ultra_conviction=ultra_conviction,
+            ultra_risk_cap=ultra_risk_cap,
+            ultra_score_pct=ultra_score_pct,
+            ultra_adx_min=ultra_adx_min,
+            ultra_edge_min=ultra_edge_min,
+            ultra_dd_max=ultra_dd_max,
+            ultra_max_per_day=ultra_max_per_day,
+            ultra_mult=ultra_mult,
             fold_id=fold['fold'],
         )
 
@@ -2222,6 +2301,9 @@ def train_v5_model(
     temp_scale=False,
     stage_a_epochs=0, stage_a_w_action_mult=2.0, stage_a_w_regime_mult=1.5, stage_a_w_reg_mult=0.5,
     balanced_sampling=True, per_symbol_scaler=False,
+    ultra_conviction=False, ultra_risk_cap=0.05, ultra_score_pct=0.95,
+    ultra_adx_min=25.0, ultra_edge_min=0.03, ultra_dd_max=0.10,
+    ultra_max_per_day=1, ultra_mult=3.0,
     fold_id=0,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
@@ -3121,6 +3203,14 @@ def train_v5_model(
                 adx_period=adx_period,
                 adx_min=adx_min,
                 adx_exception_top_pct=adx_exception_top_pct,
+                ultra_conviction=ultra_conviction,
+                ultra_risk_cap=ultra_risk_cap,
+                ultra_score_pct=ultra_score_pct,
+                ultra_adx_min=ultra_adx_min,
+                ultra_edge_min=ultra_edge_min,
+                ultra_dd_max=ultra_dd_max,
+                ultra_max_per_day=ultra_max_per_day,
+                ultra_mult=ultra_mult,
             )
 
             fwd_report = run_v5_forward_test(

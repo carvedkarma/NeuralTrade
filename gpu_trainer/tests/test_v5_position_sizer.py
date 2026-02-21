@@ -584,5 +584,93 @@ class TestBuildSizingDiagWithConviction:
         assert diag['conviction_sizing']['total_conviction_trades'] == 50
 
 
+class TestUltraConvictionSizer:
+    def _make_sizer(self, **overrides):
+        from train.v5_position_sizer import UltraConvictionSizer, UltraConvictionConfig
+        defaults = dict(enabled=True, risk_cap=0.05, score_pct=0.90,
+                        adx_min=25.0, edge_min=0.03, dd_max=0.10,
+                        max_per_day=2, mult=3.0)
+        defaults.update(overrides)
+        cfg = UltraConvictionConfig(**defaults)
+        sizer = UltraConvictionSizer(cfg)
+        for s in np.linspace(0.1, 2.0, 100):
+            sizer.record_score(s)
+        return sizer
+
+    def _eval(self, sizer, score=2.5, adx=30.0, edge_l=0.06, edge_s=0.06,
+              side=1, regime="bull", date_str="2024-01-01"):
+        return sizer.evaluate(symbol="BTCUSDT", side=side, score=score,
+                              edge_l=edge_l, edge_s=edge_s, adx_val=adx,
+                              regime=regime, date_str=date_str)
+
+    def test_disabled_returns_false(self):
+        from train.v5_position_sizer import UltraConvictionSizer, UltraConvictionConfig
+        cfg = UltraConvictionConfig(enabled=False)
+        sizer = UltraConvictionSizer(cfg)
+        assert not sizer.evaluate("BTC", 1, 2.0, 0.05, 0.05, 30.0, "bull", "2024-01-01")
+
+    def test_ultra_applied_when_all_gates_pass(self):
+        sizer = self._make_sizer()
+        assert self._eval(sizer) is True
+        assert sizer.ultra_applied == 1
+
+    def test_apply_sizing_uses_mult(self):
+        sizer = self._make_sizer(mult=3.0)
+        assert self._eval(sizer) is True
+        new_mult = sizer.apply_ultra_sizing(current_mult=1.0, stop_distance_pct=0.01)
+        assert new_mult == 3.0
+
+    def test_apply_sizing_caps_by_risk(self):
+        sizer = self._make_sizer(mult=5.0, risk_cap=0.05)
+        assert self._eval(sizer) is True
+        new_mult = sizer.apply_ultra_sizing(current_mult=1.0, stop_distance_pct=0.02)
+        assert new_mult <= 0.05 / 0.02 + 0.001
+
+    def test_ultra_blocked_by_low_adx(self):
+        sizer = self._make_sizer(adx_min=25.0)
+        assert self._eval(sizer, adx=20.0) is False
+
+    def test_ultra_blocked_by_low_edge(self):
+        sizer = self._make_sizer(edge_min=0.03)
+        assert self._eval(sizer, edge_l=0.01) is False
+
+    def test_ultra_blocked_by_regime_mismatch(self):
+        sizer = self._make_sizer()
+        assert self._eval(sizer, side=1, regime="bear") is False
+
+    def test_ultra_blocked_by_neutral_regime(self):
+        sizer = self._make_sizer()
+        assert self._eval(sizer, regime="neutral") is False
+
+    def test_ultra_daily_limit(self):
+        sizer = self._make_sizer(max_per_day=1)
+        assert self._eval(sizer) is True
+        assert self._eval(sizer) is False  # daily limit reached
+
+    def test_ultra_blocked_by_drawdown(self):
+        sizer = self._make_sizer(dd_max=0.10)
+        sizer.update_equity(1.0)
+        sizer.update_equity(-0.5)
+        assert self._eval(sizer) is False
+
+    def test_ultra_diagnostics(self):
+        sizer = self._make_sizer()
+        self._eval(sizer)
+        self._eval(sizer, score=0.5)  # low score
+        diag = sizer.get_diagnostics()
+        assert diag['ultra_applied'] == 1
+        assert diag['ultra_skipped'] >= 1
+        assert diag['risk_cap'] == 0.05
+
+    def test_ultra_score_below_percentile(self):
+        sizer = self._make_sizer(score_pct=0.95)
+        assert self._eval(sizer, score=1.0) is False
+
+    def test_build_diagnostics_with_ultra(self):
+        sizer = self._make_sizer()
+        diag = build_sizing_diagnostics(None, None, None, None, ultra=sizer)
+        assert 'ultra_conviction' in diag
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

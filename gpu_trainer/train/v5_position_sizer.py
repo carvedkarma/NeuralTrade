@@ -489,13 +489,177 @@ class ConvictionSizer:
         }
 
 
+@dataclass
+class UltraConvictionConfig:
+    enabled: bool = False
+    risk_cap: float = 0.05
+    score_pct: float = 0.95
+    adx_min: float = 25.0
+    edge_min: float = 0.03
+    dd_max: float = 0.10
+    max_per_day: int = 1
+    mult: float = 3.0
+    score_window: int = 500
+
+
+class UltraConvictionSizer:
+    """Ultra-Conviction Risk Tier: allows rare, very-high-conviction trades
+    to use up to risk_cap (default 5%) risk per trade.
+
+    Applied AFTER conviction sizing but BEFORE final clamp.
+    All 8 trigger conditions must be true for ultra to activate:
+      1) Feature enabled
+      2) Score >= rolling percentile(score_history, score_pct)
+      3) ADX >= adx_min (strong trend)
+      4) Edge for the trade side >= edge_min
+      5) Regime aligned (bull→LONG, bear→SHORT; neutral disables)
+      6) Equity drawdown <= dd_max
+      7) Not blocked by any existing capital protection gate
+      8) Ultra trades today < max_per_day
+    """
+
+    def __init__(self, config: UltraConvictionConfig):
+        self.config = config
+        from collections import deque
+        self.score_window: deque = deque(maxlen=config.score_window)
+        self.daily_ultra_counts: Dict[str, int] = {}
+        self.peak_equity: float = 0.0
+        self.current_equity: float = 0.0
+        self.ultra_applied: int = 0
+        self.ultra_skipped: int = 0
+        self.skip_reasons: Dict[str, int] = {}
+        self.ultra_history: List[dict] = []
+        self._min_scores_for_pct = 20
+
+    def update_equity(self, trade_r: float):
+        if not np.isnan(trade_r):
+            self.current_equity += trade_r
+            if self.current_equity > self.peak_equity:
+                self.peak_equity = self.current_equity
+
+    def _get_drawdown(self) -> float:
+        if self.peak_equity <= 0:
+            return 0.0
+        return (self.peak_equity - self.current_equity) / self.peak_equity
+
+    def _get_score_percentile(self, score: float) -> Optional[float]:
+        if len(self.score_window) < self._min_scores_for_pct:
+            return None
+        scores_arr = np.array(self.score_window)
+        pct_val = float(np.percentile(scores_arr, self.config.score_pct * 100))
+        return pct_val
+
+    def record_score(self, score: float):
+        self.score_window.append(score)
+
+    def _skip(self, reason: str, **log_kwargs) -> bool:
+        self.ultra_skipped += 1
+        self.skip_reasons[reason] = self.skip_reasons.get(reason, 0) + 1
+        parts = [f"reason={reason}"]
+        for k, v in log_kwargs.items():
+            if isinstance(v, float):
+                parts.append(f"{k}={v:.4f}")
+            else:
+                parts.append(f"{k}={v}")
+        log.info("[V5_ULTRA] SKIP %s", " ".join(parts))
+        return False
+
+    def evaluate(self, symbol: str, side: int, score: float,
+                 edge_l: float, edge_s: float, adx_val: float,
+                 regime: str, date_str: str,
+                 capital_blocked: bool = False) -> bool:
+        if not self.config.enabled:
+            return False
+
+        pct_threshold = self._get_score_percentile(score)
+        if pct_threshold is None:
+            return self._skip("warmup", scores=len(self.score_window))
+        if score < pct_threshold:
+            return self._skip("score_low", score=score, threshold=pct_threshold)
+
+        if np.isnan(adx_val) or adx_val < self.config.adx_min:
+            return self._skip("adx_low", adx=adx_val, min=self.config.adx_min)
+
+        edge = edge_l if side == 1 else edge_s
+        if edge < self.config.edge_min:
+            return self._skip("edge_low", edge=edge, min=self.config.edge_min,
+                              side="LONG" if side == 1 else "SHORT")
+
+        if regime in ("neutral", "chop", "unknown", ""):
+            return self._skip("regime_neutral", regime=regime)
+        if regime == "bull" and side != 1:
+            return self._skip("regime_mismatch", regime=regime,
+                              side="SHORT")
+        if regime == "bear" and side != -1:
+            return self._skip("regime_mismatch", regime=regime,
+                              side="LONG")
+
+        dd = self._get_drawdown()
+        if dd > self.config.dd_max:
+            return self._skip("drawdown_high", dd=dd, max=self.config.dd_max)
+
+        if capital_blocked:
+            return self._skip("capital_blocked")
+
+        day_count = self.daily_ultra_counts.get(date_str, 0)
+        if day_count >= self.config.max_per_day:
+            return self._skip("max_per_day", count=day_count, max=self.config.max_per_day)
+
+        self.daily_ultra_counts[date_str] = day_count + 1
+        self.ultra_applied += 1
+        side_str = "LONG" if side == 1 else "SHORT"
+        log.info("[V5_ULTRA] APPLY symbol=%s side=%s score=%.2f p%.0f=%.2f adx=%.1f "
+                 "edge_%s=%.3f regime=%s dd=%.2f mult=%.1f",
+                 symbol, side_str, score, self.config.score_pct * 100,
+                 pct_threshold, adx_val,
+                 "L" if side == 1 else "S", edge,
+                 regime, dd, self.config.mult)
+        return True
+
+    def apply_ultra_sizing(self, current_mult: float, stop_distance_pct: float) -> float:
+        sized_mult = current_mult * self.config.mult
+        if stop_distance_pct > 0:
+            risk_at_size = sized_mult * stop_distance_pct
+            if risk_at_size > self.config.risk_cap:
+                sized_mult = self.config.risk_cap / stop_distance_pct
+        self.ultra_history.append({
+            'mult_before': current_mult,
+            'mult_after': sized_mult,
+            'risk_cap': self.config.risk_cap,
+        })
+        return sized_mult
+
+    def get_diagnostics(self) -> dict:
+        result = {
+            'ultra_conviction_enabled': self.config.enabled,
+            'ultra_applied': self.ultra_applied,
+            'ultra_skipped': self.ultra_skipped,
+            'skip_reasons': dict(self.skip_reasons),
+            'risk_cap': self.config.risk_cap,
+            'mult': self.config.mult,
+            'score_pct': self.config.score_pct,
+            'adx_min': self.config.adx_min,
+            'edge_min': self.config.edge_min,
+            'dd_max': self.config.dd_max,
+            'max_per_day': self.config.max_per_day,
+        }
+        if self.ultra_history:
+            mults_before = np.array([h['mult_before'] for h in self.ultra_history])
+            mults_after = np.array([h['mult_after'] for h in self.ultra_history])
+            result['avg_mult_before'] = float(np.mean(mults_before))
+            result['avg_mult_after'] = float(np.mean(mults_after))
+            result['max_mult_after'] = float(np.max(mults_after))
+        return result
+
+
 def build_sizing_diagnostics(sizer: Optional[AdaptivePositionSizer],
                               regime: Optional[RegimeScaler],
                               daily_tracker: Optional[DailyLossTracker],
                               equity_stop: Optional[TrailingEquityStop],
                               sized_r: Optional[np.ndarray] = None,
                               unsized_r: Optional[np.ndarray] = None,
-                              conviction: Optional[ConvictionSizer] = None) -> dict:
+                              conviction: Optional[ConvictionSizer] = None,
+                              ultra: Optional['UltraConvictionSizer'] = None) -> dict:
     report = {}
     if sizer:
         report['adaptive_sizing'] = sizer.get_diagnostics()
@@ -507,6 +671,8 @@ def build_sizing_diagnostics(sizer: Optional[AdaptivePositionSizer],
         report['trailing_equity_stop'] = equity_stop.get_diagnostics()
     if conviction:
         report['conviction_sizing'] = conviction.get_diagnostics()
+    if ultra:
+        report['ultra_conviction'] = ultra.get_diagnostics()
 
     if sized_r is not None and unsized_r is not None and len(sized_r) > 0:
         report['sizing_comparison'] = {

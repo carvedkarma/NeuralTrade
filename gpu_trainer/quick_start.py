@@ -4950,6 +4950,23 @@ Examples:
     parser.add_argument("--v5-adx-exception-top-pct", type=float, default=10.0,
                         help="v5.0.9+: top N%% of scores bypass ADX gate (default: 10.0)")
 
+    parser.add_argument("--v5-ultra-conviction", action="store_true", default=False,
+                        help="v5.0.9+: enable ultra-conviction risk tier — up to 5%% risk for rare high-conviction setups")
+    parser.add_argument("--v5-ultra-risk-cap", type=float, default=0.05,
+                        help="v5.0.9+: max risk per ultra trade as fraction (default: 0.05 = 5%%)")
+    parser.add_argument("--v5-ultra-score-pct", type=float, default=0.95,
+                        help="v5.0.9+: score percentile gate for ultra tier (default: 0.95 = top 5%%)")
+    parser.add_argument("--v5-ultra-adx-min", type=float, default=25.0,
+                        help="v5.0.9+: minimum ADX for ultra tier (default: 25.0)")
+    parser.add_argument("--v5-ultra-edge-min", type=float, default=0.03,
+                        help="v5.0.9+: minimum expected edge for ultra tier (default: 0.03)")
+    parser.add_argument("--v5-ultra-dd-max", type=float, default=0.10,
+                        help="v5.0.9+: max drawdown before ultra tier is suspended (default: 0.10 = 10%%)")
+    parser.add_argument("--v5-ultra-max-per-day", type=int, default=1,
+                        help="v5.0.9+: max ultra trades per day (default: 1)")
+    parser.add_argument("--v5-ultra-mult", type=float, default=3.0,
+                        help="v5.0.9+: size multiplier for ultra trades (default: 3.0)")
+
     parser.add_argument("--v5-temp-scale", action="store_true", default=False,
                         help="v5.0.9+: enable post-training temperature scaling calibration")
 
@@ -5593,6 +5610,14 @@ Examples:
                     stage_a_epochs=10 if args.v5_staged_training else 0,
                     balanced_sampling=args.symbol_balanced_sampling and not args.no_symbol_balanced_sampling,
                     per_symbol_scaler=args.per_symbol_scaler,
+                    ultra_conviction=args.v5_ultra_conviction,
+                    ultra_risk_cap=args.v5_ultra_risk_cap,
+                    ultra_score_pct=args.v5_ultra_score_pct,
+                    ultra_adx_min=args.v5_ultra_adx_min,
+                    ultra_edge_min=args.v5_ultra_edge_min,
+                    ultra_dd_max=args.v5_ultra_dd_max,
+                    ultra_max_per_day=args.v5_ultra_max_per_day,
+                    ultra_mult=args.v5_ultra_mult,
                 )
                 return
 
@@ -5678,6 +5703,14 @@ Examples:
                 stage_a_epochs=10 if args.v5_staged_training else 0,
                 balanced_sampling=args.symbol_balanced_sampling and not args.no_symbol_balanced_sampling,
                 per_symbol_scaler=args.per_symbol_scaler,
+                ultra_conviction=args.v5_ultra_conviction,
+                ultra_risk_cap=args.v5_ultra_risk_cap,
+                ultra_score_pct=args.v5_ultra_score_pct,
+                ultra_adx_min=args.v5_ultra_adx_min,
+                ultra_edge_min=args.v5_ultra_edge_min,
+                ultra_dd_max=args.v5_ultra_dd_max,
+                ultra_max_per_day=args.v5_ultra_max_per_day,
+                ultra_mult=args.v5_ultra_mult,
             )
 
             log.info("=" * 60)
