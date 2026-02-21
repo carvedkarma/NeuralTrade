@@ -1797,6 +1797,9 @@ def run_v5_forward_test(
         trade_timestamps=t_timestamps,
     )
 
+    report['ddt_diagnostics'] = ddt.diagnostics() if ddt is not None else None
+    report['ddt_blocked'] = ddt_blocked if ddt is not None else 0
+
     if test_sym_ids is not None and len(taken_valid) > 0:
         taken_sym_ids = test_sym_ids[taken_valid]
         sym_id_map = {i: s for i, s in enumerate(config.symbols_list)} if config.symbols_list else {}
@@ -1898,6 +1901,8 @@ def _build_empty_report(test_start_date, test_end_date, config):
         'sl_mult': config.sl_mult,
         'horizon': config.horizon,
         'cooldown': config.cooldown,
+        'ddt_diagnostics': None,
+        'ddt_blocked': 0,
     }
 
 
@@ -2038,8 +2043,6 @@ def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_
         'equity_final_r': float(equity_curve[-1]) if len(equity_curve) > 0 else 0.0,
         'direction_stats': direction_stats,
         'weekly_stats': weekly_stats,
-        'ddt_diagnostics': ddt.diagnostics() if ddt is not None else None,
-        'ddt_blocked': ddt_blocked if ddt is not None else 0,
     }
 
 
