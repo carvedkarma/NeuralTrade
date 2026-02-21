@@ -1033,7 +1033,9 @@ def run_v5_forward_test(
              f"(if >95%% one-sided, this is MODEL BIAS not a bug)")
     log.info(f"[V5_FWD] Quality gate: {qual_diag.get('passed_pct', 0):.1f}% pass "
              f"({qual_diag.get('final', 0)}/{qual_diag.get('total', 0)})")
-    effective_threshold = config.score_threshold
+    effective_threshold = max(0.0, config.score_threshold)
+    if config.score_threshold < 0.0:
+        log.info(f"[V5_FWD] Hard floor: negative threshold {config.score_threshold:.4f} clamped to 0.0")
     pct_floor = None
     if config.min_threshold_pct is not None:
         pct_scores = scores.copy()
@@ -2700,6 +2702,9 @@ def train_v5_model(
                 if 'current_threshold' in tpd_c and tpd_c['current_threshold'] is not None:
                     ckpt_threshold = tpd_c['current_threshold']
             if ckpt_threshold is None:
+                ckpt_threshold = 0.0
+            if ckpt_threshold < 0.0:
+                log.info(f"[V5_FWD] Clamping negative calibrated threshold {ckpt_threshold:.4f} → 0.0")
                 ckpt_threshold = 0.0
 
             fwd_config = V5ForwardTestConfig(
