@@ -1301,8 +1301,11 @@ def run_v5_forward_test(
 
     ema200 = None
     if ema200_regime_gate and close_prices is not None:
-        ema200 = _compute_ema(close_prices, 200)
-        log.info("[V5_FWD] EMA200 regime gate ENABLED")
+        if config.multi_regime:
+            log.info("[V5_FWD] EMA200 regime gate DISABLED (superseded by --v5-multi-regime)")
+        else:
+            ema200 = _compute_ema(close_prices, 200)
+            log.info("[V5_FWD] EMA200 regime gate ENABLED")
 
     week_boundaries = None
     if config.weekly_loss_cap is not None and test_timestamps is not None:
@@ -1499,10 +1502,12 @@ def run_v5_forward_test(
         if atr_for_regime is not None:
             atr_rolling_for_regime = np.full_like(atr_for_regime, np.nan)
             window = config.regime_atr_window
-            for i in range(window, len(atr_for_regime)):
-                valid_slice = atr_for_regime[i - window:i]
+            min_valid = max(window // 2, 20)
+            for i in range(14, len(atr_for_regime)):
+                lookback = min(i, window)
+                valid_slice = atr_for_regime[max(0, i - lookback):i]
                 valid_vals = valid_slice[~np.isnan(valid_slice)]
-                if len(valid_vals) > 0:
+                if len(valid_vals) >= min_valid:
                     atr_rolling_for_regime[i] = float(np.mean(valid_vals))
         log.info(f"[V5_FWD] Multi-Regime Classifier ENABLED: "
                  f"adx_trend={config.regime_adx_trending:.1f} "
@@ -1600,6 +1605,27 @@ def run_v5_forward_test(
                 continue
             tpd_current_count += 1
 
+        bar_regime = "unknown"
+        if multi_regime_classifier is not None and close_prices is not None and idx < len(close_prices):
+            mr_adx = float(adx_values[idx]) if adx_values is not None and idx < len(adx_values) else float('nan')
+            mr_atr_cur = float(atr_for_regime[idx]) if atr_for_regime is not None and idx < len(atr_for_regime) else float('nan')
+            mr_atr_roll = float(atr_rolling_for_regime[idx]) if atr_rolling_for_regime is not None and idx < len(atr_rolling_for_regime) else float('nan')
+            mr_ema = float(ema200_for_regime[idx]) if ema200_for_regime is not None and idx < len(ema200_for_regime) else float('nan')
+            slope_lookback = config.regime_ema_slope_window
+            mr_ema_prev = float(ema200_for_regime[max(0, idx - slope_lookback)]) if ema200_for_regime is not None else float('nan')
+            bar_regime = multi_regime_classifier.classify(
+                adx_val=mr_adx, atr_current=mr_atr_cur,
+                atr_rolling=mr_atr_roll, close_price=float(close_prices[idx]),
+                ema200_val=mr_ema, ema200_prev=mr_ema_prev,
+            )
+        elif ema200_for_regime is not None and close_prices is not None and idx < len(close_prices):
+            if close_prices[idx] > ema200_for_regime[idx] * 1.01:
+                bar_regime = "trending_up"
+            elif close_prices[idx] < ema200_for_regime[idx] * 0.99:
+                bar_regime = "trending_down"
+            else:
+                bar_regime = "choppy"
+
         if ddt is not None:
             ddt_thr = ddt.effective_threshold(effective_threshold)
             if scores_work[idx] < ddt_thr:
@@ -1638,27 +1664,6 @@ def run_v5_forward_test(
                 side=int(sides[idx]),
             )
             trade_size_mult *= conv_mult
-
-        bar_regime = "unknown"
-        if multi_regime_classifier is not None and close_prices is not None and idx < len(close_prices):
-            mr_adx = float(adx_values[idx]) if adx_values is not None and idx < len(adx_values) else float('nan')
-            mr_atr_cur = float(atr_for_regime[idx]) if atr_for_regime is not None and idx < len(atr_for_regime) else float('nan')
-            mr_atr_roll = float(atr_rolling_for_regime[idx]) if atr_rolling_for_regime is not None and idx < len(atr_rolling_for_regime) else float('nan')
-            mr_ema = float(ema200_for_regime[idx]) if ema200_for_regime is not None and idx < len(ema200_for_regime) else float('nan')
-            slope_lookback = config.regime_ema_slope_window
-            mr_ema_prev = float(ema200_for_regime[max(0, idx - slope_lookback)]) if ema200_for_regime is not None else float('nan')
-            bar_regime = multi_regime_classifier.classify(
-                adx_val=mr_adx, atr_current=mr_atr_cur,
-                atr_rolling=mr_atr_roll, close_price=float(close_prices[idx]),
-                ema200_val=mr_ema, ema200_prev=mr_ema_prev,
-            )
-        elif ema200_for_regime is not None and close_prices is not None and idx < len(close_prices):
-            if close_prices[idx] > ema200_for_regime[idx] * 1.01:
-                bar_regime = "trending_up"
-            elif close_prices[idx] < ema200_for_regime[idx] * 0.99:
-                bar_regime = "trending_down"
-            else:
-                bar_regime = "choppy"
 
         if ultra_sizer is not None:
             ultra_sizer.record_score(float(scores[idx]))

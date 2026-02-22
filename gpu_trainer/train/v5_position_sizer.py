@@ -684,7 +684,7 @@ class UltraConvictionSizer:
                 parts.append(f"{k}={v:.4f}")
             else:
                 parts.append(f"{k}={v}")
-        log.info("[V5_ULTRA] SKIP %s", " ".join(parts))
+        log.debug("[V5_ULTRA] SKIP %s", " ".join(parts))
         return False
 
     def evaluate(self, symbol: str, side: int, score: float,

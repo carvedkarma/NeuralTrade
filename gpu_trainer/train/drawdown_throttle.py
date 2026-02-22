@@ -113,10 +113,10 @@ class DrawdownAdaptiveThrottle:
             'size_mult': round(size_mult, 4),
         }
         self._trade_log.append(entry)
-        log.info(f"[V5_DDT] trade_close: realized_r={realized_r:+.4f} "
-                 f"rolling_sum_R={rolling_sum:+.4f} raw_throttle={raw:.4f} "
-                 f"throttle_state={self.throttle_state:.4f} "
-                 f"thr_used={thr_used:.4f} size_mult={size_mult:.4f}")
+        log.debug(f"[V5_DDT] trade_close: realized_r={realized_r:+.4f} "
+                  f"rolling_sum_R={rolling_sum:+.4f} raw_throttle={raw:.4f} "
+                  f"throttle_state={self.throttle_state:.4f} "
+                  f"thr_used={thr_used:.4f} size_mult={size_mult:.4f}")
 
     def diagnostics(self) -> dict:
         """Compact diagnostics for report/logging."""
