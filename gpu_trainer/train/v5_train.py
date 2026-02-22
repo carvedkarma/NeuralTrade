@@ -2523,6 +2523,9 @@ def train_v5_model(
             target_tpd=target_tpd, tpd_tol=target_tpd_tol,
             score_lambda=score_lambda,
         )
+    else:
+        target_tpd = tpd_ctrl_cfg.target_tpd
+        target_tpd_tol = tpd_ctrl_cfg.tpd_tol
 
     presets = []
     if barrier_presets:
