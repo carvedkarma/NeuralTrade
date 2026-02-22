@@ -577,7 +577,7 @@ class UltraConvictionSizer:
         if score < pct_threshold:
             return self._skip("score_low", score=score, threshold=pct_threshold)
 
-        if np.isnan(adx_val) or adx_val < self.config.adx_min:
+        if not np.isnan(adx_val) and adx_val < self.config.adx_min:
             return self._skip("adx_low", adx=adx_val, min=self.config.adx_min)
 
         edge = edge_l if side == 1 else edge_s

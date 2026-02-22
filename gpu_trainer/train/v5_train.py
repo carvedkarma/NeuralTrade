@@ -46,7 +46,9 @@ def _compute_adx(high, low, close, period=14):
     """Compute ADX indicator. Returns array same length as input (NaN-filled for warmup).
 
     Uses Wilder's smoothing method (EMA with alpha=1/period).
+    Epsilon guards prevent divide-by-zero warnings in low-volatility bars.
     """
+    _EPS = 1e-10
     n = len(close)
     adx = np.full(n, np.nan)
     if n < period * 3:
@@ -81,10 +83,10 @@ def _compute_adx(high, low, close, period=14):
         plus_di_smooth[i] = plus_di_smooth[i - 1] * (1 - alpha) + plus_dm[i] * alpha
         minus_di_smooth[i] = minus_di_smooth[i - 1] * (1 - alpha) + minus_dm[i] * alpha
 
-    plus_di = np.where(atr > 0, 100 * plus_di_smooth / atr, 0)
-    minus_di = np.where(atr > 0, 100 * minus_di_smooth / atr, 0)
+    plus_di = np.where(atr > _EPS, 100 * plus_di_smooth / atr, 0)
+    minus_di = np.where(atr > _EPS, 100 * minus_di_smooth / atr, 0)
     di_sum = plus_di + minus_di
-    dx = np.where(di_sum > 0, 100 * np.abs(plus_di - minus_di) / di_sum, 0)
+    dx = np.where(di_sum > _EPS, 100 * np.abs(plus_di - minus_di) / di_sum, 0)
 
     adx_start = period * 2
     if adx_start < n:
@@ -1478,10 +1480,11 @@ def run_v5_forward_test(
 
         if adx_values is not None:
             adx_val = adx_values[idx]
-            is_exception = (adx_exception_threshold is not None and scores_work[idx] >= adx_exception_threshold)
-            if np.isnan(adx_val) or (adx_val < config.adx_min and not is_exception):
-                adx_blocked += 1
-                continue
+            if not np.isnan(adx_val):
+                is_exception = (adx_exception_threshold is not None and scores_work[idx] >= adx_exception_threshold)
+                if adx_val < config.adx_min and not is_exception:
+                    adx_blocked += 1
+                    continue
 
         expired = [k for k, v in open_positions.items() if v['expiry'] <= idx]
         for k in expired:

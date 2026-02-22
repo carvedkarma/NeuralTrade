@@ -630,6 +630,11 @@ class TestUltraConvictionSizer:
         sizer = self._make_sizer(adx_min=25.0)
         assert self._eval(sizer, adx=20.0) is False
 
+    def test_ultra_nan_adx_bypasses_gate(self):
+        sizer = self._make_sizer(adx_min=25.0)
+        result = self._eval(sizer, adx=float('nan'))
+        assert result is True
+
     def test_ultra_blocked_by_low_edge(self):
         sizer = self._make_sizer(edge_min=0.03)
         assert self._eval(sizer, edge_l=0.01) is False
