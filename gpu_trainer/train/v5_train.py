@@ -169,6 +169,14 @@ class V5ForwardTestConfig:
     ddt_alpha_down: float = 0.30
     ddt_alpha_up: float = 0.05
     ddt_warmup_trades: int = 20
+    multi_regime: bool = False
+    regime_adx_trending: float = 25.0
+    regime_adx_choppy: float = 20.0
+    regime_atr_high_vol: float = 1.3
+    regime_atr_low_vol: float = 0.7
+    regime_atr_window: int = 96
+    regime_ema_slope_window: int = 10
+    regime_ema_buffer: float = 0.005
 
 
 def _parse_date_to_ms(date_str: str) -> int:
@@ -1463,13 +1471,45 @@ def run_v5_forward_test(
 
     ema200_for_regime = None
     atr_for_regime = None
-    if regime_scaler is not None and close_prices is not None:
+    needs_ema_atr = (regime_scaler is not None or config.multi_regime
+                     or config.ultra_conviction)
+    if needs_ema_atr and close_prices is not None:
         ema200_for_regime = _compute_ema(close_prices, 200)
         diffs = np.abs(np.diff(close_prices, prepend=close_prices[0]))
         atr_period = 14
         atr_for_regime = np.full_like(diffs, np.nan)
         for i in range(atr_period, len(diffs)):
             atr_for_regime[i] = np.mean(diffs[i - atr_period:i])
+
+    multi_regime_classifier = None
+    atr_rolling_for_regime = None
+    if config.multi_regime and close_prices is not None:
+        from train.v5_position_sizer import MultiRegimeClassifier, MultiRegimeConfig
+        mr_cfg = MultiRegimeConfig(
+            enabled=True,
+            adx_trending_threshold=config.regime_adx_trending,
+            adx_choppy_threshold=config.regime_adx_choppy,
+            atr_high_vol_ratio=config.regime_atr_high_vol,
+            atr_low_vol_ratio=config.regime_atr_low_vol,
+            atr_rolling_window=config.regime_atr_window,
+            ema_slope_window=config.regime_ema_slope_window,
+            ema_price_buffer=config.regime_ema_buffer,
+        )
+        multi_regime_classifier = MultiRegimeClassifier(mr_cfg)
+        if atr_for_regime is not None:
+            atr_rolling_for_regime = np.full_like(atr_for_regime, np.nan)
+            window = config.regime_atr_window
+            for i in range(window, len(atr_for_regime)):
+                valid_slice = atr_for_regime[i - window:i]
+                valid_vals = valid_slice[~np.isnan(valid_slice)]
+                if len(valid_vals) > 0:
+                    atr_rolling_for_regime[i] = float(np.mean(valid_vals))
+        log.info(f"[V5_FWD] Multi-Regime Classifier ENABLED: "
+                 f"adx_trend={config.regime_adx_trending:.1f} "
+                 f"adx_chop={config.regime_adx_choppy:.1f} "
+                 f"atr_hi={config.regime_atr_high_vol:.2f} "
+                 f"atr_lo={config.regime_atr_low_vol:.2f} "
+                 f"atr_window={config.regime_atr_window}")
 
     for idx in chronological_idx:
         if config.warmup_skip_bars > 0 and idx < config.warmup_skip_bars:
@@ -1599,6 +1639,27 @@ def run_v5_forward_test(
             )
             trade_size_mult *= conv_mult
 
+        bar_regime = "unknown"
+        if multi_regime_classifier is not None and close_prices is not None and idx < len(close_prices):
+            mr_adx = float(adx_values[idx]) if adx_values is not None and idx < len(adx_values) else float('nan')
+            mr_atr_cur = float(atr_for_regime[idx]) if atr_for_regime is not None and idx < len(atr_for_regime) else float('nan')
+            mr_atr_roll = float(atr_rolling_for_regime[idx]) if atr_rolling_for_regime is not None and idx < len(atr_rolling_for_regime) else float('nan')
+            mr_ema = float(ema200_for_regime[idx]) if ema200_for_regime is not None and idx < len(ema200_for_regime) else float('nan')
+            slope_lookback = config.regime_ema_slope_window
+            mr_ema_prev = float(ema200_for_regime[max(0, idx - slope_lookback)]) if ema200_for_regime is not None else float('nan')
+            bar_regime = multi_regime_classifier.classify(
+                adx_val=mr_adx, atr_current=mr_atr_cur,
+                atr_rolling=mr_atr_roll, close_price=float(close_prices[idx]),
+                ema200_val=mr_ema, ema200_prev=mr_ema_prev,
+            )
+        elif ema200_for_regime is not None and close_prices is not None and idx < len(close_prices):
+            if close_prices[idx] > ema200_for_regime[idx] * 1.01:
+                bar_regime = "trending_up"
+            elif close_prices[idx] < ema200_for_regime[idx] * 0.99:
+                bar_regime = "trending_down"
+            else:
+                bar_regime = "choppy"
+
         if ultra_sizer is not None:
             ultra_sizer.record_score(float(scores[idx]))
             trade_sym_ultra = ""
@@ -1611,19 +1672,11 @@ def run_v5_forward_test(
             ultra_adx = float(adx_values[idx]) if adx_values is not None and idx < len(adx_values) else 0.0
             edge_l_val = float(arrays.get('edge_L', np.zeros(1))[min(idx, len(arrays.get('edge_L', np.zeros(1)))-1)]) if 'edge_L' in arrays else 0.0
             edge_s_val = float(arrays.get('edge_S', np.zeros(1))[min(idx, len(arrays.get('edge_S', np.zeros(1)))-1)]) if 'edge_S' in arrays else 0.0
-            ultra_regime = "unknown"
-            if ema200_for_regime is not None and close_prices is not None and idx < len(close_prices):
-                if close_prices[idx] > ema200_for_regime[idx] * 1.01:
-                    ultra_regime = "bull"
-                elif close_prices[idx] < ema200_for_regime[idx] * 0.99:
-                    ultra_regime = "bear"
-                else:
-                    ultra_regime = "neutral"
             is_ultra = ultra_sizer.evaluate(
                 symbol=trade_sym_ultra, side=int(sides[idx]),
                 score=float(scores[idx]),
                 edge_l=edge_l_val, edge_s=edge_s_val,
-                adx_val=ultra_adx, regime=ultra_regime,
+                adx_val=ultra_adx, regime=bar_regime,
                 date_str=ultra_date, capital_blocked=False,
             )
             if is_ultra:
@@ -1722,6 +1775,10 @@ def run_v5_forward_test(
         ud = ultra_sizer.get_diagnostics()
         log.info(f"[V5_ULTRA] Summary: applied={ud['ultra_applied']} skipped={ud['ultra_skipped']} "
                  f"risk_cap={ud['risk_cap']:.2f} skip_reasons={ud['skip_reasons']}")
+    if multi_regime_classifier is not None:
+        mrd = multi_regime_classifier.get_diagnostics()
+        log.info(f"[V5_REGIME] Multi-Regime Summary: total={mrd['total_classified']} "
+                 f"counts={mrd['regime_counts']} pct={mrd['regime_pct']}")
 
     n_eligible = len(sel_indices)
     n_hold_all = int(np.sum(sides[sel_indices] == 0)) if len(sel_indices) > 0 else 0
@@ -2150,6 +2207,9 @@ def run_v5_walk_forward(
     ddt_thr_k=0.60, ddt_thr_min=0.08, ddt_thr_max=0.25,
     ddt_size_k=0.70, ddt_min_size_mult=0.25,
     ddt_alpha_down=0.30, ddt_alpha_up=0.05, ddt_warmup_trades=20,
+    multi_regime=False, regime_adx_trending=25.0, regime_adx_choppy=20.0,
+    regime_atr_high_vol=1.3, regime_atr_low_vol=0.7,
+    regime_atr_window=96, regime_ema_slope_window=10, regime_ema_buffer=0.005,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -2301,6 +2361,14 @@ def run_v5_walk_forward(
             ddt_alpha_down=ddt_alpha_down,
             ddt_alpha_up=ddt_alpha_up,
             ddt_warmup_trades=ddt_warmup_trades,
+            multi_regime=multi_regime,
+            regime_adx_trending=regime_adx_trending,
+            regime_adx_choppy=regime_adx_choppy,
+            regime_atr_high_vol=regime_atr_high_vol,
+            regime_atr_low_vol=regime_atr_low_vol,
+            regime_atr_window=regime_atr_window,
+            regime_ema_slope_window=regime_ema_slope_window,
+            regime_ema_buffer=regime_ema_buffer,
             fold_id=fold['fold'],
         )
 
@@ -2424,6 +2492,9 @@ def train_v5_model(
     ddt_thr_k=0.60, ddt_thr_min=0.08, ddt_thr_max=0.25,
     ddt_size_k=0.70, ddt_min_size_mult=0.25,
     ddt_alpha_down=0.30, ddt_alpha_up=0.05, ddt_warmup_trades=20,
+    multi_regime=False, regime_adx_trending=25.0, regime_adx_choppy=20.0,
+    regime_atr_high_vol=1.3, regime_atr_low_vol=0.7,
+    regime_atr_window=96, regime_ema_slope_window=10, regime_ema_buffer=0.005,
     fold_id=0,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
@@ -3343,6 +3414,14 @@ def train_v5_model(
                 ddt_alpha_down=ddt_alpha_down,
                 ddt_alpha_up=ddt_alpha_up,
                 ddt_warmup_trades=ddt_warmup_trades,
+                multi_regime=multi_regime,
+                regime_adx_trending=regime_adx_trending,
+                regime_adx_choppy=regime_adx_choppy,
+                regime_atr_high_vol=regime_atr_high_vol,
+                regime_atr_low_vol=regime_atr_low_vol,
+                regime_atr_window=regime_atr_window,
+                regime_ema_slope_window=regime_ema_slope_window,
+                regime_ema_buffer=regime_ema_buffer,
             )
 
             fwd_report = run_v5_forward_test(

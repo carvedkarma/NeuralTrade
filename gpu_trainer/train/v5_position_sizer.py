@@ -490,6 +490,129 @@ class ConvictionSizer:
 
 
 @dataclass
+class MultiRegimeConfig:
+    enabled: bool = False
+    adx_trending_threshold: float = 25.0
+    adx_choppy_threshold: float = 20.0
+    atr_high_vol_ratio: float = 1.3
+    atr_low_vol_ratio: float = 0.7
+    atr_rolling_window: int = 96
+    ema_slope_window: int = 10
+    ema_price_buffer: float = 0.005
+
+
+class MultiRegimeClassifier:
+    """Multi-regime market state classifier using ADX + ATR ratio + EMA200 slope.
+
+    Classifies each bar into one of 5 regimes:
+      - trending_up:   ADX >= adx_trending_threshold AND price > EMA200 AND EMA slope > 0
+      - trending_down: ADX >= adx_trending_threshold AND price < EMA200 AND EMA slope < 0
+      - choppy:        ADX < adx_choppy_threshold (no clear trend)
+      - high_vol:      ATR ratio > atr_high_vol_ratio (danger zone, volatile)
+      - low_vol:       ATR ratio < atr_low_vol_ratio AND not trending (compression)
+
+    Priority order (for overlapping conditions):
+      1. high_vol  (overrides everything — volatile markets are dangerous)
+      2. choppy    (ADX says no trend — avoid directional trades)
+      3. trending_up / trending_down (clear directional trend)
+      4. low_vol   (quiet compression, potential breakout)
+
+    Ultra-Conviction alignment:
+      - LONG allowed:  trending_up, low_vol
+      - SHORT allowed: trending_down, low_vol
+      - BLOCKED:       choppy, high_vol
+    """
+
+    REGIMES = ("trending_up", "trending_down", "choppy", "high_vol", "low_vol")
+    LONG_ALLOWED = {"trending_up", "low_vol"}
+    SHORT_ALLOWED = {"trending_down", "low_vol"}
+    BLOCKED = {"choppy", "high_vol"}
+
+    def __init__(self, config: MultiRegimeConfig):
+        self.config = config
+        self.regime_counts: Dict[str, int] = {r: 0 for r in self.REGIMES}
+        self.regime_counts["unknown"] = 0
+        self.total_classified: int = 0
+
+    def classify(self, adx_val: float, atr_current: float,
+                 atr_rolling: float, close_price: float,
+                 ema200_val: float, ema200_prev: float) -> str:
+        self.total_classified += 1
+
+        has_adx = not np.isnan(adx_val)
+        has_atr = (not np.isnan(atr_current) and not np.isnan(atr_rolling)
+                   and atr_rolling > 1e-10)
+        has_ema = (not np.isnan(ema200_val) and not np.isnan(ema200_prev)
+                   and ema200_val > 0)
+
+        atr_ratio = (atr_current / atr_rolling) if has_atr else 1.0
+
+        if has_atr and atr_ratio > self.config.atr_high_vol_ratio:
+            self.regime_counts["high_vol"] += 1
+            return "high_vol"
+
+        if has_adx and adx_val < self.config.adx_choppy_threshold:
+            if has_atr and atr_ratio < self.config.atr_low_vol_ratio:
+                self.regime_counts["low_vol"] += 1
+                return "low_vol"
+            self.regime_counts["choppy"] += 1
+            return "choppy"
+
+        if has_adx and adx_val >= self.config.adx_trending_threshold and has_ema:
+            ema_slope = (ema200_val - ema200_prev) / ema200_prev
+            price_above = close_price > ema200_val * (1.0 + self.config.ema_price_buffer)
+            price_below = close_price < ema200_val * (1.0 - self.config.ema_price_buffer)
+
+            if price_above and ema_slope > 0:
+                self.regime_counts["trending_up"] += 1
+                return "trending_up"
+            elif price_below and ema_slope < 0:
+                self.regime_counts["trending_down"] += 1
+                return "trending_down"
+
+        if has_atr and atr_ratio < self.config.atr_low_vol_ratio:
+            self.regime_counts["low_vol"] += 1
+            return "low_vol"
+
+        if has_adx and adx_val >= self.config.adx_choppy_threshold:
+            if has_ema:
+                if close_price > ema200_val:
+                    self.regime_counts["trending_up"] += 1
+                    return "trending_up"
+                else:
+                    self.regime_counts["trending_down"] += 1
+                    return "trending_down"
+
+        self.regime_counts["unknown"] += 1
+        return "choppy"
+
+    def is_long_allowed(self, regime: str) -> bool:
+        return regime in self.LONG_ALLOWED
+
+    def is_short_allowed(self, regime: str) -> bool:
+        return regime in self.SHORT_ALLOWED
+
+    def is_blocked(self, regime: str) -> bool:
+        return regime in self.BLOCKED
+
+    def get_diagnostics(self) -> dict:
+        total = max(self.total_classified, 1)
+        return {
+            'multi_regime_enabled': self.config.enabled,
+            'total_classified': self.total_classified,
+            'regime_counts': dict(self.regime_counts),
+            'regime_pct': {k: round(v / total * 100, 1)
+                           for k, v in self.regime_counts.items()},
+            'config': {
+                'adx_trending': self.config.adx_trending_threshold,
+                'adx_choppy': self.config.adx_choppy_threshold,
+                'atr_high_vol': self.config.atr_high_vol_ratio,
+                'atr_low_vol': self.config.atr_low_vol_ratio,
+            }
+        }
+
+
+@dataclass
 class UltraConvictionConfig:
     enabled: bool = False
     risk_cap: float = 0.05
@@ -585,14 +708,17 @@ class UltraConvictionSizer:
             return self._skip("edge_low", edge=edge, min=self.config.edge_min,
                               side="LONG" if side == 1 else "SHORT")
 
-        if regime in ("neutral", "chop", "unknown", ""):
-            return self._skip("regime_neutral", regime=regime)
-        if regime == "bull" and side != 1:
-            return self._skip("regime_mismatch", regime=regime,
-                              side="SHORT")
-        if regime == "bear" and side != -1:
+        _BLOCKED_REGIMES = {"choppy", "high_vol", "neutral", "chop", "unknown", ""}
+        if regime in _BLOCKED_REGIMES:
+            return self._skip("regime_blocked", regime=regime)
+        _LONG_REGIMES = {"trending_up", "low_vol", "bull"}
+        _SHORT_REGIMES = {"trending_down", "low_vol", "bear"}
+        if side == 1 and regime not in _LONG_REGIMES:
             return self._skip("regime_mismatch", regime=regime,
                               side="LONG")
+        if side == -1 and regime not in _SHORT_REGIMES:
+            return self._skip("regime_mismatch", regime=regime,
+                              side="SHORT")
 
         dd = self._get_drawdown()
         if dd > self.config.dd_max:

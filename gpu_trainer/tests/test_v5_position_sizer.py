@@ -677,5 +677,163 @@ class TestUltraConvictionSizer:
         assert 'ultra_conviction' in diag
 
 
+class TestMultiRegimeClassifier:
+    def _make_classifier(self, **kwargs):
+        from train.v5_position_sizer import MultiRegimeClassifier, MultiRegimeConfig
+        defaults = dict(
+            adx_trending_threshold=25.0, adx_choppy_threshold=20.0,
+            atr_high_vol_ratio=1.3, atr_low_vol_ratio=0.7,
+            atr_rolling_window=96, ema_slope_window=10, ema_price_buffer=0.005,
+        )
+        defaults.update(kwargs)
+        cfg = MultiRegimeConfig(**defaults)
+        return MultiRegimeClassifier(cfg)
+
+    def test_high_vol_regime(self):
+        clf = self._make_classifier()
+        regime = clf.classify(adx_val=30.0, atr_current=1.5, atr_rolling=1.0,
+                              close_price=100.0, ema200_val=95.0, ema200_prev=94.5)
+        assert regime == "high_vol"
+
+    def test_choppy_regime(self):
+        clf = self._make_classifier()
+        regime = clf.classify(adx_val=15.0, atr_current=1.0, atr_rolling=1.0,
+                              close_price=100.0, ema200_val=100.0, ema200_prev=100.0)
+        assert regime == "choppy"
+
+    def test_trending_up_regime(self):
+        clf = self._make_classifier()
+        regime = clf.classify(adx_val=30.0, atr_current=1.0, atr_rolling=1.0,
+                              close_price=105.0, ema200_val=100.0, ema200_prev=98.0)
+        assert regime == "trending_up"
+
+    def test_trending_down_regime(self):
+        clf = self._make_classifier()
+        regime = clf.classify(adx_val=30.0, atr_current=1.0, atr_rolling=1.0,
+                              close_price=95.0, ema200_val=100.0, ema200_prev=102.0)
+        assert regime == "trending_down"
+
+    def test_low_vol_regime(self):
+        clf = self._make_classifier()
+        regime = clf.classify(adx_val=22.0, atr_current=0.5, atr_rolling=1.0,
+                              close_price=100.0, ema200_val=100.0, ema200_prev=100.0)
+        assert regime == "low_vol"
+
+    def test_nan_adx_low_atr_gives_low_vol(self):
+        clf = self._make_classifier()
+        regime = clf.classify(adx_val=float('nan'), atr_current=0.5, atr_rolling=1.0,
+                              close_price=100.0, ema200_val=100.0, ema200_prev=100.0)
+        assert regime == "low_vol"
+
+    def test_nan_atr_rolling_not_high_vol(self):
+        clf = self._make_classifier()
+        regime = clf.classify(adx_val=30.0, atr_current=float('nan'), atr_rolling=1.0,
+                              close_price=105.0, ema200_val=100.0, ema200_prev=98.0)
+        assert regime != "high_vol"
+
+    def test_diagnostics_tracking(self):
+        clf = self._make_classifier()
+        clf.classify(adx_val=30.0, atr_current=1.5, atr_rolling=1.0,
+                     close_price=100.0, ema200_val=95.0, ema200_prev=94.5)
+        clf.classify(adx_val=15.0, atr_current=1.0, atr_rolling=1.0,
+                     close_price=100.0, ema200_val=100.0, ema200_prev=100.0)
+        clf.classify(adx_val=30.0, atr_current=1.0, atr_rolling=1.0,
+                     close_price=105.0, ema200_val=100.0, ema200_prev=98.0)
+        diag = clf.get_diagnostics()
+        assert diag['total_classified'] == 3
+        assert diag['regime_counts']['high_vol'] == 1
+        assert diag['regime_counts']['choppy'] == 1
+        assert diag['regime_counts']['trending_up'] == 1
+
+    def test_priority_order_high_vol_over_trending(self):
+        clf = self._make_classifier()
+        regime = clf.classify(adx_val=30.0, atr_current=1.5, atr_rolling=1.0,
+                              close_price=105.0, ema200_val=100.0, ema200_prev=98.0)
+        assert regime == "high_vol"
+
+    def test_low_adx_low_atr_gives_low_vol(self):
+        clf = self._make_classifier()
+        regime = clf.classify(adx_val=15.0, atr_current=0.5, atr_rolling=1.0,
+                              close_price=100.0, ema200_val=100.0, ema200_prev=100.0)
+        assert regime == "low_vol"
+
+    def test_low_adx_normal_atr_gives_choppy(self):
+        clf = self._make_classifier()
+        regime = clf.classify(adx_val=15.0, atr_current=1.0, atr_rolling=1.0,
+                              close_price=100.0, ema200_val=100.0, ema200_prev=100.0)
+        assert regime == "choppy"
+
+
+class TestUltraConvictionMultiRegime:
+    def _make_sizer(self, **kwargs):
+        from train.v5_position_sizer import UltraConvictionSizer, UltraConvictionConfig
+        defaults = dict(enabled=True, risk_cap=0.05, score_pct=0.50,
+                        adx_min=20.0, edge_min=0.02, dd_max=0.20,
+                        max_per_day=5, mult=3.0, score_window=50)
+        defaults.update(kwargs)
+        cfg = UltraConvictionConfig(**defaults)
+        sizer = UltraConvictionSizer(cfg)
+        for s in np.linspace(0.5, 2.0, 30):
+            sizer.record_score(float(s))
+        return sizer
+
+    def _eval(self, sizer, side=1, regime="trending_up", score=1.8, adx=30.0, edge_l=0.05, edge_s=0.05):
+        return sizer.evaluate(
+            symbol="BTCUSDT", side=side, score=score,
+            edge_l=edge_l, edge_s=edge_s, adx_val=adx,
+            regime=regime, date_str="2025-01-01",
+        )
+
+    def test_trending_up_allows_long(self):
+        sizer = self._make_sizer()
+        assert self._eval(sizer, side=1, regime="trending_up") is True
+
+    def test_trending_down_allows_short(self):
+        sizer = self._make_sizer()
+        assert self._eval(sizer, side=-1, regime="trending_down") is True
+
+    def test_low_vol_allows_both(self):
+        sizer = self._make_sizer()
+        assert self._eval(sizer, side=1, regime="low_vol") is True
+        sizer2 = self._make_sizer()
+        assert self._eval(sizer2, side=-1, regime="low_vol") is True
+
+    def test_choppy_blocks_all(self):
+        sizer = self._make_sizer()
+        assert self._eval(sizer, side=1, regime="choppy") is False
+
+    def test_high_vol_blocks_all(self):
+        sizer = self._make_sizer()
+        assert self._eval(sizer, side=1, regime="high_vol") is False
+
+    def test_trending_up_blocks_short(self):
+        sizer = self._make_sizer()
+        assert self._eval(sizer, side=-1, regime="trending_up") is False
+
+    def test_trending_down_blocks_long(self):
+        sizer = self._make_sizer()
+        assert self._eval(sizer, side=1, regime="trending_down") is False
+
+    def test_backward_compat_bull(self):
+        sizer = self._make_sizer()
+        assert self._eval(sizer, side=1, regime="bull") is True
+
+    def test_backward_compat_bear(self):
+        sizer = self._make_sizer()
+        assert self._eval(sizer, side=-1, regime="bear") is True
+
+    def test_backward_compat_neutral_blocked(self):
+        sizer = self._make_sizer()
+        assert self._eval(sizer, side=1, regime="neutral") is False
+
+    def test_empty_regime_blocked(self):
+        sizer = self._make_sizer()
+        assert self._eval(sizer, side=1, regime="") is False
+
+    def test_unknown_regime_blocked(self):
+        sizer = self._make_sizer()
+        assert self._eval(sizer, side=1, regime="unknown") is False
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

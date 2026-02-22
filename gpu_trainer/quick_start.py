@@ -4992,6 +4992,23 @@ Examples:
     parser.add_argument("--v5-ddt-warmup-trades", type=int, default=20,
                         help="v5 DDT: don't throttle until >= N closed trades (default: 20)")
 
+    parser.add_argument("--v5-multi-regime", action="store_true", default=False,
+                        help="v5.0.9+: enable multi-regime classifier (trending_up/down, choppy, high_vol, low_vol)")
+    parser.add_argument("--v5-regime-adx-trending", type=float, default=25.0,
+                        help="v5.0.9+: ADX threshold for trending regime (default: 25.0)")
+    parser.add_argument("--v5-regime-adx-choppy", type=float, default=20.0,
+                        help="v5.0.9+: ADX below this = choppy regime (default: 20.0)")
+    parser.add_argument("--v5-regime-atr-high-vol", type=float, default=1.3,
+                        help="v5.0.9+: ATR ratio above this = high_vol regime (default: 1.3)")
+    parser.add_argument("--v5-regime-atr-low-vol", type=float, default=0.7,
+                        help="v5.0.9+: ATR ratio below this = low_vol regime (default: 0.7)")
+    parser.add_argument("--v5-regime-atr-window", type=int, default=96,
+                        help="v5.0.9+: rolling ATR window for regime classification (default: 96 bars)")
+    parser.add_argument("--v5-regime-ema-slope-window", type=int, default=10,
+                        help="v5.0.9+: EMA200 slope lookback bars (default: 10)")
+    parser.add_argument("--v5-regime-ema-buffer", type=float, default=0.005,
+                        help="v5.0.9+: price vs EMA200 buffer for trend direction (default: 0.005 = 0.5%%)")
+
     parser.add_argument("--v5-temp-scale", action="store_true", default=False,
                         help="v5.0.9+: enable post-training temperature scaling calibration")
 
@@ -5655,6 +5672,14 @@ Examples:
                     ddt_alpha_down=args.v5_ddt_alpha_down,
                     ddt_alpha_up=args.v5_ddt_alpha_up,
                     ddt_warmup_trades=args.v5_ddt_warmup_trades,
+                    multi_regime=args.v5_multi_regime,
+                    regime_adx_trending=args.v5_regime_adx_trending,
+                    regime_adx_choppy=args.v5_regime_adx_choppy,
+                    regime_atr_high_vol=args.v5_regime_atr_high_vol,
+                    regime_atr_low_vol=args.v5_regime_atr_low_vol,
+                    regime_atr_window=args.v5_regime_atr_window,
+                    regime_ema_slope_window=args.v5_regime_ema_slope_window,
+                    regime_ema_buffer=args.v5_regime_ema_buffer,
                 )
                 return
 
@@ -5760,6 +5785,14 @@ Examples:
                 ddt_alpha_down=args.v5_ddt_alpha_down,
                 ddt_alpha_up=args.v5_ddt_alpha_up,
                 ddt_warmup_trades=args.v5_ddt_warmup_trades,
+                multi_regime=args.v5_multi_regime,
+                regime_adx_trending=args.v5_regime_adx_trending,
+                regime_adx_choppy=args.v5_regime_adx_choppy,
+                regime_atr_high_vol=args.v5_regime_atr_high_vol,
+                regime_atr_low_vol=args.v5_regime_atr_low_vol,
+                regime_atr_window=args.v5_regime_atr_window,
+                regime_ema_slope_window=args.v5_regime_ema_slope_window,
+                regime_ema_buffer=args.v5_regime_ema_buffer,
             )
 
             log.info("=" * 60)
