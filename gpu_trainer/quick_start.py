@@ -4912,6 +4912,8 @@ Examples:
                         help="v5.0.8+: per-symbol daily R budget cap. Stops trading a symbol for rest of day when hit (e.g. -2.0). Default: None (disabled)")
     parser.add_argument("--v5-min-threshold", type=float, default=None,
                         help="v5.0.8+: minimum score threshold floor. Prevents calibrated threshold from dropping too low (e.g. 0.05). Default: None (disabled)")
+    parser.add_argument("--v5-max-threshold", type=float, default=None,
+                        help="v5.0.9+: maximum score threshold ceiling. Caps calibrated threshold from above to prevent sweep from setting it too high (e.g. 0.10). Default: None (disabled)")
     parser.add_argument("--v5-min-threshold-pct", type=float, default=None,
                         help="v5.0.8+: adaptive minimum threshold as percentile of test score distribution (e.g. 70 = use 70th percentile as floor). Adapts to each fold's score range. Default: None (disabled)")
     parser.add_argument("--v5-max-trades-per-day", type=int, default=None,
@@ -5611,6 +5613,7 @@ Examples:
                     trailing_equity_stop=args.v5_trailing_equity_stop,
                     per_symbol_daily_r_budget=args.v5_per_symbol_daily_r,
                     min_threshold=args.v5_min_threshold,
+                    max_threshold=args.v5_max_threshold,
                     min_threshold_pct=args.v5_min_threshold_pct,
                     max_trades_per_day=args.v5_max_trades_per_day,
                     trailing_sl=args.v5_trailing_sl,
@@ -5715,6 +5718,7 @@ Examples:
                 trailing_equity_stop=args.v5_trailing_equity_stop,
                 per_symbol_daily_r_budget=args.v5_per_symbol_daily_r,
                 min_threshold=args.v5_min_threshold,
+                max_threshold=args.v5_max_threshold,
                 min_threshold_pct=args.v5_min_threshold_pct,
                 max_trades_per_day=args.v5_max_trades_per_day,
                 trailing_sl=args.v5_trailing_sl,

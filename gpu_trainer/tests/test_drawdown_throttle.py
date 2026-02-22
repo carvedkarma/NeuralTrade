@@ -203,3 +203,34 @@ class TestDDTNanHandling:
         assert len(ddt.closed_r_history) == 0
         ddt.update_on_trade_close(1.0)
         assert len(ddt.closed_r_history) == 1
+
+
+class TestMaxThresholdLogic:
+    """Tests for max_threshold ceiling cap logic (mirrors run_v5_forward_test threshold computation)."""
+
+    def _compute_effective(self, score_threshold, min_threshold=None, max_threshold=None):
+        hard_floor = min_threshold if min_threshold is not None else 0.10
+        effective = max(hard_floor, score_threshold)
+        if max_threshold is not None and effective > max_threshold:
+            effective = max_threshold
+        return effective
+
+    def test_cap_reduces_high_calibrated(self):
+        assert self._compute_effective(0.20, min_threshold=0.05, max_threshold=0.10) == 0.10
+
+    def test_cap_no_effect_when_below(self):
+        assert self._compute_effective(0.08, min_threshold=0.05, max_threshold=0.15) == 0.08
+
+    def test_cap_none_means_no_ceiling(self):
+        assert self._compute_effective(0.30, min_threshold=0.05, max_threshold=None) == 0.30
+
+    def test_cap_equals_threshold(self):
+        assert self._compute_effective(0.12, min_threshold=0.05, max_threshold=0.12) == 0.12
+
+    def test_floor_wins_when_cap_above_floor(self):
+        effective = self._compute_effective(0.03, min_threshold=0.08, max_threshold=0.15)
+        assert effective == 0.08
+
+    def test_cap_below_floor_caps_to_cap(self):
+        effective = self._compute_effective(0.20, min_threshold=0.12, max_threshold=0.10)
+        assert effective == 0.10

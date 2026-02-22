@@ -129,6 +129,7 @@ class V5ForwardTestConfig:
     trailing_equity_stop: Optional[float] = None
     per_symbol_daily_r_budget: Optional[float] = None
     min_threshold: Optional[float] = None
+    max_threshold: Optional[float] = None
     min_threshold_pct: Optional[float] = None
     max_trades_per_day: Optional[int] = None
     trailing_sl: bool = False
@@ -1208,6 +1209,9 @@ def run_v5_forward_test(
     effective_threshold = max(hard_floor, config.score_threshold)
     if config.score_threshold < hard_floor:
         log.info(f"[V5_FWD] Hard floor engaged: threshold {config.score_threshold:.4f} < floor {hard_floor:.4f} → clamped to {effective_threshold:.4f}")
+    if config.max_threshold is not None and effective_threshold > config.max_threshold:
+        log.info(f"[V5_FWD] Ceiling cap engaged: threshold {effective_threshold:.4f} > cap {config.max_threshold:.4f} → clamped to {config.max_threshold:.4f}")
+        effective_threshold = config.max_threshold
     pct_floor = None
     if config.min_threshold_pct is not None:
         pct_scores = scores.copy()
@@ -1230,10 +1234,14 @@ def run_v5_forward_test(
     if pct_floor is not None and effective_threshold < pct_floor:
         log.info(f"[V5_FWD] Percentile floor: {effective_threshold:.4f} < p{config.min_threshold_pct:.0f}={pct_floor:.4f} → clamped")
         effective_threshold = pct_floor
+    if config.max_threshold is not None and effective_threshold > config.max_threshold:
+        log.info(f"[V5_FWD] Final ceiling cap: {effective_threshold:.4f} > cap {config.max_threshold:.4f} → clamped (ceiling always wins)")
+        effective_threshold = config.max_threshold
 
     log.info(f"[V5_FWD] Effective threshold={effective_threshold:.4f} "
              f"(calibrated={config.score_threshold:.4f}, "
              f"fixed_floor={config.min_threshold}, "
+             f"ceiling_cap={config.max_threshold}, "
              f"pct_floor={pct_floor}) cooldown={config.cooldown}")
     if config.max_trades_per_day is not None:
         if test_timestamps is not None:
@@ -2124,7 +2132,7 @@ def run_v5_walk_forward(
     adaptive_sizing=False, kelly_fraction=0.25, max_size_mult=2.5, min_size_mult=0.25,
     regime_scaling=False, regime_bull_mult=1.5, regime_bear_mult=0.5, regime_lookback=20,
     daily_loss_cap=None, trailing_equity_stop=None, per_symbol_daily_r_budget=None,
-    min_threshold=None, min_threshold_pct=None, max_trades_per_day=None,
+    min_threshold=None, max_threshold=None, min_threshold_pct=None, max_trades_per_day=None,
     trailing_sl=False, trail_activation=1.5, trail_distance=1.0, allow_runner=False,
     conviction_sizing=False, conviction_tier_top_pct=5.0, conviction_tier_top_mult=2.5,
     conviction_tier_high_pct=20.0, conviction_tier_high_mult=1.5,
@@ -2248,6 +2256,7 @@ def run_v5_walk_forward(
             trailing_equity_stop=trailing_equity_stop,
             per_symbol_daily_r_budget=per_symbol_daily_r_budget,
             min_threshold=min_threshold,
+            max_threshold=max_threshold,
             min_threshold_pct=min_threshold_pct,
             max_trades_per_day=max_trades_per_day,
             trailing_sl=trailing_sl,
@@ -2393,6 +2402,7 @@ def train_v5_model(
     trailing_equity_stop=None,
     per_symbol_daily_r_budget=None,
     min_threshold=None,
+    max_threshold=None,
     min_threshold_pct=None,
     max_trades_per_day=None,
     trailing_sl=False, trail_activation=1.5, trail_distance=1.0, allow_runner=False,
@@ -3292,6 +3302,7 @@ def train_v5_model(
                 trailing_equity_stop=trailing_equity_stop,
                 per_symbol_daily_r_budget=per_symbol_daily_r_budget,
                 min_threshold=min_threshold,
+                max_threshold=max_threshold,
                 min_threshold_pct=min_threshold_pct,
                 max_trades_per_day=max_trades_per_day,
                 trailing_sl=trailing_sl,
