@@ -1,0 +1,72 @@
+You are my Replit Agent working inside the existing gpu_trainer project. Your job is to upgrade the strategy so it stops “noise trading” (lots of trades, PF≈1.0, tiny expectancy) and instead produces LOW-FREQUENCY, HIGH-EDGE signals (target 3–4 trades/day total across all symbols, but only when edge is real). Do NOT add random features. Make surgical, testable changes.
+
+GOAL (measurable):
+- Increase per-trade expectancy and PF (target PF >= 1.15 on most folds)
+- Keep drawdown controlled (MaxDD not worse than before)
+- Reduce trade count when the model is uncertain (no forced trading)
+- Produce stable behavior across folds (avoid months with 0 trades unless the market truly offers no edge)
+
+PART 1 — Add “Edge-First” Selection (critical)
+1) Implement a new gate called EDGE_FIRST_MODE (CLI flag: --v5-edge-first).
+2) In forward test, before threshold/TPD controllers, compute a per-bar “edge score”:
+   edge_bar = max(edge_long, edge_short) where edge_long/edge_short already exist in logs (edge_L / edge_S).
+   If edge heads are disabled, derive proxy edge using mu_R / risk_proxy (mae or sigma): edge_proxy = abs(mu_R) / max(risk, eps).
+3) Add a new config + CLI flags:
+   --v5-edge-min (float, default 0.03)
+   --v5-edge-pct-floor (int, default 70)  # percentile floor
+   --v5-edge-topn-per-day (int, default 4) # cap on selections per day (per symbol or global, configurable)
+4) Behavior:
+   - Filter candidates to ONLY bars where edge_bar >= v5_edge_min AND edge_bar >= percentile(edge_bar, v5_edge_pct_floor) computed per-symbol per-fold.
+   - Then apply existing gates (ADX gate, correlation block, DDT sizing, etc.)
+   - TPD controller should NO LONGER “force” trades. It can only relax within safe bounds, never below the edge filter.
+5) Add diagnostics lines showing funnel counts:
+   total bars -> edge_candidates -> after_regime/adx -> after_threshold -> after_cooldown -> trades taken
+
+PART 2 — Regime-Conditional Side Filtering (stability)
+1) Add a new flag: --v5-regime-side-map
+   Accept mapping string like: "trending_up=LONG,trending_down=SHORT,choppy=NONE,high_vol=SHORT,low_vol=LONG,unknown=NONE"
+2) If enabled:
+   - If regime says NONE, skip (unless ultra-conviction applies)
+   - Else only allow the mapped side, even if the other side has a slightly better score
+3) Add a debug line per fold:
+   regime_side_map_enabled=1 and counts skipped_by_side_map
+
+PART 3 — Fix “alpha crushed by sizing” (calibration)
+We saw cases where unsized R is big but sized R is tiny. Implement a safer minimum sizing floor:
+1) Add config + flag:
+   --v5-size-floor (float, default 0.35)
+2) When DDT/adaptive sizing returns size_mult, clamp:
+   size_mult = max(size_mult, v5_size_floor) BUT only when:
+   - rolling_R over last N trades (use existing DDT rolling window) is >= 0
+   - AND not in drawdown_high state
+This preserves alpha when system is doing fine, but still shrinks hard in drawdown.
+
+PART 4 — “Don’t trade just because you can” (remove forced TPD)
+1) Audit the TPD controller:
+   - Ensure it never drops effective threshold below the EDGE_FIRST candidate filter.
+   - Ensure the “floor=0.10” clamp doesn’t override edge selection logic.
+2) Add a report section:
+   - target_tpd, achieved_tpd, avg_effective_threshold, avg_edge_of_trades
+   - percentiles of edge of taken trades (p50/p75/p90)
+
+PART 5 — Tests (must pass)
+Add unit tests (no torch dependency):
+- edge-first filters out low-edge bars correctly
+- percentile floor works
+- regime side map blocks disallowed sides
+- size floor clamp only applies when rolling_R >= 0
+- funnel diagnostics counters are consistent
+All tests must pass.
+
+PART 6 — Provide 2 recommended run commands (1-line)
+1) High-edge mode (3–4 trades/day):
+   include --v5-edge-first --v5-edge-min 0.03 --v5-edge-pct-floor 75 --v5-edge-topn-per-day 4 --v5-regime-side-map "trending_up=LONG,trending_down=SHORT,choppy=NONE,high_vol=SHORT,low_vol=LONG,unknown=NONE" --v5-size-floor 0.35
+2) Baseline comparison command (same but edge-first OFF)
+
+DELIVERABLES:
+- Code changes committed in the repo
+- Updated help/README with new flags + explanation
+- Sample log snippet showing the funnel counts
+- Confirmation that 100% tests pass (or list skipped tests and why)
+
+Start by locating the forward-test loop and candidate selection code, then implement PART 1 first. Do not proceed to PART 2–4 until PART 1 works and is covered by tests.

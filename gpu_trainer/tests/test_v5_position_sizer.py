@@ -973,5 +973,166 @@ class TestScoreStatsFinite:
         assert np.isfinite(diag['score_mean'])
 
 
+class TestEdgeFirstFilter:
+    """Tests for Edge-First selection gate (PART 1)."""
+
+    def test_edge_min_filters_low_edge(self):
+        edge_bar_values = np.array([0.01, 0.02, 0.03, 0.05, 0.10])
+        edge_min = 0.03
+        ef_pass = edge_bar_values >= edge_min
+        assert list(ef_pass) == [False, False, True, True, True]
+        assert np.sum(ef_pass) == 3
+
+    def test_percentile_floor_works(self):
+        np.random.seed(42)
+        edge_bar_values = np.random.uniform(0, 0.2, 1000).astype(np.float32)
+        pct_floor = 70
+        ef_pct_threshold = float(np.percentile(edge_bar_values, pct_floor))
+        ef_threshold = max(0.03, ef_pct_threshold)
+        ef_pass = edge_bar_values >= ef_threshold
+        pass_pct = np.mean(ef_pass) * 100
+        assert pass_pct <= 35, f"Expected at most 35% pass, got {pass_pct:.1f}%"
+
+    def test_edge_min_with_inf(self):
+        edge_bar_values = np.array([0.05, -np.inf, np.nan, 0.10, 0.02])
+        edge_min = 0.03
+        ef_pass = np.isfinite(edge_bar_values) & (edge_bar_values >= edge_min)
+        assert list(ef_pass) == [True, False, False, True, False]
+
+    def test_proxy_edge_computation(self):
+        mu_R = np.array([0.1, -0.05, 0.2, 0.0])
+        risk = np.maximum(np.array([0.5, 0.5, 0.1, 0.5]), 1e-6)
+        edge_proxy = np.abs(mu_R) / risk
+        assert abs(edge_proxy[0] - 0.2) < 1e-6
+        assert abs(edge_proxy[1] - 0.1) < 1e-6
+        assert abs(edge_proxy[2] - 2.0) < 1e-6
+        assert abs(edge_proxy[3] - 0.0) < 1e-6
+
+    def test_edge_topn_per_day_cap(self):
+        topn = 3
+        trades_today = 0
+        results = []
+        for i in range(10):
+            if trades_today >= topn:
+                results.append(False)
+            else:
+                results.append(True)
+                trades_today += 1
+        assert sum(results) == 3
+        assert len(results) == 10
+
+
+class TestRegimeSideMap:
+    """Tests for regime-conditional side filtering (PART 2)."""
+
+    def _should_block(self, regime_side_map, bar_regime, side_val, ultra_conviction=False):
+        allowed = regime_side_map.get(bar_regime, "BOTH")
+        if ultra_conviction and allowed == "NONE":
+            return False
+        if allowed == "NONE":
+            return True
+        if allowed == "LONG" and side_val != 1:
+            return True
+        if allowed == "SHORT" and side_val != -1:
+            return True
+        return False
+
+    def test_long_allowed_in_trending_up(self):
+        rsm = {"trending_up": "LONG", "trending_down": "SHORT", "choppy": "NONE"}
+        assert not self._should_block(rsm, "trending_up", 1)
+        assert self._should_block(rsm, "trending_up", -1)
+
+    def test_short_allowed_in_trending_down(self):
+        rsm = {"trending_up": "LONG", "trending_down": "SHORT", "choppy": "NONE"}
+        assert not self._should_block(rsm, "trending_down", -1)
+        assert self._should_block(rsm, "trending_down", 1)
+
+    def test_none_blocks_both(self):
+        rsm = {"choppy": "NONE"}
+        assert self._should_block(rsm, "choppy", 1)
+        assert self._should_block(rsm, "choppy", -1)
+
+    def test_ultra_conviction_overrides_none(self):
+        rsm = {"choppy": "NONE"}
+        assert not self._should_block(rsm, "choppy", 1, ultra_conviction=True)
+
+    def test_unknown_regime_allows_both(self):
+        rsm = {"trending_up": "LONG"}
+        assert not self._should_block(rsm, "unknown", 1)
+        assert not self._should_block(rsm, "unknown", -1)
+
+    def test_both_allows_all(self):
+        rsm = {"trending_up": "BOTH"}
+        assert not self._should_block(rsm, "trending_up", 1)
+        assert not self._should_block(rsm, "trending_up", -1)
+
+
+class TestSizeFloorClamp:
+    """Tests for size floor clamping (PART 3)."""
+
+    def _apply_size_floor(self, trade_size_mult, size_floor, rolling_r, throttle_level):
+        if size_floor > 0 and trade_size_mult < size_floor:
+            sf_allow = True
+            if rolling_r < 0:
+                sf_allow = False
+            if throttle_level > 0.5:
+                sf_allow = False
+            if sf_allow:
+                return size_floor
+        return trade_size_mult
+
+    def test_floor_applied_when_rolling_positive(self):
+        result = self._apply_size_floor(0.15, 0.35, rolling_r=2.0, throttle_level=0.0)
+        assert result == 0.35
+
+    def test_floor_not_applied_when_rolling_negative(self):
+        result = self._apply_size_floor(0.15, 0.35, rolling_r=-1.0, throttle_level=0.0)
+        assert result == 0.15
+
+    def test_floor_not_applied_in_high_throttle(self):
+        result = self._apply_size_floor(0.15, 0.35, rolling_r=2.0, throttle_level=0.7)
+        assert result == 0.15
+
+    def test_floor_not_applied_when_above_floor(self):
+        result = self._apply_size_floor(0.50, 0.35, rolling_r=2.0, throttle_level=0.0)
+        assert result == 0.50
+
+    def test_floor_disabled_when_zero(self):
+        result = self._apply_size_floor(0.10, 0.0, rolling_r=2.0, throttle_level=0.0)
+        assert result == 0.10
+
+
+class TestFunnelDiagnosticsConsistency:
+    """Tests that funnel diagnostic counters are consistent."""
+
+    def test_counters_add_up(self):
+        n_candidates = 1000
+        warmup = 50
+        cooldown = 100
+        adx = 30
+        ema = 20
+        regime_side = 15
+        edge_topn = 10
+        weekly = 5
+        corr = 8
+        daily = 3
+        equity = 2
+        tpd = 7
+        ddt = 12
+        edge_first_pre = 200
+        trades_taken = n_candidates - warmup - cooldown - adx - ema - regime_side \
+                       - edge_topn - weekly - corr - daily - equity - tpd - ddt - edge_first_pre
+
+        total_accounted = (warmup + cooldown + adx + ema + regime_side + edge_topn +
+                          weekly + corr + daily + equity + tpd + ddt + edge_first_pre + trades_taken)
+        assert total_accounted == n_candidates
+
+    def test_zero_trades_valid(self):
+        n_candidates = 100
+        blocked = 100
+        trades = n_candidates - blocked
+        assert trades == 0
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

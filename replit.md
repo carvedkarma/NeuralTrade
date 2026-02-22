@@ -28,6 +28,7 @@ Key enhancements include:
 - **Multi-Asset Support**: Extended to 7 symbols with symbol-balanced sampling and per-symbol reporting.
 - **Performance Optimization**: Introduced metric-based checkpoint promotion, hard threshold floors, and temperature scaling for model calibration.
 - **Ultra-Conviction Tier**: Allowed for higher risk in rare, high-conviction setups under strict gating conditions.
+- **v5.1.0 Edge-First Strategy**: Shifted from volume-maximization (TPD target) to quality-maximization (edge-per-trade). Includes edge-first pre-filtering (`--v5-edge-first`, `--v5-edge-min`, `--v5-edge-pct-floor`, `--v5-edge-topn-per-day`), regime-conditional side filtering (`--v5-regime-side-map`), and size floor clamping (`--v5-size-floor`). Recommended: `--v5-edge-first --v5-edge-min 0.03 --v5-edge-pct-floor 70 --v5-edge-topn-per-day 3 --v5-regime-side-map "trending_up=LONG,trending_down=SHORT,choppy=NONE" --v5-size-floor 0.5`.
 
 ### System Design Choices
 Data management uses Drizzle ORM for PostgreSQL and Zod for type-safe validation. The system persists learning states and separates live sentiment from historical data. The client is bundled by Vite, and the server by esbuild. Centralized timeframe configuration ensures consistency. A runtime diagnostic system provides health endpoints and UI console logging. A GPU training API supports training, status checks, and daily retraining.

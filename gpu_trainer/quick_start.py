@@ -5009,6 +5009,19 @@ Examples:
     parser.add_argument("--v5-regime-ema-buffer", type=float, default=0.005,
                         help="v5.0.9+: price vs EMA200 buffer for trend direction (default: 0.005 = 0.5%%)")
 
+    parser.add_argument("--v5-edge-first", action="store_true", default=False,
+                        help="v5.1: Edge-First mode - only take trades with real edge (filters low-edge noise)")
+    parser.add_argument("--v5-edge-min", type=float, default=0.03,
+                        help="v5.1: minimum edge score to consider a trade (default: 0.03)")
+    parser.add_argument("--v5-edge-pct-floor", type=int, default=70,
+                        help="v5.1: percentile floor for edge scores (default: 70)")
+    parser.add_argument("--v5-edge-topn-per-day", type=int, default=4,
+                        help="v5.1: max trades per day under edge-first mode (default: 4)")
+    parser.add_argument("--v5-regime-side-map", type=str, default=None,
+                        help="v5.1: regime-conditional side filtering, e.g. 'trending_up=LONG,trending_down=SHORT,choppy=NONE'")
+    parser.add_argument("--v5-size-floor", type=float, default=0.0,
+                        help="v5.1: minimum sizing multiplier floor (only when not in drawdown, default: 0 = disabled)")
+
     parser.add_argument("--v5-temp-scale", action="store_true", default=False,
                         help="v5.0.9+: enable post-training temperature scaling calibration")
 
@@ -5580,6 +5593,14 @@ Examples:
                 log.info(f"[V5] Time-based split: train < {train_end_date}, test >= {test_start_date}"
                          + (f" to {test_end_date}" if test_end_date else ""))
 
+            v5_regime_side_map = None
+            if args.v5_regime_side_map:
+                v5_regime_side_map = {}
+                for pair in args.v5_regime_side_map.split(','):
+                    k, v = pair.strip().split('=')
+                    v5_regime_side_map[k.strip()] = v.strip().upper()
+                log.info(f"[V5] Regime side map: {v5_regime_side_map}")
+
             if args.v5_walk_forward:
                 log.info("[MODE] V5 Walk-Forward Analysis")
                 run_v5_walk_forward(
@@ -5680,6 +5701,12 @@ Examples:
                     regime_atr_window=args.v5_regime_atr_window,
                     regime_ema_slope_window=args.v5_regime_ema_slope_window,
                     regime_ema_buffer=args.v5_regime_ema_buffer,
+                    edge_first=args.v5_edge_first,
+                    edge_min=args.v5_edge_min,
+                    edge_pct_floor=args.v5_edge_pct_floor,
+                    edge_topn_per_day=args.v5_edge_topn_per_day,
+                    regime_side_map=v5_regime_side_map,
+                    size_floor=args.v5_size_floor,
                 )
                 return
 
@@ -5793,6 +5820,12 @@ Examples:
                 regime_atr_window=args.v5_regime_atr_window,
                 regime_ema_slope_window=args.v5_regime_ema_slope_window,
                 regime_ema_buffer=args.v5_regime_ema_buffer,
+                edge_first=args.v5_edge_first,
+                edge_min=args.v5_edge_min,
+                edge_pct_floor=args.v5_edge_pct_floor,
+                edge_topn_per_day=args.v5_edge_topn_per_day,
+                regime_side_map=v5_regime_side_map,
+                size_floor=args.v5_size_floor,
             )
 
             log.info("=" * 60)

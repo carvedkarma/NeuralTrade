@@ -177,6 +177,12 @@ class V5ForwardTestConfig:
     regime_atr_window: int = 96
     regime_ema_slope_window: int = 10
     regime_ema_buffer: float = 0.005
+    edge_first: bool = False
+    edge_min: float = 0.03
+    edge_pct_floor: int = 70
+    edge_topn_per_day: int = 4
+    regime_side_map: Optional[dict] = None
+    size_floor: float = 0.0
 
 
 def _parse_date_to_ms(date_str: str) -> int:
@@ -1313,6 +1319,37 @@ def run_v5_forward_test(
     selected = scores_work >= ddt_base_threshold
     sel_indices = np.where(selected)[0]
 
+    edge_first_blocked = 0
+    edge_bar_values = None
+    if config.edge_first:
+        edge_L = arrays.get('edge_L', None)
+        edge_S = arrays.get('edge_S', None)
+        if edge_L is not None and edge_S is not None:
+            edge_bar_values = np.maximum(edge_L, edge_S)
+        else:
+            mu_R = arrays['mu_R']
+            risk = np.maximum(arrays.get('mae', arrays.get('sigma', np.ones_like(mu_R))), 1e-6)
+            edge_bar_values = np.abs(mu_R) / risk
+
+        ef_pct_threshold = 0.0
+        if config.edge_pct_floor > 0:
+            ef_finite = edge_bar_values[np.isfinite(edge_bar_values)]
+            if len(ef_finite) > 0:
+                ef_pct_threshold = float(np.percentile(ef_finite, config.edge_pct_floor))
+        ef_threshold = max(config.edge_min, ef_pct_threshold)
+
+        ef_pass_mask = np.isfinite(edge_bar_values) & (edge_bar_values >= ef_threshold)
+        n_before = len(sel_indices)
+        sel_indices = sel_indices[ef_pass_mask[sel_indices]]
+        edge_first_blocked = n_before - len(sel_indices)
+        log.info(f"[V5_EDGE_FIRST] ENABLED: edge_min={config.edge_min:.4f} "
+                 f"pct_floor=p{config.edge_pct_floor}={ef_pct_threshold:.4f} "
+                 f"effective_threshold={ef_threshold:.4f} "
+                 f"topn_per_day={config.edge_topn_per_day} "
+                 f"passed={len(sel_indices)}/{n_before} blocked={edge_first_blocked}")
+
+    regime_side_blocked = 0
+
     ema200 = None
     if ema200_regime_gate and close_prices is not None:
         if config.multi_regime:
@@ -1457,6 +1494,9 @@ def run_v5_forward_test(
     tpd_blocked = 0
     tpd_current_date = ""
     tpd_current_count = 0
+    edge_topn_blocked = 0
+    ef_topn_current_date = ""
+    ef_topn_current_count = 0
 
     open_positions: dict = {}
     trade_spans: dict = defaultdict(list)
@@ -1596,6 +1636,45 @@ def run_v5_forward_test(
                           close_val, ema_val)
                 ema_blocked += 1
                 continue
+
+        bar_regime = "unknown"
+        if bar_regimes is not None and idx < len(bar_regimes):
+            bar_regime = str(bar_regimes[idx])
+        elif ema200_for_regime is not None and close_prices is not None and idx < len(close_prices):
+            if close_prices[idx] > ema200_for_regime[idx] * 1.01:
+                bar_regime = "trending_up"
+            elif close_prices[idx] < ema200_for_regime[idx] * 0.99:
+                bar_regime = "trending_down"
+            else:
+                bar_regime = "choppy"
+
+        if config.regime_side_map is not None:
+            allowed = config.regime_side_map.get(bar_regime, "BOTH")
+            side_val = sides[idx]
+            is_ultra_override = False
+            if config.ultra_conviction and allowed == "NONE":
+                is_ultra_override = True
+            if not is_ultra_override:
+                if allowed == "NONE":
+                    regime_side_blocked += 1
+                    continue
+                if allowed == "LONG" and side_val != 1:
+                    regime_side_blocked += 1
+                    continue
+                if allowed == "SHORT" and side_val != -1:
+                    regime_side_blocked += 1
+                    continue
+
+        if config.edge_first and config.edge_topn_per_day > 0 and test_timestamps is not None:
+            bar_date = datetime.utcfromtimestamp(
+                test_timestamps[idx] / 1000).strftime('%Y-%m-%d')
+            if bar_date != ef_topn_current_date:
+                ef_topn_current_date = bar_date
+                ef_topn_current_count = 0
+            if ef_topn_current_count >= config.edge_topn_per_day:
+                edge_topn_blocked += 1
+                continue
+
         if config.weekly_loss_cap is not None and week_boundaries is not None:
             wk = week_boundaries[idx]
             if wk != current_week_id:
@@ -1640,17 +1719,6 @@ def run_v5_forward_test(
                 tpd_blocked += 1
                 continue
 
-        bar_regime = "unknown"
-        if bar_regimes is not None and idx < len(bar_regimes):
-            bar_regime = str(bar_regimes[idx])
-        elif ema200_for_regime is not None and close_prices is not None and idx < len(close_prices):
-            if close_prices[idx] > ema200_for_regime[idx] * 1.01:
-                bar_regime = "trending_up"
-            elif close_prices[idx] < ema200_for_regime[idx] * 0.99:
-                bar_regime = "trending_down"
-            else:
-                bar_regime = "choppy"
-
         if ddt is not None:
             ddt_thr = ddt.effective_threshold(effective_threshold)
             if scores_work[idx] < ddt_thr:
@@ -1663,6 +1731,9 @@ def run_v5_forward_test(
 
         if config.max_trades_per_day is not None:
             tpd_current_count += 1
+
+        if config.edge_first and config.edge_topn_per_day > 0:
+            ef_topn_current_count += 1
 
         trade_size_mult = 1.0
         if position_sizer is not None:
@@ -1720,6 +1791,17 @@ def run_v5_forward_test(
         if ddt is not None:
             ddt_size = ddt.size_multiplier()
             trade_size_mult *= ddt_size
+
+        if config.size_floor > 0 and trade_size_mult < config.size_floor:
+            sf_allow = True
+            if ddt is not None:
+                ddt_diag_now = ddt.diagnostics()
+                if ddt_diag_now['rolling_sum_r'] < 0:
+                    sf_allow = False
+                if ddt_diag_now['throttle_level'] > 0.5:
+                    sf_allow = False
+            if sf_allow:
+                trade_size_mult = config.size_floor
 
         size_multipliers[idx] = trade_size_mult
 
@@ -1796,6 +1878,12 @@ def run_v5_forward_test(
         log.info(f"[V5_GATE] Max trades/day cap blocked {tpd_blocked} trades")
     if adx_blocked > 0:
         log.info(f"[V5_GATE] ADX regime gate blocked {adx_blocked} trades (min={config.adx_min:.1f})")
+    if edge_first_blocked > 0:
+        log.info(f"[V5_GATE] Edge-first blocked {edge_first_blocked} candidates (pre-loop)")
+    if regime_side_blocked > 0:
+        log.info(f"[V5_GATE] Regime side map blocked {regime_side_blocked} trades")
+    if edge_topn_blocked > 0:
+        log.info(f"[V5_GATE] Edge top-N/day blocked {edge_topn_blocked} trades")
     if ddt_blocked > 0:
         log.info(f"[V5_DDT] Throttle blocked {ddt_blocked} trades")
     if ddt is not None:
@@ -1813,9 +1901,24 @@ def run_v5_forward_test(
     n_taken = len(taken)
     log.info(f"[V5_DROPOFF] bars_total={n_total_bars} | candidates={n_candidates} | "
              f"warmup={warmup_blocked} cooldown={cooldown_blocked} adx={adx_blocked} "
-             f"ema={ema_blocked} weekly={weekly_blocked} corr={corr_blocked} "
+             f"ema={ema_blocked} regime_side={regime_side_blocked} "
+             f"edge_topn={edge_topn_blocked} weekly={weekly_blocked} corr={corr_blocked} "
              f"daily={daily_blocked} equity={equity_blocked} tpd={tpd_blocked} "
-             f"ddt={ddt_blocked} → trades_taken={n_taken}")
+             f"ddt={ddt_blocked} edge_first_pre={edge_first_blocked} → trades_taken={n_taken}")
+
+    if config.edge_first and edge_bar_values is not None and len(taken) > 0:
+        taken_arr = np.array(taken)
+        taken_edges = edge_bar_values[taken_arr]
+        taken_finite = taken_edges[np.isfinite(taken_edges)]
+        if len(taken_finite) > 0:
+            log.info(f"[V5_EDGE_REPORT] Edge of taken trades: "
+                     f"mean={np.mean(taken_finite):.4f} "
+                     f"p50={np.percentile(taken_finite, 50):.4f} "
+                     f"p75={np.percentile(taken_finite, 75):.4f} "
+                     f"p90={np.percentile(taken_finite, 90):.4f}")
+    if config.regime_side_map is not None:
+        log.info(f"[V5_REGIME_SIDE] regime_side_map_enabled=1 "
+                 f"skipped_by_side_map={regime_side_blocked}")
 
     n_eligible = len(sel_indices)
     n_hold_all = int(np.sum(sides[sel_indices] == 0)) if len(sel_indices) > 0 else 0
@@ -2247,6 +2350,8 @@ def run_v5_walk_forward(
     multi_regime=False, regime_adx_trending=25.0, regime_adx_choppy=20.0,
     regime_atr_high_vol=1.3, regime_atr_low_vol=0.7,
     regime_atr_window=96, regime_ema_slope_window=10, regime_ema_buffer=0.005,
+    edge_first=False, edge_min=0.03, edge_pct_floor=70, edge_topn_per_day=4,
+    regime_side_map=None, size_floor=0.0,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -2406,6 +2511,12 @@ def run_v5_walk_forward(
             regime_atr_window=regime_atr_window,
             regime_ema_slope_window=regime_ema_slope_window,
             regime_ema_buffer=regime_ema_buffer,
+            edge_first=edge_first,
+            edge_min=edge_min,
+            edge_pct_floor=edge_pct_floor,
+            edge_topn_per_day=edge_topn_per_day,
+            regime_side_map=regime_side_map,
+            size_floor=size_floor,
             fold_id=fold['fold'],
         )
 
@@ -2532,6 +2643,8 @@ def train_v5_model(
     multi_regime=False, regime_adx_trending=25.0, regime_adx_choppy=20.0,
     regime_atr_high_vol=1.3, regime_atr_low_vol=0.7,
     regime_atr_window=96, regime_ema_slope_window=10, regime_ema_buffer=0.005,
+    edge_first=False, edge_min=0.03, edge_pct_floor=70, edge_topn_per_day=4,
+    regime_side_map=None, size_floor=0.0,
     fold_id=0,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
@@ -3462,6 +3575,12 @@ def train_v5_model(
                 regime_atr_window=regime_atr_window,
                 regime_ema_slope_window=regime_ema_slope_window,
                 regime_ema_buffer=regime_ema_buffer,
+                edge_first=edge_first,
+                edge_min=edge_min,
+                edge_pct_floor=edge_pct_floor,
+                edge_topn_per_day=edge_topn_per_day,
+                regime_side_map=regime_side_map,
+                size_floor=size_floor,
             )
 
             fwd_report = run_v5_forward_test(
