@@ -835,5 +835,143 @@ class TestUltraConvictionMultiRegime:
         assert self._eval(sizer, side=1, regime="unknown") is False
 
 
+class TestMultiRegimeCoverage:
+    """Tests that multi-regime classifier covers >95% of bars after warmup."""
+
+    def _make_classifier(self, **overrides):
+        from train.v5_position_sizer import MultiRegimeClassifier, MultiRegimeConfig
+        defaults = dict(
+            enabled=True,
+            adx_trending_threshold=25.0,
+            adx_choppy_threshold=20.0,
+            atr_high_vol_ratio=1.3,
+            atr_low_vol_ratio=0.7,
+            atr_rolling_window=96,
+            ema_slope_window=10,
+            ema_price_buffer=0.005,
+        )
+        defaults.update(overrides)
+        return MultiRegimeClassifier(MultiRegimeConfig(**defaults))
+
+    def test_coverage_with_valid_inputs(self):
+        clf = self._make_classifier()
+        n_bars = 1000
+        np.random.seed(42)
+        for i in range(n_bars):
+            adx = np.random.uniform(10, 40)
+            atr_cur = np.random.uniform(0.5, 2.0)
+            atr_roll = 1.0
+            price = 50000 + np.random.uniform(-5000, 5000)
+            ema = 50000.0
+            ema_prev = 49900.0
+            regime = clf.classify(adx, atr_cur, atr_roll, price, ema, ema_prev)
+            assert regime in ("trending_up", "trending_down", "choppy", "high_vol", "low_vol")
+        diag = clf.get_diagnostics()
+        unknown_pct = diag['regime_pct'].get('unknown', 0)
+        assert unknown_pct < 5.0, f"Unknown regime too high: {unknown_pct}%"
+        assert diag['total_classified'] == n_bars
+
+    def test_coverage_with_nan_inputs_still_classifies(self):
+        clf = self._make_classifier()
+        regime = clf.classify(float('nan'), float('nan'), float('nan'),
+                              50000.0, float('nan'), float('nan'))
+        assert regime in ("trending_up", "trending_down", "choppy", "high_vol", "low_vol", "unknown")
+
+    def test_flat_price_produces_valid_regimes(self):
+        clf = self._make_classifier()
+        for _ in range(500):
+            regime = clf.classify(adx_val=15.0, atr_current=1.0,
+                                  atr_rolling=1.0, close_price=50000.0,
+                                  ema200_val=50000.0, ema200_prev=50000.0)
+            assert regime in clf.REGIMES
+
+
+try:
+    import torch
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+
+
+@pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
+class TestADXStability:
+    """Tests that ADX computation produces no NaN after warmup, even with flat data."""
+
+    def test_adx_no_nan_after_warmup(self):
+        from train.v5_train import _compute_adx
+        n = 500
+        high = np.full(n, 50100.0)
+        low = np.full(n, 49900.0)
+        close = np.full(n, 50000.0)
+        adx = _compute_adx(high, low, close, period=14)
+        warmup_end = 14 * 3
+        post_warmup = adx[warmup_end:]
+        assert not np.any(np.isnan(post_warmup)), f"ADX has NaN after warmup: {np.sum(np.isnan(post_warmup))} NaNs"
+
+    def test_adx_no_nan_volatile_data(self):
+        from train.v5_train import _compute_adx
+        np.random.seed(99)
+        n = 1000
+        close = 50000 + np.cumsum(np.random.randn(n) * 100)
+        high = close + np.abs(np.random.randn(n) * 50)
+        low = close - np.abs(np.random.randn(n) * 50)
+        adx = _compute_adx(high, low, close, period=14)
+        warmup_end = 14 * 3
+        post_warmup = adx[warmup_end:]
+        assert not np.any(np.isnan(post_warmup))
+        assert np.all(np.isfinite(post_warmup))
+
+
+class TestScoreStatsFinite:
+    """Tests that score stat computation handles -inf values correctly."""
+
+    def _compute_finite_stats(self, scores):
+        finite_mask = np.isfinite(scores)
+        finite_scores = scores[finite_mask]
+        if len(finite_scores) > 0:
+            return {
+                'score_mean': float(np.mean(finite_scores)),
+                'score_std': float(np.std(finite_scores)),
+                'score_p50': float(np.percentile(finite_scores, 50)),
+                'score_p90': float(np.percentile(finite_scores, 90)),
+                'score_pct_positive': float(np.mean(finite_scores > 0) * 100),
+                'n_finite_scores': int(np.sum(finite_mask)),
+            }
+        else:
+            return {
+                'score_mean': 0.0, 'score_std': 0.0,
+                'score_p50': 0.0, 'score_p90': 0.0,
+                'score_pct_positive': 0.0,
+                'n_finite_scores': 0,
+            }
+
+    def test_mixed_finite_and_inf(self):
+        scores = np.array([0.5, 1.2, -np.inf, 0.8, -np.inf, 2.0])
+        diag = self._compute_finite_stats(scores)
+        assert np.isfinite(diag['score_mean'])
+        assert np.isfinite(diag['score_p50'])
+        assert np.isfinite(diag['score_p90'])
+        assert diag['n_finite_scores'] == 4
+
+    def test_all_inf_scores(self):
+        scores = np.full(50, -np.inf)
+        diag = self._compute_finite_stats(scores)
+        assert diag['score_mean'] == 0.0
+        assert diag['n_finite_scores'] == 0
+
+    def test_all_finite_scores(self):
+        scores = np.array([0.1, 0.5, 1.0, 1.5, 2.0])
+        diag = self._compute_finite_stats(scores)
+        assert diag['n_finite_scores'] == 5
+        assert abs(diag['score_mean'] - np.mean(scores)) < 1e-6
+        assert diag['score_pct_positive'] == 100.0
+
+    def test_nan_handling(self):
+        scores = np.array([0.5, np.nan, 1.0, -np.inf])
+        diag = self._compute_finite_stats(scores)
+        assert diag['n_finite_scores'] == 2
+        assert np.isfinite(diag['score_mean'])
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

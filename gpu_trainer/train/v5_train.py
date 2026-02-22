@@ -708,6 +708,18 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
     n_long_sides = int(np.sum(sides == 1))
     n_short_sides = int(np.sum(sides == -1))
 
+    finite_mask = np.isfinite(scores)
+    finite_scores = scores[finite_mask]
+    if len(finite_scores) > 0:
+        s_mean = float(np.mean(finite_scores))
+        s_std = float(np.std(finite_scores))
+        s_p50 = float(np.percentile(finite_scores, 50))
+        s_p90 = float(np.percentile(finite_scores, 90))
+        s_pct_pos = float(np.mean(finite_scores > 0) * 100)
+    else:
+        s_mean = s_std = s_p50 = s_p90 = 0.0
+        s_pct_pos = 0.0
+
     return scores, sides, {
         'mu_R_mean': float(np.nanmean(mu_R)),
         'mu_R_std': float(np.nanstd(mu_R)),
@@ -720,11 +732,13 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         'edge_L': edge_long,
         'edge_S': edge_short,
         'penalty_mean': float(np.nanmean(penalty)),
-        'score_mean': float(np.nanmean(scores)),
-        'score_std': float(np.nanstd(scores)),
-        'score_p50': float(np.nanpercentile(scores, 50)),
-        'score_p90': float(np.nanpercentile(scores, 90)),
-        'score_pct_positive': float(np.nanmean(scores > 0) * 100),
+        'score_mean': s_mean,
+        'score_std': s_std,
+        'score_p50': s_p50,
+        'score_p90': s_p90,
+        'score_pct_positive': s_pct_pos,
+        'n_finite_scores': int(np.sum(finite_mask)),
+        'n_suppressed': n_suppressed,
         'side_mode': side_mode,
         'rr_weight': rr_weight,
         'min_mu_r_score': min_mu_r_score,
@@ -1433,6 +1447,7 @@ def run_v5_forward_test(
     weekly_blocked = 0
     corr_blocked = 0
     ddt_blocked = 0
+    cooldown_blocked = 0
     current_week_r = 0.0
     current_week_id = -1
     week_killed = False
@@ -1486,6 +1501,7 @@ def run_v5_forward_test(
 
     multi_regime_classifier = None
     atr_rolling_for_regime = None
+    bar_regimes = None
     if config.multi_regime and close_prices is not None:
         from train.v5_position_sizer import MultiRegimeClassifier, MultiRegimeConfig
         mr_cfg = MultiRegimeConfig(
@@ -1509,18 +1525,38 @@ def run_v5_forward_test(
                 valid_vals = valid_slice[~np.isnan(valid_slice)]
                 if len(valid_vals) >= min_valid:
                     atr_rolling_for_regime[i] = float(np.mean(valid_vals))
-        log.info(f"[V5_FWD] Multi-Regime Classifier ENABLED: "
+
+        n_bars = len(close_prices)
+        bar_regimes = np.array(["unknown"] * n_bars, dtype=object)
+        slope_lookback = config.regime_ema_slope_window
+        for i in range(n_bars):
+            mr_adx = float(adx_values[i]) if adx_values is not None and i < len(adx_values) else float('nan')
+            mr_atr_cur = float(atr_for_regime[i]) if atr_for_regime is not None and i < len(atr_for_regime) else float('nan')
+            mr_atr_roll = float(atr_rolling_for_regime[i]) if atr_rolling_for_regime is not None and i < len(atr_rolling_for_regime) else float('nan')
+            mr_ema = float(ema200_for_regime[i]) if ema200_for_regime is not None and i < len(ema200_for_regime) else float('nan')
+            mr_ema_prev = float(ema200_for_regime[max(0, i - slope_lookback)]) if ema200_for_regime is not None else float('nan')
+            bar_regimes[i] = multi_regime_classifier.classify(
+                adx_val=mr_adx, atr_current=mr_atr_cur,
+                atr_rolling=mr_atr_roll, close_price=float(close_prices[i]),
+                ema200_val=mr_ema, ema200_prev=mr_ema_prev,
+            )
+
+        mrd = multi_regime_classifier.get_diagnostics()
+        log.info(f"[V5_FWD] Multi-Regime Classifier ENABLED (sizing-only, not a gate): "
                  f"adx_trend={config.regime_adx_trending:.1f} "
                  f"adx_chop={config.regime_adx_choppy:.1f} "
                  f"atr_hi={config.regime_atr_high_vol:.2f} "
                  f"atr_lo={config.regime_atr_low_vol:.2f} "
                  f"atr_window={config.regime_atr_window}")
+        log.info(f"[V5_REGIME] Pre-computed regime labels for {mrd['total_classified']}/{n_bars} bars: "
+                 f"counts={mrd['regime_counts']} pct={mrd['regime_pct']}")
 
     for idx in chronological_idx:
         if config.warmup_skip_bars > 0 and idx < config.warmup_skip_bars:
             warmup_blocked += 1
             continue
         if idx - last_bar < config.cooldown:
+            cooldown_blocked += 1
             continue
 
         if adx_values is not None:
@@ -1603,21 +1639,10 @@ def run_v5_forward_test(
             if tpd_current_count >= config.max_trades_per_day:
                 tpd_blocked += 1
                 continue
-            tpd_current_count += 1
 
         bar_regime = "unknown"
-        if multi_regime_classifier is not None and close_prices is not None and idx < len(close_prices):
-            mr_adx = float(adx_values[idx]) if adx_values is not None and idx < len(adx_values) else float('nan')
-            mr_atr_cur = float(atr_for_regime[idx]) if atr_for_regime is not None and idx < len(atr_for_regime) else float('nan')
-            mr_atr_roll = float(atr_rolling_for_regime[idx]) if atr_rolling_for_regime is not None and idx < len(atr_rolling_for_regime) else float('nan')
-            mr_ema = float(ema200_for_regime[idx]) if ema200_for_regime is not None and idx < len(ema200_for_regime) else float('nan')
-            slope_lookback = config.regime_ema_slope_window
-            mr_ema_prev = float(ema200_for_regime[max(0, idx - slope_lookback)]) if ema200_for_regime is not None else float('nan')
-            bar_regime = multi_regime_classifier.classify(
-                adx_val=mr_adx, atr_current=mr_atr_cur,
-                atr_rolling=mr_atr_roll, close_price=float(close_prices[idx]),
-                ema200_val=mr_ema, ema200_prev=mr_ema_prev,
-            )
+        if bar_regimes is not None and idx < len(bar_regimes):
+            bar_regime = str(bar_regimes[idx])
         elif ema200_for_regime is not None and close_prices is not None and idx < len(close_prices):
             if close_prices[idx] > ema200_for_regime[idx] * 1.01:
                 bar_regime = "trending_up"
@@ -1635,6 +1660,9 @@ def run_v5_forward_test(
 
         taken.append(idx)
         last_bar = idx
+
+        if config.max_trades_per_day is not None:
+            tpd_current_count += 1
 
         trade_size_mult = 1.0
         if position_sizer is not None:
@@ -1780,10 +1808,14 @@ def run_v5_forward_test(
         ud = ultra_sizer.get_diagnostics()
         log.info(f"[V5_ULTRA] Summary: applied={ud['ultra_applied']} skipped={ud['ultra_skipped']} "
                  f"risk_cap={ud['risk_cap']:.2f} skip_reasons={ud['skip_reasons']}")
-    if multi_regime_classifier is not None:
-        mrd = multi_regime_classifier.get_diagnostics()
-        log.info(f"[V5_REGIME] Multi-Regime Summary: total={mrd['total_classified']} "
-                 f"counts={mrd['regime_counts']} pct={mrd['regime_pct']}")
+    n_total_bars = len(scores) if scores is not None else 0
+    n_candidates = len(chronological_idx)
+    n_taken = len(taken)
+    log.info(f"[V5_DROPOFF] bars_total={n_total_bars} | candidates={n_candidates} | "
+             f"warmup={warmup_blocked} cooldown={cooldown_blocked} adx={adx_blocked} "
+             f"ema={ema_blocked} weekly={weekly_blocked} corr={corr_blocked} "
+             f"daily={daily_blocked} equity={equity_blocked} tpd={tpd_blocked} "
+             f"ddt={ddt_blocked} → trades_taken={n_taken}")
 
     n_eligible = len(sel_indices)
     n_hold_all = int(np.sum(sides[sel_indices] == 0)) if len(sel_indices) > 0 else 0
