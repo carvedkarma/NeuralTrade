@@ -202,18 +202,28 @@ def _parse_date_to_ms(date_str: str) -> int:
     return int(d.timestamp() * 1000)
 
 
-def _compute_time_split(sym_df, train_end_date=None, test_start_date=None, test_end_date=None):
+def _compute_time_split(sym_df, train_end_date=None, test_start_date=None, test_end_date=None,
+                        purge_bars: int = 0):
     """Compute train/test indices for a single symbol based on timestamp dates.
 
     Returns (train_indices, test_indices) as numpy arrays.
     If no dates provided, falls back to 80/20 percentage split.
+
+    purge_bars: number of bars to exclude between train end and test start
+        to prevent label leakage from forward-looking targets. Should be
+        set to the prediction horizon (e.g. 24 bars for 6h on 15m data).
     """
     timestamps = sym_df['timestamp'].values
     n = len(sym_df)
 
     if train_end_date is None and test_start_date is None:
         split_idx = int(n * 0.8)
-        return np.arange(split_idx), np.arange(split_idx, n)
+        train_end_idx = max(0, split_idx - purge_bars)
+        test_start_idx = split_idx
+        if purge_bars > 0:
+            log.info(f"[V5_PURGE] Percentage split: purge gap of {purge_bars} bars "
+                     f"(train ends at {train_end_idx}, test starts at {test_start_idx})")
+        return np.arange(train_end_idx), np.arange(test_start_idx, n)
 
     train_end_ms = _parse_date_to_ms(train_end_date) if train_end_date else None
     test_start_ms = _parse_date_to_ms(test_start_date) if test_start_date else train_end_ms
@@ -223,6 +233,14 @@ def _compute_time_split(sym_df, train_end_date=None, test_start_date=None, test_
         train_mask = timestamps < train_end_ms
     else:
         train_mask = np.ones(n, dtype=bool)
+
+    if purge_bars > 0 and train_end_ms is not None:
+        train_indices_raw = np.where(train_mask)[0]
+        if len(train_indices_raw) > purge_bars:
+            purge_start = len(train_indices_raw) - purge_bars
+            train_mask[train_indices_raw[purge_start:]] = False
+            log.info(f"[V5_PURGE] Removed last {purge_bars} bars from train set "
+                     f"(label horizon overlap protection)")
 
     test_mask = np.ones(n, dtype=bool)
     if test_start_ms is not None:
@@ -418,7 +436,8 @@ def _extract_v5_arrays(concat_outputs, temperature=1.0):
     }
 
 
-def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999):
+def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999,
+                    ref_arrays=None):
     """Apply data-adaptive quality gates with warmup bypass and minimum pass rate.
 
     Three safeguards prevent the multiplicative filtering problem:
@@ -428,8 +447,13 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999):
     3. Minimum pass rate: if combined pass rate < 10%, progressively relax
        all thresholds until at least 10% pass
 
+    ref_arrays: if provided, percentile thresholds are computed from these
+        (training-set arrays) instead of the test-set arrays, preventing
+        lookahead bias in the forward test.
+
     Returns: boolean mask, diagnostics dict
     """
+    ref = ref_arrays if ref_arrays is not None else arrays
     n = len(arrays['mu_R'])
     min_pass_rate = 0.10
 
@@ -443,28 +467,32 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999):
     sigma_pass = np.ones(n, dtype=bool)
     adaptive_sigma = cfg.sigma_max
     if arrays['sigma'] is not None:
-        finite_sigma = arrays['sigma'][np.isfinite(arrays['sigma'])]
+        ref_sigma = ref['sigma'] if ref.get('sigma') is not None else arrays['sigma']
+        finite_sigma = ref_sigma[np.isfinite(ref_sigma)]
         if len(finite_sigma) > 100:
             adaptive_sigma = min(cfg.sigma_max, float(np.percentile(finite_sigma, 90)))
         sigma_pass = np.isfinite(arrays['sigma']) & (arrays['sigma'] <= adaptive_sigma)
 
-    finite_mae = arrays['mae'][np.isfinite(arrays['mae'])]
+    ref_mae = ref['mae'] if ref is not None else arrays['mae']
+    finite_mae = ref_mae[np.isfinite(ref_mae)]
     adaptive_mae = cfg.mae_max
     if len(finite_mae) > 100:
         adaptive_mae = min(cfg.mae_max, float(np.percentile(finite_mae, 90)))
     mae_pass = np.isfinite(arrays['mae']) & (arrays['mae'] <= adaptive_mae)
 
     mu_R = arrays['mu_R']
-    abs_mu = np.abs(mu_R[np.isfinite(mu_R)])
+    ref_mu = ref['mu_R'] if ref is not None else mu_R
+    abs_mu_ref = np.abs(ref_mu[np.isfinite(ref_mu)])
     adaptive_mu_min = cfg.mu_R_min
-    if len(abs_mu) > 100:
-        adaptive_mu_min = max(cfg.mu_R_min * 0.01, float(np.percentile(abs_mu, 25)))
+    if len(abs_mu_ref) > 100:
+        adaptive_mu_min = max(cfg.mu_R_min * 0.01, float(np.percentile(abs_mu_ref, 25)))
     edge_pass = np.isfinite(mu_R) & (np.abs(mu_R) >= adaptive_mu_min)
 
     pt = arrays['p_trade']
+    ref_pt = ref['p_trade'] if ref is not None else pt
     adaptive_ptrade = cfg.p_trade_min
-    if len(pt) > 100:
-        adaptive_ptrade = max(cfg.p_trade_min * 0.3, float(np.percentile(pt, 40)))
+    if len(ref_pt) > 100:
+        adaptive_ptrade = max(cfg.p_trade_min * 0.3, float(np.percentile(ref_pt, 40)))
     ptrade_pass = pt >= adaptive_ptrade
 
     final_mask = sigma_pass & mae_pass & edge_pass & ptrade_pass
@@ -641,7 +669,7 @@ def fit_temperature_scaling(logits, labels, n_classes=3, lr=0.01, max_iter=200):
 def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
                       risk_proxy='mae', mae_cap=2.0, _arrays=None,
                       side_mode='action_head', rr_weight=0.0,
-                      min_mu_r_score=0.03):
+                      min_mu_r_score=0.03, slippage_bps=0.0):
     """Compute execution-aware v5 scores -- all in R-units.
 
     Two side-selection modes:
@@ -688,8 +716,17 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         p_short = action_probs[:, 2]
 
     risk = np.maximum(mae_pred, 1e-3)
-    abs_mu = np.abs(mu_R)
-    mu_over_risk = np.divide(abs_mu, risk, out=np.zeros_like(mu_R), where=risk > 0)
+
+    if slippage_bps > 0:
+        slippage_r = slippage_bps / 10000.0 / np.maximum(risk, 1e-6)
+        mu_R_adj = mu_R - np.sign(mu_R) * slippage_r
+        log.debug(f"[V5_SLIP] Deducting {slippage_bps:.1f} bps slippage from mu_R "
+                  f"(avg deduction: {float(np.mean(slippage_r)):.4f} R)")
+    else:
+        mu_R_adj = mu_R
+
+    abs_mu = np.abs(mu_R_adj)
+    mu_over_risk = np.divide(abs_mu, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
 
     if side_mode == 'action_head':
         edge_long = p_long * mu_over_risk
@@ -701,10 +738,10 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
     best_edge = np.maximum(edge_long, edge_short)
     sides = np.where(edge_long >= edge_short, 1, -1)
 
-    penalty_long = np.maximum(0.0, -mu_R)
-    penalty_short = np.maximum(0.0, mu_R)
-    penalty_long_scaled = np.divide(penalty_long, risk, out=np.zeros_like(mu_R), where=risk > 0)
-    penalty_short_scaled = np.divide(penalty_short, risk, out=np.zeros_like(mu_R), where=risk > 0)
+    penalty_long = np.maximum(0.0, -mu_R_adj)
+    penalty_short = np.maximum(0.0, mu_R_adj)
+    penalty_long_scaled = np.divide(penalty_long, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
+    penalty_short_scaled = np.divide(penalty_short, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
     directional_penalty = np.where(sides == 1, penalty_long_scaled, penalty_short_scaled)
     penalty = score_lambda * directional_penalty
 
@@ -1153,6 +1190,73 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     return sweep_results, best_label, best_score_val, best_pct, best_pf, best_max_dd, best_tpd, best_threshold
 
 
+def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
+                            config, total_train):
+    """Run inference on training data to build reference arrays for quality gate.
+
+    These training-set statistics prevent lookahead bias in the forward test
+    by anchoring percentile thresholds to in-sample distributions only.
+    """
+    log.info(f"[V5_REF] Building training reference arrays ({total_train} bars) for quality gate...")
+    model.eval()
+
+    train_valid = np.ones(total_train, dtype=np.float32)
+    train_ds = V5Dataset(
+        train_feat,
+        np.zeros(total_train, dtype=np.float32),
+        np.zeros(total_train, dtype=np.float32),
+        np.zeros(total_train, dtype=np.float32),
+        np.zeros(total_train, dtype=np.float32),
+        np.zeros(total_train, dtype=np.int64),
+        train_valid,
+        train_sym_ids,
+        np.zeros(total_train, dtype=np.int64),
+        np.zeros((total_train, 1), dtype=np.float32),
+    )
+    train_loader = DataLoader(train_ds, batch_size=512, shuffle=False)
+
+    all_outputs = {
+        'ret_mu': [], 'ret_log_sigma': [], 'ret_sigma': [],
+        'mae': [], 'mfe': [], 'action_logits': []
+    }
+
+    with torch.no_grad():
+        for batch in train_loader:
+            feat = batch['features'].to(device)
+            sym_id = batch.get('symbol_id')
+            if sym_id is not None:
+                sym_id = sym_id.to(device)
+            outputs = model(feat, symbol_ids=sym_id)
+            for k in all_outputs:
+                if k in outputs:
+                    all_outputs[k].append(outputs[k].detach().cpu())
+
+    concat_outputs = {}
+    for k in all_outputs:
+        if all_outputs[k]:
+            concat_outputs[k] = torch.cat(all_outputs[k], dim=0)
+
+    ref_arrays = _extract_v5_arrays(concat_outputs, temperature=config.temperature)
+
+    train_scores, _, _ = compute_v5_scores(
+        None, horizon_bars=config.horizon,
+        score_lambda=config.score_lambda,
+        risk_proxy=config.risk_proxy,
+        mae_cap=config.mae_cap,
+        _arrays=ref_arrays,
+        side_mode=config.side_mode,
+        rr_weight=config.rr_weight,
+        slippage_bps=config.slippage_base_bps,
+    )
+    ref_arrays['_train_scores'] = train_scores
+
+    log.info(f"[V5_REF] Training reference arrays built: mu_R mean={float(np.mean(ref_arrays['mu_R'])):.4f}, "
+             f"mae mean={float(np.mean(ref_arrays['mae'])):.4f}, "
+             f"score mean={float(np.nanmean(train_scores[np.isfinite(train_scores)])):.4f}")
+
+    return ref_arrays
+
+
 def run_v5_forward_test(
     model, device,
     test_features, test_outcomes, test_realized_r,
@@ -1163,6 +1267,7 @@ def run_v5_forward_test(
     r_long=None, r_short=None, out_long=None, out_short=None,
     close_prices=None, ema200_regime_gate=False,
     high_prices=None, low_prices=None,
+    train_ref_arrays=None,
 ):
     """Run forward test with completely frozen decision layer.
 
@@ -1213,7 +1318,8 @@ def run_v5_forward_test(
         log.info(f"[V5_FWD] Applied temperature={config.temperature:.4f} to action logits")
 
     qg_cfg = config.quality_gate_cfg or V5QualityGateConfig()
-    quality_mask, qual_diag = v5_quality_mask(arrays, qg_cfg, epoch=999)
+    quality_mask, qual_diag = v5_quality_mask(arrays, qg_cfg, epoch=999,
+                                               ref_arrays=train_ref_arrays)
 
     scores, sides, score_diag = compute_v5_scores(
         None, horizon_bars=config.horizon,
@@ -1223,6 +1329,7 @@ def run_v5_forward_test(
         _arrays=arrays,
         side_mode=config.side_mode,
         rr_weight=config.rr_weight,
+        slippage_bps=config.slippage_base_bps,
     )
 
     if 'edge_L' in score_diag:
@@ -1496,6 +1603,7 @@ def run_v5_forward_test(
     corr_blocked = 0
     ddt_blocked = 0
     cooldown_blocked = 0
+    head_disagree_blocked = 0
     current_week_r = 0.0
     current_week_id = -1
     week_killed = False
@@ -1512,7 +1620,7 @@ def run_v5_forward_test(
     open_positions: dict = {}
     trade_spans: dict = defaultdict(list)
 
-    use_side_conditional_for_cap = (r_long is not None and r_short is not None)
+    use_side_conditional_for_cap = True
 
     adx_values = None
     adx_blocked = 0
@@ -1532,9 +1640,14 @@ def run_v5_forward_test(
 
     adx_exception_threshold = None
     if adx_values is not None and config.adx_exception_top_pct > 0:
-        finite_scores_for_pct = scores_work[np.isfinite(scores_work)]
-        if len(finite_scores_for_pct) > 0:
-            adx_exception_threshold = float(np.percentile(finite_scores_for_pct, 100 - config.adx_exception_top_pct))
+        if train_ref_arrays is not None and '_train_scores' in train_ref_arrays:
+            ref_scores_for_pct = train_ref_arrays['_train_scores']
+            ref_scores_for_pct = ref_scores_for_pct[np.isfinite(ref_scores_for_pct)]
+            log.info("[V5_FWD] ADX exception: using TRAINING-set score distribution (no lookahead)")
+        else:
+            ref_scores_for_pct = scores_work[np.isfinite(scores_work)]
+        if len(ref_scores_for_pct) > 0:
+            adx_exception_threshold = float(np.percentile(ref_scores_for_pct, 100 - config.adx_exception_top_pct))
             log.info(f"[V5_FWD] ADX exception: top {config.adx_exception_top_pct}% scores "
                      f"(threshold={adx_exception_threshold:.4f}) bypass ADX gate")
 
@@ -1737,6 +1850,26 @@ def run_v5_forward_test(
                 ddt.record_block()
                 continue
 
+        if config.head_disagreement_gate:
+            disagreements = 0
+            side_val = sides[idx]
+            mu_val = float(arrays['mu_R'][idx])
+            if side_val == 1 and mu_val < -0.01:
+                disagreements += 1
+            elif side_val == -1 and mu_val > 0.01:
+                disagreements += 1
+            if arrays.get('sigma') is not None:
+                sigma_val = float(arrays['sigma'][idx])
+                mae_val = float(arrays['mae'][idx])
+                if sigma_val > mae_val * 2.0:
+                    disagreements += 1
+            p_trade_val = float(arrays['p_trade'][idx])
+            if p_trade_val < 0.35:
+                disagreements += 1
+            if disagreements >= 2:
+                head_disagree_blocked += 1
+                continue
+
         taken.append(idx)
         last_bar = idx
 
@@ -1895,6 +2028,8 @@ def run_v5_forward_test(
         log.info(f"[V5_GATE] Regime side map blocked {regime_side_blocked} trades")
     if edge_topn_blocked > 0:
         log.info(f"[V5_GATE] Edge top-N/day blocked {edge_topn_blocked} trades")
+    if head_disagree_blocked > 0:
+        log.info(f"[V5_GATE] Head disagreement blocked {head_disagree_blocked} trades")
     if ddt_blocked > 0:
         log.info(f"[V5_DDT] Throttle blocked {ddt_blocked} trades")
     if ddt is not None:
@@ -1915,6 +2050,7 @@ def run_v5_forward_test(
              f"ema={ema_blocked} regime_side={regime_side_blocked} "
              f"edge_topn={edge_topn_blocked} weekly={weekly_blocked} corr={corr_blocked} "
              f"daily={daily_blocked} equity={equity_blocked} tpd={tpd_blocked} "
+             f"head_disagree={head_disagree_blocked} "
              f"ddt={ddt_blocked} edge_first_pre={edge_first_blocked} → trades_taken={n_taken}")
 
     if config.edge_first and edge_bar_values is not None and len(taken) > 0:
@@ -1943,26 +2079,22 @@ def run_v5_forward_test(
     use_side_conditional = (r_long is not None and r_short is not None
                             and out_long is not None and out_short is not None)
 
-    if use_side_conditional:
-        side_r = np.where(sides == 1, r_long, r_short).astype(float)
-        side_out = np.where(sides == 1, out_long, out_short)
-        _valid_outcomes = ["TP", "SL", "EXP_WIN", "EXP_LOSS", "TRAIL_WIN", "TRAIL_BE"]
-        safe_outcomes = np.where(
-            np.isin(side_out, _valid_outcomes),
-            side_out, "NO_CANDIDATE"
+    if not use_side_conditional:
+        raise ValueError(
+            "[V5_FWD] FATAL: r_long/r_short/out_long/out_short are REQUIRED. "
+            "Oracle best-side fallback has been removed to prevent data leakage. "
+            "Pass side-conditional arrays from generate_v5_sweep_outcomes()."
         )
-        safe_r = np.where(np.isnan(side_r), 0.0, side_r)
-        log.info("[V5_FWD] Using side-conditional outcomes (predicted side selects LONG/SHORT R)")
-    else:
-        log.warning("[V5_FWD] DEPRECATED: Using oracle best-side outcomes. "
-                    "Pass r_long/r_short/out_long/out_short for correct evaluation.")
-        _valid_outcomes = ["TP", "SL", "EXP_WIN", "EXP_LOSS", "TRAIL_WIN", "TRAIL_BE"]
-        safe_outcomes = np.where(
-            np.isin(test_outcomes, _valid_outcomes),
-            test_outcomes, "NO_CANDIDATE"
-        )
-        safe_r = test_realized_r.copy().astype(float)
-        safe_r = np.where(np.isnan(safe_r), 0.0, safe_r)
+
+    side_r = np.where(sides == 1, r_long, r_short).astype(float)
+    side_out = np.where(sides == 1, out_long, out_short)
+    _valid_outcomes = ["TP", "SL", "EXP_WIN", "EXP_LOSS", "TRAIL_WIN", "TRAIL_BE"]
+    safe_outcomes = np.where(
+        np.isin(side_out, _valid_outcomes),
+        side_out, "NO_CANDIDATE"
+    )
+    safe_r = np.where(np.isnan(side_r), 0.0, side_r)
+    log.info("[V5_FWD] Using side-conditional outcomes (predicted side selects LONG/SHORT R)")
 
     if len(taken) == 0:
         log.warning("[V5_FWD] No trades taken in forward test!")
@@ -2228,7 +2360,39 @@ def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_
                 'total_r': float(np.sum(w_r)),
             })
 
-    if sharpe > 20 and pf > 5 and winrate > 0.85:
+    sortino = 0.0
+    if n > 1:
+        downside_r = t_r[t_r < 0]
+        downside_dev = float(np.sqrt(np.mean(downside_r ** 2))) if len(downside_r) > 0 else 1e-6
+        if trade_timestamps is not None and n > 0 and n_trading_days > 1:
+            sortino = daily_mean / max(
+                float(np.sqrt(np.mean(np.minimum(daily_pnl, 0) ** 2))) if len(daily_pnl) > 0 else 1e-6,
+                1e-6
+            ) * np.sqrt(252)
+        else:
+            trades_per_year_s = (n / max(val_days, 1e-6)) * 252
+            sortino = float(expect / max(downside_dev, 1e-6) * np.sqrt(max(trades_per_year_s, 1)))
+
+    t_stat = 0.0
+    p_value = 1.0
+    if n > 2:
+        from scipy import stats as sp_stats
+        t_result = sp_stats.ttest_1samp(t_r, 0.0)
+        t_stat = float(t_result.statistic) if np.isfinite(t_result.statistic) else 0.0
+        p_value = float(t_result.pvalue) if np.isfinite(t_result.pvalue) else 1.0
+
+    ci_lower = 0.0
+    ci_upper = 0.0
+    if n > 5:
+        rng = np.random.RandomState(42)
+        boot_means = np.array([
+            float(np.mean(rng.choice(t_r, size=n, replace=True)))
+            for _ in range(1000)
+        ])
+        ci_lower = float(np.percentile(boot_means, 2.5))
+        ci_upper = float(np.percentile(boot_means, 97.5))
+
+    if sharpe > 5 and pf > 3 and winrate > 0.75:
         log.warning("[V5_FWD_SANITY] Metrics unusually high: Sharpe=%.1f PF=%.1f WR=%.1f%%. "
                     "Check for leakage or oracle-side contamination.",
                     sharpe, pf, winrate * 100)
@@ -2244,6 +2408,11 @@ def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_
         'expectancy_r': float(expect),
         'profit_factor': float(pf),
         'sharpe': float(sharpe),
+        'sortino': float(sortino),
+        't_stat': float(t_stat),
+        'p_value': float(p_value),
+        'ci_95_lower': float(ci_lower),
+        'ci_95_upper': float(ci_upper),
         'max_drawdown_r': float(max_dd),
         'avg_win_r': float(avg_win),
         'avg_loss_r': float(avg_loss),
@@ -2282,6 +2451,13 @@ def _print_forward_report(report):
     log.info(f"  Expectancy:     {report['expectancy_r']:+.4f} R")
     log.info(f"  Profit Factor:  {report['profit_factor']:.2f}")
     log.info(f"  Sharpe (daily): {report['sharpe']:.2f}")
+    if 'sortino' in report:
+        log.info(f"  Sortino:        {report['sortino']:.2f}")
+    if 't_stat' in report:
+        sig_marker = "***" if report.get('p_value', 1) < 0.01 else "**" if report.get('p_value', 1) < 0.05 else "*" if report.get('p_value', 1) < 0.10 else "ns"
+        log.info(f"  t-stat:         {report['t_stat']:.3f}  p={report['p_value']:.4f} [{sig_marker}]")
+    if 'ci_95_lower' in report:
+        log.info(f"  95%% CI (E[R]):  [{report['ci_95_lower']:+.4f}, {report['ci_95_upper']:+.4f}]")
     log.info(f"  Max Drawdown:   {report['max_drawdown_r']:.4f} R")
     log.info(f"  Avg Win R:      {report['avg_win_r']:+.4f}")
     log.info(f"  Avg Loss R:     {report['avg_loss_r']:+.4f}")
@@ -2363,6 +2539,7 @@ def run_v5_walk_forward(
     regime_atr_window=96, regime_ema_slope_window=10, regime_ema_buffer=0.005,
     edge_first=False, edge_min=0.03, edge_pct_floor=70, edge_topn_per_day=4,
     regime_side_map=None, size_floor=0.0,
+    head_disagreement_gate=False, slippage_base_bps=0.0,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -2528,6 +2705,8 @@ def run_v5_walk_forward(
             edge_topn_per_day=edge_topn_per_day,
             regime_side_map=regime_side_map,
             size_floor=size_floor,
+            head_disagreement_gate=head_disagreement_gate,
+            slippage_base_bps=slippage_base_bps,
             fold_id=fold['fold'],
         )
 
@@ -2656,6 +2835,7 @@ def train_v5_model(
     regime_atr_window=96, regime_ema_slope_window=10, regime_ema_buffer=0.005,
     edge_first=False, edge_min=0.03, edge_pct_floor=70, edge_topn_per_day=4,
     regime_side_map=None, size_floor=0.0,
+    head_disagreement_gate=False, slippage_base_bps=0.0,
     fold_id=0,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
@@ -2851,6 +3031,7 @@ def train_v5_model(
         train_idx, test_idx = _compute_time_split(
             sym_df, train_end_date=train_end_date,
             test_start_date=test_start_date, test_end_date=test_end_date,
+            purge_bars=horizon,
         )
 
         if train_end_date:
@@ -3592,6 +3773,13 @@ def train_v5_model(
                 edge_topn_per_day=edge_topn_per_day,
                 regime_side_map=regime_side_map,
                 size_floor=size_floor,
+                head_disagreement_gate=head_disagreement_gate,
+                slippage_base_bps=slippage_base_bps,
+            )
+
+            train_ref_arrays = _build_train_ref_arrays(
+                model, device, train_feat, train_sym_ids_arr,
+                fwd_config, total_train
             )
 
             fwd_report = run_v5_forward_test(
@@ -3616,6 +3804,7 @@ def train_v5_model(
                 ema200_regime_gate=ema200_regime_gate,
                 high_prices=val_high_arr,
                 low_prices=val_low_arr,
+                train_ref_arrays=train_ref_arrays,
             )
 
             report_path = checkpoint_dir / "v5_forward_report.json"

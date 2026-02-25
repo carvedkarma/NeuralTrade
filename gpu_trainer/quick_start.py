@@ -5022,6 +5022,11 @@ Examples:
     parser.add_argument("--v5-size-floor", type=float, default=0.0,
                         help="v5.1: minimum sizing multiplier floor (only when not in drawdown, default: 0 = disabled)")
 
+    parser.add_argument("--v5-head-disagree-gate", action="store_true", default=False,
+                        help="v5.2: block trades when model heads disagree (action side vs mu_R sign)")
+    parser.add_argument("--slippage-base-bps", type=float, default=0.0,
+                        help="v5.2: slippage deduction in basis points before edge calc (default: 0 = disabled)")
+
     parser.add_argument("--v5-temp-scale", action="store_true", default=False,
                         help="v5.0.9+: enable post-training temperature scaling calibration")
 
@@ -5707,6 +5712,8 @@ Examples:
                     edge_topn_per_day=args.v5_edge_topn_per_day,
                     regime_side_map=v5_regime_side_map,
                     size_floor=args.v5_size_floor,
+                    head_disagreement_gate=getattr(args, 'v5_head_disagree_gate', False),
+                    slippage_base_bps=getattr(args, 'slippage_base_bps', 0.0),
                 )
                 return
 
@@ -5826,6 +5833,8 @@ Examples:
                 edge_topn_per_day=args.v5_edge_topn_per_day,
                 regime_side_map=v5_regime_side_map,
                 size_floor=args.v5_size_floor,
+                head_disagreement_gate=args.v5_head_disagree_gate,
+                slippage_base_bps=args.slippage_base_bps,
             )
 
             log.info("=" * 60)
