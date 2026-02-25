@@ -183,6 +183,16 @@ class V5ForwardTestConfig:
     edge_topn_per_day: int = 4
     regime_side_map: Optional[dict] = None
     size_floor: float = 0.0
+    calibration_monitor: bool = False
+    calibration_warn_ece: float = 0.10
+    calibration_block_ece: float = 0.15
+    feature_psi: bool = False
+    head_disagreement_gate: bool = False
+    slippage_base_bps: float = 0.0
+    slippage_impact_mult: float = 0.0
+    ood_gate: bool = False
+    ood_sigma_mult: float = 1.5
+    ood_size_reduction: float = 0.5
 
 
 def _parse_date_to_ms(date_str: str) -> int:

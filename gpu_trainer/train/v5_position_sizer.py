@@ -783,6 +783,162 @@ class UltraConvictionSizer:
         return result
 
 
+@dataclass
+class CalibrationMonitorConfig:
+    enabled: bool = True
+    window_size: int = 200
+    n_bins: int = 10
+    warn_ece: float = 0.10
+    block_ece: float = 0.15
+    min_trades: int = 50
+
+
+class CalibrationMonitor:
+    def __init__(self, config: CalibrationMonitorConfig = None):
+        self.config = config or CalibrationMonitorConfig()
+        self.pred_probs: List[float] = []
+        self.actual_outcomes: List[int] = []
+        self.rolling_ece: List[float] = []
+        self.warnings_issued = 0
+        self.blocks_issued = 0
+
+    def record(self, predicted_prob: float, won: bool):
+        self.pred_probs.append(float(predicted_prob))
+        self.actual_outcomes.append(1 if won else 0)
+
+    def compute_ece(self) -> Optional[float]:
+        n = len(self.pred_probs)
+        if n < self.config.min_trades:
+            return None
+        window = self.config.window_size
+        probs = np.array(self.pred_probs[-window:])
+        actuals = np.array(self.actual_outcomes[-window:])
+        n_w = len(probs)
+        if n_w < self.config.min_trades:
+            return None
+        bin_edges = np.linspace(0.0, 1.0, self.config.n_bins + 1)
+        ece = 0.0
+        for i in range(self.config.n_bins):
+            mask = (probs >= bin_edges[i]) & (probs < bin_edges[i + 1])
+            if i == self.config.n_bins - 1:
+                mask = (probs >= bin_edges[i]) & (probs <= bin_edges[i + 1])
+            n_bin = int(np.sum(mask))
+            if n_bin == 0:
+                continue
+            avg_pred = float(np.mean(probs[mask]))
+            avg_actual = float(np.mean(actuals[mask]))
+            ece += (n_bin / n_w) * abs(avg_pred - avg_actual)
+        self.rolling_ece.append(ece)
+        return ece
+
+    def should_warn(self) -> bool:
+        ece = self.compute_ece()
+        if ece is not None and ece > self.config.warn_ece:
+            self.warnings_issued += 1
+            return True
+        return False
+
+    def should_block(self) -> bool:
+        ece = self.compute_ece()
+        if ece is not None and ece > self.config.block_ece:
+            self.blocks_issued += 1
+            return True
+        return False
+
+    def get_diagnostics(self) -> dict:
+        ece = self.compute_ece()
+        return {
+            'total_recorded': len(self.pred_probs),
+            'current_ece': float(ece) if ece is not None else None,
+            'warnings_issued': self.warnings_issued,
+            'blocks_issued': self.blocks_issued,
+            'window_size': self.config.window_size,
+            'warn_threshold': self.config.warn_ece,
+            'block_threshold': self.config.block_ece,
+        }
+
+
+def compute_psi(reference: np.ndarray, current: np.ndarray, bins: int = 10) -> float:
+    ref_clean = reference[np.isfinite(reference)]
+    cur_clean = current[np.isfinite(current)]
+    if len(ref_clean) < 10 or len(cur_clean) < 10:
+        return 0.0
+    breakpoints = np.percentile(ref_clean, np.linspace(0, 100, bins + 1))
+    breakpoints[0] = -np.inf
+    breakpoints[-1] = np.inf
+    ref_counts = np.histogram(ref_clean, bins=breakpoints)[0].astype(float)
+    cur_counts = np.histogram(cur_clean, bins=breakpoints)[0].astype(float)
+    ref_pct = ref_counts / max(ref_counts.sum(), 1)
+    cur_pct = cur_counts / max(cur_counts.sum(), 1)
+    eps = 1e-4
+    ref_pct = np.clip(ref_pct, eps, None)
+    cur_pct = np.clip(cur_pct, eps, None)
+    psi = float(np.sum((cur_pct - ref_pct) * np.log(cur_pct / ref_pct)))
+    return psi
+
+
+def compute_statistical_edge(t_r: np.ndarray, trade_timestamps: Optional[np.ndarray] = None,
+                              bars_per_day: float = 96.0) -> dict:
+    n = len(t_r)
+    if n < 2:
+        return {
+            'sharpe_annualized': 0.0, 'sortino_annualized': 0.0,
+            'expectancy_ci_lower': 0.0, 'expectancy_ci_upper': 0.0,
+            'expectancy_t_stat': 0.0, 'expectancy_p_value': 1.0,
+            'n_trades': n,
+        }
+    mean_r = float(np.mean(t_r))
+    std_r = float(np.std(t_r, ddof=1))
+    downside = t_r[t_r < 0]
+    downside_std = float(np.std(downside, ddof=1)) if len(downside) > 1 else max(std_r, 1e-6)
+
+    if trade_timestamps is not None and n > 0:
+        from datetime import datetime
+        trade_days = np.array([datetime.utcfromtimestamp(ts / 1000).strftime('%Y-%m-%d')
+                               for ts in trade_timestamps])
+        unique_days = np.unique(trade_days)
+        daily_pnl = np.array([float(np.sum(t_r[trade_days == d])) for d in unique_days])
+        n_days = len(unique_days)
+        if n_days > 1:
+            d_mean = float(np.mean(daily_pnl))
+            d_std = float(np.std(daily_pnl, ddof=1))
+            d_down = daily_pnl[daily_pnl < 0]
+            d_down_std = float(np.std(d_down, ddof=1)) if len(d_down) > 1 else max(d_std, 1e-6)
+            sharpe = d_mean / max(d_std, 1e-6) * np.sqrt(252)
+            sortino = d_mean / max(d_down_std, 1e-6) * np.sqrt(252)
+        else:
+            sharpe = 0.0
+            sortino = 0.0
+    else:
+        trades_per_year = n * 252 / max(n / bars_per_day, 1)
+        ann_factor = np.sqrt(max(trades_per_year, 1))
+        sharpe = mean_r / max(std_r, 1e-6) * ann_factor
+        sortino = mean_r / max(downside_std, 1e-6) * ann_factor
+
+    t_stat = mean_r / max(std_r / np.sqrt(n), 1e-8)
+    from scipy import stats as sp_stats
+    p_value = float(1.0 - sp_stats.t.cdf(t_stat, df=n - 1)) if n > 2 else 1.0
+
+    rng = np.random.RandomState(42)
+    n_bootstrap = 1000
+    boot_means = np.array([
+        float(np.mean(rng.choice(t_r, size=n, replace=True)))
+        for _ in range(n_bootstrap)
+    ])
+    ci_lower = float(np.percentile(boot_means, 2.5))
+    ci_upper = float(np.percentile(boot_means, 97.5))
+
+    return {
+        'sharpe_annualized': float(sharpe),
+        'sortino_annualized': float(sortino),
+        'expectancy_ci_lower': ci_lower,
+        'expectancy_ci_upper': ci_upper,
+        'expectancy_t_stat': float(t_stat),
+        'expectancy_p_value': float(p_value),
+        'n_trades': n,
+    }
+
+
 def build_sizing_diagnostics(sizer: Optional[AdaptivePositionSizer],
                               regime: Optional[RegimeScaler],
                               daily_tracker: Optional[DailyLossTracker],
