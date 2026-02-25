@@ -1451,8 +1451,9 @@ def run_v5_forward_test(
             mult=config.ultra_mult,
         )
         ultra_sizer = UltraConvictionSizer(ultra_cfg)
+        _usp_display = config.ultra_score_pct * 100 if config.ultra_score_pct <= 1.0 else config.ultra_score_pct
         log.info(f"[V5_FWD] Ultra-Conviction ENABLED: risk_cap={config.ultra_risk_cap:.2f} "
-                 f"score_pct=p{config.ultra_score_pct*100:.0f} adx_min={config.ultra_adx_min:.1f} "
+                 f"score_pct=p{_usp_display:.0f} adx_min={config.ultra_adx_min:.1f} "
                  f"edge_min={config.ultra_edge_min:.3f} dd_max={config.ultra_dd_max:.2f} "
                  f"max/day={config.ultra_max_per_day} mult={config.ultra_mult:.1f}")
 

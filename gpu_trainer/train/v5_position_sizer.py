@@ -669,7 +669,11 @@ class UltraConvictionSizer:
         if len(self.score_window) < self._min_scores_for_pct:
             return None
         scores_arr = np.array(self.score_window)
-        pct_val = float(np.percentile(scores_arr, self.config.score_pct * 100))
+        pct = self.config.score_pct
+        if pct <= 1.0:
+            pct = pct * 100
+        pct = float(np.clip(pct, 0.0, 100.0))
+        pct_val = float(np.percentile(scores_arr, pct))
         return pct_val
 
     def record_score(self, score: float):
@@ -734,9 +738,10 @@ class UltraConvictionSizer:
         self.daily_ultra_counts[date_str] = day_count + 1
         self.ultra_applied += 1
         side_str = "LONG" if side == 1 else "SHORT"
+        display_pct = self.config.score_pct * 100 if self.config.score_pct <= 1.0 else self.config.score_pct
         log.info("[V5_ULTRA] APPLY symbol=%s side=%s score=%.2f p%.0f=%.2f adx=%.1f "
                  "edge_%s=%.3f regime=%s dd=%.2f mult=%.1f",
-                 symbol, side_str, score, self.config.score_pct * 100,
+                 symbol, side_str, score, display_pct,
                  pct_threshold, adx_val,
                  "L" if side == 1 else "S", edge,
                  regime, dd, self.config.mult)
