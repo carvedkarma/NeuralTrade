@@ -18,7 +18,7 @@ import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 import logging
-from collections import defaultdict
+from collections import defaultdict, Counter
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -193,6 +193,8 @@ class V5ForwardTestConfig:
     ood_gate: bool = False
     ood_sigma_mult: float = 1.5
     ood_size_reduction: float = 0.5
+    mu_debias: bool = True
+    mu_debias_alpha: float = 0.01
 
 
 def compute_feature_importance_report(
@@ -532,11 +534,39 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
     else:
         L_action = F.cross_entropy(action_logits, action_true)
 
+    LONG_IDX, SHORT_IDX = 1, 2
+    SIDE_BAL_W = 0.1
+    action_probs = F.softmax(action_logits, dim=-1)
+    p_long_mean = action_probs[:, LONG_IDX].mean()
+    p_short_mean = action_probs[:, SHORT_IDX].mean()
+
+    is_long_label = (action_true == LONG_IDX)
+    is_short_label = (action_true == SHORT_IDX)
+    target_long = is_long_label.float().mean()
+    target_short = is_short_label.float().mean()
+
+    eps = 1e-8
+    target_sum = target_long + target_short
+    if target_sum.item() < 1e-6:
+        L_side_balance = action_logits.new_tensor(0.0)
+    else:
+        target_dist = torch.stack([target_long, target_short]) / (target_sum + eps)
+        pred_dist = torch.stack([p_long_mean, p_short_mean])
+        pred_dist = pred_dist / (pred_dist.sum() + eps)
+        L_side_balance = F.kl_div(
+            (pred_dist + eps).log(),
+            target_dist.detach(),
+            reduction="batchmean"
+        )
+
+    L_action = L_action + SIDE_BAL_W * L_side_balance
+
     losses = {
         'L_ret': L_ret.item(),
         'L_mfe': L_mfe.item(),
         'L_mae': L_mae.item(),
         'L_action': L_action.item(),
+        'L_side_balance': float(L_side_balance.item()) if torch.is_tensor(L_side_balance) else 0.0,
     }
 
     if epoch <= 5:
@@ -861,7 +891,14 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         Direction comes from action_head probabilities (trained on directional labels),
         not from mu_R sign. SHORTs fire when p_short > p_long.
 
-    Penalty (both modes):
+    Penalty:
+      side_mode='action_head':
+        Conviction-based: penalty = lambda * (1 - p_side), where p_side is the
+        probability of the chosen side (p_long if LONG, p_short if SHORT).
+        Independent of mu_R sign -- prevents mu_R bias from overriding action_head.
+        LONG and SHORT with equal p_side get equal penalty.
+
+      side_mode='mu_sign' (LEGACY):
         When chosen side conflicts with mu_R sign, apply lambda * |mu_R| / risk penalty.
         LONG chosen but mu_R < 0 -> penalize. SHORT chosen but mu_R > 0 -> penalize.
         This discourages but does NOT block counter-mu_R trades.
@@ -914,12 +951,17 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
     best_edge = np.maximum(edge_long, edge_short)
     sides = np.where(edge_long >= edge_short, 1, -1)
 
-    penalty_long = np.maximum(0.0, -mu_R_adj)
-    penalty_short = np.maximum(0.0, mu_R_adj)
-    penalty_long_scaled = np.divide(penalty_long, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
-    penalty_short_scaled = np.divide(penalty_short, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
-    directional_penalty = np.where(sides == 1, penalty_long_scaled, penalty_short_scaled)
-    penalty = score_lambda * directional_penalty
+    if side_mode == 'action_head':
+        p_side = np.where(sides == 1, p_long, p_short)
+        directional_penalty = 1.0 - p_side
+        penalty = score_lambda * directional_penalty
+    else:
+        penalty_long = np.maximum(0.0, -mu_R_adj)
+        penalty_short = np.maximum(0.0, mu_R_adj)
+        penalty_long_scaled = np.divide(penalty_long, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
+        penalty_short_scaled = np.divide(penalty_short, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
+        directional_penalty = np.where(sides == 1, penalty_long_scaled, penalty_short_scaled)
+        penalty = score_lambda * directional_penalty
 
     scores = best_edge - penalty
 
@@ -1433,6 +1475,85 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
     return ref_arrays
 
 
+def _compute_side_distribution(sides_array, indices=None):
+    """Compute LONG/SHORT/HOLD counts and percentages for given indices.
+
+    Args:
+        sides_array: full array of side values (1=LONG, -1=SHORT, 0=HOLD)
+        indices: subset of indices to analyze (None = use all)
+
+    Returns:
+        dict with counts and percentages for each side
+    """
+    if indices is not None and len(indices) > 0:
+        s = sides_array[indices]
+    elif indices is not None:
+        s = np.array([], dtype=sides_array.dtype)
+    else:
+        s = sides_array
+
+    n = len(s)
+    n_long = int(np.sum(s == 1))
+    n_short = int(np.sum(s == -1))
+    n_hold = int(np.sum(s == 0))
+
+    long_short_total = n_long + n_short
+    long_pct = 100.0 * n_long / max(long_short_total, 1)
+    short_pct = 100.0 * n_short / max(long_short_total, 1)
+    hold_pct = 100.0 * n_hold / max(n, 1)
+
+    return {
+        'total': n,
+        'long': n_long,
+        'short': n_short,
+        'hold': n_hold,
+        'long_pct': long_pct,
+        'short_pct': short_pct,
+        'hold_pct': hold_pct,
+    }
+
+
+def _print_directional_balance_diagnostics(stage_distributions, gate_blocks):
+    """Print stage-by-stage side distribution table and imbalance warnings.
+
+    Args:
+        stage_distributions: dict of stage_name -> side distribution dict
+        gate_blocks: Counter with keys like "ema200", "multi_regime", "quality", etc.
+    """
+    log.info("")
+    log.info("=" * 80)
+    log.info("  DIRECTIONAL BALANCE DIAGNOSTICS")
+    log.info("=" * 80)
+    log.info(f"  {'Stage':<20} {'Total':>8} {'LONG':>8} {'LONG%':>8} {'SHORT':>8} {'SHORT%':>8} {'HOLD':>8} {'HOLD%':>8}")
+    log.info("  " + "-" * 76)
+
+    for stage_name, dist in stage_distributions.items():
+        log.info(f"  {stage_name:<20} {dist['total']:>8} "
+                 f"{dist['long']:>8} {dist['long_pct']:>7.1f}% "
+                 f"{dist['short']:>8} {dist['short_pct']:>7.1f}% "
+                 f"{dist['hold']:>8} {dist['hold_pct']:>7.1f}%")
+
+    log.info("")
+    log.info("  Gate Blocks:")
+    if gate_blocks:
+        for gate_name, count in gate_blocks.most_common():
+            log.info(f"    {gate_name:<25} {count:>6} blocked")
+    else:
+        log.info("    (none)")
+
+    for stage_name, dist in stage_distributions.items():
+        long_short_total = dist['long'] + dist['short']
+        if long_short_total > 0:
+            max_pct = max(dist['long_pct'], dist['short_pct'])
+            if max_pct > 80.0:
+                dominant = "LONG" if dist['long_pct'] > dist['short_pct'] else "SHORT"
+                log.warning(f"[V5_BALANCE_WARN] Stage '{stage_name}': {dominant} dominance "
+                            f"at {max_pct:.1f}% (>{80}%% threshold). "
+                            f"LONG={dist['long']}, SHORT={dist['short']}")
+
+    log.info("=" * 80)
+
+
 def run_v5_forward_test(
     model, device,
     test_features, test_outcomes, test_realized_r,
@@ -1492,6 +1613,42 @@ def run_v5_forward_test(
     arrays = _extract_v5_arrays(concat_outputs, temperature=config.temperature)
     if config.temperature != 1.0:
         log.info(f"[V5_FWD] Applied temperature={config.temperature:.4f} to action logits")
+
+    if config.mu_debias and test_sym_ids is not None:
+        mu_R_raw = arrays['mu_R'].copy()
+        alpha = config.mu_debias_alpha
+        unique_syms = np.unique(test_sym_ids)
+        ema_by_sym = {int(s): 0.0 for s in unique_syms}
+        for i in range(len(mu_R_raw)):
+            sym_id = int(test_sym_ids[i])
+            mu_val = float(mu_R_raw[i])
+            if not np.isnan(mu_val):
+                ema_by_sym[sym_id] = (1.0 - alpha) * ema_by_sym[sym_id] + alpha * mu_val
+            arrays['mu_R'][i] = mu_R_raw[i] - ema_by_sym[sym_id]
+        for sym_id in unique_syms:
+            sym_mask = test_sym_ids == sym_id
+            sym_name = sym_id if not hasattr(config, 'symbols_list') or config.symbols_list is None else (
+                config.symbols_list[int(sym_id)] if int(sym_id) < len(config.symbols_list) else str(sym_id)
+            )
+            log.info(f"[V5_MU_DEBIAS] {sym_name}: final_ema={ema_by_sym[int(sym_id)]:+.6f} "
+                     f"raw_mean={float(np.nanmean(mu_R_raw[sym_mask])):+.6f} "
+                     f"debiased_mean={float(np.nanmean(arrays['mu_R'][sym_mask])):+.6f}")
+        overall_raw = float(np.nanmean(mu_R_raw))
+        overall_deb = float(np.nanmean(arrays['mu_R']))
+        log.info(f"[V5_MU_DEBIAS] Overall: raw_mean={overall_raw:+.6f} debiased_mean={overall_deb:+.6f} "
+                 f"alpha={alpha}")
+    elif config.mu_debias:
+        mu_R_raw = arrays['mu_R'].copy()
+        alpha = config.mu_debias_alpha
+        ema_val = 0.0
+        for i in range(len(mu_R_raw)):
+            mu_val = float(mu_R_raw[i])
+            if not np.isnan(mu_val):
+                ema_val = (1.0 - alpha) * ema_val + alpha * mu_val
+            arrays['mu_R'][i] = mu_R_raw[i] - ema_val
+        log.info(f"[V5_MU_DEBIAS] Single-symbol mode: final_ema={ema_val:+.6f} "
+                 f"raw_mean={float(np.nanmean(mu_R_raw)):+.6f} "
+                 f"debiased_mean={float(np.nanmean(arrays['mu_R'])):+.6f}")
 
     qg_cfg = config.quality_gate_cfg or V5QualityGateConfig()
     quality_mask, qual_diag = v5_quality_mask(arrays, qg_cfg, epoch=999,
@@ -1793,6 +1950,10 @@ def run_v5_forward_test(
     ef_topn_current_date = ""
     ef_topn_current_count = 0
 
+    gate_blocks = Counter()
+    post_ema200_indices = []
+    post_regime_indices = []
+
     open_positions: dict = {}
     trade_spans: dict = defaultdict(list)
 
@@ -1894,9 +2055,11 @@ def run_v5_forward_test(
     for idx in chronological_idx:
         if config.warmup_skip_bars > 0 and idx < config.warmup_skip_bars:
             warmup_blocked += 1
+            gate_blocks["warmup"] += 1
             continue
         if idx - last_bar < config.cooldown:
             cooldown_blocked += 1
+            gate_blocks["cooldown"] += 1
             continue
 
         if adx_values is not None:
@@ -1905,6 +2068,7 @@ def run_v5_forward_test(
                 is_exception = (adx_exception_threshold is not None and scores_work[idx] >= adx_exception_threshold)
                 if adx_val < config.adx_min and not is_exception:
                     adx_blocked += 1
+                    gate_blocks["adx"] += 1
                     continue
 
         expired = [k for k, v in open_positions.items() if v['expiry'] <= idx]
@@ -1930,12 +2094,16 @@ def run_v5_forward_test(
                 log.debug("[V5_GATE] blocked_by=ema200 side=LONG close=%.2f ema200=%.2f",
                           close_val, ema_val)
                 ema_blocked += 1
+                gate_blocks["ema200"] += 1
                 continue
             if side_val == -1 and close_val > ema_val:
                 log.debug("[V5_GATE] blocked_by=ema200 side=SHORT close=%.2f ema200=%.2f",
                           close_val, ema_val)
                 ema_blocked += 1
+                gate_blocks["ema200"] += 1
                 continue
+
+        post_ema200_indices.append(idx)
 
         bar_regime = "unknown"
         if bar_regimes is not None and idx < len(bar_regimes):
@@ -1957,13 +2125,18 @@ def run_v5_forward_test(
             if not is_ultra_override:
                 if allowed == "NONE":
                     regime_side_blocked += 1
+                    gate_blocks["multi_regime"] += 1
                     continue
                 if allowed == "LONG" and side_val != 1:
                     regime_side_blocked += 1
+                    gate_blocks["multi_regime"] += 1
                     continue
                 if allowed == "SHORT" and side_val != -1:
                     regime_side_blocked += 1
+                    gate_blocks["multi_regime"] += 1
                     continue
+
+        post_regime_indices.append(idx)
 
         if config.edge_first and config.edge_topn_per_day > 0 and test_timestamps is not None:
             bar_date = datetime.utcfromtimestamp(
@@ -1973,6 +2146,7 @@ def run_v5_forward_test(
                 ef_topn_current_count = 0
             if ef_topn_current_count >= config.edge_topn_per_day:
                 edge_topn_blocked += 1
+                gate_blocks["edge_topn"] += 1
                 continue
 
         if config.weekly_loss_cap is not None and week_boundaries is not None:
@@ -1983,6 +2157,7 @@ def run_v5_forward_test(
                 week_killed = False
             if week_killed:
                 weekly_blocked += 1
+                gate_blocks["weekly_cap"] += 1
                 continue
 
         if corr_blocker is not None and test_sym_ids is not None:
@@ -1992,6 +2167,7 @@ def run_v5_forward_test(
                            if v['symbol'] != sym_name}
             if sym_name and corr_blocker.should_block(sym_name, side_val, open_by_sym):
                 corr_blocked += 1
+                gate_blocks["correlation"] += 1
                 continue
 
         if daily_tracker is not None and test_timestamps is not None:
@@ -2003,10 +2179,12 @@ def run_v5_forward_test(
                 trade_sym = sym_id_to_name.get(int(test_sym_ids[idx]), None)
             if daily_tracker.should_block(symbol=trade_sym):
                 daily_blocked += 1
+                gate_blocks["daily_loss"] += 1
                 continue
 
         if equity_stop is not None and equity_stop.should_block():
             equity_blocked += 1
+            gate_blocks["equity_stop"] += 1
             continue
 
         if config.max_trades_per_day is not None and test_timestamps is not None:
@@ -2017,12 +2195,14 @@ def run_v5_forward_test(
                 tpd_current_count = 0
             if tpd_current_count >= config.max_trades_per_day:
                 tpd_blocked += 1
+                gate_blocks["max_tpd"] += 1
                 continue
 
         if ddt is not None:
             ddt_thr = ddt.effective_threshold(effective_threshold)
             if scores_work[idx] < ddt_thr:
                 ddt_blocked += 1
+                gate_blocks["ddt"] += 1
                 ddt.record_block()
                 continue
 
@@ -2044,6 +2224,7 @@ def run_v5_forward_test(
                 disagreements += 1
             if disagreements >= 2:
                 head_disagree_blocked += 1
+                gate_blocks["head_disagreement"] += 1
                 continue
 
         taken.append(idx)
@@ -2274,7 +2455,20 @@ def run_v5_forward_test(
 
     if len(taken) == 0:
         log.warning("[V5_FWD] No trades taken in forward test!")
+        from collections import OrderedDict
+        stage_distributions_empty = OrderedDict()
+        stage_distributions_empty['pre'] = _compute_side_distribution(sides, chronological_idx)
+        stage_distributions_empty['post_ema200'] = _compute_side_distribution(
+            sides, np.array(post_ema200_indices, dtype=np.intp) if post_ema200_indices else np.array([], dtype=np.intp))
+        stage_distributions_empty['post_regime'] = _compute_side_distribution(
+            sides, np.array(post_regime_indices, dtype=np.intp) if post_regime_indices else np.array([], dtype=np.intp))
+        stage_distributions_empty['final'] = _compute_side_distribution(sides, np.array([], dtype=np.intp))
+        _print_directional_balance_diagnostics(stage_distributions_empty, gate_blocks)
         report = _build_empty_report(test_start_date, test_end_date, config)
+        report['directional_balance'] = {
+            'stage_distributions': {k: dict(v) for k, v in stage_distributions_empty.items()},
+            'gate_blocks': dict(gate_blocks),
+        }
         _print_forward_report(report)
         return report
 
@@ -2401,6 +2595,23 @@ def run_v5_forward_test(
             log.info(f"[V5_GATE] Equity stop: {es_diag['stop_triggers']} triggers, "
                      f"{es_diag['trades_blocked_equity_stop']} blocked, "
                      f"maxDD={es_diag['max_drawdown_r']:.2f}R")
+
+    from collections import OrderedDict
+    stage_distributions = OrderedDict()
+    stage_distributions['pre'] = _compute_side_distribution(sides, chronological_idx)
+    stage_distributions['post_ema200'] = _compute_side_distribution(
+        sides, np.array(post_ema200_indices, dtype=np.intp) if post_ema200_indices else np.array([], dtype=np.intp))
+    stage_distributions['post_regime'] = _compute_side_distribution(
+        sides, np.array(post_regime_indices, dtype=np.intp) if post_regime_indices else np.array([], dtype=np.intp))
+    stage_distributions['final'] = _compute_side_distribution(
+        sides, taken if isinstance(taken, np.ndarray) else np.array(taken, dtype=np.intp) if len(taken) > 0 else np.array([], dtype=np.intp))
+
+    _print_directional_balance_diagnostics(stage_distributions, gate_blocks)
+
+    report['directional_balance'] = {
+        'stage_distributions': {k: dict(v) for k, v in stage_distributions.items()},
+        'gate_blocks': dict(gate_blocks),
+    }
 
     _print_forward_report(report)
     return report
@@ -3012,6 +3223,7 @@ def train_v5_model(
     edge_first=False, edge_min=0.03, edge_pct_floor=70, edge_topn_per_day=4,
     regime_side_map=None, size_floor=0.0,
     head_disagreement_gate=False, slippage_base_bps=0.0,
+    mu_debias=True, mu_debias_alpha=0.01,
     fold_id=0,
     feature_report=False,
 ):
@@ -3981,6 +4193,8 @@ def train_v5_model(
                 size_floor=size_floor,
                 head_disagreement_gate=head_disagreement_gate,
                 slippage_base_bps=slippage_base_bps,
+                mu_debias=mu_debias,
+                mu_debias_alpha=mu_debias_alpha,
             )
 
             train_ref_arrays = _build_train_ref_arrays(

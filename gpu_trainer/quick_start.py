@@ -4862,6 +4862,10 @@ Examples:
                         help="v5: run leakage/overfitting diagnostics after training")
     parser.add_argument("--v5-feature-report", action="store_true", default=False,
                         help="v5: generate feature importance ranking (permutation) and correlation cleanup report after training. Outputs to checkpoints/v5_feature_report.json")
+    parser.add_argument("--v5-mu-debias", action="store_true", default=True,
+                        help="v5: per-symbol mu_R EMA debiasing in forward test. Removes persistent positive/negative drift from mu_R predictions (default: True)")
+    parser.add_argument("--v5-no-mu-debias", dest="v5_mu_debias", action="store_false",
+                        help="v5: disable mu_R debiasing")
     parser.add_argument("--v5-ema200-regime-gate", action="store_true", default=False,
                         help="v5: EMA200 regime gate - LONG only when close>EMA200, SHORT only when close<EMA200")
     parser.add_argument("--v5-score-side-mode", type=str, default="action_head",
@@ -5837,6 +5841,7 @@ Examples:
                 size_floor=args.v5_size_floor,
                 head_disagreement_gate=args.v5_head_disagree_gate,
                 slippage_base_bps=args.slippage_base_bps,
+                mu_debias=args.v5_mu_debias,
                 feature_report=args.v5_feature_report,
             )
 
