@@ -482,6 +482,23 @@ def bidirectional_outcome_v47_for_index(
         mfe_frac = min(max(best_d['mfe'] / tp_dist, 0.0), 1.5)
         mae_frac = min(max(best_d['mae'] / sl_dist, 0.0), 1.5)
         q = 0.50 * (1.0 - ttp / horizon) + 0.25 * min(mfe_frac, 1.0) + 0.25 * (1.0 - min(mae_frac, 1.0))
+
+        if best_d['mae'] > 0.6 * sl_dist:
+            q *= 0.5
+
+        n_bars = len(closes)
+        if i + 2 < n_bars and atr_i > 0:
+            entry = closes[i]
+            best_side = +1 if y_dir == 1 else -1
+            early_move = 0.0
+            for jj in range(1, min(3, n_bars - i)):
+                if best_side > 0:
+                    early_move = max(early_move, highs[i + jj] - entry)
+                else:
+                    early_move = max(early_move, entry - lows[i + jj])
+            if early_move > 0.3 * atr_i:
+                q *= 1.3
+
         tp_quality = max(0.0, min(1.0, q))
 
     y_quality = 0

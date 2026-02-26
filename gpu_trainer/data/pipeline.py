@@ -746,16 +746,23 @@ class FeatureEngineer:
     # Version string documents the exact computation method
     # Format: major.minor.patch-mode-details
     # Increment when ANY computation changes (windows, formulas, normalization)
-    VERSION = "4.0.0-stf47-enh20-htf10"
+    VERSION = "5.1.0-stf44-enh24-htf12-regime5"
     
-    STF_FEATURE_COUNT = 47
-    ENH_FEATURE_COUNT = 20
-    HTF_FEATURE_COUNT = 10
-    TOTAL_FEATURE_COUNT = 77
+    STF_FEATURE_COUNT = 44
+    ENH_FEATURE_COUNT = 24
+    HTF_FEATURE_COUNT = 12
+    REGIME_FEATURE_COUNT = 5
+    TOTAL_FEATURE_COUNT = 85
     
     HTF_FEATURE_NAMES = [
         "h1_sma20_slope", "h1_trend_sign", "h1_rsi14", "h1_atr_ratio", "h1_range_pos",
         "h4_sma20_slope", "h4_trend_sign", "h4_rsi14", "h4_atr_ratio", "h4_range_pos",
+        "rsi_divergence_15m_1h", "macd_hist_slope_1h",
+    ]
+    
+    REGIME_FEATURE_NAMES = [
+        "regime_trend", "regime_volatility", "regime_momentum",
+        "regime_session_sin", "regime_session_cos",
     ]
     
     VERSION_DETAILS = {
@@ -794,7 +801,6 @@ class FeatureEngineer:
             features[f"return_{period}"] = df["close"].pct_change(period)
             
         features["rsi_14"] = self._compute_rsi(df["close"], 14)
-        features["rsi_7"] = self._compute_rsi(df["close"], 7)
         
         macd, signal, hist = self._compute_macd(df["close"])
         features["macd"] = macd
@@ -809,7 +815,6 @@ class FeatureEngineer:
         features["bb_position"] = (df["close"] - bb_lower) / (bb_upper - bb_lower + 1e-8)
         
         features["atr_14"] = self._compute_atr(df, 14)
-        features["atr_7"] = self._compute_atr(df, 7)
         
         features["volume_sma_20"] = df["volume"].rolling(20).mean()
         features["volume_ratio"] = df["volume"] / features["volume_sma_20"]
@@ -831,9 +836,7 @@ class FeatureEngineer:
             np.where((price_slope_14 < 0) & (rsi_slope_14 > 0), 1.0, 0.0)
         )
         
-        vol_mom_5 = df["close"].pct_change(5) * (df["volume"] / features["volume_sma_20"].clip(lower=1))
         vol_mom_10 = df["close"].pct_change(10) * (df["volume"] / features["volume_sma_20"].clip(lower=1))
-        features["vol_weighted_mom_5"] = vol_mom_5
         features["vol_weighted_mom_10"] = vol_mom_10
         
         typical_price = (df["high"] + df["low"] + df["close"]) / 3
@@ -850,34 +853,39 @@ class FeatureEngineer:
         return features
     
     ENH_FEATURE_NAMES = [
-        "roc_accel_5", "roc_accel_20",
+        "roc_accel_20",
         "trend_persistence_20", "trend_persistence_50",
         "momentum_alignment",
         "hurst_exponent",
         "taker_imbalance_20", "taker_pressure_delta",
         "volume_surge", "trade_intensity",
         "garman_klass_vol",
-        "vol_regime_ratio", "vol_breakout",
+        "vol_breakout",
         "atr_expansion", "atr_contraction_flag",
         "range_volatility_20",
         "close_momentum_z",
         "directional_volume_flow",
         "price_acceleration",
-        "efficiency_ratio",
+        "ATR_ratio_7_28", "bb_squeeze", "vol_regime_roc",
+        "trend_efficiency", "momentum_acceleration",
+        "cvd_zscore", "volume_price_divergence",
     ]
     
     def compute_enhanced_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Compute 20 enhanced features for better trade quality prediction.
+        """Compute 24 enhanced information-dense features.
         
         Groups:
-          1. Momentum/Trend (6): ROC acceleration x2, trend persistence x2,
+          1. Momentum/Trend (5): ROC acceleration, trend persistence x2,
              momentum alignment, Hurst exponent
           2. Microstructure (4): taker imbalance, taker pressure delta, volume surge,
              trade intensity
-          3. Volatility Regime (6): Garman-Klass vol, vol regime ratio, vol breakout,
+          3. Volatility Regime (5): Garman-Klass vol, vol breakout,
              ATR expansion, ATR contraction flag, range volatility
-          4. Signal Quality (4): close momentum z-score, directional volume flow,
-             price acceleration, efficiency ratio
+          4. Signal Quality (3): close momentum z-score, directional volume flow,
+             price acceleration
+          5. Volatility Term Structure (3): ATR_ratio_7_28, bb_squeeze, vol_regime_roc
+          6. Momentum Quality (2): trend_efficiency, momentum_acceleration
+          7. Order Flow (2): cvd_zscore, volume_price_divergence
         """
         features = pd.DataFrame(index=df.index)
         close = df["close"]
@@ -885,9 +893,7 @@ class FeatureEngineer:
         low = df["low"]
         volume = df["volume"]
         
-        roc_5 = close.pct_change(5)
         roc_20 = close.pct_change(20)
-        features["roc_accel_5"] = roc_5 - roc_5.shift(5)
         features["roc_accel_20"] = roc_20 - roc_20.shift(20)
         
         returns = close.pct_change()
@@ -941,10 +947,6 @@ class FeatureEngineer:
         gk_var = 0.5 * log_hl**2 - (2 * np.log(2) - 1) * log_co**2
         features["garman_klass_vol"] = gk_var.rolling(20, min_periods=5).mean().apply(lambda x: np.sqrt(max(x, 0)))
         
-        atr_short = self._compute_atr(df, 7)
-        atr_long = self._compute_atr(df, 50)
-        features["vol_regime_ratio"] = (atr_short / atr_long.clip(lower=1e-10)).clip(0.1, 5.0)
-        
         bb_std_20 = close.rolling(20).std()
         bb_std_50 = close.rolling(50, min_periods=20).std()
         features["vol_breakout"] = (bb_std_20 / bb_std_50.clip(lower=1e-10) - 1.0).clip(-2.0, 5.0)
@@ -967,9 +969,35 @@ class FeatureEngineer:
         
         features["price_acceleration"] = (returns - returns.shift(1)).clip(-0.05, 0.05)
         
-        net_move = (close - close.shift(20)).abs()
-        total_path = returns.abs().rolling(20, min_periods=5).sum() * close.shift(20).clip(lower=1e-10)
-        features["efficiency_ratio"] = (net_move / total_path.clip(lower=1e-10)).clip(0, 5.0)
+        atr_7 = self._compute_atr(df, 7)
+        atr_28 = self._compute_atr(df, 28)
+        features["ATR_ratio_7_28"] = (atr_7 / atr_28.clip(lower=1e-10)).clip(0.1, 5.0)
+        
+        bb_width = (close.rolling(20).std() * 2) / close.rolling(20).mean().clip(lower=1e-10)
+        features["bb_squeeze"] = bb_width.rolling(50, min_periods=10).apply(
+            lambda x: stats.percentileofscore(x, x.iloc[-1]) / 100.0 if len(x) > 0 else 0.5,
+            raw=False
+        ).clip(0.0, 1.0)
+        
+        atr_14_roc = atr_14.pct_change(5)
+        features["vol_regime_roc"] = atr_14_roc.clip(-1.0, 1.0)
+        
+        N = 20
+        net_move = (close - close.shift(N)).abs()
+        total_path = close.diff().abs().rolling(N, min_periods=5).sum()
+        features["trend_efficiency"] = (net_move / total_path.clip(lower=1e-10)).clip(0.0, 1.0)
+        
+        rsi_14 = self._compute_rsi(close, 14)
+        features["momentum_acceleration"] = rsi_14.pct_change(5).clip(-0.5, 0.5)
+        
+        cvd = (taker_buy - taker_sell).cumsum()
+        cvd_mean = cvd.rolling(50, min_periods=10).mean()
+        cvd_std = cvd.rolling(50, min_periods=10).std()
+        features["cvd_zscore"] = ((cvd - cvd_mean) / cvd_std.clip(lower=1e-10)).clip(-3.0, 3.0)
+        
+        vol_change = volume.rolling(10, min_periods=3).mean() / volume.rolling(30, min_periods=10).mean().clip(lower=1)
+        price_change = close.pct_change(10).abs()
+        features["volume_price_divergence"] = (vol_change - 1.0 - price_change * 10).clip(-3.0, 3.0)
         
         assert len(features.columns) == self.ENH_FEATURE_COUNT, \
             f"Expected {self.ENH_FEATURE_COUNT} enhanced features, got {len(features.columns)}: {list(features.columns)}"
@@ -1068,6 +1096,33 @@ class FeatureEngineer:
                 0.0, 1.0
             )
         
+        rsi_15m = self._compute_rsi(ohlcv['close'], 14)
+        h1_bars = ohlcv.resample('1h', label='left', closed='left').agg({
+            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last',
+        }).dropna(subset=['open'])
+        if len(h1_bars) >= 25:
+            rsi_1h = self._compute_rsi(h1_bars['close'], 14)
+            rsi_1h_shifted = rsi_1h.shift(1)
+            rsi_1h_mapped = rsi_1h_shifted.reindex(ohlcv.index, method='ffill')
+            rsi_15m_slope = rsi_15m.diff(4)
+            rsi_1h_slope = rsi_1h_mapped.diff(4)
+            htf_features['rsi_divergence_15m_1h'] = np.clip(
+                (rsi_15m_slope - rsi_1h_slope).fillna(0.0), -50.0, 50.0
+            ) / 50.0
+            
+            macd_1h, _, macd_hist_1h = self._compute_macd(h1_bars['close'])
+            macd_hist_slope_1h = macd_hist_1h.diff(3)
+            macd_hist_slope_1h_shifted = macd_hist_slope_1h.shift(1)
+            macd_hist_slope_mapped = macd_hist_slope_1h_shifted.reindex(ohlcv.index, method='ffill')
+            macd_atr = self._compute_atr_from_ohlc(h1_bars, 14).shift(1).reindex(ohlcv.index, method='ffill')
+            htf_features['macd_hist_slope_1h'] = np.clip(
+                (macd_hist_slope_mapped / macd_atr.clip(lower=1e-10)).fillna(0.0),
+                -3.0, 3.0
+            )
+        else:
+            htf_features['rsi_divergence_15m_1h'] = 0.0
+            htf_features['macd_hist_slope_1h'] = 0.0
+        
         result = htf_features[self.HTF_FEATURE_NAMES].copy()
         result.index = df.index
         
@@ -1151,16 +1206,58 @@ class FeatureEngineer:
             )
         logger.info("=" * 70)
     
+    def compute_regime_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Compute 5 continuous regime features as model inputs.
+        
+        Replaces binary regime classification with a 4D+1 continuous regime vector:
+          1. regime_trend: tanh(ADX/25 * sign(EMA_slope)) in [-1, 1]
+          2. regime_volatility: z-score of ATR_14 vs rolling median/std of ATR over 50 bars
+          3. regime_momentum: tanh(RSI_slope_5 / 10) in [-1, 1]
+          4. regime_session_sin: sin(2*pi*hour/24) — cyclical session encoding
+          5. regime_session_cos: cos(2*pi*hour/24) — cyclical session encoding
+        """
+        features = pd.DataFrame(index=df.index)
+        close = df["close"]
+        
+        adx_14 = self._compute_adx(df, 14)
+        ema_20 = close.ewm(span=20).mean()
+        ema_slope = ema_20.diff(5)
+        ema_slope_sign = np.sign(ema_slope)
+        features["regime_trend"] = np.tanh((adx_14 / 25.0) * ema_slope_sign)
+        
+        atr_14 = self._compute_atr(df, 14)
+        atr_rolling_median = atr_14.rolling(50, min_periods=10).median()
+        atr_rolling_std = atr_14.rolling(50, min_periods=10).std()
+        features["regime_volatility"] = ((atr_14 - atr_rolling_median) / atr_rolling_std.clip(lower=1e-10)).clip(-5.0, 5.0)
+        
+        rsi_14 = self._compute_rsi(close, 14)
+        rsi_slope_5 = rsi_14.diff(5)
+        features["regime_momentum"] = np.tanh(rsi_slope_5 / 10.0)
+        
+        if 'timestamp' in df.columns:
+            ts = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+            hour = ts.dt.hour + ts.dt.minute / 60.0
+        else:
+            hour = pd.Series(np.zeros(len(df)), index=df.index)
+        features["regime_session_sin"] = np.sin(2 * np.pi * hour / 24.0)
+        features["regime_session_cos"] = np.cos(2 * np.pi * hour / 24.0)
+        
+        assert len(features.columns) == self.REGIME_FEATURE_COUNT, \
+            f"Expected {self.REGIME_FEATURE_COUNT} regime features, got {len(features.columns)}: {list(features.columns)}"
+        
+        return features
+    
     def compute_all_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Compute all features: 47 STF + 20 ENH + 10 HTF = 77 total.
+        """Compute all features: STF + ENH + HTF + REGIME = total.
         
         Returns a single DataFrame with deterministic column order.
         """
         stf = self.compute_technical_features(df)
         enh = self.compute_enhanced_features(df)
         htf = self.compute_htf_features(df)
+        regime = self.compute_regime_features(df)
         
-        combined = pd.concat([stf, enh, htf], axis=1)
+        combined = pd.concat([stf, enh, htf, regime], axis=1)
         
         assert combined.shape[1] == self.TOTAL_FEATURE_COUNT, \
             f"Expected {self.TOTAL_FEATURE_COUNT} features, got {combined.shape[1]}: {list(combined.columns)}"

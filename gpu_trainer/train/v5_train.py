@@ -195,6 +195,182 @@ class V5ForwardTestConfig:
     ood_size_reduction: float = 0.5
 
 
+def compute_feature_importance_report(
+    model, device, val_feat, val_ret_R, val_valid, val_sym_ids,
+    feature_names, checkpoint_dir, n_repeats=5,
+    corr_threshold=0.85,
+):
+    """Compute permutation importance and pairwise Spearman correlation for all features.
+
+    Permutation importance: for each feature, shuffle it n_repeats times,
+    measure the drop in prediction quality (mean |mu_R| for valid bars).
+    Higher importance = larger drop when shuffled.
+
+    Correlation: compute pairwise Spearman rank correlation on training features,
+    flag pairs with |correlation| > corr_threshold.
+
+    Returns dict with importance ranking and correlation flags.
+    Saves report to checkpoint_dir/v5_feature_report.json.
+    """
+    from scipy.stats import spearmanr
+
+    model.eval()
+    n_features = val_feat.shape[1]
+    n_samples = len(val_feat)
+
+    valid_mask = val_valid.astype(bool)
+    n_valid = int(np.sum(valid_mask))
+
+    if n_valid < 100:
+        log.warning("[V5_FEAT_REPORT] Only %d valid bars, skipping feature report", n_valid)
+        return {}
+
+    feat_tensor = torch.tensor(val_feat, dtype=torch.float32)
+    sym_tensor = torch.tensor(val_sym_ids, dtype=torch.long) if val_sym_ids is not None else None
+
+    with torch.no_grad():
+        batch_size = 2048
+        all_mu = []
+        for start in range(0, n_samples, batch_size):
+            end = min(start + batch_size, n_samples)
+            feat_batch = feat_tensor[start:end].to(device)
+            sym_batch = sym_tensor[start:end].to(device) if sym_tensor is not None else None
+            outputs = model(feat_batch, symbol_ids=sym_batch)
+            all_mu.append(outputs['ret_mu'].cpu().numpy().squeeze(-1))
+        baseline_mu = np.concatenate(all_mu, axis=0)
+
+    baseline_valid_mu = baseline_mu[valid_mask]
+    baseline_ret_valid = val_ret_R[valid_mask]
+    baseline_mse = float(np.mean((baseline_valid_mu - baseline_ret_valid) ** 2))
+
+    log.info("[V5_FEAT_REPORT] Computing permutation importance for %d features "
+             "(%d valid bars, %d repeats)...", n_features, n_valid, n_repeats)
+
+    importance_scores = np.zeros(n_features)
+
+    for fi in range(n_features):
+        drop_sum = 0.0
+        for rep in range(n_repeats):
+            shuffled_feat = val_feat.copy()
+            rng = np.random.RandomState(42 + fi * n_repeats + rep)
+            shuffled_feat[:, fi] = rng.permutation(shuffled_feat[:, fi])
+
+            shuffled_tensor = torch.tensor(shuffled_feat, dtype=torch.float32)
+            all_mu_shuf = []
+            with torch.no_grad():
+                for start in range(0, n_samples, batch_size):
+                    end = min(start + batch_size, n_samples)
+                    feat_batch = shuffled_tensor[start:end].to(device)
+                    sym_batch = sym_tensor[start:end].to(device) if sym_tensor is not None else None
+                    outputs = model(feat_batch, symbol_ids=sym_batch)
+                    all_mu_shuf.append(outputs['ret_mu'].cpu().numpy().squeeze(-1))
+            shuf_mu = np.concatenate(all_mu_shuf, axis=0)
+
+            shuf_mse = float(np.mean((shuf_mu[valid_mask] - baseline_ret_valid) ** 2))
+            drop_sum += (shuf_mse - baseline_mse)
+
+        importance_scores[fi] = drop_sum / n_repeats
+
+        if (fi + 1) % 10 == 0 or fi == n_features - 1:
+            log.info("[V5_FEAT_REPORT] Permutation importance: %d/%d features done",
+                     fi + 1, n_features)
+
+    sorted_indices = np.argsort(-importance_scores)
+    importance_ranking = []
+    for rank, idx in enumerate(sorted_indices):
+        name = feature_names[idx] if feature_names and idx < len(feature_names) else f"feature_{idx}"
+        importance_ranking.append({
+            'rank': rank + 1,
+            'feature': name,
+            'importance': float(importance_scores[idx]),
+            'feature_index': int(idx),
+        })
+
+    log.info("[V5_FEAT_REPORT] Top 10 features by permutation importance:")
+    for entry in importance_ranking[:10]:
+        log.info("  #%d  %s  importance=%.6f", entry['rank'], entry['feature'], entry['importance'])
+
+    log.info("[V5_FEAT_REPORT] Bottom 10 features (least important):")
+    for entry in importance_ranking[-10:]:
+        log.info("  #%d  %s  importance=%.6f", entry['rank'], entry['feature'], entry['importance'])
+
+    log.info("[V5_FEAT_REPORT] Computing pairwise Spearman correlation on %d features "
+             "(%d samples)...", n_features, n_samples)
+
+    subsample_n = min(n_samples, 50000)
+    if subsample_n < n_samples:
+        rng_sub = np.random.RandomState(123)
+        sub_idx = rng_sub.choice(n_samples, subsample_n, replace=False)
+        feat_sub = val_feat[sub_idx]
+    else:
+        feat_sub = val_feat
+
+    corr_matrix, _ = spearmanr(feat_sub, axis=0)
+    if corr_matrix.ndim == 0:
+        corr_matrix = np.array([[corr_matrix]])
+
+    corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)
+
+    high_corr_pairs = []
+    for i in range(n_features):
+        for j in range(i + 1, n_features):
+            c = float(corr_matrix[i, j])
+            if abs(c) > corr_threshold:
+                name_i = feature_names[i] if feature_names and i < len(feature_names) else f"feature_{i}"
+                name_j = feature_names[j] if feature_names and j < len(feature_names) else f"feature_{j}"
+                high_corr_pairs.append({
+                    'feature_a': name_i,
+                    'feature_b': name_j,
+                    'correlation': c,
+                    'abs_correlation': abs(c),
+                    'index_a': i,
+                    'index_b': j,
+                })
+
+    high_corr_pairs.sort(key=lambda x: -x['abs_correlation'])
+
+    log.info("[V5_FEAT_REPORT] Found %d feature pairs with |correlation| > %.2f:",
+             len(high_corr_pairs), corr_threshold)
+    for pair in high_corr_pairs[:20]:
+        log.info("  %s <-> %s  corr=%.4f",
+                 pair['feature_a'], pair['feature_b'], pair['correlation'])
+
+    report = {
+        'baseline_mse': baseline_mse,
+        'n_features': n_features,
+        'n_valid_bars': n_valid,
+        'n_repeats': n_repeats,
+        'corr_threshold': corr_threshold,
+        'importance_ranking': importance_ranking,
+        'high_correlation_pairs': high_corr_pairs,
+        'n_high_corr_pairs': len(high_corr_pairs),
+        'generated_at': datetime.now().isoformat(),
+    }
+
+    report_path = Path(checkpoint_dir) / "v5_feature_report.json"
+    import json
+    def _serialize(obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.float32, np.float64)):
+            return float(obj)
+        if isinstance(obj, (np.int32, np.int64)):
+            return int(obj)
+        return str(obj)
+
+    with open(report_path, 'w') as f:
+        json.dump(report, f, indent=2, default=_serialize)
+
+    log.info("[V5_FEAT_REPORT] Feature report saved to %s", report_path)
+    log.info("[V5_FEAT_REPORT] Summary: %d features, %d high-correlation pairs, "
+             "top feature=%s (importance=%.6f)",
+             n_features, len(high_corr_pairs),
+             importance_ranking[0]['feature'] if importance_ranking else "?",
+             importance_ranking[0]['importance'] if importance_ranking else 0.0)
+
+    return report
+
+
 def _parse_date_to_ms(date_str: str) -> int:
     """Parse YYYY-MM-DD to millisecond timestamp."""
     from datetime import datetime as dt, timezone
@@ -2837,6 +3013,7 @@ def train_v5_model(
     regime_side_map=None, size_floor=0.0,
     head_disagreement_gate=False, slippage_base_bps=0.0,
     fold_id=0,
+    feature_report=False,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -3136,6 +3313,11 @@ def train_v5_model(
     train_feat = np.concatenate(train_features, axis=0)
     val_feat = np.concatenate(val_features, axis=0)
 
+    train_regime_trend_raw = None
+    if features_df_columns is not None and 'regime_trend' in features_df_columns:
+        rt_idx = features_df_columns.index('regime_trend')
+        train_regime_trend_raw = train_feat[:, rt_idx].copy()
+
     from sklearn.preprocessing import RobustScaler
     scaler = RobustScaler()
     train_feat = scaler.fit_transform(train_feat).astype(np.float32)
@@ -3266,7 +3448,31 @@ def train_v5_model(
         val_barrier_oracle, val_barrier_soft,
     )
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+    regime_sample_weights = None
+    if train_regime_trend_raw is not None:
+        regime_trend_vals = train_regime_trend_raw
+        regime_sample_weights = np.ones(len(train_feat), dtype=np.float64)
+        trending_mask = np.abs(regime_trend_vals) > 0.5
+        choppy_mask = np.abs(regime_trend_vals) < 0.2
+        regime_sample_weights[trending_mask] = 1.3
+        regime_sample_weights[choppy_mask] = 0.7
+        n_trending = int(np.sum(trending_mask))
+        n_choppy = int(np.sum(choppy_mask))
+        n_normal = len(train_feat) - n_trending - n_choppy
+        log.info(f"[V5_REGIME_WEIGHT] Regime sample weighting: "
+                 f"trending(1.3x)={n_trending} choppy(0.7x)={n_choppy} normal(1.0x)={n_normal}")
+
+    if regime_sample_weights is not None:
+        from torch.utils.data import WeightedRandomSampler
+        sampler = WeightedRandomSampler(
+            weights=regime_sample_weights,
+            num_samples=len(regime_sample_weights),
+            replacement=True,
+        )
+        train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler, drop_last=True)
+        log.info("[V5_REGIME_WEIGHT] Using WeightedRandomSampler for regime-conditional training")
+    else:
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
 
     n_barrier = len(presets) if len(presets) > 1 and barrier_mode != 'fixed' else 0
@@ -3878,3 +4084,27 @@ def train_v5_model(
         with open(diag_path, 'w') as f:
             json.dump(diag_results, f, indent=2, default=_make_serializable)
         log.info(f"[V5_DIAG] Full diagnostics report saved to {diag_path}")
+
+    if feature_report:
+        log.info("=" * 60)
+        log.info("  V5 FEATURE IMPORTANCE REPORT")
+        log.info("=" * 60)
+
+        best_ckpt_for_report = checkpoint_dir / "best_v5_expectancy.pt"
+        if not best_ckpt_for_report.exists():
+            best_ckpt_for_report = checkpoint_dir / "best_v5_loss.pt"
+        if best_ckpt_for_report.exists():
+            report_ckpt = torch.load(best_ckpt_for_report, map_location=device, weights_only=False)
+            model.load_state_dict(report_ckpt['model_state_dict'])
+            log.info(f"[V5_FEAT_REPORT] Loaded best checkpoint for feature report")
+
+        compute_feature_importance_report(
+            model=model,
+            device=device,
+            val_feat=val_feat,
+            val_ret_R=val_ret_R,
+            val_valid=val_valid,
+            val_sym_ids=val_sym_ids_arr,
+            feature_names=features_df_columns,
+            checkpoint_dir=checkpoint_dir,
+        )

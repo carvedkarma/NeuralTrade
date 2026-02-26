@@ -17,7 +17,8 @@ import logging
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
 
-from data.common import compute_atr
+from data.common import compute_atr, compute_adaptive_horizons, compute_vol_adjusted_sl, log_adaptive_horizon_diagnostics
+from data.candidate_generator import compute_adx
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,12 @@ class V5TargetConfig:
     atr_period: int = 14
     hold_target: float = 0.30
     mfe_min: float = 0.05
+    adaptive_horizon: bool = True
+    horizon_min: int = 8
+    horizon_max: int = 48
+    median_window: int = 50
+    high_vol_threshold: float = 1.3
+    sl_boost: float = 1.15
 
 
 def build_v5_targets(
@@ -37,12 +44,18 @@ def build_v5_targets(
     hold_target: float = 0.30,
     mfe_min_r: float = 0.05,
     barrier_outcomes: Optional[Dict[str, np.ndarray]] = None,
+    adaptive_horizon: bool = True,
+    horizon_min: int = 8,
+    horizon_max: int = 48,
+    median_window: int = 50,
+    high_vol_threshold: float = 1.3,
+    sl_boost: float = 1.15,
 ) -> Dict[str, np.ndarray]:
     """Build v5 continuous targets from OHLCV data -- ALL in R-units.
 
     Args:
         df: DataFrame with 'open', 'high', 'low', 'close', 'volume' columns
-        horizon: forward-looking window in bars
+        horizon: forward-looking window in bars (base horizon when adaptive)
         atr_period: ATR lookback for R-unit normalization
         hold_target: target fraction of HOLD labels (adaptive deadzone)
         mfe_min_r: minimum MFE in R-units required to classify as non-HOLD
@@ -50,9 +63,16 @@ def build_v5_targets(
             r_long, r_short, out_long, out_short. When provided, action labels
             are derived from barrier outcomes instead of ret_R sign, aligning
             training targets with evaluation.
+        adaptive_horizon: if True, compute per-bar volatility-adaptive horizon
+        horizon_min: minimum adaptive horizon (default 8 = 2h on 15m)
+        horizon_max: maximum adaptive horizon (default 48 = 12h on 15m)
+        median_window: rolling window for median ATR computation
+        high_vol_threshold: ATR ratio threshold for high-vol SL adjustment
+        sl_boost: SL multiplier boost factor in high-vol conditions
 
     Returns:
-        Dict with keys: ret_R, mfe_R, mae_R, vol_h, action_label, valid_mask, atr
+        Dict with keys: ret_R, mfe_R, mae_R, vol_h, action_label, valid_mask, atr,
+        effective_horizons, effective_sl_mults
         ret_R, mfe_R, mae_R are ALL in R-units (price_change / ATR).
     """
     n = len(df)
@@ -63,6 +83,14 @@ def build_v5_targets(
     atr = compute_atr(df, atr_period)
     eps = 1e-10
 
+    if adaptive_horizon:
+        effective_horizons = compute_adaptive_horizons(
+            atr, base_horizon=horizon, median_window=median_window,
+            min_horizon=horizon_min, max_horizon=horizon_max,
+        )
+    else:
+        effective_horizons = np.full(n, horizon, dtype=np.int64)
+
     ret_R = np.full(n, np.nan, dtype=np.float64)
     mfe_R = np.full(n, np.nan, dtype=np.float64)
     mae_R = np.full(n, np.nan, dtype=np.float64)
@@ -72,14 +100,20 @@ def build_v5_targets(
     mae_R_short = np.full(n, np.nan, dtype=np.float64)
     vol_h = np.full(n, np.nan, dtype=np.float64)
 
-    for i in range(n - horizon):
+    for i in range(n):
+        h_i = int(effective_horizons[i])
+        if i + h_i >= n:
+            continue
         entry_price = closes[i]
         if entry_price <= 0 or atr[i] <= 0:
             continue
 
-        future_closes = closes[i + 1: i + 1 + horizon]
-        future_highs = highs[i + 1: i + 1 + horizon]
-        future_lows = lows[i + 1: i + 1 + horizon]
+        future_closes = closes[i + 1: i + 1 + h_i]
+        future_highs = highs[i + 1: i + 1 + h_i]
+        future_lows = lows[i + 1: i + 1 + h_i]
+
+        if len(future_closes) == 0:
+            continue
 
         exit_price = future_closes[-1]
         ret_R[i] = (exit_price - entry_price) / (atr[i] + eps)
@@ -109,17 +143,51 @@ def build_v5_targets(
         else:
             vol_h[i] = 0.0
 
+    if adaptive_horizon:
+        dummy_sl_mults = compute_vol_adjusted_sl(
+            atr, sl_mult=1.5, median_window=median_window,
+            high_vol_threshold=high_vol_threshold, sl_boost=sl_boost,
+        )
+        log_adaptive_horizon_diagnostics(effective_horizons, dummy_sl_mults, horizon, 1.5)
+
     valid_mask = (np.isfinite(ret_R) & np.isfinite(mfe_R) & np.isfinite(mae_R)
                   & np.isfinite(vol_h) & (atr > 0))
 
+    adx = compute_adx(df)
+
     abs_ret_valid = np.abs(ret_R[valid_mask])
     if len(abs_ret_valid) > 0:
-        deadzone_R = float(np.percentile(abs_ret_valid, hold_target * 100))
+        deadzone_R_default = float(np.percentile(abs_ret_valid, hold_target * 100))
+        deadzone_R_trending = float(np.percentile(abs_ret_valid, 20))
+        deadzone_R_choppy = float(np.percentile(abs_ret_valid, 50))
     else:
-        deadzone_R = 0.1
-    logger.info(f"[V5_TARGETS] Adaptive deadzone: hold_target={hold_target:.0%} -> deadzone_R={deadzone_R:.4f}")
+        deadzone_R_default = 0.1
+        deadzone_R_trending = 0.05
+        deadzone_R_choppy = 0.2
+
+    deadzone_per_bar = np.full(n, deadzone_R_default, dtype=np.float64)
+    n_trending = 0
+    n_choppy = 0
+    n_normal = 0
+    for i in range(n):
+        if not valid_mask[i]:
+            continue
+        if adx[i] > 25:
+            deadzone_per_bar[i] = deadzone_R_trending
+            n_trending += 1
+        elif adx[i] < 18:
+            deadzone_per_bar[i] = deadzone_R_choppy
+            n_choppy += 1
+        else:
+            n_normal += 1
+
+    logger.info(f"[V5_TARGETS] Regime-adaptive deadzone: "
+                f"trending(ADX>25)={deadzone_R_trending:.4f} n={n_trending}, "
+                f"normal={deadzone_R_default:.4f} n={n_normal}, "
+                f"choppy(ADX<18)={deadzone_R_choppy:.4f} n={n_choppy}")
 
     action_label = np.full(n, 0, dtype=np.int64)
+    sample_weight = np.ones(n, dtype=np.float32)
 
     if barrier_outcomes is not None:
         b_r_long = barrier_outcomes['r_long']
@@ -132,20 +200,25 @@ def build_v5_targets(
                 continue
             rl = b_r_long[i] if np.isfinite(b_r_long[i]) else -999.0
             rs = b_r_short[i] if np.isfinite(b_r_short[i]) else -999.0
+            dz = deadzone_per_bar[i]
+
+            side_conf = min(1.0, abs(rl - rs) / 0.5)
+            sample_weight[i] = float(side_conf)
+
             long_positive = rl > 0
             short_positive = rs > 0
             if not long_positive and not short_positive:
                 action_label[i] = 0
                 n_barrier_hold += 1
             elif long_positive and not short_positive:
-                if rl >= deadzone_R:
+                if rl >= dz:
                     action_label[i] = 1
                     n_barrier_long += 1
                 else:
                     action_label[i] = 0
                     n_barrier_hold += 1
             elif short_positive and not long_positive:
-                if rs >= deadzone_R:
+                if rs >= dz:
                     action_label[i] = 2
                     n_barrier_short += 1
                 else:
@@ -153,14 +226,14 @@ def build_v5_targets(
                     n_barrier_hold += 1
             else:
                 if rl >= rs:
-                    if rl >= deadzone_R:
+                    if rl >= dz:
                         action_label[i] = 1
                         n_barrier_long += 1
                     else:
                         action_label[i] = 0
                         n_barrier_hold += 1
                 else:
-                    if rs >= deadzone_R:
+                    if rs >= dz:
                         action_label[i] = 2
                         n_barrier_short += 1
                     else:
@@ -171,16 +244,21 @@ def build_v5_targets(
         for i in range(n):
             if not valid_mask[i]:
                 continue
+            dz = deadzone_per_bar[i]
             if ret_R[i] > 0:
                 side_mfe = mfe_R_long[i]
             else:
                 side_mfe = mfe_R_short[i]
-            if np.abs(ret_R[i]) < deadzone_R or side_mfe < mfe_min_r:
+            if np.abs(ret_R[i]) < dz or side_mfe < mfe_min_r:
                 action_label[i] = 0
             elif ret_R[i] > 0:
                 action_label[i] = 1
             else:
                 action_label[i] = 2
+
+    valid_weights = sample_weight[valid_mask]
+    logger.info(f"[V5_TARGETS] Side-confidence weights: mean={np.mean(valid_weights):.3f} "
+                f"median={np.median(valid_weights):.3f} min={np.min(valid_weights):.3f}")
 
     n_valid = int(np.sum(valid_mask))
     n_hold = int(np.sum(action_label[valid_mask] == 0))
@@ -219,7 +297,11 @@ def build_v5_targets(
         'action_label': action_label,
         'valid_mask': valid_mask,
         'atr': atr.astype(np.float32),
-        'deadzone_R': deadzone_R,
+        'deadzone_R': deadzone_R_default,
+        'deadzone_R_trending': deadzone_R_trending,
+        'deadzone_R_choppy': deadzone_R_choppy,
+        'sample_weight': sample_weight,
+        'effective_horizons': effective_horizons,
     }
 
 
@@ -229,12 +311,18 @@ def build_barrier_preset_labels(
     horizon: int = 16,
     atr_period: int = 14,
     temperature: float = 1.0,
+    adaptive_horizon: bool = True,
+    horizon_min: int = 8,
+    horizon_max: int = 48,
+    median_window: int = 50,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Build soft barrier selection labels from realized outcomes.
 
     For each bar, compute realized R under each preset, then produce:
     - oracle_idx: argmax preset (best realized R) -- research only
     - soft_target: softmax(R_preset / temperature) -- for learnable mode
+
+    Supports volatility-adaptive horizons per bar.
 
     Returns:
         oracle_idx: (N,) int64 array of best preset index
@@ -246,6 +334,14 @@ def build_barrier_preset_labels(
     lows = df['low'].values.astype(np.float64)
     atr = compute_atr(df, atr_period)
 
+    if adaptive_horizon:
+        effective_horizons = compute_adaptive_horizons(
+            atr, base_horizon=horizon, median_window=median_window,
+            min_horizon=horizon_min, max_horizon=horizon_max,
+        )
+    else:
+        effective_horizons = np.full(n, horizon, dtype=np.int64)
+
     n_presets = len(presets)
     realized_r = np.full((n, n_presets), np.nan, dtype=np.float64)
 
@@ -253,7 +349,10 @@ def build_barrier_preset_labels(
         tp_mult = preset['tp_mult']
         sl_mult = preset['sl_mult']
 
-        for i in range(n - horizon):
+        for i in range(n):
+            h_i = int(effective_horizons[i])
+            if i + h_i >= n:
+                continue
             if atr[i] <= 0 or closes[i] <= 0:
                 continue
 
@@ -269,7 +368,7 @@ def build_barrier_preset_labels(
             long_r = np.nan
             short_r = np.nan
 
-            for j in range(i + 1, min(i + 1 + horizon, n)):
+            for j in range(i + 1, min(i + 1 + h_i, n)):
                 if highs[j] >= long_tp:
                     long_r = tp_mult / sl_mult
                     break
@@ -277,9 +376,9 @@ def build_barrier_preset_labels(
                     long_r = -1.0
                     break
             if np.isnan(long_r):
-                long_r = (closes[min(i + horizon, n - 1)] - entry) / (atr[i] * sl_mult)
+                long_r = (closes[min(i + h_i, n - 1)] - entry) / (atr[i] * sl_mult)
 
-            for j in range(i + 1, min(i + 1 + horizon, n)):
+            for j in range(i + 1, min(i + 1 + h_i, n)):
                 if lows[j] <= short_tp:
                     short_r = tp_mult / sl_mult
                     break
@@ -287,7 +386,7 @@ def build_barrier_preset_labels(
                     short_r = -1.0
                     break
             if np.isnan(short_r):
-                short_r = (entry - closes[min(i + horizon, n - 1)]) / (atr[i] * sl_mult)
+                short_r = (entry - closes[min(i + h_i, n - 1)]) / (atr[i] * sl_mult)
 
             realized_r[i, pi] = max(long_r, short_r)
 

@@ -4860,6 +4860,8 @@ Examples:
                         help="v5 forward test: freeze decision layer (no TPD adaptation, default: True)")
     parser.add_argument("--v5-diagnostics", action="store_true", default=False,
                         help="v5: run leakage/overfitting diagnostics after training")
+    parser.add_argument("--v5-feature-report", action="store_true", default=False,
+                        help="v5: generate feature importance ranking (permutation) and correlation cleanup report after training. Outputs to checkpoints/v5_feature_report.json")
     parser.add_argument("--v5-ema200-regime-gate", action="store_true", default=False,
                         help="v5: EMA200 regime gate - LONG only when close>EMA200, SHORT only when close<EMA200")
     parser.add_argument("--v5-score-side-mode", type=str, default="action_head",
@@ -5835,6 +5837,7 @@ Examples:
                 size_floor=args.v5_size_floor,
                 head_disagreement_gate=args.v5_head_disagree_gate,
                 slippage_base_bps=args.slippage_base_bps,
+                feature_report=args.v5_feature_report,
             )
 
             log.info("=" * 60)
