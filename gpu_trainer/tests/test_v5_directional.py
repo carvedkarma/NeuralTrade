@@ -1,6 +1,6 @@
 """Tests for v5.3.1 directional balance fixes: penalty debiasing, side-balance loss, mu_R debiasing, diagnostics.
 
-T001: Directional penalty independent of mu_R sign in action_head mode
+T001: Directional penalty scales with edge magnitude, independent of mu_R sign
 T002: Side-balance regularization has gradients
 T003: mu_R debiasing via EMA centers constant streams
 T004: Diagnostics produce correct side distributions
@@ -166,6 +166,89 @@ class TestT001DirectionalPenalty:
 
         assert float(np.mean(scores_high)) > float(np.mean(scores_low)), \
             "High conviction should get higher score"
+
+    def test_penalty_scales_with_mu_over_risk(self):
+        from train.v5_train import compute_v5_scores
+        n = 50
+        arrays_big = {
+            'mu_R': np.full(n, 1.0),
+            'mae': np.full(n, 0.5),
+            'mfe': np.full(n, 1.0),
+            'p_long': np.full(n, 0.6),
+            'p_short': np.full(n, 0.4),
+        }
+        arrays_small = {
+            'mu_R': np.full(n, 0.1),
+            'mae': np.full(n, 0.05),
+            'mfe': np.full(n, 0.1),
+            'p_long': np.full(n, 0.6),
+            'p_short': np.full(n, 0.4),
+        }
+        scores_big, _, diag_big = compute_v5_scores(
+            None, _arrays=arrays_big, side_mode='action_head', score_lambda=0.5)
+        scores_small, _, diag_small = compute_v5_scores(
+            None, _arrays=arrays_small, side_mode='action_head', score_lambda=0.5)
+
+        ratio = scores_big[0] / scores_small[0]
+        assert abs(ratio - 1.0) < 0.01, \
+            f"Score ratio should be ~1.0 (same mu/risk ratio): {ratio:.4f}"
+
+    def test_score_positive_when_p_side_above_breakeven(self):
+        from train.v5_train import compute_v5_scores
+        n = 50
+        lam = 0.5
+        breakeven = lam / (1.0 + lam)
+        p_side_val = breakeven + 0.1
+        arrays = {
+            'mu_R': np.full(n, 0.3),
+            'mae': np.full(n, 0.2),
+            'mfe': np.full(n, 0.5),
+            'p_long': np.full(n, p_side_val),
+            'p_short': np.full(n, 1.0 - p_side_val),
+        }
+        scores, sides, _ = compute_v5_scores(
+            None, _arrays=arrays, side_mode='action_head', score_lambda=lam)
+
+        assert np.all(sides == 1)
+        assert np.all(scores > 0), \
+            f"Score should be positive when p_side={p_side_val:.3f} > breakeven={breakeven:.3f}: {scores[0]:.6f}"
+
+    def test_score_negative_when_p_side_below_breakeven(self):
+        from train.v5_train import compute_v5_scores
+        n = 50
+        lam = 0.5
+        breakeven = lam / (1.0 + lam)
+        p_side_val = breakeven - 0.1
+        arrays = {
+            'mu_R': np.full(n, 0.3),
+            'mae': np.full(n, 0.2),
+            'mfe': np.full(n, 0.5),
+            'p_long': np.full(n, p_side_val),
+            'p_short': np.full(n, 1.0 - p_side_val),
+        }
+        scores, sides, _ = compute_v5_scores(
+            None, _arrays=arrays, side_mode='action_head', score_lambda=lam)
+
+        assert np.all(scores < 0), \
+            f"Score should be negative when p_side={p_side_val:.3f} < breakeven={breakeven:.3f}: {scores[0]:.6f}"
+
+    def test_score_zero_when_mu_zero(self):
+        from train.v5_train import compute_v5_scores
+        n = 50
+        arrays = {
+            'mu_R': np.full(n, 0.0),
+            'mae': np.full(n, 0.3),
+            'mfe': np.full(n, 0.5),
+            'p_long': np.full(n, 0.7),
+            'p_short': np.full(n, 0.3),
+        }
+        scores, _, _ = compute_v5_scores(
+            None, _arrays=arrays, side_mode='action_head', score_lambda=0.5)
+
+        finite_scores = scores[np.isfinite(scores)]
+        if len(finite_scores) > 0:
+            assert np.allclose(finite_scores, 0.0, atol=1e-6), \
+                f"Score should be zero when mu_R=0: {finite_scores[0]:.6f}"
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not available")

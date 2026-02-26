@@ -893,9 +893,11 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
 
     Penalty:
       side_mode='action_head':
-        Conviction-based: penalty = lambda * (1 - p_side), where p_side is the
-        probability of the chosen side (p_long if LONG, p_short if SHORT).
-        Independent of mu_R sign -- prevents mu_R bias from overriding action_head.
+        Conviction-based, scaled by magnitude:
+        penalty = lambda * (1 - p_side) * mu_over_risk
+        Scales proportionally with edge magnitude so penalty never dominates
+        when mu_R is small (e.g. after debiasing). Score is positive when
+        p_side > lambda/(1+lambda). Independent of mu_R sign.
         LONG and SHORT with equal p_side get equal penalty.
 
       side_mode='mu_sign' (LEGACY):
@@ -953,7 +955,7 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
 
     if side_mode == 'action_head':
         p_side = np.where(sides == 1, p_long, p_short)
-        directional_penalty = 1.0 - p_side
+        directional_penalty = (1.0 - p_side) * mu_over_risk
         penalty = score_lambda * directional_penalty
     else:
         penalty_long = np.maximum(0.0, -mu_R_adj)
@@ -1678,6 +1680,18 @@ def run_v5_forward_test(
              f"p_short_mean={score_diag['p_short_mean']:.4f} "
              f"edge_long_mean={score_diag['edge_long_mean']:.4f} "
              f"edge_short_mean={score_diag['edge_short_mean']:.4f}")
+    mu_R_post = arrays['mu_R']
+    abs_mu_post = np.abs(mu_R_post)
+    finite_scores_diag = scores[np.isfinite(scores)]
+    p_side_arr = np.where(sides == 1, arrays['p_long'], arrays['p_short'])
+    log.info(f"[V5_FWD] Score components: edge_mean={score_diag['edge_long_mean']:.4f} "
+             f"penalty_mean={score_diag['penalty_mean']:.4f} net_score_mean={score_diag['score_mean']:.4f}")
+    log.info(f"[V5_FWD] mu_R post-debias: mean={float(np.nanmean(mu_R_post)):+.4f} "
+             f"std={float(np.nanstd(mu_R_post)):.4f} |mu_R|_mean={float(np.nanmean(abs_mu_post)):.4f}")
+    log.info(f"[V5_FWD] p_side: mean={float(np.nanmean(p_side_arr)):.4f} "
+             f"p10={float(np.nanpercentile(p_side_arr, 10)):.4f} "
+             f"p50={float(np.nanpercentile(p_side_arr, 50)):.4f} "
+             f"p90={float(np.nanpercentile(p_side_arr, 90)):.4f}")
     all_long = int(np.sum(sides == 1))
     all_short = int(np.sum(sides == -1))
     log.info(f"[V5_SIDE_DIAG] ALL bars: long={all_long} short={all_short} "
@@ -1737,6 +1751,17 @@ def run_v5_forward_test(
     scores_work[~valid_bool] = -np.inf
     if test_cand_mask is not None:
         scores_work[~test_cand_mask.astype(bool)] = -np.inf
+
+    finite_work = scores_work[np.isfinite(scores_work)]
+    if len(finite_work) > 0:
+        pct_above = float(np.mean(finite_work >= effective_threshold) * 100)
+        log.info(f"[V5_FWD] Threshold check: {len(finite_work)} finite scores, "
+                 f"{pct_above:.1f}% above threshold={effective_threshold:.4f} "
+                 f"(score p90={float(np.percentile(finite_work, 90)):.4f} "
+                 f"p99={float(np.percentile(finite_work, 99)):.4f} "
+                 f"max={float(np.max(finite_work)):.4f})")
+    else:
+        log.warning("[V5_FWD] No finite scores after quality/validity masking")
 
     ddt = None
     ddt_base_threshold = effective_threshold
