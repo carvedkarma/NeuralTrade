@@ -1645,10 +1645,10 @@ def run_v5_forward_test(
 
     ema200 = None
     if ema200_regime_gate and close_prices is not None:
+        ema200 = _compute_ema(close_prices, 200)
         if config.multi_regime:
-            log.info("[V5_FWD] EMA200 regime gate DISABLED (superseded by --v5-multi-regime)")
+            log.info("[V5_FWD] EMA200 regime gate ENABLED (alongside multi-regime)")
         else:
-            ema200 = _compute_ema(close_prices, 200)
             log.info("[V5_FWD] EMA200 regime gate ENABLED")
 
     week_boundaries = None
