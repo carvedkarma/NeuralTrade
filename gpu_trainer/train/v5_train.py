@@ -457,7 +457,7 @@ class V5TPDControllerConfig:
     mae_cap: float = 2.0
     side_mode: str = 'action_head'
     rr_weight: float = 0.0
-    min_threshold_floor: float = 0.10
+    min_threshold_floor: float = 0.02
 
 
 class V5Dataset(Dataset):
@@ -1699,7 +1699,7 @@ def run_v5_forward_test(
              f"(if >95%% one-sided, this is MODEL BIAS not a bug)")
     log.info(f"[V5_FWD] Quality gate: {qual_diag.get('passed_pct', 0):.1f}% pass "
              f"({qual_diag.get('final', 0)}/{qual_diag.get('total', 0)})")
-    hard_floor = config.min_threshold if config.min_threshold is not None else 0.10
+    hard_floor = config.min_threshold if config.min_threshold is not None else 0.02
     effective_threshold = max(hard_floor, config.score_threshold)
     if config.score_threshold < hard_floor:
         log.info(f"[V5_FWD] Hard floor engaged: threshold {config.score_threshold:.4f} < floor {hard_floor:.4f} → clamped to {effective_threshold:.4f}")

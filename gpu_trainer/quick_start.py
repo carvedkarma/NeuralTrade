@@ -5587,6 +5587,7 @@ Examples:
                 mae_cap=args.v5_mae_cap,
                 side_mode=args.v5_score_side_mode,
                 rr_weight=args.v5_rr_weight,
+                min_threshold_floor=args.v5_min_threshold if args.v5_min_threshold is not None else 0.02,
             )
             log.info(f"[V5] side_mode={args.v5_score_side_mode} rr_weight={args.v5_rr_weight}")
 
