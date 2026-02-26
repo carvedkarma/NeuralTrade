@@ -3778,7 +3778,7 @@ def train_v5_model(
             )
 
             train_ref_arrays = _build_train_ref_arrays(
-                model, device, train_feat, train_sym_ids_arr,
+                model, device, train_feat, train_sym_ids,
                 fwd_config, total_train
             )
 
