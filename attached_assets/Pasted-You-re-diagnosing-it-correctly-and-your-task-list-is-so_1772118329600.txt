@@ -1,0 +1,244 @@
+You’re diagnosing it correctly, and your task list is solid. I’d implement it almost exactly as you wrote—with two tweaks to make it safer:
+
+T001 penalty: use 1 - p_side (confidence in the chosen side), not 1 - max(p_long,p_short) (those are identical most of the time, but p_side makes the intention explicit and avoids weirdness if you later add HOLD into the decision).
+
+T002 balance regularizer: KL is fine, but do it on (LONG, SHORT) only and detach the target ratio computed from labels (so it doesn’t create gradients through label statistics).
+
+Below is an implementation-ready patch outline.
+
+T001 — Fix directional penalty so it doesn’t reintroduce mu_R bias
+
+Goal: when --v5-score-side-mode action_head, penalty must not depend on mu_R sign.
+
+Patch (in gpu_trainer/train/v5_train.py, inside compute_v5_scores)
+
+Find the directional penalty section (around where you noted ~917–924). Replace with:
+
+# probs: softmax over action logits
+# p_long = probs[..., LONG_IDX], p_short = probs[..., SHORT_IDX]
+# side: +1 for LONG, -1 for SHORT (your code likely already has this)
+
+if side_mode == "action_head":
+    # penalize low directional conviction (independent of mu_R sign)
+    p_side = torch.where(side > 0, p_long, p_short)
+    directional_penalty = score_lambda * (1.0 - p_side)
+else:
+    # legacy behavior: mu_sign side mode penalty (keep unchanged)
+    # directional_penalty = score_lambda * <your existing mu_R sign-based penalty>
+    directional_penalty = directional_penalty  # leave your existing code here
+
+Acceptance checks
+
+For two samples with identical p_long/p_short but opposite mu_R sign, penalty must match (in action_head mode).
+
+LONG and SHORT with equal p_side must get equal penalty.
+
+T002 — Add side-balance regularization term to loss
+
+Goal: discourage collapse to always-LONG (or always-SHORT) predictions even if labels are imbalanced.
+
+Patch (in compute_v5_loss)
+
+After you compute the action loss (cross-entropy / focal / OHEM etc.), add:
+
+import torch.nn.functional as F
+
+# logits: [B, 3] for [HOLD, LONG, SHORT] (adjust if different)
+probs = F.softmax(action_logits, dim=-1)
+
+p_long = probs[:, LONG_IDX].mean()
+p_short = probs[:, SHORT_IDX].mean()
+
+# target distribution from labels in this batch (LONG/SHORT only)
+# labels: [B] with values HOLD/LONG/SHORT (adjust indices)
+is_long = (action_labels == LONG_IDX)
+is_short = (action_labels == SHORT_IDX)
+
+target_long = is_long.float().mean()
+target_short = is_short.float().mean()
+
+# avoid divide-by-zero if batch has no L/S labels (rare but can happen)
+eps = 1e-8
+target_sum = target_long + target_short
+if target_sum.item() < 1e-6:
+    side_balance_loss = action_logits.new_tensor(0.0)
+else:
+    target_dist = torch.stack([target_long, target_short]) / (target_sum + eps)
+    pred_dist = torch.stack([p_long, p_short])
+    pred_dist = pred_dist / (pred_dist.sum() + eps)
+
+    # KL(target || pred) or KL(pred || target); either works as regularizer
+    side_balance_loss = F.kl_div(
+        (pred_dist + eps).log(),  # log-probs
+        target_dist.detach(),     # no grads through targets
+        reduction="batchmean"
+    )
+
+# weight (as you proposed)
+SIDE_BAL_W = 0.1
+loss = loss + SIDE_BAL_W * side_balance_loss
+
+Acceptance checks
+
+side_balance_loss is non-zero when preds collapse (e.g., p_long≈0.95, p_short≈0.01) and labels are more balanced.
+
+Gradients flow to action_logits (non-zero grad norm).
+
+T003 — mu_R debiasing via EMA running mean subtraction (forward test only)
+
+Goal: remove persistent positive drift in mu_R at inference/scoring time.
+
+CLI flag
+
+Add:
+
+--v5-mu-debias (default True for new runs)
+
+Patch (forward test loop / where you compute scores)
+
+Maintain EMA state per run (optionally per symbol—recommended).
+
+# init once before loop
+mu_debias_enabled = args.v5_mu_debias
+mu_ema_alpha = 0.01
+
+# per-symbol EMA is best (prevents ETH bias from contaminating SOL)
+ema_mu_by_symbol = {sym: 0.0 for sym in symbols}
+
+...
+
+# inside loop per symbol
+mu_R = outputs["mu_R"]  # tensor shape [N] or scalar per bar depending on your pipeline
+
+if mu_debias_enabled:
+    # compute batch mean mu_R for stable EMA update
+    mu_mean = float(mu_R.mean().item())
+
+    prev = ema_mu_by_symbol[symbol]
+    new = (1.0 - mu_ema_alpha) * prev + mu_ema_alpha * mu_mean
+    ema_mu_by_symbol[symbol] = new
+
+    mu_R_debiased = mu_R - new
+
+    if step % 500 == 0:  # or whatever cadence you use
+        logger.info(f"[V5_MU_DEBIAS] {symbol} ema_mu={new:+.6f} (alpha={mu_ema_alpha})")
+else:
+    mu_R_debiased = mu_R
+
+Then use mu_R_debiased for scoring inputs (edge calc) instead of raw mu_R.
+
+Acceptance checks
+
+With constant positive mu_R stream, mu_R_debiased tends toward ~0.
+
+LONG/SHORT ratio becomes less skewed in bear windows.
+
+T004 — Forward-test directional balance diagnostics at each stage
+
+Goal: show side distribution before/after each gate, and warn if >80/20.
+
+What to count
+
+At minimum:
+
+Pre-filter predictions: what action_head predicted (argmax over probs or thresholded decision, before any gates).
+
+After EMA200 gate
+
+After multi-regime gate
+
+Final executed trades
+
+Patch pattern
+
+Create counters like:
+
+from collections import Counter
+
+side_counts = {
+  "pre": Counter(),
+  "post_ema200": Counter(),
+  "post_regime": Counter(),
+  "final": Counter(),
+}
+gate_blocks = Counter()  # e.g. {"ema200": X, "multi_regime": Y, "quality": Z, ...}
+
+In the forward loop:
+
+# pre
+side_counts["pre"][pred_side] += 1  # pred_side in {"LONG","SHORT","HOLD"}
+
+# EMA200 gate
+if ema200_blocks:
+    gate_blocks["ema200"] += 1
+else:
+    side_counts["post_ema200"][pred_side] += 1
+
+# multi-regime gate
+if regime_blocks:
+    gate_blocks["multi_regime"] += 1
+else:
+    side_counts["post_regime"][pred_side] += 1
+
+# final executed (after all gates + threshold)
+if executed:
+    side_counts["final"][exec_side] += 1
+
+In the report:
+
+Print table for each stage:
+
+LONG count/%
+
+SHORT count/%
+
+HOLD count/%
+
+Warning if max(LONG%, SHORT%) > 0.80 (ignoring HOLD or including—your choice; I’d ignore HOLD for ratio).
+
+T005 — Tests (new file gpu_trainer/tests/test_v5_features.py)
+1) T001 penalty independent of mu_R sign (action_head mode)
+
+Pseudo-test:
+
+def test_directional_penalty_action_head_independent_of_mu_sign():
+    p_long = torch.tensor([0.8, 0.2])
+    p_short = torch.tensor([0.2, 0.8])
+    side = torch.tensor([+1, -1])  # chosen sides
+    mu_pos = torch.tensor([+0.5, +0.5])
+    mu_neg = torch.tensor([-0.5, -0.5])
+
+    pen_pos = compute_penalty_action_head(p_long, p_short, side, mu_pos, score_lambda=1.0)
+    pen_neg = compute_penalty_action_head(p_long, p_short, side, mu_neg, score_lambda=1.0)
+
+    assert torch.allclose(pen_pos, pen_neg)
+2) T002 balance regularizer has gradients
+def test_side_balance_regularizer_has_gradient():
+    logits = torch.randn(64, 3, requires_grad=True)
+    labels = torch.randint(0, 3, (64,))
+    loss = side_balance_loss(logits, labels) * 0.1
+    loss.backward()
+    assert logits.grad is not None
+    assert logits.grad.abs().sum().item() > 0
+3) T003 debias centers constant mu_R
+def test_mu_debias_ema_centers_constant_stream():
+    ema = 0.0
+    alpha = 0.01
+    for _ in range(5000):
+        mu = 0.5
+        ema = (1-alpha)*ema + alpha*mu
+        mu_debiased = mu - ema
+    assert abs(mu_debiased) < 0.05
+4) T004 diagnostics produce correct stage counts
+
+Feed a tiny synthetic forward path with known blocks and assert the counters match.
+
+What I would do first (order of execution)
+
+T001 + T004 (fast, immediately shows whether penalty was the culprit)
+
+T002 (prevents collapse over training)
+
+T003 (helps robustness but should not be your only fix)
+
+T005 (lock it in)
