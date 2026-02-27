@@ -195,6 +195,7 @@ class V5ForwardTestConfig:
     ood_size_reduction: float = 0.5
     mu_debias: bool = True
     mu_debias_alpha: float = 0.01
+    min_trades: int = 20
 
 
 def compute_feature_importance_report(
@@ -2478,6 +2479,11 @@ def run_v5_forward_test(
     safe_r = np.where(np.isnan(side_r), 0.0, side_r)
     log.info("[V5_FWD] Using side-conditional outcomes (predicted side selects LONG/SHORT R)")
 
+    if 0 < len(taken) < config.min_trades:
+        log.warning(f"[V5_FWD] NO EDGE: only {len(taken)} trades (minimum {config.min_trades}). "
+                    f"Insufficient signal quality — clearing trades to avoid noise.")
+        taken = []
+
     if len(taken) == 0:
         log.warning("[V5_FWD] No trades taken in forward test!")
         from collections import OrderedDict
@@ -2952,6 +2958,9 @@ def run_v5_walk_forward(
     edge_first=False, edge_min=0.03, edge_pct_floor=70, edge_topn_per_day=4,
     regime_side_map=None, size_floor=0.0,
     head_disagreement_gate=False, slippage_base_bps=0.0,
+    min_trades=20,
+    wf_threshold_ema=True, wf_threshold_ema_alpha=0.5,
+    mu_debias=True, mu_debias_alpha=0.01,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -3016,6 +3025,8 @@ def run_v5_walk_forward(
 
     all_reports = []
     data_path = data_dir / f"{symbols[0]}_15m.parquet"
+    threshold_ema = None
+    blended_threshold = None
 
     for fold in folds:
         log.info(f"\n{'='*80}")
@@ -3119,6 +3130,10 @@ def run_v5_walk_forward(
             size_floor=size_floor,
             head_disagreement_gate=head_disagreement_gate,
             slippage_base_bps=slippage_base_bps,
+            min_trades=min_trades,
+            mu_debias=mu_debias,
+            mu_debias_alpha=mu_debias_alpha,
+            wf_threshold_override=blended_threshold if threshold_ema is not None and wf_threshold_ema else None,
             fold_id=fold['fold'],
         )
 
@@ -3128,35 +3143,78 @@ def run_v5_walk_forward(
             with open(report_path) as f:
                 fold_report = json.load(f)
             fold_report['fold'] = fold['fold']
+
+            fold_threshold = fold_report.get('score_threshold', None)
+            if fold_threshold is not None:
+                if wf_threshold_ema and threshold_ema is not None:
+                    blended_threshold = wf_threshold_ema_alpha * fold_threshold + (1 - wf_threshold_ema_alpha) * threshold_ema
+                    log.info(f"[V5_WF_THR] Fold {fold['fold']}: sweep={fold_threshold:.4f} "
+                             f"prev_ema={threshold_ema:.4f} → blended={blended_threshold:.4f}")
+                    threshold_ema = blended_threshold
+                else:
+                    threshold_ema = fold_threshold
+                    blended_threshold = fold_threshold
+                    log.info(f"[V5_WF_THR] Fold {fold['fold']}: initial threshold={fold_threshold:.4f} (no prior EMA)")
+                fold_report['threshold_ema'] = threshold_ema
+
             all_reports.append(fold_report)
 
     if all_reports:
-        log.info("\n" + "=" * 100)
+        log.info("\n" + "=" * 120)
         log.info("  WALK-FORWARD SUMMARY")
-        log.info("=" * 100)
-        log.info(f"{'Fold':>6} {'Window':>25} {'Trades':>8} {'T/Day':>7} {'WR':>7} "
-                 f"{'Expect':>10} {'PF':>7} {'Sharpe':>8} {'MaxDD':>10} {'TotalR':>10}")
-        log.info("-" * 100)
+        log.info("=" * 120)
+        header = (f"{'Fold':>6} {'Window':>25} {'Trades':>8} {'L/S':>10} {'WR':>7} "
+                  f"{'E[R]':>10} {'PF':>7} {'Sharpe':>8} {'MaxDD':>10} "
+                  f"{'TotalR':>10} {'Threshold':>10} {'Status':>10}")
+        log.info(header)
+        log.info("-" * 120)
 
         total_trades = 0
         total_r = 0.0
         all_expectancies = []
+        active_folds = 0
+        total_long = 0
+        total_short = 0
 
         for r in all_reports:
             window = f"{r.get('window_start','?')}→{r.get('window_end','?')}"
-            log.info(f"{r['fold']:>6} {window:>25} {r['total_trades']:>8} {r['trades_per_day']:>7.2f} "
-                     f"{r['win_rate']:>6.1%} {r['expectancy_r']:>+10.4f} {r['profit_factor']:>7.2f} "
-                     f"{r['sharpe']:>8.2f} {r['max_drawdown_r']:>10.4f} {r['total_r']:>+10.4f}")
-            total_trades += r['total_trades']
+            n_trades = r['total_trades']
+            thr = r.get('score_threshold', r.get('threshold_ema', 0.0))
+            thr_str = f"{thr:.4f}" if thr else "-"
+
+            if n_trades == 0:
+                status = "NO EDGE"
+                log.info(f"{r['fold']:>6} {window:>25} {n_trades:>8} {'-/-':>10} {'-':>7} "
+                         f"{'-':>10} {'-':>7} {'-':>8} {'-':>10} "
+                         f"{'+0.0000':>10} {thr_str:>10} {status:>10}")
+            else:
+                n_long = r.get('n_long', 0)
+                n_short = r.get('n_short', 0)
+                ls_str = f"{n_long}/{n_short}"
+                status = "ACTIVE"
+                active_folds += 1
+                total_long += n_long
+                total_short += n_short
+                log.info(f"{r['fold']:>6} {window:>25} {n_trades:>8} {ls_str:>10} "
+                         f"{r['win_rate']:>6.1%} {r['expectancy_r']:>+10.4f} {r['profit_factor']:>7.2f} "
+                         f"{r['sharpe']:>8.2f} {r['max_drawdown_r']:>10.4f} "
+                         f"{r['total_r']:>+10.4f} {thr_str:>10} {status:>10}")
+
+            total_trades += n_trades
             total_r += r['total_r']
-            if r['total_trades'] > 0:
+            if n_trades > 0:
                 all_expectancies.append(r['expectancy_r'])
 
-        log.info("-" * 100)
+        log.info("-" * 120)
         avg_expect = float(np.mean(all_expectancies)) if all_expectancies else 0.0
-        log.info(f"{'AGG':>6} {'':>25} {total_trades:>8} {'':>7} {'':>7} "
-                 f"{avg_expect:>+10.4f} {'':>7} {'':>8} {'':>10} {total_r:>+10.4f}")
-        log.info("=" * 100)
+        ls_total = f"{total_long}/{total_short}"
+        log.info(f"{'TOTAL':>6} {'':>25} {total_trades:>8} {ls_total:>10} {'':>7} "
+                 f"{avg_expect:>+10.4f} {'':>7} {'':>8} {'':>10} "
+                 f"{total_r:>+10.4f} {'':>10} {'':>10}")
+        log.info(f"  Active Folds: {active_folds}/{len(all_reports)} | "
+                 f"Threshold EMA: {threshold_ema:.4f}" if threshold_ema else
+                 f"  Active Folds: {active_folds}/{len(all_reports)}")
+        log.info("=" * 120)
 
         agg_path = Path("checkpoints") / "v5_walkforward_report.json"
         import json
@@ -3168,6 +3226,8 @@ def run_v5_walk_forward(
                     'total_r': total_r,
                     'avg_expectancy_r': avg_expect,
                     'n_folds': len(all_reports),
+                    'active_folds': active_folds,
+                    'final_threshold_ema': threshold_ema,
                 },
             }, f, indent=2, default=str)
         log.info(f"[V5_WF] Walk-forward report saved to {agg_path}")
@@ -3249,6 +3309,8 @@ def train_v5_model(
     regime_side_map=None, size_floor=0.0,
     head_disagreement_gate=False, slippage_base_bps=0.0,
     mu_debias=True, mu_debias_alpha=0.01,
+    min_trades=20,
+    wf_threshold_override=None,
     fold_id=0,
     feature_report=False,
 ):
@@ -4122,11 +4184,15 @@ def train_v5_model(
                 if 'current_threshold' in tpd_c and tpd_c['current_threshold'] is not None:
                     ckpt_threshold = tpd_c['current_threshold']
             if ckpt_threshold is None:
-                ckpt_threshold = 0.10
-            ckpt_floor = min_threshold if min_threshold is not None else 0.10
+                ckpt_threshold = 0.02
+            ckpt_floor = min_threshold if min_threshold is not None else 0.02
             if ckpt_threshold < ckpt_floor:
                 log.info(f"[V5_FWD] Clamping calibrated threshold {ckpt_threshold:.4f} → floor {ckpt_floor:.4f}")
                 ckpt_threshold = ckpt_floor
+
+            if wf_threshold_override is not None:
+                log.info(f"[V5_FWD] Walk-forward threshold override: sweep={ckpt_threshold:.4f} → blended={wf_threshold_override:.4f}")
+                ckpt_threshold = wf_threshold_override
 
             ckpt_temperature = ckpt.get('temperature', fitted_temperature)
             if ckpt_temperature != 1.0:
@@ -4220,6 +4286,7 @@ def train_v5_model(
                 slippage_base_bps=slippage_base_bps,
                 mu_debias=mu_debias,
                 mu_debias_alpha=mu_debias_alpha,
+                min_trades=min_trades,
             )
 
             train_ref_arrays = _build_train_ref_arrays(

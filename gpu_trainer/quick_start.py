@@ -4866,6 +4866,8 @@ Examples:
                         help="v5: per-symbol mu_R EMA debiasing in forward test. Removes persistent positive/negative drift from mu_R predictions (default: True)")
     parser.add_argument("--v5-no-mu-debias", dest="v5_mu_debias", action="store_false",
                         help="v5: disable mu_R debiasing")
+    parser.add_argument("--v5-mu-debias-alpha", type=float, default=0.01,
+                        help="v5.3.1+: EMA alpha for mu_R debiasing (default: 0.01)")
     parser.add_argument("--v5-ema200-regime-gate", action="store_true", default=False,
                         help="v5: EMA200 regime gate - LONG only when close>EMA200, SHORT only when close<EMA200")
     parser.add_argument("--v5-score-side-mode", type=str, default="action_head",
@@ -5049,6 +5051,14 @@ Examples:
                         help="v5 walk-forward: training window in months (default: 12)")
     parser.add_argument("--v5-wf-test-months", type=int, default=1,
                         help="v5 walk-forward: test window in months (default: 1)")
+    parser.add_argument("--v5-wf-threshold-ema", action="store_true", default=True,
+                        help="v5.3.1+: carry-forward threshold EMA across walk-forward folds (default: True)")
+    parser.add_argument("--v5-no-wf-threshold-ema", action="store_true", default=False,
+                        help="v5.3.1+: disable threshold carry-forward EMA")
+    parser.add_argument("--v5-wf-threshold-ema-alpha", type=float, default=0.5,
+                        help="v5.3.1+: EMA blending weight for threshold carry-forward (default: 0.5 = 50%% new, 50%% prior)")
+    parser.add_argument("--v5-min-trades", type=int, default=20,
+                        help="v5.3.1+: minimum trades for valid fold. Below this → NO EDGE, 0R (default: 20)")
 
     parser.add_argument("--multi-horizon", action="store_true", default=False,
                         help="Train multiple horizons (8,16,32) and select best per bar")
@@ -5721,6 +5731,11 @@ Examples:
                     size_floor=args.v5_size_floor,
                     head_disagreement_gate=getattr(args, 'v5_head_disagree_gate', False),
                     slippage_base_bps=getattr(args, 'slippage_base_bps', 0.0),
+                    min_trades=args.v5_min_trades,
+                    wf_threshold_ema=args.v5_wf_threshold_ema and not args.v5_no_wf_threshold_ema,
+                    wf_threshold_ema_alpha=args.v5_wf_threshold_ema_alpha,
+                    mu_debias=args.v5_mu_debias,
+                    mu_debias_alpha=args.v5_mu_debias_alpha,
                 )
                 return
 
@@ -5843,6 +5858,8 @@ Examples:
                 head_disagreement_gate=args.v5_head_disagree_gate,
                 slippage_base_bps=args.slippage_base_bps,
                 mu_debias=args.v5_mu_debias,
+                mu_debias_alpha=args.v5_mu_debias_alpha,
+                min_trades=args.v5_min_trades,
                 feature_report=args.v5_feature_report,
             )
 

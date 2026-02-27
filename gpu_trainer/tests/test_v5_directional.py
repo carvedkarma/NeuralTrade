@@ -351,3 +351,77 @@ class TestT004Diagnostics:
         assert dist['long'] == 4
         assert dist['short'] == 0
         assert abs(dist['long_pct'] - 100.0) < 0.1
+
+
+@pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
+class TestT005MinTradesGate:
+
+    def test_min_trades_default_is_20(self):
+        from train.v5_train import V5ForwardTestConfig
+        cfg = V5ForwardTestConfig()
+        assert cfg.min_trades == 20
+
+    def test_min_trades_configurable(self):
+        from train.v5_train import V5ForwardTestConfig
+        cfg = V5ForwardTestConfig(min_trades=50)
+        assert cfg.min_trades == 50
+
+    def test_min_trades_zero_disables_gate(self):
+        from train.v5_train import V5ForwardTestConfig
+        cfg = V5ForwardTestConfig(min_trades=0)
+        assert cfg.min_trades == 0
+
+
+class TestT006ThresholdEMA:
+
+    def test_ema_blending_formula(self):
+        alpha = 0.5
+        prev_ema = 0.20
+        new_sweep = 0.02
+        blended = alpha * new_sweep + (1 - alpha) * prev_ema
+        assert abs(blended - 0.11) < 1e-6
+
+    def test_ema_converges_to_stable_threshold(self):
+        alpha = 0.5
+        ema = None
+        thresholds = [0.15, 0.15, 0.15, 0.15, 0.15]
+        for t in thresholds:
+            if ema is None:
+                ema = t
+            else:
+                ema = alpha * t + (1 - alpha) * ema
+        assert abs(ema - 0.15) < 1e-6
+
+    def test_ema_smooths_outlier(self):
+        alpha = 0.5
+        ema = 0.20
+        outlier = 0.02
+        blended = alpha * outlier + (1 - alpha) * ema
+        assert blended > outlier
+        assert blended < ema
+        assert abs(blended - 0.11) < 1e-6
+
+    def test_ema_alpha_1_uses_only_new(self):
+        alpha = 1.0
+        ema = 0.20
+        new_val = 0.05
+        blended = alpha * new_val + (1 - alpha) * ema
+        assert abs(blended - 0.05) < 1e-6
+
+    def test_ema_alpha_0_uses_only_old(self):
+        alpha = 0.0
+        ema = 0.20
+        new_val = 0.05
+        blended = alpha * new_val + (1 - alpha) * ema
+        assert abs(blended - 0.20) < 1e-6
+
+    def test_ema_sequence_dampens_oscillation(self):
+        alpha = 0.5
+        ema = None
+        thresholds = [0.30, 0.02, 0.30, 0.02, 0.30, 0.02]
+        for t in thresholds:
+            if ema is None:
+                ema = t
+            else:
+                ema = alpha * t + (1 - alpha) * ema
+        assert 0.10 < ema < 0.22
