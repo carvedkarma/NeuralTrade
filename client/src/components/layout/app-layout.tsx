@@ -1,0 +1,159 @@
+import { useLocation, Link } from "wouter";
+import {
+  LayoutDashboard,
+  Activity,
+  FileText,
+  BarChart3,
+  Settings,
+  Zap,
+  Moon,
+  Sun,
+  ChevronLeft,
+} from "lucide-react";
+import { useState, useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
+import { useTradingWs } from "@/hooks/use-trading-ws";
+
+const NAV_ITEMS = [
+  { path: "/", label: "Command Center", icon: LayoutDashboard },
+  { path: "/live", label: "Live Trading", icon: Activity },
+  { path: "/paper", label: "Paper Trading", icon: FileText },
+  { path: "/analytics", label: "Analytics", icon: BarChart3 },
+  { path: "/settings", label: "Settings", icon: Settings },
+];
+
+function GpuStatusDot({ className }: { className?: string }) {
+  const { data } = useQuery<{ gpu: { isAvailable: boolean; latencyMs: number } }>({
+    queryKey: ["/api/system/status"],
+    refetchInterval: 15000,
+  });
+  const isOnline = data?.gpu?.isAvailable ?? false;
+  return (
+    <span
+      data-testid="gpu-status-dot"
+      className={cn(
+        "inline-block w-2 h-2 rounded-full",
+        isOnline ? "bg-emerald-400" : "bg-red-400",
+        isOnline && "pulse-dot",
+        className,
+      )}
+    />
+  );
+}
+
+export default function AppLayout({ children }: { children: React.ReactNode }) {
+  const [location] = useLocation();
+  const [collapsed, setCollapsed] = useState(false);
+  const [dark, setDark] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return localStorage.getItem("theme") !== "light";
+  });
+  const { connectionState } = useTradingWs();
+
+  useEffect(() => {
+    if (dark) {
+      document.documentElement.classList.add("dark");
+      localStorage.setItem("theme", "dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+      localStorage.setItem("theme", "light");
+    }
+  }, [dark]);
+
+  return (
+    <div className="flex h-screen overflow-hidden bg-background" data-testid="app-layout">
+      <aside
+        className={cn(
+          "flex flex-col h-full border-r border-sidebar-border bg-sidebar transition-all duration-200",
+          collapsed ? "w-[52px]" : "w-[220px]",
+        )}
+        data-testid="sidebar"
+      >
+        <div className={cn("flex items-center gap-2 px-3 h-14 border-b border-sidebar-border", collapsed && "justify-center")}>
+          <div className="flex items-center justify-center w-7 h-7 rounded-md bg-primary/10">
+            <Zap className="w-4 h-4 text-primary" />
+          </div>
+          {!collapsed && (
+            <span className="text-sm font-semibold text-sidebar-foreground tracking-tight truncate">
+              Neural Terminal
+            </span>
+          )}
+        </div>
+
+        <nav className="flex-1 py-2 px-2 space-y-0.5 overflow-y-auto">
+          {NAV_ITEMS.map((item) => {
+            const isActive = location === item.path || (item.path !== "/" && location.startsWith(item.path));
+            const Icon = item.icon;
+            const linkContent = (
+              <Link
+                href={item.path}
+                data-testid={`nav-${item.label.toLowerCase().replace(/\s+/g, "-")}`}
+                className={cn(
+                  "flex items-center gap-2.5 px-2.5 py-2 rounded-md text-sm transition-colors",
+                  isActive
+                    ? "bg-sidebar-accent text-sidebar-foreground font-medium"
+                    : "text-muted-foreground hover:text-sidebar-foreground hover:bg-sidebar-accent/50",
+                  collapsed && "justify-center px-0",
+                )}
+              >
+                <Icon className="w-4 h-4 shrink-0" />
+                {!collapsed && <span className="truncate">{item.label}</span>}
+              </Link>
+            );
+
+            if (collapsed) {
+              return (
+                <Tooltip key={item.path}>
+                  <TooltipTrigger asChild>{linkContent}</TooltipTrigger>
+                  <TooltipContent side="right" className="text-xs">
+                    {item.label}
+                  </TooltipContent>
+                </Tooltip>
+              );
+            }
+            return <div key={item.path}>{linkContent}</div>;
+          })}
+        </nav>
+
+        <div className="border-t border-sidebar-border p-2 space-y-1">
+          <div className={cn("flex items-center gap-2 px-2.5 py-1.5 text-xs text-muted-foreground", collapsed && "justify-center")}>
+            <GpuStatusDot />
+            {!collapsed && (
+              <span className="truncate">
+                GPU {connectionState === "connected" ? "Online" : "Offline"}
+              </span>
+            )}
+          </div>
+
+          <div className={cn("flex gap-1", collapsed ? "flex-col items-center" : "items-center")}>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={() => setDark(!dark)}
+              data-testid="theme-toggle"
+            >
+              {dark ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={() => setCollapsed(!collapsed)}
+              data-testid="sidebar-toggle"
+            >
+              <ChevronLeft className={cn("w-3.5 h-3.5 transition-transform", collapsed && "rotate-180")} />
+            </Button>
+          </div>
+        </div>
+      </aside>
+
+      <main className="flex-1 overflow-y-auto" data-testid="main-content">
+        {children}
+      </main>
+    </div>
+  );
+}

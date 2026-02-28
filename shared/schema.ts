@@ -1501,6 +1501,33 @@ export type IngestedEventRow = typeof ingestedEvents.$inferSelect;
 export type InsertSettings = z.infer<typeof insertSettingsSchema>;
 export type SettingsRow = typeof settings.$inferSelect;
 
+export const v5Signals = pgTable("v5_signals", {
+  id: serial("id").primaryKey(),
+  symbol: varchar("symbol", { length: 20 }).notNull(),
+  direction: varchar("direction", { length: 10 }).notNull(),
+  confidence: real("confidence").notNull(),
+  score: real("score"),
+  muR: real("mu_r"),
+  pSide: real("p_side"),
+  lane: varchar("lane", { length: 10 }),
+  regime: varchar("regime", { length: 30 }),
+  entryPrice: real("entry_price"),
+  slPrice: real("sl_price"),
+  tpPrice: real("tp_price"),
+  thresholdUsed: real("threshold_used"),
+  htfScore: real("htf_score"),
+  sizeMultiplier: real("size_multiplier"),
+  signalTs: bigint("signal_ts", { mode: "number" }).notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (table) => ({
+  symbolIdx: index("v5_signals_symbol_idx").on(table.symbol),
+  signalTsIdx: index("v5_signals_ts_idx").on(table.signalTs),
+}));
+
+export const insertV5SignalSchema = createInsertSchema(v5Signals).omit({ id: true });
+export type InsertV5Signal = z.infer<typeof insertV5SignalSchema>;
+export type V5Signal = typeof v5Signals.$inferSelect;
+
 export const moneyConfigSchema = z.object({
   account_equity_usd: z.number().min(0),
   risk_per_trade_pct: z.number().min(0).max(100).default(1.0),

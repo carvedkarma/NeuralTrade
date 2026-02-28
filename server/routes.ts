@@ -4,7 +4,7 @@ import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
 import ingestRouter from "./ingest";
 import { db } from "./db";
-import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema, openInterestHistory } from "@shared/schema";
+import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema, openInterestHistory, v5Signals, paperPositions, paperPortfolio } from "@shared/schema";
 import type { ModelLearningStatsEntry, MoneyConfig } from "@shared/schema";
 import { and, eq, gte, lte, asc, desc, sql, count } from "drizzle-orm";
 import { z } from "zod";
@@ -80,6 +80,241 @@ export async function registerRoutes(
   
   app.use("/api/paper", paperRoutes);
   app.use("/api", ingestRouter);
+
+  app.get("/api/v5/signals", async (req, res) => {
+    try {
+      const symbol = req.query.symbol as string | undefined;
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 500);
+      const conditions = [];
+      if (symbol) conditions.push(eq(v5Signals.symbol, symbol));
+      const rows = await db
+        .select()
+        .from(v5Signals)
+        .where(conditions.length > 0 ? and(...conditions) : undefined)
+        .orderBy(desc(v5Signals.signalTs))
+        .limit(limit);
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/v5/performance", async (req, res) => {
+    try {
+      const trades = await db
+        .select()
+        .from(liveTradeRecords)
+        .where(eq(liveTradeRecords.outcome, "closed"))
+        .orderBy(desc(liveTradeRecords.entryTime));
+
+      const totalTrades = trades.length;
+      const wins = trades.filter((t) => (t.rMultiple ?? 0) > 0);
+      const losses = trades.filter((t) => (t.rMultiple ?? 0) <= 0);
+      const totalR = trades.reduce((s, t) => s + (t.rMultiple ?? 0), 0);
+      const winRate = totalTrades > 0 ? (wins.length / totalTrades) * 100 : 0;
+      const avgWinR = wins.length > 0 ? wins.reduce((s, t) => s + (t.rMultiple ?? 0), 0) / wins.length : 0;
+      const avgLossR = losses.length > 0 ? losses.reduce((s, t) => s + (t.rMultiple ?? 0), 0) / losses.length : 0;
+      const grossWin = wins.reduce((s, t) => s + (t.rMultiple ?? 0), 0);
+      const grossLoss = Math.abs(losses.reduce((s, t) => s + (t.rMultiple ?? 0), 0));
+      const profitFactor = grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? 999 : 0;
+
+      const symbolMap: Record<string, { trades: number; wins: number; totalR: number }> = {};
+      for (const t of trades) {
+        const sym = t.symbol ?? "UNKNOWN";
+        if (!symbolMap[sym]) symbolMap[sym] = { trades: 0, wins: 0, totalR: 0 };
+        symbolMap[sym].trades++;
+        if ((t.rMultiple ?? 0) > 0) symbolMap[sym].wins++;
+        symbolMap[sym].totalR += t.rMultiple ?? 0;
+      }
+      const perSymbol = Object.entries(symbolMap).map(([symbol, s]) => ({
+        symbol,
+        trades: s.trades,
+        wins: s.wins,
+        winRate: s.trades > 0 ? (s.wins / s.trades) * 100 : 0,
+        totalR: Math.round(s.totalR * 100) / 100,
+        expectancy: s.trades > 0 ? Math.round((s.totalR / s.trades) * 10000) / 10000 : 0,
+      }));
+
+      let maxDrawdown = 0;
+      let peak = 0;
+      let cumR = 0;
+      for (const t of [...trades].reverse()) {
+        cumR += t.rMultiple ?? 0;
+        if (cumR > peak) peak = cumR;
+        const dd = peak - cumR;
+        if (dd > maxDrawdown) maxDrawdown = dd;
+      }
+
+      const bestTrade = trades.reduce((best, t) => Math.max(best, t.rMultiple ?? 0), 0);
+      const worstTrade = trades.reduce((worst, t) => Math.min(worst, t.rMultiple ?? 0), 0);
+
+      res.json({
+        totalTrades,
+        wins: wins.length,
+        losses: losses.length,
+        winRate: Math.round(winRate * 100) / 100,
+        totalR: Math.round(totalR * 100) / 100,
+        avgWinR: Math.round(avgWinR * 10000) / 10000,
+        avgLossR: Math.round(avgLossR * 10000) / 10000,
+        profitFactor: Math.round(profitFactor * 100) / 100,
+        maxDrawdown: Math.round(maxDrawdown * 100) / 100,
+        bestTrade: Math.round(bestTrade * 10000) / 10000,
+        worstTrade: Math.round(worstTrade * 10000) / 10000,
+        perSymbol,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/v5/equity-curve", async (req, res) => {
+    try {
+      const range = req.query.range as string || "all";
+      let fromTs = 0;
+      if (range === "7d") fromTs = Date.now() - 7 * 86400000;
+      else if (range === "30d") fromTs = Date.now() - 30 * 86400000;
+
+      const trades = await db
+        .select({
+          entryTime: liveTradeRecords.entryTime,
+          exitTime: liveTradeRecords.exitTime,
+          rMultiple: liveTradeRecords.rMultiple,
+          symbol: liveTradeRecords.symbol,
+          side: liveTradeRecords.side,
+        })
+        .from(liveTradeRecords)
+        .where(
+          and(
+            eq(liveTradeRecords.outcome, "closed"),
+            fromTs > 0 ? gte(liveTradeRecords.entryTime, fromTs) : undefined,
+          ),
+        )
+        .orderBy(asc(liveTradeRecords.exitTime));
+
+      let cumR = 0;
+      const curve = trades.map((t) => {
+        cumR += t.rMultiple ?? 0;
+        return {
+          ts: t.exitTime ?? t.entryTime,
+          r: Math.round(cumR * 100) / 100,
+          tradeR: Math.round((t.rMultiple ?? 0) * 100) / 100,
+          symbol: t.symbol,
+          side: t.side,
+        };
+      });
+
+      res.json(curve);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/v5/trades", async (req, res) => {
+    try {
+      const symbol = req.query.symbol as string | undefined;
+      const status = req.query.status as string | undefined;
+      const limit = Math.min(parseInt(req.query.limit as string) || 100, 1000);
+      const conditions = [];
+      if (symbol) conditions.push(eq(liveTradeRecords.symbol, symbol));
+      if (status) conditions.push(eq(liveTradeRecords.outcome, status));
+
+      const rows = await db
+        .select()
+        .from(liveTradeRecords)
+        .where(conditions.length > 0 ? and(...conditions) : undefined)
+        .orderBy(desc(liveTradeRecords.entryTime))
+        .limit(limit);
+
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/system/status", async (req, res) => {
+    try {
+      const gpuAvailable = await gpuBridge.isGPUAvailable();
+      const syncStatus = getSyncStatus();
+      const paperStatus = await db.select().from(paperPortfolio).limit(1);
+      const openPositions = await db.select({ cnt: count() }).from(paperPositions).where(eq(paperPositions.status, "OPEN"));
+
+      const settingsRow = await db.select().from(settings).where(eq(settings.key, "money_config")).limit(1);
+      const moneyConfig = settingsRow.length > 0 ? settingsRow[0].valueJson : { account_equity_usd: 1500, risk_per_trade_pct: 1.0 };
+
+      const lastSignal = await db.select().from(v5Signals).orderBy(desc(v5Signals.signalTs)).limit(1);
+
+      res.json({
+        gpu: {
+          isAvailable: gpuAvailable,
+          url: gpuBridge.getUrl(),
+          latencyMs: null,
+        },
+        sync: syncStatus,
+        paper: {
+          portfolioExists: paperStatus.length > 0,
+          equity: paperStatus[0]?.currentEquityUsdt ?? 0,
+          openPositions: openPositions[0]?.cnt ?? 0,
+        },
+        moneyConfig,
+        lastSignal: lastSignal[0] || null,
+        serverTime: Date.now(),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/market/prices", async (req, res) => {
+    try {
+      const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSDT"];
+      const prices: Record<string, { price: number; change24h: number; high24h: number; low24h: number }> = {};
+
+      for (const sym of symbols) {
+        const latest = await db
+          .select()
+          .from(candles)
+          .where(and(eq(candles.symbol, sym), eq(candles.timeframe, "15m")))
+          .orderBy(desc(candles.timestamp))
+          .limit(96);
+
+        if (latest.length > 0) {
+          const current = latest[0].close;
+          const open24h = latest[latest.length - 1]?.open ?? current;
+          const high24h = Math.max(...latest.map((c) => c.high));
+          const low24h = Math.min(...latest.map((c) => c.low));
+          const change24h = open24h > 0 ? ((current - open24h) / open24h) * 100 : 0;
+          prices[sym] = {
+            price: current,
+            change24h: Math.round(change24h * 100) / 100,
+            high24h,
+            low24h,
+          };
+        }
+      }
+      res.json(prices);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/market/candles", async (req, res) => {
+    try {
+      const symbol = (req.query.symbol as string) || "BTCUSDT";
+      const interval = (req.query.interval as string) || "15m";
+      const limit = Math.min(parseInt(req.query.limit as string) || 200, 1000);
+
+      const rows = await db
+        .select()
+        .from(candles)
+        .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, interval)))
+        .orderBy(desc(candles.timestamp))
+        .limit(limit);
+
+      res.json(rows.reverse());
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
 
   app.get("/api/pro/cycles", async (req, res) => {
     try {

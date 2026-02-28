@@ -1,62 +1,79 @@
-# BTC Futures Signal Dashboard
+# Neural Terminal — AI Trading Dashboard
 
 ## Overview
-This project is an institutional-grade, AI-driven dashboard for generating sophisticated BTCUSDT futures trading signals. It uses machine learning, real-time market data, and sentiment analysis to provide AI-powered trade plans, aiming for continuous learning and adaptation to maximize market potential through AI-driven precision.
+An institutional-grade, GPU-accelerated AI trading system for multi-asset crypto futures. The v5 neural network runs on a local GPU trainer; this Replit web app serves as the trading terminal — displaying signals, managing paper/live trading, and tracking performance via WebSocket + ingest API.
 
 ## User Preferences
 Preferred communication style: Simple, everyday language.
 
 ## System Architecture
 
-### UI/UX Decisions
-The frontend uses React, TypeScript, and Vite, with `shadcn/ui` (Radix UI, Tailwind CSS) for components and Recharts for data visualization. It includes a tabbed interface with a Pro Dashboard and an R/$ toggle for financial metrics.
+### Frontend (5-Page Trading Terminal)
+Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), Recharts for charts, and a dark navy theme with neon accents.
 
-### Technical Implementations
-The backend is built with Node.js and Express.js (TypeScript, ESM) providing a RESTful API. It integrates AI via OpenAI and sources market data from Binance Vision API with fallbacks. A WebSocket server enables real-time event streaming. The system features a Triple-Lane Aggression Engine (CORE/FLOW/SCALP) routed by an HTF score, managing per-symbol daily R budgets and lane-specific thresholds. A live learning system supports scheduled retraining and safe model promotion, while a money management system converts R-based metrics to USD.
+**Pages:**
+- `/` — Command Center: Metrics bar, market grid (6 symbols with sparklines), live signal feed, active positions, mini equity curve
+- `/live` — Live Trading: Symbol selector tabs, price chart, signal detail panel, positions table, signal history
+- `/paper` — Paper Trading: Enable/disable toggles, portfolio metrics, equity curve, open/closed positions, configuration
+- `/analytics` — Analytics: Performance summary (8 cards), equity curve, per-symbol breakdown, trade distribution, directional analysis
+- `/settings` — Settings: GPU connection, account config, model info, risk parameters, data freshness, danger zone
 
-The core AI model predicts trend-following trade quality using 85 features on a 15-minute timeframe with a volatility-adaptive horizon (8-48 bars). It employs an EnhancedMultiHeadMLP architecture with HTF-gated Triple Barrier labeling, optimized for PR-AUC. Inference involves a probability threshold and HTF alignment for LONG/SHORT/HOLD signals, with dynamic position sizing based on ATR, account risk, and confidence. A policy auto-tuner optimizes trade frequency, and a cost model accounts for trading fees. Safety kill-switches include per-symbol daily drawdown caps and a Per-Asset Trade Quota Controller.
+**Key Files:**
+- `client/src/App.tsx` — Router with 5 routes wrapped in AppLayout
+- `client/src/components/layout/app-layout.tsx` — Collapsible sidebar with GPU status, theme toggle
+- `client/src/hooks/use-trading-ws.ts` — WebSocket hook with auto-reconnect, event subscription
+- `client/src/index.css` — Dark theme CSS vars, glow effects, glassmorphism, animations
 
-The Triple-Lane Aggression Engine routes trades based on HTF score, each with specific entry requirements, sizing multipliers, horizons, and daily R budgets. A Smart Trade Manager dynamically evaluates open positions using priority-based exit rules. The training pipeline supports multi-asset training with time-based splits. The EnhancedMultiHeadMLP includes a `value_head` for E[net R] regression and optional symbol embedding. Bias initialization and post-training temperature scaling calibrate logits, with lane gating adding E[net R] minimums. Promotion gates enforce performance and calibration. Training stability is improved with a three-stage loss schedule. Multi-asset data ingestion includes preflight checks and a HTF Warmup & Candle History mechanism.
+**Design System:**
+- Background: deep navy (HSL 225 40% 6%), cards slightly lighter
+- Primary: neon green (#22c55e / emerald-400) for profits/longs
+- Red-400 for losses/shorts, cyan-500 for info, amber-400 for warnings
+- Custom classes: glass-card, glow-green/red/cyan, number-mono, pulse-dot, gradient-border, shimmer, scanline, animate-signal-arrive
 
-Key enhancements include:
-- **Directional Separation & Quality Scoring**: Improved labeling and refined TP quality scores.
-- **Distributional Trade Forecasting**: Shifted from binary classification to distributional outputs for expected returns and quantile forecasts.
-- **Advanced Risk Management**: Incorporated candidate filtering, multi-preset barriers, Kelly-like position sizing, adaptive sizing, regime scaling, daily loss caps, trailing equity stops, and conviction-based sizing.
-- **Robust Training Pipeline**: Addressed critical bugs related to time-based data splits, scaling, quality gates, loss scheduling, and side-conditional outcomes.
-- **Market Regime Classification**: Implemented an ADX-based regime gate and a multi-regime classifier to adapt to market conditions.
-- **Capital Protection**: Added weekly loss cap kill-switches and a drawdown-adaptive throttle.
-- **Multi-Asset Support**: Extended to 7 symbols with symbol-balanced sampling and per-symbol reporting.
-- **Performance Optimization**: Introduced metric-based checkpoint promotion, hard threshold floors, and temperature scaling for model calibration.
-- **Ultra-Conviction Tier**: Allowed for higher risk in rare, high-conviction setups under strict gating conditions.
-- **v5.1.0 Edge-First Strategy**: Shifted from volume-maximization (TPD target) to quality-maximization (edge-per-trade). Includes edge-first pre-filtering (`--v5-edge-first`, `--v5-edge-min`, `--v5-edge-pct-floor`, `--v5-edge-topn-per-day`), regime-conditional side filtering (`--v5-regime-side-map`), and size floor clamping (`--v5-size-floor`). Recommended: `--v5-edge-first --v5-edge-min 0.03 --v5-edge-pct-floor 70 --v5-edge-topn-per-day 3 --v5-regime-side-map "trending_up=LONG,trending_down=SHORT,choppy=NONE" --v5-size-floor 0.5`.
-- **v5.2.0 Precision Audit Fixes**: Six bugs fixed to improve forward test accuracy: (1) Quality gate percentiles now use training-set reference arrays instead of test-set (fixes lookahead bias via `_build_train_ref_arrays`); (2) Oracle best-side fallback removed — `r_long/r_short/out_long/out_short` now required (raises `ValueError` if missing); (3) Head disagreement gate blocks trades when 2+ model heads conflict (`--v5-head-disagree-gate`); (4) Statistical edge metrics added — Sortino ratio, t-statistic, p-value, bootstrap 95% CI on expectancy, tighter sanity checks (Sharpe>5, PF>3, WR>75%); (5) Train/test purge gap — `horizon` bars removed from end of training set to prevent label leakage across the boundary; (6) Slippage deduction in score computation (`--slippage-base-bps`, default 0). Tests: 18 new tests in `test_v5_precision_audit.py`.
-- **v5.3.0 Signal Quality Upgrade**: Structural improvements to the signal pipeline addressing feature quality, regime segmentation, label quality, and horizon suitability. (1) Enhanced feature engineering — removed 6 redundant features (RSI_7, ATR_7, vol_weighted_mom_5, roc_accel_5, vol_regime_ratio, efficiency_ratio), added 7 information-dense features (ATR_ratio_7_28, bb_squeeze, vol_regime_roc, trend_efficiency, momentum_acceleration, cvd_zscore, volume_price_divergence) and 2 cross-timeframe features (rsi_divergence_15m_1h, macd_hist_slope_1h); (2) Regime-adaptive labels — ADX-based deadzone (20th pctl trending, 50th pctl choppy, 30th normal), MAE penalty (0.5x for near-SL trades), clean entry bonus (1.3x for early favorable moves), side-confidence sample weighting; (3) 4D regime vector as model input — 5 continuous features (regime_trend, regime_volatility, regime_momentum, regime_session_sin, regime_session_cos) with regime-conditional sample weighting (1.3x trending, 0.7x choppy); (4) Volatility-adaptive horizon — per-bar `effective_horizon = base * (median_ATR_50 / current_ATR_14)` clamped [8,48], vol-adjusted SL (1.15x in high-vol); (5) Feature importance report — permutation importance + Spearman correlation matrix via `--v5-feature-report` flag. Total: 85 features (STF:44, ENH:24, HTF:12, REGIME:5). Tests: 29 new tests in `test_v5_features.py`, 224 total passing.
-- **v5.3.1 Directional Balance Fixes**: Fixed massive LONG bias (228L/4S in bear market). (1) Directional penalty no longer uses `mu_R` sign — replaced with conviction penalty scaled by edge magnitude (`score_lambda * (1 - p_side) * mu_over_risk`) so penalty is proportional to signal strength and never dominates when mu_R is small (e.g. after debiasing). Score positive when `p_side > λ/(1+λ)`. Independent of mu_R sign; (2) Side-balance KL regularization added to training loss — penalizes model when batch-level LONG/SHORT prediction ratio deviates from label ratio (weight 0.1, on LONG/SHORT only, targets detached); (3) Per-symbol mu_R EMA debiasing in forward test — removes persistent positive/negative drift from `mu_R` predictions per-symbol using global chronological EMA (alpha=0.01), `--v5-mu-debias` (default True), `--v5-mu-debias-alpha` (default 0.01); (4) Forward test directional balance diagnostics — stage-by-stage side distribution tracking (pre/post-ema200/post-regime/final) with >80% dominance warnings, per-gate block counts, score component breakdown (edge/penalty/mu_R post-debias/p_side stats/threshold % above); (5) EMA200 gate no longer superseded by multi-regime (both work simultaneously). Tests: 17 tests in `test_v5_directional.py`, 229 total passing.
-- **v5.3.2 Walk-Forward Stability**: Addresses threshold instability across walk-forward folds. (1) Threshold carry-forward EMA — blends each fold's sweep-calibrated threshold with the previous fold's threshold using `ema_alpha * new + (1-ema_alpha) * prev`, preventing wild swings from 0.29→0.02→0.30 (`--v5-wf-threshold-ema`, default True; `--v5-wf-threshold-ema-alpha`, default 0.5); (2) Minimum trade count gate — folds with fewer than N trades are classified as "NO EDGE" and report 0 trades/0R instead of taking noise trades (`--v5-min-trades`, default 20); (3) Enhanced walk-forward summary table — shows L/S split, threshold per fold, active/skipped status, and aggregate statistics. All hardcoded 0.10 threshold defaults lowered to 0.02. Tests: 9 new tests in `test_v5_directional.py` (T005/T006), 235 total passing.
-- **v5.4.0 Per-Symbol Edge Learning**: Enables symbol-level edge detection and enforcement to stop trading symbols with no edge. (1) Per-symbol RobustScaler (`--per-symbol-scaler`) — fits independent scalers per symbol instead of one global scaler, preventing BTC-dominated statistics from distorting altcoin features. Saves per-symbol scalers to checkpoint; (2) Per-symbol threshold sweep (`--v5-per-symbol-threshold`) — after global threshold sweep, runs a mini-sweep per symbol to find optimal threshold for each. Symbols with no positive expectancy at any threshold get threshold=inf (never traded). Thresholds saved to checkpoint; (3) Per-symbol cumulative R kill switch (`--v5-per-symbol-r-kill`) — runtime safety net that tracks per-symbol cumulative R during forward test, kills a symbol when it drops below configurable floor (e.g. -8R); (4) Walk-forward per-symbol summary — aggregates per-symbol stats across all folds into a cross-fold table showing trades, WR, E[R], total R, and edge status per symbol; (5) Symbol embedding dim increased from 4 to 8 (`--v5-symbol-embed-dim`, default 8) — more capacity for learning symbol-specific behavior across 7 assets. Tests: 18 new tests in `test_v5_directional.py` (T007-T010), 242 total passing.
+### Backend (Node.js + Express + TypeScript)
+- **API Routes** (`server/routes.ts`):
+  - `GET /api/v5/signals` — v5 model signals from DB
+  - `GET /api/v5/performance` — Aggregated stats (total R, win rate, profit factor, per-symbol)
+  - `GET /api/v5/equity-curve` — Equity curve from trade records
+  - `GET /api/v5/trades` — Filtered trade history
+  - `GET /api/system/status` — GPU health, sync status, paper trading state
+  - `GET /api/market/prices` — Current prices for 6 symbols with 24h change
+  - `GET /api/market/candles` — Candle data for charts
+  - `GET/POST /api/paper/*` — Paper trading engine (positions, portfolio, config, enable/disable, start/stop)
+  - `POST /api/ingest/*` — Signal ingest from GPU trainer
 
-### System Design Choices
-Data management uses Drizzle ORM for PostgreSQL and Zod for type-safe validation. The system persists learning states and separates live sentiment from historical data. The client is bundled by Vite, and the server by esbuild. Centralized timeframe configuration ensures consistency. A runtime diagnostic system provides health endpoints and UI console logging. A GPU training API supports training, status checks, and daily retraining.
+- **Key Server Files:**
+  - `server/ingest.ts` — Receives GPU trainer events (CYCLE_UPDATE, TRADE_OPEN/CLOSE)
+  - `server/gpu-bridge.ts` — GPU trainer connection bridge
+  - `server/live-candle-sync.ts` — Real-time 15m candle sync from Binance
+  - `server/paper/` — Paper trading engine (routes, storage, engine, config)
+  - `server/ws.ts` — WebSocket server for real-time event streaming
+
+### Database (PostgreSQL via Drizzle ORM)
+Key tables: `v5_signals`, `live_trade_records`, `live_cycle_logs`, `paper_positions`, `paper_portfolio`, `paper_trades`, `candles`, `settings`
+
+Schema in `shared/schema.ts` with Drizzle + Zod validation.
+
+### v5 Neural Network (runs on local GPU)
+- Architecture: EnhancedMultiHeadMLP with 85 features, 15m timeframe, adaptive horizon (8-48 bars)
+- Triple-Lane Aggression Engine: CORE/FLOW/SCALP routed by HTF score
+- 6 symbols: BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, AVAXUSDT
+- Per-symbol edge learning (v5.4.0): per-symbol scalers, thresholds, kill switches
+- Walk-forward validation: 8+ profitable folds, +273R total
 
 ## External Dependencies
 
 ### Database
-- PostgreSQL
+- PostgreSQL (Drizzle ORM)
 
 ### UI Framework
-- Radix UI
-- Lucide React
-- class-variance-authority
+- Radix UI, Lucide React, class-variance-authority, Recharts
 
 ### Data & Validation
-- Zod
-- drizzle-zod
-- date-fns
+- Zod, drizzle-zod, date-fns
 
 ### AI / Machine Learning
-- OpenAI
+- OpenAI (for AI analysis features)
 
 ### Market Data
 - Binance Vision API
-- CoinGecko
-- CryptoCompare

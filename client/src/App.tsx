@@ -3,31 +3,30 @@ import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import AppLayout from "@/components/layout/app-layout";
+import CommandCenter from "@/pages/command-center";
+import LiveTrading from "@/pages/live-trading";
+import PaperTrading from "@/pages/paper-trading";
+import Analytics from "@/pages/analytics";
+import SettingsPage from "@/pages/settings";
 import NotFound from "@/pages/not-found";
-import Dashboard from "@/pages/dashboard";
-import ProDashboard from "@/pages/pro-dashboard";
-import { useEffect } from "react";
 
 function Router() {
   return (
-    <Switch>
-      <Route path="/" component={Dashboard} />
-      <Route path="/pro" component={ProDashboard} />
-      <Route component={NotFound} />
-    </Switch>
+    <AppLayout>
+      <Switch>
+        <Route path="/" component={CommandCenter} />
+        <Route path="/live" component={LiveTrading} />
+        <Route path="/paper" component={PaperTrading} />
+        <Route path="/analytics" component={Analytics} />
+        <Route path="/settings" component={SettingsPage} />
+        <Route component={NotFound} />
+      </Switch>
+    </AppLayout>
   );
 }
 
 function App() {
-  useEffect(() => {
-    const stored = localStorage.getItem("theme");
-    if (stored === "light") {
-      document.documentElement.classList.remove("dark");
-    } else {
-      document.documentElement.classList.add("dark");
-    }
-  }, []);
-
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
