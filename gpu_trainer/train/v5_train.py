@@ -3149,7 +3149,7 @@ def run_v5_walk_forward(
     conviction_confidence_threshold=0.65, conviction_confidence_boost=1.3,
     adx_gate=False, adx_period=14, adx_min=18.0, adx_exception_top_pct=10.0,
     temp_scale=False, promote_metric='expectancy', stage_a_epochs=0,
-    balanced_sampling=True, per_symbol_scaler=False,
+    balanced_sampling=True, per_symbol_scaler=False, symbol_embed_dim=8,
     ultra_conviction=False, ultra_risk_cap=0.05, ultra_score_pct=0.95,
     ultra_adx_min=25.0, ultra_edge_min=0.03, ultra_dd_max=0.10,
     ultra_max_per_day=1, ultra_mult=3.0,
