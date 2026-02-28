@@ -1246,7 +1246,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         enable_dir_head=True,
         enable_htf_head=True,
         n_symbols=n_symbols,
-        symbol_embed_dim=4 if n_symbols > 1 else 0,
+        symbol_embed_dim=args.v5_symbol_embed_dim if n_symbols > 1 else 0,
     )
     model = EnhancedMultiHeadMLP(mlp_config)
     model.name = "EnterQualityMLP"
@@ -1739,7 +1739,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             'enable_dir_head': True,
             'enable_htf_head': True,
             'n_symbols': n_symbols,
-            'symbol_embed_dim': 4 if n_symbols > 1 else 0,
+            'symbol_embed_dim': args.v5_symbol_embed_dim if n_symbols > 1 else 0,
         }
         ckpt_train_config = {
             'use_focal_loss': use_focal_loss,
@@ -4141,7 +4141,7 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
         enable_dist_quantile_head=True,
         enable_regime_head=use_regime_head,
         n_symbols=n_symbols,
-        symbol_embed_dim=4 if n_symbols > 1 else 0,
+        symbol_embed_dim=args.v5_symbol_embed_dim if n_symbols > 1 else 0,
     )
     model = EnhancedMultiHeadMLP(mlp_config)
     model.name = "DistributionalForecaster"
@@ -4429,7 +4429,7 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
             'enable_dist_quantile_head': True,
             'enable_regime_head': use_regime_head,
             'n_symbols': n_symbols,
-            'symbol_embed_dim': 4 if n_symbols > 1 else 0,
+            'symbol_embed_dim': args.v5_symbol_embed_dim if n_symbols > 1 else 0,
         }
         ckpt_train_config = {
             'model_type': 'distributional_trade_forecaster',
@@ -4684,8 +4684,10 @@ Examples:
                         help="Cap per-symbol training samples to smallest symbol's count for balanced training (default: on)")
     parser.add_argument("--no-symbol-balanced-sampling", action="store_true", default=False,
                         help="Disable symbol-balanced sampling (allow BTC to dominate training)")
+    parser.add_argument("--v5-symbol-embed-dim", type=int, default=8,
+                        help="Symbol embedding dimension for multi-asset models (default: 8)")
     parser.add_argument("--per-symbol-scaler", action="store_true", default=False,
-                        help="[TODO] Fit/apply scaler per symbol instead of global (default: off, not yet implemented)")
+                        help="Fit/apply RobustScaler per symbol instead of global (default: off)")
     parser.add_argument("--loss-warmup-epochs", type=int, default=10,
                         help="Number of warmup epochs using plain BCE before switching to focal/OHEM (default: 10)")
     parser.add_argument("--warmup-pos-weight", type=float, default=2.0,
@@ -4918,6 +4920,10 @@ Examples:
                         help="v5.0.8+: trailing equity stop in R-units. Pauses trading when equity drops this far from peak (e.g. 15.0). Default: None (disabled)")
     parser.add_argument("--v5-per-symbol-daily-r", type=float, default=None,
                         help="v5.0.8+: per-symbol daily R budget cap. Stops trading a symbol for rest of day when hit (e.g. -2.0). Default: None (disabled)")
+    parser.add_argument("--v5-per-symbol-r-kill", type=float, default=None,
+                        help="Per-symbol cumulative R kill switch. When a symbol's cumulative R drops below this floor (e.g. -8.0), stop trading it for the rest of the fold. Default: None (disabled)")
+    parser.add_argument("--v5-per-symbol-threshold", action="store_true", default=False,
+                        help="Enable per-symbol threshold sweep. Finds optimal threshold per symbol during training; symbols with no edge get threshold=inf (never traded). Default: off")
     parser.add_argument("--v5-min-threshold", type=float, default=None,
                         help="v5.0.8+: minimum score threshold floor. Prevents calibrated threshold from dropping too low (e.g. 0.05). Default: None (disabled)")
     parser.add_argument("--v5-max-threshold", type=float, default=None,
@@ -5695,6 +5701,7 @@ Examples:
                     promote_metric=args.v5_promote_metric,
                     stage_a_epochs=10 if args.v5_staged_training else 0,
                     balanced_sampling=args.symbol_balanced_sampling and not args.no_symbol_balanced_sampling,
+                    symbol_embed_dim=args.v5_symbol_embed_dim,
                     per_symbol_scaler=args.per_symbol_scaler,
                     ultra_conviction=args.v5_ultra_conviction,
                     ultra_risk_cap=args.v5_ultra_risk_cap,
@@ -5736,6 +5743,8 @@ Examples:
                     wf_threshold_ema_alpha=args.v5_wf_threshold_ema_alpha,
                     mu_debias=args.v5_mu_debias,
                     mu_debias_alpha=args.v5_mu_debias_alpha,
+                    per_symbol_r_kill=args.v5_per_symbol_r_kill,
+                    per_symbol_threshold=args.v5_per_symbol_threshold,
                 )
                 return
 
@@ -5821,6 +5830,7 @@ Examples:
                 promote_metric=args.v5_promote_metric,
                 stage_a_epochs=10 if args.v5_staged_training else 0,
                 balanced_sampling=args.symbol_balanced_sampling and not args.no_symbol_balanced_sampling,
+                symbol_embed_dim=args.v5_symbol_embed_dim,
                 per_symbol_scaler=args.per_symbol_scaler,
                 ultra_conviction=args.v5_ultra_conviction,
                 ultra_risk_cap=args.v5_ultra_risk_cap,
@@ -5861,6 +5871,8 @@ Examples:
                 mu_debias_alpha=args.v5_mu_debias_alpha,
                 min_trades=args.v5_min_trades,
                 feature_report=args.v5_feature_report,
+                per_symbol_r_kill=args.v5_per_symbol_r_kill,
+                per_symbol_threshold=args.v5_per_symbol_threshold,
             )
 
             log.info("=" * 60)

@@ -52,7 +52,7 @@ class V5ForecasterConfig:
     n_barrier_presets: int = 0
     enable_regime_head: bool = False
     n_symbols: int = 1
-    symbol_embed_dim: int = 4
+    symbol_embed_dim: int = 8
 
     def __post_init__(self):
         if self.hidden_dims is None:

@@ -558,7 +558,7 @@ class EnhancedMultiHeadMLP_Config:
     enable_regime_head: bool = False  # chop/trend/highvol classification (3-class)
 
     n_symbols: int = 1  # Number of distinct symbols for multi-asset embedding
-    symbol_embed_dim: int = 4  # Embedding dimension per symbol
+    symbol_embed_dim: int = 8  # Embedding dimension per symbol
     
     def __post_init__(self):
         if self.hidden_dims is None:

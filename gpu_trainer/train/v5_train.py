@@ -196,6 +196,8 @@ class V5ForwardTestConfig:
     mu_debias: bool = True
     mu_debias_alpha: float = 0.01
     min_trades: int = 20
+    per_symbol_r_kill: Optional[float] = None
+    per_symbol_thresholds: Optional[dict] = None
 
 
 def compute_feature_importance_report(
@@ -1411,6 +1413,152 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     return sweep_results, best_label, best_score_val, best_pct, best_pf, best_max_dd, best_tpd, best_threshold
 
 
+def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
+                          val_bars, symbol_ids, symbols_list, global_threshold,
+                          r_long=None, r_short=None, out_long=None, out_short=None,
+                          quality_mask=None, candidate_mask=None,
+                          min_trades_per_symbol=10):
+    """Per-symbol threshold sweep: find optimal threshold per symbol.
+
+    For each symbol, runs a mini-sweep on its bars only.
+    Returns dict mapping symbol_id -> threshold (or np.inf for NO EDGE symbols).
+    """
+    COOLDOWN = 4
+    _VALID_OUTCOMES = ["TP", "SL", "EXP_WIN", "EXP_LOSS", "TRAIL_WIN", "TRAIL_BE"]
+
+    use_side_conditional = (r_long is not None and r_short is not None
+                           and out_long is not None and out_short is not None)
+
+    if use_side_conditional:
+        side_r = np.where(sides == 1, r_long, r_short).astype(float)
+        side_out = np.where(sides == 1, out_long, out_short)
+        safe_outcomes = np.where(np.isin(side_out, _VALID_OUTCOMES), side_out, "NO_CANDIDATE")
+        safe_r = np.where(np.isnan(side_r), 0.0, side_r)
+    else:
+        safe_outcomes = np.where(np.isin(precomputed_outcomes, _VALID_OUTCOMES),
+                                 precomputed_outcomes, "NO_CANDIDATE")
+        safe_r = precomputed_r.copy().astype(float)
+        safe_r = np.where(np.isnan(safe_r), 0.0, safe_r)
+
+    scores_work = scores.copy()
+    if quality_mask is not None:
+        scores_work[~quality_mask] = -np.inf
+    if candidate_mask is not None:
+        scores_work[~candidate_mask] = -np.inf
+
+    unique_sym_ids = np.unique(symbol_ids)
+    per_sym_thresholds = {}
+    no_edge_symbols = []
+
+    log.info("=" * 100)
+    log.info("  PER-SYMBOL THRESHOLD SWEEP")
+    log.info("=" * 100)
+    log.info(f"{'Symbol':>12} {'Bars':>6} {'BestThr':>10} {'Trades':>7} {'E[R]':>10} "
+             f"{'WR':>7} {'PF':>7} {'TotalR':>10} {'Status':>10}")
+    log.info("-" * 100)
+
+    for sym_id in unique_sym_ids:
+        sym_mask = symbol_ids == sym_id
+        sym_name = symbols_list[sym_id] if symbols_list and sym_id < len(symbols_list) else f"sym_{sym_id}"
+        sym_scores = scores_work[sym_mask]
+        sym_safe_r = safe_r[sym_mask]
+        sym_safe_outcomes = safe_outcomes[sym_mask]
+        sym_sides = sides[sym_mask]
+        n_sym_bars = int(np.sum(sym_mask))
+
+        sym_finite = sym_scores[np.isfinite(sym_scores)]
+        if len(sym_finite) < min_trades_per_symbol:
+            per_sym_thresholds[int(sym_id)] = float('inf')
+            no_edge_symbols.append(sym_name)
+            log.info(f"{sym_name:>12} {n_sym_bars:>6} {'inf':>10} {0:>7} {'-':>10} "
+                     f"{'-':>7} {'-':>7} {'-':>10} {'NO EDGE':>10}")
+            continue
+
+        thresholds_to_try = [global_threshold]
+        for pct in [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50]:
+            thr = float(np.percentile(sym_finite, (1 - pct) * 100))
+            thresholds_to_try.append(thr)
+
+        best_sym_composite = float('-inf')
+        best_sym_threshold = global_threshold
+        best_sym_metrics = None
+
+        for thr in thresholds_to_try:
+            selected = sym_scores >= thr
+            sel_idx = np.where(selected)[0]
+            if len(sel_idx) == 0:
+                continue
+
+            taken = []
+            last_bar = -COOLDOWN - 1
+            for idx in sel_idx:
+                if idx - last_bar < COOLDOWN:
+                    continue
+                taken.append(idx)
+                last_bar = idx
+
+            if len(taken) < max(5, min_trades_per_symbol // 2):
+                continue
+
+            taken = np.array(taken)
+            t_outcomes = sym_safe_outcomes[taken]
+            t_r = sym_safe_r[taken]
+            valid_trades = np.isin(t_outcomes, _VALID_OUTCOMES)
+            n_valid = int(valid_trades.sum())
+            if n_valid < 5:
+                continue
+
+            t_r_valid = t_r[valid_trades]
+            n_trades = len(t_r_valid)
+            wins = t_r_valid[t_r_valid > 0]
+            losses = t_r_valid[t_r_valid <= 0]
+            expect = float(np.mean(t_r_valid))
+            winrate = len(wins) / max(n_trades, 1)
+            std_r = float(np.std(t_r_valid)) if n_trades > 1 else 1.0
+            sym_days = n_sym_bars / 96.0
+            trades_per_year = (n_trades / max(sym_days, 1e-6)) * 252
+            sharpe = expect / max(std_r, 1e-6) * np.sqrt(max(trades_per_year, 1))
+            total_win = float(np.sum(wins))
+            total_loss = abs(float(np.sum(losses)))
+            pf = min(total_win / max(total_loss, 1e-6), 999.99)
+            total_r = float(np.sum(t_r_valid))
+
+            composite = expect * min(sharpe, 10.0)
+            if composite > best_sym_composite and n_trades >= min_trades_per_symbol:
+                best_sym_composite = composite
+                best_sym_threshold = thr
+                best_sym_metrics = {
+                    'trades': n_trades, 'expect': expect, 'winrate': winrate,
+                    'sharpe': sharpe, 'pf': pf, 'total_r': total_r,
+                }
+
+        if best_sym_metrics is not None and best_sym_metrics['expect'] > 0:
+            per_sym_thresholds[int(sym_id)] = best_sym_threshold
+            m = best_sym_metrics
+            log.info(f"{sym_name:>12} {n_sym_bars:>6} {best_sym_threshold:>10.4f} {m['trades']:>7} "
+                     f"{m['expect']:>+10.4f} {m['winrate']:>6.1%} {m['pf']:>7.2f} "
+                     f"{m['total_r']:>+10.4f} {'ACTIVE':>10}")
+        else:
+            per_sym_thresholds[int(sym_id)] = float('inf')
+            no_edge_symbols.append(sym_name)
+            if best_sym_metrics is not None:
+                m = best_sym_metrics
+                log.info(f"{sym_name:>12} {n_sym_bars:>6} {'-':>10} {m['trades']:>7} "
+                         f"{m['expect']:>+10.4f} {m['winrate']:>6.1%} {m['pf']:>7.2f} "
+                         f"{m['total_r']:>+10.4f} {'NO EDGE':>10}")
+            else:
+                log.info(f"{sym_name:>12} {n_sym_bars:>6} {'-':>10} {0:>7} {'-':>10} "
+                         f"{'-':>7} {'-':>7} {'-':>10} {'NO EDGE':>10}")
+
+    log.info("-" * 100)
+    active = [s for s in symbols_list if s not in no_edge_symbols] if symbols_list else []
+    log.info(f"  Active symbols: {len(active)}/{len(unique_sym_ids)} | "
+             f"NO EDGE: {no_edge_symbols if no_edge_symbols else 'none'}")
+    log.info("=" * 100)
+
+    return per_sym_thresholds, no_edge_symbols
+
+
 def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
                             config, total_train):
     """Run inference on training data to build reference arrays for quality gate.
@@ -1792,7 +1940,25 @@ def run_v5_forward_test(
         log.info(f"[V5_DDT] Using relaxed pre-filter threshold={ddt_base_threshold:.4f} "
                  f"(DDT will dynamically adjust in loop)")
 
-    selected = scores_work >= ddt_base_threshold
+    if config.per_symbol_thresholds and test_sym_ids is not None:
+        hard_floor = config.min_threshold if config.min_threshold is not None else 0.02
+        per_bar_threshold = np.full(len(scores_work), ddt_base_threshold, dtype=np.float64)
+        for sym_id_key, sym_thr in config.per_symbol_thresholds.items():
+            clamped_thr = sym_thr
+            if np.isfinite(clamped_thr):
+                clamped_thr = max(clamped_thr, hard_floor)
+                if config.max_threshold is not None:
+                    clamped_thr = min(clamped_thr, config.max_threshold)
+            sym_mask = test_sym_ids == int(sym_id_key)
+            per_bar_threshold[sym_mask] = clamped_thr
+        selected = scores_work >= per_bar_threshold
+        n_inf_thr = int(np.sum(np.isinf(per_bar_threshold) & (per_bar_threshold > 0)))
+        log.info(f"[V5_FWD] Per-symbol thresholds active: "
+                 f"{len(config.per_symbol_thresholds)} symbols configured, "
+                 f"{n_inf_thr} bars have inf threshold (NO EDGE symbols), "
+                 f"floor={hard_floor:.4f} ceiling={config.max_threshold}")
+    else:
+        selected = scores_work >= ddt_base_threshold
     sel_indices = np.where(selected)[0]
 
     edge_first_blocked = 0
@@ -1891,6 +2057,9 @@ def run_v5_forward_test(
         if config.per_symbol_daily_r_budget is not None:
             log.info(f"[V5_FWD] Per-symbol daily R budget ENABLED: {config.per_symbol_daily_r_budget}R")
 
+    if config.per_symbol_r_kill is not None:
+        log.info(f"[V5_FWD] Per-symbol cumulative R kill switch ENABLED: floor={config.per_symbol_r_kill}R")
+
     if config.trailing_equity_stop is not None:
         from train.v5_position_sizer import TrailingEquityStop
         equity_stop = TrailingEquityStop(config.trailing_equity_stop)
@@ -1936,6 +2105,9 @@ def run_v5_forward_test(
     corr_tracker = None
     corr_blocker = None
     sym_id_to_name = {}
+    if config.symbols_list is not None and test_sym_ids is not None:
+        for si, s in enumerate(config.symbols_list):
+            sym_id_to_name[si] = s
     if (config.corr_block and config.symbols_list is not None
             and len(config.symbols_list) >= 2 and test_sym_ids is not None):
         from train.v5_correlation import RollingDailyCorr, CorrBlocker, CorrConfig
@@ -1979,6 +2151,10 @@ def run_v5_forward_test(
     gate_blocks = Counter()
     post_ema200_indices = []
     post_regime_indices = []
+
+    sym_cumulative_r = defaultdict(float)
+    killed_symbols = set()
+    per_sym_kill_blocked = 0
 
     open_positions: dict = {}
     trade_spans: dict = defaultdict(list)
@@ -2087,6 +2263,13 @@ def run_v5_forward_test(
             cooldown_blocked += 1
             gate_blocks["cooldown"] += 1
             continue
+
+        if config.per_symbol_r_kill is not None and test_sym_ids is not None:
+            sym_name_kill = sym_id_to_name.get(int(test_sym_ids[idx]), None)
+            if sym_name_kill and sym_name_kill in killed_symbols:
+                per_sym_kill_blocked += 1
+                gate_blocks["per_symbol_kill"] += 1
+                continue
 
         if adx_values is not None:
             adx_val = adx_values[idx]
@@ -2349,7 +2532,8 @@ def run_v5_forward_test(
                         or equity_stop is not None
                         or regime_scaler is not None
                         or ultra_sizer is not None
-                        or ddt is not None)
+                        or ddt is not None
+                        or config.per_symbol_r_kill is not None)
         if needs_post_r:
             if use_side_conditional_for_cap:
                 post_trade_r = float(r_long[idx]) if sides[idx] == 1 else float(r_short[idx])
@@ -2389,6 +2573,14 @@ def run_v5_forward_test(
                     size_mult=ddt.size_multiplier(),
                 )
 
+            if config.per_symbol_r_kill is not None and post_r_valid and test_sym_ids is not None:
+                kill_sym_name = sym_id_to_name.get(int(test_sym_ids[idx]), None)
+                if kill_sym_name:
+                    sym_cumulative_r[kill_sym_name] += post_trade_r
+                    if sym_cumulative_r[kill_sym_name] <= config.per_symbol_r_kill:
+                        killed_symbols.add(kill_sym_name)
+                        log.warning(f"[V5_GATE] Symbol {kill_sym_name} killed at cumR={sym_cumulative_r[kill_sym_name]:.2f}R (floor={config.per_symbol_r_kill}R)")
+
     if ema200 is not None:
         log.info(f"[V5_GATE] EMA200 blocked {ema_blocked} trades")
     if warmup_blocked > 0:
@@ -2413,6 +2605,11 @@ def run_v5_forward_test(
         log.info(f"[V5_GATE] Edge top-N/day blocked {edge_topn_blocked} trades")
     if head_disagree_blocked > 0:
         log.info(f"[V5_GATE] Head disagreement blocked {head_disagree_blocked} trades")
+    if per_sym_kill_blocked > 0:
+        log.info(f"[V5_GATE] Per-symbol R kill blocked {per_sym_kill_blocked} trades "
+                 f"(killed_symbols={sorted(killed_symbols)}, floor={config.per_symbol_r_kill}R)")
+        for ks in sorted(killed_symbols):
+            log.info(f"  {ks}: final cumR={sym_cumulative_r[ks]:.2f}R")
     if ddt_blocked > 0:
         log.info(f"[V5_DDT] Throttle blocked {ddt_blocked} trades")
     if ddt is not None:
@@ -2433,7 +2630,7 @@ def run_v5_forward_test(
              f"ema={ema_blocked} regime_side={regime_side_blocked} "
              f"edge_topn={edge_topn_blocked} weekly={weekly_blocked} corr={corr_blocked} "
              f"daily={daily_blocked} equity={equity_blocked} tpd={tpd_blocked} "
-             f"head_disagree={head_disagree_blocked} "
+             f"head_disagree={head_disagree_blocked} per_sym_kill={per_sym_kill_blocked} "
              f"ddt={ddt_blocked} edge_first_pre={edge_first_blocked} → trades_taken={n_taken}")
 
     if config.edge_first and edge_bar_values is not None and len(taken) > 0:
@@ -2576,6 +2773,14 @@ def run_v5_forward_test(
         for sn, ss in per_sym_stats.items():
             log.info(f"  {sn}: {ss['trades']} trades | WR {ss['win_rate']:.1%} | "
                      f"E[R]={ss['expectancy_r']:+.4f} | Total={ss['total_r']:+.4f}R")
+
+    if config.per_symbol_r_kill is not None:
+        report['per_symbol_r_kill'] = {
+            'floor': config.per_symbol_r_kill,
+            'killed_symbols': sorted(killed_symbols),
+            'blocked_trades': per_sym_kill_blocked,
+            'cumulative_r': {k: round(v, 4) for k, v in sym_cumulative_r.items()},
+        }
 
     if corr_tracker is not None:
         for k, pos in open_positions.items():
@@ -2961,6 +3166,8 @@ def run_v5_walk_forward(
     min_trades=20,
     wf_threshold_ema=True, wf_threshold_ema_alpha=0.5,
     mu_debias=True, mu_debias_alpha=0.01,
+    per_symbol_r_kill=None,
+    per_symbol_threshold=False,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -3094,6 +3301,7 @@ def run_v5_walk_forward(
             promote_metric=promote_metric,
             stage_a_epochs=stage_a_epochs,
             balanced_sampling=balanced_sampling,
+            symbol_embed_dim=symbol_embed_dim,
             per_symbol_scaler=per_symbol_scaler,
             ultra_conviction=ultra_conviction,
             ultra_risk_cap=ultra_risk_cap,
@@ -3135,6 +3343,8 @@ def run_v5_walk_forward(
             mu_debias_alpha=mu_debias_alpha,
             wf_threshold_override=blended_threshold if threshold_ema is not None and wf_threshold_ema else None,
             fold_id=fold['fold'],
+            per_symbol_r_kill=per_symbol_r_kill,
+            per_symbol_threshold=per_symbol_threshold,
         )
 
         report_path = Path("checkpoints") / "v5_forward_report.json"
@@ -3216,6 +3426,49 @@ def run_v5_walk_forward(
                  f"  Active Folds: {active_folds}/{len(all_reports)}")
         log.info("=" * 120)
 
+        wf_per_symbol = {}
+        for r in all_reports:
+            pss = r.get('per_symbol_stats', {})
+            for sym_name, sym_stats in pss.items():
+                if sym_name not in wf_per_symbol:
+                    wf_per_symbol[sym_name] = {'trades': 0, 'wins': 0, 'total_r': 0.0, 'folds': 0, 'rs': []}
+                wf_per_symbol[sym_name]['trades'] += sym_stats['trades']
+                wf_per_symbol[sym_name]['wins'] += int(sym_stats['win_rate'] * sym_stats['trades'])
+                wf_per_symbol[sym_name]['total_r'] += sym_stats['total_r']
+                wf_per_symbol[sym_name]['folds'] += 1
+                wf_per_symbol[sym_name]['rs'].append(sym_stats['total_r'])
+
+        if wf_per_symbol:
+            log.info("\n" + "=" * 100)
+            log.info("  WALK-FORWARD PER-SYMBOL SUMMARY")
+            log.info("=" * 100)
+            log.info(f"{'Symbol':>12} {'Folds':>7} {'Trades':>8} {'WR':>7} {'E[R]':>10} "
+                     f"{'TotalR':>10} {'Avg/Fold':>10} {'Edge':>6}")
+            log.info("-" * 100)
+
+            sorted_syms = sorted(wf_per_symbol.items(), key=lambda x: x[1]['total_r'], reverse=True)
+            wf_per_symbol_report = {}
+            for sym_name, sd in sorted_syms:
+                wr = sd['wins'] / max(sd['trades'], 1)
+                expect = sd['total_r'] / max(sd['trades'], 1)
+                avg_per_fold = sd['total_r'] / max(sd['folds'], 1)
+                edge = "YES" if sd['total_r'] > 0 and expect > 0 else "NO"
+                log.info(f"{sym_name:>12} {sd['folds']:>7} {sd['trades']:>8} {wr:>6.1%} "
+                         f"{expect:>+10.4f} {sd['total_r']:>+10.4f} {avg_per_fold:>+10.4f} {edge:>6}")
+                wf_per_symbol_report[sym_name] = {
+                    'folds': sd['folds'], 'trades': sd['trades'],
+                    'win_rate': round(wr, 3), 'expectancy_r': round(expect, 4),
+                    'total_r': round(sd['total_r'], 4), 'avg_per_fold_r': round(avg_per_fold, 4),
+                    'edge': edge, 'per_fold_r': [round(x, 4) for x in sd['rs']],
+                }
+
+            log.info("-" * 100)
+            edge_syms = [s for s, d in sorted_syms if d['total_r'] > 0]
+            no_edge_syms = [s for s, d in sorted_syms if d['total_r'] <= 0]
+            log.info(f"  Edge symbols ({len(edge_syms)}): {edge_syms}")
+            log.info(f"  No-edge symbols ({len(no_edge_syms)}): {no_edge_syms}")
+            log.info("=" * 100)
+
         agg_path = Path("checkpoints") / "v5_walkforward_report.json"
         import json
         with open(agg_path, 'w') as f:
@@ -3229,6 +3482,7 @@ def run_v5_walk_forward(
                     'active_folds': active_folds,
                     'final_threshold_ema': threshold_ema,
                 },
+                'per_symbol_summary': wf_per_symbol_report if wf_per_symbol else {},
             }, f, indent=2, default=str)
         log.info(f"[V5_WF] Walk-forward report saved to {agg_path}")
 
@@ -3294,6 +3548,7 @@ def train_v5_model(
     adx_gate=False, adx_period=14, adx_min=18.0, adx_exception_top_pct=10.0,
     temp_scale=False,
     stage_a_epochs=0, stage_a_w_action_mult=2.0, stage_a_w_regime_mult=1.5, stage_a_w_reg_mult=0.5,
+    symbol_embed_dim=8,
     balanced_sampling=True, per_symbol_scaler=False,
     ultra_conviction=False, ultra_risk_cap=0.05, ultra_score_pct=0.95,
     ultra_adx_min=25.0, ultra_edge_min=0.03, ultra_dd_max=0.10,
@@ -3313,6 +3568,8 @@ def train_v5_model(
     wf_threshold_override=None,
     fold_id=0,
     feature_report=False,
+    per_symbol_r_kill=None,
+    per_symbol_threshold=False,
 ):
     """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -3605,23 +3862,52 @@ def train_v5_model(
         if len(symbols) > 1:
             log.info(f"[V5_BALANCE] Balanced sampling DISABLED — using all data as-is")
 
-    if per_symbol_scaler:
-        log.warning("[V5_SCALER] --per-symbol-scaler is enabled but NOT YET IMPLEMENTED. "
-                    "Using global scaler. TODO: fit/apply per-symbol scalers.")
+    from sklearn.preprocessing import RobustScaler
+    per_symbol_scalers = {}
 
-    train_feat = np.concatenate(train_features, axis=0)
-    val_feat = np.concatenate(val_features, axis=0)
+    if per_symbol_scaler and len(symbols) > 1:
+        log.info("[V5_SCALER] Fitting per-symbol RobustScalers...")
+        for si, sym_name in enumerate(symbols):
+            sym_scaler = RobustScaler()
+            train_features[si] = sym_scaler.fit_transform(train_features[si]).astype(np.float32)
+            val_features[si] = sym_scaler.transform(val_features[si]).astype(np.float32)
+            per_symbol_scalers[sym_name] = sym_scaler
+            tr_mean = np.mean(train_features[si], axis=0)
+            tr_std = np.std(train_features[si], axis=0)
+            log.info(f"[V5_SCALER] {sym_name}: fitted on {len(train_features[si])} train bars, "
+                     f"applied to {len(val_features[si])} val bars | "
+                     f"post-scale mean=[{tr_mean.min():.3f}, {tr_mean.max():.3f}] "
+                     f"std=[{tr_std.min():.3f}, {tr_std.max():.3f}]")
+
+        train_feat = np.concatenate(train_features, axis=0)
+        val_feat = np.concatenate(val_features, axis=0)
+
+        scaler = RobustScaler()
+        scaler.center_ = np.zeros(train_feat.shape[1])
+        scaler.scale_ = np.ones(train_feat.shape[1])
+        log.info(f"[V5_SCALER] Per-symbol scaling complete. Identity global scaler set for checkpoint compat.")
+
+        import joblib
+        scalers_path = Path("checkpoints") / "per_symbol_scalers.joblib"
+        scalers_path.parent.mkdir(exist_ok=True)
+        joblib.dump(per_symbol_scalers, scalers_path)
+        log.info(f"[V5_SCALER] Saved {len(per_symbol_scalers)} per-symbol scalers to {scalers_path}")
+    else:
+        if per_symbol_scaler and len(symbols) <= 1:
+            log.info("[V5_SCALER] --per-symbol-scaler enabled but only 1 symbol — using global scaler")
+
+        train_feat = np.concatenate(train_features, axis=0)
+        val_feat = np.concatenate(val_features, axis=0)
+
+        scaler = RobustScaler()
+        train_feat = scaler.fit_transform(train_feat).astype(np.float32)
+        val_feat = scaler.transform(val_feat).astype(np.float32)
+        log.info(f"[V5] RobustScaler fitted on {len(train_feat)} train bars, applied to {len(val_feat)} val bars")
 
     train_regime_trend_raw = None
     if features_df_columns is not None and 'regime_trend' in features_df_columns:
         rt_idx = features_df_columns.index('regime_trend')
         train_regime_trend_raw = train_feat[:, rt_idx].copy()
-
-    from sklearn.preprocessing import RobustScaler
-    scaler = RobustScaler()
-    train_feat = scaler.fit_transform(train_feat).astype(np.float32)
-    val_feat = scaler.transform(val_feat).astype(np.float32)
-    log.info(f"[V5] RobustScaler fitted on {len(train_feat)} train bars, applied to {len(val_feat)} val bars")
 
     def _concat_lists(lst):
         return np.concatenate(lst, axis=0)
@@ -3784,7 +4070,7 @@ def train_v5_model(
         n_barrier_presets=n_barrier,
         enable_regime_head=use_regime_head,
         n_symbols=len(symbols) if len(symbols) > 1 else 1,
-        symbol_embed_dim=4,
+        symbol_embed_dim=symbol_embed_dim,
     )
     model = V5Forecaster(model_config).to(device)
     log.info(f"[V5] Model parameters: {model.parameters_count():,}")
@@ -4043,6 +4329,17 @@ def train_v5_model(
                      f"maxDD={sweep_max_dd:.2f} T/day={sweep_tpd:.1f} thr={sweep_threshold:.4f} "
                      f"best_at={sweep_label}")
 
+            best_per_sym_thresholds = None
+            if per_symbol_threshold and symbols and len(symbols) > 1:
+                best_per_sym_thresholds, no_edge_syms = _run_per_symbol_sweep(
+                    scores, sides, val_outcomes, val_realized_r,
+                    val_bars, val_sym_ids, symbols, sweep_threshold,
+                    r_long=val_r_long_arr, r_short=val_r_short_arr,
+                    out_long=val_out_long_arr, out_short=val_out_short_arr,
+                    quality_mask=quality_mask, candidate_mask=sweep_cand_mask,
+                    min_trades_per_symbol=max(5, min_trades // 2),
+                )
+
             if quality_gate_cfg.enable_calib:
                 val_p_trade = arrays['p_trade'][:len(val_realized_r)]
                 compute_v5_calibration(val_p_trade, val_realized_r)
@@ -4088,6 +4385,11 @@ def train_v5_model(
                     'promote_metric': promote_metric,
                     'symbol_map': {s: i for i, s in enumerate(symbols)},
                     'trained_at': datetime.now().isoformat(),
+                    'per_symbol_thresholds': best_per_sym_thresholds,
+                    'per_symbol_scalers': {
+                        sym: {'center_': s.center_.tolist(), 'scale_': s.scale_.tolist()}
+                        for sym, s in per_symbol_scalers.items()
+                    } if per_symbol_scalers else None,
                 }, checkpoint_dir / "best_v5_expectancy.pt")
                 log.info(f"[V5_CKPT] New best ({promote_metric}): expect={best_expectancy:.4f} "
                          f"PF={best_promote_pf:.2f} maxDD={best_promote_max_dd:.2f} at {sweep_label}")
@@ -4095,7 +4397,7 @@ def train_v5_model(
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience = 0
-            torch.save({
+            ckpt_loss_data = {
                 'model_state_dict': model.state_dict(),
                 'model_config': ckpt_model_config,
                 'train_config': ckpt_train_config,
@@ -4107,7 +4409,13 @@ def train_v5_model(
                 'scaler_scale': scaler.scale_,
                 'symbol_map': {s: i for i, s in enumerate(symbols)},
                 'trained_at': datetime.now().isoformat(),
-            }, checkpoint_dir / "best_v5_loss.pt")
+            }
+            if per_symbol_scalers:
+                ckpt_loss_data['per_symbol_scalers'] = {
+                    sym: {'center': s.center_, 'scale': s.scale_}
+                    for sym, s in per_symbol_scalers.items()
+                }
+            torch.save(ckpt_loss_data, checkpoint_dir / "best_v5_loss.pt")
             log.info(f"[V5_CKPT] New best val_loss={best_val_loss:.4f}")
         else:
             patience += 1
@@ -4198,6 +4506,19 @@ def train_v5_model(
             if ckpt_temperature != 1.0:
                 log.info(f"[V5_FWD] Using temperature={ckpt_temperature:.4f} from checkpoint")
 
+            ckpt_per_sym_thr = None
+            if per_symbol_threshold:
+                ckpt_per_sym_thr = ckpt.get('per_symbol_thresholds', None)
+                if ckpt_per_sym_thr:
+                    log.info(f"[V5_FWD] Per-symbol thresholds loaded from checkpoint: "
+                             f"{len(ckpt_per_sym_thr)} symbols")
+                    for sym_id_k, sym_thr_v in sorted(ckpt_per_sym_thr.items(), key=lambda x: int(x[0])):
+                        sym_name_k = symbols[int(sym_id_k)] if symbols and int(sym_id_k) < len(symbols) else f"sym_{sym_id_k}"
+                        thr_str = f"{sym_thr_v:.4f}" if np.isfinite(sym_thr_v) else "inf (NO EDGE)"
+                        log.info(f"  {sym_name_k}: threshold={thr_str}")
+                else:
+                    log.warning("[V5_FWD] Per-symbol threshold enabled but not found in checkpoint — using global threshold")
+
             fwd_config = V5ForwardTestConfig(
                 score_threshold=ckpt_threshold,
                 score_lambda=tpd_ctrl_cfg.score_lambda,
@@ -4287,6 +4608,8 @@ def train_v5_model(
                 mu_debias=mu_debias,
                 mu_debias_alpha=mu_debias_alpha,
                 min_trades=min_trades,
+                per_symbol_r_kill=per_symbol_r_kill,
+                per_symbol_thresholds=ckpt_per_sym_thr,
             )
 
             train_ref_arrays = _build_train_ref_arrays(

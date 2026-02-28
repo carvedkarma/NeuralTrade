@@ -425,3 +425,216 @@ class TestT006ThresholdEMA:
             else:
                 ema = alpha * t + (1 - alpha) * ema
         assert 0.10 < ema < 0.22
+
+
+class TestT007PerSymbolThreshold:
+
+    def test_per_symbol_threshold_applied_in_selection(self):
+        scores = np.array([0.10, 0.10, 0.10, 0.10, 0.10, 0.10])
+        sym_ids = np.array([0, 0, 0, 1, 1, 1])
+        global_thr = 0.08
+        per_sym_thr = {0: 0.05, 1: float('inf')}
+
+        per_bar_threshold = np.full(len(scores), global_thr, dtype=np.float64)
+        for sym_id_key, sym_thr in per_sym_thr.items():
+            sym_mask = sym_ids == int(sym_id_key)
+            per_bar_threshold[sym_mask] = sym_thr
+
+        selected = scores >= per_bar_threshold
+        assert selected[0] == True
+        assert selected[1] == True
+        assert selected[2] == True
+        assert selected[3] == False
+        assert selected[4] == False
+        assert selected[5] == False
+
+    def test_per_symbol_threshold_inf_blocks_all(self):
+        scores = np.array([0.99, 0.99, 0.01, 0.01])
+        sym_ids = np.array([0, 0, 1, 1])
+        per_sym_thr = {0: float('inf'), 1: float('inf')}
+
+        per_bar_threshold = np.full(len(scores), 0.0, dtype=np.float64)
+        for sym_id_key, sym_thr in per_sym_thr.items():
+            per_bar_threshold[sym_ids == int(sym_id_key)] = sym_thr
+
+        selected = scores >= per_bar_threshold
+        assert not np.any(selected)
+
+    def test_per_symbol_threshold_missing_sym_uses_global(self):
+        scores = np.array([0.10, 0.10, 0.10])
+        sym_ids = np.array([0, 1, 2])
+        per_sym_thr = {0: 0.05}
+        global_thr = 0.15
+
+        per_bar_threshold = np.full(len(scores), global_thr, dtype=np.float64)
+        for sym_id_key, sym_thr in per_sym_thr.items():
+            per_bar_threshold[sym_ids == int(sym_id_key)] = sym_thr
+
+        selected = scores >= per_bar_threshold
+        assert selected[0] == True
+        assert selected[1] == False
+        assert selected[2] == False
+
+    @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
+    def test_per_symbol_sweep_returns_correct_structure(self):
+        from train.v5_train import _run_per_symbol_sweep
+        np.random.seed(42)
+        n = 200
+        scores = np.random.uniform(0.0, 0.3, n)
+        sides = np.random.choice([1, -1], n)
+        outcomes = np.random.choice(["TP", "SL", "EXP_WIN", "EXP_LOSS"], n)
+        realized_r = np.where(outcomes == "TP", 0.5, np.where(outcomes == "SL", -0.3, 0.1))
+        sym_ids = np.concatenate([np.zeros(100), np.ones(100)]).astype(int)
+        symbols = ["BTCUSDT", "BNBUSDT"]
+
+        per_sym_thr, no_edge = _run_per_symbol_sweep(
+            scores, sides, outcomes, realized_r,
+            n, sym_ids, symbols, 0.10,
+            min_trades_per_symbol=5,
+        )
+
+        assert isinstance(per_sym_thr, dict)
+        assert 0 in per_sym_thr
+        assert 1 in per_sym_thr
+        for v in per_sym_thr.values():
+            assert isinstance(v, float)
+
+    @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
+    def test_per_symbol_sweep_no_edge_symbol(self):
+        from train.v5_train import _run_per_symbol_sweep
+        n = 200
+        scores = np.concatenate([
+            np.random.uniform(0.1, 0.3, 100),
+            np.random.uniform(0.1, 0.3, 100),
+        ])
+        sides = np.ones(n, dtype=int)
+        realized_r = np.concatenate([
+            np.full(100, 0.5),
+            np.full(100, -0.8),
+        ])
+        outcomes = np.full(n, "TP")
+        outcomes[100:] = "SL"
+        sym_ids = np.concatenate([np.zeros(100), np.ones(100)]).astype(int)
+        symbols = ["GOOD_SYM", "BAD_SYM"]
+
+        per_sym_thr, no_edge = _run_per_symbol_sweep(
+            scores, sides, outcomes, realized_r,
+            n, sym_ids, symbols, 0.10,
+            min_trades_per_symbol=5,
+        )
+
+        assert per_sym_thr[0] < float('inf')
+        assert per_sym_thr[1] == float('inf')
+        assert "BAD_SYM" in no_edge
+
+
+class TestT008PerSymbolRKill:
+
+    def test_cumulative_r_tracking(self):
+        from collections import defaultdict
+        sym_cumulative_r = defaultdict(float)
+        killed_symbols = set()
+        kill_floor = -5.0
+
+        trades = [
+            ("BTCUSDT", 0.5),
+            ("BNBUSDT", -2.0),
+            ("BTCUSDT", 0.3),
+            ("BNBUSDT", -1.5),
+            ("BNBUSDT", -2.0),
+        ]
+
+        for sym, r in trades:
+            if sym in killed_symbols:
+                continue
+            sym_cumulative_r[sym] += r
+            if sym_cumulative_r[sym] <= kill_floor:
+                killed_symbols.add(sym)
+
+        assert "BNBUSDT" in killed_symbols
+        assert "BTCUSDT" not in killed_symbols
+        assert abs(sym_cumulative_r["BTCUSDT"] - 0.8) < 1e-6
+        assert sym_cumulative_r["BNBUSDT"] <= kill_floor
+
+    def test_killed_symbol_skipped(self):
+        killed_symbols = {"BNBUSDT"}
+        trades_attempted = ["BTCUSDT", "BNBUSDT", "BTCUSDT", "BNBUSDT", "ETHUSDT"]
+        trades_taken = [t for t in trades_attempted if t not in killed_symbols]
+        assert len(trades_taken) == 3
+        assert "BNBUSDT" not in trades_taken
+
+    def test_kill_threshold_exact_boundary(self):
+        from collections import defaultdict
+        sym_cumulative_r = defaultdict(float)
+        killed_symbols = set()
+        kill_floor = -5.0
+
+        sym_cumulative_r["SYM"] += -4.99
+        if sym_cumulative_r["SYM"] <= kill_floor:
+            killed_symbols.add("SYM")
+        assert "SYM" not in killed_symbols
+
+        sym_cumulative_r["SYM"] += -0.01
+        if sym_cumulative_r["SYM"] <= kill_floor:
+            killed_symbols.add("SYM")
+        assert "SYM" in killed_symbols
+
+
+class TestT009PerSymbolScaler:
+
+    def test_independent_scalers_differ(self):
+        from sklearn.preprocessing import RobustScaler
+        np.random.seed(42)
+        data_a = np.random.normal(0, 1, (100, 5))
+        data_b = np.random.normal(10, 5, (100, 5))
+
+        global_scaler = RobustScaler()
+        global_scaler.fit(np.vstack([data_a, data_b]))
+
+        scaler_a = RobustScaler()
+        scaler_a.fit(data_a)
+        scaler_b = RobustScaler()
+        scaler_b.fit(data_b)
+
+        assert not np.allclose(scaler_a.center_, scaler_b.center_)
+        assert not np.allclose(scaler_a.center_, global_scaler.center_)
+
+        scaled_a = scaler_a.transform(data_a)
+        scaled_b = scaler_b.transform(data_b)
+        assert abs(np.median(scaled_a, axis=0).mean()) < 0.1
+        assert abs(np.median(scaled_b, axis=0).mean()) < 0.1
+
+
+class TestT010SymbolEmbedDim:
+
+    @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
+    def test_embed_dim_8_default(self):
+        from models.v5_forecaster import V5ForecasterConfig
+        cfg = V5ForecasterConfig()
+        assert cfg.symbol_embed_dim == 8
+
+    @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
+    def test_embed_dim_custom(self):
+        from models.v5_forecaster import V5ForecasterConfig
+        cfg = V5ForecasterConfig(symbol_embed_dim=16)
+        assert cfg.symbol_embed_dim == 16
+
+    @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
+    def test_model_creates_with_dim_8(self):
+        from models.v5_forecaster import V5Forecaster, V5ForecasterConfig
+        cfg = V5ForecasterConfig(
+            n_features=50, n_symbols=7, symbol_embed_dim=8,
+        )
+        model = V5Forecaster(cfg)
+        embed_weight = model.model.symbol_embed.weight
+        assert embed_weight.shape == (7, 8)
+
+    @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
+    def test_model_backward_compat_dim_4(self):
+        from models.v5_forecaster import V5Forecaster, V5ForecasterConfig
+        cfg = V5ForecasterConfig(
+            n_features=50, n_symbols=7, symbol_embed_dim=4,
+        )
+        model = V5Forecaster(cfg)
+        embed_weight = model.model.symbol_embed.weight
+        assert embed_weight.shape == (7, 4)
