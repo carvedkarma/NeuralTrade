@@ -14,6 +14,7 @@ import {
   Radio,
   Crosshair,
 } from "lucide-react";
+import { CloseButton } from "@/components/position-actions";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSDT"] as const;
 
@@ -317,13 +318,14 @@ export default function CommandCenter() {
             </div>
           ) : (
             <div className="space-y-1">
-              <div className="grid grid-cols-6 gap-2 px-2 py-1 text-xs text-muted-foreground uppercase tracking-wider">
+              <div className="grid grid-cols-7 gap-2 px-2 py-1 text-xs text-muted-foreground uppercase tracking-wider">
                 <span>Symbol</span>
                 <span>Side</span>
                 <span>Entry</span>
                 <span>Current</span>
                 <span>P&L (R)</span>
                 <span>Duration</span>
+                <span className="text-right">Action</span>
               </div>
               {positions.map((pos, idx) => {
                 const pnl = pos.pnlR ?? pos.pnl ?? 0;
@@ -333,7 +335,7 @@ export default function CommandCenter() {
                 return (
                   <div
                     key={pos.id ?? idx}
-                    className={`grid grid-cols-6 gap-2 px-2 py-2 rounded ${rowBg} items-center`}
+                    className={`grid grid-cols-7 gap-2 px-2 py-2 rounded ${rowBg} items-center`}
                     data-testid={`position-row-${idx}`}
                   >
                     <span className="text-sm font-medium">{pos.symbol ?? "—"}</span>
@@ -360,6 +362,11 @@ export default function CommandCenter() {
                         ? formatDistanceToNow(new Date((pos.openedAt ?? pos.timestamp ?? 0) * 1000), { addSuffix: false })
                         : "—"}
                     </span>
+                    <div className="flex justify-end">
+                      {pos.id && (
+                        <CloseButton positionId={pos.id as number} symbol={pos.symbol ?? "?"} side={pos.side ?? "?"} />
+                      )}
+                    </div>
                   </div>
                 );
               })}

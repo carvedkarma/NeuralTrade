@@ -2,6 +2,7 @@ import { getConfig, getTotalCostsPct, isPaperTradingEnabled, type PaperTradingCo
 import * as storage from "./storage";
 import type { PaperPosition } from "@shared/schema";
 import type { Candle } from "@shared/schema";
+import { candles as candlesTable } from "@shared/schema";
 import type { ShotPlan } from "../signal-engine";
 import { getRegimeRiskParams, classifyRegime, type MarketRegime } from "../feature-engine";
 import { strategyLearner } from "../strategy-learner";
@@ -15,6 +16,18 @@ import {
 } from "../trade-decision-engine";
 import { HORIZON_CONFIG, NO_TRADE_CONDITIONS } from "../gpu-data-export";
 import { edgeTracker } from "../edge-tracker";
+import { db } from "../db";
+import { eq, and, desc } from "drizzle-orm";
+
+async function getCurrentMarketPrice(symbol: string): Promise<number> {
+  const rows = await db
+    .select({ close: candlesTable.close })
+    .from(candlesTable)
+    .where(and(eq(candlesTable.symbol, symbol), eq(candlesTable.timeframe, "15m")))
+    .orderBy(desc(candlesTable.timestamp))
+    .limit(1);
+  return rows[0]?.close ?? 0;
+}
 
 export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK";
 
@@ -1381,4 +1394,281 @@ export async function getPortfolioSummary() {
       portfolio.startingEquityUsdt
     ),
   };
+}
+
+export async function manualClosePosition(positionId: number, exitPrice?: number): Promise<{ pnl: number; isPartial: boolean }> {
+  const position = await storage.getPositionById(positionId);
+  if (!position) throw new Error(`Position ${positionId} not found`);
+  if (position.status !== "OPEN") throw new Error(`Position ${positionId} is already ${position.status}`);
+
+  const marketPrice = await getCurrentMarketPrice(position.symbol);
+  const price = exitPrice ?? (marketPrice > 0 ? marketPrice : position.entryPrice);
+  const ctx: TradeContext = {
+    candle: { timestamp: Date.now(), open: price, high: price, low: price, close: price, volume: 0 } as any,
+    markPrice: price,
+    fundingRate: 0,
+    atr: Math.abs(position.entryPrice - (position.stopLoss ?? position.entryPrice)) / 1.5,
+    kalmanFast: price,
+    shotPlan: null,
+  };
+
+  const result = await closePosition(position, price, "MANUAL", ctx);
+  const { broadcast } = await import("../ws");
+  broadcast("TRADE_CLOSE", {
+    positionId: position.id,
+    symbol: position.symbol,
+    side: position.side,
+    entryPrice: position.entryPrice,
+    exitPrice: price,
+    pnl: result.pnl,
+    reason: "MANUAL",
+  });
+  return result;
+}
+
+export async function manualPartialClose(positionId: number, percent: number): Promise<{ pnl: number; isPartial: boolean }> {
+  const position = await storage.getPositionById(positionId);
+  if (!position) throw new Error(`Position ${positionId} not found`);
+  if (position.status !== "OPEN") throw new Error(`Position ${positionId} is already ${position.status}`);
+  if (percent <= 0 || percent >= 100) throw new Error("Percent must be between 1 and 99");
+
+  const marketPrice = await getCurrentMarketPrice(position.symbol);
+  const price = marketPrice > 0 ? marketPrice : position.entryPrice;
+  const partialQty = position.qty * (percent / 100);
+  const ctx: TradeContext = {
+    candle: { timestamp: Date.now(), open: price, high: price, low: price, close: price, volume: 0 } as any,
+    markPrice: price,
+    fundingRate: 0,
+    atr: Math.abs(position.entryPrice - (position.stopLoss ?? position.entryPrice)) / 1.5,
+    kalmanFast: price,
+    shotPlan: null,
+  };
+
+  const result = await closePosition(position, price, "MANUAL", ctx, partialQty);
+  const { broadcast } = await import("../ws");
+  broadcast("TRADE_UPDATE", {
+    positionId: position.id,
+    symbol: position.symbol,
+    side: position.side,
+    action: "PARTIAL_CLOSE",
+    percent,
+    pnl: result.pnl,
+  });
+  return result;
+}
+
+export async function updatePositionLevels(
+  positionId: number,
+  updates: { stopLoss?: number; tp1?: number; tp2?: number }
+): Promise<PaperPosition> {
+  const position = await storage.getPositionById(positionId);
+  if (!position) throw new Error(`Position ${positionId} not found`);
+  if (position.status !== "OPEN") throw new Error(`Position ${positionId} is already ${position.status}`);
+
+  if (updates.stopLoss !== undefined) {
+    if (position.side === "LONG" && updates.stopLoss >= position.entryPrice) {
+      throw new Error("LONG stop loss must be below entry price");
+    }
+    if (position.side === "SHORT" && updates.stopLoss <= position.entryPrice) {
+      throw new Error("SHORT stop loss must be above entry price");
+    }
+  }
+
+  if (updates.tp1 !== undefined) {
+    if (position.side === "LONG" && updates.tp1 <= position.entryPrice) {
+      throw new Error("LONG TP must be above entry price");
+    }
+    if (position.side === "SHORT" && updates.tp1 >= position.entryPrice) {
+      throw new Error("SHORT TP must be below entry price");
+    }
+  }
+
+  const dbUpdates: Partial<PaperPosition> = {};
+  if (updates.stopLoss !== undefined) dbUpdates.stopLoss = updates.stopLoss;
+  if (updates.tp1 !== undefined) dbUpdates.tp1 = updates.tp1;
+  if (updates.tp2 !== undefined) dbUpdates.tp2 = updates.tp2;
+
+  const updated = await storage.updatePosition(positionId, dbUpdates);
+  const { broadcast } = await import("../ws");
+  broadcast("TRADE_UPDATE", {
+    positionId: updated.id,
+    symbol: updated.symbol,
+    side: updated.side,
+    action: "LEVELS_UPDATED",
+    stopLoss: updated.stopLoss,
+    tp1: updated.tp1,
+    tp2: updated.tp2,
+  });
+  return updated;
+}
+
+export async function manualOpenPosition(params: {
+  symbol: string;
+  side: "LONG" | "SHORT";
+  entryPrice: number;
+  stopLoss: number;
+  takeProfit: number;
+  riskPercent: number;
+}): Promise<PaperPosition> {
+  const { symbol, side, entryPrice, stopLoss, takeProfit, riskPercent } = params;
+  const portfolio = await storage.getOrCreatePortfolio();
+  const config = getConfig();
+
+  if (side === "LONG" && stopLoss >= entryPrice) throw new Error("LONG SL must be below entry");
+  if (side === "SHORT" && stopLoss <= entryPrice) throw new Error("SHORT SL must be above entry");
+  if (side === "LONG" && takeProfit <= entryPrice) throw new Error("LONG TP must be above entry");
+  if (side === "SHORT" && takeProfit >= entryPrice) throw new Error("SHORT TP must be below entry");
+
+  const stopDistance = Math.abs(entryPrice - stopLoss);
+  const riskUsd = portfolio.currentEquityUsdt * (riskPercent / 100);
+  const qty = riskUsd / stopDistance;
+  const notional = qty * entryPrice;
+  const entryFee = calculateFee(notional, config.takerFeePct);
+
+  const position = await storage.createPosition({
+    symbol,
+    side,
+    status: "OPEN",
+    entryTs: Date.now(),
+    entryPrice,
+    qty,
+    notionalUsdt: notional,
+    leverage: 1,
+    stopLoss,
+    tp1: takeProfit,
+    tp2: null,
+    trailMode: "none",
+    trailPrice: null,
+    timeStopBars: 60,
+    barsOpen: 0,
+    primaryHorizon: 15,
+    initialRiskUsdt: riskUsd,
+    feesPaidUsdt: entryFee,
+    fundingPaidUsdt: 0,
+    exitTs: null,
+    exitPrice: null,
+    realizedPnlUsdt: null,
+    exitReason: null,
+    signalConfidence: null,
+    signalEdge: null,
+    peakProfit: 0,
+    initialStopDistance: stopDistance,
+    regime: null,
+  });
+
+  const { broadcast } = await import("../ws");
+  broadcast("TRADE_OPEN", {
+    positionId: position.id,
+    symbol,
+    side,
+    entryPrice,
+    stopLoss,
+    takeProfit,
+    qty,
+    riskUsd,
+    manual: true,
+  });
+
+  console.log(`[Paper] MANUAL ${side} ${symbol} @ ${entryPrice} | SL: ${stopLoss} | TP: ${takeProfit} | Risk: $${riskUsd.toFixed(2)}`);
+  return position;
+}
+
+export interface RiskAlert {
+  id: string;
+  type: "SL_PROXIMITY" | "DAILY_LOSS_CAP" | "DRAWDOWN" | "POSITION_DURATION" | "HIGH_EXPOSURE";
+  severity: "info" | "warning" | "critical";
+  symbol?: string;
+  message: string;
+  data: Record<string, unknown>;
+}
+
+export async function computeRiskAlerts(): Promise<RiskAlert[]> {
+  const alerts: RiskAlert[] = [];
+  const portfolio = await storage.getOrCreatePortfolio();
+  const openPositions = await storage.getPositions("OPEN", 50);
+
+  const priceCache = new Map<string, number>();
+  for (const pos of openPositions) {
+    if (!priceCache.has(pos.symbol)) {
+      priceCache.set(pos.symbol, await getCurrentMarketPrice(pos.symbol));
+    }
+  }
+
+  for (const pos of openPositions) {
+    const currentPrice = priceCache.get(pos.symbol) || pos.entryPrice;
+
+    if (pos.stopLoss) {
+      const priceToSl = pos.side === "LONG"
+        ? currentPrice - pos.stopLoss
+        : pos.stopLoss - currentPrice;
+      const entryToSl = Math.abs(pos.entryPrice - pos.stopLoss);
+      const distanceRatio = entryToSl > 0 ? priceToSl / entryToSl : 1;
+
+      if (distanceRatio < 0.15) {
+        alerts.push({
+          id: `sl-${pos.id}`,
+          type: "SL_PROXIMITY",
+          severity: "critical",
+          symbol: pos.symbol,
+          message: `${pos.symbol} ${pos.side} is very close to stop loss (${(distanceRatio * 100).toFixed(0)}% remaining)`,
+          data: { positionId: pos.id, distanceRatio, stopLoss: pos.stopLoss, entryPrice: pos.entryPrice },
+        });
+      } else if (distanceRatio < 0.30) {
+        alerts.push({
+          id: `sl-${pos.id}`,
+          type: "SL_PROXIMITY",
+          severity: "warning",
+          symbol: pos.symbol,
+          message: `${pos.symbol} ${pos.side} approaching stop loss (${(distanceRatio * 100).toFixed(0)}% remaining)`,
+          data: { positionId: pos.id, distanceRatio, stopLoss: pos.stopLoss, entryPrice: pos.entryPrice },
+        });
+      }
+    }
+
+    const durationMs = Date.now() - pos.entryTs;
+    const durationHours = durationMs / (1000 * 60 * 60);
+    if (durationHours > 4) {
+      alerts.push({
+        id: `dur-${pos.id}`,
+        type: "POSITION_DURATION",
+        severity: "info",
+        symbol: pos.symbol,
+        message: `${pos.symbol} ${pos.side} has been open for ${durationHours.toFixed(1)} hours`,
+        data: { positionId: pos.id, durationHours },
+      });
+    }
+  }
+
+  const totalExposure = openPositions.reduce((sum, p) => sum + p.notionalUsdt, 0);
+  const exposureRatio = portfolio.currentEquityUsdt > 0 ? totalExposure / portfolio.currentEquityUsdt : 0;
+  if (exposureRatio > 0.5) {
+    alerts.push({
+      id: "exposure",
+      type: "HIGH_EXPOSURE",
+      severity: "warning",
+      message: `Total exposure is ${(exposureRatio * 100).toFixed(0)}% of equity ($${totalExposure.toFixed(0)} / $${portfolio.currentEquityUsdt.toFixed(0)})`,
+      data: { totalExposure, equity: portfolio.currentEquityUsdt, ratio: exposureRatio },
+    });
+  }
+
+  const drawdownPct = portfolio.maxDrawdownPct ?? 0;
+  if (drawdownPct > 10) {
+    alerts.push({
+      id: "drawdown",
+      type: "DRAWDOWN",
+      severity: "critical",
+      message: `Drawdown has reached ${drawdownPct.toFixed(1)}% from peak equity`,
+      data: { drawdownPct, peakEquity: portfolio.peakEquityUsdt, currentEquity: portfolio.currentEquityUsdt },
+    });
+  } else if (drawdownPct > 5) {
+    alerts.push({
+      id: "drawdown",
+      type: "DRAWDOWN",
+      severity: "warning",
+      message: `Drawdown at ${drawdownPct.toFixed(1)}% from peak equity`,
+      data: { drawdownPct, peakEquity: portfolio.peakEquityUsdt, currentEquity: portfolio.currentEquityUsdt },
+    });
+  }
+
+  return alerts;
 }

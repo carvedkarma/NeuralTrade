@@ -1,5 +1,7 @@
 import { useState, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 import { formatDistanceToNow } from "date-fns";
 import {
   ArrowUpRight,
@@ -10,6 +12,8 @@ import {
   Coffee,
   Activity,
   Filter,
+  Plus,
+  Loader2,
 } from "lucide-react";
 import {
   ComposedChart,
@@ -40,6 +44,17 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from "@/components/ui/sheet";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Slider } from "@/components/ui/slider";
+import { CloseButton, PartialCloseButton, EditSLTPDialog, SLTPProgressBar } from "@/components/position-actions";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSDT"] as const;
 const TIMEFRAMES = ["15m", "1h", "4h"] as const;
@@ -146,6 +161,206 @@ function LaneBadge({ lane }: { lane: string | null }) {
   );
 }
 
+function NewTradePanel({ prices }: { prices: PriceData | undefined }) {
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const [symbol, setSymbol] = useState("BTCUSDT");
+  const [side, setSide] = useState<"LONG" | "SHORT">("LONG");
+  const [entryPrice, setEntryPrice] = useState("");
+  const [stopLoss, setStopLoss] = useState("");
+  const [takeProfit, setTakeProfit] = useState("");
+  const [riskPercent, setRiskPercent] = useState(1);
+
+  const { data: portfolio } = useQuery<{ currentEquity: number }>({
+    queryKey: ["/api/paper/portfolio"],
+  });
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      apiRequest("POST", "/api/paper/manual-open", {
+        symbol,
+        side,
+        entryPrice: parseFloat(entryPrice),
+        stopLoss: parseFloat(stopLoss),
+        takeProfit: parseFloat(takeProfit),
+        riskPercent,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/paper/positions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/paper/portfolio"] });
+      toast({ title: `Opened ${side} ${symbol}` });
+      setOpen(false);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed to open trade", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const equity = portfolio?.currentEquity ?? 10000;
+  const riskUsd = equity * (riskPercent / 100);
+  const ep = parseFloat(entryPrice) || 0;
+  const sl = parseFloat(stopLoss) || 0;
+  const tp = parseFloat(takeProfit) || 0;
+  const stopDist = Math.abs(ep - sl);
+  const posSize = stopDist > 0 ? riskUsd / stopDist : 0;
+  const rrRatio = stopDist > 0 ? Math.abs(tp - ep) / stopDist : 0;
+
+  const setRRRatio = (ratio: number) => {
+    if (!stopDist || !ep) return;
+    const tpCalc = side === "LONG" ? ep + stopDist * ratio : ep - stopDist * ratio;
+    setTakeProfit(tpCalc.toFixed(2));
+  };
+
+  const handleSymbolSelect = (sym: string) => {
+    setSymbol(sym);
+    const p = prices?.[sym]?.price;
+    if (p) setEntryPrice(p.toString());
+  };
+
+  return (
+    <Sheet open={open} onOpenChange={setOpen}>
+      <SheetTrigger asChild>
+        <Button className="bg-emerald-600 hover:bg-emerald-700" data-testid="button-new-trade">
+          <Plus className="w-4 h-4 mr-1" />
+          New Trade
+        </Button>
+      </SheetTrigger>
+      <SheetContent className="w-[420px] sm:max-w-[420px] overflow-y-auto" data-testid="new-trade-panel">
+        <SheetHeader>
+          <SheetTitle>Open Manual Trade</SheetTitle>
+        </SheetHeader>
+        <div className="space-y-5 mt-4">
+          <div>
+            <Label className="text-xs text-muted-foreground mb-2 block">Symbol</Label>
+            <div className="grid grid-cols-3 gap-1.5" data-testid="trade-symbol-selector">
+              {SYMBOLS.map((sym) => (
+                <Button
+                  key={sym}
+                  variant={symbol === sym ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => handleSymbolSelect(sym)}
+                  data-testid={`trade-symbol-${sym}`}
+                >
+                  {sym.replace("USDT", "")}
+                </Button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <Label className="text-xs text-muted-foreground mb-2 block">Side</Label>
+            <div className="grid grid-cols-2 gap-2" data-testid="trade-side-selector">
+              <Button
+                variant={side === "LONG" ? "default" : "outline"}
+                className={side === "LONG" ? "bg-emerald-600 hover:bg-emerald-700" : ""}
+                onClick={() => setSide("LONG")}
+                data-testid="trade-side-long"
+              >
+                <ArrowUpRight className="w-4 h-4 mr-1" /> LONG
+              </Button>
+              <Button
+                variant={side === "SHORT" ? "default" : "outline"}
+                className={side === "SHORT" ? "bg-red-600 hover:bg-red-700" : ""}
+                onClick={() => setSide("SHORT")}
+                data-testid="trade-side-short"
+              >
+                <ArrowDownRight className="w-4 h-4 mr-1" /> SHORT
+              </Button>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="trade-entry">Entry Price</Label>
+            <Input
+              id="trade-entry"
+              type="number"
+              step="any"
+              value={entryPrice}
+              onChange={(e) => setEntryPrice(e.target.value)}
+              data-testid="input-trade-entry"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="trade-sl">Stop Loss</Label>
+            <Input
+              id="trade-sl"
+              type="number"
+              step="any"
+              value={stopLoss}
+              onChange={(e) => setStopLoss(e.target.value)}
+              data-testid="input-trade-sl"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="trade-tp">Take Profit</Label>
+            <Input
+              id="trade-tp"
+              type="number"
+              step="any"
+              value={takeProfit}
+              onChange={(e) => setTakeProfit(e.target.value)}
+              data-testid="input-trade-tp"
+            />
+            <div className="flex gap-1">
+              {[1, 2, 3].map((r) => (
+                <Button
+                  key={r}
+                  variant="outline"
+                  size="sm"
+                  className="text-xs flex-1"
+                  onClick={() => setRRRatio(r)}
+                  data-testid={`button-rr-${r}`}
+                >
+                  {r}:1 R:R
+                </Button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label>Risk: {riskPercent}% (${riskUsd.toFixed(2)})</Label>
+            <Slider
+              value={[riskPercent]}
+              onValueChange={([v]) => setRiskPercent(v)}
+              min={0.5}
+              max={5}
+              step={0.5}
+              data-testid="slider-risk-percent"
+            />
+          </div>
+
+          <div className="glass-card rounded-md p-3 space-y-1 text-sm">
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Position Size</span>
+              <span className="number-mono" data-testid="text-position-size">{posSize.toFixed(6)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">R:R Ratio</span>
+              <span className="number-mono" data-testid="text-rr-ratio">{rrRatio.toFixed(2)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Risk USD</span>
+              <span className="number-mono" data-testid="text-risk-usd">${riskUsd.toFixed(2)}</span>
+            </div>
+          </div>
+
+          <Button
+            className={`w-full ${side === "LONG" ? "bg-emerald-600 hover:bg-emerald-700" : "bg-red-600 hover:bg-red-700"}`}
+            onClick={() => mutation.mutate()}
+            disabled={mutation.isPending || !ep || !sl || !tp}
+            data-testid="button-submit-trade"
+          >
+            {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin mr-1" />}
+            Open {side} Position
+          </Button>
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
 export default function LiveTrading() {
   const [selectedSymbol, setSelectedSymbol] = useState<string>("BTCUSDT");
   const [timeframe, setTimeframe] = useState<string>("15m");
@@ -201,6 +416,8 @@ export default function LiveTrading() {
   return (
     <div className="p-4 space-y-4" data-testid="live-trading">
       <div className="flex items-center gap-2 flex-wrap" data-testid="symbol-tabs">
+        <NewTradePanel prices={prices} />
+        <div className="w-px h-8 bg-border" />
         {SYMBOLS.map((sym) => {
           const p = prices?.[sym];
           const isActive = selectedSymbol === sym;
@@ -470,9 +687,9 @@ export default function LiveTrading() {
                       <TableHead className="text-xs">Entry</TableHead>
                       <TableHead className="text-xs">Current</TableHead>
                       <TableHead className="text-xs">P&L</TableHead>
+                      <TableHead className="text-xs">SL/TP</TableHead>
                       <TableHead className="text-xs">Duration</TableHead>
-                      <TableHead className="text-xs">SL</TableHead>
-                      <TableHead className="text-xs">TP</TableHead>
+                      <TableHead className="text-xs text-right">Actions</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -508,11 +725,38 @@ export default function LiveTrading() {
                           <TableCell className={`text-xs number-mono font-medium ${isProfit ? "text-emerald-400" : "text-red-400"}`}>
                             {pnlR != null ? `${pnlR >= 0 ? "+" : ""}${pnlR.toFixed(2)}R` : "-"}
                           </TableCell>
+                          <TableCell className="text-xs">
+                            <div className="space-y-0.5">
+                              <div className="flex justify-between gap-2 text-[10px]">
+                                <span className="text-red-400 number-mono">{pos.stopLoss ? `$${formatPrice(pos.stopLoss)}` : "-"}</span>
+                                <span className="text-emerald-400 number-mono">{pos.tp1 ? `$${formatPrice(pos.tp1)}` : "-"}</span>
+                              </div>
+                              <SLTPProgressBar
+                                entryPrice={pos.entryPrice}
+                                currentPrice={curPrice}
+                                stopLoss={pos.stopLoss}
+                                takeProfit={pos.tp1}
+                                side={pos.side}
+                              />
+                            </div>
+                          </TableCell>
                           <TableCell className="text-xs text-muted-foreground">
                             {formatDistanceToNow(new Date(pos.entryTs), { addSuffix: false })}
                           </TableCell>
-                          <TableCell className="text-xs number-mono">{pos.stopLoss ? `$${formatPrice(pos.stopLoss)}` : "-"}</TableCell>
-                          <TableCell className="text-xs number-mono">{pos.tp1 ? `$${formatPrice(pos.tp1)}` : "-"}</TableCell>
+                          <TableCell className="text-right">
+                            <div className="flex items-center justify-end gap-0.5">
+                              <PartialCloseButton positionId={pos.id} symbol={pos.symbol} />
+                              <EditSLTPDialog
+                                positionId={pos.id}
+                                symbol={pos.symbol}
+                                side={pos.side}
+                                currentSL={pos.stopLoss}
+                                currentTP={pos.tp1}
+                                entryPrice={pos.entryPrice}
+                              />
+                              <CloseButton positionId={pos.id} symbol={pos.symbol} side={pos.side} />
+                            </div>
+                          </TableCell>
                         </TableRow>
                       );
                     })}

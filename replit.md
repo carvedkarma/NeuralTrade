@@ -12,9 +12,9 @@ Preferred communication style: Simple, everyday language.
 Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), Recharts for charts, and a dark navy theme with neon accents.
 
 **Pages:**
-- `/` — Command Center: Metrics bar, market grid (6 symbols with sparklines), live signal feed, active positions, mini equity curve
-- `/live` — Live Trading: Symbol selector tabs, price chart, signal detail panel, positions table, signal history
-- `/paper` — Paper Trading: Enable/disable toggles, portfolio metrics, equity curve, open/closed positions, configuration
+- `/` — Command Center: Metrics bar, market grid (6 symbols with sparklines), live signal feed, active positions (with quick close), mini equity curve
+- `/live` — Live Trading: Symbol selector tabs, price chart, signal detail panel, positions table (close/partial-close/edit SL-TP actions, SL/TP progress bars), new manual trade panel, signal history
+- `/paper` — Paper Trading: Enable/disable toggles, portfolio metrics, equity curve, open/closed positions (with close/partial-close/edit SL-TP actions), configuration
 - `/analytics` — Analytics: Performance summary (8 cards), equity curve, per-symbol breakdown, trade distribution, directional analysis
 - `/settings` — Settings: GPU connection, account config, model info, risk parameters, data freshness, danger zone
 
@@ -40,6 +40,12 @@ Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), 
   - `GET /api/market/prices` — Current prices for 6 symbols with 24h change
   - `GET /api/market/candles` — Candle data for charts
   - `GET/POST /api/paper/*` — Paper trading engine (positions, portfolio, config, enable/disable, start/stop)
+  - `POST /api/paper/positions/:id/close` — Manual close position at market
+  - `POST /api/paper/positions/:id/partial-close` — Partial close (percent)
+  - `PATCH /api/paper/positions/:id/sl` — Update stop loss
+  - `PATCH /api/paper/positions/:id/tp` — Update take profit
+  - `POST /api/paper/manual-open` — Open manual position
+  - `GET /api/paper/risk-alerts` — Real-time risk alerts (SL proximity, drawdown, exposure, duration)
   - `POST /api/ingest/*` — Signal ingest from GPU trainer
 
 - **Key Server Files:**

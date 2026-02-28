@@ -16,6 +16,9 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { useTradingWs } from "@/hooks/use-trading-ws";
+import { useToast } from "@/hooks/use-toast";
+import { queryClient } from "@/lib/queryClient";
+import RiskAlertBar from "@/components/risk-alert-bar";
 
 const NAV_ITEMS = [
   { path: "/", label: "Command Center", icon: LayoutDashboard },
@@ -51,7 +54,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     if (typeof window === "undefined") return true;
     return localStorage.getItem("theme") !== "light";
   });
-  const { connectionState } = useTradingWs();
+  const { connectionState, subscribe } = useTradingWs();
+  const { toast } = useToast();
 
   useEffect(() => {
     if (dark) {
@@ -62,6 +66,40 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       localStorage.setItem("theme", "light");
     }
   }, [dark]);
+
+  useEffect(() => {
+    const unsubs = [
+      subscribe("TRADE_OPEN", (payload) => {
+        const p = payload as { symbol?: string; side?: string; entryPrice?: number; riskUsd?: number; manual?: boolean };
+        toast({
+          title: `${p.manual ? "Manual " : ""}Opened ${p.side} ${p.symbol}`,
+          description: `Entry: $${p.entryPrice?.toLocaleString() ?? "?"} | Risk: $${p.riskUsd?.toFixed(2) ?? "?"}`,
+        });
+        queryClient.invalidateQueries({ queryKey: ["/api/paper/positions"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/paper/portfolio"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/paper/risk-alerts"] });
+      }),
+      subscribe("TRADE_CLOSE", (payload) => {
+        const p = payload as { symbol?: string; side?: string; pnl?: number; reason?: string };
+        const isWin = (p.pnl ?? 0) >= 0;
+        toast({
+          title: `Closed ${p.symbol} ${p.side}`,
+          description: `P&L: ${isWin ? "+" : ""}$${p.pnl?.toFixed(2) ?? "0"} (${p.reason ?? ""})`,
+          variant: isWin ? "default" : "destructive",
+        });
+        queryClient.invalidateQueries({ queryKey: ["/api/paper/positions"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/paper/portfolio"] });
+      }),
+      subscribe("TRADE_UPDATE", (payload) => {
+        const p = payload as { symbol?: string; action?: string };
+        toast({ title: `${p.symbol} — ${p.action}` });
+        queryClient.invalidateQueries({ queryKey: ["/api/paper/positions"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/paper/portfolio"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/paper/risk-alerts"] });
+      }),
+    ];
+    return () => unsubs.forEach((u) => u());
+  }, [subscribe, toast]);
 
   return (
     <div className="flex h-screen overflow-hidden bg-background" data-testid="app-layout">
@@ -152,6 +190,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       </aside>
 
       <main className="flex-1 overflow-y-auto" data-testid="main-content">
+        <RiskAlertBar />
         {children}
       </main>
     </div>

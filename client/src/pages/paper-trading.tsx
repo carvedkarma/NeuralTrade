@@ -32,6 +32,7 @@ import {
   Activity,
   AlertTriangle,
 } from "lucide-react";
+import { CloseButton, PartialCloseButton, EditSLTPDialog } from "@/components/position-actions";
 
 interface Portfolio {
   startingEquity: number;
@@ -415,12 +416,14 @@ export default function PaperTrading() {
                   <TableHead>Duration</TableHead>
                   <TableHead>SL</TableHead>
                   <TableHead>TP</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {openPositions.map((pos, i) => {
                   const pnl = pos.pnlR ?? 0;
                   const dur = pos.entryTime ? Date.now() - pos.entryTime : 0;
+                  const posId = typeof pos.id === "number" ? pos.id : parseInt(String(pos.id ?? "0"));
                   return (
                     <TableRow key={pos.id ?? i} data-testid={`row-open-position-${i}`}>
                       <TableCell className="font-medium">{pos.symbol}</TableCell>
@@ -440,6 +443,24 @@ export default function PaperTrading() {
                       <TableCell className="text-muted-foreground">{dur > 0 ? formatDuration(dur) : "-"}</TableCell>
                       <TableCell className="number-mono">{pos.stopLoss?.toFixed(2) ?? "-"}</TableCell>
                       <TableCell className="number-mono">{pos.takeProfit?.toFixed(2) ?? "-"}</TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-0.5">
+                          {posId > 0 && (
+                            <>
+                              <PartialCloseButton positionId={posId} symbol={pos.symbol} />
+                              <EditSLTPDialog
+                                positionId={posId}
+                                symbol={pos.symbol}
+                                side={pos.side}
+                                currentSL={pos.stopLoss ?? null}
+                                currentTP={pos.takeProfit ?? null}
+                                entryPrice={pos.entryPrice}
+                              />
+                              <CloseButton positionId={posId} symbol={pos.symbol} side={pos.side} />
+                            </>
+                          )}
+                        </div>
+                      </TableCell>
                     </TableRow>
                   );
                 })}

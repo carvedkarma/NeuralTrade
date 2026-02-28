@@ -168,6 +168,99 @@ router.get("/audit", async (req, res) => {
   }
 });
 
+router.post("/positions/:id/close", async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) { res.status(400).json({ error: "Invalid position ID" }); return; }
+    const { exitPrice } = req.body || {};
+    const result = await engine.manualClosePosition(id, exitPrice);
+    res.json({ message: "Position closed", ...result });
+  } catch (error: any) {
+    console.error("Error closing position:", error);
+    res.status(error.message?.includes("not found") ? 404 : 400).json({ error: error.message });
+  }
+});
+
+router.post("/positions/:id/partial-close", async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) { res.status(400).json({ error: "Invalid position ID" }); return; }
+    const { percent } = req.body || {};
+    if (!percent || percent <= 0 || percent >= 100) {
+      res.status(400).json({ error: "Percent must be between 1 and 99" }); return;
+    }
+    const result = await engine.manualPartialClose(id, percent);
+    res.json({ message: "Partial close executed", ...result });
+  } catch (error: any) {
+    console.error("Error partial closing position:", error);
+    res.status(error.message?.includes("not found") ? 404 : 400).json({ error: error.message });
+  }
+});
+
+router.patch("/positions/:id/sl", async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) { res.status(400).json({ error: "Invalid position ID" }); return; }
+    const { stopLoss } = req.body || {};
+    if (stopLoss === undefined || typeof stopLoss !== "number") {
+      res.status(400).json({ error: "stopLoss must be a number" }); return;
+    }
+    const updated = await engine.updatePositionLevels(id, { stopLoss });
+    res.json(updated);
+  } catch (error: any) {
+    console.error("Error updating SL:", error);
+    res.status(error.message?.includes("not found") ? 404 : 400).json({ error: error.message });
+  }
+});
+
+router.patch("/positions/:id/tp", async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (isNaN(id)) { res.status(400).json({ error: "Invalid position ID" }); return; }
+    const { tp1, tp2 } = req.body || {};
+    if (tp1 === undefined && tp2 === undefined) {
+      res.status(400).json({ error: "Provide at least tp1 or tp2" }); return;
+    }
+    const updates: { tp1?: number; tp2?: number } = {};
+    if (tp1 !== undefined) updates.tp1 = tp1;
+    if (tp2 !== undefined) updates.tp2 = tp2;
+    const updated = await engine.updatePositionLevels(id, updates);
+    res.json(updated);
+  } catch (error: any) {
+    console.error("Error updating TP:", error);
+    res.status(error.message?.includes("not found") ? 404 : 400).json({ error: error.message });
+  }
+});
+
+router.post("/manual-open", async (req, res) => {
+  try {
+    const { symbol, side, entryPrice, stopLoss, takeProfit, riskPercent } = req.body || {};
+    if (!symbol || !side || !entryPrice || !stopLoss || !takeProfit || !riskPercent) {
+      res.status(400).json({ error: "Missing required fields: symbol, side, entryPrice, stopLoss, takeProfit, riskPercent" }); return;
+    }
+    if (!["LONG", "SHORT"].includes(side)) {
+      res.status(400).json({ error: "side must be LONG or SHORT" }); return;
+    }
+    const position = await engine.manualOpenPosition({
+      symbol, side, entryPrice, stopLoss, takeProfit, riskPercent
+    });
+    res.json({ message: "Position opened", position });
+  } catch (error: any) {
+    console.error("Error opening manual position:", error);
+    res.status(400).json({ error: error.message });
+  }
+});
+
+router.get("/risk-alerts", async (req, res) => {
+  try {
+    const alerts = await engine.computeRiskAlerts();
+    res.json(alerts);
+  } catch (error: any) {
+    console.error("Error computing risk alerts:", error);
+    res.status(500).json({ error: "Failed to compute risk alerts" });
+  }
+});
+
 router.get("/status", async (req, res) => {
   try {
     const config = getConfig();

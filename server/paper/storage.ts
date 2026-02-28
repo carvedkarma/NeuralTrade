@@ -66,6 +66,14 @@ export async function getPositions(status?: "OPEN" | "CLOSED", limit: number = 1
     .limit(limit);
 }
 
+export async function getPositionById(id: number): Promise<PaperPosition | null> {
+  const positions = await db.select()
+    .from(paperPositions)
+    .where(eq(paperPositions.id, id))
+    .limit(1);
+  return positions[0] || null;
+}
+
 export async function createPosition(position: Omit<PaperPosition, "id">): Promise<PaperPosition> {
   const [created] = await db.insert(paperPositions).values(position).returning();
   return created;
