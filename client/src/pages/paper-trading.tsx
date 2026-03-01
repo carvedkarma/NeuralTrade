@@ -112,6 +112,161 @@ function formatDuration(ms: number): string {
   return `${hours}h ${minutes}m`;
 }
 
+function formatPrice(price: number): string {
+  if (price >= 1000) return price.toFixed(2);
+  if (price >= 1) return price.toFixed(4);
+  return price.toFixed(6);
+}
+
+function PositionPriceGauge({ pos }: { pos: Position }) {
+  const { entryPrice, currentPrice, stopLoss, takeProfit, side, pnlR, pnlUsdt } = pos;
+  if (!currentPrice || !stopLoss || !takeProfit) return null;
+
+  const isLong = side === "LONG";
+  const lo = isLong ? stopLoss : takeProfit;
+  const hi = isLong ? takeProfit : stopLoss;
+  const range = hi - lo;
+  if (range <= 0) return null;
+
+  const entryPct = ((entryPrice - lo) / range) * 100;
+  const pricePct = ((currentPrice - lo) / range) * 100;
+  const clampedPricePct = Math.max(0, Math.min(100, pricePct));
+
+  const pnl = pnlR ?? 0;
+  const isProfit = pnl >= 0;
+
+  const dur = pos.entryTime ? Date.now() - pos.entryTime : 0;
+
+  const slDenom = isLong ? (entryPrice - stopLoss) : (stopLoss - entryPrice);
+  const tpDenom = isLong ? (takeProfit - entryPrice) : (entryPrice - takeProfit);
+  const slDist = slDenom > 0
+    ? Math.max(0, Math.min(999, (isLong ? (currentPrice - stopLoss) : (stopLoss - currentPrice)) / slDenom * 100))
+    : 0;
+  const tpDist = tpDenom > 0
+    ? Math.max(0, Math.min(999, (isLong ? (takeProfit - currentPrice) : (currentPrice - takeProfit)) / tpDenom * 100))
+    : 0;
+
+  const posId = typeof pos.id === "number" ? pos.id : parseInt(String(pos.id ?? "0"));
+
+  return (
+    <div className="glass-card rounded-lg border border-border/50 p-3 space-y-3" data-testid={`position-gauge-${pos.symbol}`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="font-semibold text-sm">{pos.symbol}</span>
+          <Badge
+            variant="outline"
+            className={isLong ? "text-emerald-400 border-emerald-400/30 text-[10px] px-1.5" : "text-red-400 border-red-400/30 text-[10px] px-1.5"}
+          >
+            {side}
+          </Badge>
+          {pos.source === "v5_signal" && (
+            <Badge className="no-default-hover-elevate no-default-active-elevate text-[10px] bg-cyan-500/20 text-cyan-400 px-1.5">V5</Badge>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={`text-sm font-bold number-mono ${isProfit ? "text-emerald-400" : "text-red-400"}`}>
+            {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}R
+          </span>
+          {pnlUsdt != null && (
+            <span className={`text-xs number-mono ${isProfit ? "text-emerald-400/70" : "text-red-400/70"}`}>
+              {pnlUsdt >= 0 ? "+" : ""}${pnlUsdt.toFixed(2)}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <div className="relative h-8 rounded-md overflow-hidden bg-muted/30">
+          <div
+            className="absolute top-0 bottom-0 w-0.5 bg-amber-400/80 z-10"
+            style={{ left: `${Math.max(1, Math.min(99, entryPct))}%` }}
+          >
+            <div className="absolute -top-0.5 left-1/2 -translate-x-1/2 w-0 h-0 border-l-[3px] border-r-[3px] border-t-[4px] border-l-transparent border-r-transparent border-t-amber-400" />
+          </div>
+
+          <div
+            className={`absolute top-0 bottom-0 rounded-sm transition-all duration-500 ${
+              isProfit ? "bg-emerald-500/20" : "bg-red-500/20"
+            }`}
+            style={{
+              left: `${Math.min(clampedPricePct, Math.max(0, Math.min(100, entryPct)))}%`,
+              width: `${Math.abs(clampedPricePct - Math.max(0, Math.min(100, entryPct)))}%`,
+            }}
+          />
+
+          <div
+            className={`absolute top-0 bottom-0 w-[3px] z-20 rounded-full transition-all duration-500 ${
+              isProfit ? "bg-emerald-400 shadow-[0_0_8px_rgba(34,197,94,0.5)]" : "bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.5)]"
+            }`}
+            style={{ left: `${clampedPricePct}%` }}
+          />
+
+          <div
+            className="absolute inset-y-0 left-0 flex items-center pl-1.5"
+          >
+            <span className="text-[9px] font-semibold text-red-400/80 number-mono">
+              {isLong ? "SL" : "TP"}
+            </span>
+          </div>
+          <div
+            className="absolute inset-y-0 right-0 flex items-center pr-1.5"
+          >
+            <span className="text-[9px] font-semibold text-emerald-400/80 number-mono">
+              {isLong ? "TP" : "SL"}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex justify-between items-center text-[10px] number-mono text-muted-foreground">
+          <span className="text-red-400/70">${formatPrice(isLong ? stopLoss : takeProfit)}</span>
+          <div className="flex items-center gap-1">
+            <span className="text-amber-400/70">Entry ${formatPrice(entryPrice)}</span>
+            <span className="text-foreground/50">→</span>
+            <span className={isProfit ? "text-emerald-400" : "text-red-400"}>Now ${formatPrice(currentPrice)}</span>
+          </div>
+          <span className="text-emerald-400/70">${formatPrice(isLong ? takeProfit : stopLoss)}</span>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between text-[10px]">
+        <div className="flex gap-3">
+          <div>
+            <span className="text-muted-foreground">SL Dist: </span>
+            <span className={`number-mono ${slDist < 30 ? "text-red-400 font-semibold" : "text-muted-foreground"}`}>
+              {slDist.toFixed(0)}%
+            </span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">TP Dist: </span>
+            <span className={`number-mono ${tpDist < 30 ? "text-emerald-400 font-semibold" : "text-muted-foreground"}`}>
+              {tpDist.toFixed(0)}%
+            </span>
+          </div>
+          <div className="text-muted-foreground">
+            {dur > 0 ? formatDuration(dur) : "-"}
+          </div>
+        </div>
+        <div className="flex items-center gap-0.5">
+          {posId > 0 && (
+            <>
+              <PartialCloseButton positionId={posId} symbol={pos.symbol} />
+              <EditSLTPDialog
+                positionId={posId}
+                symbol={pos.symbol}
+                side={pos.side}
+                currentSL={pos.stopLoss ?? null}
+                currentTP={pos.takeProfit ?? null}
+                entryPrice={pos.entryPrice}
+              />
+              <CloseButton positionId={posId} symbol={pos.symbol} side={pos.side} />
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function PaperTrading() {
   const [equityRange, setEquityRange] = useState<"7d" | "30d" | "all">("30d");
 
@@ -134,7 +289,7 @@ export default function PaperTrading() {
 
   const { data: openPositions } = useQuery<Position[]>({
     queryKey: ["/api/paper/positions", "?status=OPEN"],
-    refetchInterval: 10000,
+    refetchInterval: 5000,
   });
 
   const { data: closedPositions } = useQuery<Position[]>({
@@ -398,7 +553,14 @@ export default function PaperTrading() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-sm font-medium">Open Positions</CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-sm font-medium">Open Positions</CardTitle>
+            {openPositions && openPositions.length > 0 && (
+              <Badge variant="outline" className="text-[10px] text-cyan-400 border-cyan-400/30" data-testid="badge-open-count">
+                {openPositions.length} active
+              </Badge>
+            )}
+          </div>
         </CardHeader>
         <CardContent>
           {(!openPositions || openPositions.length === 0) ? (
@@ -406,76 +568,11 @@ export default function PaperTrading() {
               No open positions
             </p>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Symbol</TableHead>
-                  <TableHead>Side</TableHead>
-                  <TableHead>Entry Price</TableHead>
-                  <TableHead>Current Price</TableHead>
-                  <TableHead>P&L (R)</TableHead>
-                  <TableHead>Duration</TableHead>
-                  <TableHead>SL</TableHead>
-                  <TableHead>TP</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {openPositions.map((pos, i) => {
-                  const pnl = pos.pnlR ?? 0;
-                  const dur = pos.entryTime ? Date.now() - pos.entryTime : 0;
-                  const posId = typeof pos.id === "number" ? pos.id : parseInt(String(pos.id ?? "0"));
-                  return (
-                    <TableRow key={pos.id ?? i} data-testid={`row-open-position-${i}`}>
-                      <TableCell className="font-medium">
-                        <div className="flex items-center gap-1.5">
-                          {pos.symbol}
-                          {pos.source === "v5_signal" && (
-                            <Badge className="no-default-hover-elevate no-default-active-elevate text-[10px] bg-cyan-500/20 text-cyan-400" data-testid={`badge-v5-signal-${i}`}>
-                              V5
-                            </Badge>
-                          )}
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant="outline"
-                          className={pos.side === "LONG" ? "text-emerald-400 border-emerald-400/30" : "text-red-400 border-red-400/30"}
-                        >
-                          {pos.side}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="number-mono">{pos.entryPrice?.toFixed(2)}</TableCell>
-                      <TableCell className="number-mono">{pos.currentPrice?.toFixed(2) ?? "-"}</TableCell>
-                      <TableCell className={`number-mono ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                        {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}R
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">{dur > 0 ? formatDuration(dur) : "-"}</TableCell>
-                      <TableCell className="number-mono">{pos.stopLoss?.toFixed(2) ?? "-"}</TableCell>
-                      <TableCell className="number-mono">{pos.takeProfit?.toFixed(2) ?? "-"}</TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex items-center justify-end gap-0.5">
-                          {posId > 0 && (
-                            <>
-                              <PartialCloseButton positionId={posId} symbol={pos.symbol} />
-                              <EditSLTPDialog
-                                positionId={posId}
-                                symbol={pos.symbol}
-                                side={pos.side}
-                                currentSL={pos.stopLoss ?? null}
-                                currentTP={pos.takeProfit ?? null}
-                                entryPrice={pos.entryPrice}
-                              />
-                              <CloseButton positionId={posId} symbol={pos.symbol} side={pos.side} />
-                            </>
-                          )}
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
+            <div className="grid gap-3 sm:grid-cols-1 md:grid-cols-2 xl:grid-cols-3" data-testid="positions-grid">
+              {openPositions.map((pos, i) => (
+                <PositionPriceGauge key={pos.id ?? i} pos={pos} />
+              ))}
+            </div>
           )}
         </CardContent>
       </Card>
