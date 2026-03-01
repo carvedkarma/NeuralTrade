@@ -40,7 +40,7 @@ Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), 
   - `GET /api/market/prices` — Current prices for 6 symbols with 24h change
   - `GET /api/market/candles` — Candle data for charts
   - `GET /api/live/cycle-logs` — Cycle log history (supports `symbol`, `limit` params)
-  - `POST /api/live/cycle-log` — Receive cycle log from GPU trainer, broadcasts via WebSocket
+  - `POST /api/live/cycle-log` — Receive cycle log from GPU trainer, broadcasts via WebSocket. **Auto-trade**: when decision=ENTER and paper trading is enabled, automatically opens a paper position via `manualOpenPosition` with source="v5_signal", SL/TP calculated from threshold_used, 2:1 R:R ratio. Safety checks: max 1 position per symbol, max 6 total open positions.
   - `GET/POST /api/paper/*` — Paper trading engine (positions, portfolio, config, enable/disable, start/stop)
   - `POST /api/paper/positions/:id/close` — Manual close position at market
   - `POST /api/paper/positions/:id/partial-close` — Partial close (percent)
@@ -61,7 +61,7 @@ Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), 
   - `server/ws.ts` — WebSocket server for real-time event streaming (broadcasts CYCLE_UPDATE on push)
 
 ### Database (PostgreSQL via Drizzle ORM)
-Key tables: `v5_signals`, `live_trade_records`, `live_cycle_logs` (with V5 fields: ret_mu, mfe_pred, mae_pred, p_hold, p_long, p_short), `paper_positions`, `paper_portfolio`, `paper_trades`, `paper_trade_history` (complete trade records with R metrics per asset), `candles`, `settings`
+Key tables: `v5_signals`, `live_trade_records`, `live_cycle_logs` (with V5 fields: ret_mu, mfe_pred, mae_pred, p_hold, p_long, p_short), `paper_positions` (with `source` field: "v5_signal"|"manual"|"auto"), `paper_portfolio`, `paper_trades`, `paper_trade_history` (complete trade records with R metrics per asset), `candles`, `settings`
 
 Schema in `shared/schema.ts` with Drizzle + Zod validation.
 

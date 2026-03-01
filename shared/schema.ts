@@ -717,6 +717,7 @@ export const paperPositions = pgTable("paper_positions", {
   peakProfit: real("peak_profit").default(0),           // Maximum favorable excursion (MFE) in USD
   initialStopDistance: real("initial_stop_distance"),   // Initial stop distance for R-multiple calc
   regime: varchar("regime", { length: 20 }),            // Market regime at entry
+  source: varchar("source", { length: 20 }).default("manual"),
 }, (table) => ({
   statusIdx: index("paper_positions_status_idx").on(table.status),
   entryTsIdx: index("paper_positions_entry_ts_idx").on(table.entryTs),

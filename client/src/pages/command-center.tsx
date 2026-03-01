@@ -43,6 +43,7 @@ interface CycleLog {
   pLong: number | null;
   pShort: number | null;
   createdAt: number;
+  autoTradeResult?: { opened: boolean; positionId?: number; reason?: string };
 }
 
 function MetricCard({
@@ -227,9 +228,13 @@ export default function CommandCenter() {
       pLong: (payload.pLong as number) ?? null,
       pShort: (payload.pShort as number) ?? null,
       createdAt: Date.now(),
+      autoTradeResult: payload.autoTradeResult as CycleLog["autoTradeResult"] ?? undefined,
     };
     setRealtimeCycles((prev) => [newCycle, ...prev].slice(0, 30));
     queryClient.invalidateQueries({ queryKey: ["/api/live/cycle-logs"] });
+    if (newCycle.autoTradeResult?.opened) {
+      queryClient.invalidateQueries({ queryKey: ["/api/paper/positions"] });
+    }
   }, []);
 
   useEffect(() => {
@@ -420,9 +425,16 @@ export default function CommandCenter() {
                   <Badge className={`no-default-hover-elevate no-default-active-elevate text-xs w-fit ${dirColor}`} data-testid={`cycle-dir-${idx}`}>
                     {dir}
                   </Badge>
-                  <Badge className={`no-default-hover-elevate no-default-active-elevate text-xs w-fit ${decisionColor}`} data-testid={`cycle-decision-${idx}`}>
-                    {cycle.decision}
-                  </Badge>
+                  <div className="flex items-center gap-1">
+                    <Badge className={`no-default-hover-elevate no-default-active-elevate text-xs w-fit ${decisionColor}`} data-testid={`cycle-decision-${idx}`}>
+                      {cycle.decision}
+                    </Badge>
+                    {cycle.autoTradeResult?.opened && (
+                      <Badge className="no-default-hover-elevate no-default-active-elevate text-[10px] w-fit bg-cyan-500/20 text-cyan-400 animate-signal-arrive" data-testid={`cycle-executed-${idx}`}>
+                        EXECUTED
+                      </Badge>
+                    )}
+                  </div>
                   <div className="flex items-center gap-2">
                     <Progress value={(cycle.pEnter ?? 0) * 100} className="h-2 flex-1" />
                     <span className="number-mono text-xs">{cycle.pEnter != null ? (cycle.pEnter * 100).toFixed(0) + "%" : "—"}</span>
@@ -477,7 +489,12 @@ export default function CommandCenter() {
                     className={`grid grid-cols-7 gap-2 px-2 py-2 rounded ${rowBg} items-center`}
                     data-testid={`position-row-${idx}`}
                   >
-                    <span className="text-sm font-medium">{pos.symbol ?? "—"}</span>
+                    <span className="text-sm font-medium flex items-center gap-1">
+                      {pos.symbol ?? "—"}
+                      {pos.source === "v5_signal" && (
+                        <Badge className="no-default-hover-elevate no-default-active-elevate text-[9px] px-1 py-0 bg-cyan-500/20 text-cyan-400" data-testid={`badge-v5-${idx}`}>V5</Badge>
+                      )}
+                    </span>
                     <Badge
                       className={`no-default-hover-elevate no-default-active-elevate text-xs w-fit ${
                         pos.side === "LONG" ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"

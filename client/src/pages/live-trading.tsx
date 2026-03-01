@@ -366,6 +366,7 @@ function NewTradePanel({ prices }: { prices: PriceData | undefined }) {
 }
 
 export default function LiveTrading() {
+  const { toast } = useToast();
   const [selectedSymbol, setSelectedSymbol] = useState<string>("BTCUSDT");
   const [timeframe, setTimeframe] = useState<string>("15m");
   const [historyFilter, setHistoryFilter] = useState<string>("ALL");
@@ -432,12 +433,20 @@ export default function LiveTrading() {
   const { subscribe } = useTradingWs();
 
   useEffect(() => {
-    const unsub = subscribe("CYCLE_UPDATE", () => {
+    const unsub = subscribe("CYCLE_UPDATE", (payload: Record<string, unknown>) => {
       queryClient.invalidateQueries({ queryKey: ["/api/live/cycle-logs"] });
       queryClient.invalidateQueries({ queryKey: ["/api/v5/signals"] });
+      const autoTrade = payload.autoTradeResult as { opened?: boolean; positionId?: number } | undefined;
+      if (autoTrade?.opened) {
+        queryClient.invalidateQueries({ queryKey: ["/api/paper/positions"] });
+        toast({
+          title: `V5 Auto-Trade: ${(payload.direction as string)?.toUpperCase()} ${payload.symbol}`,
+          description: `Position opened @ $${Number(payload.price).toFixed(2)} | p_enter: ${((payload.pEnter as number) * 100).toFixed(0)}%`,
+        });
+      }
     });
     return unsub;
-  }, [subscribe]);
+  }, [subscribe, toast]);
 
   const signal = latestSignal?.[0] ?? null;
   const latestCycle = cycleLog?.[0] ?? null;
@@ -924,7 +933,14 @@ export default function LiveTrading() {
                           data-testid={`position-row-${pos.id}`}
                           className={isProfit ? "bg-emerald-500/5" : pnlR != null && pnlR < 0 ? "bg-red-500/5" : ""}
                         >
-                          <TableCell className="text-xs font-medium">{pos.symbol}</TableCell>
+                          <TableCell className="text-xs font-medium">
+                            <span className="flex items-center gap-1">
+                              {pos.symbol}
+                              {pos.source === "v5_signal" && (
+                                <Badge className="no-default-hover-elevate no-default-active-elevate text-[9px] px-1 py-0 bg-cyan-500/20 text-cyan-400">V5</Badge>
+                              )}
+                            </span>
+                          </TableCell>
                           <TableCell>
                             <Badge
                               className={

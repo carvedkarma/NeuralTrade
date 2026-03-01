@@ -67,6 +67,7 @@ interface Position {
   exitPrice?: number;
   exitType?: string;
   status?: string;
+  source?: string;
 }
 
 interface EquityPoint {
@@ -426,7 +427,16 @@ export default function PaperTrading() {
                   const posId = typeof pos.id === "number" ? pos.id : parseInt(String(pos.id ?? "0"));
                   return (
                     <TableRow key={pos.id ?? i} data-testid={`row-open-position-${i}`}>
-                      <TableCell className="font-medium">{pos.symbol}</TableCell>
+                      <TableCell className="font-medium">
+                        <div className="flex items-center gap-1.5">
+                          {pos.symbol}
+                          {pos.source === "v5_signal" && (
+                            <Badge className="no-default-hover-elevate no-default-active-elevate text-[10px] bg-cyan-500/20 text-cyan-400" data-testid={`badge-v5-signal-${i}`}>
+                              V5
+                            </Badge>
+                          )}
+                        </div>
+                      </TableCell>
                       <TableCell>
                         <Badge
                           variant="outline"

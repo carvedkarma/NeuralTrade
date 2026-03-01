@@ -2,6 +2,9 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
+import { manualOpenPosition } from "./paper/engine";
+import { getConfig } from "./paper/config";
+import { getPositionsBySymbol } from "./paper/storage";
 import ingestRouter from "./ingest";
 import { db } from "./db";
 import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema, openInterestHistory, v5Signals, paperPositions, paperPortfolio, paperTradeHistory } from "@shared/schema";
@@ -4781,6 +4784,65 @@ export async function registerRoutes(
         createdAt: Date.now(),
       });
       gpuBridge.recordActivity();
+      let autoTradeResult: { opened: boolean; positionId?: number; reason?: string } = { opened: false };
+
+      const isEnterDecision = typeof c.decision === "string" && c.decision.toUpperCase().includes("ENTER");
+      if (isEnterDecision && c.price && c.direction) {
+        const paperConfig = getConfig();
+        if (!paperConfig.paperTradingEnabled) {
+          autoTradeResult = { opened: false, reason: "paper_trading_disabled" };
+        } else {
+          try {
+            const existingPositions = await getPositionsBySymbol(c.symbol, "OPEN", 1);
+            if (existingPositions.length > 0) {
+              autoTradeResult = { opened: false, reason: "position_already_open" };
+              console.log(`[Auto-Trade] SKIP ${c.symbol} — position already open`);
+            } else {
+              const allOpenPositions = await db.select().from(paperPositions).where(eq(paperPositions.status, "OPEN"));
+              const maxPositions = 6;
+              if (allOpenPositions.length >= maxPositions) {
+                autoTradeResult = { opened: false, reason: "max_positions_reached" };
+                console.log(`[Auto-Trade] SKIP ${c.symbol} — max ${maxPositions} positions reached`);
+              } else {
+                const side: "LONG" | "SHORT" = c.direction.toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+                const entryPrice = Number(c.price);
+                const thresholdUsed = Number(c.threshold_used) || 0.75;
+                const stopDistancePct = thresholdUsed * 0.015;
+                const stopDistance = entryPrice * Math.max(stopDistancePct, 0.003);
+                const rrRatio = 2.0;
+
+                let stopLoss: number;
+                let takeProfit: number;
+                if (side === "LONG") {
+                  stopLoss = entryPrice - stopDistance;
+                  takeProfit = entryPrice + (stopDistance * rrRatio);
+                } else {
+                  stopLoss = entryPrice + stopDistance;
+                  takeProfit = entryPrice - (stopDistance * rrRatio);
+                }
+
+                const position = await manualOpenPosition({
+                  symbol: c.symbol,
+                  side,
+                  entryPrice,
+                  stopLoss: Number(stopLoss.toFixed(6)),
+                  takeProfit: Number(takeProfit.toFixed(6)),
+                  riskPercent: paperConfig.riskPerTradePct,
+                  source: "v5_signal",
+                  signalConfidence: c.p_enter ?? null,
+                });
+
+                autoTradeResult = { opened: true, positionId: position.id };
+                console.log(`[Auto-Trade] Opened ${side} ${c.symbol} @ $${entryPrice} | SL: $${stopLoss.toFixed(4)} | TP: $${takeProfit.toFixed(4)} | p_enter: ${c.p_enter}`);
+              }
+            }
+          } catch (err: any) {
+            autoTradeResult = { opened: false, reason: err.message };
+            console.error(`[Auto-Trade] Failed to open ${c.symbol}:`, err.message);
+          }
+        }
+      }
+
       broadcast("CYCLE_UPDATE", {
         id: record.id,
         symbol: c.symbol,
@@ -4801,8 +4863,9 @@ export async function registerRoutes(
         holdReason: c.hold_reason,
         thresholdUsed: c.threshold_used,
         laneSizeMult: c.lane_size_mult,
+        autoTradeResult,
       });
-      res.json({ success: true, id: record.id });
+      res.json({ success: true, id: record.id, autoTrade: autoTradeResult });
     } catch (error) {
       console.error("[Cycle Log] Error:", error);
       res.status(500).json({ error: "Failed to record cycle log" });

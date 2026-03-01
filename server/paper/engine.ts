@@ -1537,8 +1537,10 @@ export async function manualOpenPosition(params: {
   stopLoss: number;
   takeProfit: number;
   riskPercent: number;
+  source?: string;
+  signalConfidence?: number;
 }): Promise<PaperPosition> {
-  const { symbol, side, entryPrice, stopLoss, takeProfit, riskPercent } = params;
+  const { symbol, side, entryPrice, stopLoss, takeProfit, riskPercent, source = "manual", signalConfidence = null } = params;
   const portfolio = await storage.getOrCreatePortfolio();
   const config = getConfig();
 
@@ -1577,11 +1579,12 @@ export async function manualOpenPosition(params: {
     exitPrice: null,
     realizedPnlUsdt: null,
     exitReason: null,
-    signalConfidence: null,
+    signalConfidence: signalConfidence,
     signalEdge: null,
     peakProfit: 0,
     initialStopDistance: stopDistance,
     regime: null,
+    source: source,
   });
 
   const { broadcast } = await import("../ws");
@@ -1594,10 +1597,11 @@ export async function manualOpenPosition(params: {
     takeProfit,
     qty,
     riskUsd,
-    manual: true,
+    source,
   });
 
-  console.log(`[Paper] MANUAL ${side} ${symbol} @ ${entryPrice} | SL: ${stopLoss} | TP: ${takeProfit} | Risk: $${riskUsd.toFixed(2)}`);
+  const label = source === "v5_signal" ? "Auto-Trade" : "Paper";
+  console.log(`[${label}] ${side} ${symbol} @ ${entryPrice} | SL: ${stopLoss} | TP: ${takeProfit} | Risk: $${riskUsd.toFixed(2)}`);
   return position;
 }
 
