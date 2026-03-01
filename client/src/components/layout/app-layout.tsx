@@ -9,9 +9,11 @@ import {
   Moon,
   Sun,
   ChevronLeft,
+  Radio,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { formatDistanceToNow } from "date-fns";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -28,11 +30,23 @@ const NAV_ITEMS = [
   { path: "/settings", label: "Settings", icon: Settings },
 ];
 
-function GpuStatusDot({ className }: { className?: string }) {
-  const { data } = useQuery<{ gpu: { isAvailable: boolean; latencyMs: number } }>({
+interface SystemStatusData {
+  gpu: { isAvailable: boolean; latencyMs: number; lastActivity: number | null };
+  paper: { portfolioExists: boolean; openPositions: number };
+  cyclesToday: number;
+  lastCycleTs: number | null;
+  lastSignal: { signalTs: number } | null;
+}
+
+function useSystemStatus() {
+  return useQuery<SystemStatusData>({
     queryKey: ["/api/system/status"],
     refetchInterval: 15000,
   });
+}
+
+function GpuStatusDot({ className }: { className?: string }) {
+  const { data } = useSystemStatus();
   const isOnline = data?.gpu?.isAvailable ?? false;
   return (
     <span
@@ -44,6 +58,63 @@ function GpuStatusDot({ className }: { className?: string }) {
         className,
       )}
     />
+  );
+}
+
+function SystemLiveIndicator({ collapsed }: { collapsed: boolean }) {
+  const { data } = useSystemStatus();
+  const gpuOnline = data?.gpu?.isAvailable ?? false;
+  const paperEnabled = data?.paper?.portfolioExists ?? false;
+  const isLive = gpuOnline && paperEnabled;
+  const cyclesToday = data?.cyclesToday ?? 0;
+  const lastCycleTs = data?.lastCycleTs ?? data?.gpu?.lastActivity ?? null;
+
+  if (collapsed) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div className="flex items-center justify-center py-1" data-testid="system-live-indicator">
+            <span
+              className={cn(
+                "inline-block w-2 h-2 rounded-full",
+                isLive ? "bg-emerald-400 pulse-dot" : "bg-muted-foreground",
+              )}
+            />
+          </div>
+        </TooltipTrigger>
+        <TooltipContent side="right" className="text-xs">
+          {isLive ? "System LIVE" : "System Offline"}
+          {lastCycleTs && ` — Last scan: ${formatDistanceToNow(new Date(lastCycleTs), { addSuffix: true })}`}
+        </TooltipContent>
+      </Tooltip>
+    );
+  }
+
+  return (
+    <div className="px-2.5 py-1.5 space-y-1" data-testid="system-live-indicator">
+      <div className="flex items-center gap-2">
+        <span
+          className={cn(
+            "inline-block w-2 h-2 rounded-full shrink-0",
+            isLive ? "bg-emerald-400 pulse-dot" : "bg-muted-foreground",
+          )}
+        />
+        <span className={cn("text-xs font-semibold tracking-wider uppercase", isLive ? "text-emerald-400" : "text-muted-foreground")}>
+          {isLive ? "LIVE" : "OFFLINE"}
+        </span>
+        {isLive && <Radio className="w-3 h-3 text-emerald-400 ml-auto" />}
+      </div>
+      {lastCycleTs && (
+        <div className="text-[10px] text-muted-foreground pl-4 truncate" data-testid="text-last-scan">
+          Last scan: {formatDistanceToNow(new Date(lastCycleTs), { addSuffix: true })}
+        </div>
+      )}
+      {cyclesToday > 0 && (
+        <div className="text-[10px] text-muted-foreground pl-4" data-testid="text-cycles-today">
+          {cyclesToday} cycles today
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -157,6 +228,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         </nav>
 
         <div className="border-t border-sidebar-border p-2 space-y-1">
+          <SystemLiveIndicator collapsed={collapsed} />
           <div className={cn("flex items-center gap-2 px-2.5 py-1.5 text-xs text-muted-foreground", collapsed && "justify-center")}>
             <GpuStatusDot />
             {!collapsed && (

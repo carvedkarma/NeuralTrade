@@ -253,6 +253,7 @@ class GPUTrainerBridge {
   private lastHealthCheck: number = 0;
   private healthCheckInterval: number = 30000; // 30 seconds
   private predictionMode: "stf" | "mtf" = "stf"; // Default to STF for 15m-trained models
+  private lastIngestActivity: number = 0;
   
   // Pushed status from remote GPU trainer
   private pushedStatus: PushedGPUStatus = {
@@ -422,11 +423,24 @@ class GPUTrainerBridge {
     return this.flowForecastCapable;
   }
   
+  recordActivity(): void {
+    this.lastIngestActivity = Date.now();
+  }
+
+  getLastActivity(): number {
+    return this.lastIngestActivity;
+  }
+
   /**
    * Check if GPU trainer is available (with caching)
+   * Returns true if health check passes OR if there was recent push activity within 5 minutes
    */
   async isGPUAvailable(): Promise<boolean> {
     const now = Date.now();
+    const recentPushActivity = this.lastIngestActivity > 0 && (now - this.lastIngestActivity) < 5 * 60 * 1000;
+    if (recentPushActivity) {
+      return true;
+    }
     if (now - this.lastHealthCheck > this.healthCheckInterval) {
       await this.checkHealth();
     }

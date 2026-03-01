@@ -101,6 +101,12 @@ async function processEvent(
         laneSizeMult: p.lane_size_mult ?? null,
         laneBudgetRemainingR: p.lane_budget_remaining_r ?? null,
         holdReason: p.hold_reason ?? null,
+        retMu: p.ret_mu ?? null,
+        mfePred: p.mfe_pred ?? null,
+        maePred: p.mae_pred ?? null,
+        pHold: p.p_hold ?? null,
+        pLong: p.p_long ?? null,
+        pShort: p.p_short ?? null,
         createdAt: Date.now(),
       });
       break;

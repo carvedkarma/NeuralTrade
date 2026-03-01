@@ -1,7 +1,7 @@
 import { db } from "../db";
-import { paperPortfolio, paperPositions, paperTrades, paperEquityCurve } from "@shared/schema";
+import { paperPortfolio, paperPositions, paperTrades, paperEquityCurve, paperTradeHistory } from "@shared/schema";
 import type { PaperPortfolio, PaperPosition, PaperTrade, PaperEquityCurve } from "@shared/schema";
-import { eq, desc, gte } from "drizzle-orm";
+import { eq, desc, gte, and } from "drizzle-orm";
 import { getConfig } from "./config";
 
 export async function getOrCreatePortfolio(): Promise<PaperPortfolio> {
@@ -139,6 +139,75 @@ export async function getEquityCurve(range?: "7d" | "30d" | "all"): Promise<Pape
     .orderBy(paperEquityCurve.ts);
 }
 
+export async function getPositionsBySymbol(symbol: string, status?: "OPEN" | "CLOSED", limit: number = 100): Promise<PaperPosition[]> {
+  const conditions = [eq(paperPositions.symbol, symbol)];
+  if (status) conditions.push(eq(paperPositions.status, status));
+  return db.select()
+    .from(paperPositions)
+    .where(and(...conditions))
+    .orderBy(desc(paperPositions.entryTs))
+    .limit(limit);
+}
+
+export interface TradeCloseRecord {
+  positionId: number;
+  symbol: string;
+  side: string;
+  entryTs: number;
+  entryPrice: number;
+  exitTs: number;
+  exitPrice: number;
+  grossR: number;
+  netR: number;
+  costR: number;
+  pnlUsdt: number;
+  riskUsdt: number;
+  barsHeld: number;
+  exitReason: string;
+  maxFavorableR: number;
+  regime: string | null;
+  signalConfidence: number | null;
+  signalEdge: number | null;
+}
+
+export async function recordTradeClose(record: TradeCloseRecord): Promise<void> {
+  try {
+    await db.insert(paperTradeHistory).values({
+      positionId: record.positionId,
+      symbol: record.symbol,
+      side: record.side,
+      entryTs: record.entryTs,
+      entryPrice: record.entryPrice,
+      exitTs: record.exitTs,
+      exitPrice: record.exitPrice,
+      grossR: record.grossR,
+      netR: record.netR,
+      costR: record.costR,
+      pnlUsdt: record.pnlUsdt,
+      riskUsdt: record.riskUsdt,
+      barsHeld: record.barsHeld,
+      exitReason: record.exitReason,
+      maxFavorableR: record.maxFavorableR,
+      regime: record.regime,
+      signalConfidence: record.signalConfidence,
+      signalEdge: record.signalEdge,
+    });
+  } catch (err) {
+    console.error("[Paper Storage] Failed to record trade close:", err);
+  }
+}
+
+export async function getTradeHistory(options?: { symbol?: string; limit?: number; offset?: number }): Promise<any[]> {
+  const conditions = [];
+  if (options?.symbol) conditions.push(eq(paperTradeHistory.symbol, options.symbol));
+  return db.select()
+    .from(paperTradeHistory)
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .orderBy(desc(paperTradeHistory.exitTs))
+    .limit(options?.limit ?? 100)
+    .offset(options?.offset ?? 0);
+}
+
 /**
  * Get consecutive losing trades at the end of the trade history
  * Used for institution-grade loss streak tracking
@@ -155,7 +224,7 @@ export async function getRecentLossStreak(): Promise<number> {
     if (pnl < 0) {
       lossStreak++;
     } else {
-      break; // Stop counting at first win
+      break;
     }
   }
   return lossStreak;

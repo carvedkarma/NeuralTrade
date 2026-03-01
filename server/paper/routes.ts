@@ -28,8 +28,14 @@ router.get("/portfolio", async (req, res) => {
 router.get("/positions", async (req, res) => {
   try {
     const status = req.query.status as "OPEN" | "CLOSED" | undefined;
+    const symbol = req.query.symbol as string | undefined;
     const limit = parseInt(req.query.limit as string) || 100;
-    const positions = await storage.getPositions(status, limit);
+    let positions;
+    if (symbol) {
+      positions = await storage.getPositionsBySymbol(symbol, status, limit);
+    } else {
+      positions = await storage.getPositions(status, limit);
+    }
     res.json(positions);
   } catch (error) {
     console.error("Error getting positions:", error);
@@ -45,6 +51,19 @@ router.get("/trades", async (req, res) => {
   } catch (error) {
     console.error("Error getting trades:", error);
     res.status(500).json({ error: "Failed to get trades" });
+  }
+});
+
+router.get("/trade-history", async (req, res) => {
+  try {
+    const symbol = req.query.symbol as string | undefined;
+    const limit = parseInt(req.query.limit as string) || 100;
+    const offset = parseInt(req.query.offset as string) || 0;
+    const history = await storage.getTradeHistory({ symbol, limit, offset });
+    res.json(history);
+  } catch (error) {
+    console.error("Error getting trade history:", error);
+    res.status(500).json({ error: "Failed to get trade history" });
   }
 });
 

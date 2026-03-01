@@ -68,7 +68,19 @@ export default function SettingsPage() {
 
   const gpuConnected = systemStatus?.gpu?.isAvailable ?? false;
   const gpuUrl = systemStatus?.gpu?.url ?? "";
+  const gpuLastActivity = systemStatus?.gpu?.lastActivity ?? null;
   const lastSync = systemStatus?.sync?.lastSync;
+
+  const formatTimeAgo = (ts: number | null): string => {
+    if (!ts) return "";
+    const diff = Date.now() - ts;
+    if (diff < 60000) return `${Math.floor(diff / 1000)}s ago`;
+    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+    return `${Math.floor(diff / 86400000)}d ago`;
+  };
+
+  const isViaPush = gpuConnected && gpuLastActivity && (Date.now() - gpuLastActivity) < 5 * 60 * 1000;
 
   return (
     <div className="p-4 space-y-4 max-w-4xl" data-testid="settings">
@@ -84,7 +96,7 @@ export default function SettingsPage() {
         <div className="flex items-center gap-3 mb-3">
           {gpuConnected ? (
             <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30" data-testid="gpu-status-badge">
-              Connected
+              {isViaPush ? "Connected (via push)" : "Connected"}
             </Badge>
           ) : (
             <Badge className="bg-red-500/20 text-red-400 border-red-500/30" data-testid="gpu-status-badge">
@@ -92,6 +104,12 @@ export default function SettingsPage() {
             </Badge>
           )}
         </div>
+        {gpuLastActivity && (
+          <div className="mb-2">
+            <Label className="text-muted-foreground text-xs">Last Activity</Label>
+            <p className="text-sm" data-testid="gpu-last-activity">{formatTimeAgo(gpuLastActivity)}</p>
+          </div>
+        )}
         {gpuUrl && (
           <div className="mb-2">
             <Label className="text-muted-foreground text-xs">GPU URL</Label>

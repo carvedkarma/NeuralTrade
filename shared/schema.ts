@@ -748,6 +748,33 @@ export const paperEquityCurve = pgTable("paper_equity_curve", {
   tsIdx: index("paper_equity_curve_ts_idx").on(table.ts),
 }));
 
+export const paperTradeHistory = pgTable("paper_trade_history", {
+  id: serial("id").primaryKey(),
+  positionId: integer("position_id").notNull(),
+  symbol: varchar("symbol", { length: 20 }).notNull(),
+  side: varchar("side", { length: 10 }).notNull(),
+  entryTs: bigint("entry_ts", { mode: "number" }).notNull(),
+  entryPrice: real("entry_price").notNull(),
+  exitTs: bigint("exit_ts", { mode: "number" }).notNull(),
+  exitPrice: real("exit_price").notNull(),
+  grossR: real("gross_r"),
+  netR: real("net_r"),
+  costR: real("cost_r"),
+  pnlUsdt: real("pnl_usdt"),
+  riskUsdt: real("risk_usdt"),
+  barsHeld: integer("bars_held"),
+  exitReason: varchar("exit_reason", { length: 20 }),
+  maxFavorableR: real("max_favorable_r"),
+  regime: varchar("regime", { length: 20 }),
+  signalConfidence: real("signal_confidence"),
+  signalEdge: real("signal_edge"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull().$defaultFn(() => Date.now()),
+}, (table) => ({
+  symbolIdx: index("paper_trade_history_symbol_idx").on(table.symbol),
+  exitTsIdx: index("paper_trade_history_exit_ts_idx").on(table.exitTs),
+  positionIdIdx: index("paper_trade_history_position_id_idx").on(table.positionId),
+}));
+
 export const learningState = pgTable("learning_state", {
   id: serial("id").primaryKey(),
   key: varchar("key", { length: 50 }).notNull().unique(),
@@ -1329,6 +1356,12 @@ export const liveCycleLogs = pgTable("live_cycle_logs", {
   scalpVolRatio: real("scalp_vol_ratio"),
   scalpVolExpansionOk: boolean("scalp_vol_expansion_ok"),
   scalpMomentumOk: boolean("scalp_momentum_ok"),
+  retMu: real("ret_mu"),
+  mfePred: real("mfe_pred"),
+  maePred: real("mae_pred"),
+  pHold: real("p_hold"),
+  pLong: real("p_long"),
+  pShort: real("p_short"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (table) => ({
   symbolIdx: index("cycle_logs_symbol_idx").on(table.symbol),
@@ -1405,6 +1438,7 @@ export const insertSentimentSchema = createInsertSchema(sentimentData).omit({ id
 export const insertPaperPortfolioSchema = createInsertSchema(paperPortfolio).omit({ id: true });
 export const insertPaperPositionSchema = createInsertSchema(paperPositions).omit({ id: true });
 export const insertPaperTradeSchema = createInsertSchema(paperTrades).omit({ id: true });
+export const insertPaperTradeHistorySchema = createInsertSchema(paperTradeHistory).omit({ id: true });
 export const insertPaperEquitySchema = createInsertSchema(paperEquityCurve).omit({ id: true });
 export const insertLearningStateSchema = createInsertSchema(learningState).omit({ id: true });
 export const insertPatternClusterSchema = createInsertSchema(patternClusters).omit({ id: true });
@@ -1466,6 +1500,7 @@ export type BacktestRun = typeof backtestRuns.$inferSelect;
 export type PaperPortfolio = typeof paperPortfolio.$inferSelect;
 export type PaperPosition = typeof paperPositions.$inferSelect;
 export type PaperTrade = typeof paperTrades.$inferSelect;
+export type PaperTradeHistory = typeof paperTradeHistory.$inferSelect;
 export type PaperEquityCurve = typeof paperEquityCurve.$inferSelect;
 export type LearningState = typeof learningState.$inferSelect;
 export type PatternCluster = typeof patternClusters.$inferSelect;

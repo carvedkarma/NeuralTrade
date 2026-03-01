@@ -1,7 +1,8 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { useTradingWs } from "@/hooks/use-trading-ws";
 import { formatDistanceToNow } from "date-fns";
 import {
   ArrowUpRight,
@@ -14,6 +15,9 @@ import {
   Filter,
   Plus,
   Loader2,
+  Radio,
+  ScanLine,
+  Layers,
 } from "lucide-react";
 import {
   ComposedChart,
@@ -391,7 +395,61 @@ export default function LiveTrading() {
     refetchInterval: 60000,
   });
 
+  const { data: cycleLog } = useQuery<
+    Array<{
+      id: number;
+      symbol: string;
+      cycleTs: number;
+      price: number | null;
+      pEnter: number | null;
+      direction: string | null;
+      decision: string;
+      laneSelected: string | null;
+      htfScore: number | null;
+      reasons: string[];
+      thresholdUsed: number | null;
+      laneSizeMult: number | null;
+      holdReason: string | null;
+      retMu: number | null;
+      mfePred: number | null;
+      maePred: number | null;
+      pHold: number | null;
+      pLong: number | null;
+      pShort: number | null;
+    }>
+  >({
+    queryKey: [`/api/live/cycle-logs?symbol=${selectedSymbol}&limit=10`],
+    refetchInterval: 30000,
+  });
+
+  const { data: allRecentCycles } = useQuery<
+    Array<{ symbol: string; cycleTs: number }>
+  >({
+    queryKey: ["/api/live/cycle-logs?limit=50"],
+    refetchInterval: 30000,
+  });
+
+  const { subscribe } = useTradingWs();
+
+  useEffect(() => {
+    const unsub = subscribe("CYCLE_UPDATE", () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/live/cycle-logs"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/v5/signals"] });
+    });
+    return unsub;
+  }, [subscribe]);
+
   const signal = latestSignal?.[0] ?? null;
+  const latestCycle = cycleLog?.[0] ?? null;
+
+  const lastScanPerSymbol = useMemo(() => {
+    const map: Record<string, number> = {};
+    if (!allRecentCycles) return map;
+    for (const c of allRecentCycles) {
+      if (!map[c.symbol]) map[c.symbol] = c.cycleTs;
+    }
+    return map;
+  }, [allRecentCycles]);
 
   const chartData = useMemo(() => {
     if (!candles?.length) return [];
@@ -413,8 +471,35 @@ export default function LiveTrading() {
     return signalHistory.filter((s) => s.symbol === historyFilter);
   }, [signalHistory, historyFilter]);
 
+  const hasAnyScan = Object.keys(lastScanPerSymbol).length > 0;
+
   return (
     <div className="p-4 space-y-4" data-testid="live-trading">
+      <div className="glass-card rounded-lg px-4 py-2.5 flex items-center gap-3 flex-wrap" data-testid="market-scanner-indicator">
+        <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${hasAnyScan ? "bg-emerald-400 pulse-dot" : "bg-muted-foreground"}`} />
+        <ScanLine className={`w-4 h-4 ${hasAnyScan ? "text-emerald-400" : "text-muted-foreground"}`} />
+        <span className={`text-sm font-semibold ${hasAnyScan ? "text-foreground" : "text-muted-foreground"}`} data-testid="text-scanner-status">
+          {hasAnyScan ? "Market Scanner Active" : "Market Scanner Idle"}
+        </span>
+        {lastScanPerSymbol[selectedSymbol] && (
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground ml-2" data-testid="text-symbol-last-scan">
+            <Clock className="w-3 h-3" />
+            <span>{selectedSymbol}: {formatDistanceToNow(new Date(lastScanPerSymbol[selectedSymbol]), { addSuffix: true })}</span>
+          </div>
+        )}
+        <div className="ml-auto flex items-center gap-3">
+          {SYMBOLS.map((sym) => {
+            const ts = lastScanPerSymbol[sym];
+            if (!ts) return null;
+            return (
+              <span key={sym} className="text-[10px] text-muted-foreground number-mono" data-testid={`text-scan-${sym}`}>
+                {sym.replace("USDT", "")}: {formatDistanceToNow(new Date(ts), { addSuffix: false })}
+              </span>
+            );
+          })}
+        </div>
+      </div>
+
       <div className="flex items-center gap-2 flex-wrap" data-testid="symbol-tabs">
         <NewTradePanel prices={prices} />
         <div className="w-px h-8 bg-border" />
@@ -650,6 +735,139 @@ export default function LiveTrading() {
                     <span className="text-muted-foreground">Size Mult</span>
                     <span className="number-mono" data-testid="signal-size-mult">{signal.sizeMultiplier?.toFixed(2) ?? "-"}</span>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {latestCycle && (
+              <div className="mt-4 pt-3 border-t border-border/50 space-y-2 animate-signal-arrive" data-testid="cycle-log-panel">
+                <div className="flex items-center gap-2 mb-2">
+                  <Radio className="w-3.5 h-3.5 text-cyan-400" />
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Latest Cycle Log</span>
+                  <span className="text-[10px] text-muted-foreground ml-auto number-mono" data-testid="text-cycle-time">
+                    {formatDistanceToNow(new Date(latestCycle.cycleTs), { addSuffix: true })}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">p_enter</span>
+                    <span className="number-mono" data-testid="cycle-p-enter">{latestCycle.pEnter?.toFixed(4) ?? "-"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Direction</span>
+                    <span className={`text-xs font-medium ${latestCycle.direction === "LONG" ? "text-emerald-400" : latestCycle.direction === "SHORT" ? "text-red-400" : "text-amber-400"}`} data-testid="cycle-direction">
+                      {latestCycle.direction ?? "-"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Decision</span>
+                    <span className="number-mono" data-testid="cycle-decision">{latestCycle.decision}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Lane</span>
+                    <LaneBadge lane={latestCycle.laneSelected} />
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">HTF Score</span>
+                    <span className="number-mono" data-testid="cycle-htf">{latestCycle.htfScore?.toFixed(4) ?? "-"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Threshold</span>
+                    <span className="number-mono" data-testid="cycle-threshold">{latestCycle.thresholdUsed?.toFixed(4) ?? "-"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">ret_mu</span>
+                    <span className="number-mono" data-testid="cycle-ret-mu">{latestCycle.retMu?.toFixed(4) ?? "-"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">MFE pred</span>
+                    <span className="number-mono text-emerald-400" data-testid="cycle-mfe">{latestCycle.mfePred?.toFixed(4) ?? "-"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">MAE pred</span>
+                    <span className="number-mono text-red-400" data-testid="cycle-mae">{latestCycle.maePred?.toFixed(4) ?? "-"}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Lane Size</span>
+                    <span className="number-mono" data-testid="cycle-lane-size">{latestCycle.laneSizeMult?.toFixed(2) ?? "-"}</span>
+                  </div>
+                </div>
+                {(latestCycle.pHold != null || latestCycle.pLong != null || latestCycle.pShort != null) && (
+                  <div className="mt-2" data-testid="cycle-action-probs">
+                    <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Action Probabilities</span>
+                    <div className="flex items-center gap-2 mt-1">
+                      <div className="flex h-2 flex-1 rounded-full overflow-hidden bg-muted">
+                        <div className="bg-emerald-500" style={{ width: `${(latestCycle.pLong ?? 0) * 100}%` }} />
+                        <div className="bg-amber-500" style={{ width: `${(latestCycle.pHold ?? 0) * 100}%` }} />
+                        <div className="bg-red-500" style={{ width: `${(latestCycle.pShort ?? 0) * 100}%` }} />
+                      </div>
+                    </div>
+                    <div className="flex justify-between mt-1 text-[10px] number-mono">
+                      <span className="text-emerald-400">LONG {((latestCycle.pLong ?? 0) * 100).toFixed(1)}%</span>
+                      <span className="text-amber-400">HOLD {((latestCycle.pHold ?? 0) * 100).toFixed(1)}%</span>
+                      <span className="text-red-400">SHORT {((latestCycle.pShort ?? 0) * 100).toFixed(1)}%</span>
+                    </div>
+                  </div>
+                )}
+                {latestCycle.holdReason && (
+                  <div className="mt-1.5" data-testid="cycle-hold-reason">
+                    <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Hold Reason</span>
+                    <div className="mt-0.5">
+                      <Badge variant="secondary" className="text-[10px]">{latestCycle.holdReason}</Badge>
+                    </div>
+                  </div>
+                )}
+                {latestCycle.reasons && latestCycle.reasons.length > 0 && (
+                  <div className="mt-1.5" data-testid="cycle-reasons">
+                    <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Reasons</span>
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {latestCycle.reasons.map((r, i) => (
+                        <Badge key={i} variant="secondary" className="text-[10px]">{r}</Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {cycleLog && cycleLog.length > 1 && (
+              <div className="mt-4 pt-3 border-t border-border/50" data-testid="cycle-history-mini">
+                <div className="flex items-center gap-2 mb-2">
+                  <Layers className="w-3.5 h-3.5 text-muted-foreground" />
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Recent Cycles</span>
+                </div>
+                <div className="space-y-1">
+                  {cycleLog.slice(1, 6).map((c, idx) => (
+                    <div key={c.id ?? idx} className="flex items-center gap-2 text-[10px] number-mono py-0.5" data-testid={`mini-cycle-${idx}`}>
+                      <span className="text-muted-foreground w-16 shrink-0">
+                        {formatDistanceToNow(new Date(c.cycleTs), { addSuffix: false })}
+                      </span>
+                      <Badge
+                        className={`no-default-hover-elevate no-default-active-elevate text-[10px] ${
+                          c.direction === "LONG" ? "bg-emerald-500/20 text-emerald-400" :
+                          c.direction === "SHORT" ? "bg-red-500/20 text-red-400" :
+                          "bg-amber-500/20 text-amber-400"
+                        }`}
+                      >
+                        {c.direction ?? "HOLD"}
+                      </Badge>
+                      <Badge
+                        className={`no-default-hover-elevate no-default-active-elevate text-[10px] ${
+                          c.decision === "ENTER" ? "bg-emerald-500/20 text-emerald-400" :
+                          "bg-muted text-muted-foreground"
+                        }`}
+                      >
+                        {c.decision}
+                      </Badge>
+                      <span>{c.pEnter != null ? `p=${(c.pEnter * 100).toFixed(0)}%` : ""}</span>
+                      {c.retMu != null && <span className="text-foreground">mu={c.retMu.toFixed(3)}</span>}
+                      {c.laneSelected && (
+                        <Badge className="no-default-hover-elevate no-default-active-elevate text-[10px] bg-cyan-500/20 text-cyan-400">
+                          {c.laneSelected}
+                        </Badge>
+                      )}
+                    </div>
+                  ))}
                 </div>
               </div>
             )}

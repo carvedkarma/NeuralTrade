@@ -963,13 +963,41 @@ export async function closePosition(
     });
   } else {
     const totalRealizedPnl = netPnl - (position.fundingPaidUsdt || 0);
+    const totalFees = (position.feesPaidUsdt || 0) + exitFee;
+    const riskUsdt = position.initialRiskUsdt ?? 1;
+    const grossRMultiple = riskUsdt > 0 ? (totalRealizedPnl + totalFees) / riskUsdt : 0;
+    const netRMultiple = riskUsdt > 0 ? totalRealizedPnl / riskUsdt : 0;
+    const costRMultiple = riskUsdt > 0 ? totalFees / riskUsdt : 0;
+    const maxFavorableR = riskUsdt > 0 && position.peakProfit != null ? position.peakProfit / riskUsdt : 0;
+
     await storage.updatePosition(position.id, {
       status: "CLOSED",
       exitTs: ctx.candle.timestamp,
       exitPrice: slippedExitPrice,
       realizedPnlUsdt: totalRealizedPnl,
       exitReason: reason,
-      feesPaidUsdt: (position.feesPaidUsdt || 0) + exitFee,
+      feesPaidUsdt: totalFees,
+    });
+
+    await storage.recordTradeClose({
+      positionId: position.id,
+      symbol: position.symbol,
+      side: position.side,
+      entryTs: position.entryTs,
+      entryPrice: position.entryPrice,
+      exitTs: ctx.candle.timestamp,
+      exitPrice: slippedExitPrice,
+      grossR: Math.round(grossRMultiple * 10000) / 10000,
+      netR: Math.round(netRMultiple * 10000) / 10000,
+      costR: Math.round(costRMultiple * 10000) / 10000,
+      pnlUsdt: totalRealizedPnl,
+      riskUsdt,
+      barsHeld: position.barsOpen ?? 0,
+      exitReason: reason,
+      maxFavorableR: Math.round(maxFavorableR * 10000) / 10000,
+      regime: position.regime ?? null,
+      signalConfidence: position.signalConfidence ?? null,
+      signalEdge: position.signalEdge ?? null,
     });
 
     const newEquity = portfolio.currentEquityUsdt + totalRealizedPnl;

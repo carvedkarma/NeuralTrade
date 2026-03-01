@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState, useEffect, useCallback } from "react";
 import { formatDistanceToNow } from "date-fns";
 import { AreaChart, Area, ResponsiveContainer } from "recharts";
 import { Badge } from "@/components/ui/badge";
@@ -13,10 +14,36 @@ import {
   Brain,
   Radio,
   Crosshair,
+  Zap,
 } from "lucide-react";
 import { CloseButton } from "@/components/position-actions";
+import { useTradingWs } from "@/hooks/use-trading-ws";
+import { queryClient } from "@/lib/queryClient";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSDT"] as const;
+
+interface CycleLog {
+  id: number;
+  symbol: string;
+  cycleTs: number;
+  price: number | null;
+  pEnter: number | null;
+  direction: string | null;
+  decision: string;
+  reasons: string[] | null;
+  laneSelected: string | null;
+  htfScore: number | null;
+  thresholdUsed: number | null;
+  laneSizeMult: number | null;
+  holdReason: string | null;
+  retMu: number | null;
+  mfePred: number | null;
+  maePred: number | null;
+  pHold: number | null;
+  pLong: number | null;
+  pShort: number | null;
+  createdAt: number;
+}
 
 function MetricCard({
   label,
@@ -108,7 +135,31 @@ function MarketCard({
   );
 }
 
+function ActionProbBar({ pHold, pLong, pShort }: { pHold: number | null; pLong: number | null; pShort: number | null }) {
+  const hold = (pHold ?? 0) * 100;
+  const long = (pLong ?? 0) * 100;
+  const short = (pShort ?? 0) * 100;
+  const total = hold + long + short;
+  if (total === 0) return null;
+
+  return (
+    <div className="flex items-center gap-1.5 w-full">
+      <div className="flex h-1.5 flex-1 rounded-full overflow-hidden bg-muted">
+        <div className="bg-emerald-500" style={{ width: `${long}%` }} />
+        <div className="bg-amber-500" style={{ width: `${hold}%` }} />
+        <div className="bg-red-500" style={{ width: `${short}%` }} />
+      </div>
+      <span className="text-[10px] number-mono text-muted-foreground whitespace-nowrap">
+        L{long.toFixed(0)} H{hold.toFixed(0)} S{short.toFixed(0)}
+      </span>
+    </div>
+  );
+}
+
 export default function CommandCenter() {
+  const { subscribe } = useTradingWs();
+  const [realtimeCycles, setRealtimeCycles] = useState<CycleLog[]>([]);
+
   const { data: systemStatus, isLoading: statusLoading } = useQuery<{
     moneyConfig?: { account_equity_usd?: number };
     dailyPnl?: number;
@@ -116,6 +167,8 @@ export default function CommandCenter() {
     profitFactor?: number;
     activePositions?: number;
     avgConfidence?: number;
+    gpu?: { isAvailable?: boolean; lastActivity?: number | null };
+    lastSignal?: { signalTs?: number; symbol?: string; direction?: string } | null;
   }>({
     queryKey: ["/api/system/status"],
   });
@@ -127,18 +180,9 @@ export default function CommandCenter() {
     refetchInterval: 15000,
   });
 
-  const { data: signals, isLoading: signalsLoading } = useQuery<
-    Array<{
-      id?: number;
-      signalTs: number;
-      symbol?: string;
-      direction?: string;
-      confidence: number;
-      score?: number;
-      lane?: string;
-    }>
-  >({
-    queryKey: ["/api/v5/signals?limit=20"],
+  const { data: cycleLogs, isLoading: cycleLogsLoading } = useQuery<CycleLog[]>({
+    queryKey: ["/api/live/cycle-logs?limit=30"],
+    refetchInterval: 30000,
   });
 
   const { data: positions } = useQuery<
@@ -161,15 +205,96 @@ export default function CommandCenter() {
     queryKey: ["/api/v5/equity-curve"],
   });
 
+  const handleCycleUpdate = useCallback((payload: Record<string, unknown>) => {
+    const newCycle: CycleLog = {
+      id: (payload.id as number) ?? 0,
+      symbol: (payload.symbol as string) ?? "BTCUSDT",
+      cycleTs: (payload.cycleTs as number) ?? Date.now(),
+      price: (payload.price as number) ?? null,
+      pEnter: (payload.pEnter as number) ?? null,
+      direction: (payload.direction as string) ?? null,
+      decision: (payload.decision as string) ?? "UNKNOWN",
+      reasons: (payload.reasons as string[]) ?? null,
+      laneSelected: (payload.laneSelected as string) ?? null,
+      htfScore: (payload.htfScore as number) ?? null,
+      thresholdUsed: (payload.thresholdUsed as number) ?? null,
+      laneSizeMult: (payload.laneSizeMult as number) ?? null,
+      holdReason: (payload.holdReason as string) ?? null,
+      retMu: (payload.retMu as number) ?? null,
+      mfePred: (payload.mfePred as number) ?? null,
+      maePred: (payload.maePred as number) ?? null,
+      pHold: (payload.pHold as number) ?? null,
+      pLong: (payload.pLong as number) ?? null,
+      pShort: (payload.pShort as number) ?? null,
+      createdAt: Date.now(),
+    };
+    setRealtimeCycles((prev) => [newCycle, ...prev].slice(0, 30));
+    queryClient.invalidateQueries({ queryKey: ["/api/live/cycle-logs"] });
+  }, []);
+
+  useEffect(() => {
+    const unsub = subscribe("CYCLE_UPDATE", handleCycleUpdate);
+    return unsub;
+  }, [subscribe, handleCycleUpdate]);
+
+  const allCycles = realtimeCycles.length > 0
+    ? [...realtimeCycles, ...(cycleLogs ?? [])].reduce((acc, c) => {
+        if (!acc.find((x) => x.id === c.id)) acc.push(c);
+        return acc;
+      }, [] as CycleLog[]).sort((a, b) => b.cycleTs - a.cycleTs).slice(0, 30)
+    : cycleLogs ?? [];
+
   const equity = systemStatus?.moneyConfig?.account_equity_usd ?? 0;
   const dailyPnl = systemStatus?.dailyPnl ?? 0;
   const winRate = systemStatus?.winRate ?? 0;
   const profitFactor = systemStatus?.profitFactor ?? 0;
   const activeCount = systemStatus?.activePositions ?? positions?.length ?? 0;
   const avgConfidence = systemStatus?.avgConfidence ?? 0;
+  const gpuLive = systemStatus?.gpu?.isAvailable ?? false;
+  const lastSignal = systemStatus?.lastSignal;
+
+  const pEnterValues = allCycles.filter((c) => c.pEnter != null).map((c) => ({ value: c.pEnter! })).slice(0, 20);
 
   return (
     <div className="p-4 space-y-4" data-testid="command-center">
+      <div
+        className={`glass-card rounded-lg p-3 flex items-center gap-3 ${gpuLive ? "glow-green" : ""}`}
+        data-testid="live-status-banner"
+      >
+        <div className={`w-3 h-3 rounded-full ${gpuLive ? "bg-emerald-400 pulse-dot" : "bg-muted-foreground"}`} />
+        <span className="text-sm font-semibold">
+          {gpuLive ? "V5 Neural Engine LIVE" : "V5 Neural Engine OFFLINE"}
+        </span>
+        {gpuLive && (
+          <span className="text-xs text-muted-foreground">
+            Scanning 6 assets every 15m
+          </span>
+        )}
+        {lastSignal?.signalTs && (
+          <span className="text-xs text-muted-foreground ml-auto flex items-center gap-1" data-testid="text-last-signal-time">
+            <Zap className="w-3 h-3 text-amber-400" />
+            Last Signal: {formatDistanceToNow(new Date(lastSignal.signalTs), { addSuffix: true })}
+          </span>
+        )}
+        {pEnterValues.length > 0 && (
+          <div className="ml-2 w-24" data-testid="heartbeat-sparkline">
+            <ResponsiveContainer width="100%" height={20}>
+              <AreaChart data={pEnterValues}>
+                <Area
+                  type="monotone"
+                  dataKey="value"
+                  stroke="#22c55e"
+                  strokeWidth={1}
+                  fill="none"
+                  dot={false}
+                  isAnimationActive={false}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+
       <div className="grid grid-cols-6 gap-3" data-testid="metrics-bar">
         {statusLoading ? (
           Array.from({ length: 6 }).map((_, i) => (
@@ -240,64 +365,78 @@ export default function CommandCenter() {
           <Radio className="w-4 h-4 text-emerald-400 ml-auto" />
         </div>
 
-        {signalsLoading ? (
+        {cycleLogsLoading ? (
           <div className="space-y-2">
             {Array.from({ length: 5 }).map((_, i) => (
               <div key={i} className="h-10 shimmer rounded" />
             ))}
           </div>
-        ) : !signals || signals.length === 0 ? (
+        ) : allCycles.length === 0 ? (
           <div className="flex items-center justify-center py-8 text-muted-foreground">
-            <div className="shimmer rounded px-6 py-3 text-sm">Awaiting signals...</div>
+            <div className="shimmer rounded px-6 py-3 text-sm">Awaiting cycle data...</div>
           </div>
         ) : (
           <div className="space-y-1">
-            <div className="grid grid-cols-6 gap-2 px-2 py-1 text-xs text-muted-foreground uppercase tracking-wider">
+            <div className="grid grid-cols-8 gap-2 px-2 py-1 text-xs text-muted-foreground uppercase tracking-wider">
               <span>Time</span>
               <span>Symbol</span>
               <span>Direction</span>
-              <span>Confidence</span>
-              <span>Score</span>
+              <span>Decision</span>
+              <span>p_enter</span>
               <span>Lane</span>
+              <span>Action Probs</span>
+              <span>ret_mu / MFE / MAE</span>
             </div>
-            {signals.map((sig, idx) => {
-              const dir = sig.direction ?? "HOLD";
+            {allCycles.map((cycle, idx) => {
+              const dir = cycle.direction ?? "HOLD";
               const dirColor =
                 dir === "LONG" ? "bg-emerald-500/20 text-emerald-400" :
                 dir === "SHORT" ? "bg-red-500/20 text-red-400" :
                 "bg-amber-500/20 text-amber-400";
+              const decisionColor =
+                cycle.decision === "ENTER" ? "bg-emerald-500/20 text-emerald-400" :
+                cycle.decision === "HOLD" ? "bg-amber-500/20 text-amber-400" :
+                "bg-muted text-muted-foreground";
               const laneColor =
-                sig.lane === "CORE" ? "bg-cyan-500/20 text-cyan-400" :
-                sig.lane === "FLOW" ? "bg-violet-500/20 text-violet-400" :
+                cycle.laneSelected === "CORE" ? "bg-cyan-500/20 text-cyan-400" :
+                cycle.laneSelected === "FLOW" ? "bg-violet-500/20 text-violet-400" :
+                cycle.laneSelected === "SCALP" ? "bg-amber-500/20 text-amber-400" :
                 "bg-muted text-muted-foreground";
 
               return (
                 <div
-                  key={sig.id ?? idx}
-                  className="grid grid-cols-6 gap-2 px-2 py-2 rounded hover-elevate animate-signal-arrive items-center"
-                  data-testid={`signal-row-${idx}`}
+                  key={cycle.id ?? idx}
+                  className="grid grid-cols-8 gap-2 px-2 py-2 rounded hover-elevate animate-signal-arrive items-center"
+                  data-testid={`cycle-row-${idx}`}
                 >
                   <span className="text-xs text-muted-foreground number-mono">
-                    {sig.signalTs
-                      ? formatDistanceToNow(new Date(sig.signalTs), { addSuffix: true })
+                    {cycle.cycleTs
+                      ? formatDistanceToNow(new Date(cycle.cycleTs), { addSuffix: true })
                       : "—"}
                   </span>
-                  <Badge className="no-default-hover-elevate no-default-active-elevate text-xs w-fit bg-muted text-foreground" data-testid={`signal-symbol-${idx}`}>
-                    {sig.symbol ?? "BTC"}
+                  <Badge className="no-default-hover-elevate no-default-active-elevate text-xs w-fit bg-muted text-foreground" data-testid={`cycle-symbol-${idx}`}>
+                    {cycle.symbol?.replace("USDT", "") ?? "?"}
                   </Badge>
-                  <Badge className={`no-default-hover-elevate no-default-active-elevate text-xs w-fit ${dirColor}`} data-testid={`signal-dir-${idx}`}>
+                  <Badge className={`no-default-hover-elevate no-default-active-elevate text-xs w-fit ${dirColor}`} data-testid={`cycle-dir-${idx}`}>
                     {dir}
                   </Badge>
-                  <div className="flex items-center gap-2">
-                    <Progress value={sig.confidence * 100} className="h-2 flex-1" />
-                    <span className="number-mono text-xs">{(sig.confidence * 100).toFixed(0)}%</span>
-                  </div>
-                  <span className="number-mono text-sm" data-testid={`signal-score-${idx}`}>
-                    {sig.score?.toFixed(2) ?? "—"}
-                  </span>
-                  <Badge className={`no-default-hover-elevate no-default-active-elevate text-xs w-fit ${laneColor}`}>
-                    {sig.lane ?? "—"}
+                  <Badge className={`no-default-hover-elevate no-default-active-elevate text-xs w-fit ${decisionColor}`} data-testid={`cycle-decision-${idx}`}>
+                    {cycle.decision}
                   </Badge>
+                  <div className="flex items-center gap-2">
+                    <Progress value={(cycle.pEnter ?? 0) * 100} className="h-2 flex-1" />
+                    <span className="number-mono text-xs">{cycle.pEnter != null ? (cycle.pEnter * 100).toFixed(0) + "%" : "—"}</span>
+                  </div>
+                  <Badge className={`no-default-hover-elevate no-default-active-elevate text-xs w-fit ${laneColor}`}>
+                    {cycle.laneSelected ?? "—"}
+                  </Badge>
+                  <ActionProbBar pHold={cycle.pHold} pLong={cycle.pLong} pShort={cycle.pShort} />
+                  <div className="text-[10px] number-mono text-muted-foreground space-x-1">
+                    {cycle.retMu != null && <span className="text-foreground">{cycle.retMu.toFixed(4)}</span>}
+                    {cycle.mfePred != null && <span className="text-emerald-400">{cycle.mfePred.toFixed(3)}</span>}
+                    {cycle.maePred != null && <span className="text-red-400">{cycle.maePred.toFixed(3)}</span>}
+                    {cycle.retMu == null && cycle.mfePred == null && "—"}
+                  </div>
                 </div>
               );
             })}

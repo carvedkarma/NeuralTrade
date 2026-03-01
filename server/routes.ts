@@ -4,7 +4,7 @@ import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
 import ingestRouter from "./ingest";
 import { db } from "./db";
-import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema, openInterestHistory, v5Signals, paperPositions, paperPortfolio } from "@shared/schema";
+import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema, openInterestHistory, v5Signals, paperPositions, paperPortfolio, paperTradeHistory } from "@shared/schema";
 import type { ModelLearningStatsEntry, MoneyConfig } from "@shared/schema";
 import { and, eq, gte, lte, asc, desc, sql, count } from "drizzle-orm";
 import { z } from "zod";
@@ -14,6 +14,7 @@ import * as crypto from "crypto";
 import { getMultiTimeframeKlines } from "./binance";
 import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
+import { broadcast } from "./ws";
 import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning, loadCandleTimestamps } from "./unified-learning-controller";
 import { getLatestFeatures } from "./feature-engine";
 import { recalculatePatternLabels } from "./pattern-memory";
@@ -105,48 +106,196 @@ export async function registerRoutes(
         .select()
         .from(liveTradeRecords)
         .where(eq(liveTradeRecords.outcome, "closed"))
-        .orderBy(desc(liveTradeRecords.entryTime));
+        .orderBy(asc(liveTradeRecords.entryTime));
+
+      const getR = (t: typeof trades[0]) => t.netR ?? t.grossR ?? 0;
 
       const totalTrades = trades.length;
-      const wins = trades.filter((t) => (t.rMultiple ?? 0) > 0);
-      const losses = trades.filter((t) => (t.rMultiple ?? 0) <= 0);
-      const totalR = trades.reduce((s, t) => s + (t.rMultiple ?? 0), 0);
+      const wins = trades.filter((t) => getR(t) > 0);
+      const losses = trades.filter((t) => getR(t) <= 0);
+      const rValues = trades.map(getR);
+      const totalR = rValues.reduce((s, v) => s + v, 0);
       const winRate = totalTrades > 0 ? (wins.length / totalTrades) * 100 : 0;
-      const avgWinR = wins.length > 0 ? wins.reduce((s, t) => s + (t.rMultiple ?? 0), 0) / wins.length : 0;
-      const avgLossR = losses.length > 0 ? losses.reduce((s, t) => s + (t.rMultiple ?? 0), 0) / losses.length : 0;
-      const grossWin = wins.reduce((s, t) => s + (t.rMultiple ?? 0), 0);
-      const grossLoss = Math.abs(losses.reduce((s, t) => s + (t.rMultiple ?? 0), 0));
+      const avgWinR = wins.length > 0 ? wins.reduce((s, t) => s + getR(t), 0) / wins.length : 0;
+      const avgLossR = losses.length > 0 ? losses.reduce((s, t) => s + getR(t), 0) / losses.length : 0;
+      const grossWin = wins.reduce((s, t) => s + getR(t), 0);
+      const grossLoss = Math.abs(losses.reduce((s, t) => s + getR(t), 0));
       const profitFactor = grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? 999 : 0;
+      const expectancy = totalTrades > 0 ? totalR / totalTrades : 0;
 
-      const symbolMap: Record<string, { trades: number; wins: number; totalR: number }> = {};
+      const meanR = totalTrades > 0 ? totalR / totalTrades : 0;
+      const variance = totalTrades > 1 ? rValues.reduce((s, v) => s + (v - meanR) ** 2, 0) / (totalTrades - 1) : 0;
+      const stdDev = Math.sqrt(variance);
+      const sharpeRatio = stdDev > 0 ? meanR / stdDev : 0;
+
+      const downsideValues = rValues.filter((v) => v < 0);
+      const downsideVariance = downsideValues.length > 0 ? downsideValues.reduce((s, v) => s + v ** 2, 0) / downsideValues.length : 0;
+      const downsideStdDev = Math.sqrt(downsideVariance);
+      const sortinoRatio = downsideStdDev > 0 ? meanR / downsideStdDev : 0;
+
+      let maxConsecWins = 0, maxConsecLosses = 0, curWins = 0, curLosses = 0;
+      const streaks: Array<{ type: "win" | "loss"; length: number; ts: number }> = [];
+      let prevType: "win" | "loss" | null = null;
+      let streakLen = 0;
+      for (const t of trades) {
+        const isWin = getR(t) > 0;
+        if (isWin) {
+          curWins++;
+          curLosses = 0;
+          if (curWins > maxConsecWins) maxConsecWins = curWins;
+        } else {
+          curLosses++;
+          curWins = 0;
+          if (curLosses > maxConsecLosses) maxConsecLosses = curLosses;
+        }
+        const curType = isWin ? "win" : "loss";
+        if (curType === prevType) {
+          streakLen++;
+        } else {
+          if (prevType !== null) {
+            streaks.push({ type: prevType, length: streakLen, ts: t.entryTime });
+          }
+          streakLen = 1;
+          prevType = curType;
+        }
+      }
+      if (prevType !== null && trades.length > 0) {
+        streaks.push({ type: prevType, length: streakLen, ts: trades[trades.length - 1].entryTime });
+      }
+
+      const symbolMap: Record<string, { trades: typeof trades; wins: number; totalR: number }> = {};
       for (const t of trades) {
         const sym = t.symbol ?? "UNKNOWN";
-        if (!symbolMap[sym]) symbolMap[sym] = { trades: 0, wins: 0, totalR: 0 };
-        symbolMap[sym].trades++;
-        if ((t.rMultiple ?? 0) > 0) symbolMap[sym].wins++;
-        symbolMap[sym].totalR += t.rMultiple ?? 0;
+        if (!symbolMap[sym]) symbolMap[sym] = { trades: [], wins: 0, totalR: 0 };
+        symbolMap[sym].trades.push(t);
+        if (getR(t) > 0) symbolMap[sym].wins++;
+        symbolMap[sym].totalR += getR(t);
       }
       const perSymbol = Object.entries(symbolMap).map(([symbol, s]) => ({
         symbol,
-        trades: s.trades,
+        trades: s.trades.length,
         wins: s.wins,
-        winRate: s.trades > 0 ? (s.wins / s.trades) * 100 : 0,
+        winRate: s.trades.length > 0 ? (s.wins / s.trades.length) * 100 : 0,
         totalR: Math.round(s.totalR * 100) / 100,
-        expectancy: s.trades > 0 ? Math.round((s.totalR / s.trades) * 10000) / 10000 : 0,
+        expectancy: s.trades.length > 0 ? Math.round((s.totalR / s.trades.length) * 10000) / 10000 : 0,
       }));
+
+      const perSymbolEquity: Record<string, Array<{ ts: number; r: number; tradeR: number }>> = {};
+      for (const [symbol, s] of Object.entries(symbolMap)) {
+        let cum = 0;
+        perSymbolEquity[symbol] = s.trades.map((t) => {
+          const r = getR(t);
+          cum += r;
+          return { ts: t.exitTime ?? t.entryTime, r: Math.round(cum * 100) / 100, tradeR: Math.round(r * 100) / 100 };
+        });
+      }
 
       let maxDrawdown = 0;
       let peak = 0;
       let cumR = 0;
-      for (const t of [...trades].reverse()) {
-        cumR += t.rMultiple ?? 0;
+      for (const t of trades) {
+        cumR += getR(t);
         if (cumR > peak) peak = cumR;
         const dd = peak - cumR;
         if (dd > maxDrawdown) maxDrawdown = dd;
       }
 
-      const bestTrade = trades.reduce((best, t) => Math.max(best, t.rMultiple ?? 0), 0);
-      const worstTrade = trades.reduce((worst, t) => Math.min(worst, t.rMultiple ?? 0), 0);
+      const bestTrade = rValues.length > 0 ? Math.max(...rValues) : 0;
+      const worstTrade = rValues.length > 0 ? Math.min(...rValues) : 0;
+
+      const totalBarsHeld = trades.reduce((s, t) => s + (t.barsHeld ?? 0), 0);
+      const avgHoldBars = totalTrades > 0 ? totalBarsHeld / totalTrades : 0;
+      const avgHoldMinutes = avgHoldBars * 15;
+
+      const durationBins = [
+        { label: "< 1h", min: 0, max: 4, count: 0 },
+        { label: "1-3h", min: 4, max: 12, count: 0 },
+        { label: "3-6h", min: 12, max: 24, count: 0 },
+        { label: "6-12h", min: 24, max: 48, count: 0 },
+        { label: "12-24h", min: 48, max: 96, count: 0 },
+        { label: "1-3d", min: 96, max: 288, count: 0 },
+        { label: "> 3d", min: 288, max: Infinity, count: 0 },
+      ];
+      for (const t of trades) {
+        const bars = t.barsHeld ?? 0;
+        for (const bin of durationBins) {
+          if (bars >= bin.min && bars < bin.max) { bin.count++; break; }
+        }
+      }
+
+      const hourlyPerf: Record<number, { trades: number; wins: number; totalR: number }> = {};
+      for (let h = 0; h < 24; h++) hourlyPerf[h] = { trades: 0, wins: 0, totalR: 0 };
+      for (const t of trades) {
+        const hour = new Date(t.entryTime).getUTCHours();
+        hourlyPerf[hour].trades++;
+        if (getR(t) > 0) hourlyPerf[hour].wins++;
+        hourlyPerf[hour].totalR += getR(t);
+      }
+      const hourlyBreakdown = Object.entries(hourlyPerf).map(([hour, h]) => ({
+        hour: parseInt(hour),
+        trades: h.trades,
+        wins: h.wins,
+        winRate: h.trades > 0 ? Math.round((h.wins / h.trades) * 1000) / 10 : 0,
+        totalR: Math.round(h.totalR * 100) / 100,
+        avgR: h.trades > 0 ? Math.round((h.totalR / h.trades) * 1000) / 1000 : 0,
+      }));
+
+      const monthlyPnl: Record<string, { totalR: number; trades: number; wins: number }> = {};
+      for (const t of trades) {
+        const d = new Date(t.exitTime ?? t.entryTime);
+        const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+        if (!monthlyPnl[key]) monthlyPnl[key] = { totalR: 0, trades: 0, wins: 0 };
+        monthlyPnl[key].totalR += getR(t);
+        monthlyPnl[key].trades++;
+        if (getR(t) > 0) monthlyPnl[key].wins++;
+      }
+      const monthlyData = Object.entries(monthlyPnl)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([month, m]) => ({
+          month,
+          totalR: Math.round(m.totalR * 100) / 100,
+          trades: m.trades,
+          wins: m.wins,
+          winRate: m.trades > 0 ? Math.round((m.wins / m.trades) * 1000) / 10 : 0,
+        }));
+
+      const weeklyPnl: Record<string, { totalR: number; trades: number; wins: number }> = {};
+      for (const t of trades) {
+        const d = new Date(t.exitTime ?? t.entryTime);
+        const startOfWeek = new Date(d);
+        startOfWeek.setUTCDate(d.getUTCDate() - d.getUTCDay());
+        const key = `${startOfWeek.getUTCFullYear()}-${String(startOfWeek.getUTCMonth() + 1).padStart(2, "0")}-${String(startOfWeek.getUTCDate()).padStart(2, "0")}`;
+        if (!weeklyPnl[key]) weeklyPnl[key] = { totalR: 0, trades: 0, wins: 0 };
+        weeklyPnl[key].totalR += getR(t);
+        weeklyPnl[key].trades++;
+        if (getR(t) > 0) weeklyPnl[key].wins++;
+      }
+      const weeklyData = Object.entries(weeklyPnl)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([week, w]) => ({
+          week,
+          totalR: Math.round(w.totalR * 100) / 100,
+          trades: w.trades,
+          wins: w.wins,
+          winRate: w.trades > 0 ? Math.round((w.wins / w.trades) * 1000) / 10 : 0,
+        }));
+
+      const now = Date.now();
+      const computeRolling = (windowMs: number) => {
+        const windowTrades = trades.filter((t) => (t.exitTime ?? t.entryTime) >= now - windowMs);
+        const wt = windowTrades.length;
+        const wWins = windowTrades.filter((t) => getR(t) > 0).length;
+        const wR = windowTrades.reduce((s, t) => s + getR(t), 0);
+        return {
+          trades: wt,
+          wins: wWins,
+          winRate: wt > 0 ? Math.round((wWins / wt) * 1000) / 10 : 0,
+          totalR: Math.round(wR * 100) / 100,
+          expectancy: wt > 0 ? Math.round((wR / wt) * 1000) / 1000 : 0,
+        };
+      };
+      const rolling7d = computeRolling(7 * 86400000);
+      const rolling30d = computeRolling(30 * 86400000);
 
       res.json({
         totalTrades,
@@ -160,7 +309,22 @@ export async function registerRoutes(
         maxDrawdown: Math.round(maxDrawdown * 100) / 100,
         bestTrade: Math.round(bestTrade * 10000) / 10000,
         worstTrade: Math.round(worstTrade * 10000) / 10000,
+        expectancy: Math.round(expectancy * 10000) / 10000,
+        sharpeRatio: Math.round(sharpeRatio * 100) / 100,
+        sortinoRatio: Math.round(sortinoRatio * 100) / 100,
+        maxConsecWins,
+        maxConsecLosses,
+        avgHoldBars: Math.round(avgHoldBars * 10) / 10,
+        avgHoldMinutes: Math.round(avgHoldMinutes),
         perSymbol,
+        perSymbolEquity,
+        hourlyBreakdown,
+        durationBins,
+        streaks,
+        monthlyData,
+        weeklyData,
+        rolling7d,
+        rolling30d,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -178,7 +342,8 @@ export async function registerRoutes(
         .select({
           entryTime: liveTradeRecords.entryTime,
           exitTime: liveTradeRecords.exitTime,
-          rMultiple: liveTradeRecords.rMultiple,
+          netR: liveTradeRecords.netR,
+          grossR: liveTradeRecords.grossR,
           symbol: liveTradeRecords.symbol,
           side: liveTradeRecords.side,
         })
@@ -193,11 +358,12 @@ export async function registerRoutes(
 
       let cumR = 0;
       const curve = trades.map((t) => {
-        cumR += t.rMultiple ?? 0;
+        const r = t.netR ?? t.grossR ?? 0;
+        cumR += r;
         return {
           ts: t.exitTime ?? t.entryTime,
           r: Math.round(cumR * 100) / 100,
-          tradeR: Math.round((t.rMultiple ?? 0) * 100) / 100,
+          tradeR: Math.round(r * 100) / 100,
           symbol: t.symbol,
           side: t.side,
         };
@@ -213,7 +379,107 @@ export async function registerRoutes(
     try {
       const symbol = req.query.symbol as string | undefined;
       const status = req.query.status as string | undefined;
+      const source = req.query.source as string | undefined;
       const limit = Math.min(parseInt(req.query.limit as string) || 100, 1000);
+      const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
+
+      if (source === "paper") {
+        const paperConditions = [];
+        if (symbol) paperConditions.push(eq(paperTradeHistory.symbol, symbol));
+
+        const rows = await db
+          .select()
+          .from(paperTradeHistory)
+          .where(paperConditions.length > 0 ? and(...paperConditions) : undefined)
+          .orderBy(desc(paperTradeHistory.exitTs))
+          .limit(limit)
+          .offset(offset);
+
+        const mapped = rows.map((p) => ({
+          id: p.id,
+          symbol: p.symbol,
+          side: p.side,
+          entryTime: p.entryTs,
+          entryPrice: p.entryPrice,
+          exitTime: p.exitTs,
+          exitPrice: p.exitPrice,
+          outcome: "closed",
+          status: "closed",
+          grossR: p.grossR,
+          netR: p.netR,
+          costR: p.costR,
+          pnlUsd: p.pnlUsdt,
+          riskUsdUsed: p.riskUsdt,
+          barsHeld: p.barsHeld,
+          exitReason: p.exitReason,
+          maxFavorableR: p.maxFavorableR,
+          regime: p.regime,
+          signalConfidence: p.signalConfidence,
+          signalEdge: p.signalEdge,
+          source: "paper",
+          createdAt: p.entryTs,
+        }));
+
+        return res.json(mapped);
+      }
+
+      if (source === "all") {
+        const liveConditions = [];
+        if (symbol) liveConditions.push(eq(liveTradeRecords.symbol, symbol));
+        if (status) liveConditions.push(eq(liveTradeRecords.outcome, status));
+
+        const liveRows = await db
+          .select()
+          .from(liveTradeRecords)
+          .where(liveConditions.length > 0 ? and(...liveConditions) : undefined)
+          .orderBy(desc(liveTradeRecords.entryTime))
+          .limit(limit)
+          .offset(offset);
+
+        const paperConditions = [];
+        if (symbol) paperConditions.push(eq(paperTradeHistory.symbol, symbol));
+
+        const paperRows = await db
+          .select()
+          .from(paperTradeHistory)
+          .where(paperConditions.length > 0 ? and(...paperConditions) : undefined)
+          .orderBy(desc(paperTradeHistory.exitTs))
+          .limit(limit)
+          .offset(offset);
+
+        const liveMapped = liveRows.map((r) => ({ ...r, source: "live" as const }));
+        const paperMapped = paperRows.map((p) => ({
+          id: p.id,
+          symbol: p.symbol,
+          side: p.side,
+          entryTime: p.entryTs,
+          entryPrice: p.entryPrice,
+          exitTime: p.exitTs,
+          exitPrice: p.exitPrice,
+          outcome: "closed",
+          status: "closed",
+          grossR: p.grossR,
+          netR: p.netR,
+          costR: p.costR,
+          pnlUsd: p.pnlUsdt,
+          riskUsdUsed: p.riskUsdt,
+          barsHeld: p.barsHeld,
+          exitReason: p.exitReason,
+          maxFavorableR: p.maxFavorableR,
+          regime: p.regime,
+          signalConfidence: p.signalConfidence,
+          signalEdge: p.signalEdge,
+          source: "paper" as const,
+          createdAt: p.entryTs,
+        }));
+
+        const combined = [...liveMapped, ...paperMapped]
+          .sort((a, b) => (b.entryTime ?? 0) - (a.entryTime ?? 0))
+          .slice(0, limit);
+
+        return res.json(combined);
+      }
+
       const conditions = [];
       if (symbol) conditions.push(eq(liveTradeRecords.symbol, symbol));
       if (status) conditions.push(eq(liveTradeRecords.outcome, status));
@@ -223,7 +489,8 @@ export async function registerRoutes(
         .from(liveTradeRecords)
         .where(conditions.length > 0 ? and(...conditions) : undefined)
         .orderBy(desc(liveTradeRecords.entryTime))
-        .limit(limit);
+        .limit(limit)
+        .offset(offset);
 
       res.json(rows);
     } catch (err: any) {
@@ -243,11 +510,22 @@ export async function registerRoutes(
 
       const lastSignal = await db.select().from(v5Signals).orderBy(desc(v5Signals.signalTs)).limit(1);
 
+      const lastActivity = gpuBridge.getLastActivity();
+
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const todayCycles = await db.select({ cnt: count() }).from(liveCycleLogs)
+        .where(gte(liveCycleLogs.cycleTs, todayStart.getTime()));
+
+      const lastCycleRow = await db.select().from(liveCycleLogs)
+        .orderBy(desc(liveCycleLogs.cycleTs)).limit(1);
+
       res.json({
         gpu: {
           isAvailable: gpuAvailable,
           url: gpuBridge.getUrl(),
           latencyMs: null,
+          lastActivity: lastActivity > 0 ? lastActivity : null,
         },
         sync: syncStatus,
         paper: {
@@ -258,6 +536,8 @@ export async function registerRoutes(
         moneyConfig,
         lastSignal: lastSignal[0] || null,
         serverTime: Date.now(),
+        cyclesToday: todayCycles[0]?.cnt ?? 0,
+        lastCycleTs: lastCycleRow[0]?.cycleTs ?? null,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -2381,6 +2661,7 @@ export async function registerRoutes(
         createdAt: Date.now(),
       });
       
+      gpuBridge.recordActivity();
       console.log(`[GPU Push] Received multi-head prediction: ${pred.action} confidence=${pred.confidence.toFixed(3)} vol_state=${pred.vol_state ?? 'N/A'}`);
       res.json({ success: true, id: record.id, received: Date.now() });
     } catch (error) {
@@ -4319,6 +4600,7 @@ export async function registerRoutes(
         tmActions: t.tm_actions ?? null,
         createdAt: Date.now(),
       });
+      gpuBridge.recordActivity();
       console.log(`[Live Trade] Recorded ${t.side} ${t.symbol} @ ${t.entry_price} (id=${record.id})`);
       res.json({ success: true, id: record.id });
     } catch (error) {
@@ -4490,7 +4772,35 @@ export async function registerRoutes(
         scalpVolRatio: c.scalp_vol_ratio ?? null,
         scalpVolExpansionOk: c.scalp_vol_expansion_ok ?? null,
         scalpMomentumOk: c.scalp_momentum_ok ?? null,
+        retMu: c.ret_mu ?? null,
+        mfePred: c.mfe_pred ?? null,
+        maePred: c.mae_pred ?? null,
+        pHold: c.p_hold ?? null,
+        pLong: c.p_long ?? null,
+        pShort: c.p_short ?? null,
         createdAt: Date.now(),
+      });
+      gpuBridge.recordActivity();
+      broadcast("CYCLE_UPDATE", {
+        id: record.id,
+        symbol: c.symbol,
+        cycleTs: c.cycle_ts || Date.now(),
+        price: c.price,
+        pEnter: c.p_enter,
+        direction: c.direction,
+        decision: c.decision,
+        reasons: c.reasons,
+        laneSelected: c.lane_selected,
+        htfScore: c.htf_score,
+        retMu: c.ret_mu,
+        mfePred: c.mfe_pred,
+        maePred: c.mae_pred,
+        pHold: c.p_hold,
+        pLong: c.p_long,
+        pShort: c.p_short,
+        holdReason: c.hold_reason,
+        thresholdUsed: c.threshold_used,
+        laneSizeMult: c.lane_size_mult,
       });
       res.json({ success: true, id: record.id });
     } catch (error) {
