@@ -36,6 +36,9 @@ interface CycleLog {
   thresholdUsed: number | null;
   laneSizeMult: number | null;
   holdReason: string | null;
+  v5Score: number | null;
+  v5Threshold: number | null;
+  v5Side: string | null;
   retMu: number | null;
   mfePred: number | null;
   maePred: number | null;
@@ -221,6 +224,9 @@ export default function CommandCenter() {
       thresholdUsed: (payload.thresholdUsed as number) ?? null,
       laneSizeMult: (payload.laneSizeMult as number) ?? null,
       holdReason: (payload.holdReason as string) ?? null,
+      v5Score: (payload.v5Score as number) ?? null,
+      v5Threshold: (payload.v5Threshold as number) ?? null,
+      v5Side: (payload.v5Side as string) ?? null,
       retMu: (payload.retMu as number) ?? null,
       mfePred: (payload.mfePred as number) ?? null,
       maePred: (payload.maePred as number) ?? null,
@@ -388,7 +394,7 @@ export default function CommandCenter() {
               <span>Direction</span>
               <span>Decision</span>
               <span>p_enter</span>
-              <span>Lane</span>
+              <span>V5 Score</span>
               <span>Action Probs</span>
               <span>ret_mu / MFE / MAE</span>
             </div>
@@ -402,10 +408,9 @@ export default function CommandCenter() {
                 cycle.decision === "ENTER" ? "bg-emerald-500/20 text-emerald-400" :
                 cycle.decision === "HOLD" ? "bg-amber-500/20 text-amber-400" :
                 "bg-muted text-muted-foreground";
-              const laneColor =
-                cycle.laneSelected === "CORE" ? "bg-cyan-500/20 text-cyan-400" :
-                cycle.laneSelected === "FLOW" ? "bg-violet-500/20 text-violet-400" :
-                cycle.laneSelected === "SCALP" ? "bg-amber-500/20 text-amber-400" :
+              const scoreVal = cycle.v5Score;
+              const scoreColor =
+                scoreVal != null && scoreVal >= (cycle.v5Threshold ?? 0.02) ? "bg-emerald-500/20 text-emerald-400" :
                 "bg-muted text-muted-foreground";
 
               return (
@@ -439,8 +444,8 @@ export default function CommandCenter() {
                     <Progress value={(cycle.pEnter ?? 0) * 100} className="h-2 flex-1" />
                     <span className="number-mono text-xs">{cycle.pEnter != null ? (cycle.pEnter * 100).toFixed(0) + "%" : "—"}</span>
                   </div>
-                  <Badge className={`no-default-hover-elevate no-default-active-elevate text-xs w-fit ${laneColor}`}>
-                    {cycle.laneSelected ?? "—"}
+                  <Badge className={`no-default-hover-elevate no-default-active-elevate text-xs w-fit ${scoreColor}`} data-testid={`cycle-v5score-${idx}`}>
+                    {scoreVal != null ? scoreVal.toFixed(4) : "—"}
                   </Badge>
                   <ActionProbBar pHold={cycle.pHold} pLong={cycle.pLong} pShort={cycle.pShort} />
                   <div className="text-[10px] number-mono text-muted-foreground space-x-1">

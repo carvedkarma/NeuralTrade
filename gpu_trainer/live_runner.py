@@ -1,16 +1,14 @@
-"""Multi-asset live inference loop (v4.5.2 — Triple-Lane Aggression Engine).
+"""Multi-asset live inference loop (v5.0 — V5 Composite Scoring Engine).
 
-Monitors multiple symbols in parallel on 15m intervals, runs the ENTER QUALITY
-model inference, applies HTF gates, computes HTF score, routes trades through
-CORE / FLOW / SCALP lanes, manages per-symbol daily R budgets, and handles
-SCALP time-stop exits.
+Monitors multiple symbols in parallel on 15m intervals, runs the V5Forecaster
+multi-head inference (action probs, ret_mu, MFE, MAE), computes composite
+score using the training formula, and enters trades when score >= threshold.
 
-v4.3.0 additions:
-  - HTF score (0–3) replacing binary aligned gate
-  - Triple-lane policy router (CORE / FLOW / SCALP)
-  - Per-symbol daily R budget with lane-specific caps
-  - SCALP lane with time-stop exit after 4 bars
-  - Enhanced cycle log + trade record payloads
+v5.0 scoring:
+  - V5 composite score: edge(p_side × |mu|/risk) - λ × penalty
+  - Side determined by model (edge_long vs edge_short)
+  - Score threshold (default 0.02) + min |ret_mu| (default 0.03)
+  - No lane routing — pure model-driven decisions
 
 Usage:
     python quick_start.py --live --paper --symbols BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,AVAXUSDT,XRPUSDT,ADAUSDT
@@ -32,7 +30,7 @@ import pandas as pd
 log = logging.getLogger("LiveRunner")
 
 
-SYSTEM_VERSION = "v4.5.2_directional_sep_fix"
+SYSTEM_VERSION = "v5.0_composite_scoring"
 
 REQUIRED_CANDLES = 800
 MAX_CACHE_BARS = 2000
@@ -42,24 +40,9 @@ RETRY_DELAY = 2.0
 MIN_H1_BARS = 100
 MIN_H4_BARS = 50
 
-SCALP_HORIZON = 4
-SCALP_TP_R = 1.20
-SCALP_SL_R = 0.80
-SCALP_SIZE_MULT = 0.25
-
-DAILY_BUDGET_R_TOTAL = 2.0
-LANE_BUDGET = {
-    "CORE": 1.20,
-    "FLOW": 0.60,
-    "SCALP": 0.20,
-}
-
-FLOW_QUOTA_STEPS = {
-    0: {"percentile": 95, "size_mult": 0.60},
-    1: {"percentile": 93, "size_mult": 0.50},
-    2: {"percentile": 91, "size_mult": 0.40},
-    3: {"percentile": 89, "size_mult": 0.30},
-}
+V5_SCORE_LAMBDA = 0.5
+V5_SCORE_THRESHOLD = 0.02
+V5_MIN_MU_R = 0.03
 
 COST_BPS = 8.0
 
@@ -736,7 +719,7 @@ class LiveRunner:
         self.symbols = symbols
         self.device = device
         self.interval = interval
-        self.enter_threshold = enter_threshold
+        self.enter_threshold = enter_threshold  # kept for backward compat but V5 scoring is primary
         self.tp_mult = tp_mult
         self.sl_mult = sl_mult
         self.cooldown_bars = cooldown_bars
@@ -751,15 +734,14 @@ class LiveRunner:
         self.limit_15m = limit_15m
         self.direct_htf = direct_htf
 
-        self.lane_budgets = {
-            "CORE": budget_core if budget_core is not None else LANE_BUDGET["CORE"],
-            "FLOW": budget_flow if budget_flow is not None else LANE_BUDGET["FLOW"],
-            "SCALP": budget_scalp if budget_scalp is not None else LANE_BUDGET["SCALP"],
-        }
+        self.v5_score_lambda = V5_SCORE_LAMBDA
+        self.v5_score_threshold = V5_SCORE_THRESHOLD
+        self.v5_min_mu_r = V5_MIN_MU_R
+
         log.info(f"[INIT] LiveRunner {SYSTEM_VERSION} execution_mode={execution_mode} "
                  f"record_trades={record_trades} symbols={symbols}")
-        log.info(f"[CONFIG] Lane budgets: CORE={self.lane_budgets['CORE']:.2f}R "
-                 f"FLOW={self.lane_budgets['FLOW']:.2f}R SCALP={self.lane_budgets['SCALP']:.2f}R")
+        log.info(f"[CONFIG] V5 scoring: lambda={self.v5_score_lambda} "
+                 f"threshold={self.v5_score_threshold} min_mu_r={self.v5_min_mu_r}")
 
         self.model = None
         self.engineer = None
@@ -770,12 +752,7 @@ class LiveRunner:
         self.candle_cache: Dict[str, pd.DataFrame] = {}
         self.exchange_time_offset = 0.0
         self.cooldown_tracker: Dict[str, int] = {}
-        self.p_enter_history: Dict[str, List[float]] = {}
         self.warmup_logged: Dict[str, bool] = {}
-
-        self.daily_budget: Dict[str, Dict[str, float]] = {}
-        self.daily_budget_date: Dict[str, str] = {}
-        self.budget_block_logged: Dict[str, Dict[str, bool]] = {}
 
         from trade_manager import TradeManager
         self.trade_manager = TradeManager()
@@ -908,32 +885,23 @@ class LiveRunner:
             "slope_ok": bool(htf.get('slope_ok', False)),
             "range_ok": bool(htf.get('range_ok', False)),
             "direction": str(direction),
-            "threshold_used": float(li.get('threshold_used', self.enter_threshold)),
+            "threshold_used": float(li.get('threshold_used', self.v5_score_threshold)),
             "decision": str(decision),
             "reasons": [str(r) for r in reasons] if reasons else [],
-            "lane_selected": li.get('lane_selected'),
             "htf_score": li.get('htf_score'),
-            "core_thr": li.get('core_thr'),
-            "flow_thr": li.get('flow_thr'),
-            "scalp_thr": li.get('scalp_thr'),
-            "lane_size_mult": li.get('lane_size_mult'),
-            "lane_budget_remaining_r": li.get('lane_budget_remaining_r'),
             "hold_reason": li.get('hold_reason'),
-            "quota_step": li.get('quota_step'),
-            "e_net_pred": round(float(e_net_pred), 4) if e_net_pred is not None else li.get('e_net_pred'),
+            "e_net_pred": round(float(e_net_pred), 4) if e_net_pred is not None else li.get('ret_mu'),
             "enter_logit": round(float(enter_logit), 4) if enter_logit is not None else None,
             "temperature_used": round(float(temperature_used), 4) if temperature_used is not None else None,
+            "v5_score": li.get('v5_score'),
+            "v5_threshold": li.get('v5_threshold'),
+            "v5_side": li.get('v5_side'),
+            "v5_mfe": li.get('v5_mfe'),
+            "v5_mae": li.get('v5_mae'),
+            "v5_ret_mu": li.get('ret_mu'),
+            "v5_p_long": li.get('p_long'),
+            "v5_p_short": li.get('p_short'),
         }
-        sg = li.get('scalp_gates')
-        if sg:
-            payload["scalp_atr_ratio"] = sg.get('atr_ratio')
-            payload["scalp_tr_z"] = sg.get('true_range_z')
-            payload["scalp_bb_z"] = sg.get('bb_width_z')
-            payload["scalp_ema20_slope"] = sg.get('ema20_slope')
-            payload["scalp_macd_hist"] = sg.get('macd_hist_val')
-            payload["scalp_vol_ratio"] = sg.get('volume_ratio')
-            payload["scalp_vol_expansion_ok"] = sg.get('vol_expansion_ok')
-            payload["scalp_momentum_ok"] = sg.get('momentum_ok')
         payload_keys = [k for k, v in payload.items() if v is not None]
         log.debug(f"[CYCLE_PAYLOAD] sym={symbol} fields_present={payload_keys}")
         _retry_request("POST", url, json=payload)
@@ -954,11 +922,11 @@ class LiveRunner:
             "p_enter": p_enter,
             "size_pct": size_pct,
             "status": "open",
-            "lane": li.get('lane'),
+            "lane": li.get('lane', 'V5'),
             "htf_score": li.get('htf_score'),
             "lane_threshold_used": li.get('threshold_used'),
-            "lane_size_mult": li.get('lane_size_mult'),
-            "lane_horizon": li.get('lane_horizon'),
+            "lane_size_mult": li.get('lane_size_mult', 1.0),
+            "lane_horizon": li.get('lane_horizon', 24),
         }
         resp = _retry_request("POST", url, json=payload)
         if resp and resp.status_code == 200:
@@ -1054,16 +1022,13 @@ class LiveRunner:
         """Main loop — runs continuously until interrupted."""
         mode_label = {"signal_only": "SIGNAL_ONLY", "paper": "PAPER", "live": "LIVE"}.get(self.execution_mode, "UNKNOWN")
         log.info("=" * 80)
-        log.info(f"  LIVE RUNNER v4.5.2 ({mode_label})")
+        log.info(f"  LIVE RUNNER v5.0 ({mode_label})")
         log.info(f"  [MODE] execution_mode={self.execution_mode} record_trades={self.record_trades} "
                  f"paper={self.paper} live={self.execution_mode == 'live'}")
         log.info(f"  Symbols: {', '.join(self.symbols)}")
-        log.info(f"  Interval: {self.interval} | Threshold: {self.enter_threshold}")
+        log.info(f"  V5 Scoring: lambda={self.v5_score_lambda} threshold={self.v5_score_threshold} min_mu_r={self.v5_min_mu_r}")
         log.info(f"  TP={self.tp_mult}x SL={self.sl_mult}x | Cooldown: {self.cooldown_bars} bars")
         log.info(f"  Per-symbol models: {self.per_symbol_models}")
-        log.info(f"  Triple-Lane Engine: CORE(p99/1.0x) FLOW(p95-stepped) SCALP(p90/0.25x/4bar)")
-        total_budget = sum(self.lane_budgets.values())
-        log.info(f"  Daily R Budget: {total_budget:.2f}R total | CORE={self.lane_budgets['CORE']:.2f}R FLOW={self.lane_budgets['FLOW']:.2f}R SCALP={self.lane_budgets['SCALP']:.2f}R")
 
         self.portfolio.on_close_callback = self._on_position_close
         log.info(f"  15m fetch limit: {self.limit_15m} | Direct HTF fetch: {self.direct_htf}")
@@ -1243,213 +1208,6 @@ class LiveRunner:
         for c in accepted:
             self._execute_candidate(c)
 
-    def _reset_daily_budget_if_needed(self, symbol: str):
-        """Reset daily R budget for symbol at UTC day boundary."""
-        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-        if self.daily_budget_date.get(symbol) != today:
-            self.daily_budget[symbol] = {
-                "CORE": self.lane_budgets["CORE"],
-                "FLOW": self.lane_budgets["FLOW"],
-                "SCALP": self.lane_budgets["SCALP"],
-            }
-            self.daily_budget_date[symbol] = today
-            self.budget_block_logged[symbol] = {"CORE": False, "FLOW": False, "SCALP": False}
-
-    def _check_lane_budget(self, symbol: str, lane: str, size_mult: float) -> bool:
-        """Check if lane has enough R budget remaining. Reserve = 1.0R * size_mult."""
-        self._reset_daily_budget_if_needed(symbol)
-        reserve_r = 1.0 * size_mult
-        remaining = self.daily_budget.get(symbol, {}).get(lane, 0.0)
-        if remaining < reserve_r:
-            if not self.budget_block_logged.get(symbol, {}).get(lane, False):
-                log.warning(f"BUDGET_BLOCK: {symbol} lane={lane} remaining={remaining:.2f} < need={reserve_r:.2f} -> disabled today")
-                self.budget_block_logged.setdefault(symbol, {})[lane] = True
-            return False
-        return True
-
-    def _spend_lane_budget(self, symbol: str, lane: str, size_mult: float):
-        """Deduct R budget after a trade is opened."""
-        reserve_r = 1.0 * size_mult
-        self.daily_budget.setdefault(symbol, {})
-        self.daily_budget[symbol][lane] = self.daily_budget[symbol].get(lane, 0.0) - reserve_r
-
-    def _get_lane_budget_remaining(self, symbol: str, lane: str) -> float:
-        """Get remaining R budget for a lane."""
-        self._reset_daily_budget_if_needed(symbol)
-        return self.daily_budget.get(symbol, {}).get(lane, 0.0)
-
-    def _get_percentile(self, symbol: str, pct: int) -> Optional[float]:
-        """Get p_enter percentile from history for a symbol."""
-        hist = self.p_enter_history.get(symbol, [])
-        if len(hist) < 20:
-            return None
-        return float(np.percentile(hist, pct))
-
-    def _select_lane(self, symbol: str, p_enter: float, htf: dict,
-                     htf_score: int, features_df: pd.DataFrame,
-                     df_candles: pd.DataFrame, atr: float,
-                     e_net_pred: float = 0.0) -> dict:
-        """Triple-lane router: CORE > FLOW > SCALP > HOLD.
-
-        Returns dict with lane selection info including:
-        lane_selected, threshold_used, lane_size_mult, lane_horizon,
-        core_thr, flow_thr, scalp_thr, hold_reason, quota_step, e_net_pred
-        """
-        range_ok = htf.get('range_ok', False)
-        side = htf.get('side', 'NEUTRAL')
-        if side == 'NEUTRAL':
-            return {
-                'lane_selected': 'HOLD', 'threshold_used': 0.0,
-                'lane_size_mult': 0.0, 'lane_horizon': 24,
-                'core_thr': None, 'flow_thr': None, 'scalp_thr': None,
-                'hold_reason': 'NEUTRAL_SIDE', 'htf_score': htf_score,
-                'lane_budget_remaining_r': 0.0, 'quota_step': None, 'lane': None,
-            }
-
-        p99 = self._get_percentile(symbol, 99)
-        p95 = self._get_percentile(symbol, 95)
-        p90 = self._get_percentile(symbol, 90)
-
-        core_thr = max(self.enter_threshold, p99) if p99 is not None else self.enter_threshold
-        scalp_thr = p90 if p90 is not None else 0.65
-
-        flow_momentum_ok = _compute_momentum_ok(features_df, side)
-        scalp_gates = _compute_scalp_gates(df_candles, features_df, side, atr)
-        log.info(f"[SCALP_GATES] sym={symbol} vol_ok={scalp_gates['vol_expansion_ok']} "
-                 f"mom_ok={scalp_gates['momentum_ok']} atr_ratio={scalp_gates['atr_ratio']:.4f} "
-                 f"bb_z={scalp_gates['bb_width_z']:.4f} tr_z={scalp_gates['true_range_z']:.4f} "
-                 f"vol_ratio={scalp_gates['volume_ratio']:.4f}")
-
-        quota_step = 0
-        sym_hist = self.p_enter_history.get(symbol, [])
-        trades_today = self.daily_budget_date.get(symbol, '')
-        if len(sym_hist) >= 20:
-            recent_hist = np.array(sym_hist)
-            target_trades_per_day = 3
-            actual_today = self.lane_budgets["FLOW"] - self._get_lane_budget_remaining(symbol, "FLOW")
-            if actual_today > 0:
-                ratio = actual_today / self.lane_budgets["FLOW"]
-                if ratio < 0.25:
-                    quota_step = 3
-                elif ratio < 0.5:
-                    quota_step = 2
-                elif ratio < 0.75:
-                    quota_step = 1
-                else:
-                    quota_step = 0
-
-        flow_config = FLOW_QUOTA_STEPS.get(quota_step, FLOW_QUOTA_STEPS[0])
-        flow_pct = flow_config["percentile"]
-        flow_size_mult = flow_config["size_mult"]
-        flow_thr_val = self._get_percentile(symbol, flow_pct)
-        flow_thr = flow_thr_val if flow_thr_val is not None else 0.75
-
-        flow_budget_used = self.lane_budgets["FLOW"] - self._get_lane_budget_remaining(symbol, "FLOW")
-        log.info(f"[QUOTA] sym={symbol} trades_today={flow_budget_used:.2f}R_used "
-                 f"target_tpd=3 step={quota_step} pressure={quota_step} "
-                 f"flow_pct={flow_pct} flow_size_mult={flow_size_mult:.2f}")
-
-        min_enet_core = getattr(self, 'min_enet_core', 0.00)
-        min_enet_flow = getattr(self, 'min_enet_flow', -0.05)
-        min_enet_scalp = getattr(self, 'min_enet_scalp', -0.02)
-
-        result_base = {
-            'htf_score': htf_score,
-            'core_thr': round(core_thr, 4),
-            'flow_thr': round(flow_thr, 4),
-            'scalp_thr': round(scalp_thr, 4),
-            'quota_step': quota_step,
-            'e_net_pred': round(e_net_pred, 4),
-        }
-
-        if htf_score >= 3 and range_ok:
-            if p_enter >= core_thr:
-                if e_net_pred < min_enet_core:
-                    log.info(f"[ENET_GATE] CORE blocked: e_net={e_net_pred:.4f} < min={min_enet_core:.4f}")
-                elif self._check_lane_budget(symbol, "CORE", 1.0):
-                    log.info(f"[BUDGET] sym={symbol} core_rem={self._get_lane_budget_remaining(symbol, 'CORE'):.2f} "
-                             f"flow_rem={self._get_lane_budget_remaining(symbol, 'FLOW'):.2f} "
-                             f"scalp_rem={self._get_lane_budget_remaining(symbol, 'SCALP'):.2f}")
-                    return {**result_base,
-                        'lane_selected': 'CORE', 'lane': 'CORE',
-                        'threshold_used': core_thr, 'lane_size_mult': 1.0,
-                        'lane_horizon': 24,
-                        'lane_budget_remaining_r': self._get_lane_budget_remaining(symbol, "CORE"),
-                        'hold_reason': None,
-                        'scalp_gates': scalp_gates,
-                    }
-
-        if htf_score >= 2 and (range_ok or flow_momentum_ok):
-            if p_enter >= flow_thr:
-                if e_net_pred < min_enet_flow:
-                    log.info(f"[ENET_GATE] FLOW blocked: e_net={e_net_pred:.4f} < min={min_enet_flow:.4f}")
-                elif self._check_lane_budget(symbol, "FLOW", flow_size_mult):
-                    log.info(f"[BUDGET] sym={symbol} core_rem={self._get_lane_budget_remaining(symbol, 'CORE'):.2f} "
-                             f"flow_rem={self._get_lane_budget_remaining(symbol, 'FLOW'):.2f} "
-                             f"scalp_rem={self._get_lane_budget_remaining(symbol, 'SCALP'):.2f}")
-                    return {**result_base,
-                        'lane_selected': 'FLOW', 'lane': 'FLOW',
-                        'threshold_used': flow_thr, 'lane_size_mult': flow_size_mult,
-                        'lane_horizon': 24,
-                        'lane_budget_remaining_r': self._get_lane_budget_remaining(symbol, "FLOW"),
-                        'hold_reason': None,
-                        'scalp_gates': scalp_gates,
-                    }
-
-        if htf_score >= 1 and scalp_gates['vol_expansion_ok'] and scalp_gates['momentum_ok']:
-            if p_enter >= scalp_thr:
-                if e_net_pred < min_enet_scalp:
-                    log.info(f"[ENET_GATE] SCALP blocked: e_net={e_net_pred:.4f} < min={min_enet_scalp:.4f}")
-                else:
-                    scalp_size = SCALP_SIZE_MULT
-                    if not range_ok:
-                        scalp_size *= 0.5
-                    if self._check_lane_budget(symbol, "SCALP", scalp_size):
-                        log.info(f"[BUDGET] sym={symbol} core_rem={self._get_lane_budget_remaining(symbol, 'CORE'):.2f} "
-                                 f"flow_rem={self._get_lane_budget_remaining(symbol, 'FLOW'):.2f} "
-                                 f"scalp_rem={self._get_lane_budget_remaining(symbol, 'SCALP'):.2f}")
-                        return {**result_base,
-                            'lane_selected': 'SCALP', 'lane': 'SCALP',
-                            'threshold_used': scalp_thr, 'lane_size_mult': scalp_size,
-                            'lane_horizon': SCALP_HORIZON,
-                            'lane_budget_remaining_r': self._get_lane_budget_remaining(symbol, "SCALP"),
-                            'hold_reason': None,
-                            'scalp_gates': scalp_gates,
-                        }
-
-        hold_reasons = []
-        if htf_score < 1:
-            hold_reasons.append(f"htf_score={htf_score}<1")
-        elif htf_score < 2:
-            if p_enter < scalp_thr:
-                hold_reasons.append(f"p_enter={p_enter:.4f}<scalp_thr={scalp_thr:.4f}")
-            if not scalp_gates['vol_expansion_ok']:
-                hold_reasons.append("vol_expansion_fail")
-            if not scalp_gates['momentum_ok']:
-                hold_reasons.append("momentum_fail")
-        elif htf_score < 3:
-            if p_enter < flow_thr:
-                hold_reasons.append(f"p_enter={p_enter:.4f}<flow_thr={flow_thr:.4f}")
-        else:
-            if p_enter < core_thr:
-                hold_reasons.append(f"p_enter={p_enter:.4f}<core_thr={core_thr:.4f}")
-        if e_net_pred < min_enet_scalp:
-            hold_reasons.append(f"e_net={e_net_pred:.4f}<min_enet_scalp={min_enet_scalp:.4f}")
-
-        core_rem = self._get_lane_budget_remaining(symbol, "CORE")
-        flow_rem = self._get_lane_budget_remaining(symbol, "FLOW")
-        scalp_rem = self._get_lane_budget_remaining(symbol, "SCALP")
-        log.info(f"[BUDGET] sym={symbol} core_rem={core_rem:.2f} flow_rem={flow_rem:.2f} scalp_rem={scalp_rem:.2f}")
-        total_remaining = core_rem + flow_rem + scalp_rem
-        return {**result_base,
-            'lane_selected': 'HOLD', 'lane': None,
-            'threshold_used': 0.0, 'lane_size_mult': 0.0,
-            'lane_horizon': 24,
-            'lane_budget_remaining_r': total_remaining,
-            'hold_reason': '; '.join(hold_reasons) if hold_reasons else 'NO_LANE_MATCH',
-            'scalp_gates': scalp_gates,
-        }
-
     def _compute_htf_from_direct(self, htf_direct: Dict[str, pd.DataFrame],
                                   df_candles: pd.DataFrame) -> dict:
         """Compute HTF gate values from directly-fetched 1H/4H candle data.
@@ -1609,23 +1367,34 @@ class LiveRunner:
         current_price = float(df_candles.iloc[-1]['close'])
         atr = _compute_atr(df_candles)
 
-        if symbol not in self.p_enter_history:
-            self.p_enter_history[symbol] = []
-        self.p_enter_history[symbol].append(p_enter)
-        if len(self.p_enter_history[symbol]) > 2000:
-            self.p_enter_history[symbol] = self.p_enter_history[symbol][-2000:]
+        v5_probs = infer_result.get('v5_action_probs', [0.5, 0.25, 0.25])
+        p_hold = v5_probs[0]
+        p_long = v5_probs[1]
+        p_short = v5_probs[2]
+        v5_mfe = infer_result.get('v5_mfe', 0.0)
+        v5_mae = infer_result.get('v5_mae', 0.0)
+        ret_mu = infer_result.get('v5_ret_mu', e_net_pred)
 
-        side = htf.get('side', 'NEUTRAL')
-        if side == 'NEUTRAL':
-            dir_for_score = 'LONG' if htf.get('h1_trend', 0) >= 0 else 'SHORT'
-        else:
-            dir_for_score = side
-        htf_score = _compute_htf_score(htf, dir_for_score)
+        risk = max(v5_mae, 0.001)
+        abs_mu = abs(ret_mu)
+        mu_over_risk = abs_mu / risk if risk > 0 else 0.0
+        edge_long = p_long * mu_over_risk
+        edge_short = p_short * mu_over_risk
+        best_edge = max(edge_long, edge_short)
+        side = "LONG" if edge_long >= edge_short else "SHORT"
+        p_side = p_long if side == "LONG" else p_short
+        penalty = self.v5_score_lambda * (1.0 - p_side) * mu_over_risk
+        v5_score = best_edge - penalty
 
-        log.info(f"  {symbol}: price={current_price:.2f} p_enter={p_enter:.4f} e_net={e_net_pred:.4f} "
-                 f"logit={enter_logit:.3f} T={temperature_used:.3f} "
-                 f"side={side} htf_score={htf_score} "
-                 f"slope_ok={htf['slope_ok']} range_ok={htf['range_ok']}")
+        if abs_mu < self.v5_min_mu_r:
+            v5_score = -999.0
+
+        htf = _apply_htf_gates(features_df) if not (use_direct_htf and htf_direct) else self._compute_htf_from_direct(htf_direct, df_candles)
+        htf_score = _compute_htf_score(htf, side)
+
+        log.info(f"  {symbol}: price={current_price:.2f} v5_score={v5_score:.4f} thr={self.v5_score_threshold} "
+                 f"p_enter={p_enter:.4f} ret_mu={ret_mu:.4f} mfe={v5_mfe:.4f} mae={v5_mae:.4f} "
+                 f"p_long={p_long:.3f} p_short={p_short:.3f} side={side}")
 
         reasons = []
         decision = "HOLD"
@@ -1635,129 +1404,73 @@ class LiveRunner:
             self.cooldown_tracker[symbol] -= 1
             reasons.append(f"Cooldown active ({bars_left} bars left)")
             decision = "COOLDOWN"
-            lane_info = {
-                'lane_selected': 'HOLD', 'htf_score': htf_score,
+            v5_info = {
+                'v5_score': round(v5_score, 4), 'v5_threshold': self.v5_score_threshold,
+                'v5_side': side, 'v5_mfe': round(v5_mfe, 4), 'v5_mae': round(v5_mae, 4),
+                'ret_mu': round(ret_mu, 4), 'p_long': round(p_long, 4), 'p_short': round(p_short, 4),
+                'htf_score': htf_score, 'threshold_used': self.v5_score_threshold,
                 'hold_reason': f'COOLDOWN ({bars_left} bars)',
-                'lane_size_mult': 0.0, 'threshold_used': 0.0,
-                'core_thr': None, 'flow_thr': None, 'scalp_thr': None,
             }
             try:
                 self._push_cycle_log(symbol=symbol, price=current_price, p_enter=p_enter,
                     htf=htf, direction=side, decision=decision, reasons=reasons,
-                    lane_info=lane_info,
+                    lane_info=v5_info,
                     e_net_pred=e_net_pred, enter_logit=enter_logit,
                     temperature_used=temperature_used)
             except Exception as e:
                 log.warning(f"Failed to push cycle log for {symbol}: {e}")
             return None
 
-        self._reset_daily_budget_if_needed(symbol)
-        lane_result = self._select_lane(
-            symbol=symbol, p_enter=p_enter, htf=htf,
-            htf_score=htf_score, features_df=features_df,
-            df_candles=df_candles, atr=atr,
-            e_net_pred=e_net_pred,
-        )
+        score_pass = v5_score >= self.v5_score_threshold
 
-        lane_selected = lane_result['lane_selected']
+        v5_info = {
+            'v5_score': round(v5_score, 4), 'v5_threshold': self.v5_score_threshold,
+            'v5_side': side, 'v5_mfe': round(v5_mfe, 4), 'v5_mae': round(v5_mae, 4),
+            'ret_mu': round(ret_mu, 4), 'p_long': round(p_long, 4), 'p_short': round(p_short, 4),
+            'htf_score': htf_score, 'threshold_used': self.v5_score_threshold,
+        }
 
-        if hasattr(self, 'verifier') and self.verifier:
-            vf = self.verifier
-            vf.stats.total_cycles += 1
-            cycle_n = vf.stats.total_cycles
-            fs = vf.verify_lane_routing(cycle_n, lane_result, p_enter, htf_score, htf)
-            vf.add_failures(fs)
-            payload_for_check = {
-                'lane_selected': lane_result.get('lane_selected'),
-                'htf_score': lane_result.get('htf_score'),
-                'hold_reason': lane_result.get('hold_reason'),
-                'quota_step': lane_result.get('quota_step'),
-                'core_thr': lane_result.get('core_thr'),
-                'flow_thr': lane_result.get('flow_thr'),
-                'scalp_thr': lane_result.get('scalp_thr'),
-                'lane_size_mult': lane_result.get('lane_size_mult'),
-                'lane_budget_remaining_r': lane_result.get('lane_budget_remaining_r'),
-            }
-            fs2 = vf.verify_payload(cycle_n, payload_for_check)
-            vf.add_failures(fs2)
-            qs = lane_result.get('quota_step')
-            if qs is not None:
-                vf.record_quota_step(qs)
-            if cycle_n >= vf.max_cycles:
-                log.info(f"[VERIFY] Reached {vf.max_cycles} cycles -- stopping for report generation")
-                self._should_stop = True
-
-        if hasattr(self, 'separation_verifier') and self.separation_verifier:
-            sv = self.separation_verifier
-            scalp_gates = lane_result.get('scalp_gates', {})
-            budgets = {
-                'core_remaining': self._get_lane_budget_remaining(symbol, "CORE"),
-                'flow_remaining': self._get_lane_budget_remaining(symbol, "FLOW"),
-                'scalp_remaining': self._get_lane_budget_remaining(symbol, "SCALP"),
-            }
-            sv.verify_cycle(
-                cycle=sv.stats.total_cycles,
-                lane_result=lane_result,
-                p_enter=p_enter,
-                htf_score=htf_score,
-                htf=htf,
-                scalp_gates=scalp_gates,
-                budgets=budgets,
-            )
-            if sv.stats.total_cycles >= sv.max_cycles:
-                log.info(f"[VERIFY_SEPARATION] Reached {sv.max_cycles} cycles -- stopping for report generation")
-                self._should_stop = True
-
-        if lane_selected == 'HOLD':
-            decision = "HOLD"
-            hold_reason = lane_result.get('hold_reason', 'NO_LANE_MATCH')
+        if not score_pass:
+            hold_reasons = []
+            if abs_mu < self.v5_min_mu_r:
+                hold_reasons.append(f"abs_mu={abs_mu:.4f}<min={self.v5_min_mu_r}")
+            else:
+                hold_reasons.append(f"v5_score={v5_score:.4f}<thr={self.v5_score_threshold}")
+            hold_reason = '; '.join(hold_reasons)
             reasons.append(hold_reason)
-            log.info(f"[LANE_DECISION] sym={symbol} lane=HOLD p={p_enter:.4f} "
-                     f"htf_score={htf_score} core_thr={lane_result.get('core_thr','?')} "
-                     f"flow_thr={lane_result.get('flow_thr','?')} scalp_thr={lane_result.get('scalp_thr','?')} "
-                     f"reason={hold_reason}")
+            v5_info['hold_reason'] = hold_reason
 
-            sym_hist = self.p_enter_history.get(symbol, [])
-            if len(sym_hist) >= 20:
-                hist = np.array(sym_hist)
-                p90 = float(np.percentile(hist, 90))
-                p95 = float(np.percentile(hist, 95))
-                p99 = float(np.percentile(hist, 99))
-                log.info(f"    {symbol} p_enter percentiles (last {len(hist)}): "
-                         f"p90={p90:.3f} p95={p95:.3f} p99={p99:.3f}")
-                log.info(f"    thresholds: core={lane_result.get('core_thr','?')} "
-                         f"flow={lane_result.get('flow_thr','?')} "
-                         f"scalp={lane_result.get('scalp_thr','?')}")
+            log.info(f"[V5_DECISION] sym={symbol} score={v5_score:.4f} thr={self.v5_score_threshold} "
+                     f"side={side} -> HOLD reason={hold_reason}")
 
             try:
                 self._push_cycle_log(symbol=symbol, price=current_price, p_enter=p_enter,
                     htf=htf, direction=side, decision=decision, reasons=reasons,
-                    lane_info=lane_result,
+                    lane_info=v5_info,
                     e_net_pred=e_net_pred, enter_logit=enter_logit,
                     temperature_used=temperature_used)
             except Exception as e:
                 log.warning(f"Failed to push cycle log for {symbol}: {e}")
             return None
 
-        decision = f"ENTER {lane_selected}"
-        reasons.append(f"p_enter={p_enter:.1%} side={side} lane={lane_selected}")
-        log.info(f"[LANE_DECISION] sym={symbol} lane={lane_selected} p={p_enter:.4f} "
-                 f"htf_score={htf_score} core_thr={lane_result.get('core_thr','?')} "
-                 f"flow_thr={lane_result.get('flow_thr','?')} scalp_thr={lane_result.get('scalp_thr','?')} "
-                 f"reason=ENTER size_mult={lane_result['lane_size_mult']:.2f} "
-                 f"horizon={lane_result['lane_horizon']}")
+        decision = "ENTER"
+        reasons.append(f"v5_score={v5_score:.4f}>=thr={self.v5_score_threshold} side={side} p_enter={p_enter:.1%}")
+        v5_info['hold_reason'] = None
+
+        log.info(f"[V5_DECISION] sym={symbol} score={v5_score:.4f} thr={self.v5_score_threshold} "
+                 f"side={side} -> ENTER")
 
         try:
             self._push_cycle_log(symbol=symbol, price=current_price, p_enter=p_enter,
                 htf=htf, direction=side, decision=decision, reasons=reasons,
-                lane_info=lane_result,
+                lane_info=v5_info,
                 e_net_pred=e_net_pred, enter_logit=enter_logit,
                 temperature_used=temperature_used)
         except Exception as e:
             log.warning(f"Failed to push cycle log for {symbol}: {e}")
 
         sl_pct = self.sl_mult * atr / current_price
-        risk_pct = min(2.0 * sl_pct * 100, 5.0) * lane_result['lane_size_mult']
+        risk_pct = min(2.0 * sl_pct * 100, 5.0)
 
         return {
             'symbol': symbol,
@@ -1768,13 +1481,13 @@ class LiveRunner:
             'htf': htf,
             'risk_pct': risk_pct,
             'df_candles': df_candles,
-            'expected_net_r': (p_enter - 0.5) * self.tp_mult / self.sl_mult,
-            'lane_info': lane_result,
+            'expected_net_r': v5_score,
+            'v5_info': v5_info,
             'features_df': features_df,
         }
 
     def _execute_candidate(self, candidate: dict):
-        """Execute a trade candidate — with lane-aware geometry and budget spending.
+        """Execute a trade candidate using V5 composite scoring.
 
         Gated by execution_mode:
         - signal_only: log the signal, push cycle log, do NOT create Position or POST trade
@@ -1789,19 +1502,12 @@ class LiveRunner:
         atr = candidate['atr']
         p_enter = candidate['p_enter']
         htf = candidate['htf']
-        lane_info = candidate.get('lane_info', {})
-        lane = lane_info.get('lane', 'CORE')
-        size_mult = lane_info.get('lane_size_mult', 1.0)
-        horizon = lane_info.get('lane_horizon', 24)
-        htf_score = lane_info.get('htf_score', 0)
+        v5_info = candidate.get('v5_info', {})
+        htf_score = v5_info.get('htf_score', 0)
 
         if self.execution_mode == "signal_only" or not self.record_trades:
-            if lane == "SCALP":
-                sig_sl_dist = SCALP_SL_R * atr
-                sig_tp_dist = SCALP_TP_R * atr
-            else:
-                sig_sl_dist = self.sl_mult * atr
-                sig_tp_dist = self.tp_mult * atr
+            sig_sl_dist = self.sl_mult * atr
+            sig_tp_dist = self.tp_mult * atr
             if side == "LONG":
                 sig_sl = current_price - sig_sl_dist
                 sig_tp = current_price + sig_tp_dist
@@ -1809,9 +1515,9 @@ class LiveRunner:
                 sig_sl = current_price + sig_sl_dist
                 sig_tp = current_price - sig_tp_dist
             no_exec_reason = "SIGNAL_ONLY" if self.execution_mode == "signal_only" else "RECORD_TRADES_OFF"
-            log.info(f"  [NO_EXEC] {no_exec_reason} would_open_trade symbol={symbol} side={side} lane={lane} "
-                     f"p={p_enter:.4f} entry={current_price:.2f} sl={sig_sl:.2f} tp={sig_tp:.2f} "
-                     f"htf_score={htf_score} size_mult={size_mult:.2f} horizon={horizon}")
+            log.info(f"  [NO_EXEC] {no_exec_reason} would_open_trade symbol={symbol} side={side} "
+                     f"v5_score={v5_info.get('v5_score','?')} p={p_enter:.4f} "
+                     f"entry={current_price:.2f} sl={sig_sl:.2f} tp={sig_tp:.2f}")
             try:
                 self._push_cycle_log(
                     symbol=symbol, price=current_price, p_enter=p_enter,
@@ -1819,9 +1525,9 @@ class LiveRunner:
                     reasons=[
                         f"would_enter=true",
                         f"side={side} entry={current_price:.2f} sl={sig_sl:.2f} tp={sig_tp:.2f}",
-                        f"lane={lane} p={p_enter:.4f} htf_score={htf_score}",
+                        f"v5_score={v5_info.get('v5_score','?')} p={p_enter:.4f}",
                     ],
-                    lane_info=lane_info,
+                    lane_info=v5_info,
                 )
             except Exception as e:
                 log.warning(f"Failed to push {no_exec_reason} cycle log for {symbol}: {e}")
@@ -1847,12 +1553,8 @@ class LiveRunner:
 
             entry_price = exec_result.entry_price
 
-        if lane == "SCALP":
-            sl_dist = SCALP_SL_R * atr
-            tp_dist = SCALP_TP_R * atr
-        else:
-            sl_dist = self.sl_mult * atr
-            tp_dist = self.tp_mult * atr
+        sl_dist = self.sl_mult * atr
+        tp_dist = self.tp_mult * atr
 
         if side == "LONG":
             sl_price = entry_price - sl_dist
@@ -1869,36 +1571,31 @@ class LiveRunner:
         )
 
         sl_pct = abs(entry_price - sl_price) / entry_price
-        risk_pct = min(2.0 * sl_pct * 100, 5.0) * size_mult
+        risk_pct = min(2.0 * sl_pct * 100, 5.0)
         size_pct = risk_pct
 
         pos = Position(
             symbol=symbol, side=side,
             entry_price=entry_price, entry_time=time.time(),
             atr=atr, tp_price=tp_price, sl_price=sl_price,
-            p_enter=p_enter, size_mult=size_mult, risk_pct=risk_pct,
+            p_enter=p_enter, size_mult=1.0, risk_pct=risk_pct,
             bar_index=self.cycle_count,
-            lane=lane, horizon=horizon, htf_score=htf_score,
-            threshold_used=lane_info.get('threshold_used', self.enter_threshold),
+            lane="V5", horizon=24, htf_score=htf_score,
+            threshold_used=self.v5_score_threshold,
         )
         self.portfolio.open_position(pos)
 
-        self._spend_lane_budget(symbol, lane, size_mult)
-
-        cooldown = self.cooldown_bars
-        if lane == "SCALP":
-            cooldown = max(2, self.cooldown_bars // 2)
-        self.cooldown_tracker[symbol] = cooldown
+        self.cooldown_tracker[symbol] = self.cooldown_bars
 
         try:
             trade_id = self._push_trade_record(
                 symbol=symbol, side=side, entry_price=entry_price,
                 sl_price=sl_price, tp_price=tp_price,
                 p_enter=p_enter, size_pct=size_pct, lane_info={
-                    'lane': lane, 'htf_score': htf_score,
-                    'threshold_used': lane_info.get('threshold_used'),
-                    'lane_size_mult': size_mult,
-                    'lane_horizon': horizon,
+                    'lane': 'V5', 'htf_score': htf_score,
+                    'threshold_used': self.v5_score_threshold,
+                    'lane_size_mult': 1.0,
+                    'lane_horizon': 24,
                 },
             )
             if trade_id:
@@ -1907,11 +1604,11 @@ class LiveRunner:
             log.warning(f"Failed to push trade record for {symbol}: {e}")
 
         if self.execution_mode == "paper":
-            log.info(f"  [PAPER_OPEN] {lane} {symbol} {side} @ {entry_price:.2f} "
-                     f"| size_mult={size_mult:.2f} horizon={horizon}")
+            log.info(f"  [PAPER_OPEN] V5 {symbol} {side} @ {entry_price:.2f} "
+                     f"| v5_score={v5_info.get('v5_score','?')}")
         elif self.execution_mode == "live":
-            log.info(f"  [LIVE_OPEN] placing_order {lane} {symbol} {side} @ {entry_price:.2f} "
-                     f"| size_mult={size_mult:.2f} horizon={horizon}")
+            log.info(f"  [LIVE_OPEN] placing_order V5 {symbol} {side} @ {entry_price:.2f} "
+                     f"| v5_score={v5_info.get('v5_score','?')}")
         self._push_prediction(prediction)
 
     def _print_summary(self):

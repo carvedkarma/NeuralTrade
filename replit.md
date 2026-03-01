@@ -12,8 +12,8 @@ Preferred communication style: Simple, everyday language.
 Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), Recharts for charts, and a dark navy theme with neon accents.
 
 **Pages:**
-- `/` — Command Center: Live status banner ("V5 Neural Engine LIVE"), metrics bar (6 KPIs), market grid (6 symbols with sparklines), real-time signal feed with V5 model outputs (action probs, ret_mu, MFE/MAE, lane routing), heartbeat sparkline, active positions (with quick close), mini equity curve
-- `/live` — Live Trading: Symbol selector tabs, price chart, market scanner indicator with per-symbol scan times, signal detail panel with V5 cycle log data (p_enter, direction, decision, lane, action prob bar, ret_mu/MFE/MAE, reasons), recent cycles mini-history, positions table (close/partial-close/edit SL-TP actions, SL/TP progress bars), new manual trade panel, signal history
+- `/` — Command Center: Live status banner ("V5 Neural Engine LIVE"), metrics bar (6 KPIs), market grid (6 symbols with sparklines), real-time signal feed with V5 model outputs (action probs, ret_mu, MFE/MAE, V5 composite score), heartbeat sparkline, active positions (with quick close), mini equity curve
+- `/live` — Live Trading: Symbol selector tabs, price chart, market scanner indicator with per-symbol scan times, signal detail panel with V5 cycle log data (p_enter, direction, decision, V5 score/threshold, action prob bar, ret_mu/MFE/MAE, reasons), recent cycles mini-history, positions table (close/partial-close/edit SL-TP actions, SL/TP progress bars), new manual trade panel, signal history
 - `/paper` — Paper Trading: Enable/disable toggles, portfolio metrics, equity curve, open/closed positions (with close/partial-close/edit SL-TP actions), configuration
 - `/analytics` — Analytics: 10 stat cards (Total R, Trades, Win Rate, Profit Factor, Expectancy, Sharpe Ratio, Sortino Ratio, Max Drawdown, Max Consec Wins, Avg Hold Time), equity curve, rolling 7d/30d performance, hourly heatmap, per-symbol equity curves, win/loss streaks chart, trade duration histogram, R-multiple distribution, per-symbol breakdown table with edge status, monthly/weekly P&L table
 - `/settings` — Settings: GPU connection (push-based detection with "Last activity: X ago"), account config, model info, risk parameters, data freshness, danger zone
@@ -40,7 +40,7 @@ Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), 
   - `GET /api/market/prices` — Current prices for 6 symbols with 24h change
   - `GET /api/market/candles` — Candle data for charts
   - `GET /api/live/cycle-logs` — Cycle log history (supports `symbol`, `limit` params)
-  - `POST /api/live/cycle-log` — Receive cycle log from GPU trainer, broadcasts via WebSocket. **Auto-trade**: when decision=ENTER and paper trading is enabled, automatically opens a paper position via `manualOpenPosition` with source="v5_signal", SL/TP calculated from threshold_used, 2:1 R:R ratio. Safety checks: max 1 position per symbol, max 6 total open positions.
+  - `POST /api/live/cycle-log` — Receive cycle log from GPU trainer, broadcasts via WebSocket (includes v5Score, v5Threshold, v5Side). **Auto-trade**: when decision=ENTER and paper trading is enabled, automatically opens a paper position via `manualOpenPosition` with source="v5_signal", SL calculated from V5 MAE prediction (×1.2 buffer), TP from dynamic R:R ratio (MFE/MAE clamped 1.5-3.0). Safety checks: max 1 position per symbol, max 6 total open positions.
   - `GET/POST /api/paper/*` — Paper trading engine (positions, portfolio, config, enable/disable, start/stop). Positions endpoint returns enriched data: `currentPrice`, `pnlR`, `pnlUsdt`, `takeProfit` (mapped from `tp1`), `entryTime` (mapped from `entryTs`)
   - `POST /api/paper/positions/:id/close` — Manual close position at market
   - `POST /api/paper/positions/:id/partial-close` — Partial close (percent)
@@ -70,7 +70,8 @@ Schema in `shared/schema.ts` with Drizzle + Zod validation.
 - Architecture: V5Forecaster (multi-head: ret_dist, mfe, mae, action[HOLD/LONG/SHORT]) with 85 features, 15m timeframe
 - Also supports legacy EnhancedMultiHeadMLP (auto-detected from checkpoint `model_type` field)
 - Feature version: v5.0.1_forecaster (FeatureEngineer: STF44 + ENH24 + HTF12 + Regime5 = 85 features)
-- Triple-Lane Aggression Engine: CORE/FLOW/SCALP routed by HTF score
+- V5 Composite Scoring Engine (replaced Triple-Lane system): score = p_side × |mu|/risk - λ × (1-p_side) × |mu|/risk, threshold=0.02, min_mu_r=0.03, lambda=0.5
+- Side determined by model (edge_long vs edge_short), not HTF alignment
 - 6 symbols: BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, AVAXUSDT
 - Per-symbol edge learning (v5.4.0): per-symbol scalers, thresholds, kill switches
 - Walk-forward validation: 21/25 folds profitable, +520R cumulative

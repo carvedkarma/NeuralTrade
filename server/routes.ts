@@ -4775,12 +4775,12 @@ export async function registerRoutes(
         scalpVolRatio: c.scalp_vol_ratio ?? null,
         scalpVolExpansionOk: c.scalp_vol_expansion_ok ?? null,
         scalpMomentumOk: c.scalp_momentum_ok ?? null,
-        retMu: c.ret_mu ?? null,
-        mfePred: c.mfe_pred ?? null,
-        maePred: c.mae_pred ?? null,
+        retMu: c.v5_ret_mu ?? c.ret_mu ?? null,
+        mfePred: c.v5_mfe ?? c.mfe_pred ?? null,
+        maePred: c.v5_mae ?? c.mae_pred ?? null,
         pHold: c.p_hold ?? null,
-        pLong: c.p_long ?? null,
-        pShort: c.p_short ?? null,
+        pLong: c.v5_p_long ?? c.p_long ?? null,
+        pShort: c.v5_p_short ?? c.p_short ?? null,
         createdAt: Date.now(),
       });
       gpuBridge.recordActivity();
@@ -4806,10 +4806,20 @@ export async function registerRoutes(
               } else {
                 const side: "LONG" | "SHORT" = c.direction.toUpperCase() === "SHORT" ? "SHORT" : "LONG";
                 const entryPrice = Number(c.price);
-                const thresholdUsed = Number(c.threshold_used) || 0.75;
-                const stopDistancePct = thresholdUsed * 0.015;
+                const v5Mae = Number(c.v5_mae || c.mae_pred) || 0;
+                const v5Mfe = Number(c.v5_mfe || c.mfe_pred) || 0;
+                let stopDistancePct: number;
+                let rrRatio = 2.0;
+                if (v5Mae > 0.001) {
+                  stopDistancePct = v5Mae * 1.2;
+                  if (v5Mfe > 0.001 && v5Mae > 0.001) {
+                    rrRatio = Math.min(Math.max(v5Mfe / v5Mae, 1.5), 3.0);
+                  }
+                } else {
+                  const thresholdUsed = Number(c.threshold_used) || 0.75;
+                  stopDistancePct = thresholdUsed * 0.015;
+                }
                 const stopDistance = entryPrice * Math.max(stopDistancePct, 0.003);
-                const rrRatio = 2.0;
 
                 let stopLoss: number;
                 let takeProfit: number;
@@ -4852,17 +4862,18 @@ export async function registerRoutes(
         direction: c.direction,
         decision: c.decision,
         reasons: c.reasons,
-        laneSelected: c.lane_selected,
         htfScore: c.htf_score,
-        retMu: c.ret_mu,
-        mfePred: c.mfe_pred,
-        maePred: c.mae_pred,
+        retMu: c.v5_ret_mu ?? c.ret_mu,
+        mfePred: c.v5_mfe ?? c.mfe_pred,
+        maePred: c.v5_mae ?? c.mae_pred,
         pHold: c.p_hold,
-        pLong: c.p_long,
-        pShort: c.p_short,
+        pLong: c.v5_p_long ?? c.p_long,
+        pShort: c.v5_p_short ?? c.p_short,
         holdReason: c.hold_reason,
         thresholdUsed: c.threshold_used,
-        laneSizeMult: c.lane_size_mult,
+        v5Score: c.v5_score,
+        v5Threshold: c.v5_threshold,
+        v5Side: c.v5_side,
         autoTradeResult,
       });
       res.json({ success: true, id: record.id, autoTrade: autoTradeResult });

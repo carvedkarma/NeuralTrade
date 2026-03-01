@@ -151,19 +151,6 @@ function DirectionBadge({ direction }: { direction: string }) {
   );
 }
 
-function LaneBadge({ lane }: { lane: string | null }) {
-  if (!lane) return <span className="text-muted-foreground">-</span>;
-  const colors: Record<string, string> = {
-    CORE: "bg-cyan-500/20 text-cyan-400 border-cyan-500/30",
-    FLOW: "bg-violet-500/20 text-violet-400 border-violet-500/30",
-    SCALP: "bg-amber-500/20 text-amber-400 border-amber-500/30",
-  };
-  return (
-    <Badge data-testid={`badge-lane-${lane}`} className={colors[lane.toUpperCase()] || "bg-muted text-muted-foreground"}>
-      {lane.toUpperCase()}
-    </Badge>
-  );
-}
 
 function NewTradePanel({ prices }: { prices: PriceData | undefined }) {
   const { toast } = useToast();
@@ -411,6 +398,9 @@ export default function LiveTrading() {
       thresholdUsed: number | null;
       laneSizeMult: number | null;
       holdReason: string | null;
+      v5Score: number | null;
+      v5Threshold: number | null;
+      v5Side: string | null;
       retMu: number | null;
       mfePred: number | null;
       maePred: number | null;
@@ -729,8 +719,10 @@ export default function LiveTrading() {
                     <span className="number-mono text-emerald-400" data-testid="signal-tp">${formatPrice(signal.tpPrice)}</span>
                   </div>
                   <div className="flex justify-between items-center">
-                    <span className="text-muted-foreground">Lane</span>
-                    <LaneBadge lane={signal.lane} />
+                    <span className="text-muted-foreground">Engine</span>
+                    <Badge data-testid="signal-engine" className="bg-cyan-500/20 text-cyan-400 border-cyan-500/30">
+                      {signal.lane === "V5" ? "V5" : signal.lane ?? "V5"}
+                    </Badge>
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="text-muted-foreground">Regime</span>
@@ -773,16 +765,14 @@ export default function LiveTrading() {
                     <span className="number-mono" data-testid="cycle-decision">{latestCycle.decision}</span>
                   </div>
                   <div className="flex justify-between items-center">
-                    <span className="text-muted-foreground">Lane</span>
-                    <LaneBadge lane={latestCycle.laneSelected} />
+                    <span className="text-muted-foreground">V5 Score</span>
+                    <span className={`number-mono font-medium ${latestCycle.v5Score != null && latestCycle.v5Score >= (latestCycle.v5Threshold ?? 0.02) ? "text-emerald-400" : "text-muted-foreground"}`} data-testid="cycle-v5-score">
+                      {latestCycle.v5Score?.toFixed(4) ?? "-"}
+                    </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-muted-foreground">HTF Score</span>
-                    <span className="number-mono" data-testid="cycle-htf">{latestCycle.htfScore?.toFixed(4) ?? "-"}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Threshold</span>
-                    <span className="number-mono" data-testid="cycle-threshold">{latestCycle.thresholdUsed?.toFixed(4) ?? "-"}</span>
+                    <span className="text-muted-foreground">V5 Threshold</span>
+                    <span className="number-mono" data-testid="cycle-v5-threshold">{latestCycle.v5Threshold?.toFixed(4) ?? latestCycle.thresholdUsed?.toFixed(4) ?? "-"}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">ret_mu</span>
@@ -797,8 +787,8 @@ export default function LiveTrading() {
                     <span className="number-mono text-red-400" data-testid="cycle-mae">{latestCycle.maePred?.toFixed(4) ?? "-"}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-muted-foreground">Lane Size</span>
-                    <span className="number-mono" data-testid="cycle-lane-size">{latestCycle.laneSizeMult?.toFixed(2) ?? "-"}</span>
+                    <span className="text-muted-foreground">HTF Score</span>
+                    <span className="number-mono" data-testid="cycle-htf">{latestCycle.htfScore ?? "-"}</span>
                   </div>
                 </div>
                 {(latestCycle.pHold != null || latestCycle.pLong != null || latestCycle.pShort != null) && (
@@ -870,10 +860,10 @@ export default function LiveTrading() {
                       </Badge>
                       <span>{c.pEnter != null ? `p=${(c.pEnter * 100).toFixed(0)}%` : ""}</span>
                       {c.retMu != null && <span className="text-foreground">mu={c.retMu.toFixed(3)}</span>}
-                      {c.laneSelected && (
-                        <Badge className="no-default-hover-elevate no-default-active-elevate text-[10px] bg-cyan-500/20 text-cyan-400">
-                          {c.laneSelected}
-                        </Badge>
+                      {c.v5Score != null && (
+                        <span className={`text-[10px] number-mono ${c.v5Score >= (c.v5Threshold ?? 0.02) ? "text-emerald-400" : "text-muted-foreground"}`}>
+                          s={c.v5Score.toFixed(3)}
+                        </span>
                       )}
                     </div>
                   ))}
@@ -1062,7 +1052,11 @@ export default function LiveTrading() {
                       <TableCell><DirectionBadge direction={sig.direction} /></TableCell>
                       <TableCell className="text-xs number-mono">{(sig.confidence * 100).toFixed(1)}%</TableCell>
                       <TableCell className="text-xs number-mono">{sig.score?.toFixed(4) ?? "-"}</TableCell>
-                      <TableCell><LaneBadge lane={sig.lane} /></TableCell>
+                      <TableCell>
+                        <Badge className="text-[10px] bg-cyan-500/20 text-cyan-400">
+                          {sig.lane === "V5" ? "V5" : sig.lane ?? "V5"}
+                        </Badge>
+                      </TableCell>
                       <TableCell>
                         <Badge variant="secondary" className="text-[10px]">{sig.regime ?? "-"}</Badge>
                       </TableCell>
