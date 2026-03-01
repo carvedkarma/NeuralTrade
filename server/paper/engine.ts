@@ -19,6 +19,10 @@ import { edgeTracker } from "../edge-tracker";
 import { db } from "../db";
 import { eq, and, desc } from "drizzle-orm";
 
+export async function getMarketPrice(symbol: string): Promise<number> {
+  return getCurrentMarketPrice(symbol);
+}
+
 async function getCurrentMarketPrice(symbol: string): Promise<number> {
   const rows = await db
     .select({ close: candlesTable.close })
@@ -1209,6 +1213,112 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
   await storage.updatePortfolio({
     unrealizedPnlUsdt: unrealizedPnl,
   });
+}
+
+let monitorIntervalId: ReturnType<typeof setInterval> | null = null;
+let monitorRunning = false;
+
+export async function monitorAllPositions(): Promise<void> {
+  if (monitorRunning) return;
+  if (!isPaperTradingEnabled()) return;
+  monitorRunning = true;
+
+  try {
+    const openPositions = await storage.getPositions("OPEN", 100);
+    if (openPositions.length === 0) return;
+
+    const { broadcast } = await import("../ws");
+    const config = getConfig();
+
+    for (const position of openPositions) {
+      try {
+        const currentPrice = await getCurrentMarketPrice(position.symbol);
+        if (!currentPrice || currentPrice === 0) continue;
+
+        const syntheticCandle = {
+          timestamp: Date.now(),
+          open: currentPrice,
+          high: currentPrice,
+          low: currentPrice,
+          close: currentPrice,
+          volume: 0,
+        };
+
+        const syntheticCtx: TradeContext = {
+          candle: syntheticCandle,
+          markPrice: currentPrice,
+          fundingRate: 0,
+          atr: position.initialStopDistance ?? 100,
+          kalmanFast: currentPrice,
+          shotPlan: null,
+        };
+
+        const slHit = checkStopLoss(position, syntheticCandle);
+        const tp1Hit = checkTp1(position, syntheticCandle);
+        const tp2Hit = checkTp2(position, syntheticCandle);
+
+        if (slHit) {
+          console.log(`[Position Monitor] SL HIT: ${position.symbol} ${position.side} @ ${currentPrice} (SL: ${position.stopLoss})`);
+          await closePosition(position, position.stopLoss!, "SL", syntheticCtx);
+          broadcast("TRADE_CLOSE", { positionId: position.id, symbol: position.symbol, reason: "SL", exitPrice: position.stopLoss });
+          continue;
+        }
+
+        if (tp1Hit && position.tp1) {
+          if (tp2Hit && position.tp2) {
+            console.log(`[Position Monitor] TP2 HIT: ${position.symbol} ${position.side} @ ${currentPrice} (TP2: ${position.tp2})`);
+            await closePosition(position, position.tp2, "TP2", syntheticCtx);
+            broadcast("TRADE_CLOSE", { positionId: position.id, symbol: position.symbol, reason: "TP2", exitPrice: position.tp2 });
+          } else {
+            console.log(`[Position Monitor] TP1 HIT: ${position.symbol} ${position.side} @ ${currentPrice} (TP1: ${position.tp1})`);
+            await closePosition(position, position.tp1, "TP1", syntheticCtx);
+            broadcast("TRADE_CLOSE", { positionId: position.id, symbol: position.symbol, reason: "TP1", exitPrice: position.tp1 });
+          }
+          continue;
+        }
+
+        const unrealizedPnl = calculateUnrealizedPnl(position, currentPrice);
+        const pnlR = position.initialRiskUsdt ? unrealizedPnl / position.initialRiskUsdt : 0;
+
+        if (checkTimeStop(position, pnlR, config)) {
+          console.log(`[Position Monitor] TIME STOP: ${position.symbol} ${position.side} after ${position.barsOpen} bars`);
+          await closePosition(position, currentPrice, "TIME", syntheticCtx);
+          broadcast("TRADE_CLOSE", { positionId: position.id, symbol: position.symbol, reason: "TIME", exitPrice: currentPrice });
+          continue;
+        }
+
+        const currentPeakProfit = position.peakProfit ?? 0;
+        const newPeakProfit = Math.max(currentPeakProfit, unrealizedPnl);
+        if (newPeakProfit > currentPeakProfit) {
+          await storage.updatePosition(position.id, { peakProfit: newPeakProfit });
+        }
+
+        await storage.updatePosition(position.id, {
+          barsOpen: (position.barsOpen || 0) + 1,
+        });
+      } catch (err) {
+        console.error(`[Position Monitor] Error checking ${position.symbol}:`, err);
+      }
+    }
+  } finally {
+    monitorRunning = false;
+  }
+}
+
+export function startPositionMonitor(intervalMs: number = 30000): void {
+  if (monitorIntervalId) return;
+  console.log(`[Position Monitor] Started — checking all open positions every ${intervalMs / 1000}s`);
+  monitorIntervalId = setInterval(() => {
+    monitorAllPositions().catch(err => console.error("[Position Monitor] Error:", err));
+  }, intervalMs);
+}
+
+export function stopPositionMonitor(): void {
+  if (monitorIntervalId) {
+    clearInterval(monitorIntervalId);
+    monitorIntervalId = null;
+    console.log("[Position Monitor] Stopped");
+  }
 }
 
 /**

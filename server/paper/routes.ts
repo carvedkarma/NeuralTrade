@@ -36,7 +36,29 @@ router.get("/positions", async (req, res) => {
     } else {
       positions = await storage.getPositions(status, limit);
     }
-    res.json(positions);
+
+    const enriched = await Promise.all(positions.map(async (pos) => {
+      const currentPrice = pos.status === "OPEN" ? await engine.getMarketPrice(pos.symbol) : null;
+      let pnlR = 0;
+      let pnlUsdt = 0;
+      if (currentPrice && pos.status === "OPEN") {
+        const priceDiff = pos.side === "LONG"
+          ? currentPrice - pos.entryPrice
+          : pos.entryPrice - currentPrice;
+        pnlUsdt = priceDiff * pos.qty;
+        pnlR = pos.initialRiskUsdt ? pnlUsdt / pos.initialRiskUsdt : 0;
+      }
+      return {
+        ...pos,
+        currentPrice,
+        pnlR: Math.round(pnlR * 100) / 100,
+        pnlUsdt: Math.round(pnlUsdt * 100) / 100,
+        takeProfit: pos.tp1,
+        entryTime: pos.entryTs,
+      };
+    }));
+
+    res.json(enriched);
   } catch (error) {
     console.error("Error getting positions:", error);
     res.status(500).json({ error: "Failed to get positions" });

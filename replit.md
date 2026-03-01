@@ -41,7 +41,7 @@ Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), 
   - `GET /api/market/candles` — Candle data for charts
   - `GET /api/live/cycle-logs` — Cycle log history (supports `symbol`, `limit` params)
   - `POST /api/live/cycle-log` — Receive cycle log from GPU trainer, broadcasts via WebSocket. **Auto-trade**: when decision=ENTER and paper trading is enabled, automatically opens a paper position via `manualOpenPosition` with source="v5_signal", SL/TP calculated from threshold_used, 2:1 R:R ratio. Safety checks: max 1 position per symbol, max 6 total open positions.
-  - `GET/POST /api/paper/*` — Paper trading engine (positions, portfolio, config, enable/disable, start/stop)
+  - `GET/POST /api/paper/*` — Paper trading engine (positions, portfolio, config, enable/disable, start/stop). Positions endpoint returns enriched data: `currentPrice`, `pnlR`, `pnlUsdt`, `takeProfit` (mapped from `tp1`), `entryTime` (mapped from `entryTs`)
   - `POST /api/paper/positions/:id/close` — Manual close position at market
   - `POST /api/paper/positions/:id/partial-close` — Partial close (percent)
   - `PATCH /api/paper/positions/:id/sl` — Update stop loss
@@ -58,6 +58,7 @@ Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), 
   - `server/live-candle-sync.ts` — Real-time 15m candle sync from Binance
   - `server/paper/` — Paper trading engine (routes, storage, engine, config)
   - `server/paper/storage.ts` — Paper storage with getPositionsBySymbol(), recordTradeClose(), getTradeHistory()
+  - `server/paper/engine.ts` — Paper engine with position monitor (30s interval, checks SL/TP1/TP2/time-stop for all open positions across all symbols, broadcasts TRADE_CLOSE via WebSocket)
   - `server/ws.ts` — WebSocket server for real-time event streaming (broadcasts CYCLE_UPDATE on push)
 
 ### Database (PostgreSQL via Drizzle ORM)

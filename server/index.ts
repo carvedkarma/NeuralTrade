@@ -4,6 +4,7 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { checkIncompleteBackfillJobs, backfillHistoricalData } from "./historical-data";
 import { loadPaperState } from "./paper/config";
+import { startPositionMonitor } from "./paper/engine";
 import { loadCandleTimestamps } from "./unified-learning-controller";
 import { initializeSelfLearning } from "./pattern-memory";
 import { setupWebSocket } from "./ws";
@@ -101,6 +102,7 @@ app.use((req, res, next) => {
       log(`serving on port ${port}`);
       
       loadPaperState().then(() => {
+        startPositionMonitor(30000);
         return hydrateBackfillStateFromDb();
       }).then(() => {
         return loadCandleTimestamps();
