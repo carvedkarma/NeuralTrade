@@ -1,0 +1,17 @@
+{
+  "results": [
+    {
+      "timestamp": "2026-03-01T06:37:25.750Z",
+      "action": "LONG",
+      "entryPrice": 627.85,
+      "exitPrice": 66898.469484,
+      "horizon": 16,
+      "actualReturn": 105.55167553396511,
+      "netReturn": 105.55077553396511,
+      "tradingCost": 0.0009,
+      "confidence": 0.8308,
+      "isWin": true
+    }
+  ],
+  "tradingCostMode": "taker_taker"
+}
