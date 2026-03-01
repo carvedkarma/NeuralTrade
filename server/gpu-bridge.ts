@@ -431,13 +431,34 @@ class GPUTrainerBridge {
     return this.lastIngestActivity;
   }
 
+  async hydrateLastActivityFromDb(): Promise<void> {
+    try {
+      const { db } = await import("./db");
+      const { liveCycleLogs } = await import("@shared/schema");
+      const { desc } = await import("drizzle-orm");
+      const rows = await db.select({ cycleTs: liveCycleLogs.cycleTs })
+        .from(liveCycleLogs)
+        .orderBy(desc(liveCycleLogs.cycleTs))
+        .limit(1);
+      if (rows.length > 0 && rows[0].cycleTs) {
+        const ts = typeof rows[0].cycleTs === "number" ? rows[0].cycleTs : new Date(rows[0].cycleTs).getTime();
+        if (ts > this.lastIngestActivity) {
+          this.lastIngestActivity = ts;
+          console.log(`[GPU Bridge] Hydrated lastActivity from DB: ${new Date(ts).toISOString()}`);
+        }
+      }
+    } catch (err) {
+      console.error("[GPU Bridge] Failed to hydrate lastActivity from DB:", err);
+    }
+  }
+
   /**
    * Check if GPU trainer is available (with caching)
-   * Returns true if health check passes OR if there was recent push activity within 5 minutes
+   * Returns true if health check passes OR if there was recent push activity within 10 minutes
    */
   async isGPUAvailable(): Promise<boolean> {
     const now = Date.now();
-    const recentPushActivity = this.lastIngestActivity > 0 && (now - this.lastIngestActivity) < 5 * 60 * 1000;
+    const recentPushActivity = this.lastIngestActivity > 0 && (now - this.lastIngestActivity) < 10 * 60 * 1000;
     if (recentPushActivity) {
       return true;
     }

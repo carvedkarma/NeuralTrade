@@ -5,6 +5,7 @@ import { createServer } from "http";
 import { checkIncompleteBackfillJobs, backfillHistoricalData } from "./historical-data";
 import { loadPaperState } from "./paper/config";
 import { startPositionMonitor } from "./paper/engine";
+import { gpuBridge } from "./gpu-bridge";
 import { loadCandleTimestamps } from "./unified-learning-controller";
 import { initializeSelfLearning } from "./pattern-memory";
 import { setupWebSocket } from "./ws";
@@ -103,6 +104,8 @@ app.use((req, res, next) => {
       
       loadPaperState().then(() => {
         startPositionMonitor(30000);
+        return gpuBridge.hydrateLastActivityFromDb();
+      }).then(() => {
         return hydrateBackfillStateFromDb();
       }).then(() => {
         return loadCandleTimestamps();
