@@ -901,6 +901,8 @@ class LiveRunner:
             "v5_ret_mu": li.get('ret_mu'),
             "v5_p_long": li.get('p_long'),
             "v5_p_short": li.get('p_short'),
+            "sl_price": li.get('sl_price'),
+            "tp_price": li.get('tp_price'),
         }
         payload_keys = [k for k, v in payload.items() if v is not None]
         log.debug(f"[CYCLE_PAYLOAD] sym={symbol} fields_present={payload_keys}")
@@ -1457,8 +1459,20 @@ class LiveRunner:
         reasons.append(f"v5_score={v5_score:.4f}>=thr={self.v5_score_threshold} side={side} p_enter={p_enter:.1%}")
         v5_info['hold_reason'] = None
 
-        log.info(f"[V5_DECISION] sym={symbol} score={v5_score:.4f} thr={self.v5_score_threshold} "
-                 f"side={side} -> ENTER")
+        if atr and atr > 0 and not (atr != atr):
+            sl_dist = self.sl_mult * atr
+            tp_dist = self.tp_mult * atr
+            if side == "LONG":
+                v5_info['sl_price'] = round(current_price - sl_dist, 6)
+                v5_info['tp_price'] = round(current_price + tp_dist, 6)
+            else:
+                v5_info['sl_price'] = round(current_price + sl_dist, 6)
+                v5_info['tp_price'] = round(current_price - tp_dist, 6)
+            log.info(f"[V5_DECISION] sym={symbol} score={v5_score:.4f} thr={self.v5_score_threshold} "
+                     f"side={side} -> ENTER | SL: ${v5_info['sl_price']:.2f} | TP: ${v5_info['tp_price']:.2f}")
+        else:
+            log.warning(f"[V5_DECISION] sym={symbol} score={v5_score:.4f} -> ENTER (ATR invalid={atr}, SL/TP omitted)")
+
 
         try:
             self._push_cycle_log(symbol=symbol, price=current_price, p_enter=p_enter,

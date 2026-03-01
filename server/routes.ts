@@ -4809,29 +4809,36 @@ export async function registerRoutes(
               } else {
                 const side: "LONG" | "SHORT" = c.direction.toUpperCase() === "SHORT" ? "SHORT" : "LONG";
                 const entryPrice = Number(c.price);
-                const v5Mae = Number(c.v5_mae || c.mae_pred) || 0;
-                const v5Mfe = Number(c.v5_mfe || c.mfe_pred) || 0;
-                let stopDistancePct: number;
-                let rrRatio = 2.0;
-                if (v5Mae > 0.001) {
-                  stopDistancePct = v5Mae * 1.2;
-                  if (v5Mfe > 0.001 && v5Mae > 0.001) {
-                    rrRatio = Math.min(Math.max(v5Mfe / v5Mae, 1.5), 3.0);
-                  }
-                } else {
-                  const thresholdUsed = Number(c.threshold_used) || 0.75;
-                  stopDistancePct = thresholdUsed * 0.015;
-                }
-                const stopDistance = entryPrice * Math.max(stopDistancePct, 0.003);
 
                 let stopLoss: number;
                 let takeProfit: number;
-                if (side === "LONG") {
-                  stopLoss = entryPrice - stopDistance;
-                  takeProfit = entryPrice + (stopDistance * rrRatio);
+
+                const gpuSl = c.sl_price ? Number(c.sl_price) : NaN;
+                const gpuTp = c.tp_price ? Number(c.tp_price) : NaN;
+                const gpuSlValid = Number.isFinite(gpuSl) && gpuSl > 0;
+                const gpuTpValid = Number.isFinite(gpuTp) && gpuTp > 0;
+                const gpuSlCorrectSide = side === "LONG" ? gpuSl < entryPrice : gpuSl > entryPrice;
+                const gpuTpCorrectSide = side === "LONG" ? gpuTp > entryPrice : gpuTp < entryPrice;
+
+                if (gpuSlValid && gpuTpValid && gpuSlCorrectSide && gpuTpCorrectSide) {
+                  stopLoss = gpuSl;
+                  takeProfit = gpuTp;
+                  console.log(`[Auto-Trade] Using GPU trainer SL/TP: SL=$${stopLoss.toFixed(2)} TP=$${takeProfit.toFixed(2)}`);
                 } else {
-                  stopLoss = entryPrice + stopDistance;
-                  takeProfit = entryPrice - (stopDistance * rrRatio);
+                  if (c.sl_price || c.tp_price) {
+                    console.warn(`[Auto-Trade] GPU SL/TP invalid (sl=${c.sl_price}, tp=${c.tp_price}, side=${side}, entry=${entryPrice}), using fallback`);
+                  }
+                  const stopDistancePct = Math.max(0.003, Math.min(0.05, 0.015));
+                  const stopDistance = entryPrice * stopDistancePct;
+                  const rrRatio = 2.0;
+                  if (side === "LONG") {
+                    stopLoss = entryPrice - stopDistance;
+                    takeProfit = entryPrice + (stopDistance * rrRatio);
+                  } else {
+                    stopLoss = entryPrice + stopDistance;
+                    takeProfit = entryPrice - (stopDistance * rrRatio);
+                  }
+                  console.log(`[Auto-Trade] Using fallback SL/TP (1.5% stop): SL=$${stopLoss.toFixed(2)} TP=$${takeProfit.toFixed(2)}`);
                 }
 
                 const position = await manualOpenPosition({
