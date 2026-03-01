@@ -241,8 +241,9 @@ def _load_model(device: str, symbol: Optional[str] = None):
 
     symbol_map = checkpoint.get('symbol_map', None)
 
+    n_symbols = cfg.get('n_symbols', 1)
     log.info(f"Model loaded: {len(feature_columns)} features, version {saved_version}, "
-             f"value_head={enable_value_head}, edge_head={enable_edge_head}, n_symbols={n_symbols}, temperature={temperature:.4f}")
+             f"model_type={model_type}, n_symbols={n_symbols}, temperature={temperature:.4f}")
     return model, engineer, feature_columns, temperature, symbol_map
 
 
