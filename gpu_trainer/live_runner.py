@@ -95,27 +95,32 @@ def _get_exchange_time_offset() -> float:
 
 
 def _load_model(device: str, symbol: Optional[str] = None):
-    """Load the trained ENTER QUALITY model, scaler, feature columns, and temperature.
+    """Load the trained model, scaler, feature columns, and temperature.
 
+    Supports both legacy EnhancedMultiHeadMLP and V5Forecaster models.
     If symbol is provided, first checks checkpoints/deployed/{symbol}/ for a
     per-symbol model. Falls back to the global checkpoints/ directory.
 
     Returns: (model, engineer, feature_columns, temperature, symbol_map)
     """
     import torch
-    from models.simple_mlp import EnhancedMultiHeadMLP, EnhancedMultiHeadMLP_Config
     from data.pipeline import FeatureEngineer
-
-    from quick_start import FEATURE_VERSION
 
     search_dirs = []
     if symbol:
         search_dirs.append(Path(f"checkpoints/deployed/{symbol}"))
     search_dirs.append(Path("checkpoints"))
 
+    checkpoint_names = [
+        "best_enter_prauc.pt",
+        "best_v5_expectancy.pt",
+        "best_enter_loss.pt",
+        "best_v5_loss.pt",
+    ]
+
     checkpoint_path = None
     for d in search_dirs:
-        for name in ["best_enter_prauc.pt", "best_enter_loss.pt"]:
+        for name in checkpoint_names:
             p = d / name
             if p.exists():
                 checkpoint_path = p
@@ -124,15 +129,17 @@ def _load_model(device: str, symbol: Optional[str] = None):
             break
 
     if not checkpoint_path:
-        log.error(f"No trained ENTER model found{' for '+symbol if symbol else ''}! Run training first.")
+        log.error(f"No trained model found{' for '+symbol if symbol else ''}! Run training first.")
         sys.exit(1)
 
     log.info(f"Loading model from {checkpoint_path}{' ('+symbol+')' if symbol else ''}...")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     saved_version = checkpoint.get('feature_version', 'unknown')
-    if saved_version != FEATURE_VERSION:
-        log.error(f"Feature version mismatch! Model: '{saved_version}', current: '{FEATURE_VERSION}'")
+    from quick_start import FEATURE_VERSION
+    ACCEPTED_VERSIONS = {FEATURE_VERSION, "v5.0.1_forecaster"}
+    if saved_version not in ACCEPTED_VERSIONS:
+        log.error(f"Feature version mismatch! Model: '{saved_version}', accepted: {ACCEPTED_VERSIONS}")
         sys.exit(1)
 
     feature_columns = checkpoint.get('feature_columns', [])
@@ -141,46 +148,83 @@ def _load_model(device: str, symbol: Optional[str] = None):
         sys.exit(1)
 
     cfg = checkpoint.get('model_config', {})
-    n_symbols = cfg.get('n_symbols', 1)
-    symbol_embed_dim = cfg.get('symbol_embed_dim', 0)
-    enable_value_head = cfg.get('enable_value_head', False)
-    enable_edge_head = cfg.get('enable_edge_head', False)
+    model_type = checkpoint.get('model_type', 'legacy')
 
-    mlp_config = EnhancedMultiHeadMLP_Config(
-        input_dim=cfg.get('input_dim', 63),
-        hidden_dims=cfg.get('hidden_dims', [512, 256, 128, 64]),
-        num_classes=3,
-        dropout=0.3,
-        use_layer_norm=True,
-        use_residual=True,
-        enable_enter_head=True,
-        enable_quantile_head=False,
-        enable_vol_state_head=False,
-        enable_mu_head=False,
-        enable_sigma_head=False,
-        enable_value_head=enable_value_head,
-        enable_edge_head=enable_edge_head,
-        n_symbols=n_symbols,
-        symbol_embed_dim=symbol_embed_dim,
-    )
-    model = EnhancedMultiHeadMLP(mlp_config)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    if model_type == 'v5_forecaster':
+        from models.v5_forecaster import V5Forecaster, V5ForecasterConfig
+        v5_config = V5ForecasterConfig(
+            input_dim=cfg.get('input_dim', 85),
+            hidden_dims=cfg.get('hidden_dims', [512, 256, 128, 64]),
+            dropout=cfg.get('dropout', 0.3),
+            use_layer_norm=True,
+            use_residual=True,
+            n_barrier_presets=cfg.get('n_barrier_presets', 0),
+            enable_regime_head=cfg.get('enable_regime_head', False),
+            n_symbols=cfg.get('n_symbols', 1),
+            symbol_embed_dim=cfg.get('symbol_embed_dim', 8),
+        )
+        model = V5Forecaster(v5_config)
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        model._is_v5 = True
+        log.info(f"Loaded V5Forecaster ({model.parameters_count():,} params)")
+    else:
+        from models.simple_mlp import EnhancedMultiHeadMLP, EnhancedMultiHeadMLP_Config
+        n_symbols = cfg.get('n_symbols', 1)
+        symbol_embed_dim = cfg.get('symbol_embed_dim', 0)
+        enable_value_head = cfg.get('enable_value_head', False)
+        enable_edge_head = cfg.get('enable_edge_head', False)
+        mlp_config = EnhancedMultiHeadMLP_Config(
+            input_dim=cfg.get('input_dim', 63),
+            hidden_dims=cfg.get('hidden_dims', [512, 256, 128, 64]),
+            num_classes=3,
+            dropout=0.3,
+            use_layer_norm=True,
+            use_residual=True,
+            enable_enter_head=True,
+            enable_quantile_head=False,
+            enable_vol_state_head=False,
+            enable_mu_head=False,
+            enable_sigma_head=False,
+            enable_value_head=enable_value_head,
+            enable_edge_head=enable_edge_head,
+            n_symbols=n_symbols,
+            symbol_embed_dim=symbol_embed_dim,
+        )
+        model = EnhancedMultiHeadMLP(mlp_config)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model._is_v5 = False
+        log.info(f"Loaded EnhancedMultiHeadMLP")
+
     model.to(device)
     model.eval()
 
-    scaler_path = None
-    for d in search_dirs:
-        sp = d / "scaler.joblib"
-        if sp.exists():
-            scaler_path = sp
-            break
-
     engineer = FeatureEngineer()
-    if scaler_path:
-        engineer.load_scalers(str(scaler_path))
-        log.info(f"Scaler loaded from {scaler_path}")
-    else:
-        log.warning("No saved scaler — prediction quality may be reduced")
+    scaler_loaded = False
+
+    if model_type == 'v5_forecaster' and 'scaler_center' in checkpoint and 'scaler_scale' in checkpoint:
+        from sklearn.preprocessing import RobustScaler
+        v5_scaler = RobustScaler()
+        v5_scaler.center_ = np.array(checkpoint['scaler_center'])
+        v5_scaler.scale_ = np.array(checkpoint['scaler_scale'])
+        engineer._v5_global_scaler = v5_scaler
+        scaler_loaded = True
+        log.info("Scaler loaded from checkpoint (embedded)")
+
+    if not scaler_loaded:
+        scaler_path = None
+        for d in search_dirs:
+            for sname in ["per_symbol_scalers.joblib", "scaler.joblib"]:
+                sp = d / sname
+                if sp.exists():
+                    scaler_path = sp
+                    break
+            if scaler_path:
+                break
+        if scaler_path:
+            engineer.load_scalers(str(scaler_path))
+            log.info(f"Scaler loaded from {scaler_path}")
+        else:
+            log.warning("No saved scaler — prediction quality may be reduced")
 
     temperature = 1.0
     for d in search_dirs:
@@ -327,10 +371,15 @@ def _compute_features_for_symbol(df: pd.DataFrame, engineer, feature_columns: li
         features_df = features_df.reindex(columns=feature_columns, fill_value=0)
 
         last_features = features_df.iloc[-1:].copy()
-        last_scaled = engineer.transform_and_clip(
-            pd.DataFrame(last_features.values, columns=feature_columns),
-            clip_range=5.0
-        ).values.astype(np.float32)
+        if hasattr(engineer, '_v5_global_scaler'):
+            raw = last_features.values.astype(np.float32)
+            last_scaled = engineer._v5_global_scaler.transform(raw).astype(np.float32)
+            last_scaled = np.clip(last_scaled, -5.0, 5.0)
+        else:
+            last_scaled = engineer.transform_and_clip(
+                pd.DataFrame(last_features.values, columns=feature_columns),
+                clip_range=5.0
+            ).values.astype(np.float32)
         last_scaled = np.where(np.isinf(last_scaled), 0, last_scaled)
         last_scaled = np.where(np.isnan(last_scaled), 0, last_scaled)
 
@@ -344,35 +393,74 @@ def _compute_features_for_symbol(df: pd.DataFrame, engineer, feature_columns: li
 
 def _run_inference(model, scaled_features: np.ndarray, device: str,
                    temperature: float = 1.0, symbol_id: Optional[int] = None) -> dict:
-    """Run single-row ENTER model inference with temperature calibration.
+    """Run single-row model inference with temperature calibration.
+    
+    Supports both legacy EnhancedMultiHeadMLP and V5Forecaster models.
     
     Returns dict with:
-      p_enter: calibrated probability
-      e_net_pred: predicted E[net R] (0.0 if no value head)
+      p_enter: calibrated probability of entering a trade
+      e_net_pred: predicted E[net R] (ret_mu for V5, value_logits for legacy)
       enter_logit: raw logit before calibration
+      v5_action_probs: [hold, long, short] probabilities (V5 only)
+      v5_ret_mu: predicted return in R-units (V5 only)
+      v5_mfe: predicted max favorable excursion (V5 only)
+      v5_mae: predicted max adverse excursion (V5 only)
     """
     import torch
+    is_v5 = getattr(model, '_is_v5', False)
+
     with torch.no_grad():
         x = torch.FloatTensor(scaled_features).to(device)
-        sym_ids = None
-        if symbol_id is not None and model.symbol_embedding is not None:
-            sym_ids = torch.tensor([symbol_id], dtype=torch.long, device=device)
-        output = model.forward_multihead(x, symbol_ids=sym_ids)
-        
-    enter_logit = float(output.enter_logits.cpu().item())
-    calibrated_logit = enter_logit / max(temperature, 0.01)
-    p_enter = float(torch.sigmoid(torch.tensor(calibrated_logit)).item())
-    
-    e_net_pred = 0.0
-    if output.value_logits is not None:
-        e_net_pred = float(output.value_logits.cpu().item())
-    
-    return {
-        'p_enter': p_enter,
-        'e_net_pred': e_net_pred,
-        'enter_logit': enter_logit,
-        'temperature_used': temperature,
-    }
+
+        if is_v5:
+            sym_ids = None
+            if symbol_id is not None and model.symbol_embedding is not None:
+                sym_ids = torch.tensor([symbol_id], dtype=torch.long, device=device)
+            output = model(x, symbol_ids=sym_ids)
+
+            action_logits = output['action_logits']
+            calibrated_logits = action_logits / max(temperature, 0.01)
+            action_probs = torch.softmax(calibrated_logits, dim=-1).cpu().numpy().flatten()
+
+            p_hold = float(action_probs[0])
+            p_enter = 1.0 - p_hold
+
+            ret_mu = float(output['ret_mu'].cpu().item())
+            mfe = float(output['mfe'].cpu().item())
+            mae = float(output['mae'].cpu().item())
+
+            enter_logit = float(action_logits[0, 1].cpu().item() - action_logits[0, 0].cpu().item())
+
+            return {
+                'p_enter': p_enter,
+                'e_net_pred': ret_mu,
+                'enter_logit': enter_logit,
+                'temperature_used': temperature,
+                'v5_action_probs': action_probs.tolist(),
+                'v5_ret_mu': ret_mu,
+                'v5_mfe': mfe,
+                'v5_mae': mae,
+            }
+        else:
+            sym_ids = None
+            if symbol_id is not None and model.symbol_embedding is not None:
+                sym_ids = torch.tensor([symbol_id], dtype=torch.long, device=device)
+            output = model.forward_multihead(x, symbol_ids=sym_ids)
+
+            enter_logit = float(output.enter_logits.cpu().item())
+            calibrated_logit = enter_logit / max(temperature, 0.01)
+            p_enter = float(torch.sigmoid(torch.tensor(calibrated_logit)).item())
+
+            e_net_pred = 0.0
+            if output.value_logits is not None:
+                e_net_pred = float(output.value_logits.cpu().item())
+
+            return {
+                'p_enter': p_enter,
+                'e_net_pred': e_net_pred,
+                'enter_logit': enter_logit,
+                'temperature_used': temperature,
+            }
 
 
 def _apply_htf_gates(features_df: pd.DataFrame) -> dict:

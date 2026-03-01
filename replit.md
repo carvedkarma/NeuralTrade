@@ -61,11 +61,15 @@ Key tables: `v5_signals`, `live_trade_records`, `live_cycle_logs`, `paper_positi
 Schema in `shared/schema.ts` with Drizzle + Zod validation.
 
 ### v5 Neural Network (runs on local GPU)
-- Architecture: EnhancedMultiHeadMLP with 85 features, 15m timeframe, adaptive horizon (8-48 bars)
+- Architecture: V5Forecaster (multi-head: ret_dist, mfe, mae, action[HOLD/LONG/SHORT]) with 85 features, 15m timeframe
+- Also supports legacy EnhancedMultiHeadMLP (auto-detected from checkpoint `model_type` field)
+- Feature version: v5.0.1_forecaster (FeatureEngineer: STF44 + ENH24 + HTF12 + Regime5 = 85 features)
 - Triple-Lane Aggression Engine: CORE/FLOW/SCALP routed by HTF score
 - 6 symbols: BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, AVAXUSDT
 - Per-symbol edge learning (v5.4.0): per-symbol scalers, thresholds, kill switches
-- Walk-forward validation: 8+ profitable folds, +273R total
+- Walk-forward validation: 21/25 folds profitable, +520R cumulative
+- Checkpoint loading: searches best_enter_prauc.pt → best_v5_expectancy.pt → best_enter_loss.pt → best_v5_loss.pt
+- Scaler: embedded in checkpoint (scaler_center/scaler_scale) or loaded from per_symbol_scalers.joblib/scaler.joblib
 
 ## External Dependencies
 

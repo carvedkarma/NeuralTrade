@@ -2386,12 +2386,14 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
     df = pd.read_parquet(data_path)
     from data.pipeline import FeatureEngineer
 
-    expected_count = FeatureEngineer.TOTAL_FEATURE_COUNT + FUNDING_FEATURE_COUNT + OI_FEATURE_COUNT
-    if len(feature_columns) != expected_count:
-        raise RuntimeError(
-            f"FATAL: feature_columns has {len(feature_columns)} cols, expected {expected_count} ({FeatureEngineer.TOTAL_FEATURE_COUNT} base + {FUNDING_FEATURE_COUNT} funding + {OI_FEATURE_COUNT} OI). "
-            f"Checkpoint mismatch - retrain the model."
-        )
+    is_v5 = getattr(model, '_is_v5', False)
+    if not is_v5:
+        expected_count = FeatureEngineer.TOTAL_FEATURE_COUNT + FUNDING_FEATURE_COUNT + OI_FEATURE_COUNT
+        if len(feature_columns) != expected_count:
+            raise RuntimeError(
+                f"FATAL: feature_columns has {len(feature_columns)} cols, expected {expected_count} ({FeatureEngineer.TOTAL_FEATURE_COUNT} base + {FUNDING_FEATURE_COUNT} funding + {OI_FEATURE_COUNT} OI). "
+                f"Checkpoint mismatch - retrain the model."
+            )
 
     features_df = engineer.compute_all_features(df)
     features_df = features_df.fillna(0)
@@ -2420,19 +2422,28 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
     features_df = features_df.reindex(columns=feature_columns, fill_value=0)
 
     last_features = features_df.iloc[-1:].copy()
-    last_scaled = engineer.transform_and_clip(
-        pd.DataFrame(last_features.values, columns=feature_columns),
-        clip_range=5.0
-    ).values.astype(np.float32)
+    if hasattr(engineer, '_v5_global_scaler'):
+        raw = last_features.values.astype(np.float32)
+        last_scaled = engineer._v5_global_scaler.transform(raw).astype(np.float32)
+        last_scaled = np.clip(last_scaled, -5.0, 5.0)
+    else:
+        last_scaled = engineer.transform_and_clip(
+            pd.DataFrame(last_features.values, columns=feature_columns),
+            clip_range=5.0
+        ).values.astype(np.float32)
     last_scaled = np.where(np.isinf(last_scaled), 0, last_scaled)
     last_scaled = np.where(np.isnan(last_scaled), 0, last_scaled)
 
     model.eval()
     with torch.no_grad():
         x = torch.FloatTensor(last_scaled).to(device)
-        output = model.forward_multihead(x)
-
-    p_enter = float(torch.sigmoid(output.enter_logits).cpu().item())
+        if is_v5:
+            output = model(x)
+            action_probs = torch.softmax(output['action_logits'], dim=-1).cpu().numpy().flatten()
+            p_enter = 1.0 - float(action_probs[0])
+        else:
+            output = model.forward_multihead(x)
+            p_enter = float(torch.sigmoid(output.enter_logits).cpu().item())
 
     last_row = features_df.iloc[-1]
     h1_trend = last_row.get('h1_trend_sign', 0)
@@ -2659,8 +2670,9 @@ def _prepare_regime_eval_context(data_path, device, regimes_str, slope_eps):
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     saved_version = checkpoint.get('feature_version', 'unknown')
-    if saved_version != FEATURE_VERSION:
-        log.error(f"FATAL: Feature version mismatch! Model: '{saved_version}', current: '{FEATURE_VERSION}'")
+    ACCEPTED_VERSIONS = {FEATURE_VERSION, "v5.0.1_forecaster"}
+    if saved_version not in ACCEPTED_VERSIONS:
+        log.error(f"FATAL: Feature version mismatch! Model: '{saved_version}', accepted: {ACCEPTED_VERSIONS}")
         sys.exit(1)
     log.info(f"Checkpoint: {checkpoint_path.name} | Feature version: {saved_version}")
 
@@ -2669,31 +2681,67 @@ def _prepare_regime_eval_context(data_path, device, regimes_str, slope_eps):
         log.error("FATAL: No feature_columns in checkpoint - retrain.")
         sys.exit(1)
 
-    from models.simple_mlp import EnhancedMultiHeadMLP, EnhancedMultiHeadMLP_Config
     cfg = checkpoint.get('model_config', {})
-    mlp_config = EnhancedMultiHeadMLP_Config(
-        input_dim=cfg.get('input_dim', 63),
-        hidden_dims=cfg.get('hidden_dims', [512, 256, 128, 64]),
-        num_classes=3, dropout=0.3, use_layer_norm=True, use_residual=True,
-        enable_enter_head=True, enable_quantile_head=False,
-        enable_vol_state_head=False, enable_mu_head=False, enable_sigma_head=False,
-        enable_dir_head=cfg.get('enable_dir_head', False),
-        enable_htf_head=cfg.get('enable_htf_head', False),
-    )
-    model = EnhancedMultiHeadMLP(mlp_config)
-    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    model_type = checkpoint.get('model_type', 'legacy')
+
+    if model_type == 'v5_forecaster':
+        from models.v5_forecaster import V5Forecaster, V5ForecasterConfig
+        v5_config = V5ForecasterConfig(
+            input_dim=cfg.get('input_dim', 85),
+            hidden_dims=cfg.get('hidden_dims', [512, 256, 128, 64]),
+            dropout=cfg.get('dropout', 0.3),
+            use_layer_norm=True,
+            use_residual=True,
+            n_barrier_presets=cfg.get('n_barrier_presets', 0),
+            enable_regime_head=cfg.get('enable_regime_head', False),
+            n_symbols=cfg.get('n_symbols', 1),
+            symbol_embed_dim=cfg.get('symbol_embed_dim', 8),
+        )
+        model = V5Forecaster(v5_config)
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        model._is_v5 = True
+    else:
+        from models.simple_mlp import EnhancedMultiHeadMLP, EnhancedMultiHeadMLP_Config
+        mlp_config = EnhancedMultiHeadMLP_Config(
+            input_dim=cfg.get('input_dim', 63),
+            hidden_dims=cfg.get('hidden_dims', [512, 256, 128, 64]),
+            num_classes=3, dropout=0.3, use_layer_norm=True, use_residual=True,
+            enable_enter_head=True, enable_quantile_head=False,
+            enable_vol_state_head=False, enable_mu_head=False, enable_sigma_head=False,
+            enable_dir_head=cfg.get('enable_dir_head', False),
+            enable_htf_head=cfg.get('enable_htf_head', False),
+        )
+        model = EnhancedMultiHeadMLP(mlp_config)
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        model._is_v5 = False
+
     model.to(device)
     model.eval()
-    log.info(f"Model loaded: {model.parameters_count():,} parameters")
+    log.info(f"Model loaded: {model.parameters_count():,} parameters ({model_type})")
 
     from data.pipeline import FeatureEngineer
     engineer = FeatureEngineer()
-    scaler_path = Path("checkpoints/scaler.joblib")
-    if scaler_path.exists():
-        engineer.load_scalers(str(scaler_path))
+    v5_global_scaler = None
+
+    if model_type == 'v5_forecaster' and 'scaler_center' in checkpoint and 'scaler_scale' in checkpoint:
+        from sklearn.preprocessing import RobustScaler
+        v5_global_scaler = RobustScaler()
+        v5_global_scaler.center_ = np.array(checkpoint['scaler_center'])
+        v5_global_scaler.scale_ = np.array(checkpoint['scaler_scale'])
+        log.info("Scaler loaded from checkpoint (embedded)")
     else:
-        log.error("No saved scaler found! Predictions will be unreliable.")
-        sys.exit(1)
+        scaler_path = None
+        for sname in ["per_symbol_scalers.joblib", "scaler.joblib"]:
+            sp = Path(f"checkpoints/{sname}")
+            if sp.exists():
+                scaler_path = sp
+                break
+        if scaler_path:
+            engineer.load_scalers(str(scaler_path))
+            log.info(f"Scaler loaded from {scaler_path}")
+        else:
+            log.error("No saved scaler found! Predictions will be unreliable.")
+            sys.exit(1)
 
     df = pd.read_parquet(data_path)
     log.info(f"Loaded {len(df)} candles")
@@ -2728,12 +2776,17 @@ def _prepare_regime_eval_context(data_path, device, regimes_str, slope_eps):
     features_df = features_df.reindex(columns=feature_columns, fill_value=0)
     log.info(f"Features: {len(feature_columns)} columns")
 
-    scaled_df = engineer.transform_and_clip(features_df, clip_range=5.0)
-    scaled_np = scaled_df.values.astype(np.float32)
+    if v5_global_scaler is not None:
+        scaled_np = v5_global_scaler.transform(features_df.values).astype(np.float32)
+        scaled_np = np.clip(scaled_np, -5.0, 5.0)
+    else:
+        scaled_df = engineer.transform_and_clip(features_df, clip_range=5.0)
+        scaled_np = scaled_df.values.astype(np.float32)
     scaled_np = np.where(np.isinf(scaled_np), 0, scaled_np)
     scaled_np = np.where(np.isnan(scaled_np), 0, scaled_np)
 
-    log.info(f"Running single-row inference over {len(df)} bars...")
+    is_v5 = getattr(model, '_is_v5', False)
+    log.info(f"Running {'V5' if is_v5 else 'legacy'} inference over {len(df)} bars...")
     all_p_enter = np.full(len(df), np.nan, dtype=np.float64)
     BATCH_SIZE = 1024
     valid_indices = list(range(len(scaled_np)))
@@ -2742,8 +2795,13 @@ def _prepare_regime_eval_context(data_path, device, regimes_str, slope_eps):
             batch_idx = valid_indices[batch_start:batch_start + BATCH_SIZE]
             batch_rows = scaled_np[batch_idx]
             batch_tensor = torch.FloatTensor(batch_rows).to(device)
-            output = model.forward_multihead(batch_tensor)
-            p_batch = torch.sigmoid(output.enter_logits).cpu().numpy().flatten()
+            if is_v5:
+                output = model(batch_tensor)
+                action_probs = torch.softmax(output['action_logits'], dim=-1)
+                p_batch = (1.0 - action_probs[:, 0]).cpu().numpy().flatten()
+            else:
+                output = model.forward_multihead(batch_tensor)
+                p_batch = torch.sigmoid(output.enter_logits).cpu().numpy().flatten()
             for k, idx in enumerate(batch_idx):
                 all_p_enter[idx] = p_batch[k]
 
@@ -6012,45 +6070,79 @@ Examples:
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
         saved_version = checkpoint.get('feature_version', 'unknown')
-        if saved_version != FEATURE_VERSION:
-            log.error(f"FATAL: Feature version mismatch! Model: '{saved_version}', current: '{FEATURE_VERSION}'")
+        ACCEPTED_VERSIONS = {FEATURE_VERSION, "v5.0.1_forecaster"}
+        if saved_version not in ACCEPTED_VERSIONS:
+            log.error(f"FATAL: Feature version mismatch! Model: '{saved_version}', accepted: {ACCEPTED_VERSIONS}")
             sys.exit(1)
-        log.info(f"Feature version: {saved_version} (matches)")
+        log.info(f"Feature version: {saved_version} (accepted)")
 
         feature_columns = checkpoint.get('feature_columns', [])
         if not feature_columns:
             log.error("FATAL: No feature_columns in checkpoint - retrain.")
             sys.exit(1)
 
-        from models.simple_mlp import EnhancedMultiHeadMLP, EnhancedMultiHeadMLP_Config
         cfg = checkpoint.get('model_config', {})
-        mlp_config = EnhancedMultiHeadMLP_Config(
-            input_dim=cfg.get('input_dim', 63),
-            hidden_dims=cfg.get('hidden_dims', [512, 256, 128, 64]),
-            num_classes=3,
-            dropout=0.3,
-            use_layer_norm=True,
-            use_residual=True,
-            enable_enter_head=True,
-            enable_quantile_head=False,
-            enable_vol_state_head=False,
-            enable_mu_head=False,
-            enable_sigma_head=False,
-            enable_edge_head=cfg.get('enable_edge_head', False),
-            enable_dir_head=cfg.get('enable_dir_head', False),
-            enable_htf_head=cfg.get('enable_htf_head', False),
-        )
-        model = EnhancedMultiHeadMLP(mlp_config)
-        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        model_type = checkpoint.get('model_type', 'legacy')
+
+        if model_type == 'v5_forecaster':
+            from models.v5_forecaster import V5Forecaster, V5ForecasterConfig
+            v5_config = V5ForecasterConfig(
+                input_dim=cfg.get('input_dim', 85),
+                hidden_dims=cfg.get('hidden_dims', [512, 256, 128, 64]),
+                dropout=cfg.get('dropout', 0.3),
+                use_layer_norm=True,
+                use_residual=True,
+                n_barrier_presets=cfg.get('n_barrier_presets', 0),
+                enable_regime_head=cfg.get('enable_regime_head', False),
+                n_symbols=cfg.get('n_symbols', 1),
+                symbol_embed_dim=cfg.get('symbol_embed_dim', 8),
+            )
+            model = V5Forecaster(v5_config)
+            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            model._is_v5 = True
+        else:
+            from models.simple_mlp import EnhancedMultiHeadMLP, EnhancedMultiHeadMLP_Config
+            mlp_config = EnhancedMultiHeadMLP_Config(
+                input_dim=cfg.get('input_dim', 63),
+                hidden_dims=cfg.get('hidden_dims', [512, 256, 128, 64]),
+                num_classes=3,
+                dropout=0.3,
+                use_layer_norm=True,
+                use_residual=True,
+                enable_enter_head=True,
+                enable_quantile_head=False,
+                enable_vol_state_head=False,
+                enable_mu_head=False,
+                enable_sigma_head=False,
+                enable_edge_head=cfg.get('enable_edge_head', False),
+                enable_dir_head=cfg.get('enable_dir_head', False),
+                enable_htf_head=cfg.get('enable_htf_head', False),
+            )
+            model = EnhancedMultiHeadMLP(mlp_config)
+            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            model._is_v5 = False
         model.to(device)
 
         from data.pipeline import FeatureEngineer
         engineer = FeatureEngineer()
-        scaler_path = Path("checkpoints/scaler.joblib")
-        if scaler_path.exists():
-            engineer.load_scalers(str(scaler_path))
+        if model_type == 'v5_forecaster' and 'scaler_center' in checkpoint and 'scaler_scale' in checkpoint:
+            from sklearn.preprocessing import RobustScaler
+            v5_scaler = RobustScaler()
+            v5_scaler.center_ = np.array(checkpoint['scaler_center'])
+            v5_scaler.scale_ = np.array(checkpoint['scaler_scale'])
+            engineer._v5_global_scaler = v5_scaler
+            log.info("Scaler loaded from checkpoint (embedded)")
         else:
-            log.warning("No saved scaler found - prediction quality may be reduced")
+            scaler_path = None
+            for sname in ["per_symbol_scalers.joblib", "scaler.joblib"]:
+                sp = Path(f"checkpoints/{sname}")
+                if sp.exists():
+                    scaler_path = sp
+                    break
+            if scaler_path:
+                engineer.load_scalers(str(scaler_path))
+            else:
+                log.warning("No saved scaler found - prediction quality may be reduced")
 
     if not args.no_push:
         prediction = make_enter_prediction(model, engineer, feature_columns, data_path, device)
