@@ -37,13 +37,19 @@ import { CloseButton, PartialCloseButton, EditSLTPDialog } from "@/components/po
 interface Portfolio {
   startingEquity: number;
   currentEquity: number;
+  equity: number;
   totalPnlR: number;
   totalPnlUsdt: number;
+  totalPnl: number;
   maxDrawdownR: number;
-  dailyPnlR: number;
-  weeklyPnlR: number;
+  maxDrawdown: number;
+  unrealizedPnl: number;
+  unrealizedPnlR: number;
+  realizedPnl: number;
   tradesCount: number;
+  totalTrades: number;
   winRate: number;
+  openPositions: number;
 }
 
 interface PaperConfig {

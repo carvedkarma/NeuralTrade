@@ -1399,21 +1399,32 @@ function runMonteCarloSimulation(
 
 export async function getPortfolioSummary() {
   const portfolio = await storage.getOrCreatePortfolio();
-  const openPosition = await storage.getOpenPosition();
+  const openPositions = await storage.getPositions("OPEN", 100);
   const config = getConfig();
   
-  let unrealizedPnl = portfolio.unrealizedPnlUsdt;
+  let unrealizedPnl = 0;
+  let unrealizedPnlR = 0;
   let exposure = 0;
   
-  if (openPosition) {
-    exposure = openPosition.notionalUsdt;
+  for (const pos of openPositions) {
+    const currentPrice = await getCurrentMarketPrice(pos.symbol);
+    if (currentPrice > 0) {
+      const priceDiff = pos.side === "LONG"
+        ? currentPrice - pos.entryPrice
+        : pos.entryPrice - currentPrice;
+      const positionPnl = priceDiff * pos.qty;
+      unrealizedPnl += positionPnl;
+      if (pos.initialRiskUsdt) {
+        unrealizedPnlR += positionPnl / pos.initialRiskUsdt;
+      }
+    }
+    exposure += pos.notionalUsdt;
   }
 
   const totalTrades = portfolio.totalTrades ?? 0;
   const winningTrades = portfolio.winningTrades ?? 0;
   const losingTrades = portfolio.losingTrades ?? 0;
   const realizedPnl = portfolio.realizedPnlUsdt ?? 0;
-  const unrealized = unrealizedPnl ?? 0;
   
   const winRate = totalTrades > 0 
     ? (winningTrades / totalTrades) * 100 
@@ -1472,19 +1483,28 @@ export async function getPortfolioSummary() {
     }
   }
 
-  const equity = portfolio.currentEquityUsdt + unrealized;
+  const equity = portfolio.currentEquityUsdt + unrealizedPnl;
+  const startingEquity = portfolio.startingEquityUsdt;
+  const totalPnlUsdt = realizedPnl + unrealizedPnl;
+  const totalPnlR = startingEquity > 0 ? totalPnlUsdt / (startingEquity * 0.01) : 0;
+  const maxDrawdownR = startingEquity > 0 ? ((portfolio.maxDrawdownPct ?? 0) / 100) * startingEquity / (startingEquity * 0.01) : 0;
   const peak = portfolio.peakEquityUsdt;
   const currentDrawdown = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
   const exposurePct = equity > 0 ? (exposure / equity) * 100 : 0;
 
   return {
     equity,
-    startingEquity: portfolio.startingEquityUsdt,
+    currentEquity: equity,
+    startingEquity,
     availableBalance: portfolio.availableBalanceUsdt,
     realizedPnl,
-    unrealizedPnl: unrealized,
-    totalPnl: realizedPnl + unrealized,
+    unrealizedPnl,
+    unrealizedPnlR,
+    totalPnl: totalPnlUsdt,
+    totalPnlUsdt,
+    totalPnlR: Math.round(totalPnlR * 100) / 100,
     maxDrawdown: portfolio.maxDrawdownPct ?? 0,
+    maxDrawdownR: Math.round(maxDrawdownR * 100) / 100,
     currentDrawdown,
     totalTrades,
     winningTrades,
@@ -1493,7 +1513,7 @@ export async function getPortfolioSummary() {
     avgWin,
     avgLoss,
     sharpe,
-    sharpeWarning,  // Overfitting indicator: null if OK, warning message if Sharpe > 2.5
+    sharpeWarning,
     expectancy,
     bestTrade,
     worstTrade,
@@ -1502,19 +1522,7 @@ export async function getPortfolioSummary() {
     exposurePct,
     isAutoTrading: config.isAutoTrading,
     isPaperTradingEnabled: config.paperTradingEnabled,
-    openPosition: openPosition ? {
-      id: openPosition.id,
-      side: openPosition.side as "LONG" | "SHORT",
-      entryPrice: openPosition.entryPrice,
-      qty: openPosition.qty,
-      notional: openPosition.notionalUsdt,
-      stopLoss: openPosition.stopLoss,
-      tp1: openPosition.tp1,
-      tp2: openPosition.tp2,
-      barsOpen: openPosition.barsOpen,
-      unrealizedPnl: unrealized,
-      entryTs: openPosition.entryTs,
-    } : null,
+    openPositions: openPositions.length,
     recentAuditLogs: auditLog.slice(-10),
     // Monte Carlo confidence intervals for backtest validation
     // Filter NaN/undefined values to ensure clean data for simulation
