@@ -58,7 +58,7 @@ Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), 
   - `server/live-candle-sync.ts` — Real-time 15m candle sync from Binance
   - `server/paper/` — Paper trading engine (routes, storage, engine, config)
   - `server/paper/storage.ts` — Paper storage with getPositionsBySymbol(), recordTradeClose(), getTradeHistory()
-  - `server/paper/engine.ts` — Paper engine with position monitor (30s interval, checks SL/TP1/TP2/time-stop for all open positions across all symbols, broadcasts TRADE_CLOSE via WebSocket)
+  - `server/paper/engine.ts` — Paper engine with position monitor (30s interval, checks SL/TP1/TP2 for all open positions across all symbols, broadcasts TRADE_CLOSE via WebSocket). `processCandle()` skips v5_signal-sourced positions to avoid cross-symbol price contamination from the legacy BTCUSDT-only `executePaperTrade()` loop in storage.ts.
   - `server/ws.ts` — WebSocket server for real-time event streaming (broadcasts CYCLE_UPDATE on push)
 
 ### Database (PostgreSQL via Drizzle ORM)

@@ -1053,6 +1053,10 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
   const position = await storage.getOpenPosition();
   const portfolio = await storage.getOrCreatePortfolio();
   
+  if (position && position.source === "v5_signal") {
+    return;
+  }
+  
   if (!position) {
     const gating = checkShotPlanGating(ctx.shotPlan, config, ctx);
     const shotPlanCosts = ctx.shotPlan?.estimatedCosts || getTotalCostsPct();
@@ -1228,7 +1232,6 @@ export async function monitorAllPositions(): Promise<void> {
     if (openPositions.length === 0) return;
 
     const { broadcast } = await import("../ws");
-    const config = getConfig();
 
     for (const position of openPositions) {
       try {
@@ -1278,24 +1281,12 @@ export async function monitorAllPositions(): Promise<void> {
         }
 
         const unrealizedPnl = calculateUnrealizedPnl(position, currentPrice);
-        const pnlR = position.initialRiskUsdt ? unrealizedPnl / position.initialRiskUsdt : 0;
-
-        if (checkTimeStop(position, pnlR, config)) {
-          console.log(`[Position Monitor] TIME STOP: ${position.symbol} ${position.side} after ${position.barsOpen} bars`);
-          await closePosition(position, currentPrice, "TIME", syntheticCtx);
-          broadcast("TRADE_CLOSE", { positionId: position.id, symbol: position.symbol, reason: "TIME", exitPrice: currentPrice });
-          continue;
-        }
 
         const currentPeakProfit = position.peakProfit ?? 0;
         const newPeakProfit = Math.max(currentPeakProfit, unrealizedPnl);
         if (newPeakProfit > currentPeakProfit) {
           await storage.updatePosition(position.id, { peakProfit: newPeakProfit });
         }
-
-        await storage.updatePosition(position.id, {
-          barsOpen: (position.barsOpen || 0) + 1,
-        });
       } catch (err) {
         console.error(`[Position Monitor] Error checking ${position.symbol}:`, err);
       }
