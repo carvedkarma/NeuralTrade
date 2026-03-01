@@ -62,7 +62,7 @@ Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), 
   - `server/ws.ts` — WebSocket server for real-time event streaming (broadcasts CYCLE_UPDATE on push)
 
 ### Database (PostgreSQL via Drizzle ORM)
-Key tables: `v5_signals`, `live_trade_records`, `live_cycle_logs` (with V5 fields: ret_mu, mfe_pred, mae_pred, p_hold, p_long, p_short), `paper_positions` (with `source` field: "v5_signal"|"manual"|"auto"), `paper_portfolio`, `paper_trades`, `paper_trade_history` (complete trade records with R metrics per asset), `candles`, `settings`
+Key tables: `v5_signals`, `live_trade_records`, `live_cycle_logs` (with V5 fields: ret_mu, mfe_pred, mae_pred, p_hold, p_long, p_short, v5_score, v5_threshold, v5_side), `paper_positions` (with `source` field: "v5_signal"|"manual"|"auto"), `paper_portfolio`, `paper_trades`, `paper_trade_history` (complete trade records with R metrics per asset), `candles`, `settings`
 
 Schema in `shared/schema.ts` with Drizzle + Zod validation.
 

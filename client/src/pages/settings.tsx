@@ -170,12 +170,12 @@ export default function SettingsPage() {
           <h2 className="font-semibold text-lg">Model Information</h2>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-          <InfoItem label="Architecture" value="EnhancedMultiHeadMLP" />
+          <InfoItem label="Architecture" value="V5Forecaster (multi-head)" />
           <InfoItem label="Features" value="85 (STF:44, ENH:24, HTF:12, REGIME:5)" />
           <InfoItem label="Timeframe" value="15m with adaptive horizon (8-48 bars)" />
           <InfoItem label="Symbols" value="BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, AVAXUSDT" />
-          <InfoItem label="Engine" value="Triple-Lane Aggression (CORE/FLOW/SCALP)" />
-          <InfoItem label="Version" value="v5.4.0" />
+          <InfoItem label="Engine" value="V5 Composite Scoring (score ≥ 0.02)" />
+          <InfoItem label="Version" value="v5.0" />
         </div>
       </div>
 

@@ -1363,6 +1363,9 @@ export const liveCycleLogs = pgTable("live_cycle_logs", {
   pHold: real("p_hold"),
   pLong: real("p_long"),
   pShort: real("p_short"),
+  v5Score: real("v5_score"),
+  v5Threshold: real("v5_threshold"),
+  v5Side: varchar("v5_side", { length: 10 }),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (table) => ({
   symbolIdx: index("cycle_logs_symbol_idx").on(table.symbol),

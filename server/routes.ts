@@ -4781,6 +4781,9 @@ export async function registerRoutes(
         pHold: c.p_hold ?? null,
         pLong: c.v5_p_long ?? c.p_long ?? null,
         pShort: c.v5_p_short ?? c.p_short ?? null,
+        v5Score: c.v5_score ?? null,
+        v5Threshold: c.v5_threshold ?? null,
+        v5Side: c.v5_side ?? null,
         createdAt: Date.now(),
       });
       gpuBridge.recordActivity();
