@@ -2643,10 +2643,17 @@ def _prepare_regime_eval_context(data_path, device, regimes_str, slope_eps):
     import pandas as pd
     from training.triple_barrier import compute_atr_14
 
-    checkpoint_path = Path("checkpoints/best_enter_prauc.pt")
-    if not checkpoint_path.exists():
-        checkpoint_path = Path("checkpoints/best_enter_loss.pt")
-    if not checkpoint_path.exists():
+    checkpoint_path = None
+    for candidate in [
+        Path("checkpoints/best_enter_prauc.pt"),
+        Path("checkpoints/best_v5_expectancy.pt"),
+        Path("checkpoints/best_enter_loss.pt"),
+        Path("checkpoints/best_v5_loss.pt"),
+    ]:
+        if candidate.exists():
+            checkpoint_path = candidate
+            break
+    if checkpoint_path is None:
         log.error("No trained ENTER model found! Train first.")
         sys.exit(1)
 
@@ -5984,10 +5991,17 @@ Examples:
             log.info(f"  Epochs trained: {len(history['val_loss'])}")
     else:
         import torch
-        checkpoint_path = Path("checkpoints/best_enter_prauc.pt")
-        if not checkpoint_path.exists():
-            checkpoint_path = Path("checkpoints/best_enter_loss.pt")
-        if not checkpoint_path.exists():
+        checkpoint_path = None
+        for candidate in [
+            Path("checkpoints/best_enter_prauc.pt"),
+            Path("checkpoints/best_v5_expectancy.pt"),
+            Path("checkpoints/best_enter_loss.pt"),
+            Path("checkpoints/best_v5_loss.pt"),
+        ]:
+            if candidate.exists():
+                checkpoint_path = candidate
+                break
+        if checkpoint_path is None:
             log.error("No trained ENTER model found! Run without --predict-only first.")
             sys.exit(1)
 
