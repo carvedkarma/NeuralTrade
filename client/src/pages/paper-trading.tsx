@@ -52,6 +52,25 @@ interface Portfolio {
   openPositions: number;
 }
 
+interface TradeRecord {
+  id: number;
+  positionId: number;
+  symbol: string;
+  side: string;
+  entryTs: number;
+  entryPrice: number;
+  exitTs: number;
+  exitPrice: number;
+  grossR: number;
+  netR: number;
+  costR: number;
+  pnlUsdt: number;
+  riskUsdt: number;
+  barsHeld: number;
+  exitReason: string;
+  maxFavorableR: number;
+}
+
 interface PaperConfig {
   paperTradingEnabled: boolean;
   isAutoTrading?: boolean;
@@ -298,8 +317,8 @@ export default function PaperTrading() {
     refetchInterval: 5000,
   });
 
-  const { data: closedPositions } = useQuery<Position[]>({
-    queryKey: ["/api/paper/positions", "?status=CLOSED&limit=100"],
+  const { data: tradeHistory } = useQuery<TradeRecord[]>({
+    queryKey: ["/api/paper/trade-history", "?limit=100"],
   });
 
   const { data: equityCurve } = useQuery<EquityPoint[]>({
@@ -589,7 +608,7 @@ export default function PaperTrading() {
         </CardHeader>
         <CardContent>
           <div className="max-h-96 overflow-auto">
-            {(!closedPositions || closedPositions.length === 0) ? (
+            {(!tradeHistory || tradeHistory.length === 0) ? (
               <p className="text-sm text-muted-foreground text-center py-8" data-testid="text-no-trades">
                 No completed trades yet
               </p>
@@ -609,15 +628,15 @@ export default function PaperTrading() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {[...closedPositions]
-                    .sort((a, b) => (b.exitTime ?? 0) - (a.exitTime ?? 0))
+                  {[...tradeHistory]
+                    .sort((a, b) => (b.exitTs ?? 0) - (a.exitTs ?? 0))
                     .map((trade, i) => {
-                      const pnl = trade.pnlR ?? 0;
-                      const dur = trade.entryTime && trade.exitTime ? trade.exitTime - trade.entryTime : 0;
+                      const pnl = trade.netR ?? 0;
+                      const dur = trade.entryTs && trade.exitTs ? trade.exitTs - trade.entryTs : 0;
                       return (
                         <TableRow key={trade.id ?? i} data-testid={`row-trade-history-${i}`}>
                           <TableCell className="text-muted-foreground">
-                            {trade.exitTime ? formatDateTime(trade.exitTime) : "-"}
+                            {trade.exitTs ? formatDateTime(trade.exitTs) : "-"}
                           </TableCell>
                           <TableCell className="font-medium">{trade.symbol}</TableCell>
                           <TableCell>
@@ -633,14 +652,14 @@ export default function PaperTrading() {
                           <TableCell className={`number-mono ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                             {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}R
                           </TableCell>
-                          <TableCell className="number-mono">
+                          <TableCell className={`number-mono ${trade.pnlUsdt >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                             {trade.pnlUsdt != null ? formatUsd(trade.pnlUsdt) : "-"}
                           </TableCell>
                           <TableCell className="text-muted-foreground">
                             {dur > 0 ? formatDuration(dur) : "-"}
                           </TableCell>
                           <TableCell>
-                            <span className="text-xs text-muted-foreground">{trade.exitType ?? "-"}</span>
+                            <span className="text-xs text-muted-foreground">{trade.exitReason ?? "-"}</span>
                           </TableCell>
                         </TableRow>
                       );
