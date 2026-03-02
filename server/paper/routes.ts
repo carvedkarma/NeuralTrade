@@ -89,6 +89,38 @@ router.get("/trade-history", async (req, res) => {
   }
 });
 
+router.get("/equity-curve", async (req, res) => {
+  try {
+    const range = req.query.range as string || "all";
+    let fromTs = 0;
+    if (range === "7d") fromTs = Date.now() - 7 * 86400000;
+    else if (range === "30d") fromTs = Date.now() - 30 * 86400000;
+
+    const history = await storage.getTradeHistory({ limit: 10000 });
+    const sorted = history
+      .filter((t: any) => t.exitTs && (fromTs === 0 || t.exitTs >= fromTs))
+      .sort((a: any, b: any) => (a.exitTs ?? 0) - (b.exitTs ?? 0));
+
+    let cumR = 0;
+    const curve = sorted.map((t: any) => {
+      const r = t.netR ?? t.grossR ?? 0;
+      cumR += r;
+      return {
+        ts: t.exitTs ?? t.entryTs,
+        r: Math.round(cumR * 100) / 100,
+        tradeR: Math.round(r * 100) / 100,
+        symbol: t.symbol,
+        side: t.side,
+      };
+    });
+
+    res.json(curve);
+  } catch (error) {
+    console.error("Error getting paper equity curve:", error);
+    res.status(500).json({ error: "Failed to get paper equity curve" });
+  }
+});
+
 router.get("/equity", async (req, res) => {
   try {
     const range = req.query.range as "7d" | "30d" | "all" | undefined;

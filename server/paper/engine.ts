@@ -24,6 +24,11 @@ export async function getMarketPrice(symbol: string): Promise<number> {
 }
 
 async function getCurrentMarketPrice(symbol: string): Promise<number> {
+  try {
+    const { getLatestPrice } = await import("../binance-ws");
+    const wsPrice = getLatestPrice(symbol);
+    if (wsPrice && wsPrice > 0) return wsPrice;
+  } catch {}
   const rows = await db
     .select({ close: candlesTable.close })
     .from(candlesTable)

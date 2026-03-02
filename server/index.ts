@@ -9,6 +9,7 @@ import { gpuBridge } from "./gpu-bridge";
 import { loadCandleTimestamps } from "./unified-learning-controller";
 import { initializeSelfLearning } from "./pattern-memory";
 import { setupWebSocket } from "./ws";
+import { startBinanceWs } from "./binance-ws";
 
 const app = express();
 const httpServer = createServer(app);
@@ -102,6 +103,7 @@ app.use((req, res, next) => {
     () => {
       log(`serving on port ${port}`);
       
+      startBinanceWs();
       loadPaperState().then(() => {
         startPositionMonitor(30000);
         return gpuBridge.hydrateLastActivityFromDb();

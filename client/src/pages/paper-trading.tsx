@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useTradingWs } from "@/hooks/use-trading-ws";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -93,6 +94,9 @@ interface Position {
   exitType?: string;
   status?: string;
   source?: string;
+  leverage?: number;
+  qty?: number;
+  initialRiskUsdt?: number;
 }
 
 interface EquityPoint {
@@ -143,8 +147,9 @@ function formatPrice(price: number): string {
   return price.toFixed(6);
 }
 
-function PositionPriceGauge({ pos }: { pos: Position }) {
-  const { entryPrice, currentPrice, stopLoss, takeProfit, side, pnlR, pnlUsdt } = pos;
+function PositionPriceGauge({ pos, livePrice }: { pos: Position; livePrice?: number }) {
+  const { entryPrice, stopLoss, takeProfit, side } = pos;
+  const currentPrice = livePrice ?? pos.currentPrice;
   if (!currentPrice || !stopLoss || !takeProfit) return null;
 
   const isLong = side === "LONG";
@@ -157,7 +162,11 @@ function PositionPriceGauge({ pos }: { pos: Position }) {
   const pricePct = ((currentPrice - lo) / range) * 100;
   const clampedPricePct = Math.max(0, Math.min(100, pricePct));
 
-  const pnl = pnlR ?? 0;
+  const priceDiff = isLong ? currentPrice - entryPrice : entryPrice - currentPrice;
+  const livePnlUsdt = pos.qty ? priceDiff * pos.qty : (pos.pnlUsdt ?? 0);
+  const livePnlR = pos.initialRiskUsdt ? livePnlUsdt / pos.initialRiskUsdt : (pos.pnlR ?? 0);
+  const pnl = Math.round(livePnlR * 100) / 100;
+  const pnlUsd = Math.round(livePnlUsdt * 100) / 100;
   const isProfit = pnl >= 0;
 
   const dur = pos.entryTime ? Date.now() - pos.entryTime : 0;
@@ -187,16 +196,19 @@ function PositionPriceGauge({ pos }: { pos: Position }) {
           {pos.source === "v5_signal" && (
             <Badge className="no-default-hover-elevate no-default-active-elevate text-[10px] bg-cyan-500/20 text-cyan-400 px-1.5">V5</Badge>
           )}
+          {pos.leverage != null && pos.leverage > 1 && (
+            <Badge variant="outline" className="text-amber-400 border-amber-400/30 text-[10px] px-1.5" data-testid="badge-leverage">
+              {pos.leverage}x
+            </Badge>
+          )}
         </div>
         <div className="flex items-center gap-2">
-          <span className={`text-sm font-bold number-mono ${isProfit ? "text-emerald-400" : "text-red-400"}`}>
+          <span className={`text-sm font-bold number-mono ${isProfit ? "text-emerald-400" : "text-red-400"}`} data-testid={`text-pnlr-${pos.symbol}`}>
             {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}R
           </span>
-          {pnlUsdt != null && (
-            <span className={`text-xs number-mono ${isProfit ? "text-emerald-400/70" : "text-red-400/70"}`}>
-              {pnlUsdt >= 0 ? "+" : ""}${pnlUsdt.toFixed(2)}
-            </span>
-          )}
+          <span className={`text-xs number-mono ${isProfit ? "text-emerald-400/70" : "text-red-400/70"}`} data-testid={`text-pnlusdt-${pos.symbol}`}>
+            {pnlUsd >= 0 ? "+" : ""}${pnlUsd.toFixed(2)}
+          </span>
         </div>
       </div>
 
@@ -267,9 +279,18 @@ function PositionPriceGauge({ pos }: { pos: Position }) {
               {tpDist.toFixed(0)}%
             </span>
           </div>
-          <div className="text-muted-foreground">
-            {dur > 0 ? formatDuration(dur) : "-"}
+          <div className="text-muted-foreground" data-testid={`text-duration-${pos.symbol}`}>
+            {pos.entryTime ? (
+              <span title={new Date(pos.entryTime).toLocaleString()}>
+                {formatDateTime(pos.entryTime)} · {dur > 0 ? formatDuration(dur) : "-"}
+              </span>
+            ) : "-"}
           </div>
+          {pos.leverage != null && (
+            <div className="text-amber-400/70" data-testid={`text-leverage-${pos.symbol}`}>
+              {pos.leverage}x
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-0.5">
           {posId > 0 && (
@@ -294,6 +315,15 @@ function PositionPriceGauge({ pos }: { pos: Position }) {
 
 export default function PaperTrading() {
   const [equityRange, setEquityRange] = useState<"7d" | "30d" | "all">("30d");
+  const [livePrices, setLivePrices] = useState<Record<string, number>>({});
+  const { subscribe } = useTradingWs();
+
+  useEffect(() => {
+    const unsub = subscribe("PRICE_TICK", (payload) => {
+      setLivePrices(payload as Record<string, number>);
+    });
+    return unsub;
+  }, [subscribe]);
 
   const { data: portfolio, isLoading: portfolioLoading } = useQuery<Portfolio>({
     queryKey: ["/api/paper/portfolio"],
@@ -319,10 +349,12 @@ export default function PaperTrading() {
 
   const { data: tradeHistory } = useQuery<TradeRecord[]>({
     queryKey: ["/api/paper/trade-history", "?limit=100"],
+    refetchInterval: 30000,
   });
 
   const { data: equityCurve } = useQuery<EquityPoint[]>({
-    queryKey: ["/api/v5/equity-curve", `?range=${equityRange}`],
+    queryKey: ["/api/paper/equity-curve", `?range=${equityRange}`],
+    refetchInterval: 30000,
   });
 
   const enableMutation = useMutation({
@@ -595,7 +627,7 @@ export default function PaperTrading() {
           ) : (
             <div className="grid gap-3 sm:grid-cols-1 md:grid-cols-2 xl:grid-cols-3" data-testid="positions-grid">
               {openPositions.map((pos, i) => (
-                <PositionPriceGauge key={pos.id ?? i} pos={pos} />
+                <PositionPriceGauge key={pos.id ?? i} pos={pos} livePrice={livePrices[pos.symbol]} />
               ))}
             </div>
           )}

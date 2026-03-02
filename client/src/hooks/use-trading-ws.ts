@@ -8,7 +8,8 @@ export type WsEventType =
   | "TRADE_CLOSE"
   | "GPU_STATUS_UPDATE"
   | "SIGNAL_UPDATE"
-  | "HEALTH_STATUS";
+  | "HEALTH_STATUS"
+  | "PRICE_TICK";
 
 export type WsConnectionState = "connecting" | "connected" | "disconnected" | "error";
 

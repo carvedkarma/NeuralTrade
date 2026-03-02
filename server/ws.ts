@@ -37,7 +37,7 @@ export function broadcast(eventType: string, payload: unknown): void {
       sent++;
     }
   });
-  if (sent > 0) {
+  if (sent > 0 && eventType !== "PRICE_TICK") {
     console.log(`[WS] Broadcast ${eventType} to ${sent} clients`);
   }
 }
