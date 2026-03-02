@@ -45,6 +45,11 @@ export interface PaperTradingConfig {
   
   // Performance metrics tracking
   trackRMultiple: boolean;          // Track R-multiple per trade
+  
+  // Signal-strength leverage tiers
+  leverageEnabled: boolean;
+  leverageTiers: { minScore: number; leverage: number }[];
+  maxLeverage: number;
 }
 
 export const defaultConfig: PaperTradingConfig = {
@@ -97,6 +102,16 @@ export const defaultConfig: PaperTradingConfig = {
   
   // Performance metrics tracking
   trackRMultiple: true,         // Track R-multiple per trade
+  
+  // Signal-strength leverage tiers (v5Score thresholds → leverage)
+  leverageEnabled: true,
+  leverageTiers: [
+    { minScore: 0.15, leverage: 5 },
+    { minScore: 0.10, leverage: 3 },
+    { minScore: 0.05, leverage: 2 },
+    { minScore: 0.02, leverage: 1 },
+  ],
+  maxLeverage: 5,
 };
 
 let currentConfig: PaperTradingConfig = { ...defaultConfig };

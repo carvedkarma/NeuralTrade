@@ -4850,10 +4850,11 @@ export async function registerRoutes(
                   riskPercent: paperConfig.riskPerTradePct,
                   source: "v5_signal",
                   signalConfidence: c.p_enter ?? null,
+                  v5Score: c.v5_score ?? undefined,
                 });
 
                 autoTradeResult = { opened: true, positionId: position.id };
-                console.log(`[Auto-Trade] Opened ${side} ${c.symbol} @ $${entryPrice} | SL: $${stopLoss.toFixed(4)} | TP: $${takeProfit.toFixed(4)} | p_enter: ${c.p_enter}`);
+                console.log(`[Auto-Trade] Opened ${side} ${c.symbol} @ $${entryPrice} | ${position.leverage}x leverage | SL: $${stopLoss.toFixed(4)} | TP: $${takeProfit.toFixed(4)} | v5Score: ${c.v5_score} | p_enter: ${c.p_enter}`);
               }
             }
           } catch (err: any) {

@@ -75,6 +75,9 @@ interface TradeRecord {
 interface PaperConfig {
   paperTradingEnabled: boolean;
   isAutoTrading?: boolean;
+  leverageEnabled?: boolean;
+  leverageTiers?: { minScore: number; leverage: number }[];
+  maxLeverage?: number;
 }
 
 interface Position {
@@ -607,6 +610,36 @@ export default function PaperTrading() {
           </ResponsiveContainer>
         </div>
       </div>
+
+      {config?.leverageEnabled && config?.leverageTiers && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-medium">Signal-Strength Leverage</CardTitle>
+              <Badge variant="outline" className="text-[10px] text-amber-400 border-amber-400/30" data-testid="badge-leverage-active">
+                Active — Max {config.maxLeverage ?? 5}x
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="flex gap-2 flex-wrap" data-testid="leverage-tiers">
+              {[...config.leverageTiers]
+                .sort((a, b) => a.minScore - b.minScore)
+                .map((tier, i) => (
+                  <div key={i} className="flex items-center gap-2 bg-card/50 border border-border/30 rounded-md px-3 py-2" data-testid={`leverage-tier-${tier.leverage}`}>
+                    <span className="text-xs text-muted-foreground">Score ≥ {tier.minScore}</span>
+                    <span className={`text-sm font-mono font-bold ${tier.leverage >= 5 ? 'text-amber-400' : tier.leverage >= 3 ? 'text-cyan-400' : 'text-emerald-400'}`}>
+                      {tier.leverage}x
+                    </span>
+                  </div>
+                ))}
+            </div>
+            <p className="text-xs text-muted-foreground mt-2">
+              Stronger V5 signals automatically increase position leverage. Risk per trade stays constant — only position size scales.
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>

@@ -1644,6 +1644,19 @@ export async function updatePositionLevels(
   return updated;
 }
 
+export function computeSignalLeverage(v5Score: number | null | undefined): number {
+  const config = getConfig();
+  if (!config.leverageEnabled || !v5Score || v5Score <= 0) return 1;
+  
+  const sortedTiers = [...config.leverageTiers].sort((a, b) => b.minScore - a.minScore);
+  for (const tier of sortedTiers) {
+    if (v5Score >= tier.minScore) {
+      return Math.min(tier.leverage, config.maxLeverage);
+    }
+  }
+  return 1;
+}
+
 export async function manualOpenPosition(params: {
   symbol: string;
   side: "LONG" | "SHORT";
@@ -1653,8 +1666,9 @@ export async function manualOpenPosition(params: {
   riskPercent: number;
   source?: string;
   signalConfidence?: number;
+  v5Score?: number;
 }): Promise<PaperPosition> {
-  const { symbol, side, entryPrice, stopLoss, takeProfit, riskPercent, source = "manual", signalConfidence = null } = params;
+  const { symbol, side, entryPrice, stopLoss, takeProfit, riskPercent, source = "manual", signalConfidence = null, v5Score } = params;
   const portfolio = await storage.getOrCreatePortfolio();
   const config = getConfig();
 
@@ -1663,9 +1677,11 @@ export async function manualOpenPosition(params: {
   if (side === "LONG" && takeProfit <= entryPrice) throw new Error("LONG TP must be above entry");
   if (side === "SHORT" && takeProfit >= entryPrice) throw new Error("SHORT TP must be below entry");
 
+  const leverage = source === "v5_signal" ? computeSignalLeverage(v5Score) : 1;
   const stopDistance = Math.abs(entryPrice - stopLoss);
   const riskUsd = portfolio.currentEquityUsdt * (riskPercent / 100);
-  const qty = riskUsd / stopDistance;
+  const baseQty = riskUsd / stopDistance;
+  const qty = baseQty * leverage;
   const notional = qty * entryPrice;
   const entryFee = calculateFee(notional, config.takerFeePct);
 
@@ -1677,7 +1693,7 @@ export async function manualOpenPosition(params: {
     entryPrice,
     qty,
     notionalUsdt: notional,
-    leverage: 1,
+    leverage,
     stopLoss,
     tp1: takeProfit,
     tp2: null,

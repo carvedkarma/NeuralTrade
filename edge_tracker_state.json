@@ -239,6 +239,18 @@
       "tradingCost": 0.0009,
       "confidence": 0.800568,
       "isWin": false
+    },
+    {
+      "timestamp": "2026-03-02T03:07:34.151Z",
+      "action": "LONG",
+      "entryPrice": 1.351,
+      "exitPrice": 1.36516347,
+      "horizon": 16,
+      "actualReturn": 0.010483693560325653,
+      "netReturn": 0.009583693560325653,
+      "tradingCost": 0.0009,
+      "confidence": 0.80785346,
+      "isWin": true
     }
   ],
   "tradingCostMode": "taker_taker"
