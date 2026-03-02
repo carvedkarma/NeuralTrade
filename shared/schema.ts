@@ -713,6 +713,7 @@ export const paperPositions = pgTable("paper_positions", {
   exitReason: varchar("exit_reason", { length: 20 }),
   signalConfidence: real("signal_confidence"),
   signalEdge: real("signal_edge"),
+  v5Score: real("v5_score"),
   // MFE tracking and R-multiple fields
   peakProfit: real("peak_profit").default(0),           // Maximum favorable excursion (MFE) in USD
   initialStopDistance: real("initial_stop_distance"),   // Initial stop distance for R-multiple calc

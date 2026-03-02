@@ -100,6 +100,7 @@ interface Position {
   leverage?: number;
   qty?: number;
   initialRiskUsdt?: number;
+  v5Score?: number;
 }
 
 interface EquityPoint {
@@ -292,6 +293,11 @@ function PositionPriceGauge({ pos, livePrice }: { pos: Position; livePrice?: num
           {pos.leverage != null && (
             <div className="text-amber-400/70" data-testid={`text-leverage-${pos.symbol}`}>
               {pos.leverage}x
+              {pos.v5Score != null && (
+                <span className="ml-1 text-cyan-400/70" data-testid={`text-v5score-${pos.symbol}`}>
+                  (V5: {pos.v5Score.toFixed(3)})
+                </span>
+              )}
             </div>
           )}
         </div>

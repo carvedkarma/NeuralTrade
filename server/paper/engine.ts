@@ -1711,6 +1711,7 @@ export async function manualOpenPosition(params: {
     exitReason: null,
     signalConfidence: signalConfidence,
     signalEdge: null,
+    v5Score: v5Score ?? null,
     peakProfit: 0,
     initialStopDistance: stopDistance,
     regime: null,
