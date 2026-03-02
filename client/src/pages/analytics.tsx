@@ -57,6 +57,9 @@ interface PerformanceData {
   weeklyData: Array<{ week: string; totalR: number; trades: number; wins: number; winRate: number }>;
   rolling7d: { trades: number; wins: number; winRate: number; totalR: number; expectancy: number };
   rolling30d: { trades: number; wins: number; winRate: number; totalR: number; expectancy: number };
+  leverageBreakdown?: Array<{ tier: string; trades: number; wins: number; winRate: number; totalR: number; totalPnlUsdt: number }>;
+  totalPnlUsdt?: number;
+  totalRiskUsdt?: number;
 }
 
 interface EquityPoint {
@@ -439,18 +442,24 @@ function computeHistogram(rValues: number[]) {
 
 export default function Analytics() {
   const [pnlView, setPnlView] = useState<"monthly" | "weekly">("monthly");
+  const [source, setSource] = useState<"live" | "paper">("paper");
+
+  const perfUrl = source === "paper" ? "/api/paper/performance" : "/api/v5/performance";
+  const equityUrl = source === "paper" ? "/api/paper/equity-curve?range=all" : "/api/v5/equity-curve?range=all";
 
   const { data: perf, isLoading: perfLoading } = useQuery<PerformanceData>({
-    queryKey: ["/api/v5/performance"],
+    queryKey: [perfUrl],
+    refetchInterval: source === "paper" ? 30000 : undefined,
   });
 
   const { data: equity, isLoading: equityLoading } = useQuery<EquityPoint[]>({
-    queryKey: ["/api/v5/equity-curve", "all"],
+    queryKey: [equityUrl],
     queryFn: async () => {
-      const res = await fetch("/api/v5/equity-curve?range=all");
+      const res = await fetch(equityUrl);
       if (!res.ok) throw new Error("Failed to fetch equity curve");
       return res.json();
     },
+    refetchInterval: source === "paper" ? 30000 : undefined,
   });
 
   const isLoading = perfLoading || equityLoading;
@@ -458,6 +467,13 @@ export default function Analytics() {
   if (isLoading) {
     return (
       <div className="p-4 space-y-4" data-testid="analytics">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Loading Analytics...</h2>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setSource("live")} className={`px-3 py-1.5 rounded-md text-xs font-medium ${source === "live" ? "bg-cyan-500/20 text-cyan-400 border border-cyan-400/30" : "text-muted-foreground"}`}>Live</button>
+            <button onClick={() => setSource("paper")} className={`px-3 py-1.5 rounded-md text-xs font-medium ${source === "paper" ? "bg-emerald-500/20 text-emerald-400 border border-emerald-400/30" : "text-muted-foreground"}`}>Paper</button>
+          </div>
+        </div>
         <div className="grid grid-cols-5 gap-3">
           {Array.from({ length: 10 }).map((_, i) => (
             <div key={i} className="glass-card rounded-md p-3 h-20 shimmer" />
@@ -469,14 +485,41 @@ export default function Analytics() {
     );
   }
 
+  const sourceToggle = (
+    <div className="flex items-center gap-2" data-testid="source-toggle">
+      <button
+        onClick={() => setSource("live")}
+        className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${source === "live" ? "bg-cyan-500/20 text-cyan-400 border border-cyan-400/30" : "text-muted-foreground hover:text-foreground"}`}
+        data-testid="btn-source-live"
+      >
+        Live
+      </button>
+      <button
+        onClick={() => setSource("paper")}
+        className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${source === "paper" ? "bg-emerald-500/20 text-emerald-400 border border-emerald-400/30" : "text-muted-foreground hover:text-foreground"}`}
+        data-testid="btn-source-paper"
+      >
+        Paper
+      </button>
+    </div>
+  );
+
   if (!perf || perf.totalTrades === 0) {
     return (
-      <div className="p-4 space-y-4 flex items-center justify-center min-h-[60vh]" data-testid="analytics">
-        <div className="text-center space-y-3">
-          <BarChart3 className="w-12 h-12 text-muted-foreground mx-auto" />
-          <p className="text-muted-foreground text-sm" data-testid="text-empty-state">
-            No trading data yet. Signals will appear once the v5 model starts generating trades.
-          </p>
+      <div className="p-4 space-y-4" data-testid="analytics">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+            {source === "paper" ? "Paper Trading" : "Live Trading"} Analytics
+          </h2>
+          {sourceToggle}
+        </div>
+        <div className="flex items-center justify-center min-h-[50vh]">
+          <div className="text-center space-y-3">
+            <BarChart3 className="w-12 h-12 text-muted-foreground mx-auto" />
+            <p className="text-muted-foreground text-sm" data-testid="text-empty-state">
+              No {source} trading data yet. {source === "paper" ? "Paper trades will appear once the V5 model generates ENTER signals." : "Signals will appear once the v5 model starts generating trades."}
+            </p>
+          </div>
         </div>
       </div>
     );
@@ -494,6 +537,16 @@ export default function Analytics() {
 
   return (
     <div className="p-4 space-y-4" data-testid="analytics">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+          {source === "paper" ? "Paper Trading" : "Live Trading"} Analytics
+          <Badge variant="outline" className={`ml-2 text-[10px] ${source === "paper" ? "text-emerald-400 border-emerald-400/30" : "text-cyan-400 border-cyan-400/30"}`}>
+            {perf.totalTrades} trades
+          </Badge>
+        </h2>
+        {sourceToggle}
+      </div>
+
       <div className="grid grid-cols-5 gap-3">
         <StatCard
           icon={TrendingUp}
@@ -740,6 +793,63 @@ export default function Analytics() {
           <MonthlyPnlTable data={pnlData} type={pnlView} />
         </div>
       </div>
+
+      {source === "paper" && perf.totalPnlUsdt != null && (
+        <div className="grid grid-cols-3 gap-3">
+          <div className="glass-card rounded-md p-3" data-testid="stat-total-pnl-usdt">
+            <Zap className="w-4 h-4 text-muted-foreground mb-1" />
+            <p className="text-xs text-muted-foreground">Total P&L (USDT)</p>
+            <p className={`text-xl number-mono font-bold ${(perf.totalPnlUsdt ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {(perf.totalPnlUsdt ?? 0) >= 0 ? "+" : ""}{(perf.totalPnlUsdt ?? 0).toFixed(2)}
+            </p>
+          </div>
+          <div className="glass-card rounded-md p-3" data-testid="stat-total-risk-usdt">
+            <ArrowDown className="w-4 h-4 text-muted-foreground mb-1" />
+            <p className="text-xs text-muted-foreground">Total Risk (USDT)</p>
+            <p className="text-xl number-mono font-bold text-amber-400">
+              {(perf.totalRiskUsdt ?? 0).toFixed(2)}
+            </p>
+          </div>
+          <div className="glass-card rounded-md p-3" data-testid="stat-roi">
+            <Target className="w-4 h-4 text-muted-foreground mb-1" />
+            <p className="text-xs text-muted-foreground">ROI on Risk</p>
+            <p className={`text-xl number-mono font-bold ${(perf.totalRiskUsdt ?? 0) > 0 && (perf.totalPnlUsdt ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {(perf.totalRiskUsdt ?? 0) > 0 ? (((perf.totalPnlUsdt ?? 0) / (perf.totalRiskUsdt ?? 1)) * 100).toFixed(1) : "0"}%
+            </p>
+          </div>
+        </div>
+      )}
+
+      {source === "paper" && perf.leverageBreakdown && perf.leverageBreakdown.length > 0 && (
+        <div className="glass-card rounded-md p-4" data-testid="leverage-analysis">
+          <p className="text-sm font-semibold mb-3">
+            <Scale className="w-4 h-4 inline mr-1" />
+            Leverage Tier Performance
+          </p>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="text-xs">Tier</TableHead>
+                <TableHead className="text-xs text-center">Trades</TableHead>
+                <TableHead className="text-xs text-center">Win Rate</TableHead>
+                <TableHead className="text-xs text-right">Total R</TableHead>
+                <TableHead className="text-xs text-right">P&L (USDT)</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {perf.leverageBreakdown.map((l) => (
+                <TableRow key={l.tier}>
+                  <TableCell className="text-sm font-mono text-amber-400">{l.tier}</TableCell>
+                  <TableCell className="text-sm text-center number-mono">{l.trades}</TableCell>
+                  <TableCell className={`text-sm text-center number-mono ${getWinRateColor(l.winRate)}`}>{l.winRate.toFixed(1)}%</TableCell>
+                  <TableCell className={`text-sm text-right number-mono ${l.totalR >= 0 ? "text-emerald-400" : "text-red-400"}`}>{l.totalR >= 0 ? "+" : ""}{l.totalR.toFixed(2)}R</TableCell>
+                  <TableCell className={`text-sm text-right number-mono ${l.totalPnlUsdt >= 0 ? "text-emerald-400" : "text-red-400"}`}>{l.totalPnlUsdt >= 0 ? "+" : ""}{l.totalPnlUsdt.toFixed(2)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
     </div>
   );
 }

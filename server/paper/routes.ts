@@ -89,6 +89,245 @@ router.get("/trade-history", async (req, res) => {
   }
 });
 
+router.get("/performance", async (req, res) => {
+  try {
+    const allTrades = await storage.getTradeHistory({ limit: 100000 });
+    const trades = allTrades.sort((a, b) => (a.exitTs ?? 0) - (b.exitTs ?? 0));
+
+    const getR = (t: typeof trades[0]) => t.netR ?? t.grossR ?? 0;
+
+    const totalTrades = trades.length;
+    const wins = trades.filter((t) => getR(t) > 0);
+    const losses = trades.filter((t) => getR(t) <= 0);
+    const rValues = trades.map(getR);
+    const totalR = rValues.reduce((s, v) => s + v, 0);
+    const winRate = totalTrades > 0 ? (wins.length / totalTrades) * 100 : 0;
+    const avgWinR = wins.length > 0 ? wins.reduce((s, t) => s + getR(t), 0) / wins.length : 0;
+    const avgLossR = losses.length > 0 ? losses.reduce((s, t) => s + getR(t), 0) / losses.length : 0;
+    const grossWin = wins.reduce((s, t) => s + getR(t), 0);
+    const grossLoss = Math.abs(losses.reduce((s, t) => s + getR(t), 0));
+    const profitFactor = grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? 999 : 0;
+    const expectancy = totalTrades > 0 ? totalR / totalTrades : 0;
+
+    const meanR = totalTrades > 0 ? totalR / totalTrades : 0;
+    const variance = totalTrades > 1 ? rValues.reduce((s, v) => s + (v - meanR) ** 2, 0) / (totalTrades - 1) : 0;
+    const stdDev = Math.sqrt(variance);
+    const sharpeRatio = stdDev > 0 ? meanR / stdDev : 0;
+
+    const downsideValues = rValues.filter((v) => v < 0);
+    const downsideVariance = downsideValues.length > 0 ? downsideValues.reduce((s, v) => s + v ** 2, 0) / downsideValues.length : 0;
+    const downsideStdDev = Math.sqrt(downsideVariance);
+    const sortinoRatio = downsideStdDev > 0 ? meanR / downsideStdDev : 0;
+
+    let maxConsecWins = 0, maxConsecLosses = 0, curWins = 0, curLosses = 0;
+    const streaks: Array<{ type: "win" | "loss"; length: number; ts: number }> = [];
+    let prevType: "win" | "loss" | null = null;
+    let streakLen = 0;
+    for (const t of trades) {
+      const isWin = getR(t) > 0;
+      if (isWin) { curWins++; curLosses = 0; if (curWins > maxConsecWins) maxConsecWins = curWins; }
+      else { curLosses++; curWins = 0; if (curLosses > maxConsecLosses) maxConsecLosses = curLosses; }
+      const curType = isWin ? "win" : "loss";
+      if (curType === prevType) { streakLen++; }
+      else {
+        if (prevType !== null) streaks.push({ type: prevType, length: streakLen, ts: t.entryTs ?? 0 });
+        streakLen = 1;
+        prevType = curType;
+      }
+    }
+    if (prevType !== null && trades.length > 0) {
+      streaks.push({ type: prevType, length: streakLen, ts: trades[trades.length - 1].entryTs ?? 0 });
+    }
+
+    const symbolMap: Record<string, { trades: typeof trades; wins: number; totalR: number }> = {};
+    for (const t of trades) {
+      const sym = t.symbol ?? "UNKNOWN";
+      if (!symbolMap[sym]) symbolMap[sym] = { trades: [], wins: 0, totalR: 0 };
+      symbolMap[sym].trades.push(t);
+      if (getR(t) > 0) symbolMap[sym].wins++;
+      symbolMap[sym].totalR += getR(t);
+    }
+    const perSymbol = Object.entries(symbolMap).map(([symbol, s]) => ({
+      symbol,
+      trades: s.trades.length,
+      wins: s.wins,
+      winRate: s.trades.length > 0 ? (s.wins / s.trades.length) * 100 : 0,
+      totalR: Math.round(s.totalR * 100) / 100,
+      expectancy: s.trades.length > 0 ? Math.round((s.totalR / s.trades.length) * 10000) / 10000 : 0,
+    }));
+
+    const perSymbolEquity: Record<string, Array<{ ts: number; r: number; tradeR: number }>> = {};
+    for (const [symbol, s] of Object.entries(symbolMap)) {
+      let cum = 0;
+      perSymbolEquity[symbol] = s.trades.map((t) => {
+        const r = getR(t);
+        cum += r;
+        return { ts: t.exitTs ?? t.entryTs ?? 0, r: Math.round(cum * 100) / 100, tradeR: Math.round(r * 100) / 100 };
+      });
+    }
+
+    let maxDrawdown = 0, peak = 0, cumR = 0;
+    for (const t of trades) {
+      cumR += getR(t);
+      if (cumR > peak) peak = cumR;
+      const dd = peak - cumR;
+      if (dd > maxDrawdown) maxDrawdown = dd;
+    }
+
+    const bestTrade = rValues.length > 0 ? Math.max(...rValues) : 0;
+    const worstTrade = rValues.length > 0 ? Math.min(...rValues) : 0;
+
+    const totalBarsHeld = trades.reduce((s, t) => s + (t.barsHeld ?? 0), 0);
+    const avgHoldBars = totalTrades > 0 ? totalBarsHeld / totalTrades : 0;
+    const avgHoldMinutes = avgHoldBars * 15;
+
+    const durationBins = [
+      { label: "< 1h", min: 0, max: 4, count: 0 },
+      { label: "1-3h", min: 4, max: 12, count: 0 },
+      { label: "3-6h", min: 12, max: 24, count: 0 },
+      { label: "6-12h", min: 24, max: 48, count: 0 },
+      { label: "12-24h", min: 48, max: 96, count: 0 },
+      { label: "1-3d", min: 96, max: 288, count: 0 },
+      { label: "> 3d", min: 288, max: Infinity, count: 0 },
+    ];
+    for (const t of trades) {
+      const bars = t.barsHeld ?? 0;
+      for (const bin of durationBins) {
+        if (bars >= bin.min && bars < bin.max) { bin.count++; break; }
+      }
+    }
+
+    const hourlyPerf: Record<number, { trades: number; wins: number; totalR: number }> = {};
+    for (let h = 0; h < 24; h++) hourlyPerf[h] = { trades: 0, wins: 0, totalR: 0 };
+    for (const t of trades) {
+      const hour = new Date(t.entryTs ?? 0).getUTCHours();
+      hourlyPerf[hour].trades++;
+      if (getR(t) > 0) hourlyPerf[hour].wins++;
+      hourlyPerf[hour].totalR += getR(t);
+    }
+    const hourlyBreakdown = Object.entries(hourlyPerf).map(([hour, h]) => ({
+      hour: parseInt(hour),
+      trades: h.trades,
+      wins: h.wins,
+      winRate: h.trades > 0 ? Math.round((h.wins / h.trades) * 1000) / 10 : 0,
+      totalR: Math.round(h.totalR * 100) / 100,
+      avgR: h.trades > 0 ? Math.round((h.totalR / h.trades) * 1000) / 1000 : 0,
+    }));
+
+    const monthlyPnl: Record<string, { totalR: number; trades: number; wins: number }> = {};
+    for (const t of trades) {
+      const d = new Date(t.exitTs ?? t.entryTs ?? 0);
+      const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+      if (!monthlyPnl[key]) monthlyPnl[key] = { totalR: 0, trades: 0, wins: 0 };
+      monthlyPnl[key].totalR += getR(t);
+      monthlyPnl[key].trades++;
+      if (getR(t) > 0) monthlyPnl[key].wins++;
+    }
+    const monthlyData = Object.entries(monthlyPnl)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([month, m]) => ({
+        month,
+        totalR: Math.round(m.totalR * 100) / 100,
+        trades: m.trades,
+        wins: m.wins,
+        winRate: m.trades > 0 ? Math.round((m.wins / m.trades) * 1000) / 10 : 0,
+      }));
+
+    const weeklyPnl: Record<string, { totalR: number; trades: number; wins: number }> = {};
+    for (const t of trades) {
+      const d = new Date(t.exitTs ?? t.entryTs ?? 0);
+      const startOfWeek = new Date(d);
+      startOfWeek.setUTCDate(d.getUTCDate() - d.getUTCDay());
+      const key = `${startOfWeek.getUTCFullYear()}-${String(startOfWeek.getUTCMonth() + 1).padStart(2, "0")}-${String(startOfWeek.getUTCDate()).padStart(2, "0")}`;
+      if (!weeklyPnl[key]) weeklyPnl[key] = { totalR: 0, trades: 0, wins: 0 };
+      weeklyPnl[key].totalR += getR(t);
+      weeklyPnl[key].trades++;
+      if (getR(t) > 0) weeklyPnl[key].wins++;
+    }
+    const weeklyData = Object.entries(weeklyPnl)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([week, w]) => ({
+        week,
+        totalR: Math.round(w.totalR * 100) / 100,
+        trades: w.trades,
+        wins: w.wins,
+        winRate: w.trades > 0 ? Math.round((w.wins / w.trades) * 1000) / 10 : 0,
+      }));
+
+    const now = Date.now();
+    const computeRolling = (windowMs: number) => {
+      const windowTrades = trades.filter((t) => (t.exitTs ?? t.entryTs ?? 0) >= now - windowMs);
+      const wt = windowTrades.length;
+      const wWins = windowTrades.filter((t) => getR(t) > 0).length;
+      const wR = windowTrades.reduce((s, t) => s + getR(t), 0);
+      return {
+        trades: wt,
+        wins: wWins,
+        winRate: wt > 0 ? Math.round((wWins / wt) * 1000) / 10 : 0,
+        totalR: Math.round(wR * 100) / 100,
+        expectancy: wt > 0 ? Math.round((wR / wt) * 1000) / 1000 : 0,
+      };
+    };
+    const rolling7d = computeRolling(7 * 86400000);
+    const rolling30d = computeRolling(30 * 86400000);
+
+    const leverageMap: Record<string, { trades: number; wins: number; totalR: number; totalPnlUsdt: number }> = {};
+    for (const t of trades) {
+      const lev = "1x";
+      const key = lev;
+      if (!leverageMap[key]) leverageMap[key] = { trades: 0, wins: 0, totalR: 0, totalPnlUsdt: 0 };
+      leverageMap[key].trades++;
+      if (getR(t) > 0) leverageMap[key].wins++;
+      leverageMap[key].totalR += getR(t);
+      leverageMap[key].totalPnlUsdt += t.pnlUsdt ?? 0;
+    }
+    const leverageBreakdown = Object.entries(leverageMap).map(([tier, l]) => ({
+      tier,
+      trades: l.trades,
+      wins: l.wins,
+      winRate: l.trades > 0 ? Math.round((l.wins / l.trades) * 1000) / 10 : 0,
+      totalR: Math.round(l.totalR * 100) / 100,
+      totalPnlUsdt: Math.round(l.totalPnlUsdt * 100) / 100,
+    }));
+
+    res.json({
+      totalTrades,
+      wins: wins.length,
+      losses: losses.length,
+      winRate: Math.round(winRate * 100) / 100,
+      totalR: Math.round(totalR * 100) / 100,
+      avgWinR: Math.round(avgWinR * 10000) / 10000,
+      avgLossR: Math.round(avgLossR * 10000) / 10000,
+      profitFactor: Math.round(profitFactor * 100) / 100,
+      maxDrawdown: Math.round(maxDrawdown * 100) / 100,
+      bestTrade: Math.round(bestTrade * 10000) / 10000,
+      worstTrade: Math.round(worstTrade * 10000) / 10000,
+      expectancy: Math.round(expectancy * 10000) / 10000,
+      sharpeRatio: Math.round(sharpeRatio * 100) / 100,
+      sortinoRatio: Math.round(sortinoRatio * 100) / 100,
+      maxConsecWins,
+      maxConsecLosses,
+      avgHoldBars: Math.round(avgHoldBars * 10) / 10,
+      avgHoldMinutes: Math.round(avgHoldMinutes),
+      perSymbol,
+      perSymbolEquity,
+      hourlyBreakdown,
+      durationBins,
+      streaks,
+      monthlyData,
+      weeklyData,
+      rolling7d,
+      rolling30d,
+      leverageBreakdown,
+      totalPnlUsdt: Math.round(trades.reduce((s, t) => s + (t.pnlUsdt ?? 0), 0) * 100) / 100,
+      totalRiskUsdt: Math.round(trades.reduce((s, t) => s + (t.riskUsdt ?? 0), 0) * 100) / 100,
+    });
+  } catch (err: any) {
+    console.error("Error computing paper performance:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get("/equity-curve", async (req, res) => {
   try {
     const range = req.query.range as string || "all";
