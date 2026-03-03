@@ -11,9 +11,12 @@ import {
   healthStatus,
   modelLearningStats,
   settings,
+  trainingSessions,
+  trainingEpochs,
+  trainingFolds,
 } from "@shared/schema";
 import type { MoneyConfig } from "@shared/schema";
-import { eq } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 
 async function getMoneyConfig(): Promise<MoneyConfig> {
   const row = await db.select().from(settings).where(eq(settings.key, "money_config")).limit(1);
@@ -58,7 +61,11 @@ router.post("/ingest/event", async (req, res) => {
     broadcast(type, payload);
     console.log(`[Ingest] Event accepted type=${type}, event_id=${event_id}`);
 
-    return res.status(200).json({ status: "accepted", event_id, type });
+    const extra: Record<string, any> = {};
+    if (type === "TRAINING_SESSION_START" && (payload as any).session_id) {
+      extra.session_id = (payload as any).session_id;
+    }
+    return res.status(200).json({ status: "accepted", event_id, type, ...extra });
   } catch (err: any) {
     console.error("[Ingest] Error processing event:", err.message);
     return res.status(500).json({ error: "Internal error", message: err.message });
@@ -279,6 +286,142 @@ async function processEvent(
         status: p.status ?? "unknown",
         message: p.message ?? null,
       });
+      break;
+    }
+
+    case "TRAINING_SESSION_START": {
+      const p = payload as any;
+      const [session] = await db.insert(trainingSessions).values({
+        sessionType: p.session_type ?? "walk_forward",
+        status: "running",
+        startedAt: p.started_at ?? ts,
+        totalFolds: p.total_folds ?? 0,
+        totalEpochs: p.total_epochs ?? 0,
+        symbols: p.symbols ?? [],
+        config: p.config ?? null,
+        gpuName: p.gpu_name ?? null,
+        trainMonths: p.train_months ?? null,
+        testMonths: p.test_months ?? null,
+        lastUpdateTs: ts,
+      }).returning();
+      (payload as any).session_id = session.id;
+      break;
+    }
+
+    case "TRAINING_SESSION_UPDATE": {
+      const p = payload as any;
+      if (p.session_id) {
+        const updates: Record<string, any> = { lastUpdateTs: ts };
+        if (p.current_fold !== undefined) updates.currentFold = p.current_fold;
+        if (p.completed_folds !== undefined) updates.completedFolds = p.completed_folds;
+        if (p.current_epoch !== undefined) updates.currentEpoch = p.current_epoch;
+        if (p.estimated_completion_ts !== undefined) updates.estimatedCompletionTs = p.estimated_completion_ts;
+        if (p.current_fold_metrics) updates.currentFoldMetrics = p.current_fold_metrics;
+        if (p.aggregate_metrics) updates.aggregateMetrics = p.aggregate_metrics;
+        if (p.status) updates.status = p.status;
+        await db.update(trainingSessions).set(updates).where(eq(trainingSessions.id, p.session_id));
+      }
+      break;
+    }
+
+    case "TRAINING_SESSION_END": {
+      const p = payload as any;
+      if (p.session_id) {
+        await db.update(trainingSessions).set({
+          status: p.status ?? "completed",
+          completedAt: p.completed_at ?? ts,
+          completedFolds: p.completed_folds,
+          aggregateMetrics: p.aggregate_metrics ?? null,
+          errorMessage: p.error_message ?? null,
+          lastUpdateTs: ts,
+        }).where(eq(trainingSessions.id, p.session_id));
+      }
+      break;
+    }
+
+    case "TRAINING_EPOCH": {
+      const p = payload as any;
+      if (p.session_id) {
+        await db.insert(trainingEpochs).values({
+          sessionId: p.session_id,
+          foldNum: p.fold_num ?? 0,
+          epoch: p.epoch ?? 0,
+          trainLoss: p.train_loss ?? null,
+          valLoss: p.val_loss ?? null,
+          lossBreakdown: p.loss_breakdown ?? null,
+          actionAccuracy: p.action_accuracy ?? null,
+          learningRate: p.learning_rate ?? null,
+          expectancy: p.expectancy ?? null,
+          profitFactor: p.profit_factor ?? null,
+          winRate: p.win_rate ?? null,
+          maxDrawdown: p.max_drawdown ?? null,
+          tradesPerDay: p.trades_per_day ?? null,
+          threshold: p.threshold ?? null,
+          scoreDiag: p.score_diag ?? null,
+          timestamp: ts,
+        });
+        await db.update(trainingSessions).set({
+          currentEpoch: p.epoch,
+          currentFold: p.fold_num,
+          lastUpdateTs: ts,
+          ...(p.estimated_completion_ts ? { estimatedCompletionTs: p.estimated_completion_ts } : {}),
+        }).where(eq(trainingSessions.id, p.session_id));
+      }
+      break;
+    }
+
+    case "TRAINING_FOLD_START": {
+      const p = payload as any;
+      if (p.session_id) {
+        await db.insert(trainingFolds).values({
+          sessionId: p.session_id,
+          foldNum: p.fold_num ?? 0,
+          trainStart: p.train_start ?? null,
+          trainEnd: p.train_end ?? null,
+          testStart: p.test_start ?? null,
+          testEnd: p.test_end ?? null,
+          status: "running",
+          startedAt: ts,
+        });
+        await db.update(trainingSessions).set({
+          currentFold: p.fold_num,
+          currentEpoch: 0,
+          lastUpdateTs: ts,
+        }).where(eq(trainingSessions.id, p.session_id));
+      }
+      break;
+    }
+
+    case "TRAINING_FOLD_END": {
+      const p = payload as any;
+      if (p.session_id) {
+        const [fold] = await db.select().from(trainingFolds)
+          .where(eq(trainingFolds.sessionId, p.session_id))
+          .orderBy(desc(trainingFolds.id))
+          .limit(1);
+        if (fold) {
+          await db.update(trainingFolds).set({
+            status: p.status ?? "completed",
+            trades: p.trades ?? null,
+            winRate: p.win_rate ?? null,
+            expectancy: p.expectancy ?? null,
+            profitFactor: p.profit_factor ?? null,
+            sharpe: p.sharpe ?? null,
+            maxDrawdown: p.max_drawdown ?? null,
+            totalR: p.total_r ?? null,
+            longShortRatio: p.long_short_ratio ?? null,
+            perSymbol: p.per_symbol ?? null,
+            completedAt: ts,
+            bestEpoch: p.best_epoch ?? null,
+            finalThreshold: p.final_threshold ?? null,
+          }).where(eq(trainingFolds.id, fold.id));
+        }
+        await db.update(trainingSessions).set({
+          completedFolds: p.completed_folds ?? (fold ? fold.foldNum : 0),
+          lastUpdateTs: ts,
+          ...(p.aggregate_metrics ? { aggregateMetrics: p.aggregate_metrics } : {}),
+        }).where(eq(trainingSessions.id, p.session_id));
+      }
       break;
     }
 

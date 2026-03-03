@@ -31,6 +31,10 @@ log = logging.getLogger("QuickStart")
 
 V5_FEATURE_VERSION = "v5.0.1_forecaster"
 
+_active_pusher = None
+_active_fold_num = 0
+_active_total_folds = 1
+
 
 def _compute_ema(close_arr, period=200):
     """Compute EMA using only past data (no leakage). Returns array same length as input."""
@@ -3168,6 +3172,7 @@ def run_v5_walk_forward(
     mu_debias=True, mu_debias_alpha=0.01,
     per_symbol_r_kill=None,
     per_symbol_threshold=False,
+    replit_url=None,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -3175,6 +3180,9 @@ def run_v5_walk_forward(
     except ImportError:
         log.error("[V5_WF] python-dateutil not installed. Install with: pip install python-dateutil")
         return
+
+    from train.training_push import TrainingProgressPusher
+    pusher = TrainingProgressPusher(replit_url=replit_url)
 
     first_ts = None
     last_ts = None
@@ -3230,6 +3238,28 @@ def run_v5_walk_forward(
     for f in folds:
         log.info(f"  Fold {f['fold']}: train {f['train_start']}→{f['train_end']} | test {f['test_start']}→{f['test_end']}")
 
+    try:
+        import torch
+        gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+    except Exception:
+        gpu_name = "Unknown"
+
+    pusher.session_start(
+        session_type="walk_forward",
+        total_folds=len(folds),
+        total_epochs=epochs,
+        symbols=symbols,
+        config={
+            "lr": lr, "batch_size": batch_size, "epochs": epochs,
+            "horizon": horizon, "tp_mult": tp_mult, "sl_mult": sl_mult,
+            "score_lambda": score_lambda, "risk_proxy": risk_proxy,
+            "balanced_sampling": balanced_sampling, "per_symbol_scaler": per_symbol_scaler,
+        },
+        gpu_name=gpu_name,
+        train_months=train_months,
+        test_months=test_months,
+    )
+
     all_reports = []
     data_path = data_dir / f"{symbols[0]}_15m.parquet"
     threshold_ema = None
@@ -3239,6 +3269,19 @@ def run_v5_walk_forward(
         log.info(f"\n{'='*80}")
         log.info(f"  WALK-FORWARD FOLD {fold['fold']}/{len(folds)}")
         log.info(f"{'='*80}")
+
+        pusher.fold_start(
+            fold_num=fold['fold'],
+            train_start=fold['train_start'],
+            train_end=fold['train_end'],
+            test_start=fold['test_start'],
+            test_end=fold['test_end'],
+        )
+
+        global _active_pusher, _active_fold_num, _active_total_folds
+        _active_pusher = pusher
+        _active_fold_num = fold['fold']
+        _active_total_folds = len(folds)
 
         train_v5_model(
             data_path, device, epochs, batch_size, lr,
@@ -3367,7 +3410,19 @@ def run_v5_walk_forward(
                     log.info(f"[V5_WF_THR] Fold {fold['fold']}: initial threshold={fold_threshold:.4f} (no prior EMA)")
                 fold_report['threshold_ema'] = threshold_ema
 
+            pusher.fold_end(
+                fold_num=fold['fold'],
+                completed_folds=len(all_reports),
+                report=fold_report,
+            )
+
             all_reports.append(fold_report)
+        else:
+            pusher.fold_end(
+                fold_num=fold['fold'],
+                completed_folds=len(all_reports),
+                report={"total_trades": 0, "total_r": 0},
+            )
 
     if all_reports:
         log.info("\n" + "=" * 120)
@@ -3469,19 +3524,28 @@ def run_v5_walk_forward(
             log.info(f"  No-edge symbols ({len(no_edge_syms)}): {no_edge_syms}")
             log.info("=" * 100)
 
+        agg_report = {
+            'total_trades': total_trades,
+            'total_r': round(total_r, 4),
+            'avg_expectancy_r': round(avg_expect, 4),
+            'n_folds': len(all_reports),
+            'active_folds': active_folds,
+            'final_threshold_ema': threshold_ema,
+            'per_symbol': wf_per_symbol_report if wf_per_symbol else {},
+        }
+
+        pusher.session_end(
+            status="completed",
+            completed_folds=len(all_reports),
+            aggregate_metrics=agg_report,
+        )
+
         agg_path = Path("checkpoints") / "v5_walkforward_report.json"
         import json
         with open(agg_path, 'w') as f:
             json.dump({
                 'folds': all_reports,
-                'aggregate': {
-                    'total_trades': total_trades,
-                    'total_r': total_r,
-                    'avg_expectancy_r': avg_expect,
-                    'n_folds': len(all_reports),
-                    'active_folds': active_folds,
-                    'final_threshold_ema': threshold_ema,
-                },
+                'aggregate': agg_report,
                 'per_symbol_summary': wf_per_symbol_report if wf_per_symbol else {},
             }, f, indent=2, default=str)
         log.info(f"[V5_WF] Walk-forward report saved to {agg_path}")
@@ -3868,6 +3932,16 @@ def train_v5_model(
     if per_symbol_scaler and len(symbols) > 1:
         log.info("[V5_SCALER] Fitting per-symbol RobustScalers...")
         for si, sym_name in enumerate(symbols):
+            if len(train_features[si]) == 0:
+                log.warning(f"[V5_SCALER] {sym_name}: SKIPPED — 0 train samples in this fold")
+                per_symbol_scalers[sym_name] = None
+                continue
+            if len(val_features[si]) == 0:
+                log.warning(f"[V5_SCALER] {sym_name}: SKIPPED — 0 val samples in this fold (train has {len(train_features[si])})")
+                sym_scaler = RobustScaler()
+                train_features[si] = sym_scaler.fit_transform(train_features[si]).astype(np.float32)
+                per_symbol_scalers[sym_name] = sym_scaler
+                continue
             sym_scaler = RobustScaler()
             train_features[si] = sym_scaler.fit_transform(train_features[si]).astype(np.float32)
             val_features[si] = sym_scaler.transform(val_features[si]).astype(np.float32)
@@ -3879,8 +3953,10 @@ def train_v5_model(
                      f"post-scale mean=[{tr_mean.min():.3f}, {tr_mean.max():.3f}] "
                      f"std=[{tr_std.min():.3f}, {tr_std.max():.3f}]")
 
-        train_feat = np.concatenate(train_features, axis=0)
-        val_feat = np.concatenate(val_features, axis=0)
+        non_empty_train = [f for f in train_features if len(f) > 0]
+        non_empty_val = [f for f in val_features if len(f) > 0]
+        train_feat = np.concatenate(non_empty_train, axis=0) if non_empty_train else np.empty((0, train_features[0].shape[1] if train_features else 85), dtype=np.float32)
+        val_feat = np.concatenate(non_empty_val, axis=0) if non_empty_val else np.empty((0, train_feat.shape[1]), dtype=np.float32)
 
         scaler = RobustScaler()
         scaler.center_ = np.zeros(train_feat.shape[1])
@@ -4328,6 +4404,24 @@ def train_v5_model(
             log.info(f"[V5_EPOCH_TRADING] epoch={epoch:03d} | expect={sweep_expect:+.4f} PF={sweep_pf:.2f} "
                      f"maxDD={sweep_max_dd:.2f} T/day={sweep_tpd:.1f} thr={sweep_threshold:.4f} "
                      f"best_at={sweep_label}")
+
+            if _active_pusher:
+                lb_dict = {k: float(np.mean(v)) for k, v in loss_breakdown.items() if v}
+                _active_pusher.epoch_update(
+                    fold_num=_active_fold_num, epoch=epoch, total_epochs=epochs,
+                    train_loss=float(avg_train_loss), val_loss=float(avg_val_loss),
+                    loss_breakdown=lb_dict, action_accuracy=float(action_acc),
+                    learning_rate=float(current_lr), total_folds=_active_total_folds,
+                    sweep_metrics={
+                        "expectancy": float(sweep_expect),
+                        "profit_factor": float(sweep_pf),
+                        "max_drawdown": float(sweep_max_dd),
+                        "trades_per_day": float(sweep_tpd),
+                        "threshold": float(sweep_threshold),
+                        "win_rate": float(sweep_pct),
+                        "score_diag": {k: float(v) for k, v in score_diag.items() if isinstance(v, (int, float))},
+                    },
+                )
 
             best_per_sym_thresholds = None
             if per_symbol_threshold and symbols and len(symbols) > 1:

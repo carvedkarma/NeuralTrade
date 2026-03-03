@@ -162,7 +162,7 @@ class LearningManager:
         try:
             from quick_start import FEATURE_VERSION
             from data.pipeline import FeatureEngineer, BinanceDataFetcher
-            from training.train_loop import train_enter_model
+            from quick_start import train_enter_model
 
             log.info(f"[Learning] Fetching data for {symbol}...")
             fetcher = BinanceDataFetcher(

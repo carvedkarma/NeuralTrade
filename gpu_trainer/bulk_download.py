@@ -118,33 +118,105 @@ def download_from_binance(symbol: str, days_back: int = DAYS_BACK) -> pd.DataFra
     return df
 
 
-def process_symbol(symbol: str, force: bool = False) -> dict:
+STALE_THRESHOLD_HOURS = 48
+
+
+def refresh_existing_data(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
+    last_ts = int(df["timestamp"].max())
+    now_ms = int(time.time() * 1000)
+    hours_stale = (now_ms - last_ts) / (3600 * 1000)
+
+    if hours_stale <= STALE_THRESHOLD_HOURS:
+        return df
+
+    print(f"  [{symbol}] Data is {hours_stale:.0f}h stale (last: {datetime.utcfromtimestamp(last_ts/1000).strftime('%Y-%m-%d %H:%M')}), fetching new candles...")
+
+    start_ms = last_ts + MS_15M
+    new_candles = []
+    cursor = start_ms
+    batch_num = 0
+
+    while cursor < now_ms:
+        batch_end = min(cursor + CANDLES_PER_REQUEST * MS_15M, now_ms)
+        data = []
+        for attempt in range(3):
+            data = fetch_klines_batch(symbol, cursor, batch_end)
+            if data:
+                break
+            time.sleep(0.5 * (attempt + 1))
+
+        if data:
+            for k in data:
+                new_candles.append({
+                    "timestamp": int(k[0]),
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                    "volume": float(k[5]),
+                })
+
+        cursor = batch_end
+        batch_num += 1
+        if batch_num % 20 == 0:
+            print(f"  [{symbol}] Refreshing... {len(new_candles):,} new candles so far", flush=True)
+        time.sleep(0.02)
+
+    if new_candles:
+        df_new = pd.DataFrame(new_candles)
+        df = pd.concat([df, df_new], ignore_index=True)
+        df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        print(f"  [{symbol}] Added {len(new_candles):,} new candles (total: {len(df):,})")
+    else:
+        print(f"  [{symbol}] No new candles available from Binance")
+
+    return df
+
+
+def process_symbol(symbol: str, force: bool = False, refresh: bool = False) -> dict:
     parquet_path = DATA_DIR / f"{symbol}_15m.parquet"
-    
+
     if parquet_path.exists() and not force:
         df = pd.read_parquet(parquet_path)
         if len(df) >= MIN_CANDLES:
-            print(f"  [{symbol}] Already cached: {len(df):,} candles")
-            return {"symbol": symbol, "candles": len(df), "status": "cached"}
-    
+            if refresh:
+                df = refresh_existing_data(symbol, df)
+                df.to_parquet(parquet_path, index=False)
+                date_min = datetime.utcfromtimestamp(df["timestamp"].min() / 1000).strftime("%Y-%m-%d")
+                date_max = datetime.utcfromtimestamp(df["timestamp"].max() / 1000).strftime("%Y-%m-%d")
+                return {"symbol": symbol, "candles": len(df), "status": "refreshed", "date_range": f"{date_min} to {date_max}"}
+            else:
+                last_ts = int(df["timestamp"].max())
+                now_ms = int(time.time() * 1000)
+                hours_stale = (now_ms - last_ts) / (3600 * 1000)
+                if hours_stale > STALE_THRESHOLD_HOURS:
+                    print(f"  [{symbol}] Cached but stale ({hours_stale:.0f}h old), auto-refreshing...")
+                    df = refresh_existing_data(symbol, df)
+                    df.to_parquet(parquet_path, index=False)
+                    date_min = datetime.utcfromtimestamp(df["timestamp"].min() / 1000).strftime("%Y-%m-%d")
+                    date_max = datetime.utcfromtimestamp(df["timestamp"].max() / 1000).strftime("%Y-%m-%d")
+                    return {"symbol": symbol, "candles": len(df), "status": "refreshed", "date_range": f"{date_min} to {date_max}"}
+                print(f"  [{symbol}] Already cached: {len(df):,} candles")
+                return {"symbol": symbol, "candles": len(df), "status": "cached"}
+
     df = fetch_from_dashboard(symbol)
-    
+
     if len(df) < MIN_CANDLES:
         print(f"  [{symbol}] Dashboard only has {len(df)} candles, fetching from Binance...")
         df_binance = download_from_binance(symbol)
         if len(df_binance) > len(df):
             df = df_binance
-    
+
     if df.empty:
         return {"symbol": symbol, "candles": 0, "status": "failed"}
-    
+
     df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-    
+
     date_min = datetime.utcfromtimestamp(df["timestamp"].min() / 1000).strftime("%Y-%m-%d")
     date_max = datetime.utcfromtimestamp(df["timestamp"].max() / 1000).strftime("%Y-%m-%d")
-    
+
     df.to_parquet(parquet_path, index=False)
-    
+
     status = "ok" if len(df) >= MIN_CANDLES else f"low"
     print(f"  [{symbol}] SAVED: {len(df):,} candles [{date_min} to {date_max}]")
     return {"symbol": symbol, "candles": len(df), "status": status, "date_range": f"{date_min} to {date_max}"}
@@ -152,6 +224,7 @@ def process_symbol(symbol: str, force: bool = False) -> dict:
 
 def main():
     force = "--force" in sys.argv
+    refresh = "--refresh" in sys.argv
     only = None
     for arg in sys.argv[1:]:
         if arg.endswith("USDT"):
@@ -165,11 +238,13 @@ def main():
     print("=" * 60)
     print(f"  Symbols: {', '.join(symbols)}")
     print(f"  Output:  {DATA_DIR}")
+    if refresh:
+        print(f"  Mode:    REFRESH (force update stale data)")
     print()
     
     results = []
     for sym in symbols:
-        result = process_symbol(sym, force=force)
+        result = process_symbol(sym, force=force, refresh=refresh)
         results.append(result)
         sys.stdout.flush()
     

@@ -7,7 +7,7 @@ import { getConfig } from "./paper/config";
 import { getPositionsBySymbol } from "./paper/storage";
 import ingestRouter from "./ingest";
 import { db } from "./db";
-import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema, openInterestHistory, v5Signals, paperPositions, paperPortfolio, paperTradeHistory } from "@shared/schema";
+import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema, openInterestHistory, v5Signals, paperPositions, paperPortfolio, paperTradeHistory, trainingSessions, trainingEpochs, trainingFolds } from "@shared/schema";
 import type { ModelLearningStatsEntry, MoneyConfig } from "@shared/schema";
 import { and, eq, gte, lte, asc, desc, sql, count } from "drizzle-orm";
 import { z } from "zod";
@@ -542,6 +542,75 @@ export async function registerRoutes(
         cyclesToday: todayCycles[0]?.cnt ?? 0,
         lastCycleTs: lastCycleRow[0]?.cycleTs ?? null,
       });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/training/sessions", async (req, res) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+      const offset = parseInt(req.query.offset as string) || 0;
+      const sessions = await db.select().from(trainingSessions)
+        .orderBy(desc(trainingSessions.startedAt))
+        .limit(limit).offset(offset);
+      const total = await db.select({ cnt: count() }).from(trainingSessions);
+      res.json({ sessions, total: total[0]?.cnt ?? 0 });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/training/active", async (req, res) => {
+    try {
+      const [session] = await db.select().from(trainingSessions)
+        .where(eq(trainingSessions.status, "running"))
+        .orderBy(desc(trainingSessions.startedAt))
+        .limit(1);
+      if (!session) {
+        const [latest] = await db.select().from(trainingSessions)
+          .orderBy(desc(trainingSessions.startedAt)).limit(1);
+        return res.json({ active: null, latest: latest || null });
+      }
+      const folds = await db.select().from(trainingFolds)
+        .where(eq(trainingFolds.sessionId, session.id))
+        .orderBy(asc(trainingFolds.foldNum));
+      const recentEpochs = await db.select().from(trainingEpochs)
+        .where(eq(trainingEpochs.sessionId, session.id))
+        .orderBy(desc(trainingEpochs.timestamp))
+        .limit(50);
+      res.json({ active: session, folds, recentEpochs: recentEpochs.reverse() });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/training/sessions/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const [session] = await db.select().from(trainingSessions)
+        .where(eq(trainingSessions.id, id)).limit(1);
+      if (!session) return res.status(404).json({ error: "Session not found" });
+      const folds = await db.select().from(trainingFolds)
+        .where(eq(trainingFolds.sessionId, id))
+        .orderBy(asc(trainingFolds.foldNum));
+      res.json({ session, folds });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/training/sessions/:id/epochs", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const foldNum = req.query.fold !== undefined ? parseInt(req.query.fold as string) : undefined;
+      let query = db.select().from(trainingEpochs)
+        .where(foldNum !== undefined
+          ? and(eq(trainingEpochs.sessionId, id), eq(trainingEpochs.foldNum, foldNum))
+          : eq(trainingEpochs.sessionId, id))
+        .orderBy(asc(trainingEpochs.timestamp));
+      const epochs = await query;
+      res.json({ epochs });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

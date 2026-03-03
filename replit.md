@@ -8,7 +8,7 @@ Preferred communication style: Simple, everyday language.
 
 ## System Architecture
 
-### Frontend (5-Page Trading Terminal)
+### Frontend (6-Page Trading Terminal)
 Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), Recharts for charts, and a dark navy theme with neon accents.
 
 **Pages:**
@@ -16,10 +16,11 @@ Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), 
 - `/live` — Live Trading: Symbol selector tabs, price chart, market scanner indicator with per-symbol scan times, signal detail panel with V5 cycle log data (p_enter, direction, decision, V5 score/threshold, action prob bar, ret_mu/MFE/MAE, reasons), recent cycles mini-history, positions table (close/partial-close/edit SL-TP actions, SL/TP progress bars), new manual trade panel, signal history
 - `/paper` — Paper Trading: Enable/disable toggles, portfolio metrics, equity curve, signal-strength leverage tiers display, open/closed positions (with close/partial-close/edit SL-TP actions, live 1s price updates), configuration
 - `/analytics` — Analytics: Live/Paper source toggle (default: Paper), 10 stat cards (Total R, Trades, Win Rate, Profit Factor, Expectancy, Sharpe Ratio, Sortino Ratio, Max Drawdown, Max Consec Wins, Avg Hold Time), equity curve, rolling 7d/30d performance, hourly heatmap, per-symbol equity curves, win/loss streaks chart, trade duration histogram, R-multiple distribution, per-symbol breakdown table with edge status, monthly/weekly P&L table. Paper mode adds: Total P&L (USDT), Total Risk (USDT), ROI on Risk, Leverage Tier Performance table
+- `/training` — Training Monitor: Live GPU training progress page. Status banner (pulse when training active, ETA, progress bar), overview cards (folds/epochs/elapsed/ETA/total R/avg expectancy), model knowledge gauge, live loss curves (train+val with fold boundaries, togglable L_ret/L_mfe/L_mae/L_action components), action accuracy trend chart, expectancy & threshold evolution chart, walk-forward fold results table (per-fold R/WR/PF/Sharpe/MaxDD), per-fold R bar chart, per-symbol edge heatmap (symbols×folds), collapsible config panel, session history list. Real-time via WebSocket (TRAINING_EPOCH, TRAINING_FOLD_END, TRAINING_SESSION_START/END events) + 10s polling
 - `/settings` — Settings: GPU connection (push-based detection with "Last activity: X ago"), account config, model info, risk parameters, data freshness, danger zone
 
 **Key Files:**
-- `client/src/App.tsx` — Router with 5 routes wrapped in AppLayout
+- `client/src/App.tsx` — Router with 6 routes wrapped in AppLayout
 - `client/src/components/layout/app-layout.tsx` — Collapsible sidebar with GPU status, system live indicator (pulse dot + "LIVE" text, last scan time, cycle count today), theme toggle
 - `client/src/hooks/use-trading-ws.ts` — WebSocket hook with auto-reconnect, event subscription
 - `client/src/index.css` — Dark theme CSS vars, glow effects, glassmorphism, animations
@@ -62,7 +63,7 @@ Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), 
   - `server/ws.ts` — WebSocket server for real-time event streaming (broadcasts CYCLE_UPDATE on push)
 
 ### Database (PostgreSQL via Drizzle ORM)
-Key tables: `v5_signals`, `live_trade_records`, `live_cycle_logs` (with V5 fields: ret_mu, mfe_pred, mae_pred, p_hold, p_long, p_short, v5_score, v5_threshold, v5_side), `paper_positions` (with `source` field: "v5_signal"|"manual"|"auto"), `paper_portfolio`, `paper_trades`, `paper_trade_history` (complete trade records with R metrics per asset), `candles`, `settings`
+Key tables: `v5_signals`, `live_trade_records`, `live_cycle_logs` (with V5 fields: ret_mu, mfe_pred, mae_pred, p_hold, p_long, p_short, v5_score, v5_threshold, v5_side), `paper_positions` (with `source` field: "v5_signal"|"manual"|"auto"), `paper_portfolio`, `paper_trades`, `paper_trade_history` (complete trade records with R metrics per asset), `candles`, `settings`, `training_sessions` (walk-forward session tracking with config, aggregate metrics, ETA), `training_epochs` (per-epoch loss curves, accuracy, sweep metrics), `training_folds` (per-fold results with per-symbol breakdown)
 
 Schema in `shared/schema.ts` with Drizzle + Zod validation.
 

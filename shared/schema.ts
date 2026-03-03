@@ -1475,6 +1475,12 @@ export const ingestEventPayloadSchema = z.object({
     "MODEL_PROMOTED",
     "HEALTH_STATUS",
     "SIGNAL_UPDATE",
+    "TRAINING_SESSION_START",
+    "TRAINING_SESSION_UPDATE",
+    "TRAINING_SESSION_END",
+    "TRAINING_EPOCH",
+    "TRAINING_FOLD_START",
+    "TRAINING_FOLD_END",
   ]),
   payload: z.record(z.unknown()),
   ts: z.number(),
@@ -1540,6 +1546,92 @@ export type InsertIngestedEvent = z.infer<typeof insertIngestedEventSchema>;
 export type IngestedEventRow = typeof ingestedEvents.$inferSelect;
 export type InsertSettings = z.infer<typeof insertSettingsSchema>;
 export type SettingsRow = typeof settings.$inferSelect;
+
+export const trainingSessions = pgTable("training_sessions", {
+  id: serial("id").primaryKey(),
+  sessionType: varchar("session_type", { length: 30 }).notNull().default("walk_forward"),
+  status: varchar("status", { length: 20 }).notNull().default("running"),
+  startedAt: bigint("started_at", { mode: "number" }).notNull(),
+  completedAt: bigint("completed_at", { mode: "number" }),
+  totalFolds: integer("total_folds").default(0),
+  completedFolds: integer("completed_folds").default(0),
+  currentFold: integer("current_fold").default(0),
+  totalEpochs: integer("total_epochs").default(0),
+  currentEpoch: integer("current_epoch").default(0),
+  symbols: text("symbols").array(),
+  config: jsonb("config"),
+  currentFoldMetrics: jsonb("current_fold_metrics"),
+  aggregateMetrics: jsonb("aggregate_metrics"),
+  gpuName: varchar("gpu_name", { length: 100 }),
+  estimatedCompletionTs: bigint("estimated_completion_ts", { mode: "number" }),
+  lastUpdateTs: bigint("last_update_ts", { mode: "number" }),
+  trainMonths: integer("train_months"),
+  testMonths: integer("test_months"),
+  errorMessage: text("error_message"),
+}, (table) => ({
+  statusIdx: index("training_sessions_status_idx").on(table.status),
+  startedAtIdx: index("training_sessions_started_at_idx").on(table.startedAt),
+}));
+
+export const trainingEpochs = pgTable("training_epochs", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id").notNull(),
+  foldNum: integer("fold_num").notNull(),
+  epoch: integer("epoch").notNull(),
+  trainLoss: real("train_loss"),
+  valLoss: real("val_loss"),
+  lossBreakdown: jsonb("loss_breakdown"),
+  actionAccuracy: real("action_accuracy"),
+  learningRate: real("learning_rate"),
+  expectancy: real("expectancy"),
+  profitFactor: real("profit_factor"),
+  winRate: real("win_rate"),
+  maxDrawdown: real("max_drawdown"),
+  tradesPerDay: real("trades_per_day"),
+  threshold: real("threshold"),
+  scoreDiag: jsonb("score_diag"),
+  timestamp: bigint("timestamp", { mode: "number" }).notNull(),
+}, (table) => ({
+  sessionIdx: index("training_epochs_session_idx").on(table.sessionId),
+  foldEpochIdx: index("training_epochs_fold_epoch_idx").on(table.sessionId, table.foldNum, table.epoch),
+}));
+
+export const trainingFolds = pgTable("training_folds", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id").notNull(),
+  foldNum: integer("fold_num").notNull(),
+  trainStart: varchar("train_start", { length: 20 }),
+  trainEnd: varchar("train_end", { length: 20 }),
+  testStart: varchar("test_start", { length: 20 }),
+  testEnd: varchar("test_end", { length: 20 }),
+  status: varchar("status", { length: 20 }).default("pending"),
+  trades: integer("trades"),
+  winRate: real("win_rate"),
+  expectancy: real("expectancy"),
+  profitFactor: real("profit_factor"),
+  sharpe: real("sharpe"),
+  maxDrawdown: real("max_drawdown"),
+  totalR: real("total_r"),
+  longShortRatio: varchar("long_short_ratio", { length: 20 }),
+  perSymbol: jsonb("per_symbol"),
+  startedAt: bigint("started_at", { mode: "number" }),
+  completedAt: bigint("completed_at", { mode: "number" }),
+  bestEpoch: integer("best_epoch"),
+  finalThreshold: real("final_threshold"),
+}, (table) => ({
+  sessionIdx: index("training_folds_session_idx").on(table.sessionId),
+  foldNumIdx: index("training_folds_fold_num_idx").on(table.sessionId, table.foldNum),
+}));
+
+export const insertTrainingSessionSchema = createInsertSchema(trainingSessions).omit({ id: true });
+export const insertTrainingEpochSchema = createInsertSchema(trainingEpochs).omit({ id: true });
+export const insertTrainingFoldSchema = createInsertSchema(trainingFolds).omit({ id: true });
+export type InsertTrainingSession = z.infer<typeof insertTrainingSessionSchema>;
+export type TrainingSession = typeof trainingSessions.$inferSelect;
+export type InsertTrainingEpoch = z.infer<typeof insertTrainingEpochSchema>;
+export type TrainingEpoch = typeof trainingEpochs.$inferSelect;
+export type InsertTrainingFold = z.infer<typeof insertTrainingFoldSchema>;
+export type TrainingFold = typeof trainingFolds.$inferSelect;
 
 export const v5Signals = pgTable("v5_signals", {
   id: serial("id").primaryKey(),

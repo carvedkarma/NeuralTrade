@@ -8,6 +8,7 @@ import CommandCenter from "@/pages/command-center";
 import LiveTrading from "@/pages/live-trading";
 import PaperTrading from "@/pages/paper-trading";
 import Analytics from "@/pages/analytics";
+import TrainingMonitor from "@/pages/training-monitor";
 import SettingsPage from "@/pages/settings";
 import NotFound from "@/pages/not-found";
 
@@ -19,6 +20,7 @@ function Router() {
         <Route path="/live" component={LiveTrading} />
         <Route path="/paper" component={PaperTrading} />
         <Route path="/analytics" component={Analytics} />
+        <Route path="/training" component={TrainingMonitor} />
         <Route path="/settings" component={SettingsPage} />
         <Route component={NotFound} />
       </Switch>

@@ -5810,6 +5810,7 @@ Examples:
                     mu_debias_alpha=args.v5_mu_debias_alpha,
                     per_symbol_r_kill=args.v5_per_symbol_r_kill,
                     per_symbol_threshold=args.v5_per_symbol_threshold,
+                    replit_url=getattr(args, 'url', None),
                 )
                 return
 
