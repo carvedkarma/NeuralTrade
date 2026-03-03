@@ -204,21 +204,29 @@ function StatusBanner({ session, isActive, onClear, onClearAll, clearPending }: 
   const isCompleted = session.status === "completed";
   const isFailed = session.status === "failed";
   const isDone = isCompleted || isFailed;
+  const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+  const isStale = session.status === "running" && session.lastUpdateTs && (Date.now() - session.lastUpdateTs > STALE_THRESHOLD_MS);
+  const isReallyActive = isActive && !isStale;
+  const canClear = isDone || isStale || session.status === "running";
 
   return (
     <div className={cn(
       "glass-card border p-6 mb-6 relative overflow-hidden",
-      isActive ? "border-cyan-500/50 glow-cyan" : isCompleted ? "border-emerald-500/30" : isFailed ? "border-red-500/30" : "border-border/50",
+      isReallyActive ? "border-cyan-500/50 glow-cyan" : isStale ? "border-amber-500/30" : isCompleted ? "border-emerald-500/30" : isFailed ? "border-red-500/30" : "border-border/50",
     )} data-testid="status-banner">
-      {isActive && (
+      {isReallyActive && (
         <div className="absolute inset-0 bg-gradient-to-r from-cyan-500/5 via-transparent to-cyan-500/5 animate-pulse pointer-events-none" />
       )}
       <div className="flex items-center justify-between mb-4 relative">
         <div className="flex items-center gap-3">
-          {isActive ? (
+          {isReallyActive ? (
             <div className="relative p-3 rounded-xl bg-cyan-500/10">
               <Brain className="w-8 h-8 text-cyan-400" />
               <span className="absolute top-1 right-1 w-3 h-3 bg-cyan-400 rounded-full pulse-dot" />
+            </div>
+          ) : isStale ? (
+            <div className="p-3 rounded-xl bg-amber-500/10">
+              <AlertTriangle className="w-8 h-8 text-amber-400" />
             </div>
           ) : (
             <div className={cn("p-3 rounded-xl", isCompleted ? "bg-emerald-500/10" : "bg-red-500/10")}>
@@ -231,34 +239,46 @@ function StatusBanner({ session, isActive, onClear, onClearAll, clearPending }: 
           )}
           <div>
             <h2 className="text-lg font-semibold">
-              {isActive ? "V5 TRAINING IN PROGRESS" : isCompleted ? "Training Complete" : "Training Failed"}
+              {isReallyActive ? "V5 TRAINING IN PROGRESS" : isStale ? "Training Stale — CLI Stopped?" : isCompleted ? "Training Complete" : "Training Failed"}
             </h2>
             <p className="text-xs text-muted-foreground">
               {session.sessionType === "walk_forward" ? "Walk-Forward Analysis" : "Single Training"} — Started {formatDistanceToNow(new Date(session.startedAt), { addSuffix: true })}
               {session.gpuName && ` on ${session.gpuName}`}
               {isDone && session.completedAt && ` — Finished ${formatDistanceToNow(new Date(session.completedAt), { addSuffix: true })}`}
             </p>
+            {isStale && (
+              <p className="text-xs text-amber-400 mt-1">No updates received for {formatDuration(Date.now() - (session.lastUpdateTs ?? session.startedAt))} — if the CLI was stopped, clear this session to start fresh</p>
+            )}
             {isFailed && session.errorMessage && (
               <p className="text-xs text-red-400 mt-1">{session.errorMessage}</p>
             )}
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {isActive && eta && eta > 0 && (
+          {isReallyActive && eta && eta > 0 && (
             <Badge variant="outline" className="border-cyan-500/50 text-cyan-400" data-testid="badge-eta">
               <Timer className="w-3 h-3 mr-1" />
               ETA: {formatDuration(eta)}
             </Badge>
           )}
+          {isStale && (
+            <Badge variant="outline" className="border-amber-500/50 text-amber-400" data-testid="badge-stale">
+              <AlertTriangle className="w-3 h-3 mr-1" />
+              STALE
+            </Badge>
+          )}
           <Badge
-            variant={isActive ? "default" : isCompleted ? "secondary" : "destructive"}
-            className={cn(isActive && "bg-cyan-500/20 text-cyan-400 border-cyan-500/50")}
+            variant={isReallyActive ? "default" : isCompleted ? "secondary" : isStale ? "outline" : "destructive"}
+            className={cn(
+              isReallyActive && "bg-cyan-500/20 text-cyan-400 border-cyan-500/50",
+              isStale && "border-amber-500/50 text-amber-400"
+            )}
             data-testid="badge-status"
           >
-            {isActive && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
-            {session.status.toUpperCase()}
+            {isReallyActive && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
+            {isStale ? "STALE" : session.status.toUpperCase()}
           </Badge>
-          {isDone && onClear && (
+          {canClear && onClear && (
             <AlertDialog>
               <AlertDialogTrigger asChild>
                 <Button variant="outline" size="sm" className="border-red-500/30 text-red-400 hover:bg-red-500/10" data-testid="button-clear-session" disabled={clearPending}>
@@ -268,10 +288,13 @@ function StatusBanner({ session, isActive, onClear, onClearAll, clearPending }: 
               </AlertDialogTrigger>
               <AlertDialogContent className="glass-card border-border/50">
                 <AlertDialogHeader>
-                  <AlertDialogTitle>Clear Training Session?</AlertDialogTitle>
+                  <AlertDialogTitle>{isStale ? "Clear Stale Session?" : session.status === "running" ? "Force Clear Running Session?" : "Clear Training Session?"}</AlertDialogTitle>
                   <AlertDialogDescription>
-                    This will permanently delete this training session and all its epoch/fold data.
-                    You need to clear previous sessions before starting new training.
+                    {isStale
+                      ? "This session appears to be stale (no updates received). This will delete it and all its data so you can start fresh."
+                      : session.status === "running"
+                        ? "Warning: This session is marked as running. Only clear it if you've already stopped the CLI. This will permanently delete all training data."
+                        : "This will permanently delete this training session and all its epoch/fold data. You need to clear previous sessions before starting new training."}
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -286,7 +309,7 @@ function StatusBanner({ session, isActive, onClear, onClearAll, clearPending }: 
         </div>
       </div>
 
-      {isActive && (
+      {(isReallyActive || isStale) && (
         <div className="space-y-2 relative">
           <div className="flex justify-between text-xs text-muted-foreground">
             <span>Fold {session.currentFold}/{session.totalFolds} — Epoch {session.currentEpoch}/{session.totalEpochs}</span>

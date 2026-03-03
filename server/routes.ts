@@ -622,7 +622,6 @@ export async function registerRoutes(
       const [session] = await db.select().from(trainingSessions)
         .where(eq(trainingSessions.id, id)).limit(1);
       if (!session) return res.status(404).json({ error: "Session not found" });
-      if (session.status === "running") return res.status(400).json({ error: "Cannot delete a running session" });
       await db.delete(trainingEpochs).where(eq(trainingEpochs.sessionId, id));
       await db.delete(trainingFolds).where(eq(trainingFolds.sessionId, id));
       await db.delete(trainingSessions).where(eq(trainingSessions.id, id));
@@ -634,10 +633,9 @@ export async function registerRoutes(
 
   app.post("/api/training/sessions/clear-all", async (req, res) => {
     try {
-      const completedSessions = await db.select({ id: trainingSessions.id }).from(trainingSessions)
-        .where(sql`${trainingSessions.status} != 'running'`);
+      const allSessions = await db.select({ id: trainingSessions.id }).from(trainingSessions);
       let cleared = 0;
-      for (const s of completedSessions) {
+      for (const s of allSessions) {
         await db.delete(trainingEpochs).where(eq(trainingEpochs.sessionId, s.id));
         await db.delete(trainingFolds).where(eq(trainingFolds.sessionId, s.id));
         await db.delete(trainingSessions).where(eq(trainingSessions.id, s.id));
