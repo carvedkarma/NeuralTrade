@@ -37,6 +37,17 @@ class TrainingProgressPusher:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 result = json.loads(resp.read().decode())
                 return result
+        except urllib.error.HTTPError as e:
+            try:
+                body = json.loads(e.read().decode())
+                if body.get("status") == "blocked":
+                    log.warning(f"[TrainingPush] BLOCKED: {body.get('reason', 'unknown')}")
+                    return body
+                log.debug(f"[TrainingPush] HTTP {e.code} for {event_type}: {body}")
+                return body
+            except Exception:
+                log.debug(f"[TrainingPush] HTTP {e.code} for {event_type}")
+                return {}
         except Exception as e:
             log.debug(f"[TrainingPush] Failed to push {event_type}: {e}")
             return {}
@@ -56,6 +67,11 @@ class TrainingProgressPusher:
             "test_months": test_months,
         }
         result = self._push_event("TRAINING_SESSION_START", payload)
+        if result.get("status") == "blocked":
+            log.error(f"[TrainingPush] Cannot start: {result.get('reason', 'Previous sessions not cleared')}")
+            log.error("[TrainingPush] Clear previous training sessions from the Training Monitor page before starting new training.")
+            self.enabled = False
+            return
         if result.get("status") == "accepted":
             self.session_id = result.get("session_id")
         if not self.session_id:

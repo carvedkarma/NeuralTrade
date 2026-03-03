@@ -616,6 +616,62 @@ export async function registerRoutes(
     }
   });
 
+  app.delete("/api/training/sessions/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const [session] = await db.select().from(trainingSessions)
+        .where(eq(trainingSessions.id, id)).limit(1);
+      if (!session) return res.status(404).json({ error: "Session not found" });
+      if (session.status === "running") return res.status(400).json({ error: "Cannot delete a running session" });
+      await db.delete(trainingEpochs).where(eq(trainingEpochs.sessionId, id));
+      await db.delete(trainingFolds).where(eq(trainingFolds.sessionId, id));
+      await db.delete(trainingSessions).where(eq(trainingSessions.id, id));
+      res.json({ success: true, message: `Session ${id} cleared` });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/training/sessions/clear-all", async (req, res) => {
+    try {
+      const completedSessions = await db.select({ id: trainingSessions.id }).from(trainingSessions)
+        .where(sql`${trainingSessions.status} != 'running'`);
+      let cleared = 0;
+      for (const s of completedSessions) {
+        await db.delete(trainingEpochs).where(eq(trainingEpochs.sessionId, s.id));
+        await db.delete(trainingFolds).where(eq(trainingFolds.sessionId, s.id));
+        await db.delete(trainingSessions).where(eq(trainingSessions.id, s.id));
+        cleared++;
+      }
+      res.json({ success: true, cleared, message: `Cleared ${cleared} training session(s)` });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/training/ready", async (req, res) => {
+    try {
+      const uncleared = await db.select({ cnt: count() }).from(trainingSessions)
+        .where(sql`${trainingSessions.status} != 'running'`);
+      const running = await db.select({ cnt: count() }).from(trainingSessions)
+        .where(eq(trainingSessions.status, "running"));
+      const unclearedCount = uncleared[0]?.cnt ?? 0;
+      const runningCount = running[0]?.cnt ?? 0;
+      res.json({
+        ready: unclearedCount === 0 && runningCount === 0,
+        unclearedSessions: unclearedCount,
+        runningSessions: runningCount,
+        message: runningCount > 0
+          ? "Training is currently in progress"
+          : unclearedCount > 0
+            ? `${unclearedCount} previous session(s) need to be cleared before starting new training`
+            : "Ready for new training",
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get("/api/market/prices", async (req, res) => {
     try {
       const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSDT"];

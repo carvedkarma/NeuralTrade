@@ -1,23 +1,30 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { useTradingWs } from "@/hooks/use-trading-ws";
-import { queryClient } from "@/lib/queryClient";
-import { useEffect, useState } from "react";
+import { queryClient, apiRequest } from "@/lib/queryClient";
+import { useEffect, useState, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  Brain, Clock, Layers, Zap, TrendingUp, TrendingDown,
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import {
+  Brain, Clock, Layers, Zap, TrendingUp,
   BarChart3, Activity, ChevronDown, ChevronUp, Timer,
   CheckCircle2, XCircle, Loader2, Target, History,
+  Trash2, ShieldCheck, AlertTriangle, Gauge, Trophy,
+  ArrowUpRight, ArrowDownRight, Cpu, Hash,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useToast } from "@/hooks/use-toast";
 import { formatDistanceToNow, format } from "date-fns";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip,
   ResponsiveContainer, BarChart, Bar, Cell, ReferenceLine, Area, AreaChart,
-  Legend,
+  Legend, ComposedChart,
 } from "recharts";
 
 interface TrainingSession {
@@ -108,6 +115,13 @@ interface EpochsResponse {
   epochs: TrainingEpoch[];
 }
 
+interface ReadyResponse {
+  ready: boolean;
+  unclearedSessions: number;
+  runningSessions: number;
+  message: string;
+}
+
 function useActiveTraining() {
   return useQuery<ActiveResponse>({
     queryKey: ["/api/training/active"],
@@ -143,6 +157,13 @@ function useSessionEpochs(id: number | null, fold?: number) {
   });
 }
 
+function useTrainingReady() {
+  return useQuery<ReadyResponse>({
+    queryKey: ["/api/training/ready"],
+    refetchInterval: 15000,
+  });
+}
+
 function formatDuration(ms: number): string {
   const seconds = Math.floor(ms / 1000);
   const minutes = Math.floor(seconds / 60);
@@ -152,12 +173,20 @@ function formatDuration(ms: number): string {
   return `${seconds}s`;
 }
 
-function StatusBanner({ session, isActive }: { session: TrainingSession | null; isActive: boolean }) {
+function StatusBanner({ session, isActive, onClear, onClearAll, clearPending }: {
+  session: TrainingSession | null;
+  isActive: boolean;
+  onClear?: (id: number) => void;
+  onClearAll?: () => void;
+  clearPending?: boolean;
+}) {
   if (!session) {
     return (
       <div className="glass-card border border-border/50 p-6 mb-6" data-testid="status-banner">
         <div className="flex items-center gap-3">
-          <Brain className="w-8 h-8 text-muted-foreground" />
+          <div className="p-3 rounded-xl bg-muted/20">
+            <Brain className="w-8 h-8 text-muted-foreground" />
+          </div>
           <div>
             <h2 className="text-lg font-semibold text-muted-foreground">No Training Sessions</h2>
             <p className="text-sm text-muted-foreground">Start training on your local GPU to see live progress here</p>
@@ -172,33 +201,49 @@ function StatusBanner({ session, isActive }: { session: TrainingSession | null; 
   const progressPct = session.totalFolds > 0
     ? ((session.completedFolds + (session.currentEpoch / Math.max(session.totalEpochs, 1))) / session.totalFolds) * 100
     : 0;
+  const isCompleted = session.status === "completed";
+  const isFailed = session.status === "failed";
+  const isDone = isCompleted || isFailed;
 
   return (
     <div className={cn(
-      "glass-card border p-6 mb-6",
-      isActive ? "border-cyan-500/50 glow-cyan" : "border-border/50",
+      "glass-card border p-6 mb-6 relative overflow-hidden",
+      isActive ? "border-cyan-500/50 glow-cyan" : isCompleted ? "border-emerald-500/30" : isFailed ? "border-red-500/30" : "border-border/50",
     )} data-testid="status-banner">
-      <div className="flex items-center justify-between mb-4">
+      {isActive && (
+        <div className="absolute inset-0 bg-gradient-to-r from-cyan-500/5 via-transparent to-cyan-500/5 animate-pulse pointer-events-none" />
+      )}
+      <div className="flex items-center justify-between mb-4 relative">
         <div className="flex items-center gap-3">
           {isActive ? (
-            <div className="relative">
+            <div className="relative p-3 rounded-xl bg-cyan-500/10">
               <Brain className="w-8 h-8 text-cyan-400" />
-              <span className="absolute -top-1 -right-1 w-3 h-3 bg-cyan-400 rounded-full pulse-dot" />
+              <span className="absolute top-1 right-1 w-3 h-3 bg-cyan-400 rounded-full pulse-dot" />
             </div>
           ) : (
-            <Brain className={cn("w-8 h-8", session.status === "completed" ? "text-emerald-400" : "text-red-400")} />
+            <div className={cn("p-3 rounded-xl", isCompleted ? "bg-emerald-500/10" : "bg-red-500/10")}>
+              {isCompleted ? (
+                <CheckCircle2 className="w-8 h-8 text-emerald-400" />
+              ) : (
+                <XCircle className="w-8 h-8 text-red-400" />
+              )}
+            </div>
           )}
           <div>
             <h2 className="text-lg font-semibold">
-              {isActive ? "V5 TRAINING IN PROGRESS" : `Training ${session.status === "completed" ? "Complete" : "Failed"}`}
+              {isActive ? "V5 TRAINING IN PROGRESS" : isCompleted ? "Training Complete" : "Training Failed"}
             </h2>
             <p className="text-xs text-muted-foreground">
               {session.sessionType === "walk_forward" ? "Walk-Forward Analysis" : "Single Training"} — Started {formatDistanceToNow(new Date(session.startedAt), { addSuffix: true })}
               {session.gpuName && ` on ${session.gpuName}`}
+              {isDone && session.completedAt && ` — Finished ${formatDistanceToNow(new Date(session.completedAt), { addSuffix: true })}`}
             </p>
+            {isFailed && session.errorMessage && (
+              <p className="text-xs text-red-400 mt-1">{session.errorMessage}</p>
+            )}
           </div>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           {isActive && eta && eta > 0 && (
             <Badge variant="outline" className="border-cyan-500/50 text-cyan-400" data-testid="badge-eta">
               <Timer className="w-3 h-3 mr-1" />
@@ -206,22 +251,48 @@ function StatusBanner({ session, isActive }: { session: TrainingSession | null; 
             </Badge>
           )}
           <Badge
-            variant={isActive ? "default" : session.status === "completed" ? "secondary" : "destructive"}
+            variant={isActive ? "default" : isCompleted ? "secondary" : "destructive"}
+            className={cn(isActive && "bg-cyan-500/20 text-cyan-400 border-cyan-500/50")}
             data-testid="badge-status"
           >
             {isActive && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
             {session.status.toUpperCase()}
           </Badge>
+          {isDone && onClear && (
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button variant="outline" size="sm" className="border-red-500/30 text-red-400 hover:bg-red-500/10" data-testid="button-clear-session" disabled={clearPending}>
+                  {clearPending ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <Trash2 className="w-3 h-3 mr-1" />}
+                  Clear
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent className="glass-card border-border/50">
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Clear Training Session?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This will permanently delete this training session and all its epoch/fold data.
+                    You need to clear previous sessions before starting new training.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel data-testid="button-cancel-clear">Cancel</AlertDialogCancel>
+                  <AlertDialogAction onClick={() => onClear(session.id)} className="bg-red-500 hover:bg-red-600" data-testid="button-confirm-clear">
+                    Clear Session
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          )}
         </div>
       </div>
 
       {isActive && (
-        <div className="space-y-2">
+        <div className="space-y-2 relative">
           <div className="flex justify-between text-xs text-muted-foreground">
             <span>Fold {session.currentFold}/{session.totalFolds} — Epoch {session.currentEpoch}/{session.totalEpochs}</span>
             <span>{progressPct.toFixed(1)}%</span>
           </div>
-          <Progress value={progressPct} className="h-2" data-testid="progress-bar" />
+          <Progress value={progressPct} className="h-2.5" data-testid="progress-bar" />
           <div className="flex justify-between text-xs text-muted-foreground">
             <span>Elapsed: {formatDuration(elapsed)}</span>
             {session.lastUpdateTs && (
@@ -230,7 +301,79 @@ function StatusBanner({ session, isActive }: { session: TrainingSession | null; 
           </div>
         </div>
       )}
+
+      {isDone && (
+        <CompletionSummary session={session} />
+      )}
     </div>
+  );
+}
+
+function CompletionSummary({ session }: { session: TrainingSession }) {
+  const agg = session.aggregateMetrics as Record<string, any> | null;
+  const duration = (session.completedAt ?? Date.now()) - session.startedAt;
+
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-4 pt-4 border-t border-border/30">
+      <div className="text-center">
+        <span className="text-[10px] text-muted-foreground block uppercase tracking-wider">Duration</span>
+        <span className="text-sm font-bold number-mono">{formatDuration(duration)}</span>
+      </div>
+      <div className="text-center">
+        <span className="text-[10px] text-muted-foreground block uppercase tracking-wider">Folds Done</span>
+        <span className="text-sm font-bold number-mono">{session.completedFolds}/{session.totalFolds}</span>
+      </div>
+      <div className="text-center">
+        <span className="text-[10px] text-muted-foreground block uppercase tracking-wider">Total R</span>
+        <span className={cn("text-sm font-bold number-mono", (agg?.total_r ?? 0) >= 0 ? "text-emerald-400" : "text-red-400")}>
+          {agg?.total_r !== undefined ? `${agg.total_r >= 0 ? "+" : ""}${Number(agg.total_r).toFixed(1)}` : "—"}
+        </span>
+      </div>
+      <div className="text-center">
+        <span className="text-[10px] text-muted-foreground block uppercase tracking-wider">Avg E[R]</span>
+        <span className={cn("text-sm font-bold number-mono", (agg?.avg_expectancy_r ?? 0) >= 0 ? "text-emerald-400" : "text-red-400")}>
+          {agg?.avg_expectancy_r !== undefined ? `${agg.avg_expectancy_r >= 0 ? "+" : ""}${Number(agg.avg_expectancy_r).toFixed(4)}` : "—"}
+        </span>
+      </div>
+      <div className="text-center">
+        <span className="text-[10px] text-muted-foreground block uppercase tracking-wider">Profitable</span>
+        <span className="text-sm font-bold number-mono">
+          {agg?.profitable_folds !== undefined ? `${agg.profitable_folds}/${session.totalFolds}` : "—"}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function ReadinessGate({ ready }: { ready: ReadyResponse }) {
+  if (ready.ready) return null;
+
+  return (
+    <Card className={cn(
+      "glass-card mb-6 border",
+      ready.runningSessions > 0 ? "border-cyan-500/30" : "border-amber-500/30",
+    )} data-testid="readiness-gate">
+      <CardContent className="p-4">
+        <div className="flex items-center gap-3">
+          {ready.runningSessions > 0 ? (
+            <Activity className="w-5 h-5 text-cyan-400 animate-pulse" />
+          ) : (
+            <AlertTriangle className="w-5 h-5 text-amber-400" />
+          )}
+          <div className="flex-1">
+            <p className="text-sm font-medium">{ready.message}</p>
+            {ready.unclearedSessions > 0 && ready.runningSessions === 0 && (
+              <p className="text-xs text-muted-foreground mt-1">
+                Clear or review previous session results to unlock new training
+              </p>
+            )}
+          </div>
+          {ready.runningSessions === 0 && (
+            <ShieldCheck className="w-5 h-5 text-muted-foreground" />
+          )}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -238,76 +381,136 @@ function OverviewCards({ session }: { session: TrainingSession }) {
   const elapsed = Date.now() - session.startedAt;
   const eta = session.estimatedCompletionTs ? Math.max(0, session.estimatedCompletionTs - Date.now()) : null;
   const agg = session.aggregateMetrics as Record<string, any> | null;
+  const isActive = session.status === "running";
+
+  const cards = [
+    { icon: Layers, label: "Folds", value: `${session.completedFolds}`, sub: `/${session.totalFolds}`, color: "text-cyan-400" },
+    { icon: Activity, label: "Epoch", value: `${session.currentEpoch}`, sub: `/${session.totalEpochs}`, color: "text-cyan-400" },
+    { icon: Clock, label: "Elapsed", value: formatDuration(elapsed), sub: null, color: "text-amber-400" },
+    { icon: Timer, label: "ETA", value: eta !== null && isActive ? formatDuration(eta) : "—", sub: null, color: "text-amber-400" },
+    {
+      icon: TrendingUp, label: "Total R",
+      value: agg?.total_r !== undefined ? `${agg.total_r >= 0 ? "+" : ""}${Number(agg.total_r).toFixed(1)}` : "—",
+      sub: null,
+      color: (agg?.total_r ?? 0) >= 0 ? "text-emerald-400" : "text-red-400",
+      valueColor: true,
+    },
+    {
+      icon: Target, label: "Avg E[R]",
+      value: agg?.avg_expectancy_r !== undefined ? `${agg.avg_expectancy_r >= 0 ? "+" : ""}${Number(agg.avg_expectancy_r).toFixed(4)}` : "—",
+      sub: null,
+      color: (agg?.avg_expectancy_r ?? 0) >= 0 ? "text-emerald-400" : "text-red-400",
+      valueColor: true,
+    },
+  ];
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3 mb-6" data-testid="overview-cards">
-      <Card className="glass-card">
-        <CardContent className="p-4">
-          <div className="flex items-center gap-2 mb-1">
-            <Layers className="w-4 h-4 text-cyan-400" />
-            <span className="text-xs text-muted-foreground">Folds</span>
-          </div>
-          <div className="text-2xl font-bold number-mono" data-testid="text-folds">
-            {session.completedFolds}<span className="text-sm text-muted-foreground">/{session.totalFolds}</span>
-          </div>
-        </CardContent>
-      </Card>
-      <Card className="glass-card">
-        <CardContent className="p-4">
-          <div className="flex items-center gap-2 mb-1">
-            <Activity className="w-4 h-4 text-cyan-400" />
-            <span className="text-xs text-muted-foreground">Epoch</span>
-          </div>
-          <div className="text-2xl font-bold number-mono" data-testid="text-epoch">
-            {session.currentEpoch}<span className="text-sm text-muted-foreground">/{session.totalEpochs}</span>
-          </div>
-        </CardContent>
-      </Card>
-      <Card className="glass-card">
-        <CardContent className="p-4">
-          <div className="flex items-center gap-2 mb-1">
-            <Clock className="w-4 h-4 text-amber-400" />
-            <span className="text-xs text-muted-foreground">Elapsed</span>
-          </div>
-          <div className="text-lg font-bold number-mono" data-testid="text-elapsed">
-            {formatDuration(elapsed)}
-          </div>
-        </CardContent>
-      </Card>
-      <Card className="glass-card">
-        <CardContent className="p-4">
-          <div className="flex items-center gap-2 mb-1">
-            <Timer className="w-4 h-4 text-amber-400" />
-            <span className="text-xs text-muted-foreground">ETA</span>
-          </div>
-          <div className="text-lg font-bold number-mono" data-testid="text-eta">
-            {eta !== null ? formatDuration(eta) : "—"}
-          </div>
-        </CardContent>
-      </Card>
-      <Card className="glass-card">
-        <CardContent className="p-4">
-          <div className="flex items-center gap-2 mb-1">
-            <TrendingUp className="w-4 h-4 text-emerald-400" />
-            <span className="text-xs text-muted-foreground">Total R</span>
-          </div>
-          <div className={cn("text-2xl font-bold number-mono", (agg?.total_r ?? 0) >= 0 ? "text-emerald-400" : "text-red-400")} data-testid="text-total-r">
-            {agg?.total_r !== undefined ? `${agg.total_r >= 0 ? "+" : ""}${agg.total_r.toFixed(1)}` : "—"}
-          </div>
-        </CardContent>
-      </Card>
-      <Card className="glass-card">
-        <CardContent className="p-4">
-          <div className="flex items-center gap-2 mb-1">
-            <Target className="w-4 h-4 text-emerald-400" />
-            <span className="text-xs text-muted-foreground">Avg E[R]</span>
-          </div>
-          <div className={cn("text-2xl font-bold number-mono", (agg?.avg_expectancy_r ?? 0) >= 0 ? "text-emerald-400" : "text-red-400")} data-testid="text-avg-expectancy">
-            {agg?.avg_expectancy_r !== undefined ? `${agg.avg_expectancy_r >= 0 ? "+" : ""}${agg.avg_expectancy_r.toFixed(4)}` : "—"}
-          </div>
-        </CardContent>
-      </Card>
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6" data-testid="overview-cards">
+      {cards.map((c) => (
+        <Card key={c.label} className="glass-card hover:border-border/60 transition-colors">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <c.icon className={cn("w-4 h-4", c.color)} />
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wider">{c.label}</span>
+            </div>
+            <div className={cn("text-xl font-bold number-mono", c.valueColor && c.color)} data-testid={`text-${c.label.toLowerCase().replace(/[^a-z]/g, "-")}`}>
+              {c.value}
+              {c.sub && <span className="text-sm text-muted-foreground">{c.sub}</span>}
+            </div>
+          </CardContent>
+        </Card>
+      ))}
     </div>
+  );
+}
+
+function ModelKnowledge({ epochs, session }: { epochs: TrainingEpoch[]; session: TrainingSession }) {
+  if (!epochs.length) return null;
+
+  const sweepEpochs = epochs.filter((e) => e.expectancy !== null);
+  const latestAccuracy = epochs[epochs.length - 1]?.actionAccuracy ?? 0;
+  const firstAccuracy = epochs[0]?.actionAccuracy ?? 0;
+  const accuracyImprovement = latestAccuracy - firstAccuracy;
+
+  const bestLoss = Math.min(...epochs.filter((e) => e.valLoss !== null).map((e) => e.valLoss!));
+  const lossReduction = epochs[0]?.valLoss ? (1 - bestLoss / epochs[0].valLoss) * 100 : 0;
+
+  const bestExpect = sweepEpochs.length ? Math.max(...sweepEpochs.map((e) => e.expectancy ?? -999)) : 0;
+  const bestWR = sweepEpochs.length ? Math.max(...sweepEpochs.filter((e) => e.winRate !== null).map((e) => e.winRate ?? 0)) : 0;
+  const bestPF = sweepEpochs.length ? Math.max(...sweepEpochs.filter((e) => e.profitFactor !== null).map((e) => e.profitFactor ?? 0)) : 0;
+
+  const overallProgress = Math.min(100, Math.max(0,
+    (latestAccuracy * 100 * 0.3) + (lossReduction * 0.3) + ((bestExpect > 0 ? 40 : 0))
+  ));
+
+  const gaugeColor = overallProgress > 70 ? "from-emerald-500 to-cyan-400" : overallProgress > 40 ? "from-amber-500 to-cyan-400" : "from-red-500 to-amber-400";
+
+  return (
+    <Card className="glass-card mb-6" data-testid="model-knowledge">
+      <CardHeader>
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Gauge className="w-4 h-4 text-cyan-400" />
+          Model Knowledge
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-5">
+          <div>
+            <div className="flex justify-between text-xs mb-2">
+              <span className="text-muted-foreground">Learning Progress</span>
+              <span className="number-mono text-cyan-400 font-medium">{overallProgress.toFixed(0)}%</span>
+            </div>
+            <div className="h-4 bg-muted/20 rounded-full overflow-hidden relative">
+              <div
+                className={cn("h-full rounded-full bg-gradient-to-r transition-all duration-700", gaugeColor)}
+                style={{ width: `${overallProgress}%` }}
+              />
+              <div className="absolute inset-0 flex items-center px-2">
+                {[25, 50, 75].map((mark) => (
+                  <div key={mark} className="absolute h-full w-px bg-background/30" style={{ left: `${mark}%` }} />
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+            <div className="text-center p-2 rounded-lg bg-muted/10">
+              <span className="text-[10px] text-muted-foreground block uppercase tracking-wider">Accuracy</span>
+              <span className="text-lg font-bold number-mono text-emerald-400">{(latestAccuracy * 100).toFixed(1)}%</span>
+              {accuracyImprovement > 0 && (
+                <span className="text-[10px] text-emerald-400 flex items-center justify-center gap-0.5">
+                  <ArrowUpRight className="w-3 h-3" />{(accuracyImprovement * 100).toFixed(1)}%
+                </span>
+              )}
+            </div>
+            <div className="text-center p-2 rounded-lg bg-muted/10">
+              <span className="text-[10px] text-muted-foreground block uppercase tracking-wider">Best Val Loss</span>
+              <span className="text-lg font-bold number-mono">{bestLoss.toFixed(4)}</span>
+              <span className="text-[10px] text-emerald-400 flex items-center justify-center gap-0.5">
+                <ArrowDownRight className="w-3 h-3" />{lossReduction.toFixed(1)}%
+              </span>
+            </div>
+            <div className="text-center p-2 rounded-lg bg-muted/10">
+              <span className="text-[10px] text-muted-foreground block uppercase tracking-wider">Best E[R]</span>
+              <span className={cn("text-lg font-bold number-mono", bestExpect >= 0 ? "text-emerald-400" : "text-red-400")}>
+                {bestExpect > -999 ? `${bestExpect >= 0 ? "+" : ""}${bestExpect.toFixed(4)}` : "—"}
+              </span>
+            </div>
+            <div className="text-center p-2 rounded-lg bg-muted/10">
+              <span className="text-[10px] text-muted-foreground block uppercase tracking-wider">Best Win Rate</span>
+              <span className="text-lg font-bold number-mono text-cyan-400">
+                {bestWR > 0 ? `${(bestWR * 100).toFixed(1)}%` : "—"}
+              </span>
+            </div>
+            <div className="text-center p-2 rounded-lg bg-muted/10">
+              <span className="text-[10px] text-muted-foreground block uppercase tracking-wider">Best PF</span>
+              <span className="text-lg font-bold number-mono text-cyan-400">
+                {bestPF > 0 ? bestPF.toFixed(2) : "—"}
+              </span>
+            </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -318,7 +521,7 @@ function LossCurves({ epochs, folds }: { epochs: TrainingEpoch[]; folds: Trainin
     return (
       <Card className="glass-card mb-6">
         <CardHeader><CardTitle className="text-sm flex items-center gap-2"><BarChart3 className="w-4 h-4 text-cyan-400" />Loss Curves</CardTitle></CardHeader>
-        <CardContent><p className="text-sm text-muted-foreground text-center py-8">Waiting for epoch data...</p></CardContent>
+        <CardContent><p className="text-sm text-muted-foreground text-center py-12">Waiting for epoch data...</p></CardContent>
       </Card>
     );
   }
@@ -329,7 +532,6 @@ function LossCurves({ epochs, folds }: { epochs: TrainingEpoch[]; folds: Trainin
     fold: e.foldNum,
     trainLoss: e.trainLoss,
     valLoss: e.valLoss,
-    accuracy: e.actionAccuracy ? e.actionAccuracy * 100 : null,
     ...(e.lossBreakdown ?? {}),
   }));
 
@@ -344,6 +546,7 @@ function LossCurves({ epochs, folds }: { epochs: TrainingEpoch[]; folds: Trainin
           <CardTitle className="text-sm flex items-center gap-2">
             <BarChart3 className="w-4 h-4 text-cyan-400" />
             Loss Curves
+            <Badge variant="outline" className="ml-2 text-[10px]">{epochs.length} epochs</Badge>
           </CardTitle>
           <Button variant="ghost" size="sm" onClick={() => setShowComponents(!showComponents)} data-testid="button-toggle-components">
             {showComponents ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
@@ -352,14 +555,14 @@ function LossCurves({ epochs, folds }: { epochs: TrainingEpoch[]; folds: Trainin
         </div>
       </CardHeader>
       <CardContent>
-        <ResponsiveContainer width="100%" height={280}>
+        <ResponsiveContainer width="100%" height={300}>
           <LineChart data={chartData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} />
-            <XAxis dataKey="label" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} interval={Math.max(1, Math.floor(chartData.length / 20))} />
-            <YAxis tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
-            <RechartsTooltip contentStyle={{ backgroundColor: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 12 }} />
-            <Line type="monotone" dataKey="trainLoss" stroke="#06b6d4" strokeWidth={1.5} dot={false} name="Train Loss" />
-            <Line type="monotone" dataKey="valLoss" stroke="#f59e0b" strokeWidth={1.5} dot={false} name="Val Loss" />
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.2} />
+            <XAxis dataKey="label" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} interval={Math.max(1, Math.floor(chartData.length / 20))} />
+            <YAxis tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
+            <RechartsTooltip contentStyle={{ backgroundColor: "hsl(225 40% 8%)", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 11 }} />
+            <Line type="monotone" dataKey="trainLoss" stroke="#06b6d4" strokeWidth={2} dot={false} name="Train Loss" />
+            <Line type="monotone" dataKey="valLoss" stroke="#f59e0b" strokeWidth={2} dot={false} name="Val Loss" />
             {showComponents && (
               <>
                 <Line type="monotone" dataKey="L_ret" stroke="#8b5cf6" strokeWidth={1} dot={false} name="L_ret" strokeDasharray="4 2" />
@@ -369,9 +572,9 @@ function LossCurves({ epochs, folds }: { epochs: TrainingEpoch[]; folds: Trainin
               </>
             )}
             {foldBoundaries.map((b, i) => (
-              <ReferenceLine key={i} x={b} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" opacity={0.5} />
+              <ReferenceLine key={i} x={b} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" opacity={0.4} label={{ value: `F${i + 1}`, position: "top", fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
             ))}
-            <Legend />
+            <Legend wrapperStyle={{ fontSize: 10 }} />
           </LineChart>
         </ResponsiveContainer>
       </CardContent>
@@ -379,15 +582,64 @@ function LossCurves({ epochs, folds }: { epochs: TrainingEpoch[]; folds: Trainin
   );
 }
 
-function AccuracyChart({ epochs }: { epochs: TrainingEpoch[] }) {
-  if (!epochs.length) return null;
+function CumulativeRCurve({ folds }: { folds: TrainingFold[] }) {
+  const completed = folds.filter((f) => f.status === "completed" && f.totalR !== null);
+  if (completed.length < 2) return null;
 
-  const chartData = epochs
-    .filter((e) => e.actionAccuracy !== null)
-    .map((e) => ({
+  let cumR = 0;
+  const data = completed.map((f) => {
+    cumR += f.totalR ?? 0;
+    return {
+      fold: `F${f.foldNum}`,
+      totalR: +(f.totalR ?? 0).toFixed(2),
+      cumulativeR: +cumR.toFixed(2),
+      trades: f.trades ?? 0,
+      winRate: f.winRate ? +(f.winRate * 100).toFixed(1) : null,
+    };
+  });
+
+  return (
+    <Card className="glass-card" data-testid="cumulative-r-curve">
+      <CardHeader>
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Trophy className="w-4 h-4 text-emerald-400" />
+          Cumulative R
+          <Badge variant="outline" className={cn("ml-2 text-[10px]", cumR >= 0 ? "text-emerald-400 border-emerald-500/30" : "text-red-400 border-red-500/30")}>
+            {cumR >= 0 ? "+" : ""}{cumR.toFixed(1)}R
+          </Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <ResponsiveContainer width="100%" height={220}>
+          <ComposedChart data={data}>
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.2} />
+            <XAxis dataKey="fold" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
+            <YAxis yAxisId="left" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
+            <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
+            <RechartsTooltip contentStyle={{ backgroundColor: "hsl(225 40% 8%)", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 11 }} />
+            <Bar yAxisId="right" dataKey="totalR" name="Fold R" radius={[3, 3, 0, 0]} fillOpacity={0.6}>
+              {data.map((entry, i) => (
+                <Cell key={i} fill={entry.totalR >= 0 ? "#22c55e" : "#ef4444"} />
+              ))}
+            </Bar>
+            <Line yAxisId="left" type="monotone" dataKey="cumulativeR" stroke="#06b6d4" strokeWidth={2.5} dot={{ fill: "#06b6d4", r: 3 }} name="Cumulative R" />
+            <ReferenceLine yAxisId="left" y={0} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" opacity={0.4} />
+            <Legend wrapperStyle={{ fontSize: 10 }} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </CardContent>
+    </Card>
+  );
+}
+
+function AccuracyChart({ epochs }: { epochs: TrainingEpoch[] }) {
+  const chartData = useMemo(() =>
+    epochs.filter((e) => e.actionAccuracy !== null).map((e) => ({
       label: `F${e.foldNum}E${e.epoch}`,
       accuracy: e.actionAccuracy ? +(e.actionAccuracy * 100).toFixed(1) : null,
-    }));
+    })),
+    [epochs]
+  );
 
   if (!chartData.length) return null;
 
@@ -397,11 +649,11 @@ function AccuracyChart({ epochs }: { epochs: TrainingEpoch[] }) {
       <CardContent>
         <ResponsiveContainer width="100%" height={200}>
           <AreaChart data={chartData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} />
-            <XAxis dataKey="label" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} interval={Math.max(1, Math.floor(chartData.length / 15))} />
-            <YAxis tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} domain={[0, 100]} />
-            <RechartsTooltip contentStyle={{ backgroundColor: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 12 }} />
-            <Area type="monotone" dataKey="accuracy" stroke="#22c55e" fill="#22c55e" fillOpacity={0.1} strokeWidth={1.5} name="Accuracy %" />
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.2} />
+            <XAxis dataKey="label" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} interval={Math.max(1, Math.floor(chartData.length / 15))} />
+            <YAxis tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} domain={[0, 100]} />
+            <RechartsTooltip contentStyle={{ backgroundColor: "hsl(225 40% 8%)", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 11 }} />
+            <Area type="monotone" dataKey="accuracy" stroke="#22c55e" fill="#22c55e" fillOpacity={0.08} strokeWidth={2} name="Accuracy %" />
           </AreaChart>
         </ResponsiveContainer>
       </CardContent>
@@ -410,14 +662,15 @@ function AccuracyChart({ epochs }: { epochs: TrainingEpoch[] }) {
 }
 
 function ExpectancyChart({ epochs }: { epochs: TrainingEpoch[] }) {
-  const sweepEpochs = epochs.filter((e) => e.expectancy !== null);
+  const sweepEpochs = useMemo(() => epochs.filter((e) => e.expectancy !== null), [epochs]);
   if (!sweepEpochs.length) return null;
 
   const chartData = sweepEpochs.map((e) => ({
     label: `F${e.foldNum}E${e.epoch}`,
     expectancy: e.expectancy ? +e.expectancy.toFixed(4) : null,
-    pf: e.profitFactor ? +e.profitFactor.toFixed(2) : null,
     threshold: e.threshold ? +e.threshold.toFixed(4) : null,
+    winRate: e.winRate ? +(e.winRate * 100).toFixed(1) : null,
+    pf: e.profitFactor ? +e.profitFactor.toFixed(2) : null,
   }));
 
   return (
@@ -426,15 +679,48 @@ function ExpectancyChart({ epochs }: { epochs: TrainingEpoch[] }) {
       <CardContent>
         <ResponsiveContainer width="100%" height={200}>
           <LineChart data={chartData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} />
-            <XAxis dataKey="label" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} interval={Math.max(1, Math.floor(chartData.length / 15))} />
-            <YAxis yAxisId="left" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
-            <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
-            <RechartsTooltip contentStyle={{ backgroundColor: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 12 }} />
-            <Line yAxisId="left" type="monotone" dataKey="expectancy" stroke="#06b6d4" strokeWidth={1.5} dot={false} name="E[R]" />
-            <Line yAxisId="right" type="monotone" dataKey="threshold" stroke="#f59e0b" strokeWidth={1} dot={false} name="Threshold" strokeDasharray="4 2" />
-            <ReferenceLine yAxisId="left" y={0} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" opacity={0.5} />
-            <Legend />
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.2} />
+            <XAxis dataKey="label" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} interval={Math.max(1, Math.floor(chartData.length / 15))} />
+            <YAxis yAxisId="left" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
+            <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
+            <RechartsTooltip contentStyle={{ backgroundColor: "hsl(225 40% 8%)", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 11 }} />
+            <Line yAxisId="left" type="monotone" dataKey="expectancy" stroke="#06b6d4" strokeWidth={2} dot={false} name="E[R]" />
+            <Line yAxisId="right" type="monotone" dataKey="threshold" stroke="#f59e0b" strokeWidth={1.5} dot={false} name="Threshold" strokeDasharray="4 2" />
+            <ReferenceLine yAxisId="left" y={0} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" opacity={0.4} />
+            <Legend wrapperStyle={{ fontSize: 10 }} />
+          </LineChart>
+        </ResponsiveContainer>
+      </CardContent>
+    </Card>
+  );
+}
+
+function WinRatePFChart({ epochs }: { epochs: TrainingEpoch[] }) {
+  const sweepEpochs = useMemo(() => epochs.filter((e) => e.winRate !== null || e.profitFactor !== null), [epochs]);
+  if (sweepEpochs.length < 2) return null;
+
+  const chartData = sweepEpochs.map((e) => ({
+    label: `F${e.foldNum}E${e.epoch}`,
+    winRate: e.winRate ? +(e.winRate * 100).toFixed(1) : null,
+    profitFactor: e.profitFactor ? +e.profitFactor.toFixed(2) : null,
+  }));
+
+  return (
+    <Card className="glass-card" data-testid="winrate-pf-chart">
+      <CardHeader><CardTitle className="text-sm flex items-center gap-2"><Hash className="w-4 h-4 text-amber-400" />Win Rate & Profit Factor</CardTitle></CardHeader>
+      <CardContent>
+        <ResponsiveContainer width="100%" height={200}>
+          <LineChart data={chartData}>
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.2} />
+            <XAxis dataKey="label" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} interval={Math.max(1, Math.floor(chartData.length / 15))} />
+            <YAxis yAxisId="left" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} domain={[0, 100]} />
+            <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
+            <RechartsTooltip contentStyle={{ backgroundColor: "hsl(225 40% 8%)", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 11 }} />
+            <Line yAxisId="left" type="monotone" dataKey="winRate" stroke="#22c55e" strokeWidth={2} dot={false} name="Win Rate %" />
+            <Line yAxisId="right" type="monotone" dataKey="profitFactor" stroke="#a78bfa" strokeWidth={2} dot={false} name="Profit Factor" />
+            <ReferenceLine yAxisId="left" y={50} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" opacity={0.3} />
+            <ReferenceLine yAxisId="right" y={1} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" opacity={0.3} />
+            <Legend wrapperStyle={{ fontSize: 10 }} />
           </LineChart>
         </ResponsiveContainer>
       </CardContent>
@@ -445,48 +731,69 @@ function ExpectancyChart({ epochs }: { epochs: TrainingEpoch[] }) {
 function FoldResultsTable({ folds }: { folds: TrainingFold[] }) {
   if (!folds.length) return null;
 
+  const completedFolds = folds.filter((f) => f.status === "completed");
+  const totalR = completedFolds.reduce((sum, f) => sum + (f.totalR ?? 0), 0);
+  const avgWR = completedFolds.length ? completedFolds.reduce((sum, f) => sum + (f.winRate ?? 0), 0) / completedFolds.length : 0;
+  const profitableFolds = completedFolds.filter((f) => (f.totalR ?? 0) > 0).length;
+
   return (
     <Card className="glass-card mb-6" data-testid="fold-results-table">
-      <CardHeader><CardTitle className="text-sm flex items-center gap-2"><Layers className="w-4 h-4 text-cyan-400" />Walk-Forward Fold Results</CardTitle></CardHeader>
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Layers className="w-4 h-4 text-cyan-400" />
+            Walk-Forward Fold Results
+          </CardTitle>
+          <div className="flex items-center gap-3 text-xs">
+            <span className="text-muted-foreground">{profitableFolds}/{completedFolds.length} profitable</span>
+            <Badge variant="outline" className={cn("text-[10px]", totalR >= 0 ? "text-emerald-400 border-emerald-500/30" : "text-red-400 border-red-500/30")}>
+              {totalR >= 0 ? "+" : ""}{totalR.toFixed(1)}R total
+            </Badge>
+            <Badge variant="outline" className="text-[10px] text-cyan-400 border-cyan-500/30">
+              {(avgWR * 100).toFixed(1)}% avg WR
+            </Badge>
+          </div>
+        </div>
+      </CardHeader>
       <CardContent>
         <div className="overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
               <tr className="border-b border-border/50">
-                <th className="text-left py-2 px-2 text-muted-foreground">Fold</th>
-                <th className="text-left py-2 px-2 text-muted-foreground">Window</th>
-                <th className="text-left py-2 px-2 text-muted-foreground">Status</th>
-                <th className="text-right py-2 px-2 text-muted-foreground">Trades</th>
-                <th className="text-right py-2 px-2 text-muted-foreground">Win Rate</th>
-                <th className="text-right py-2 px-2 text-muted-foreground">E[R]</th>
-                <th className="text-right py-2 px-2 text-muted-foreground">PF</th>
-                <th className="text-right py-2 px-2 text-muted-foreground">Sharpe</th>
-                <th className="text-right py-2 px-2 text-muted-foreground">MaxDD</th>
-                <th className="text-right py-2 px-2 text-muted-foreground">Total R</th>
-                <th className="text-right py-2 px-2 text-muted-foreground">Threshold</th>
+                <th className="text-left py-2.5 px-2 text-muted-foreground font-medium">Fold</th>
+                <th className="text-left py-2.5 px-2 text-muted-foreground font-medium">Test Window</th>
+                <th className="text-left py-2.5 px-2 text-muted-foreground font-medium">Status</th>
+                <th className="text-right py-2.5 px-2 text-muted-foreground font-medium">Trades</th>
+                <th className="text-right py-2.5 px-2 text-muted-foreground font-medium">Win Rate</th>
+                <th className="text-right py-2.5 px-2 text-muted-foreground font-medium">E[R]</th>
+                <th className="text-right py-2.5 px-2 text-muted-foreground font-medium">PF</th>
+                <th className="text-right py-2.5 px-2 text-muted-foreground font-medium">Sharpe</th>
+                <th className="text-right py-2.5 px-2 text-muted-foreground font-medium">MaxDD</th>
+                <th className="text-right py-2.5 px-2 text-muted-foreground font-medium">Total R</th>
+                <th className="text-right py-2.5 px-2 text-muted-foreground font-medium">Threshold</th>
               </tr>
             </thead>
             <tbody>
               {folds.map((fold) => {
                 const isRunning = fold.status === "running";
-                const totalR = fold.totalR ?? 0;
+                const foldR = fold.totalR ?? 0;
                 return (
                   <tr
                     key={fold.id}
                     className={cn(
-                      "border-b border-border/30 hover:bg-muted/20",
+                      "border-b border-border/20 hover:bg-muted/10 transition-colors",
                       isRunning && "bg-cyan-500/5 border-l-2 border-l-cyan-500",
                     )}
                     data-testid={`row-fold-${fold.foldNum}`}
                   >
-                    <td className="py-2 px-2 font-mono font-medium">
+                    <td className="py-2.5 px-2 font-mono font-medium">
                       {isRunning && <Loader2 className="w-3 h-3 inline mr-1 animate-spin text-cyan-400" />}
                       {fold.foldNum}
                     </td>
-                    <td className="py-2 px-2 text-muted-foreground">
+                    <td className="py-2.5 px-2 text-muted-foreground text-[11px]">
                       {fold.testStart && fold.testEnd ? `${fold.testStart} → ${fold.testEnd}` : "—"}
                     </td>
-                    <td className="py-2 px-2">
+                    <td className="py-2.5 px-2">
                       <Badge
                         variant={isRunning ? "default" : fold.status === "completed" ? "secondary" : "outline"}
                         className={cn("text-[10px]", isRunning && "bg-cyan-500/20 text-cyan-400 border-cyan-500/50")}
@@ -494,20 +801,20 @@ function FoldResultsTable({ folds }: { folds: TrainingFold[] }) {
                         {fold.status ?? "pending"}
                       </Badge>
                     </td>
-                    <td className="py-2 px-2 text-right number-mono">{fold.trades ?? "—"}</td>
-                    <td className="py-2 px-2 text-right number-mono">
+                    <td className="py-2.5 px-2 text-right number-mono">{fold.trades ?? "—"}</td>
+                    <td className="py-2.5 px-2 text-right number-mono">
                       {fold.winRate !== null ? `${(fold.winRate * 100).toFixed(1)}%` : "—"}
                     </td>
-                    <td className={cn("py-2 px-2 text-right number-mono", (fold.expectancy ?? 0) >= 0 ? "text-emerald-400" : "text-red-400")}>
+                    <td className={cn("py-2.5 px-2 text-right number-mono", (fold.expectancy ?? 0) >= 0 ? "text-emerald-400" : "text-red-400")}>
                       {fold.expectancy !== null ? `${fold.expectancy >= 0 ? "+" : ""}${fold.expectancy.toFixed(4)}` : "—"}
                     </td>
-                    <td className="py-2 px-2 text-right number-mono">{fold.profitFactor?.toFixed(2) ?? "—"}</td>
-                    <td className="py-2 px-2 text-right number-mono">{fold.sharpe?.toFixed(2) ?? "—"}</td>
-                    <td className="py-2 px-2 text-right number-mono text-red-400">{fold.maxDrawdown?.toFixed(2) ?? "—"}</td>
-                    <td className={cn("py-2 px-2 text-right number-mono font-medium", totalR >= 0 ? "text-emerald-400" : "text-red-400")}>
-                      {fold.totalR !== null ? `${totalR >= 0 ? "+" : ""}${totalR.toFixed(2)}` : "—"}
+                    <td className="py-2.5 px-2 text-right number-mono">{fold.profitFactor?.toFixed(2) ?? "—"}</td>
+                    <td className="py-2.5 px-2 text-right number-mono">{fold.sharpe?.toFixed(2) ?? "—"}</td>
+                    <td className="py-2.5 px-2 text-right number-mono text-red-400">{fold.maxDrawdown?.toFixed(2) ?? "—"}</td>
+                    <td className={cn("py-2.5 px-2 text-right number-mono font-medium", foldR >= 0 ? "text-emerald-400" : "text-red-400")}>
+                      {fold.totalR !== null ? `${foldR >= 0 ? "+" : ""}${foldR.toFixed(2)}` : "—"}
                     </td>
-                    <td className="py-2 px-2 text-right number-mono text-muted-foreground">{fold.finalThreshold?.toFixed(4) ?? "—"}</td>
+                    <td className="py-2.5 px-2 text-right number-mono text-muted-foreground">{fold.finalThreshold?.toFixed(4) ?? "—"}</td>
                   </tr>
                 );
               })}
@@ -535,14 +842,14 @@ function FoldBarChart({ folds }: { folds: TrainingFold[] }) {
       <CardContent>
         <ResponsiveContainer width="100%" height={200}>
           <BarChart data={data}>
-            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} />
-            <XAxis dataKey="fold" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
-            <YAxis tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} />
-            <RechartsTooltip contentStyle={{ backgroundColor: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 12 }} />
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.2} />
+            <XAxis dataKey="fold" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
+            <YAxis tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
+            <RechartsTooltip contentStyle={{ backgroundColor: "hsl(225 40% 8%)", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 11 }} />
             <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" />
             <Bar dataKey="totalR" name="Total R" radius={[4, 4, 0, 0]}>
               {data.map((entry, i) => (
-                <Cell key={i} fill={entry.totalR >= 0 ? "#22c55e" : "#ef4444"} fillOpacity={0.8} />
+                <Cell key={i} fill={entry.totalR >= 0 ? "#22c55e" : "#ef4444"} fillOpacity={0.75} />
               ))}
             </Bar>
           </BarChart>
@@ -564,38 +871,41 @@ function PerSymbolEdge({ folds, symbols }: { folds: TrainingFold[]; symbols: str
           <table className="w-full text-xs">
             <thead>
               <tr className="border-b border-border/50">
-                <th className="text-left py-2 px-2 text-muted-foreground">Symbol</th>
+                <th className="text-left py-2 px-2 text-muted-foreground font-medium">Symbol</th>
                 {completedFolds.map((f) => (
-                  <th key={f.foldNum} className="text-center py-2 px-1 text-muted-foreground">F{f.foldNum}</th>
+                  <th key={f.foldNum} className="text-center py-2 px-1 text-muted-foreground font-medium">F{f.foldNum}</th>
                 ))}
                 <th className="text-right py-2 px-2 text-muted-foreground font-medium">Total</th>
+                <th className="text-center py-2 px-2 text-muted-foreground font-medium">Edge</th>
               </tr>
             </thead>
             <tbody>
               {symbols.map((sym) => {
                 let total = 0;
+                let positiveFolds = 0;
                 return (
-                  <tr key={sym} className="border-b border-border/30">
-                    <td className="py-1.5 px-2 font-mono font-medium">{sym.replace("USDT", "")}</td>
+                  <tr key={sym} className="border-b border-border/20">
+                    <td className="py-2 px-2 font-mono font-medium">{sym.replace("USDT", "")}</td>
                     {completedFolds.map((f) => {
                       const ps = f.perSymbol as Record<string, any> | null;
                       const symData = ps?.[sym];
                       const r = symData?.total_r ?? symData ?? null;
                       const rNum = typeof r === "number" ? r : (r?.total_r ?? 0);
                       total += rNum;
+                      if (rNum > 0) positiveFolds++;
                       const intensity = Math.min(1, Math.abs(rNum) / 20);
                       return (
-                        <td key={f.foldNum} className="text-center py-1.5 px-1">
+                        <td key={f.foldNum} className="text-center py-2 px-1">
                           <span
                             className={cn(
-                              "inline-block w-full px-1 py-0.5 rounded text-[10px] number-mono",
+                              "inline-block w-full px-1 py-0.5 rounded text-[10px] number-mono font-medium",
                               rNum > 0 ? "text-emerald-400" : rNum < 0 ? "text-red-400" : "text-muted-foreground",
                             )}
                             style={{
                               backgroundColor: rNum > 0
-                                ? `rgba(34, 197, 94, ${intensity * 0.2})`
+                                ? `rgba(34, 197, 94, ${intensity * 0.25})`
                                 : rNum < 0
-                                  ? `rgba(239, 68, 68, ${intensity * 0.2})`
+                                  ? `rgba(239, 68, 68, ${intensity * 0.25})`
                                   : "transparent",
                             }}
                           >
@@ -604,8 +914,22 @@ function PerSymbolEdge({ folds, symbols }: { folds: TrainingFold[]; symbols: str
                         </td>
                       );
                     })}
-                    <td className={cn("text-right py-1.5 px-2 number-mono font-medium", total >= 0 ? "text-emerald-400" : "text-red-400")}>
+                    <td className={cn("text-right py-2 px-2 number-mono font-bold", total >= 0 ? "text-emerald-400" : "text-red-400")}>
                       {total >= 0 ? "+" : ""}{total.toFixed(1)}
+                    </td>
+                    <td className="text-center py-2 px-2">
+                      <Badge
+                        variant="outline"
+                        className={cn("text-[9px]",
+                          positiveFolds > completedFolds.length * 0.6
+                            ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10"
+                            : positiveFolds > completedFolds.length * 0.4
+                              ? "text-amber-400 border-amber-500/30 bg-amber-500/10"
+                              : "text-red-400 border-red-500/30 bg-red-500/10"
+                        )}
+                      >
+                        {positiveFolds > completedFolds.length * 0.6 ? "EDGE" : positiveFolds > completedFolds.length * 0.4 ? "WEAK" : "NONE"}
+                      </Badge>
                     </td>
                   </tr>
                 );
@@ -625,37 +949,39 @@ function ConfigPanel({ session }: { session: TrainingSession }) {
   return (
     <Card className="glass-card mb-6" data-testid="config-panel">
       <CardHeader>
-        <div className="flex items-center justify-between cursor-pointer" onClick={() => setExpanded(!expanded)}>
+        <div className="flex items-center justify-between cursor-pointer select-none" onClick={() => setExpanded(!expanded)}>
           <CardTitle className="text-sm flex items-center gap-2">
-            <Zap className="w-4 h-4 text-amber-400" />
+            <Cpu className="w-4 h-4 text-amber-400" />
             Training Configuration
           </CardTitle>
-          {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
+            {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </Button>
         </div>
       </CardHeader>
       {expanded && (
         <CardContent>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div>
-              <span className="text-[10px] text-muted-foreground block">Symbols</span>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="p-2 rounded-lg bg-muted/10">
+              <span className="text-[10px] text-muted-foreground block uppercase tracking-wider">Symbols</span>
               <span className="text-xs font-mono">{session.symbols?.join(", ") ?? "—"}</span>
             </div>
-            <div>
-              <span className="text-[10px] text-muted-foreground block">Window</span>
+            <div className="p-2 rounded-lg bg-muted/10">
+              <span className="text-[10px] text-muted-foreground block uppercase tracking-wider">Window</span>
               <span className="text-xs font-mono">{session.trainMonths ?? "?"}m train / {session.testMonths ?? "?"}m test</span>
             </div>
-            <div>
-              <span className="text-[10px] text-muted-foreground block">GPU</span>
+            <div className="p-2 rounded-lg bg-muted/10">
+              <span className="text-[10px] text-muted-foreground block uppercase tracking-wider">GPU</span>
               <span className="text-xs font-mono">{session.gpuName ?? "—"}</span>
             </div>
-            <div>
-              <span className="text-[10px] text-muted-foreground block">Epochs/Fold</span>
+            <div className="p-2 rounded-lg bg-muted/10">
+              <span className="text-[10px] text-muted-foreground block uppercase tracking-wider">Epochs/Fold</span>
               <span className="text-xs font-mono">{session.totalEpochs ?? "—"}</span>
             </div>
-            {config && Object.entries(config).map(([key, val]) => (
-              <div key={key}>
-                <span className="text-[10px] text-muted-foreground block">{key}</span>
-                <span className="text-xs font-mono">{typeof val === "object" ? JSON.stringify(val) : String(val)}</span>
+            {config && Object.entries(config).slice(0, 12).map(([key, val]) => (
+              <div key={key} className="p-2 rounded-lg bg-muted/10">
+                <span className="text-[10px] text-muted-foreground block uppercase tracking-wider">{key.replace(/_/g, " ")}</span>
+                <span className="text-xs font-mono break-all">{typeof val === "object" ? JSON.stringify(val) : String(val)}</span>
               </div>
             ))}
           </div>
@@ -665,78 +991,23 @@ function ConfigPanel({ session }: { session: TrainingSession }) {
   );
 }
 
-function ModelKnowledge({ epochs, session }: { epochs: TrainingEpoch[]; session: TrainingSession }) {
-  if (!epochs.length) return null;
-
-  const sweepEpochs = epochs.filter((e) => e.expectancy !== null);
-  const latestAccuracy = epochs[epochs.length - 1]?.actionAccuracy ?? 0;
-  const firstAccuracy = epochs[0]?.actionAccuracy ?? 0;
-  const accuracyImprovement = latestAccuracy - firstAccuracy;
-
-  const latestLoss = epochs[epochs.length - 1]?.valLoss ?? 1;
-  const bestLoss = Math.min(...epochs.filter((e) => e.valLoss !== null).map((e) => e.valLoss!));
-  const lossReduction = epochs[0]?.valLoss ? (1 - bestLoss / epochs[0].valLoss) * 100 : 0;
-
-  const latestExpect = sweepEpochs.length ? sweepEpochs[sweepEpochs.length - 1]?.expectancy ?? 0 : 0;
-  const bestExpect = sweepEpochs.length ? Math.max(...sweepEpochs.map((e) => e.expectancy ?? -999)) : 0;
-
-  const overallProgress = Math.min(100, Math.max(0,
-    (latestAccuracy * 100 * 0.3) + (lossReduction * 0.3) + ((latestExpect > 0 ? 40 : 0))
-  ));
-
-  return (
-    <Card className="glass-card mb-6" data-testid="model-knowledge">
-      <CardHeader><CardTitle className="text-sm flex items-center gap-2"><Brain className="w-4 h-4 text-cyan-400" />Model Knowledge</CardTitle></CardHeader>
-      <CardContent>
-        <div className="space-y-4">
-          <div>
-            <div className="flex justify-between text-xs mb-1">
-              <span className="text-muted-foreground">Learning Progress</span>
-              <span className="number-mono text-cyan-400">{overallProgress.toFixed(0)}%</span>
-            </div>
-            <div className="h-3 bg-muted/30 rounded-full overflow-hidden">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-emerald-400 transition-all duration-500"
-                style={{ width: `${overallProgress}%` }}
-              />
-            </div>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div className="text-center">
-              <span className="text-[10px] text-muted-foreground block">Action Accuracy</span>
-              <span className="text-lg font-bold number-mono text-emerald-400">{(latestAccuracy * 100).toFixed(1)}%</span>
-              {accuracyImprovement > 0 && (
-                <span className="text-[10px] text-emerald-400 block">+{(accuracyImprovement * 100).toFixed(1)}%</span>
-              )}
-            </div>
-            <div className="text-center">
-              <span className="text-[10px] text-muted-foreground block">Best Val Loss</span>
-              <span className="text-lg font-bold number-mono">{bestLoss.toFixed(4)}</span>
-              <span className="text-[10px] text-emerald-400 block">-{lossReduction.toFixed(1)}%</span>
-            </div>
-            <div className="text-center">
-              <span className="text-[10px] text-muted-foreground block">Best E[R]</span>
-              <span className={cn("text-lg font-bold number-mono", bestExpect >= 0 ? "text-emerald-400" : "text-red-400")}>
-                {bestExpect > -999 ? `${bestExpect >= 0 ? "+" : ""}${bestExpect.toFixed(4)}` : "—"}
-              </span>
-            </div>
-            <div className="text-center">
-              <span className="text-[10px] text-muted-foreground block">Sweep Epochs</span>
-              <span className="text-lg font-bold number-mono">{sweepEpochs.length}</span>
-            </div>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function SessionHistory({ sessions, onSelect }: { sessions: TrainingSession[]; onSelect: (id: number) => void }) {
+function SessionHistory({ sessions, onSelect, onDelete, deletePending }: {
+  sessions: TrainingSession[];
+  onSelect: (id: number) => void;
+  onDelete?: (id: number) => void;
+  deletePending?: boolean;
+}) {
   if (!sessions.length) return null;
 
   return (
     <Card className="glass-card" data-testid="session-history">
-      <CardHeader><CardTitle className="text-sm flex items-center gap-2"><History className="w-4 h-4 text-muted-foreground" />Session History</CardTitle></CardHeader>
+      <CardHeader>
+        <CardTitle className="text-sm flex items-center gap-2">
+          <History className="w-4 h-4 text-muted-foreground" />
+          Session History
+          <Badge variant="outline" className="text-[10px] ml-2">{sessions.length}</Badge>
+        </CardTitle>
+      </CardHeader>
       <CardContent>
         <div className="space-y-2">
           {sessions.map((s) => {
@@ -745,23 +1016,30 @@ function SessionHistory({ sessions, onSelect }: { sessions: TrainingSession[]; o
             return (
               <div
                 key={s.id}
-                className="flex items-center justify-between p-2 rounded-md hover:bg-muted/20 cursor-pointer border border-border/30"
+                className="flex items-center justify-between p-3 rounded-lg hover:bg-muted/10 cursor-pointer border border-border/20 transition-colors group"
                 onClick={() => onSelect(s.id)}
                 data-testid={`card-session-${s.id}`}
               >
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-3">
                   {s.status === "completed" ? (
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                    <div className="p-1.5 rounded-lg bg-emerald-500/10">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                    </div>
                   ) : s.status === "running" ? (
-                    <Loader2 className="w-4 h-4 text-cyan-400 animate-spin" />
+                    <div className="p-1.5 rounded-lg bg-cyan-500/10">
+                      <Loader2 className="w-4 h-4 text-cyan-400 animate-spin" />
+                    </div>
                   ) : (
-                    <XCircle className="w-4 h-4 text-red-400" />
+                    <div className="p-1.5 rounded-lg bg-red-500/10">
+                      <XCircle className="w-4 h-4 text-red-400" />
+                    </div>
                   )}
                   <div>
-                    <span className="text-xs font-medium">{s.sessionType}</span>
+                    <span className="text-xs font-medium">{s.sessionType === "walk_forward" ? "Walk-Forward" : s.sessionType}</span>
                     <span className="text-[10px] text-muted-foreground ml-2">
                       {format(new Date(s.startedAt), "MMM d, yyyy HH:mm")}
                     </span>
+                    {s.symbols && <span className="text-[10px] text-muted-foreground ml-2">{s.symbols.length} symbols</span>}
                   </div>
                 </div>
                 <div className="flex items-center gap-3 text-xs">
@@ -769,8 +1047,20 @@ function SessionHistory({ sessions, onSelect }: { sessions: TrainingSession[]; o
                   <span className="number-mono text-muted-foreground">{formatDuration(duration)}</span>
                   {agg?.total_r !== undefined && (
                     <span className={cn("number-mono font-medium", agg.total_r >= 0 ? "text-emerald-400" : "text-red-400")}>
-                      {agg.total_r >= 0 ? "+" : ""}{agg.total_r.toFixed(1)}R
+                      {agg.total_r >= 0 ? "+" : ""}{Number(agg.total_r).toFixed(1)}R
                     </span>
+                  )}
+                  {onDelete && s.status !== "running" && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 w-6 p-0 opacity-0 group-hover:opacity-100 transition-opacity text-red-400 hover:text-red-300 hover:bg-red-500/10"
+                      onClick={(e) => { e.stopPropagation(); onDelete(s.id); }}
+                      disabled={deletePending}
+                      data-testid={`button-delete-session-${s.id}`}
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </Button>
                   )}
                 </div>
               </div>
@@ -785,7 +1075,9 @@ function SessionHistory({ sessions, onSelect }: { sessions: TrainingSession[]; o
 export default function TrainingMonitor() {
   const { data: activeData, isLoading } = useActiveTraining();
   const { data: sessionsData } = useSessions();
+  const { data: readyData } = useTrainingReady();
   const { subscribe } = useTradingWs();
+  const { toast } = useToast();
 
   const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null);
 
@@ -806,6 +1098,38 @@ export default function TrainingMonitor() {
   const { data: epochsData } = useSessionEpochs(viewingSessionId);
   const allEpochs = epochsData?.epochs ?? (viewingSessionId === displaySession?.id ? recentEpochs : []);
 
+  const clearSessionMutation = useMutation({
+    mutationFn: async (id: number) => {
+      await apiRequest("DELETE", `/api/training/sessions/${id}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/training/active"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/training/sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/training/ready"] });
+      setSelectedSessionId(null);
+      toast({ title: "Session cleared", description: "Training session data has been removed" });
+    },
+    onError: (err: any) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const clearAllMutation = useMutation({
+    mutationFn: async () => {
+      await apiRequest("POST", "/api/training/sessions/clear-all");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/training/active"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/training/sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/training/ready"] });
+      setSelectedSessionId(null);
+      toast({ title: "All sessions cleared", description: "Training history has been cleared. Ready for new training." });
+    },
+    onError: (err: any) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
   useEffect(() => {
     const unsubs = [
       subscribe("TRAINING_EPOCH", () => {
@@ -821,10 +1145,12 @@ export default function TrainingMonitor() {
       subscribe("TRAINING_SESSION_START", () => {
         queryClient.invalidateQueries({ queryKey: ["/api/training/active"] });
         queryClient.invalidateQueries({ queryKey: ["/api/training/sessions"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/training/ready"] });
       }),
       subscribe("TRAINING_SESSION_END", () => {
         queryClient.invalidateQueries({ queryKey: ["/api/training/active"] });
         queryClient.invalidateQueries({ queryKey: ["/api/training/sessions"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/training/ready"] });
       }),
     ];
     return () => unsubs.forEach((u) => u());
@@ -838,6 +1164,10 @@ export default function TrainingMonitor() {
     );
   }
 
+  const allSessions = sessionsData?.sessions ?? [];
+  const historySessions = allSessions.filter((s) => s.id !== viewingSession?.id);
+  const hasUncleared = readyData && !readyData.ready && readyData.runningSessions === 0;
+
   return (
     <div className="p-4 md:p-6 space-y-0" data-testid="training-monitor-page">
       <div className="flex items-center justify-between mb-4">
@@ -845,14 +1175,49 @@ export default function TrainingMonitor() {
           <Brain className="w-5 h-5 text-cyan-400" />
           Training Monitor
         </h1>
-        {selectedSessionId && selectedSessionId !== displaySession?.id && (
-          <Button variant="ghost" size="sm" onClick={() => setSelectedSessionId(null)} data-testid="button-back-to-active">
-            Back to {isActive ? "Active" : "Latest"}
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          {selectedSessionId && selectedSessionId !== displaySession?.id && (
+            <Button variant="ghost" size="sm" onClick={() => setSelectedSessionId(null)} data-testid="button-back-to-active">
+              Back to {isActive ? "Active" : "Latest"}
+            </Button>
+          )}
+          {hasUncleared && (
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button variant="outline" size="sm" className="border-amber-500/30 text-amber-400 hover:bg-amber-500/10" data-testid="button-clear-all">
+                  {clearAllMutation.isPending ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <Trash2 className="w-3 h-3 mr-1" />}
+                  Clear All Sessions
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent className="glass-card border-border/50">
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Clear All Training Sessions?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This will permanently delete all completed training sessions and their data.
+                    This action is required before starting new training.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel data-testid="button-cancel-clear-all">Cancel</AlertDialogCancel>
+                  <AlertDialogAction onClick={() => clearAllMutation.mutate()} className="bg-amber-500 hover:bg-amber-600 text-black" data-testid="button-confirm-clear-all">
+                    Clear All
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          )}
+        </div>
       </div>
 
-      <StatusBanner session={viewingSession} isActive={isActive && viewingSession?.id === activeSession?.id} />
+      {readyData && <ReadinessGate ready={readyData} />}
+
+      <StatusBanner
+        session={viewingSession}
+        isActive={isActive && viewingSession?.id === activeSession?.id}
+        onClear={(id) => clearSessionMutation.mutate(id)}
+        onClearAll={() => clearAllMutation.mutate()}
+        clearPending={clearSessionMutation.isPending}
+      />
 
       {viewingSession && (
         <>
@@ -863,6 +1228,11 @@ export default function TrainingMonitor() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
             <AccuracyChart epochs={allEpochs} />
             <ExpectancyChart epochs={allEpochs} />
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+            <WinRatePFChart epochs={allEpochs} />
+            <CumulativeRCurve folds={viewingFolds} />
           </div>
 
           <FoldResultsTable folds={viewingFolds} />
@@ -878,10 +1248,12 @@ export default function TrainingMonitor() {
         </>
       )}
 
-      {sessionsData?.sessions && sessionsData.sessions.length > 0 && (
+      {historySessions.length > 0 && (
         <SessionHistory
-          sessions={sessionsData.sessions.filter((s) => s.id !== viewingSession?.id)}
+          sessions={historySessions}
           onSelect={setSelectedSessionId}
+          onDelete={(id) => clearSessionMutation.mutate(id)}
+          deletePending={clearSessionMutation.isPending}
         />
       )}
     </div>

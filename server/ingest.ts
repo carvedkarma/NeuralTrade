@@ -16,7 +16,7 @@ import {
   trainingFolds,
 } from "@shared/schema";
 import type { MoneyConfig } from "@shared/schema";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, count, sql } from "drizzle-orm";
 
 async function getMoneyConfig(): Promise<MoneyConfig> {
   const row = await db.select().from(settings).where(eq(settings.key, "money_config")).limit(1);
@@ -62,8 +62,18 @@ router.post("/ingest/event", async (req, res) => {
     console.log(`[Ingest] Event accepted type=${type}, event_id=${event_id}`);
 
     const extra: Record<string, any> = {};
-    if (type === "TRAINING_SESSION_START" && (payload as any).session_id) {
-      extra.session_id = (payload as any).session_id;
+    if (type === "TRAINING_SESSION_START") {
+      if ((payload as any)._blocked) {
+        return res.status(409).json({
+          status: "blocked",
+          event_id,
+          type,
+          reason: (payload as any)._blockReason,
+        });
+      }
+      if ((payload as any).session_id) {
+        extra.session_id = (payload as any).session_id;
+      }
     }
     return res.status(200).json({ status: "accepted", event_id, type, ...extra });
   } catch (err: any) {
@@ -291,6 +301,22 @@ async function processEvent(
 
     case "TRAINING_SESSION_START": {
       const p = payload as any;
+      const unclearedSessions = await db.select({ cnt: count() }).from(trainingSessions)
+        .where(sql`${trainingSessions.status} != 'running'`);
+      const runningSessions = await db.select({ cnt: count() }).from(trainingSessions)
+        .where(eq(trainingSessions.status, "running"));
+      if ((runningSessions[0]?.cnt ?? 0) > 0) {
+        console.log(`[Ingest] TRAINING_SESSION_START blocked: ${runningSessions[0].cnt} running session(s) exist.`);
+        (payload as any)._blocked = true;
+        (payload as any)._blockReason = `Training is already in progress (${runningSessions[0].cnt} running session(s))`;
+        break;
+      }
+      if ((unclearedSessions[0]?.cnt ?? 0) > 0) {
+        console.log(`[Ingest] TRAINING_SESSION_START blocked: ${unclearedSessions[0].cnt} uncleared session(s) exist. Clear them from the dashboard first.`);
+        (payload as any)._blocked = true;
+        (payload as any)._blockReason = `${unclearedSessions[0].cnt} previous session(s) need to be cleared from the Training Monitor before starting new training`;
+        break;
+      }
       const [session] = await db.insert(trainingSessions).values({
         sessionType: p.session_type ?? "walk_forward",
         status: "running",
