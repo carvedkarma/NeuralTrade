@@ -1229,7 +1229,6 @@ let monitorRunning = false;
 
 export async function monitorAllPositions(): Promise<void> {
   if (monitorRunning) return;
-  if (!isPaperTradingEnabled()) return;
   monitorRunning = true;
 
   try {
