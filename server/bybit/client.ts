@@ -4,7 +4,8 @@ const BYBIT_BASE_URL = "https://api.bybit.com";
 const RECV_WINDOW = "5000";
 
 function getGpuProxyUrl(): string {
-  return process.env.GPU_TRAINER_URL || "http://localhost:8000";
+  const url = process.env.GPU_TRAINER_URL || "http://localhost:8000";
+  return url.replace(/\/+$/, "");
 }
 
 function getCredentials() {
@@ -27,80 +28,115 @@ function generateSignature(
   return crypto.createHmac("sha256", apiSecret).update(preSign).digest("hex");
 }
 
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function request<T>(
   method: "GET" | "POST",
   endpoint: string,
   params?: Record<string, any>
 ): Promise<BybitResponse<T>> {
   const { apiKey, apiSecret } = getCredentials();
-  const timestamp = Date.now().toString();
-
-  let queryString = "";
-  let body = "";
-
-  if (method === "GET" && params) {
-    const qs = new URLSearchParams();
-    for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined && v !== null) qs.append(k, String(v));
-    }
-    queryString = qs.toString();
-  }
-
-  if (method === "POST") {
-    body = params ? JSON.stringify(params) : "";
-  }
-
-  const signPayload = method === "GET" ? queryString : body;
-  const signature = generateSignature(apiSecret, timestamp, apiKey, RECV_WINDOW, signPayload);
-
-  const headers: Record<string, string> = {
-    "X-BAPI-API-KEY": apiKey,
-    "X-BAPI-SIGN": signature,
-    "X-BAPI-SIGN-TYPE": "2",
-    "X-BAPI-TIMESTAMP": timestamp,
-    "X-BAPI-RECV-WINDOW": RECV_WINDOW,
-  };
-  if (method === "POST") {
-    headers["Content-Type"] = "application/json";
-  }
-
   const proxyUrl = getGpuProxyUrl();
-  try {
-    const proxyRes = await fetch(`${proxyUrl}/bybit-proxy`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        method,
-        endpoint,
-        queryString: queryString || undefined,
-        body: body || undefined,
-        headers,
-        baseUrl: BYBIT_BASE_URL,
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
 
-    if (!proxyRes.ok) {
-      const text = await proxyRes.text().catch(() => "");
-      throw new Error(`GPU proxy error ${proxyRes.status}: ${text}`);
+  const maxRetries = 1;
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      await sleep(2000);
     }
 
-    const proxyData = await proxyRes.json() as any;
+    const timestamp = Date.now().toString();
 
-    if (proxyData.error) {
-      throw new Error(`Proxy error: ${proxyData.error}`);
+    let queryString = "";
+    let body = "";
+
+    if (method === "GET" && params) {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null) qs.append(k, String(v));
+      }
+      queryString = qs.toString();
     }
 
-    return proxyData as BybitResponse<T>;
-  } catch (err: any) {
-    if (err.name === "TimeoutError" || err.message.includes("timeout")) {
-      throw new Error("GPU proxy request timed out — is your GPU trainer running with /bybit-proxy endpoint?");
+    if (method === "POST") {
+      body = params ? JSON.stringify(params) : "";
     }
-    if (err.message.includes("fetch failed") || err.message.includes("ECONNREFUSED")) {
-      throw new Error("Cannot reach GPU trainer for Bybit proxy — ensure GPU trainer is running");
+
+    const signPayload = method === "GET" ? queryString : body;
+    const signature = generateSignature(apiSecret, timestamp, apiKey, RECV_WINDOW, signPayload);
+
+    const headers: Record<string, string> = {
+      "X-BAPI-API-KEY": apiKey,
+      "X-BAPI-SIGN": signature,
+      "X-BAPI-SIGN-TYPE": "2",
+      "X-BAPI-TIMESTAMP": timestamp,
+      "X-BAPI-RECV-WINDOW": RECV_WINDOW,
+    };
+    if (method === "POST") {
+      headers["Content-Type"] = "application/json";
     }
-    throw err;
+
+    try {
+      const proxyRes = await fetch(`${proxyUrl}/bybit-proxy`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          method,
+          endpoint,
+          queryString: queryString || undefined,
+          body: body || undefined,
+          headers,
+          baseUrl: BYBIT_BASE_URL,
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+
+      if (!proxyRes.ok) {
+        const text = await proxyRes.text().catch(() => "");
+        if (proxyRes.status === 404) {
+          throw new Error(`GPU trainer at ${proxyUrl} does not have /bybit-proxy endpoint — update your GPU trainer code`);
+        }
+        if (proxyRes.status === 502 || proxyRes.status === 503) {
+          lastError = new Error(`GPU trainer proxy temporarily unavailable (${proxyRes.status})`);
+          continue;
+        }
+        throw new Error(`GPU proxy error ${proxyRes.status}: ${text}`);
+      }
+
+      const proxyData = await proxyRes.json() as any;
+
+      if (proxyData.error) {
+        throw new Error(`Bybit proxy error: ${proxyData.error}`);
+      }
+
+      return proxyData as BybitResponse<T>;
+    } catch (err: any) {
+      if (err.message.includes("does not have /bybit-proxy") || err.message.includes("Bybit proxy error")) {
+        throw err;
+      }
+
+      if (err.name === "TimeoutError" || err.message.includes("timeout")) {
+        lastError = new Error(`Request to GPU trainer timed out (${proxyUrl}) — check your ngrok tunnel is running`);
+        continue;
+      }
+      if (err.message.includes("fetch failed") || err.message.includes("ECONNREFUSED") || err.message.includes("ENOTFOUND")) {
+        const isLocalhost = proxyUrl.includes("localhost") || proxyUrl.includes("127.0.0.1");
+        if (isLocalhost) {
+          throw new Error("GPU_TRAINER_URL is set to localhost — set it to your ngrok tunnel URL (e.g. https://abc123.ngrok-free.app)");
+        }
+        lastError = new Error(`Cannot reach GPU trainer at ${proxyUrl} — check your ngrok tunnel is running`);
+        continue;
+      }
+
+      lastError = err;
+      if (attempt < maxRetries) continue;
+    }
   }
+
+  throw lastError || new Error("Bybit proxy request failed after retries");
 }
 
 export interface BybitResponse<T> {
@@ -183,10 +219,20 @@ export function isConfigured(): boolean {
   return !!(process.env.BYBIT_API_KEY && process.env.BYBIT_API_SECRET);
 }
 
+export function getProxyStatus(): { url: string; isLocalhost: boolean } {
+  const url = getGpuProxyUrl();
+  const isLocalhost = url.includes("localhost") || url.includes("127.0.0.1");
+  return { url, isLocalhost };
+}
+
 export async function testConnection(): Promise<{ success: boolean; error?: string; balance?: string }> {
   try {
     if (!isConfigured()) {
       return { success: false, error: "API credentials not configured" };
+    }
+    const { isLocalhost } = getProxyStatus();
+    if (isLocalhost) {
+      return { success: false, error: "GPU_TRAINER_URL is set to localhost — set it to your ngrok tunnel URL" };
     }
     const result = await getWalletBalance("USDT");
     if (result.retCode !== 0) {

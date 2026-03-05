@@ -280,9 +280,19 @@ export default function SettingsPage() {
           </p>
         )}
         {bybitStatus?.configured && !bybitStatus?.connected && bybitStatus?.error && (
-          <p className="text-xs text-muted-foreground/70 mt-2">
-            Bybit API calls are routed through your GPU trainer's /bybit-proxy endpoint. Ensure your GPU trainer is running with the proxy enabled.
-          </p>
+          <div className="mt-2 space-y-1">
+            <p className="text-xs text-red-400/80">{bybitStatus.error}</p>
+            {bybitStatus?.proxy?.isLocalhost && (
+              <p className="text-xs text-amber-400/80">
+                GPU_TRAINER_URL is set to localhost. Set it to your ngrok tunnel URL (e.g. https://abc123.ngrok-free.app) in environment secrets.
+              </p>
+            )}
+            {!bybitStatus?.proxy?.isLocalhost && bybitStatus?.proxy?.url && (
+              <p className="text-xs text-muted-foreground/70">
+                Proxy: {bybitStatus.proxy.url} — ensure your GPU trainer and ngrok tunnel are running.
+              </p>
+            )}
+          </div>
         )}
       </div>
 

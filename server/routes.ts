@@ -5604,8 +5604,9 @@ Provide your analysis in this JSON format:
 
   app.get("/api/bybit/status", async (_req, res) => {
     try {
+      const proxyStatus = bybitClient.getProxyStatus();
       if (!bybitClient.isConfigured()) {
-        return res.json({ configured: false, connected: false, error: "API credentials not configured" });
+        return res.json({ configured: false, connected: false, error: "API credentials not configured", proxy: proxyStatus });
       }
       const test = await bybitClient.testConnection();
       res.json({
@@ -5615,9 +5616,11 @@ Provide your analysis in this JSON format:
         error: test.error,
         liveTradingEnabled: isLiveTradingEnabled(),
         config: getLiveConfig(),
+        proxy: proxyStatus,
       });
     } catch (error: any) {
-      res.json({ configured: false, connected: false, error: error.message });
+      const proxyStatus = bybitClient.getProxyStatus();
+      res.json({ configured: false, connected: false, error: error.message, proxy: proxyStatus });
     }
   });
 
