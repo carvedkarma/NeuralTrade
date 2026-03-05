@@ -80,6 +80,8 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  bybitClient.setGpuBridgeRef(gpuBridge);
+
   // Start live candle sync service automatically
   console.log("[Server] Starting live 15m candle sync service...");
   startLiveCandleSync();
@@ -2739,6 +2741,17 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/gpu/register", (req, res) => {
+    const { url } = req.body;
+    if (url && typeof url === "string") {
+      gpuBridge.registerGpuUrl(url);
+      gpuBridge.recordActivity();
+      res.json({ success: true, registered: url });
+    } else {
+      res.status(400).json({ error: "url is required" });
+    }
+  });
+
   // Multi-head prediction push endpoint - Receives full 5-head predictions from local GPU trainer
   app.post("/api/gpu/push-prediction", async (req, res) => {
     try {
@@ -2790,6 +2803,7 @@ export async function registerRoutes(
       });
       
       gpuBridge.recordActivity();
+      if (pred.gpu_callback_url) gpuBridge.registerGpuUrl(pred.gpu_callback_url);
       console.log(`[GPU Push] Received multi-head prediction: ${pred.action} confidence=${pred.confidence.toFixed(3)} vol_state=${pred.vol_state ?? 'N/A'}`);
       res.json({ success: true, id: record.id, received: Date.now() });
     } catch (error) {
@@ -4729,6 +4743,7 @@ export async function registerRoutes(
         createdAt: Date.now(),
       });
       gpuBridge.recordActivity();
+      if (t.gpu_callback_url) gpuBridge.registerGpuUrl(t.gpu_callback_url);
       console.log(`[Live Trade] Recorded ${t.side} ${t.symbol} @ ${t.entry_price} (id=${record.id})`);
       res.json({ success: true, id: record.id });
     } catch (error) {
@@ -5085,6 +5100,9 @@ Provide your analysis in this JSON format:
       const c = req.body;
       if (!c || !c.symbol || !c.decision) {
         return res.status(400).json({ error: "symbol and decision are required" });
+      }
+      if (c.gpu_callback_url) {
+        gpuBridge.registerGpuUrl(c.gpu_callback_url);
       }
       const record = await storage.recordLiveCycleLog({
         symbol: c.symbol,

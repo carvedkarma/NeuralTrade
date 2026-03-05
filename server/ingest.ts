@@ -28,6 +28,13 @@ const router = Router();
 
 router.post("/ingest/event", async (req, res) => {
   try {
+    if (req.body?.gpu_callback_url) {
+      try {
+        const { gpuBridge } = await import("./gpu-bridge");
+        gpuBridge.registerGpuUrl(req.body.gpu_callback_url);
+      } catch {}
+    }
+
     const parsed = ingestEventPayloadSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({

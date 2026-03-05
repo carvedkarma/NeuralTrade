@@ -4702,6 +4702,42 @@ async def run_training(request: TrainingRequest):
         traceback.print_exc()
         model_manager.update_training_status(is_training=False)
 
+async def _register_with_replit():
+    """Register GPU trainer's public URL (ngrok) with the Replit dashboard."""
+    import os
+    import httpx
+    dashboard_url = os.environ.get("DASHBOARD_URL", "").rstrip("/")
+    if not dashboard_url:
+        return
+    gpu_url = os.environ.get("GPU_SELF_URL")
+    if not gpu_url:
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get("http://127.0.0.1:4040/api/tunnels")
+                if resp.status_code == 200:
+                    tunnels = resp.json().get("tunnels", [])
+                    for t in tunnels:
+                        if t.get("proto") == "https":
+                            gpu_url = t["public_url"].rstrip("/")
+                            break
+                    if not gpu_url and tunnels:
+                        gpu_url = tunnels[0].get("public_url", "").rstrip("/")
+        except Exception:
+            pass
+    if gpu_url:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(f"{dashboard_url}/api/gpu/register", json={"url": gpu_url})
+                if resp.status_code == 200:
+                    logger.info(f"[STARTUP] Registered GPU URL with Replit: {gpu_url}")
+                else:
+                    logger.warning(f"[STARTUP] GPU registration failed: {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"[STARTUP] GPU registration error: {e}")
+    else:
+        logger.info("[STARTUP] No ngrok tunnel detected - Replit will use GPU_TRAINER_URL env var")
+
+
 @app.on_event("startup")
 async def startup_event():
     """Load models at server startup with STF validation."""
@@ -4741,6 +4777,8 @@ async def startup_event():
         logger.info(f"STF validation passed: mode={model_manager.training_mode}, input_dim={model_manager.input_dim}")
     
     logger.info(f"Startup complete. Device: {model_manager.device}, Models: {len(model_manager.models)}, STF Serving: {model_manager.stf_serving_enabled}")
+    
+    asyncio.create_task(_register_with_replit())
 
 
 @app.get("/health")

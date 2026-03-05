@@ -733,6 +733,7 @@ class LiveRunner:
         self.per_symbol_models = per_symbol_models
         self.limit_15m = limit_15m
         self.direct_htf = direct_htf
+        self.gpu_self_url = self._detect_gpu_self_url()
 
         self.v5_score_lambda = V5_SCORE_LAMBDA
         self.v5_score_threshold = V5_SCORE_THRESHOLD
@@ -756,6 +757,46 @@ class LiveRunner:
 
         from trade_manager import TradeManager
         self.trade_manager = TradeManager()
+
+    @staticmethod
+    def _detect_gpu_self_url() -> Optional[str]:
+        """Detect the GPU trainer's own public URL (e.g. ngrok tunnel)."""
+        import os
+        explicit = os.environ.get("GPU_SELF_URL")
+        if explicit:
+            log.info(f"[GPU URL] Using explicit GPU_SELF_URL: {explicit}")
+            return explicit.rstrip("/")
+        try:
+            resp = requests.get("http://127.0.0.1:4040/api/tunnels", timeout=3)
+            if resp.status_code == 200:
+                tunnels = resp.json().get("tunnels", [])
+                for t in tunnels:
+                    if t.get("proto") == "https":
+                        url = t["public_url"].rstrip("/")
+                        log.info(f"[GPU URL] Auto-detected ngrok URL: {url}")
+                        return url
+                if tunnels:
+                    url = tunnels[0].get("public_url", "").rstrip("/")
+                    log.info(f"[GPU URL] Auto-detected ngrok URL: {url}")
+                    return url
+        except Exception:
+            pass
+        log.warning("[GPU URL] No ngrok tunnel detected and GPU_SELF_URL not set")
+        return None
+
+    def _register_gpu_url(self):
+        """Register GPU trainer URL with the Replit dashboard."""
+        if not self.gpu_self_url:
+            return
+        try:
+            url = f"{self.replit_url.rstrip('/')}/api/gpu/register"
+            resp = requests.post(url, json={"url": self.gpu_self_url}, timeout=5)
+            if resp.status_code == 200:
+                log.info(f"[GPU REG] Registered URL with Replit: {self.gpu_self_url}")
+            else:
+                log.warning(f"[GPU REG] Registration failed: {resp.status_code}")
+        except Exception as e:
+            log.warning(f"[GPU REG] Failed to register: {e}")
 
     def _init_fetcher(self):
         from data.pipeline import BinanceDataFetcher
@@ -904,6 +945,8 @@ class LiveRunner:
             "sl_price": li.get('sl_price'),
             "tp_price": li.get('tp_price'),
         }
+        if self.gpu_self_url:
+            payload["gpu_callback_url"] = self.gpu_self_url
         payload_keys = [k for k, v in payload.items() if v is not None]
         log.debug(f"[CYCLE_PAYLOAD] sym={symbol} fields_present={payload_keys}")
         _retry_request("POST", url, json=payload)
@@ -1041,6 +1084,9 @@ class LiveRunner:
 
         self.exchange_time_offset = _get_exchange_time_offset()
         log.info(f"Exchange time offset: {self.exchange_time_offset*1000:.0f}ms")
+
+        self.gpu_self_url = self._detect_gpu_self_url()
+        self._register_gpu_url()
 
         self.model, self.engineer, self.feature_columns, self.temperature, self.symbol_map = _load_model(self.device)
         self._init_fetcher()

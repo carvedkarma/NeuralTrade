@@ -62,7 +62,7 @@ Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), 
 
 - **Key Server Files:**
   - `server/ingest.ts` — Receives GPU trainer events (CYCLE_UPDATE, TRADE_OPEN/CLOSE), saves V5 model outputs (retMu, mfePred, maePred, pHold, pLong, pShort)
-  - `server/gpu-bridge.ts` — GPU trainer connection bridge with push-based detection (lastIngestActivity timestamp, recordActivity(), 5-minute window for availability)
+  - `server/gpu-bridge.ts` — GPU trainer connection bridge with push-based detection (lastIngestActivity timestamp, recordActivity(), 5-minute window for availability). **GPU URL auto-registration**: GPU trainer sends its ngrok URL via `gpu_callback_url` field in push payloads or `POST /api/gpu/register`. Bybit client uses registered URL via `getEffectiveGpuUrl()`.
   - `server/live-candle-sync.ts` — Real-time 15m candle sync from Binance
   - `server/paper/` — Paper trading engine (routes, storage, engine, config)
   - `server/paper/storage.ts` — Paper storage with getPositionsBySymbol(), recordTradeClose(), getTradeHistory()

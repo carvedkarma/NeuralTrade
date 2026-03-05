@@ -254,6 +254,7 @@ class GPUTrainerBridge {
   private healthCheckInterval: number = 30000; // 30 seconds
   private predictionMode: "stf" | "mtf" = "stf"; // Default to STF for 15m-trained models
   private lastIngestActivity: number = 0;
+  private registeredGpuUrl: string | null = null;
   
   // Pushed status from remote GPU trainer
   private pushedStatus: PushedGPUStatus = {
@@ -429,6 +430,27 @@ class GPUTrainerBridge {
 
   getLastActivity(): number {
     return this.lastIngestActivity;
+  }
+
+  registerGpuUrl(url: string): void {
+    if (url && typeof url === "string" && url.startsWith("http")) {
+      const cleanUrl = url.replace(/\/+$/, "");
+      if (this.registeredGpuUrl !== cleanUrl) {
+        console.log(`[GPU Bridge] GPU trainer registered URL: ${cleanUrl}`);
+      }
+      this.registeredGpuUrl = cleanUrl;
+    }
+  }
+
+  getRegisteredGpuUrl(): string | null {
+    return this.registeredGpuUrl;
+  }
+
+  getEffectiveGpuUrl(): string {
+    if (this.registeredGpuUrl) {
+      return this.registeredGpuUrl;
+    }
+    return process.env.GPU_TRAINER_URL || this.baseUrl;
   }
 
   async hydrateLastActivityFromDb(): Promise<void> {

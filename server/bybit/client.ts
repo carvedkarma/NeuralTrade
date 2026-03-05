@@ -3,7 +3,19 @@ import crypto from "crypto";
 const BYBIT_BASE_URL = "https://api.bybit.com";
 const RECV_WINDOW = "5000";
 
+let _gpuBridgeRef: any = null;
+
+export function setGpuBridgeRef(bridge: any): void {
+  _gpuBridgeRef = bridge;
+}
+
 function getGpuProxyUrl(): string {
+  if (_gpuBridgeRef) {
+    const registeredUrl = _gpuBridgeRef.getEffectiveGpuUrl();
+    if (registeredUrl) {
+      return registeredUrl.replace(/\/+$/, "");
+    }
+  }
   const url = process.env.GPU_TRAINER_URL || "http://localhost:8000";
   return url.replace(/\/+$/, "");
 }
@@ -219,10 +231,12 @@ export function isConfigured(): boolean {
   return !!(process.env.BYBIT_API_KEY && process.env.BYBIT_API_SECRET);
 }
 
-export function getProxyStatus(): { url: string; isLocalhost: boolean } {
+export function getProxyStatus(): { url: string; isLocalhost: boolean; isRegistered: boolean; envSet: boolean } {
   const url = getGpuProxyUrl();
   const isLocalhost = url.includes("localhost") || url.includes("127.0.0.1");
-  return { url, isLocalhost };
+  const isRegistered = _gpuBridgeRef ? !!_gpuBridgeRef.getRegisteredGpuUrl() : false;
+  const envSet = !!process.env.GPU_TRAINER_URL;
+  return { url, isLocalhost, isRegistered, envSet };
 }
 
 export async function testConnection(): Promise<{ success: boolean; error?: string; balance?: string }> {
@@ -230,13 +244,16 @@ export async function testConnection(): Promise<{ success: boolean; error?: stri
     if (!isConfigured()) {
       return { success: false, error: "API credentials not configured" };
     }
-    const { isLocalhost } = getProxyStatus();
-    if (isLocalhost) {
-      return { success: false, error: "GPU_TRAINER_URL is set to localhost — set it to your ngrok tunnel URL" };
+    const { url, isLocalhost, isRegistered } = getProxyStatus();
+    if (isLocalhost && !isRegistered) {
+      if (!process.env.GPU_TRAINER_URL) {
+        return { success: false, error: "GPU_TRAINER_URL not set — add your ngrok tunnel URL (e.g. https://abc123.ngrok-free.app) as an environment secret, or start your GPU trainer so it auto-registers" };
+      }
+      return { success: false, error: "GPU_TRAINER_URL points to localhost — set it to your ngrok tunnel URL" };
     }
     const result = await getWalletBalance("USDT");
     if (result.retCode !== 0) {
-      return { success: false, error: `Bybit API error: ${result.retMsg}` };
+      return { success: false, error: `Bybit API error (${result.retCode}): ${result.retMsg}` };
     }
     const usdtCoin = result.result?.list?.[0]?.coin?.find((c: any) => c.coin === "USDT");
     return {
