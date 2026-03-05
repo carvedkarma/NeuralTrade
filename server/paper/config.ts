@@ -106,12 +106,14 @@ export const defaultConfig: PaperTradingConfig = {
   // Signal-strength leverage tiers (v5Score thresholds → leverage)
   leverageEnabled: true,
   leverageTiers: [
+    { minScore: 0.50, leverage: 30 },
+    { minScore: 0.40, leverage: 10 },
     { minScore: 0.15, leverage: 5 },
     { minScore: 0.10, leverage: 3 },
     { minScore: 0.05, leverage: 2 },
     { minScore: 0.02, leverage: 1 },
   ],
-  maxLeverage: 5,
+  maxLeverage: 30,
 };
 
 let currentConfig: PaperTradingConfig = { ...defaultConfig };
