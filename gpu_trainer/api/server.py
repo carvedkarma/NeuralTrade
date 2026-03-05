@@ -4952,6 +4952,40 @@ async def get_models_status():
         "warning": "Models will return default HOLD (p=0.34 each) if no model_instances are loaded" if successful_instances == 0 else None
     }
 
+@app.post("/bybit-proxy")
+async def bybit_proxy(request: Dict[str, Any]):
+    """Proxy Bybit API calls from Replit (which is geo-blocked from Bybit).
+    
+    Receives pre-signed requests from Replit's Bybit client and forwards them
+    to api.bybit.com, returning the response. Auth signing happens on Replit;
+    this endpoint just relays the request.
+    """
+    import httpx
+    
+    method = request.get("method", "GET")
+    endpoint = request.get("endpoint", "")
+    query_string = request.get("queryString", "")
+    body = request.get("body", "")
+    headers = request.get("headers", {})
+    base_url = request.get("baseUrl", "https://api.bybit.com")
+    
+    url = f"{base_url}{endpoint}"
+    if query_string:
+        url += f"?{query_string}"
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            if method == "GET":
+                resp = await client.get(url, headers=headers)
+            else:
+                resp = await client.post(url, headers=headers, content=body)
+        
+        return resp.json()
+    except Exception as e:
+        logger.error(f"[BYBIT PROXY] Error forwarding to {url}: {e}")
+        return {"error": str(e)}
+
+
 def start_server(host: str = "0.0.0.0", port: int = 8000):
     import uvicorn
     uvicorn.run(app, host=host, port=port)
