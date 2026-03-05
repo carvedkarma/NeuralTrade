@@ -1331,6 +1331,78 @@
       "tradingCost": 0.0009,
       "confidence": 0.84533453,
       "isWin": false
+    },
+    {
+      "timestamp": "2026-03-05T12:47:41.774Z",
+      "action": "LONG",
+      "entryPrice": 72842.13,
+      "exitPrice": 72947.744496,
+      "horizon": 16,
+      "actualReturn": 0.0014499094960566733,
+      "netReturn": 0.0005499094960566733,
+      "tradingCost": 0.0009,
+      "confidence": 0.8309028,
+      "isWin": true
+    },
+    {
+      "timestamp": "2026-03-05T12:48:15.275Z",
+      "action": "LONG",
+      "entryPrice": 2134.38,
+      "exitPrice": 2141.235855,
+      "horizon": 16,
+      "actualReturn": 0.0032121060916986627,
+      "netReturn": 0.002312106091698663,
+      "tradingCost": 0.0009,
+      "confidence": 0.8367025,
+      "isWin": true
+    },
+    {
+      "timestamp": "2026-03-05T12:48:20.002Z",
+      "action": "LONG",
+      "entryPrice": 1.4371,
+      "exitPrice": 1.4406559200000002,
+      "horizon": 16,
+      "actualReturn": 0.002474371999165094,
+      "netReturn": 0.001574371999165094,
+      "tradingCost": 0.0009,
+      "confidence": 0.8162941,
+      "isWin": true
+    },
+    {
+      "timestamp": "2026-03-05T12:49:33.888Z",
+      "action": "LONG",
+      "entryPrice": 658.99,
+      "exitPrice": 660.423951,
+      "horizon": 16,
+      "actualReturn": 0.0021759829435954703,
+      "netReturn": 0.0012759829435954704,
+      "tradingCost": 0.0009,
+      "confidence": 0.84801465,
+      "isWin": true
+    },
+    {
+      "timestamp": "2026-03-05T12:49:37.131Z",
+      "action": "LONG",
+      "entryPrice": 9.51,
+      "exitPrice": 9.529047,
+      "horizon": 16,
+      "actualReturn": 0.0020028391167192933,
+      "netReturn": 0.0011028391167192933,
+      "tradingCost": 0.0009,
+      "confidence": 0.8412092,
+      "isWin": true
+    },
+    {
+      "timestamp": "2026-03-05T13:18:41.802Z",
+      "action": "LONG",
+      "entryPrice": 72653.21,
+      "exitPrice": 72646.81459200001,
+      "horizon": 16,
+      "actualReturn": -0.00008802650288950313,
+      "netReturn": -0.0009880265028895032,
+      "tradingCost": 0.0009,
+      "confidence": 0.8389374,
+      "isWin": false
     }
   ],
   "tradingCostMode": "taker_taker"
