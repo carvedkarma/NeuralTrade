@@ -1980,7 +1980,7 @@ export async function computePositionHealth(
   position: PaperPosition,
   latestSignal?: NeuralSignalData | null
 ): Promise<PositionHealth> {
-  const currentPrice = latestSignal?.price || await getCurrentMarketPrice(position.symbol);
+  const currentPrice = await getCurrentMarketPrice(position.symbol) || latestSignal?.price || 0;
   if (!currentPrice || currentPrice <= 0) {
     return { score: 50, riskLevel: "MEDIUM", reason: "Unable to determine current price", factors: { pnlScore: 50, slTpRatioScore: 50, modelConfidenceScore: 50, timeScore: 50, mfeTrendScore: 50 }, currentPnlR: 0, peakPnlR: 0, giveback: 0, latestV5Score: null, latestAdjustment: null };
   }

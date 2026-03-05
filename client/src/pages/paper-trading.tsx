@@ -220,7 +220,8 @@ function HealthGauge({ score, riskLevel }: { score: number; riskLevel: string })
 function MfeTracker({ currentPnlR, peakPnlR, giveback }: { currentPnlR: number; peakPnlR: number; giveback: number }) {
   if (peakPnlR <= 0) return null;
 
-  const givebackPct = Math.round(giveback * 100);
+  const rawGivebackPct = Math.round(giveback * 100);
+  const givebackPct = Math.min(rawGivebackPct, 100);
   const givebackColor = givebackPct < 15 ? "text-emerald-400/70" : givebackPct < 40 ? "text-amber-400/70" : "text-red-400/70";
 
   return (
