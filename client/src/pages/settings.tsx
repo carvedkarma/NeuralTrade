@@ -279,6 +279,11 @@ export default function SettingsPage() {
             Add BYBIT_API_KEY and BYBIT_API_SECRET as environment secrets to connect.
           </p>
         )}
+        {bybitStatus?.configured && !bybitStatus?.connected && bybitStatus?.error && (
+          <p className="text-xs text-muted-foreground/70 mt-2">
+            Bybit API calls are routed through your GPU trainer's /bybit-proxy endpoint. Ensure your GPU trainer is running with the proxy enabled.
+          </p>
+        )}
       </div>
 
       <div className="glass-card rounded-md p-4" data-testid="account-settings-card">

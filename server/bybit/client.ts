@@ -1,7 +1,11 @@
 import crypto from "crypto";
 
-const BASE_URL = process.env.BYBIT_API_URL || "https://api-demo.bybit.com";
+const BYBIT_BASE_URL = "https://api.bybit.com";
 const RECV_WINDOW = "5000";
+
+function getGpuProxyUrl(): string {
+  return process.env.GPU_TRAINER_URL || "http://localhost:8000";
+}
 
 function getCredentials() {
   const apiKey = process.env.BYBIT_API_KEY;
@@ -31,7 +35,7 @@ async function request<T>(
   const { apiKey, apiSecret } = getCredentials();
   const timestamp = Date.now().toString();
 
-  let url = `${BASE_URL}${endpoint}`;
+  let queryString = "";
   let body = "";
 
   if (method === "GET" && params) {
@@ -39,62 +43,64 @@ async function request<T>(
     for (const [k, v] of Object.entries(params)) {
       if (v !== undefined && v !== null) qs.append(k, String(v));
     }
-    const queryString = qs.toString();
-    if (queryString) {
-      url += `?${queryString}`;
-    }
-    const signature = generateSignature(apiSecret, timestamp, apiKey, RECV_WINDOW, queryString);
-    const res = await fetch(url, {
-      method: "GET",
-      headers: {
-        "X-BAPI-API-KEY": apiKey,
-        "X-BAPI-SIGN": signature,
-        "X-BAPI-SIGN-TYPE": "2",
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": RECV_WINDOW,
-      },
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`Bybit HTTP ${res.status}: ${text}`);
-    }
-    return res.json() as Promise<BybitResponse<T>>;
+    queryString = qs.toString();
   }
 
   if (method === "POST") {
     body = params ? JSON.stringify(params) : "";
-    const signature = generateSignature(apiSecret, timestamp, apiKey, RECV_WINDOW, body);
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "X-BAPI-API-KEY": apiKey,
-        "X-BAPI-SIGN": signature,
-        "X-BAPI-SIGN-TYPE": "2",
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": RECV_WINDOW,
-        "Content-Type": "application/json",
-      },
-      body,
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`Bybit HTTP ${res.status}: ${text}`);
-    }
-    return res.json() as Promise<BybitResponse<T>>;
   }
 
-  const signature = generateSignature(apiSecret, timestamp, apiKey, RECV_WINDOW, "");
-  const res = await fetch(url, {
-    method,
-    headers: {
-      "X-BAPI-API-KEY": apiKey,
-      "X-BAPI-SIGN": signature,
-      "X-BAPI-SIGN-TYPE": "2",
-      "X-BAPI-TIMESTAMP": timestamp,
-      "X-BAPI-RECV-WINDOW": RECV_WINDOW,
-    },
-  });
-  return res.json() as Promise<BybitResponse<T>>;
+  const signPayload = method === "GET" ? queryString : body;
+  const signature = generateSignature(apiSecret, timestamp, apiKey, RECV_WINDOW, signPayload);
+
+  const headers: Record<string, string> = {
+    "X-BAPI-API-KEY": apiKey,
+    "X-BAPI-SIGN": signature,
+    "X-BAPI-SIGN-TYPE": "2",
+    "X-BAPI-TIMESTAMP": timestamp,
+    "X-BAPI-RECV-WINDOW": RECV_WINDOW,
+  };
+  if (method === "POST") {
+    headers["Content-Type"] = "application/json";
+  }
+
+  const proxyUrl = getGpuProxyUrl();
+  try {
+    const proxyRes = await fetch(`${proxyUrl}/bybit-proxy`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        method,
+        endpoint,
+        queryString: queryString || undefined,
+        body: body || undefined,
+        headers,
+        baseUrl: BYBIT_BASE_URL,
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!proxyRes.ok) {
+      const text = await proxyRes.text().catch(() => "");
+      throw new Error(`GPU proxy error ${proxyRes.status}: ${text}`);
+    }
+
+    const proxyData = await proxyRes.json() as any;
+
+    if (proxyData.error) {
+      throw new Error(`Proxy error: ${proxyData.error}`);
+    }
+
+    return proxyData as BybitResponse<T>;
+  } catch (err: any) {
+    if (err.name === "TimeoutError" || err.message.includes("timeout")) {
+      throw new Error("GPU proxy request timed out — is your GPU trainer running with /bybit-proxy endpoint?");
+    }
+    if (err.message.includes("fetch failed") || err.message.includes("ECONNREFUSED")) {
+      throw new Error("Cannot reach GPU trainer for Bybit proxy — ensure GPU trainer is running");
+    }
+    throw err;
+  }
 }
 
 export interface BybitResponse<T> {
