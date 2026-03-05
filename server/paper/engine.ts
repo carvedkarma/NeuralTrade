@@ -1227,6 +1227,24 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
 let monitorIntervalId: ReturnType<typeof setInterval> | null = null;
 let monitorRunning = false;
 
+const latestCycleSignals = new Map<string, { signal: NeuralSignalData; timestamp: number }>();
+const SIGNAL_STALE_MS = 30 * 60 * 1000;
+let neuralPmEvalCount = 0;
+
+export function updateCachedSignal(symbol: string, signal: NeuralSignalData): void {
+  latestCycleSignals.set(symbol, { signal, timestamp: Date.now() });
+}
+
+export function getCachedSignal(symbol: string): NeuralSignalData | null {
+  const entry = latestCycleSignals.get(symbol);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > SIGNAL_STALE_MS) {
+    latestCycleSignals.delete(symbol);
+    return null;
+  }
+  return entry.signal;
+}
+
 export async function monitorAllPositions(): Promise<void> {
   if (monitorRunning) return;
   monitorRunning = true;
@@ -1291,9 +1309,33 @@ export async function monitorAllPositions(): Promise<void> {
         if (newPeakProfit > currentPeakProfit) {
           await storage.updatePosition(position.id, { peakProfit: newPeakProfit });
         }
+
+        const cachedSignal = getCachedSignal(position.symbol);
+        if (cachedSignal) {
+          try {
+            const freshPosition = newPeakProfit > currentPeakProfit
+              ? { ...position, peakProfit: newPeakProfit }
+              : position;
+            const signalWithLivePrice: NeuralSignalData = {
+              ...cachedSignal,
+              price: currentPrice,
+            };
+            const neuralResult = await neuralPositionManager(freshPosition, signalWithLivePrice);
+            neuralPmEvalCount++;
+            if (neuralResult) {
+              console.log(`[Position Monitor → Neural PM] ${position.symbol}: ${neuralResult.adjustmentType} — ${neuralResult.reason}`);
+              if (neuralResult.positionClosed) continue;
+            }
+          } catch (neuralErr: any) {
+            console.error(`[Position Monitor → Neural PM] Error on ${position.symbol}:`, neuralErr.message);
+          }
+        }
       } catch (err) {
         console.error(`[Position Monitor] Error checking ${position.symbol}:`, err);
       }
+    }
+    if (neuralPmEvalCount > 0 && neuralPmEvalCount % 30 === 0) {
+      console.log(`[Position Monitor → Neural PM] ${neuralPmEvalCount} evaluations completed (${latestCycleSignals.size} symbols cached)`);
     }
   } finally {
     monitorRunning = false;

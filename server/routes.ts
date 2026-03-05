@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
-import { manualOpenPosition, neuralPositionManager, computePositionHealth, type NeuralSignalData } from "./paper/engine";
+import { manualOpenPosition, neuralPositionManager, computePositionHealth, updateCachedSignal, type NeuralSignalData } from "./paper/engine";
 import { getConfig } from "./paper/config";
 import { getPositionsBySymbol } from "./paper/storage";
 import ingestRouter from "./ingest";
@@ -5129,6 +5129,20 @@ Provide your analysis in this JSON format:
         createdAt: Date.now(),
       });
       gpuBridge.recordActivity();
+
+      const cachedNeuralSignal: NeuralSignalData = {
+        v5Score: c.v5_score ?? null,
+        pHold: c.p_hold ?? null,
+        pLong: c.v5_p_long ?? c.p_long ?? null,
+        pShort: c.v5_p_short ?? c.p_short ?? null,
+        retMu: c.v5_ret_mu ?? c.ret_mu ?? null,
+        mfePred: c.v5_mfe ?? c.mfe_pred ?? null,
+        maePred: c.v5_mae ?? c.mae_pred ?? null,
+        v5Side: c.v5_side ?? null,
+        price: Number(c.price) || 0,
+      };
+      updateCachedSignal(c.symbol, cachedNeuralSignal);
+
       let autoTradeResult: { opened: boolean; positionId?: number; reason?: string } = { opened: false };
 
       const isEnterDecision = typeof c.decision === "string" && c.decision.toUpperCase().includes("ENTER");
@@ -5143,18 +5157,7 @@ Provide your analysis in this JSON format:
               autoTradeResult = { opened: false, reason: "position_already_open" };
 
               try {
-                const neuralSignal: NeuralSignalData = {
-                  v5Score: c.v5_score ?? null,
-                  pHold: c.p_hold ?? null,
-                  pLong: c.v5_p_long ?? c.p_long ?? null,
-                  pShort: c.v5_p_short ?? c.p_short ?? null,
-                  retMu: c.v5_ret_mu ?? c.ret_mu ?? null,
-                  mfePred: c.v5_mfe ?? c.mfe_pred ?? null,
-                  maePred: c.v5_mae ?? c.mae_pred ?? null,
-                  v5Side: c.v5_side ?? null,
-                  price: Number(c.price) || 0,
-                };
-                const neuralResult = await neuralPositionManager(existingPositions[0], neuralSignal);
+                const neuralResult = await neuralPositionManager(existingPositions[0], cachedNeuralSignal);
                 if (neuralResult) {
                   (autoTradeResult as any).neuralAction = neuralResult;
                   console.log(`[Neural PM] ${c.symbol}: ${neuralResult.adjustmentType} — ${neuralResult.reason}`);
