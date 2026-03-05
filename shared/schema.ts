@@ -1660,6 +1660,31 @@ export const insertV5SignalSchema = createInsertSchema(v5Signals).omit({ id: tru
 export type InsertV5Signal = z.infer<typeof insertV5SignalSchema>;
 export type V5Signal = typeof v5Signals.$inferSelect;
 
+export const neuralAdjustments = pgTable("neural_adjustments", {
+  id: serial("id").primaryKey(),
+  positionId: integer("position_id").notNull(),
+  symbol: varchar("symbol", { length: 20 }).notNull(),
+  timestamp: bigint("timestamp", { mode: "number" }).notNull(),
+  adjustmentType: varchar("adjustment_type", { length: 40 }).notNull(),
+  previousSl: real("previous_sl"),
+  newSl: real("new_sl"),
+  v5Score: real("v5_score"),
+  pHold: real("p_hold"),
+  pLong: real("p_long"),
+  pShort: real("p_short"),
+  retMu: real("ret_mu"),
+  positionPnlR: real("position_pnl_r"),
+  reason: text("reason"),
+}, (table) => ({
+  positionIdx: index("neural_adj_position_idx").on(table.positionId),
+  symbolIdx: index("neural_adj_symbol_idx").on(table.symbol),
+  tsIdx: index("neural_adj_ts_idx").on(table.timestamp),
+}));
+
+export const insertNeuralAdjustmentSchema = createInsertSchema(neuralAdjustments).omit({ id: true });
+export type InsertNeuralAdjustment = z.infer<typeof insertNeuralAdjustmentSchema>;
+export type NeuralAdjustment = typeof neuralAdjustments.$inferSelect;
+
 export const moneyConfigSchema = z.object({
   account_equity_usd: z.number().min(0),
   risk_per_trade_pct: z.number().min(0).max(100).default(1.0),

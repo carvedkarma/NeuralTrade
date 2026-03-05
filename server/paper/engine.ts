@@ -38,7 +38,7 @@ async function getCurrentMarketPrice(symbol: string): Promise<number> {
   return rows[0]?.close ?? 0;
 }
 
-export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK";
+export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK" | "NEURAL_FLIP" | "NEURAL_MFE" | "NEURAL_DECAY";
 
 interface TradeContext {
   candle: Candle;
@@ -1733,6 +1733,319 @@ export async function manualOpenPosition(params: {
   const label = source === "v5_signal" ? "Auto-Trade" : "Paper";
   console.log(`[${label}] ${side} ${symbol} @ ${entryPrice} | SL: ${stopLoss} | TP: ${takeProfit} | Risk: $${riskUsd.toFixed(2)}`);
   return position;
+}
+
+export interface NeuralSignalData {
+  v5Score: number | null;
+  pHold: number | null;
+  pLong: number | null;
+  pShort: number | null;
+  retMu: number | null;
+  mfePred: number | null;
+  maePred: number | null;
+  v5Side: string | null;
+  price: number;
+}
+
+export interface NeuralAdjustmentResult {
+  action: string;
+  adjustmentType: string;
+  previousSl?: number;
+  newSl?: number;
+  reason: string;
+  positionClosed: boolean;
+  exitReason?: ExitReason;
+}
+
+export async function neuralPositionManager(
+  position: PaperPosition,
+  signal: NeuralSignalData
+): Promise<NeuralAdjustmentResult | null> {
+  if (position.status !== "OPEN") return null;
+  if (!position.qty || position.qty <= 0) return null;
+
+  const { broadcast } = await import("../ws");
+  const { neuralAdjustments } = await import("@shared/schema");
+
+  const currentPrice = signal.price;
+  if (!currentPrice || currentPrice <= 0) return null;
+
+  const riskUsdt = Math.max(position.initialRiskUsdt ?? 1, 0.01);
+  const pnlUsdt = calculateUnrealizedPnl(position, currentPrice);
+  const pnlR = pnlUsdt / riskUsdt;
+  const peakProfitR = (position.peakProfit ?? 0) / riskUsdt;
+
+  const v5Score = signal.v5Score ?? 0;
+  const pHold = signal.pHold ?? 0;
+  const retMu = signal.retMu ?? 0;
+  const v5Side = signal.v5Side ?? "";
+  const pLong = signal.pLong ?? 0;
+  const pShort = signal.pShort ?? 0;
+
+  const recordAdjustment = async (type: string, prevSl: number | null, newSl: number | null, reason: string) => {
+    try {
+      await db.insert(neuralAdjustments).values({
+        positionId: position.id,
+        symbol: position.symbol,
+        timestamp: Date.now(),
+        adjustmentType: type,
+        previousSl: prevSl,
+        newSl: newSl,
+        v5Score: signal.v5Score,
+        pHold: signal.pHold,
+        pLong: signal.pLong,
+        pShort: signal.pShort,
+        retMu: signal.retMu,
+        positionPnlR: Math.round(pnlR * 10000) / 10000,
+        reason,
+      });
+    } catch (err) {
+      console.error(`[Neural PM] Failed to record adjustment:`, err);
+    }
+  };
+
+  const sideIsLong = position.side === "LONG";
+  const modelSide = v5Side.toUpperCase();
+  const directionFlipped = (sideIsLong && modelSide === "SHORT") || (!sideIsLong && modelSide === "LONG");
+
+  const refetchAndClose = async (exitReason: ExitReason, reason: string, adjType: string): Promise<NeuralAdjustmentResult | null> => {
+    const fresh = await storage.getPositionById(position.id);
+    if (!fresh || fresh.status !== "OPEN") {
+      console.log(`[Neural PM] ${position.symbol} — position already closed, skipping ${adjType}`);
+      return null;
+    }
+    const syntheticCtx: TradeContext = {
+      candle: { timestamp: Date.now(), open: currentPrice, high: currentPrice, low: currentPrice, close: currentPrice, volume: 0 },
+      markPrice: currentPrice,
+      fundingRate: 0,
+      atr: position.initialStopDistance ?? 100,
+      kalmanFast: currentPrice,
+      shotPlan: null,
+    };
+    await closePosition(fresh, currentPrice, exitReason, syntheticCtx);
+    broadcast("TRADE_CLOSE", { positionId: position.id, symbol: position.symbol, reason: exitReason, exitPrice: currentPrice });
+    await recordAdjustment(adjType, position.stopLoss, null, reason);
+    return { action: "CLOSE", adjustmentType: adjType, reason, positionClosed: true, exitReason };
+  };
+
+  if (directionFlipped && (pLong > 0.5 || pShort > 0.5)) {
+    const oppositeProb = sideIsLong ? pShort : pLong;
+    if (oppositeProb > 0.55) {
+      const reason = `Direction FLIP: model now says ${modelSide} (p=${oppositeProb.toFixed(3)}) while position is ${position.side}. PnL: ${pnlR.toFixed(2)}R`;
+      console.log(`[Neural PM] ${position.symbol} — ${reason}`);
+      return await refetchAndClose("NEURAL_FLIP", reason, "DIRECTION_FLIP_EXIT");
+    }
+  }
+
+  if (pnlR >= 2.0 && retMu < -0.001) {
+    const reason = `MFE Protection: position at ${pnlR.toFixed(2)}R profit but model predicts negative return (ret_mu=${retMu.toFixed(5)}). Locking in profit.`;
+    console.log(`[Neural PM] ${position.symbol} — ${reason}`);
+    return await refetchAndClose("NEURAL_MFE", reason, "MFE_PROTECTION_EXIT");
+  }
+
+  if (pHold > 0.6 && pnlR >= 0.5) {
+    const config = getConfig();
+    const feeBuffer = position.entryPrice * (getTotalCostsPct() / 100) * 1.2;
+    const breakevenSl = sideIsLong
+      ? position.entryPrice + feeBuffer + (position.entryPrice * 0.001)
+      : position.entryPrice - feeBuffer - (position.entryPrice * 0.001);
+    const currentSl = position.stopLoss ?? 0;
+    const shouldTighten = sideIsLong
+      ? breakevenSl > currentSl
+      : breakevenSl < currentSl;
+
+    if (shouldTighten) {
+      const reason = `Confidence decay: p_hold=${pHold.toFixed(3)} (model says HOLD now) while position at ${pnlR.toFixed(2)}R. Moving SL to breakeven+buffer.`;
+      console.log(`[Neural PM] ${position.symbol} — ${reason}`);
+
+      const prevSl = position.stopLoss;
+      await storage.updatePosition(position.id, { stopLoss: breakevenSl });
+      broadcast("TRADE_UPDATE", { positionId: position.id, symbol: position.symbol, side: position.side, action: "NEURAL_ADJUST", stopLoss: breakevenSl, adjustmentType: "CONFIDENCE_DECAY" });
+      await recordAdjustment("CONFIDENCE_DECAY_TIGHTEN", prevSl, breakevenSl, reason);
+
+      return { action: "TIGHTEN_SL", adjustmentType: "CONFIDENCE_DECAY_TIGHTEN", previousSl: prevSl ?? undefined, newSl: breakevenSl, reason, positionClosed: false };
+    }
+  }
+
+  if (pnlR >= 1.0 && position.stopLoss) {
+    const feeBuffer = position.entryPrice * (getTotalCostsPct() / 100) * 1.2;
+    const breakevenPrice = sideIsLong
+      ? position.entryPrice + feeBuffer
+      : position.entryPrice - feeBuffer;
+    const currentSl = position.stopLoss;
+    const slBelowBE = sideIsLong ? currentSl < breakevenPrice : currentSl > breakevenPrice;
+
+    if (slBelowBE) {
+      const reason = `Breakeven move: position at ${pnlR.toFixed(2)}R profit. Moving SL to breakeven ($${breakevenPrice.toFixed(2)}).`;
+      console.log(`[Neural PM] ${position.symbol} — ${reason}`);
+
+      await storage.updatePosition(position.id, { stopLoss: breakevenPrice });
+      broadcast("TRADE_UPDATE", { positionId: position.id, symbol: position.symbol, side: position.side, action: "NEURAL_ADJUST", stopLoss: breakevenPrice, adjustmentType: "BREAKEVEN" });
+      await recordAdjustment("BREAKEVEN", currentSl, breakevenPrice, reason);
+
+      return { action: "MOVE_BE", adjustmentType: "BREAKEVEN", previousSl: currentSl, newSl: breakevenPrice, reason, positionClosed: false };
+    }
+  }
+
+  if (pnlR >= 1.5 && position.stopLoss && peakProfitR > 0) {
+    const givebackPct = v5Score >= 0.15 ? 0.40 : v5Score >= 0.05 ? 0.30 : 0.20;
+    const stopDistance = position.initialStopDistance ?? Math.abs(position.entryPrice - (position.stopLoss ?? position.entryPrice));
+    const peakPnlPrice = sideIsLong
+      ? position.entryPrice + (peakProfitR * (riskUsdt / position.qty))
+      : position.entryPrice - (peakProfitR * (riskUsdt / position.qty));
+    const givebackAmount = Math.abs(peakPnlPrice - position.entryPrice) * givebackPct;
+    const adaptiveTrail = sideIsLong
+      ? peakPnlPrice - givebackAmount
+      : peakPnlPrice + givebackAmount;
+
+    const currentSl = position.stopLoss;
+    const trailBetter = sideIsLong ? adaptiveTrail > currentSl : adaptiveTrail < currentSl;
+
+    if (trailBetter) {
+      const reason = `Adaptive trail (${(givebackPct*100).toFixed(0)}% giveback): v5Score=${v5Score.toFixed(3)}, peak=${peakProfitR.toFixed(2)}R, trail=$${adaptiveTrail.toFixed(2)}`;
+      console.log(`[Neural PM] ${position.symbol} — ${reason}`);
+
+      await storage.updatePosition(position.id, { stopLoss: adaptiveTrail, trailMode: "neural" });
+      broadcast("TRADE_UPDATE", { positionId: position.id, symbol: position.symbol, side: position.side, action: "NEURAL_ADJUST", stopLoss: adaptiveTrail, adjustmentType: "ADAPTIVE_TRAIL" });
+      await recordAdjustment("ADAPTIVE_TRAIL", currentSl, adaptiveTrail, reason);
+
+      return { action: "TRAIL", adjustmentType: "ADAPTIVE_TRAIL", previousSl: currentSl, newSl: adaptiveTrail, reason, positionClosed: false };
+    }
+  }
+
+  return null;
+}
+
+export interface PositionHealth {
+  score: number;
+  riskLevel: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  reason: string;
+  factors: {
+    pnlScore: number;
+    slTpRatioScore: number;
+    modelConfidenceScore: number;
+    timeScore: number;
+    mfeTrendScore: number;
+  };
+  currentPnlR: number;
+  peakPnlR: number;
+  giveback: number;
+  latestV5Score: number | null;
+  latestAdjustment: string | null;
+}
+
+export async function computePositionHealth(
+  position: PaperPosition,
+  latestSignal?: NeuralSignalData | null
+): Promise<PositionHealth> {
+  const currentPrice = latestSignal?.price || await getCurrentMarketPrice(position.symbol);
+  if (!currentPrice || currentPrice <= 0) {
+    return { score: 50, riskLevel: "MEDIUM", reason: "Unable to determine current price", factors: { pnlScore: 50, slTpRatioScore: 50, modelConfidenceScore: 50, timeScore: 50, mfeTrendScore: 50 }, currentPnlR: 0, peakPnlR: 0, giveback: 0, latestV5Score: null, latestAdjustment: null };
+  }
+  const riskUsdt = Math.max(position.initialRiskUsdt ?? 1, 0.01);
+  const pnlUsdt = calculateUnrealizedPnl(position, currentPrice);
+  const pnlR = riskUsdt > 0 ? pnlUsdt / riskUsdt : 0;
+  const peakProfitR = riskUsdt > 0 ? (position.peakProfit ?? 0) / riskUsdt : 0;
+  const giveback = peakProfitR > 0 ? (peakProfitR - pnlR) / peakProfitR : 0;
+
+  let pnlScore = 50;
+  if (pnlR >= 3) pnlScore = 95;
+  else if (pnlR >= 2) pnlScore = 85;
+  else if (pnlR >= 1) pnlScore = 70;
+  else if (pnlR >= 0) pnlScore = 55;
+  else if (pnlR >= -0.5) pnlScore = 35;
+  else if (pnlR >= -1) pnlScore = 15;
+  else pnlScore = 5;
+
+  let slTpRatioScore = 50;
+  if (position.stopLoss && position.tp1) {
+    const distToSl = Math.abs(currentPrice - position.stopLoss);
+    const distToTp = Math.abs(position.tp1 - currentPrice);
+    const totalDist = distToSl + distToTp;
+    if (totalDist > 0) {
+      slTpRatioScore = Math.round((distToSl / totalDist) * 100);
+    }
+  }
+
+  let modelConfidenceScore = 50;
+  if (latestSignal) {
+    const sideIsLong = position.side === "LONG";
+    const friendlyProb = sideIsLong ? (latestSignal.pLong ?? 0) : (latestSignal.pShort ?? 0);
+    const holdProb = latestSignal.pHold ?? 0;
+    if (friendlyProb > 0.6) modelConfidenceScore = 90;
+    else if (friendlyProb > 0.4) modelConfidenceScore = 65;
+    else if (holdProb > 0.6) modelConfidenceScore = 30;
+    else modelConfidenceScore = 15;
+
+    const v5Side = (latestSignal.v5Side ?? "").toUpperCase();
+    const flipped = (sideIsLong && v5Side === "SHORT") || (!sideIsLong && v5Side === "LONG");
+    if (flipped) modelConfidenceScore = Math.max(0, modelConfidenceScore - 40);
+  }
+
+  let timeScore = 80;
+  const holdHours = (Date.now() - position.entryTs) / (1000 * 60 * 60);
+  if (holdHours > 8) timeScore = 20;
+  else if (holdHours > 4) timeScore = 40;
+  else if (holdHours > 2) timeScore = 60;
+
+  let mfeTrendScore = 60;
+  if (peakProfitR > 0) {
+    if (giveback < 0.1) mfeTrendScore = 95;
+    else if (giveback < 0.25) mfeTrendScore = 75;
+    else if (giveback < 0.5) mfeTrendScore = 45;
+    else mfeTrendScore = 15;
+  }
+
+  const weights = { pnl: 0.30, slTp: 0.20, model: 0.25, time: 0.10, mfe: 0.15 };
+  const rawScore = Math.round(
+    pnlScore * weights.pnl +
+    slTpRatioScore * weights.slTp +
+    modelConfidenceScore * weights.model +
+    timeScore * weights.time +
+    mfeTrendScore * weights.mfe
+  );
+  const score = Math.max(0, Math.min(100, rawScore));
+
+  let riskLevel: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" = "LOW";
+  let reason = "";
+  if (score >= 70) { riskLevel = "LOW"; reason = "Position is healthy"; }
+  else if (score >= 45) { riskLevel = "MEDIUM"; reason = "Position needs monitoring"; }
+  else if (score >= 25) { riskLevel = "HIGH"; reason = "Position at elevated risk"; }
+  else { riskLevel = "CRITICAL"; reason = "Position in critical condition"; }
+
+  if (giveback > 0.5 && peakProfitR > 1) reason += ` — giving back ${(giveback*100).toFixed(0)}% of peak ${peakProfitR.toFixed(1)}R profit`;
+  if (pnlR < -1) reason += ` — down ${pnlR.toFixed(1)}R`;
+
+  let latestAdjustment: string | null = null;
+  try {
+    const { neuralAdjustments } = await import("@shared/schema");
+    const recent = await db.select()
+      .from(neuralAdjustments)
+      .where(eq(neuralAdjustments.positionId, position.id))
+      .orderBy(desc(neuralAdjustments.timestamp))
+      .limit(1);
+    if (recent.length > 0) {
+      latestAdjustment = recent[0].adjustmentType;
+    }
+  } catch {}
+
+  return {
+    score,
+    riskLevel,
+    reason,
+    factors: {
+      pnlScore,
+      slTpRatioScore,
+      modelConfidenceScore,
+      timeScore,
+      mfeTrendScore,
+    },
+    currentPnlR: Math.round(pnlR * 10000) / 10000,
+    peakPnlR: Math.round(peakProfitR * 10000) / 10000,
+    giveback: Math.round(giveback * 10000) / 10000,
+    latestV5Score: latestSignal?.v5Score ?? position.v5Score ?? null,
+    latestAdjustment,
+  };
 }
 
 export interface RiskAlert {

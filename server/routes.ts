@@ -2,12 +2,12 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
-import { manualOpenPosition } from "./paper/engine";
+import { manualOpenPosition, neuralPositionManager, computePositionHealth, type NeuralSignalData } from "./paper/engine";
 import { getConfig } from "./paper/config";
 import { getPositionsBySymbol } from "./paper/storage";
 import ingestRouter from "./ingest";
 import { db } from "./db";
-import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema, openInterestHistory, v5Signals, paperPositions, paperPortfolio, paperTradeHistory, trainingSessions, trainingEpochs, trainingFolds } from "@shared/schema";
+import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema, openInterestHistory, v5Signals, paperPositions, paperPortfolio, paperTradeHistory, trainingSessions, trainingEpochs, trainingFolds, neuralAdjustments } from "@shared/schema";
 import type { ModelLearningStatsEntry, MoneyConfig } from "@shared/schema";
 import { and, eq, gte, lte, asc, desc, sql, count } from "drizzle-orm";
 import { z } from "zod";
@@ -4859,6 +4859,225 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/v5/analytics/mfe-mae", async (req, res) => {
+    try {
+      const source = (req.query.source as string) || "paper";
+      const trades = await db.select().from(paperTradeHistory).orderBy(desc(paperTradeHistory.exitTs)).limit(500);
+
+      const mfeVsResult = trades.map(t => ({
+        symbol: t.symbol,
+        maxFavorableR: t.maxFavorableR ?? 0,
+        netR: t.netR ?? 0,
+        exitReason: t.exitReason,
+        side: t.side,
+      }));
+
+      const wins = trades.filter(t => (t.netR ?? 0) > 0);
+      const losses = trades.filter(t => (t.netR ?? 0) <= 0);
+
+      const avgWinCapture = wins.length > 0
+        ? wins.reduce((s, t) => s + ((t.maxFavorableR ?? 0) > 0 ? (t.netR ?? 0) / (t.maxFavorableR ?? 1) : 1), 0) / wins.length
+        : 0;
+
+      const wastedEdge = losses
+        .filter(t => (t.maxFavorableR ?? 0) > 1.5)
+        .reduce((s, t) => s + ((t.maxFavorableR ?? 0) - (t.netR ?? 0)), 0);
+
+      const highMfeLosses = losses.filter(t => (t.maxFavorableR ?? 0) > 2.0).length;
+
+      const optimalExitSim: { exitPct: number; totalR: number }[] = [];
+      for (let pct = 0.3; pct <= 1.0; pct += 0.05) {
+        let simR = 0;
+        for (const t of trades) {
+          const mfe = t.maxFavorableR ?? 0;
+          const netR = t.netR ?? 0;
+          if (mfe > 0 && netR < mfe * pct) {
+            simR += mfe * pct * 0.9;
+          } else {
+            simR += netR;
+          }
+        }
+        optimalExitSim.push({ exitPct: Math.round(pct * 100), totalR: Math.round(simR * 100) / 100 });
+      }
+
+      res.json({
+        mfeVsResult,
+        captureRatio: Math.round(avgWinCapture * 10000) / 10000,
+        wastedEdge: Math.round(wastedEdge * 100) / 100,
+        highMfeLosses,
+        totalLosses: losses.length,
+        optimalExitSim,
+      });
+    } catch (error) {
+      console.error("[MFE/MAE Analytics] Error:", error);
+      res.status(500).json({ error: "Failed to compute MFE/MAE analytics" });
+    }
+  });
+
+  app.get("/api/v5/analytics/neural-adjustments", async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 100, 500);
+      const symbol = req.query.symbol as string | undefined;
+
+      let query = db.select().from(neuralAdjustments).orderBy(desc(neuralAdjustments.timestamp)).limit(limit);
+      if (symbol) {
+        query = db.select().from(neuralAdjustments).where(eq(neuralAdjustments.symbol, symbol)).orderBy(desc(neuralAdjustments.timestamp)).limit(limit);
+      }
+
+      const adjustments = await query;
+
+      const summary = {
+        total: adjustments.length,
+        byType: {} as Record<string, number>,
+        avgPnlR: adjustments.length > 0 ? adjustments.reduce((s, a) => s + (a.positionPnlR ?? 0), 0) / adjustments.length : 0,
+      };
+      for (const adj of adjustments) {
+        summary.byType[adj.adjustmentType] = (summary.byType[adj.adjustmentType] || 0) + 1;
+      }
+
+      res.json({ adjustments, summary });
+    } catch (error) {
+      console.error("[Neural Adjustments] Error:", error);
+      res.status(500).json({ error: "Failed to get neural adjustments" });
+    }
+  });
+
+  app.get("/api/paper/positions/:id/health", async (req, res) => {
+    try {
+      const positionId = Number(req.params.id);
+      const positions = await db.select().from(paperPositions).where(eq(paperPositions.id, positionId)).limit(1);
+      if (positions.length === 0) return res.status(404).json({ error: "Position not found" });
+
+      const position = positions[0];
+      const latestCycleLog = await db.select()
+        .from(liveCycleLogs)
+        .where(eq(liveCycleLogs.symbol, position.symbol))
+        .orderBy(desc(liveCycleLogs.cycleTs))
+        .limit(1);
+
+      let latestSignal: NeuralSignalData | null = null;
+      if (latestCycleLog.length > 0) {
+        const cl = latestCycleLog[0];
+        latestSignal = {
+          v5Score: cl.v5Score,
+          pHold: cl.pHold,
+          pLong: cl.pLong,
+          pShort: cl.pShort,
+          retMu: cl.retMu,
+          mfePred: cl.mfePred,
+          maePred: cl.maePred,
+          v5Side: cl.v5Side,
+          price: cl.price ?? 0,
+        };
+      }
+
+      const health = await computePositionHealth(position as any, latestSignal);
+      res.json(health);
+    } catch (error) {
+      console.error("[Position Health] Error:", error);
+      res.status(500).json({ error: "Failed to compute position health" });
+    }
+  });
+
+  let lastAiAnalysis: { result: any; generatedAt: number } | null = null;
+  let lastAiCallTs = 0;
+  const AI_COOLDOWN_MS = 60_000;
+
+  app.post("/api/v5/analytics/ai-analysis", async (req, res) => {
+    try {
+      const now = Date.now();
+      if (now - lastAiCallTs < AI_COOLDOWN_MS) {
+        if (lastAiAnalysis) return res.json(lastAiAnalysis);
+        return res.status(429).json({ error: "AI analysis rate limited. Try again in 60 seconds." });
+      }
+      lastAiCallTs = now;
+
+      const trades = await db.select().from(paperTradeHistory).orderBy(desc(paperTradeHistory.exitTs)).limit(100);
+      const adjustmentsList = await db.select().from(neuralAdjustments).orderBy(desc(neuralAdjustments.timestamp)).limit(50);
+
+      const wins = trades.filter(t => (t.netR ?? 0) > 0);
+      const losses = trades.filter(t => (t.netR ?? 0) <= 0);
+      const totalR = trades.reduce((s, t) => s + (t.netR ?? 0), 0);
+
+      const symbolStats: Record<string, { trades: number; totalR: number; wr: number }> = {};
+      for (const t of trades) {
+        if (!symbolStats[t.symbol]) symbolStats[t.symbol] = { trades: 0, totalR: 0, wr: 0 };
+        symbolStats[t.symbol].trades++;
+        symbolStats[t.symbol].totalR += t.netR ?? 0;
+      }
+      for (const sym of Object.keys(symbolStats)) {
+        const symTrades = trades.filter(t => t.symbol === sym);
+        symbolStats[sym].wr = symTrades.filter(t => (t.netR ?? 0) > 0).length / symTrades.length * 100;
+      }
+
+      const highMfeLosses = losses.filter(t => (t.maxFavorableR ?? 0) > 2).length;
+      const wastedEdge = losses
+        .filter(t => (t.maxFavorableR ?? 0) > 1.5)
+        .reduce((s, t) => s + ((t.maxFavorableR ?? 0) - (t.netR ?? 0)), 0);
+
+      const adjustmentSummary: Record<string, number> = {};
+      for (const adj of adjustmentsList) {
+        adjustmentSummary[adj.adjustmentType] = (adjustmentSummary[adj.adjustmentType] || 0) + 1;
+      }
+
+      const prompt = `You are an elite quantitative trading analyst. Analyze this trading system's performance data and provide actionable insights.
+
+PERFORMANCE DATA:
+- Total trades: ${trades.length} | Wins: ${wins.length} | Losses: ${losses.length}
+- Win Rate: ${(wins.length/Math.max(trades.length,1)*100).toFixed(1)}%
+- Total R: ${totalR.toFixed(2)}R
+- Avg Win: ${wins.length > 0 ? (wins.reduce((s,t)=>s+(t.netR??0),0)/wins.length).toFixed(2) : 0}R
+- Avg Loss: ${losses.length > 0 ? (losses.reduce((s,t)=>s+(t.netR??0),0)/losses.length).toFixed(2) : 0}R
+- Profit Factor: ${wins.length > 0 && losses.length > 0 ? (wins.reduce((s,t)=>s+(t.netR??0),0)/Math.abs(losses.reduce((s,t)=>s+(t.netR??0),0))).toFixed(2) : 'N/A'}
+
+WASTED EDGE ANALYSIS:
+- Trades that were >2R profitable before ending as losses: ${highMfeLosses}/${losses.length} (${(highMfeLosses/Math.max(losses.length,1)*100).toFixed(0)}%)
+- Total wasted R swing: ${wastedEdge.toFixed(1)}R
+
+PER-SYMBOL BREAKDOWN:
+${Object.entries(symbolStats).map(([sym, s]) => `${sym}: ${s.trades} trades, ${s.totalR.toFixed(1)}R, ${s.wr.toFixed(0)}% WR`).join('\n')}
+
+NEURAL POSITION MANAGER ACTIONS:
+${Object.entries(adjustmentSummary).map(([type, count]) => `${type}: ${count}`).join('\n') || 'No neural adjustments recorded yet'}
+
+EXIT REASONS:
+${(() => { const reasons: Record<string, {count: number, totalR: number}> = {}; trades.forEach(t => { const r = t.exitReason ?? 'UNKNOWN'; if (!reasons[r]) reasons[r] = {count:0,totalR:0}; reasons[r].count++; reasons[r].totalR += t.netR ?? 0; }); return Object.entries(reasons).map(([r,d]) => `${r}: ${d.count} trades, ${d.totalR.toFixed(1)}R`).join('\n'); })()}
+
+Provide your analysis in this JSON format:
+{
+  "overallAssessment": "2-3 sentence summary",
+  "strengths": ["strength1", "strength2", "strength3"],
+  "weaknesses": ["weakness1", "weakness2", "weakness3"],
+  "actionableInsights": [
+    {"title": "...", "description": "...", "priority": "HIGH|MEDIUM|LOW", "expectedImpact": "..."}
+  ],
+  "symbolRecommendations": [
+    {"symbol": "...", "action": "KEEP|REDUCE|KILL|BOOST", "reason": "..."}
+  ],
+  "leverageRecommendation": "...",
+  "riskScore": 1-10,
+  "edgeQuality": "STRONG|MODERATE|WEAK|DETERIORATING"
+}`;
+
+      const OpenAI = (await import("openai")).default;
+      const openai = new OpenAI();
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: prompt }],
+        response_format: { type: "json_object" },
+        temperature: 0.3,
+        max_tokens: 2000,
+      });
+
+      const analysis = JSON.parse(completion.choices[0].message.content || "{}");
+      lastAiAnalysis = { analysis, generatedAt: Date.now() };
+      res.json(lastAiAnalysis);
+    } catch (error: any) {
+      console.error("[AI Analysis] Error:", error.message);
+      res.status(500).json({ error: "Failed to generate AI analysis" });
+    }
+  });
+
   app.post("/api/live/cycle-log", async (req, res) => {
     try {
       const c = req.body;
@@ -4922,7 +5141,27 @@ export async function registerRoutes(
             const existingPositions = await getPositionsBySymbol(c.symbol, "OPEN", 1);
             if (existingPositions.length > 0) {
               autoTradeResult = { opened: false, reason: "position_already_open" };
-              console.log(`[Auto-Trade] SKIP ${c.symbol} — position already open`);
+
+              try {
+                const neuralSignal: NeuralSignalData = {
+                  v5Score: c.v5_score ?? null,
+                  pHold: c.p_hold ?? null,
+                  pLong: c.v5_p_long ?? c.p_long ?? null,
+                  pShort: c.v5_p_short ?? c.p_short ?? null,
+                  retMu: c.v5_ret_mu ?? c.ret_mu ?? null,
+                  mfePred: c.v5_mfe ?? c.mfe_pred ?? null,
+                  maePred: c.v5_mae ?? c.mae_pred ?? null,
+                  v5Side: c.v5_side ?? null,
+                  price: Number(c.price) || 0,
+                };
+                const neuralResult = await neuralPositionManager(existingPositions[0], neuralSignal);
+                if (neuralResult) {
+                  (autoTradeResult as any).neuralAction = neuralResult;
+                  console.log(`[Neural PM] ${c.symbol}: ${neuralResult.adjustmentType} — ${neuralResult.reason}`);
+                }
+              } catch (neuralErr: any) {
+                console.error(`[Neural PM] Error managing ${c.symbol}:`, neuralErr.message);
+              }
             } else {
               const allOpenPositions = await db.select().from(paperPositions).where(eq(paperPositions.status, "OPEN"));
               const maxPositions = 6;

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useTradingWs } from "@/hooks/use-trading-ws";
@@ -32,6 +32,11 @@ import {
   DollarSign,
   Activity,
   AlertTriangle,
+  Brain,
+  Shield,
+  ShieldAlert,
+  ShieldCheck,
+  ArrowUpDown,
 } from "lucide-react";
 import { CloseButton, PartialCloseButton, EditSLTPDialog } from "@/components/position-actions";
 
@@ -101,6 +106,9 @@ interface Position {
   qty?: number;
   initialRiskUsdt?: number;
   v5Score?: number;
+  peakProfit?: number;
+  trailPrice?: number;
+  trailMode?: string;
 }
 
 interface EquityPoint {
@@ -109,6 +117,24 @@ interface EquityPoint {
   tradeR: number;
   symbol: string;
   side: string;
+}
+
+interface PositionHealth {
+  score: number;
+  riskLevel: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  reason: string;
+  factors: {
+    pnlScore: number;
+    slTpRatioScore: number;
+    modelConfidenceScore: number;
+    timeScore: number;
+    mfeTrendScore: number;
+  };
+  currentPnlR: number;
+  peakPnlR: number;
+  giveback: number;
+  latestV5Score: number | null;
+  latestAdjustment: string | null;
 }
 
 function formatUsd(value: number): string {
@@ -151,7 +177,70 @@ function formatPrice(price: number): string {
   return price.toFixed(6);
 }
 
-function PositionPriceGauge({ pos, livePrice }: { pos: Position; livePrice?: number }) {
+const NEURAL_ADJUSTMENT_LABELS: Record<string, { label: string; color: string }> = {
+  BREAKEVEN: { label: "BE Set", color: "text-amber-400" },
+  TRAIL_TIGHTEN: { label: "Trail Tight", color: "text-cyan-400" },
+  TRAIL_WIDEN: { label: "Trail Wide", color: "text-blue-400" },
+  DIRECTION_FLIP_EXIT: { label: "Flip Exit", color: "text-red-400" },
+  CONFIDENCE_DECAY_EXIT: { label: "Decay Exit", color: "text-orange-400" },
+  CONFIDENCE_DECAY_TIGHTEN: { label: "Decay Tight", color: "text-orange-400" },
+  MFE_PROTECTION_EXIT: { label: "MFE Lock", color: "text-emerald-400" },
+  ADAPTIVE_TRAIL: { label: "Adapt Trail", color: "text-purple-400" },
+};
+
+function HealthGauge({ score, riskLevel }: { score: number; riskLevel: string }) {
+  const color = score >= 70 ? "text-emerald-400" : score >= 45 ? "text-amber-400" : score >= 25 ? "text-orange-400" : "text-red-400";
+  const bgColor = score >= 70 ? "bg-emerald-400" : score >= 45 ? "bg-amber-400" : score >= 25 ? "bg-orange-400" : "bg-red-400";
+  const bgTrack = "bg-muted/40";
+
+  return (
+    <div className="flex items-center gap-2" data-testid="health-gauge">
+      <div className={`relative w-16 h-1.5 rounded-full ${bgTrack}`}>
+        <div
+          className={`absolute top-0 left-0 h-full rounded-full transition-all duration-700 ${bgColor}`}
+          style={{ width: `${Math.max(2, Math.min(100, score))}%` }}
+        />
+      </div>
+      <span className={`text-[10px] font-bold number-mono ${color}`} data-testid="text-health-score">
+        {score}
+      </span>
+      {riskLevel === "CRITICAL" && (
+        <ShieldAlert className="w-3 h-3 text-red-400" />
+      )}
+      {riskLevel === "HIGH" && (
+        <ShieldAlert className="w-3 h-3 text-orange-400" />
+      )}
+      {riskLevel === "LOW" && (
+        <ShieldCheck className="w-3 h-3 text-emerald-400/60" />
+      )}
+    </div>
+  );
+}
+
+function MfeTracker({ currentPnlR, peakPnlR, giveback }: { currentPnlR: number; peakPnlR: number; giveback: number }) {
+  if (peakPnlR <= 0) return null;
+
+  const givebackPct = Math.round(giveback * 100);
+  const givebackColor = givebackPct < 15 ? "text-emerald-400/70" : givebackPct < 40 ? "text-amber-400/70" : "text-red-400/70";
+
+  return (
+    <div className="flex items-center gap-1.5 text-[10px]" data-testid="mfe-tracker">
+      <TrendingUp className="w-3 h-3 text-cyan-400/60" />
+      <span className="text-muted-foreground">Peak</span>
+      <span className="number-mono text-cyan-400">{peakPnlR.toFixed(2)}R</span>
+      {givebackPct > 0 && (
+        <>
+          <span className="text-muted-foreground/50">|</span>
+          <span className={`number-mono ${givebackColor}`} data-testid="text-giveback">
+            -{givebackPct}% giveback
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
+function PositionPriceGauge({ pos, livePrice, health }: { pos: Position; livePrice?: number; health?: PositionHealth }) {
   const { entryPrice, stopLoss, takeProfit, side } = pos;
   const currentPrice = livePrice ?? pos.currentPrice;
   if (!currentPrice || !stopLoss || !takeProfit) return null;
@@ -186,10 +275,29 @@ function PositionPriceGauge({ pos, livePrice }: { pos: Position; livePrice?: num
 
   const posId = typeof pos.id === "number" ? pos.id : parseInt(String(pos.id ?? "0"));
 
+  const healthScore = health?.score ?? null;
+  const isBreakeven = stopLoss != null && Math.abs(stopLoss - entryPrice) / entryPrice < 0.001;
+
+  const trailPrice = pos.trailPrice;
+  let trailPct: number | null = null;
+  if (trailPrice && range > 0) {
+    trailPct = Math.max(0, Math.min(100, ((trailPrice - lo) / range) * 100));
+  }
+
+  const pulseClass =
+    healthScore !== null && healthScore < 15
+      ? "animate-pulse border-red-500/60"
+      : healthScore !== null && healthScore < 30
+      ? "animate-pulse border-amber-500/50"
+      : "border-border/50";
+
+  const latestAdj = health?.latestAdjustment;
+  const adjInfo = latestAdj ? NEURAL_ADJUSTMENT_LABELS[latestAdj] : null;
+
   return (
-    <div className="glass-card rounded-lg border border-border/50 p-3 space-y-3" data-testid={`position-gauge-${pos.symbol}`}>
+    <div className={`glass-card rounded-lg border p-3 space-y-3 ${pulseClass}`} data-testid={`position-gauge-${pos.symbol}`}>
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="font-semibold text-sm">{pos.symbol}</span>
           <Badge
             variant="outline"
@@ -205,6 +313,16 @@ function PositionPriceGauge({ pos, livePrice }: { pos: Position; livePrice?: num
               {pos.leverage}x
             </Badge>
           )}
+          {isBreakeven && (
+            <Badge variant="outline" className="text-amber-400 border-amber-400/30 text-[10px] px-1.5" data-testid="badge-breakeven">
+              <Shield className="w-2.5 h-2.5 mr-0.5" />BE
+            </Badge>
+          )}
+          {adjInfo && (
+            <Badge variant="outline" className={`${adjInfo.color} border-current/30 text-[10px] px-1.5`} data-testid="badge-neural-status">
+              <Brain className="w-2.5 h-2.5 mr-0.5" />{adjInfo.label}
+            </Badge>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <span className={`text-sm font-bold number-mono ${isProfit ? "text-emerald-400" : "text-red-400"}`} data-testid={`text-pnlr-${pos.symbol}`}>
@@ -215,6 +333,13 @@ function PositionPriceGauge({ pos, livePrice }: { pos: Position; livePrice?: num
           </span>
         </div>
       </div>
+
+      {health && (
+        <div className="flex items-center justify-between">
+          <HealthGauge score={health.score} riskLevel={health.riskLevel} />
+          <MfeTracker currentPnlR={health.currentPnlR} peakPnlR={health.peakPnlR} giveback={health.giveback} />
+        </div>
+      )}
 
       <div className="space-y-1.5">
         <div className="relative h-8 rounded-md overflow-hidden bg-muted/30">
@@ -242,6 +367,25 @@ function PositionPriceGauge({ pos, livePrice }: { pos: Position; livePrice?: num
             style={{ left: `${clampedPricePct}%` }}
           />
 
+          {trailPct !== null && (
+            <div
+              className="absolute top-0 bottom-0 w-[2px] z-15 rounded-full bg-purple-400/70 transition-all duration-500"
+              style={{ left: `${trailPct}%` }}
+              data-testid="trail-level-indicator"
+            >
+              <div className="absolute -bottom-0.5 left-1/2 -translate-x-1/2 w-0 h-0 border-l-[2px] border-r-[2px] border-b-[3px] border-l-transparent border-r-transparent border-b-purple-400" />
+            </div>
+          )}
+
+          {isBreakeven && (
+            <div
+              className="absolute top-0 bottom-0 w-[2px] z-12 bg-amber-400/40"
+              style={{ left: `${Math.max(1, Math.min(99, entryPct))}%` }}
+            >
+              <div className="absolute top-0 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full bg-amber-400/60" />
+            </div>
+          )}
+
           <div
             className="absolute inset-y-0 left-0 flex items-center pl-1.5"
           >
@@ -260,17 +404,23 @@ function PositionPriceGauge({ pos, livePrice }: { pos: Position; livePrice?: num
 
         <div className="flex justify-between items-center text-[10px] number-mono text-muted-foreground">
           <span className="text-red-400/70">${formatPrice(isLong ? stopLoss : takeProfit)}</span>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 flex-wrap">
             <span className="text-amber-400/70">Entry ${formatPrice(entryPrice)}</span>
             <span className="text-foreground/50">→</span>
             <span className={isProfit ? "text-emerald-400" : "text-red-400"}>Now ${formatPrice(currentPrice)}</span>
+            {trailPrice && (
+              <>
+                <span className="text-foreground/50">|</span>
+                <span className="text-purple-400/70">Trail ${formatPrice(trailPrice)}</span>
+              </>
+            )}
           </div>
           <span className="text-emerald-400/70">${formatPrice(isLong ? takeProfit : stopLoss)}</span>
         </div>
       </div>
 
       <div className="flex items-center justify-between text-[10px]">
-        <div className="flex gap-3">
+        <div className="flex gap-3 flex-wrap">
           <div>
             <span className="text-muted-foreground">SL Dist: </span>
             <span className={`number-mono ${slDist < 30 ? "text-red-400 font-semibold" : "text-muted-foreground"}`}>
@@ -325,6 +475,7 @@ function PositionPriceGauge({ pos, livePrice }: { pos: Position; livePrice?: num
 export default function PaperTrading() {
   const [equityRange, setEquityRange] = useState<"7d" | "30d" | "all">("30d");
   const [livePrices, setLivePrices] = useState<Record<string, number>>({});
+  const [healthMap, setHealthMap] = useState<Record<number, PositionHealth>>({});
   const { subscribe } = useTradingWs();
 
   useEffect(() => {
@@ -365,6 +516,32 @@ export default function PaperTrading() {
     queryKey: ["/api/paper/equity-curve", `?range=${equityRange}`],
     refetchInterval: 30000,
   });
+
+  useEffect(() => {
+    if (!openPositions || openPositions.length === 0) {
+      setHealthMap({});
+      return;
+    }
+    const fetchHealth = async () => {
+      const results: Record<number, PositionHealth> = {};
+      await Promise.all(
+        openPositions.map(async (pos) => {
+          const posId = typeof pos.id === "number" ? pos.id : parseInt(String(pos.id ?? "0"));
+          if (posId <= 0) return;
+          try {
+            const resp = await fetch(`/api/paper/positions/${posId}/health`);
+            if (resp.ok) {
+              results[posId] = await resp.json();
+            }
+          } catch {}
+        })
+      );
+      setHealthMap(results);
+    };
+    fetchHealth();
+    const interval = setInterval(fetchHealth, 15000);
+    return () => clearInterval(interval);
+  }, [openPositions]);
 
   const enableMutation = useMutation({
     mutationFn: () => apiRequest("POST", "/api/paper/enable"),
@@ -649,8 +826,11 @@ export default function PaperTrading() {
 
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-sm font-medium">Open Positions</CardTitle>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <CardTitle className="text-sm font-medium">Open Positions</CardTitle>
+              <Brain className="w-4 h-4 text-purple-400/60" />
+            </div>
             {openPositions && openPositions.length > 0 && (
               <Badge variant="outline" className="text-[10px] text-cyan-400 border-cyan-400/30" data-testid="badge-open-count">
                 {openPositions.length} active
@@ -665,9 +845,17 @@ export default function PaperTrading() {
             </p>
           ) : (
             <div className="grid gap-3 sm:grid-cols-1 md:grid-cols-2 xl:grid-cols-3" data-testid="positions-grid">
-              {openPositions.map((pos, i) => (
-                <PositionPriceGauge key={pos.id ?? i} pos={pos} livePrice={livePrices[pos.symbol]} />
-              ))}
+              {openPositions.map((pos, i) => {
+                const posId = typeof pos.id === "number" ? pos.id : parseInt(String(pos.id ?? "0"));
+                return (
+                  <PositionPriceGauge
+                    key={pos.id ?? i}
+                    pos={pos}
+                    livePrice={livePrices[pos.symbol]}
+                    health={posId > 0 ? healthMap[posId] : undefined}
+                  />
+                );
+              })}
             </div>
           )}
         </CardContent>
