@@ -1,6 +1,6 @@
 import crypto from "crypto";
 
-const BASE_URL = process.env.BYBIT_API_URL || "https://api.bytick.com";
+const BASE_URL = process.env.BYBIT_API_URL || "https://api-demo.bybit.com";
 const RECV_WINDOW = "5000";
 
 function getCredentials() {
