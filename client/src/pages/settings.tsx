@@ -279,44 +279,22 @@ export default function SettingsPage() {
             Add BYBIT_API_KEY and BYBIT_API_SECRET as environment secrets to connect.
           </p>
         )}
-        {bybitStatus?.configured && !bybitStatus?.connected && (
+        {bybitStatus?.configured && !bybitStatus?.connected && bybitStatus?.error && (
           <div className="mt-2 space-y-2" data-testid="bybit-setup-guidance">
-            {bybitStatus?.error && (
-              <p className="text-xs text-red-400/80" data-testid="bybit-error-detail">{bybitStatus.error}</p>
-            )}
-            {bybitStatus?.proxy?.isRegistered ? (
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-                <p className="text-xs text-muted-foreground">
-                  Proxy: <span className="number-mono text-amber-400">{bybitStatus.proxy.url}</span> (auto-registered, but connection failed)
-                </p>
-              </div>
-            ) : bybitStatus?.proxy?.envSet ? (
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-amber-400" />
-                <p className="text-xs text-muted-foreground">
-                  GPU_TRAINER_URL: <span className="number-mono text-amber-400">{bybitStatus.proxy.url}</span>
-                </p>
-              </div>
-            ) : (
-              <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 space-y-2">
-                <p className="text-xs text-amber-400 font-medium">Tunnel Setup Required</p>
-                <p className="text-xs text-muted-foreground">
-                  Bybit API calls route through your GPU trainer's ngrok tunnel. Two ways to connect:
-                </p>
-                <ol className="text-xs text-muted-foreground list-decimal list-inside space-y-1">
-                  <li>Set <span className="number-mono text-cyan-400">GPU_TRAINER_URL</span> secret to your ngrok URL (e.g. <span className="number-mono">https://abc123.ngrok-free.app</span>)</li>
-                  <li>Or start your GPU trainer with ngrok — it will auto-register its URL</li>
-                </ol>
-              </div>
-            )}
+            <p className="text-xs text-red-400/80" data-testid="bybit-error-detail">{bybitStatus.error}</p>
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-amber-400" />
+              <p className="text-xs text-muted-foreground">
+                Mode: <span className="number-mono text-amber-400">{bybitStatus.proxy?.mode === "proxy" ? `Proxy (${bybitStatus.proxy.url})` : "Direct"}</span>
+              </p>
+            </div>
           </div>
         )}
         {bybitStatus?.configured && bybitStatus?.connected && (
-          <div className="flex items-center gap-2 mt-1" data-testid="bybit-connected-proxy">
+          <div className="flex items-center gap-2 mt-1" data-testid="bybit-connected-info">
             <div className="w-2 h-2 rounded-full bg-emerald-400" />
             <p className="text-xs text-emerald-400/70">
-              Connected via GPU proxy{bybitStatus?.proxy?.isRegistered ? " (auto-registered)" : ""} — {bybitStatus.proxy?.url}
+              {bybitStatus.proxy?.mode === "proxy" ? `Connected via GPU proxy — ${bybitStatus.proxy?.url}` : "Connected directly to Bybit API"}
             </p>
           </div>
         )}
