@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Cpu,
   Wallet,
@@ -12,6 +13,10 @@ import {
   Shield,
   Database,
   AlertTriangle,
+  Zap,
+  CheckCircle,
+  XCircle,
+  Loader2,
 } from "lucide-react";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSDT"];
@@ -19,6 +24,8 @@ const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSD
 export default function SettingsPage() {
   const [equity, setEquity] = useState<number>(0);
   const [riskPct, setRiskPct] = useState<number>(0);
+  const [liveRiskPct, setLiveRiskPct] = useState<number>(0.5);
+  const [maxDailyLoss, setMaxDailyLoss] = useState<number>(500);
 
   const { data: systemStatus } = useQuery<any>({
     queryKey: ["/api/system/status"],
@@ -28,6 +35,37 @@ export default function SettingsPage() {
   const { data: paperConfig } = useQuery<any>({
     queryKey: ["/api/paper/config"],
   });
+
+  const { data: bybitStatus, refetch: refetchBybit } = useQuery<any>({
+    queryKey: ["/api/bybit/status"],
+    refetchInterval: 30000,
+  });
+
+  const testConnectionMutation = useMutation({
+    mutationFn: () => fetch("/api/bybit/status").then(r => r.json()),
+    onSuccess: () => { refetchBybit(); },
+  });
+
+  const toggleLiveMutation = useMutation({
+    mutationFn: (enabled: boolean) => apiRequest("POST", "/api/bybit/toggle", { enabled }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bybit/status"] });
+    },
+  });
+
+  const saveLiveConfigMutation = useMutation({
+    mutationFn: () => apiRequest("PATCH", "/api/bybit/config", { riskPerTradePct: liveRiskPct, maxDailyLossUsdt: maxDailyLoss }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bybit/status"] });
+    },
+  });
+
+  useEffect(() => {
+    if (bybitStatus?.config) {
+      setLiveRiskPct(bybitStatus.config.riskPerTradePct ?? 0.5);
+      setMaxDailyLoss(bybitStatus.config.maxDailyLossUsdt ?? 500);
+    }
+  }, [bybitStatus]);
 
   const { data: prices } = useQuery<any>({
     queryKey: ["/api/market/prices"],
@@ -119,6 +157,126 @@ export default function SettingsPage() {
         {!gpuConnected && (
           <p className="text-sm text-muted-foreground" data-testid="gpu-info-text">
             GPU trainer runs locally. Configure tunnel URL to connect.
+          </p>
+        )}
+      </div>
+
+      <div
+        className={`glass-card rounded-md p-4 ${bybitStatus?.connected ? "glow-green" : ""}`}
+        data-testid="bybit-connection-card"
+      >
+        <div className="flex items-center gap-2 mb-3">
+          <Zap className="w-5 h-5 text-amber-400" />
+          <h2 className="font-semibold text-lg">Exchange Connection (Bybit)</h2>
+        </div>
+        <div className="flex items-center gap-3 mb-3">
+          {bybitStatus?.connected ? (
+            <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30" data-testid="bybit-status-badge">
+              <CheckCircle className="w-3 h-3 mr-1" /> Connected
+            </Badge>
+          ) : bybitStatus?.configured ? (
+            <Badge className="bg-red-500/20 text-red-400 border-red-500/30" data-testid="bybit-status-badge">
+              <XCircle className="w-3 h-3 mr-1" /> Connection Error
+            </Badge>
+          ) : (
+            <Badge className="bg-gray-500/20 text-gray-400 border-gray-500/30" data-testid="bybit-status-badge">
+              Not Configured
+            </Badge>
+          )}
+          {bybitStatus?.liveTradingEnabled && (
+            <Badge className="bg-red-500/20 text-red-400 border-red-500/50 animate-pulse" data-testid="live-trading-badge">
+              LIVE TRADING ACTIVE
+            </Badge>
+          )}
+        </div>
+
+        {bybitStatus?.connected && (
+          <div className="mb-3">
+            <Label className="text-muted-foreground text-xs">Account Balance (USDT)</Label>
+            <p className="number-mono text-lg text-emerald-400" data-testid="bybit-balance">
+              ${parseFloat(bybitStatus.balance || "0").toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </p>
+          </div>
+        )}
+
+        {bybitStatus?.error && !bybitStatus?.connected && (
+          <p className="text-sm text-red-400 mb-3" data-testid="bybit-error">{bybitStatus.error}</p>
+        )}
+
+        <div className="flex gap-2 mb-4">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => testConnectionMutation.mutate()}
+            disabled={testConnectionMutation.isPending}
+            data-testid="button-test-bybit"
+          >
+            {testConnectionMutation.isPending ? (
+              <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Testing...</>
+            ) : "Test Connection"}
+          </Button>
+        </div>
+
+        {bybitStatus?.connected && (
+          <div className="border-t border-border/30 pt-3 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <Label className="text-sm font-medium">Live Trading</Label>
+                <p className="text-xs text-muted-foreground">Execute real trades on Bybit when V5 signals fire</p>
+              </div>
+              <Switch
+                checked={bybitStatus?.liveTradingEnabled || false}
+                onCheckedChange={(checked) => {
+                  if (checked) {
+                    if (window.confirm("⚠️ ENABLE LIVE TRADING?\n\nThis will execute REAL trades with REAL money on Bybit when V5 signals fire.\n\nAre you sure?")) {
+                      toggleLiveMutation.mutate(true);
+                    }
+                  } else {
+                    toggleLiveMutation.mutate(false);
+                  }
+                }}
+                disabled={toggleLiveMutation.isPending}
+                data-testid="switch-live-trading"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label htmlFor="live-risk-input" className="text-xs text-muted-foreground">Risk Per Trade (%)</Label>
+                <Input
+                  id="live-risk-input"
+                  type="number"
+                  step={0.1}
+                  value={liveRiskPct}
+                  onChange={(e) => setLiveRiskPct(parseFloat(e.target.value) || 0)}
+                  data-testid="input-live-risk"
+                />
+              </div>
+              <div>
+                <Label htmlFor="max-loss-input" className="text-xs text-muted-foreground">Max Daily Loss (USDT)</Label>
+                <Input
+                  id="max-loss-input"
+                  type="number"
+                  value={maxDailyLoss}
+                  onChange={(e) => setMaxDailyLoss(parseFloat(e.target.value) || 0)}
+                  data-testid="input-max-daily-loss"
+                />
+              </div>
+            </div>
+            <Button
+              size="sm"
+              onClick={() => saveLiveConfigMutation.mutate()}
+              disabled={saveLiveConfigMutation.isPending}
+              data-testid="button-save-live-config"
+            >
+              {saveLiveConfigMutation.isPending ? "Saving..." : "Save Live Config"}
+            </Button>
+          </div>
+        )}
+
+        {!bybitStatus?.configured && (
+          <p className="text-sm text-muted-foreground">
+            Add BYBIT_API_KEY and BYBIT_API_SECRET as environment secrets to connect.
           </p>
         )}
       </div>

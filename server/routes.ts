@@ -18,6 +18,8 @@ import { getMultiTimeframeKlines } from "./binance";
 import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
 import { broadcast } from "./ws";
+import * as bybitClient from "./bybit/client";
+import { openLivePosition, closeLivePosition, amendLiveSLTP, getLivePositions, getLiveBalance, isLiveTradingEnabled, getLiveConfig, setLiveTradingEnabled, updateLiveConfig, loadLiveConfig } from "./bybit/live-engine";
 import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning, loadCandleTimestamps } from "./unified-learning-controller";
 import { getLatestFeatures } from "./feature-engine";
 import { recalculatePatternLabels } from "./pattern-memory";
@@ -5143,13 +5145,61 @@ Provide your analysis in this JSON format:
       };
       updateCachedSignal(c.symbol, cachedNeuralSignal);
 
-      let autoTradeResult: { opened: boolean; positionId?: number; reason?: string } = { opened: false };
+      let autoTradeResult: { opened: boolean; positionId?: number; reason?: string; liveOrderId?: string } = { opened: false };
 
       const isEnterDecision = typeof c.decision === "string" && c.decision.toUpperCase().includes("ENTER");
       if (isEnterDecision && c.price && c.direction) {
+        const side: "LONG" | "SHORT" = c.direction.toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+        const entryPrice = Number(c.price);
+
+        if (isLiveTradingEnabled()) {
+          try {
+            const gpuSl = c.sl_price ? Number(c.sl_price) : NaN;
+            const gpuTp = c.tp_price ? Number(c.tp_price) : NaN;
+            const gpuSlValid = Number.isFinite(gpuSl) && gpuSl > 0;
+            const gpuTpValid = Number.isFinite(gpuTp) && gpuTp > 0;
+            const gpuSlCorrectSide = side === "LONG" ? gpuSl < entryPrice : gpuSl > entryPrice;
+            const gpuTpCorrectSide = side === "LONG" ? gpuTp > entryPrice : gpuTp < entryPrice;
+
+            let liveSl: number;
+            let liveTp: number;
+            if (gpuSlValid && gpuTpValid && gpuSlCorrectSide && gpuTpCorrectSide) {
+              liveSl = gpuSl;
+              liveTp = gpuTp;
+            } else {
+              const stopDistancePct = Math.max(0.003, Math.min(0.05, 0.015));
+              const stopDistance = entryPrice * stopDistancePct;
+              const rrRatio = 2.0;
+              liveSl = side === "LONG" ? entryPrice - stopDistance : entryPrice + stopDistance;
+              liveTp = side === "LONG" ? entryPrice + (stopDistance * rrRatio) : entryPrice - (stopDistance * rrRatio);
+            }
+
+            const liveResult = await openLivePosition({
+              symbol: c.symbol,
+              side,
+              entryPrice,
+              stopLoss: liveSl,
+              takeProfit: liveTp,
+              v5Score: c.v5_score ?? 0,
+              signalConfidence: c.p_enter ?? undefined,
+            });
+
+            if (liveResult.success) {
+              autoTradeResult = { opened: true, reason: "live_bybit", liveOrderId: liveResult.orderId };
+              console.log(`[Auto-Trade → BYBIT LIVE] ${side} ${c.symbol} @ $${entryPrice} | ${liveResult.leverage}x | qty=${liveResult.qty} | orderId=${liveResult.orderId}`);
+            } else {
+              autoTradeResult = { opened: false, reason: `live_failed: ${liveResult.error}` };
+              console.warn(`[Auto-Trade → BYBIT LIVE] Failed ${c.symbol}: ${liveResult.error}`);
+            }
+          } catch (liveErr: any) {
+            autoTradeResult = { opened: false, reason: `live_error: ${liveErr.message}` };
+            console.error(`[Auto-Trade → BYBIT LIVE] Error ${c.symbol}:`, liveErr.message);
+          }
+        }
+
         const paperConfig = getConfig();
         if (!paperConfig.paperTradingEnabled) {
-          autoTradeResult = { opened: false, reason: "paper_trading_disabled" };
+          if (!autoTradeResult.opened) autoTradeResult = { opened: false, reason: "paper_trading_disabled" };
         } else {
           try {
             const existingPositions = await getPositionsBySymbol(c.symbol, "OPEN", 1);
@@ -5172,9 +5222,6 @@ Provide your analysis in this JSON format:
                 autoTradeResult = { opened: false, reason: "max_positions_reached" };
                 console.log(`[Auto-Trade] SKIP ${c.symbol} — max ${maxPositions} positions reached`);
               } else {
-                const side: "LONG" | "SHORT" = c.direction.toUpperCase() === "SHORT" ? "SHORT" : "LONG";
-                const entryPrice = Number(c.price);
-
                 let stopLoss: number;
                 let takeProfit: number;
 
@@ -5548,6 +5595,125 @@ Provide your analysis in this JSON format:
     } catch (error) {
       console.error("[OI Stats] Error:", error);
       res.status(500).json({ error: "Failed to get OI stats" });
+    }
+  });
+
+  loadLiveConfig().then(() => {
+    console.log(`[Live Trading] Config loaded: enabled=${getLiveConfig().enabled}`);
+  });
+
+  app.get("/api/bybit/status", async (_req, res) => {
+    try {
+      if (!bybitClient.isConfigured()) {
+        return res.json({ configured: false, connected: false, error: "API credentials not configured" });
+      }
+      const test = await bybitClient.testConnection();
+      res.json({
+        configured: true,
+        connected: test.success,
+        balance: test.balance,
+        error: test.error,
+        liveTradingEnabled: isLiveTradingEnabled(),
+        config: getLiveConfig(),
+      });
+    } catch (error: any) {
+      res.json({ configured: false, connected: false, error: error.message });
+    }
+  });
+
+  app.get("/api/bybit/positions", async (_req, res) => {
+    try {
+      const result = await getLivePositions();
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ positions: [], error: error.message });
+    }
+  });
+
+  app.get("/api/bybit/balance", async (_req, res) => {
+    try {
+      const result = await getLiveBalance();
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/bybit/close/:symbol", async (req, res) => {
+    try {
+      const { symbol } = req.params;
+      const { qty } = req.body || {};
+      const result = await closeLivePosition(symbol, qty);
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.post("/api/bybit/amend/:symbol", async (req, res) => {
+    try {
+      const { symbol } = req.params;
+      const { stopLoss, takeProfit } = req.body || {};
+      const params: { stopLoss?: number; takeProfit?: number } = {};
+      if (stopLoss !== undefined) {
+        const val = Number(stopLoss);
+        if (!Number.isFinite(val) || val <= 0) {
+          return res.status(400).json({ success: false, error: "Invalid stopLoss value" });
+        }
+        params.stopLoss = val;
+      }
+      if (takeProfit !== undefined) {
+        const val = Number(takeProfit);
+        if (!Number.isFinite(val) || val <= 0) {
+          return res.status(400).json({ success: false, error: "Invalid takeProfit value" });
+        }
+        params.takeProfit = val;
+      }
+      if (!params.stopLoss && !params.takeProfit) {
+        return res.status(400).json({ success: false, error: "Must provide stopLoss or takeProfit" });
+      }
+      const result = await amendLiveSLTP(symbol, params);
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.post("/api/bybit/toggle", async (req, res) => {
+    try {
+      const { enabled } = req.body;
+      if (typeof enabled !== "boolean") {
+        return res.status(400).json({ error: "enabled must be a boolean" });
+      }
+      await setLiveTradingEnabled(enabled);
+      res.json({ success: true, enabled: isLiveTradingEnabled(), config: getLiveConfig() });
+    } catch (error: any) {
+      res.status(400).json({ success: false, error: error.message });
+    }
+  });
+
+  app.patch("/api/bybit/config", async (req, res) => {
+    try {
+      const { riskPerTradePct, maxDailyLossUsdt } = req.body;
+      const updates: any = {};
+      if (riskPerTradePct !== undefined) {
+        const val = Number(riskPerTradePct);
+        if (!Number.isFinite(val) || val <= 0 || val > 5) {
+          return res.status(400).json({ success: false, error: "riskPerTradePct must be between 0 and 5" });
+        }
+        updates.riskPerTradePct = val;
+      }
+      if (maxDailyLossUsdt !== undefined) {
+        const val = Number(maxDailyLossUsdt);
+        if (!Number.isFinite(val) || val <= 0 || val > 100000) {
+          return res.status(400).json({ success: false, error: "maxDailyLossUsdt must be between 0 and 100000" });
+        }
+        updates.maxDailyLossUsdt = val;
+      }
+      await updateLiveConfig(updates);
+      res.json({ success: true, config: getLiveConfig() });
+    } catch (error: any) {
+      res.status(400).json({ success: false, error: error.message });
     }
   });
 

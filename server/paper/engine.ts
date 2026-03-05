@@ -1809,6 +1809,30 @@ export async function neuralPositionManager(
   const { broadcast } = await import("../ws");
   const { neuralAdjustments } = await import("@shared/schema");
 
+  const propagateToBybit = async (action: "amend" | "close", params?: { stopLoss?: number; takeProfit?: number }) => {
+    try {
+      const { isLiveTradingEnabled, amendLiveSLTP, closeLivePosition } = await import("../bybit/live-engine");
+      if (!isLiveTradingEnabled()) return;
+      if (action === "close") {
+        const result = await closeLivePosition(position.symbol);
+        if (result.success) {
+          console.log(`[Neural PM → Bybit] Closed ${position.symbol} on exchange`);
+        } else if (result.error && !result.error.includes("No open position")) {
+          console.warn(`[Neural PM → Bybit] Close ${position.symbol} failed: ${result.error}`);
+        }
+      } else if (action === "amend" && params) {
+        const result = await amendLiveSLTP(position.symbol, params);
+        if (result.success) {
+          console.log(`[Neural PM → Bybit] Amended ${position.symbol} SL/TP on exchange`);
+        } else if (result.error && !result.error.includes("No open position")) {
+          console.warn(`[Neural PM → Bybit] Amend ${position.symbol} failed: ${result.error}`);
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[Neural PM → Bybit] Error propagating to exchange: ${err.message}`);
+    }
+  };
+
   const currentPrice = signal.price;
   if (!currentPrice || currentPrice <= 0) return null;
 
@@ -1867,6 +1891,7 @@ export async function neuralPositionManager(
     await closePosition(fresh, currentPrice, exitReason, syntheticCtx);
     broadcast("TRADE_CLOSE", { positionId: position.id, symbol: position.symbol, reason: exitReason, exitPrice: currentPrice });
     await recordAdjustment(adjType, position.stopLoss, null, reason);
+    await propagateToBybit("close");
     return { action: "CLOSE", adjustmentType: adjType, reason, positionClosed: true, exitReason };
   };
 
@@ -1904,6 +1929,7 @@ export async function neuralPositionManager(
       await storage.updatePosition(position.id, { stopLoss: breakevenSl });
       broadcast("TRADE_UPDATE", { positionId: position.id, symbol: position.symbol, side: position.side, action: "NEURAL_ADJUST", stopLoss: breakevenSl, adjustmentType: "CONFIDENCE_DECAY" });
       await recordAdjustment("CONFIDENCE_DECAY_TIGHTEN", prevSl, breakevenSl, reason);
+      await propagateToBybit("amend", { stopLoss: breakevenSl });
 
       return { action: "TIGHTEN_SL", adjustmentType: "CONFIDENCE_DECAY_TIGHTEN", previousSl: prevSl ?? undefined, newSl: breakevenSl, reason, positionClosed: false };
     }
@@ -1924,6 +1950,7 @@ export async function neuralPositionManager(
       await storage.updatePosition(position.id, { stopLoss: breakevenPrice });
       broadcast("TRADE_UPDATE", { positionId: position.id, symbol: position.symbol, side: position.side, action: "NEURAL_ADJUST", stopLoss: breakevenPrice, adjustmentType: "BREAKEVEN" });
       await recordAdjustment("BREAKEVEN", currentSl, breakevenPrice, reason);
+      await propagateToBybit("amend", { stopLoss: breakevenPrice });
 
       return { action: "MOVE_BE", adjustmentType: "BREAKEVEN", previousSl: currentSl, newSl: breakevenPrice, reason, positionClosed: false };
     }
@@ -1950,6 +1977,7 @@ export async function neuralPositionManager(
       await storage.updatePosition(position.id, { stopLoss: adaptiveTrail, trailMode: "neural" });
       broadcast("TRADE_UPDATE", { positionId: position.id, symbol: position.symbol, side: position.side, action: "NEURAL_ADJUST", stopLoss: adaptiveTrail, adjustmentType: "ADAPTIVE_TRAIL" });
       await recordAdjustment("ADAPTIVE_TRAIL", currentSl, adaptiveTrail, reason);
+      await propagateToBybit("amend", { stopLoss: adaptiveTrail });
 
       return { action: "TRAIL", adjustmentType: "ADAPTIVE_TRAIL", previousSl: currentSl, newSl: adaptiveTrail, reason, positionClosed: false };
     }
