@@ -32,7 +32,7 @@ async function fetchPrices() {
 function startPollLoop() {
   fetchPrices();
   if (pollInterval) clearInterval(pollInterval);
-  pollInterval = setInterval(fetchPrices, 2000);
+  pollInterval = setInterval(fetchPrices, 1000);
 }
 
 function startBroadcastLoop() {
@@ -47,5 +47,5 @@ function startBroadcastLoop() {
 export function startBinanceWs() {
   startPollLoop();
   startBroadcastLoop();
-  console.log("[Price Ticker] Started (Binance Vision REST, 2s poll, 1s broadcast)");
+  console.log("[Price Ticker] Started (Binance Vision REST, 1s poll, 1s broadcast)");
 }

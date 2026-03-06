@@ -89,6 +89,10 @@ export async function registerRoutes(
   app.use("/api/paper", paperRoutes);
   app.use("/api", ingestRouter);
 
+  app.get("/api/ping", (_req, res) => {
+    res.json({ ts: Date.now() });
+  });
+
   app.get("/api/v5/signals", async (req, res) => {
     try {
       const symbol = req.query.symbol as string | undefined;

@@ -14,17 +14,6 @@ import {
   DialogFooter,
   DialogClose,
 } from "@/components/ui/dialog";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
 import { X, Scissors, Pencil, Loader2 } from "lucide-react";
 
 function invalidatePositions() {
@@ -33,10 +22,10 @@ function invalidatePositions() {
   queryClient.invalidateQueries({ queryKey: ["/api/paper/risk-alerts"] });
 }
 
-export function CloseButton({ positionId, symbol, side }: { positionId: number; symbol: string; side: string }) {
+export function CloseButton({ positionId, symbol, side, livePrice }: { positionId: number; symbol: string; side: string; livePrice?: number }) {
   const { toast } = useToast();
   const mutation = useMutation({
-    mutationFn: () => apiRequest("POST", `/api/paper/positions/${positionId}/close`),
+    mutationFn: () => apiRequest("POST", `/api/paper/positions/${positionId}/close`, livePrice ? { exitPrice: livePrice } : {}),
     onSuccess: async (res) => {
       const data = await res.json();
       invalidatePositions();
@@ -52,38 +41,16 @@ export function CloseButton({ positionId, symbol, side }: { positionId: number; 
   });
 
   return (
-    <AlertDialog>
-      <AlertDialogTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7 text-red-400 hover:text-red-300 hover:bg-red-500/20"
-          data-testid={`button-close-position-${positionId}`}
-        >
-          <X className="w-4 h-4" />
-        </Button>
-      </AlertDialogTrigger>
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>Close Position</AlertDialogTitle>
-          <AlertDialogDescription>
-            Close {symbol} {side} at market price? This action cannot be undone.
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel data-testid="button-cancel-close">Cancel</AlertDialogCancel>
-          <AlertDialogAction
-            onClick={() => mutation.mutate()}
-            className="bg-red-600 hover:bg-red-700"
-            data-testid="button-confirm-close"
-            disabled={mutation.isPending}
-          >
-            {mutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : null}
-            Close Position
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
+    <Button
+      variant="ghost"
+      size="icon"
+      className="h-7 w-7 text-red-400 hover:text-red-300 hover:bg-red-500/20"
+      onClick={() => mutation.mutate()}
+      disabled={mutation.isPending}
+      data-testid={`button-close-position-${positionId}`}
+    >
+      {mutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <X className="w-4 h-4" />}
+    </Button>
   );
 }
 

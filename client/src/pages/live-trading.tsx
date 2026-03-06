@@ -59,6 +59,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { CloseButton, PartialCloseButton, EditSLTPDialog, SLTPProgressBar } from "@/components/position-actions";
+import { usePingMonitor } from "@/hooks/use-ping";
+import { PingBadge } from "@/components/ping-badge";
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSDT"] as const;
 const TIMEFRAMES = ["15m", "1h", "4h"] as const;
@@ -357,6 +359,7 @@ export default function LiveTrading() {
   const [selectedSymbol, setSelectedSymbol] = useState<string>("BTCUSDT");
   const [timeframe, setTimeframe] = useState<string>("15m");
   const [historyFilter, setHistoryFilter] = useState<string>("ALL");
+  const ping = usePingMonitor();
 
   const { data: prices, isLoading: pricesLoading } = useQuery<PriceData>({
     queryKey: ["/api/market/prices"],
@@ -546,9 +549,7 @@ export default function LiveTrading() {
                         size="sm"
                         className="h-5 px-2 text-[10px] text-red-400 hover:text-red-300"
                         onClick={() => {
-                          if (window.confirm(`Close ${pos.symbol} position on Bybit?`)) {
-                            closeBybitMutation.mutate(pos.symbol);
-                          }
+                          closeBybitMutation.mutate(pos.symbol);
                         }}
                         disabled={closeBybitMutation.isPending}
                         data-testid={`button-close-live-${pos.symbol}`}
@@ -584,6 +585,7 @@ export default function LiveTrading() {
           </div>
         )}
         <div className="ml-auto flex items-center gap-3">
+          <PingBadge ping={ping} />
           {SYMBOLS.map((sym) => {
             const ts = lastScanPerSymbol[sym];
             if (!ts) return null;
@@ -1075,7 +1077,7 @@ export default function LiveTrading() {
                                 currentTP={pos.tp1}
                                 entryPrice={pos.entryPrice}
                               />
-                              <CloseButton positionId={pos.id} symbol={pos.symbol} side={pos.side} />
+                              <CloseButton positionId={pos.id} symbol={pos.symbol} side={pos.side} livePrice={curPrice} />
                             </div>
                           </TableCell>
                         </TableRow>
