@@ -549,22 +549,16 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
 
     is_long_label = (action_true == LONG_IDX)
     is_short_label = (action_true == SHORT_IDX)
-    target_long = is_long_label.float().mean()
-    target_short = is_short_label.float().mean()
 
     eps = 1e-8
-    target_sum = target_long + target_short
-    if target_sum.item() < 1e-6:
-        L_side_balance = action_logits.new_tensor(0.0)
-    else:
-        target_dist = torch.stack([target_long, target_short]) / (target_sum + eps)
-        pred_dist = torch.stack([p_long_mean, p_short_mean])
-        pred_dist = pred_dist / (pred_dist.sum() + eps)
-        L_side_balance = F.kl_div(
-            (pred_dist + eps).log(),
-            target_dist.detach(),
-            reduction="batchmean"
-        )
+    target_dist = torch.tensor([0.5, 0.5], device=action_logits.device)
+    pred_dist = torch.stack([p_long_mean, p_short_mean])
+    pred_dist = pred_dist / (pred_dist.sum() + eps)
+    L_side_balance = F.kl_div(
+        (pred_dist + eps).log(),
+        target_dist.detach(),
+        reduction="batchmean"
+    )
 
     L_action = L_action + SIDE_BAL_W * L_side_balance
 
@@ -4070,6 +4064,10 @@ def train_v5_model(
 
     log.info(f"[V5_ACTION_DIST] TRAIN: HOLD={n_hold} ({n_hold/n_total_act:.1%}) "
              f"LONG={n_long} ({n_long/n_total_act:.1%}) SHORT={n_short} ({n_short/n_total_act:.1%})")
+    long_pct = n_long / max(n_long + n_short, 1) * 100
+    short_pct = n_short / max(n_long + n_short, 1) * 100
+    log.info(f"[V5_SIDE_BALANCE] Training label bias: LONG={long_pct:.1f}% SHORT={short_pct:.1f}% | "
+             f"Using balanced 50/50 KL target (not training distribution)")
 
     action_class_weights = np.ones(3, dtype=np.float32)
     if n_hold > 0 and n_long > 0 and n_short > 0:
