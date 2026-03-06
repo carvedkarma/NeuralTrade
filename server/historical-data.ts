@@ -1,6 +1,7 @@
 import { db } from "./db";
 import { candles, learningState, backfillJobs } from "./db/schema";
 import { eq, and, gte, gt, lte, sql, desc, asc, or, ne } from "drizzle-orm";
+import { TRADING_SYMBOLS } from "@shared/symbols";
 
 const BINANCE_VISION_BASE = "https://data-api.binance.vision";
 const BINANCE_FAPI_BASE = "https://fapi.binance.com";
@@ -843,7 +844,7 @@ export async function checkIncompleteBackfillJobs(): Promise<{
 }
 
 // Multi-asset data management
-const SUPPORTED_ASSETS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "XRPUSDT", "ADAUSDT"];
+const SUPPORTED_ASSETS = [...TRADING_SYMBOLS];
 
 export interface AssetDataSummary {
   symbol: string;

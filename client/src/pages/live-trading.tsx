@@ -61,8 +61,9 @@ import { Slider } from "@/components/ui/slider";
 import { CloseButton, PartialCloseButton, EditSLTPDialog, SLTPProgressBar } from "@/components/position-actions";
 import { usePingMonitor } from "@/hooks/use-ping";
 import { PingBadge } from "@/components/ping-badge";
+import { TRADING_SYMBOLS } from "@shared/symbols";
 
-const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSDT"] as const;
+const SYMBOLS = TRADING_SYMBOLS;
 const TIMEFRAMES = ["15m", "1h", "4h"] as const;
 
 type PriceData = Record<string, { price: number; change24h: number; high24h: number; low24h: number }>;
@@ -225,7 +226,7 @@ function NewTradePanel({ prices }: { prices: PriceData | undefined }) {
         <div className="space-y-5 mt-4">
           <div>
             <Label className="text-xs text-muted-foreground mb-2 block">Symbol</Label>
-            <div className="grid grid-cols-3 gap-1.5" data-testid="trade-symbol-selector">
+            <div className="grid grid-cols-4 gap-1.5" data-testid="trade-symbol-selector">
               {SYMBOLS.map((sym) => (
                 <Button
                   key={sym}

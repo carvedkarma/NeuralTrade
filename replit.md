@@ -34,6 +34,16 @@ The backend provides a comprehensive set of API routes and services to support t
 -   **Bybit Client & Live Engine:** Provides an interface for interacting with the Bybit V5 REST API for live trading operations, including opening/closing positions, amending SL/TP, and managing account configurations. It supports both direct and proxy modes for API calls.
 -   **WebSocket Server:** Enables real-time event streaming for continuous updates on cycles, trades, and execution states.
 
+### Symbol Configuration
+All 20 trading symbols are defined in a single source of truth: `shared/symbols.ts`. This file exports:
+- `TRADING_SYMBOLS`: Array of all 20 symbol strings
+- `QTY_PRECISION`: Bybit quantity precision per symbol (decimal places for order qty)
+- `PRICE_PRECISION`: Bybit price precision per symbol (decimal places for order price)
+
+All server files, client pages, and GPU trainer scripts import from this shared config.
+
+**20 Symbols:** BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, AVAXUSDT, ADAUSDT, DOGEUSDT, LINKUSDT, LTCUSDT, NEARUSDT, PEPEUSDT, SUIUSDT, AAVEUSDT, ARBUSDT, DOTUSDT, MATICUSDT, FILUSDT, APTUSDT, OPUSDT
+
 ### Database (PostgreSQL via Drizzle ORM)
 The system leverages PostgreSQL with Drizzle ORM for data persistence.
 
@@ -49,10 +59,12 @@ The system leverages PostgreSQL with Drizzle ORM for data persistence.
 ### v5 Neural Network
 The core trading intelligence is provided by a v5 neural network, `V5Forecaster`, running on a local GPU.
 -   **Architecture:** Multi-head output (return distribution, MFE, MAE, action probabilities) based on 85 features from a 15-minute timeframe.
--   **Symbols:** Supports trading for BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, AVAXUSDT.
+-   **Symbols:** Supports trading for all 20 symbols defined in `shared/symbols.ts`.
 -   **Composite Scoring:** Employs a V5 Composite Scoring Engine for signal evaluation.
 -   **Per-symbol Edge Learning:** Incorporates symbol-specific scalers, thresholds, and kill switches for refined trading.
 -   **Live Feature Pipeline:** Integrates real-time funding rates and open interest data during live inference to ensure feature consistency with training.
+-   **Side Balance fix** (`v5_train.py`): KL divergence loss uses balanced 50/50 LONG/SHORT target instead of biased training label distribution. Training data (2021-2026 bull market) had more LONG labels, causing the model to systematically favor LONG. Fix requires retraining.
+-   **Live feature pipeline** (`gpu_trainer/live_runner.py`): `_compute_features_for_symbol()` fetches real funding rate (from Binance FAPI `/fapi/v1/fundingRate`) and open interest (`/futures/data/openInterestHist`) during live inference, matching the training pipeline. Funding cached 30min (TTL), OI cached 15min. Falls back to zeros on fetch failure. One-time `[Feature Check]` diagnostic log per symbol per session.
 
 ## External Dependencies
 

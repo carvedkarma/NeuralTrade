@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bulk download 15m candle data for all 7 symbols.
+"""Bulk download 15m candle data for all 20 symbols.
 
 Strategy:
 1. For symbols already in DB (BTC/ETH/SOL/BNB) - export directly from dashboard API (fast)
@@ -21,7 +21,11 @@ from datetime import datetime
 
 import pandas as pd
 
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "XRPUSDT", "ADAUSDT"]
+SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "XRPUSDT", "ADAUSDT",
+    "DOGEUSDT", "LINKUSDT", "LTCUSDT", "NEARUSDT", "PEPEUSDT", "SUIUSDT",
+    "AAVEUSDT", "ARBUSDT", "DOTUSDT", "MATICUSDT", "FILUSDT", "APTUSDT", "OPUSDT",
+]
 DATA_DIR = Path(__file__).parent / "data_cache"
 INTERVAL = "15m"
 MS_15M = 15 * 60 * 1000
@@ -32,7 +36,6 @@ DASHBOARD_URL = "http://localhost:5000"
 
 BINANCE_ENDPOINTS = [
     "https://data-api.binance.vision/api/v3/klines",
-    "https://api.binance.com/api/v3/klines",
 ]
 
 
@@ -108,7 +111,7 @@ def download_from_binance(symbol: str, days_back: int = DAYS_BACK) -> pd.DataFra
             pct = min(99, int(batch_num / expected_batches * 100))
             print(f"  [{symbol}] {pct}% - {len(all_candles):,} candles...", flush=True)
         
-        time.sleep(0.02)
+        time.sleep(0.005)
     
     if not all_candles:
         return pd.DataFrame()

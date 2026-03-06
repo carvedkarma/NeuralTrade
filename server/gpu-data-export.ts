@@ -1,6 +1,7 @@
 import { db } from "./db";
 import { candles } from "@shared/schema";
 import { eq, and, gte, lte, asc, desc, sql } from "drizzle-orm";
+import { TRADING_SYMBOLS } from "@shared/symbols";
 
 interface CandleRow {
   timestamp: number;
@@ -265,7 +266,7 @@ export async function exportCrossAssetAligned(
   count: number;
   symbols: string[];
 }> {
-  const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "XRPUSDT", "ADAUSDT"];
+  const symbols = [...TRADING_SYMBOLS];
   
   const allCandles: Record<string, Map<number, CandleRow>> = {};
   for (const sym of symbols) {

@@ -5156,8 +5156,8 @@ Examples:
 
     parser.add_argument("--live", action="store_true",
                         help="Run continuous live multi-asset inference loop")
-    parser.add_argument("--symbols", type=str, default="BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,AVAXUSDT,XRPUSDT,ADAUSDT",
-                        help="Comma-separated symbols to monitor (default: BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,AVAXUSDT,XRPUSDT,ADAUSDT)")
+    parser.add_argument("--symbols", type=str, default="BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,AVAXUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,LINKUSDT,LTCUSDT,NEARUSDT,PEPEUSDT,SUIUSDT,AAVEUSDT,ARBUSDT,DOTUSDT,MATICUSDT,FILUSDT,APTUSDT,OPUSDT",
+                        help="Comma-separated symbols to monitor (default: all 20 symbols)")
     parser.add_argument("--interval", type=str, default="15m",
                         help="Signal timeframe interval (default: 15m)")
     parser.add_argument("--paper", action="store_true", default=False,

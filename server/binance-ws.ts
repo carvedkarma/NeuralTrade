@@ -1,6 +1,7 @@
 import { broadcast, getClientCount } from "./ws";
+import { TRADING_SYMBOLS } from "@shared/symbols";
 
-const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSDT"];
+const SYMBOLS = [...TRADING_SYMBOLS];
 const VISION_BASE = "https://data-api.binance.vision/api/v3";
 
 const latestPrices: Record<string, number> = {};

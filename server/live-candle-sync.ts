@@ -2,11 +2,12 @@ import { db } from "./db";
 import { candles } from "./db/schema";
 import { eq, and, desc } from "drizzle-orm";
 import { getCandlesBinanceVision, getBTCPriceBinanceVision } from "./binance-vision";
+import { TRADING_SYMBOLS } from "@shared/symbols";
 
 const FIFTEEN_MIN_MS = 15 * 60 * 1000;
 const SYNC_INTERVAL_MS = 60000;
 
-const SYNC_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "XRPUSDT", "ADAUSDT"];
+const SYNC_SYMBOLS = [...TRADING_SYMBOLS];
 
 interface SyncStatus {
   isRunning: boolean;

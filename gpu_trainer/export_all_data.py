@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export all 7 symbol datasets from the dashboard API to parquet files for GPU training."""
+"""Export all 20 symbol datasets from the dashboard API to parquet files for GPU training."""
 
 import os
 import sys
@@ -8,7 +8,11 @@ import requests
 import pandas as pd
 from pathlib import Path
 
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "XRPUSDT", "ADAUSDT"]
+SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT", "XRPUSDT", "ADAUSDT",
+    "DOGEUSDT", "LINKUSDT", "LTCUSDT", "NEARUSDT", "PEPEUSDT", "SUIUSDT",
+    "AAVEUSDT", "ARBUSDT", "DOTUSDT", "MATICUSDT", "FILUSDT", "APTUSDT", "OPUSDT",
+]
 DATA_DIR = Path(__file__).parent / "data_cache"
 MIN_CANDLES = 20000
 

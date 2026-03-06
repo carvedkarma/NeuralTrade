@@ -18,8 +18,9 @@ import {
   XCircle,
   Loader2,
 } from "lucide-react";
+import { TRADING_SYMBOLS } from "@shared/symbols";
 
-const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSDT"];
+const SYMBOLS = TRADING_SYMBOLS;
 
 export default function SettingsPage() {
   const [equity, setEquity] = useState<number>(0);
@@ -360,7 +361,7 @@ export default function SettingsPage() {
           <InfoItem label="Architecture" value="V5Forecaster (multi-head)" />
           <InfoItem label="Features" value="85 (STF:44, ENH:24, HTF:12, REGIME:5)" />
           <InfoItem label="Timeframe" value="15m with adaptive horizon (8-48 bars)" />
-          <InfoItem label="Symbols" value="BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, AVAXUSDT" />
+          <InfoItem label="Symbols" value={SYMBOLS.map(s => s.replace("USDT", "")).join(", ")} />
           <InfoItem label="Engine" value="V5 Composite Scoring (score ≥ 0.02)" />
           <InfoItem label="Version" value="v5.0" />
         </div>

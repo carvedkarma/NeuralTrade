@@ -3,8 +3,9 @@ import { computeSignalLeverage } from "../paper/engine";
 import { db } from "../db";
 import { settings } from "@shared/schema";
 import { eq } from "drizzle-orm";
+import { TRADING_SYMBOLS, QTY_PRECISION, PRICE_PRECISION } from "@shared/symbols";
 
-const SUPPORTED_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSDT"];
+const SUPPORTED_SYMBOLS: readonly string[] = TRADING_SYMBOLS;
 const MAX_OPEN_POSITIONS = 6;
 
 interface LiveTradingConfig {
@@ -96,28 +97,12 @@ function resetDailyLossIfNeeded(): void {
 }
 
 function formatQty(symbol: string, qty: number): string {
-  const precisionMap: Record<string, number> = {
-    BTCUSDT: 3,
-    ETHUSDT: 2,
-    SOLUSDT: 1,
-    BNBUSDT: 2,
-    XRPUSDT: 0,
-    AVAXUSDT: 1,
-  };
-  const precision = precisionMap[symbol] ?? 3;
+  const precision = QTY_PRECISION[symbol] ?? 3;
   return qty.toFixed(precision);
 }
 
 function formatPrice(symbol: string, price: number): string {
-  const precisionMap: Record<string, number> = {
-    BTCUSDT: 2,
-    ETHUSDT: 2,
-    SOLUSDT: 2,
-    BNBUSDT: 2,
-    XRPUSDT: 4,
-    AVAXUSDT: 4,
-  };
-  const precision = precisionMap[symbol] ?? 2;
+  const precision = PRICE_PRECISION[symbol] ?? 2;
   return price.toFixed(precision);
 }
 

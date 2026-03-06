@@ -19,8 +19,9 @@ import {
 import { CloseButton } from "@/components/position-actions";
 import { useTradingWs } from "@/hooks/use-trading-ws";
 import { queryClient } from "@/lib/queryClient";
+import { TRADING_SYMBOLS } from "@shared/symbols";
 
-const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSDT"] as const;
+const SYMBOLS = TRADING_SYMBOLS;
 
 interface CycleLog {
   id: number;
@@ -278,7 +279,7 @@ export default function CommandCenter() {
         </span>
         {gpuLive && (
           <span className="text-xs text-muted-foreground">
-            Scanning 6 assets every 15m
+            Scanning {SYMBOLS.length} assets every 15m
           </span>
         )}
         {lastSignal?.signalTs && (
@@ -359,7 +360,7 @@ export default function CommandCenter() {
         )}
       </div>
 
-      <div className="grid grid-cols-3 gap-3" data-testid="market-grid">
+      <div className="grid grid-cols-4 gap-3" data-testid="market-grid">
         {SYMBOLS.map((sym) => (
           <MarketCard
             key={sym}
