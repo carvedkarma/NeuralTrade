@@ -4489,7 +4489,7 @@ def train_v5_model(
                     'per_symbol_thresholds': best_per_sym_thresholds,
                     'per_symbol_scalers': {
                         sym: {'center_': s.center_.tolist(), 'scale_': s.scale_.tolist()}
-                        for sym, s in per_symbol_scalers.items()
+                        for sym, s in per_symbol_scalers.items() if s is not None
                     } if per_symbol_scalers else None,
                 }, checkpoint_dir / "best_v5_expectancy.pt")
                 log.info(f"[V5_CKPT] New best ({promote_metric}): expect={best_expectancy:.4f} "
@@ -4514,7 +4514,7 @@ def train_v5_model(
             if per_symbol_scalers:
                 ckpt_loss_data['per_symbol_scalers'] = {
                     sym: {'center': s.center_, 'scale': s.scale_}
-                    for sym, s in per_symbol_scalers.items()
+                    for sym, s in per_symbol_scalers.items() if s is not None
                 }
             torch.save(ckpt_loss_data, checkpoint_dir / "best_v5_loss.pt")
             log.info(f"[V5_CKPT] New best val_loss={best_val_loss:.4f}")
