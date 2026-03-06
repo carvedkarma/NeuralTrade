@@ -54,13 +54,15 @@ Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), 
   - `GET /api/paper/trade-history` — Paper trade history (supports `symbol`, `limit`, `offset`)
   - `POST /api/ingest/*` — Signal ingest from GPU trainer
   - `POST /api/gpu/push-prediction` — Multi-head prediction push from GPU trainer (records activity for connection detection)
-  - `GET /api/bybit/status` — Bybit connection status, live trading enabled flag, config
-  - `GET /api/bybit/positions` — Current open positions on Bybit (filtered to non-zero size)
-  - `GET /api/bybit/balance` — USDT wallet balance (equity, available, unrealised PnL)
-  - `POST /api/bybit/close/:symbol` — Close position on Bybit (market order, reduceOnly)
-  - `POST /api/bybit/amend/:symbol` — Amend SL/TP on open Bybit position via setTradingStop
+  - `GET /api/bybit/status` — Bybit connection status, live trading enabled flag, config, execution service status
+  - `GET /api/bybit/positions` — Current open positions (from execution service cache if connected, otherwise direct Bybit API)
+  - `GET /api/bybit/balance` — USDT wallet balance (from execution service cache if connected, otherwise direct)
+  - `POST /api/bybit/close/:symbol` — Close position on Bybit via proxy (market order, reduceOnly)
+  - `POST /api/bybit/amend/:symbol` — Amend SL/TP on open Bybit position via proxy (setTradingStop)
   - `POST /api/bybit/toggle` — Enable/disable live trading (requires testConnection success)
   - `PATCH /api/bybit/config` — Update live trading config (riskPerTradePct, maxDailyLossUsdt)
+  - `POST /api/execution/push-state` — Receive Bybit positions/balance push from GPU trainer execution service
+  - `GET /api/execution/state` — Current execution service state and connection status
 
 - **Key Server Files:**
   - `server/ingest.ts` — Receives GPU trainer events (CYCLE_UPDATE, TRADE_OPEN/CLOSE), saves V5 model outputs (retMu, mfePred, maePred, pHold, pLong, pShort)
@@ -69,7 +71,8 @@ Built with React + TypeScript + Vite, using shadcn/ui (Radix UI, Tailwind CSS), 
   - `server/paper/` — Paper trading engine (routes, storage, engine, config)
   - `server/paper/storage.ts` — Paper storage with getPositionsBySymbol(), recordTradeClose(), getTradeHistory()
   - `server/paper/engine.ts` — Paper engine with position monitor (30s interval, checks SL/TP1/TP2 for all open positions across all symbols, broadcasts TRADE_CLOSE via WebSocket). `processCandle()` skips v5_signal-sourced positions to avoid cross-symbol price contamination from the legacy BTCUSDT-only `executePaperTrade()` loop in storage.ts. **Neural Position Manager**: `neuralPositionManager()` re-evaluates open positions every V5 cycle — direction flip exit, MFE protection exit, confidence decay tightening, breakeven automation, adaptive trailing (giveback % scales with V5 score). Neural PM propagates SL/TP changes and closes to Bybit when live trading is enabled. **Position Health**: `computePositionHealth()` returns 0-100 health score from weighted factors (P&L, SL/TP distance, model confidence, time, MFE trend).
-  - `server/bybit/client.ts` — Bybit V5 REST API client with HMAC-SHA256 auth. Methods: getWalletBalance, getTicker, getPositions, createOrder, amendOrder, cancelOrder, setLeverage, setTradingStop, getKlines, getOrderHistory, getClosedPnl. Base URL: api.bybit.com (mainnet).
+  - `server/execution-bridge.ts` — Execution Service bridge: caches positions/balance pushed from GPU trainer, tracks connection status (30s timeout), broadcasts EXECUTION_STATE via WebSocket
+  - `server/bybit/client.ts` — Bybit V5 REST API client with HMAC-SHA256 auth. Methods: getWalletBalance, getTicker, getPositions, createOrder, amendOrder, cancelOrder, setLeverage, setTradingStop, getKlines, getOrderHistory, getClosedPnl. Base URL: api.bybit.com (mainnet). Supports direct mode and proxy mode (routes through GPU trainer `/bybit-proxy` endpoint when registered).
   - `server/bybit/live-engine.ts` — Live trading execution engine. openLivePosition (market order with SL/TP, signal-strength leverage), closeLivePosition (reduceOnly), amendLiveSLTP (setTradingStop). Config persisted to DB (settings table). Safety: max 6 positions, 1 per symbol, daily loss limit, requires testConnection before enable. formatQty/formatPrice with per-symbol decimal precision.
   - `server/ws.ts` — WebSocket server for real-time event streaming (broadcasts CYCLE_UPDATE on push, LIVE_TRADE_OPEN/CLOSE events)
 

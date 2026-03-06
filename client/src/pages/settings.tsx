@@ -298,6 +298,16 @@ export default function SettingsPage() {
             </p>
           </div>
         )}
+        {bybitStatus?.executionService && (
+          <div className="flex items-center gap-2 mt-1" data-testid="execution-service-status">
+            <div className={`w-2 h-2 rounded-full ${bybitStatus.executionService.connected ? "bg-emerald-400 pulse-dot" : "bg-muted-foreground"}`} />
+            <p className={`text-xs ${bybitStatus.executionService.connected ? "text-emerald-400/70" : "text-muted-foreground"}`}>
+              {bybitStatus.executionService.connected
+                ? `Execution Service connected — ${bybitStatus.executionService.positionCount} positions, last push ${Math.round((bybitStatus.executionService.lastPushAgo || 0) / 1000)}s ago`
+                : "Execution Service not connected — start GPU trainer with Bybit keys to enable"}
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="glass-card rounded-md p-4" data-testid="account-settings-card">

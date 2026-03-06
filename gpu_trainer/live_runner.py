@@ -798,6 +798,28 @@ class LiveRunner:
         except Exception as e:
             log.warning(f"[GPU REG] Failed to register: {e}")
 
+    def _start_execution_service(self):
+        """Start the Bybit execution service push loop if API keys are available."""
+        import os
+        api_key = os.environ.get("BYBIT_API_KEY", "")
+        api_secret = os.environ.get("BYBIT_API_SECRET", "")
+        if not api_key or not api_secret:
+            log.info("[Execution Service] No BYBIT_API_KEY/SECRET — skipping execution service")
+            return
+        try:
+            from execution_service import start_execution_service
+            start_execution_service(
+                replit_url=self.replit_url,
+                gpu_self_url=self.gpu_self_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                interval=5,
+                daemon=True,
+            )
+            log.info("[Execution Service] Bybit state push loop started")
+        except Exception as e:
+            log.warning(f"[Execution Service] Failed to start: {e}")
+
     def _init_fetcher(self):
         from data.pipeline import BinanceDataFetcher
         self.fetcher = BinanceDataFetcher(
@@ -1087,6 +1109,7 @@ class LiveRunner:
 
         self.gpu_self_url = self._detect_gpu_self_url()
         self._register_gpu_url()
+        self._start_execution_service()
 
         self.model, self.engineer, self.feature_columns, self.temperature, self.symbol_map = _load_model(self.device)
         self._init_fetcher()

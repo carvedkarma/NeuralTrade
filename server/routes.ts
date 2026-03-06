@@ -19,6 +19,7 @@ import { strategyLearner } from "./strategy-learner";
 import { gpuBridge } from "./gpu-bridge";
 import { broadcast } from "./ws";
 import * as bybitClient from "./bybit/client";
+import { executionBridge } from "./execution-bridge";
 import { openLivePosition, closeLivePosition, amendLiveSLTP, getLivePositions, getLiveBalance, isLiveTradingEnabled, getLiveConfig, setLiveTradingEnabled, updateLiveConfig, loadLiveConfig } from "./bybit/live-engine";
 import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning, loadCandleTimestamps } from "./unified-learning-controller";
 import { getLatestFeatures } from "./feature-engine";
@@ -5627,8 +5628,21 @@ Provide your analysis in this JSON format:
   app.get("/api/bybit/status", async (_req, res) => {
     try {
       const proxyStatus = bybitClient.getProxyStatus();
+      const execStatus = executionBridge.getStatus();
       if (!bybitClient.isConfigured()) {
-        return res.json({ configured: false, connected: false, error: "API credentials not configured", proxy: proxyStatus });
+        return res.json({ configured: false, connected: false, error: "API credentials not configured", proxy: proxyStatus, executionService: execStatus });
+      }
+      if (execStatus.connected) {
+        const balance = executionBridge.getBalance();
+        return res.json({
+          configured: true,
+          connected: true,
+          balance: balance ? parseFloat(balance.walletBalance || "0") : null,
+          liveTradingEnabled: isLiveTradingEnabled(),
+          config: getLiveConfig(),
+          proxy: proxyStatus,
+          executionService: execStatus,
+        });
       }
       const test = await bybitClient.testConnection();
       res.json({
@@ -5639,15 +5653,21 @@ Provide your analysis in this JSON format:
         liveTradingEnabled: isLiveTradingEnabled(),
         config: getLiveConfig(),
         proxy: proxyStatus,
+        executionService: execStatus,
       });
     } catch (error: any) {
       const proxyStatus = bybitClient.getProxyStatus();
-      res.json({ configured: false, connected: false, error: error.message, proxy: proxyStatus });
+      const execStatus = executionBridge.getStatus();
+      res.json({ configured: false, connected: false, error: error.message, proxy: proxyStatus, executionService: execStatus });
     }
   });
 
   app.get("/api/bybit/positions", async (_req, res) => {
     try {
+      if (executionBridge.isConnected()) {
+        const positions = executionBridge.getPositions();
+        return res.json({ positions });
+      }
       const result = await getLivePositions();
       res.json(result);
     } catch (error: any) {
@@ -5657,6 +5677,10 @@ Provide your analysis in this JSON format:
 
   app.get("/api/bybit/balance", async (_req, res) => {
     try {
+      if (executionBridge.isConnected()) {
+        const balance = executionBridge.getBalance();
+        if (balance) return res.json(balance);
+      }
       const result = await getLiveBalance();
       res.json(result);
     } catch (error: any) {
@@ -5740,6 +5764,41 @@ Provide your analysis in this JSON format:
     } catch (error: any) {
       res.status(400).json({ success: false, error: error.message });
     }
+  });
+
+  app.post("/api/execution/push-state", (req, res) => {
+    try {
+      const authHeader = req.headers["x-exec-secret"] as string | undefined;
+      const expectedSecret = process.env.SESSION_SECRET;
+      if (expectedSecret && authHeader !== expectedSecret) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const { positions, balance, timestamp, gpu_callback_url } = req.body || {};
+
+      if (gpu_callback_url && typeof gpu_callback_url === "string" && gpu_callback_url.startsWith("http")) {
+        gpuBridge.registerGpuUrl(gpu_callback_url);
+        gpuBridge.recordActivity();
+      }
+
+      executionBridge.pushState({
+        positions: Array.isArray(positions) ? positions : [],
+        balance: balance && typeof balance === "object" ? balance : null,
+        timestamp: typeof timestamp === "number" ? timestamp : Date.now(),
+      });
+
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("[Execution Bridge] Push state error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/execution/state", (_req, res) => {
+    res.json({
+      ...executionBridge.getStatus(),
+      state: executionBridge.getState(),
+    });
   });
 
   return httpServer;
