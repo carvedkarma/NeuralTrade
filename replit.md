@@ -93,6 +93,7 @@ Schema in `shared/schema.ts` with Drizzle + Zod validation.
 - Walk-forward validation: 21/25 folds profitable, +520R cumulative
 - Checkpoint loading: searches best_enter_prauc.pt → best_v5_expectancy.pt → best_enter_loss.pt → best_v5_loss.pt
 - Scaler: embedded in checkpoint (scaler_center/scaler_scale) or loaded from per_symbol_scalers.joblib/scaler.joblib
+- **Live feature pipeline** (`gpu_trainer/live_runner.py`): `_compute_features_for_symbol()` fetches real funding rate (from Binance FAPI `/fapi/v1/fundingRate`) and open interest (`/futures/data/openInterestHist`) during live inference, matching the training pipeline. Funding cached 30min (TTL), OI cached 15min. Falls back to zeros on fetch failure. One-time `[Feature Check]` diagnostic log per symbol per session.
 
 ## External Dependencies
 

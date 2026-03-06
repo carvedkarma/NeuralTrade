@@ -319,17 +319,130 @@ def _fetch_htf_candles_direct(fetcher, symbol: str) -> Optional[Dict[str, pd.Dat
     return result
 
 
+_FUNDING_CACHE_TTL = 1800
+_OI_CACHE_TTL = 900
+_DATA_DIR = Path(__file__).resolve().parent / "data_cache"
+_DATA_DIR.mkdir(exist_ok=True)
+
+
+def _fetch_funding_cached(df: pd.DataFrame, cache: Dict, symbol: str) -> pd.DataFrame:
+    """Fetch funding rate features with caching (TTL=30min). Uses BTCUSDT funding as market indicator."""
+    from quick_start import (
+        fetch_funding_rates, compute_funding_features,
+        FUNDING_FEATURE_COUNT, FUNDING_FEATURE_NAMES,
+    )
+    n = len(df)
+    now = time.time()
+    cache_key = "BTCUSDT"
+
+    if cache_key in cache and (now - cache[cache_key]["fetched_at"]) < _FUNDING_CACHE_TTL:
+        funding_df = cache[cache_key]["data"]
+    else:
+        try:
+            funding_df = fetch_funding_rates(df, _DATA_DIR)
+            cache[cache_key] = {"data": funding_df, "fetched_at": now}
+        except Exception as e:
+            log.warning(f"[{symbol}] Funding fetch failed, using zeros: {e}")
+            return pd.DataFrame(
+                np.zeros((n, FUNDING_FEATURE_COUNT)),
+                columns=FUNDING_FEATURE_NAMES,
+                index=df.index,
+            )
+
+    try:
+        return compute_funding_features(df, funding_df)
+    except Exception as e:
+        log.warning(f"[{symbol}] Funding feature computation failed, using zeros: {e}")
+        return pd.DataFrame(
+            np.zeros((n, FUNDING_FEATURE_COUNT)),
+            columns=FUNDING_FEATURE_NAMES,
+            index=df.index,
+        )
+
+
+def _fetch_oi_cached(df: pd.DataFrame, cache: Dict, symbol: str) -> pd.DataFrame:
+    """Fetch open interest features with caching (TTL=15min). Per-symbol OI data."""
+    from quick_start import (
+        fetch_open_interest_hist, compute_oi_features,
+        OI_FEATURE_COUNT, OI_FEATURE_NAMES,
+    )
+    n = len(df)
+    now = time.time()
+
+    if symbol in cache and (now - cache[symbol]["fetched_at"]) < _OI_CACHE_TTL:
+        oi_df = cache[symbol]["data"]
+    else:
+        try:
+            oi_df = fetch_open_interest_hist(df, _DATA_DIR, symbol=symbol)
+            cache[symbol] = {"data": oi_df, "fetched_at": now}
+        except Exception as e:
+            log.warning(f"[{symbol}] OI fetch failed, using zeros: {e}")
+            return pd.DataFrame(
+                np.zeros((n, OI_FEATURE_COUNT)),
+                columns=OI_FEATURE_NAMES,
+                index=df.index,
+            )
+
+    try:
+        return compute_oi_features(df, oi_df)
+    except Exception as e:
+        log.warning(f"[{symbol}] OI feature computation failed, using zeros: {e}")
+        return pd.DataFrame(
+            np.zeros((n, OI_FEATURE_COUNT)),
+            columns=OI_FEATURE_NAMES,
+            index=df.index,
+        )
+
+
+def _log_feature_check(symbol: str, funding_features: pd.DataFrame,
+                       oi_features: pd.DataFrame, logged: Dict):
+    """One-time diagnostic log per symbol showing funding/OI feature values."""
+    if logged.get(symbol):
+        return
+    logged[symbol] = True
+
+    last_f = funding_features.iloc[-1]
+    last_o = oi_features.iloc[-1]
+
+    fr = last_f.get('funding_rate', 0)
+    fd = last_f.get('funding_rate_delta_8h', 0)
+    fz = last_f.get('funding_rate_zscore_30d', 0)
+    oi = last_o.get('open_interest', 0)
+    od = last_o.get('oi_delta_1h', 0)
+    oz = last_o.get('oi_zscore_30d', 0)
+
+    log.info(f"[Feature Check] {symbol}: funding_rate={fr:.6f} delta_8h={fd:.6f} "
+             f"zscore_30d={fz:.4f} | OI={oi:.4f} oi_delta_1h={od:.4f} oi_zscore_30d={oz:.4f}")
+
+    all_zero = abs(fr) < 1e-8 and abs(fd) < 1e-8 and abs(fz) < 1e-8
+    oi_zero = abs(oi) < 1e-8 and abs(od) < 1e-8 and abs(oz) < 1e-8
+    if all_zero:
+        log.warning(f"[Feature Check] {symbol}: ALL funding features are zero — fetch may have failed")
+    if oi_zero:
+        log.warning(f"[Feature Check] {symbol}: ALL OI features are zero — fetch may have failed")
+
+
 def _compute_features_for_symbol(df: pd.DataFrame, engineer, feature_columns: list,
-                                  symbol: str) -> Optional[np.ndarray]:
+                                  symbol: str,
+                                  funding_cache: Optional[Dict] = None,
+                                  oi_cache: Optional[Dict] = None,
+                                  feature_check_logged: Optional[Dict] = None) -> Optional[np.ndarray]:
     """Compute features for the latest bar of a symbol's candle data.
 
     Uses the same pipeline as make_enter_prediction: FeatureEngineer.compute_all_features,
-    then funding + OI features, then scale + clip.
+    then real funding + OI features from Binance FAPI, then scale + clip.
     """
     from quick_start import (
         FUNDING_FEATURE_COUNT, OI_FEATURE_COUNT,
         FUNDING_FEATURE_NAMES, OI_FEATURE_NAMES,
     )
+
+    if funding_cache is None:
+        funding_cache = {}
+    if oi_cache is None:
+        oi_cache = {}
+    if feature_check_logged is None:
+        feature_check_logged = {}
 
     try:
         feat_engineer_local = engineer.__class__()
@@ -337,20 +450,14 @@ def _compute_features_for_symbol(df: pd.DataFrame, engineer, feature_columns: li
         features_df = features_df.fillna(0)
 
         n = len(df)
-        funding_features = pd.DataFrame(
-            np.zeros((n, FUNDING_FEATURE_COUNT)),
-            columns=FUNDING_FEATURE_NAMES,
-            index=df.index,
-        )
+        funding_features = _fetch_funding_cached(df, funding_cache, symbol)
         features_df = pd.concat([features_df, funding_features], axis=1)
 
-        oi_features = pd.DataFrame(
-            np.zeros((n, OI_FEATURE_COUNT)),
-            columns=OI_FEATURE_NAMES,
-            index=df.index,
-        )
+        oi_features = _fetch_oi_cached(df, oi_cache, symbol)
         features_df = pd.concat([features_df, oi_features], axis=1)
         features_df = features_df.fillna(0)
+
+        _log_feature_check(symbol, funding_features, oi_features, feature_check_logged)
 
         features_df = features_df.reindex(columns=feature_columns, fill_value=0)
 
@@ -754,6 +861,9 @@ class LiveRunner:
         self.exchange_time_offset = 0.0
         self.cooldown_tracker: Dict[str, int] = {}
         self.warmup_logged: Dict[str, bool] = {}
+        self._funding_cache: Dict[str, Dict] = {}
+        self._oi_cache: Dict[str, Dict] = {}
+        self._feature_check_logged: Dict[str, bool] = {}
 
         from trade_manager import TradeManager
         self.trade_manager = TradeManager()
@@ -1414,7 +1524,10 @@ class LiveRunner:
         model, engineer, feature_columns, temperature, symbol_map = self._get_model_for_symbol(symbol)
 
         scaled, features_df = _compute_features_for_symbol(
-            df_candles, engineer, feature_columns, symbol
+            df_candles, engineer, feature_columns, symbol,
+            funding_cache=self._funding_cache,
+            oi_cache=self._oi_cache,
+            feature_check_logged=self._feature_check_logged,
         )
         if scaled is None:
             return None
