@@ -3892,9 +3892,18 @@ def train_v5_model(
         log.info(f"[V5_BALANCE] {sym_log}: train={per_sym_train_counts[si_log]} val={per_sym_val_counts[si_log]}")
 
     if balanced_sampling and len(symbols) > 1 and len(train_features) > 1:
-        min_train = min(per_sym_train_counts)
-        max_train = max(per_sym_train_counts)
-        if max_train > min_train * 1.05:
+        nonzero_counts = [c for c in per_sym_train_counts if c > 0]
+        zero_syms = [symbols[i] for i, c in enumerate(per_sym_train_counts) if c == 0]
+        if zero_syms:
+            log.info(f"[V5_BALANCE] Symbols with 0 train samples in this fold (not yet listed): {zero_syms}")
+        if not nonzero_counts:
+            log.warning(f"[V5_BALANCE] ALL symbols have 0 train samples — skipping balance step")
+            min_train = 0
+            max_train = 0
+        else:
+            min_train = min(nonzero_counts)
+            max_train = max(nonzero_counts)
+        if min_train > 0 and max_train > min_train * 1.05:
             log.info(f"[V5_BALANCE] Capping per-symbol train samples to min={min_train} "
                      f"(was max={max_train}, ratio={max_train/min_train:.2f}x)")
             for i in range(len(train_features)):
