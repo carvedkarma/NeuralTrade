@@ -4750,7 +4750,86 @@ export async function registerRoutes(
       gpuBridge.recordActivity();
       if (t.gpu_callback_url) gpuBridge.registerGpuUrl(t.gpu_callback_url);
       console.log(`[Live Trade] Recorded ${t.side} ${t.symbol} @ ${t.entry_price} (id=${record.id})`);
-      res.json({ success: true, id: record.id });
+
+      let autoTradeResult: { opened: boolean; positionId?: number; reason?: string; liveOrderId?: string } = { opened: false };
+
+      const side: "LONG" | "SHORT" = t.side.toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+      const entryPrice = Number(t.entry_price);
+      const slPrice = t.stop_loss ? Number(t.stop_loss) : NaN;
+      const tpPrice = t.take_profit ? Number(t.take_profit) : NaN;
+      const slValid = Number.isFinite(slPrice) && slPrice > 0;
+      const tpValid = Number.isFinite(tpPrice) && tpPrice > 0;
+      const slCorrectSide = side === "LONG" ? slPrice < entryPrice : slPrice > entryPrice;
+      const tpCorrectSide = side === "LONG" ? tpPrice > entryPrice : tpPrice < entryPrice;
+
+      if (!slValid || !tpValid || !slCorrectSide || !tpCorrectSide) {
+        console.log(`[Auto-Trade] SKIP ${t.symbol} — invalid SL/TP from GPU trainer (sl=${t.stop_loss}, tp=${t.take_profit}, side=${side}, entry=${entryPrice})`);
+        autoTradeResult = { opened: false, reason: "invalid_sl_tp" };
+      } else {
+        if (isLiveTradingEnabled()) {
+          try {
+            const liveResult = await openLivePosition({
+              symbol: t.symbol,
+              side,
+              entryPrice,
+              stopLoss: slPrice,
+              takeProfit: tpPrice,
+              v5Score: t.v5_score ?? 0,
+              signalConfidence: t.p_enter ?? undefined,
+            });
+
+            if (liveResult.success) {
+              autoTradeResult = { opened: true, reason: "live_bybit", liveOrderId: liveResult.orderId };
+              console.log(`[Auto-Trade → BYBIT LIVE] ${side} ${t.symbol} @ $${entryPrice} | ${liveResult.leverage}x | qty=${liveResult.qty} | orderId=${liveResult.orderId}`);
+            } else {
+              autoTradeResult = { opened: false, reason: `live_failed: ${liveResult.error}` };
+              console.warn(`[Auto-Trade → BYBIT LIVE] Failed ${t.symbol}: ${liveResult.error}`);
+            }
+          } catch (liveErr: any) {
+            autoTradeResult = { opened: false, reason: `live_error: ${liveErr.message}` };
+            console.error(`[Auto-Trade → BYBIT LIVE] Error ${t.symbol}:`, liveErr.message);
+          }
+        }
+
+        const paperConfig = getConfig();
+        if (!paperConfig.paperTradingEnabled) {
+          if (!autoTradeResult.opened) autoTradeResult = { opened: false, reason: "paper_trading_disabled" };
+        } else {
+          try {
+            const existingPositions = await getPositionsBySymbol(t.symbol, "OPEN", 1);
+            if (existingPositions.length > 0) {
+              autoTradeResult = { opened: false, reason: "position_already_open" };
+            } else {
+              const allOpenPositions = await db.select().from(paperPositions).where(eq(paperPositions.status, "OPEN"));
+              const maxPositions = 6;
+              if (allOpenPositions.length >= maxPositions) {
+                autoTradeResult = { opened: false, reason: "max_positions_reached" };
+                console.log(`[Auto-Trade] SKIP ${t.symbol} — max ${maxPositions} positions reached`);
+              } else {
+                const position = await manualOpenPosition({
+                  symbol: t.symbol,
+                  side,
+                  entryPrice,
+                  stopLoss: Number(slPrice.toFixed(6)),
+                  takeProfit: Number(tpPrice.toFixed(6)),
+                  riskPercent: paperConfig.riskPerTradePct,
+                  source: "v5_signal",
+                  signalConfidence: t.p_enter ?? null,
+                  v5Score: t.v5_score ?? undefined,
+                });
+
+                autoTradeResult = { opened: true, positionId: position.id };
+                console.log(`[Auto-Trade] Opened ${side} ${t.symbol} @ $${entryPrice} | ${position.leverage}x leverage | SL: $${slPrice.toFixed(4)} | TP: $${tpPrice.toFixed(4)} (from /api/live/trade)`);
+              }
+            }
+          } catch (err: any) {
+            autoTradeResult = { opened: false, reason: err.message };
+            console.error(`[Auto-Trade] Failed to open ${t.symbol}:`, err.message);
+          }
+        }
+      }
+
+      res.json({ success: true, id: record.id, autoTrade: autoTradeResult });
     } catch (error) {
       console.error("[Live Trade] Error:", error);
       res.status(500).json({ error: "Failed to record trade" });
@@ -5168,135 +5247,22 @@ Provide your analysis in this JSON format:
       };
       updateCachedSignal(c.symbol, cachedNeuralSignal);
 
-      let autoTradeResult: { opened: boolean; positionId?: number; reason?: string; liveOrderId?: string } = { opened: false };
+      let autoTradeResult: { opened: boolean; positionId?: number; reason?: string; liveOrderId?: string } = { opened: false, reason: "auto_trade_via_live_trade_endpoint" };
 
-      const isEnterDecision = typeof c.decision === "string" && c.decision.toUpperCase().includes("ENTER");
-      if (isEnterDecision && c.price && c.direction) {
-        const side: "LONG" | "SHORT" = c.direction.toUpperCase() === "SHORT" ? "SHORT" : "LONG";
-        const entryPrice = Number(c.price);
-
-        if (isLiveTradingEnabled()) {
+      try {
+        const existingPositions = await getPositionsBySymbol(c.symbol, "OPEN", 1);
+        if (existingPositions.length > 0) {
           try {
-            const gpuSl = c.sl_price ? Number(c.sl_price) : NaN;
-            const gpuTp = c.tp_price ? Number(c.tp_price) : NaN;
-            const gpuSlValid = Number.isFinite(gpuSl) && gpuSl > 0;
-            const gpuTpValid = Number.isFinite(gpuTp) && gpuTp > 0;
-            const gpuSlCorrectSide = side === "LONG" ? gpuSl < entryPrice : gpuSl > entryPrice;
-            const gpuTpCorrectSide = side === "LONG" ? gpuTp > entryPrice : gpuTp < entryPrice;
-
-            let liveSl: number;
-            let liveTp: number;
-            if (gpuSlValid && gpuTpValid && gpuSlCorrectSide && gpuTpCorrectSide) {
-              liveSl = gpuSl;
-              liveTp = gpuTp;
-            } else {
-              const stopDistancePct = Math.max(0.003, Math.min(0.05, 0.015));
-              const stopDistance = entryPrice * stopDistancePct;
-              const rrRatio = 2.0;
-              liveSl = side === "LONG" ? entryPrice - stopDistance : entryPrice + stopDistance;
-              liveTp = side === "LONG" ? entryPrice + (stopDistance * rrRatio) : entryPrice - (stopDistance * rrRatio);
+            const neuralResult = await neuralPositionManager(existingPositions[0], cachedNeuralSignal);
+            if (neuralResult) {
+              console.log(`[Neural PM] ${c.symbol}: ${neuralResult.adjustmentType} — ${neuralResult.reason}`);
             }
-
-            const liveResult = await openLivePosition({
-              symbol: c.symbol,
-              side,
-              entryPrice,
-              stopLoss: liveSl,
-              takeProfit: liveTp,
-              v5Score: c.v5_score ?? 0,
-              signalConfidence: c.p_enter ?? undefined,
-            });
-
-            if (liveResult.success) {
-              autoTradeResult = { opened: true, reason: "live_bybit", liveOrderId: liveResult.orderId };
-              console.log(`[Auto-Trade → BYBIT LIVE] ${side} ${c.symbol} @ $${entryPrice} | ${liveResult.leverage}x | qty=${liveResult.qty} | orderId=${liveResult.orderId}`);
-            } else {
-              autoTradeResult = { opened: false, reason: `live_failed: ${liveResult.error}` };
-              console.warn(`[Auto-Trade → BYBIT LIVE] Failed ${c.symbol}: ${liveResult.error}`);
-            }
-          } catch (liveErr: any) {
-            autoTradeResult = { opened: false, reason: `live_error: ${liveErr.message}` };
-            console.error(`[Auto-Trade → BYBIT LIVE] Error ${c.symbol}:`, liveErr.message);
+          } catch (neuralErr: any) {
+            console.error(`[Neural PM] Error managing ${c.symbol}:`, neuralErr.message);
           }
         }
-
-        const paperConfig = getConfig();
-        if (!paperConfig.paperTradingEnabled) {
-          if (!autoTradeResult.opened) autoTradeResult = { opened: false, reason: "paper_trading_disabled" };
-        } else {
-          try {
-            const existingPositions = await getPositionsBySymbol(c.symbol, "OPEN", 1);
-            if (existingPositions.length > 0) {
-              autoTradeResult = { opened: false, reason: "position_already_open" };
-
-              try {
-                const neuralResult = await neuralPositionManager(existingPositions[0], cachedNeuralSignal);
-                if (neuralResult) {
-                  (autoTradeResult as any).neuralAction = neuralResult;
-                  console.log(`[Neural PM] ${c.symbol}: ${neuralResult.adjustmentType} — ${neuralResult.reason}`);
-                }
-              } catch (neuralErr: any) {
-                console.error(`[Neural PM] Error managing ${c.symbol}:`, neuralErr.message);
-              }
-            } else {
-              const allOpenPositions = await db.select().from(paperPositions).where(eq(paperPositions.status, "OPEN"));
-              const maxPositions = 6;
-              if (allOpenPositions.length >= maxPositions) {
-                autoTradeResult = { opened: false, reason: "max_positions_reached" };
-                console.log(`[Auto-Trade] SKIP ${c.symbol} — max ${maxPositions} positions reached`);
-              } else {
-                let stopLoss: number;
-                let takeProfit: number;
-
-                const gpuSl = c.sl_price ? Number(c.sl_price) : NaN;
-                const gpuTp = c.tp_price ? Number(c.tp_price) : NaN;
-                const gpuSlValid = Number.isFinite(gpuSl) && gpuSl > 0;
-                const gpuTpValid = Number.isFinite(gpuTp) && gpuTp > 0;
-                const gpuSlCorrectSide = side === "LONG" ? gpuSl < entryPrice : gpuSl > entryPrice;
-                const gpuTpCorrectSide = side === "LONG" ? gpuTp > entryPrice : gpuTp < entryPrice;
-
-                if (gpuSlValid && gpuTpValid && gpuSlCorrectSide && gpuTpCorrectSide) {
-                  stopLoss = gpuSl;
-                  takeProfit = gpuTp;
-                  console.log(`[Auto-Trade] Using GPU trainer SL/TP: SL=$${stopLoss.toFixed(2)} TP=$${takeProfit.toFixed(2)}`);
-                } else {
-                  if (c.sl_price || c.tp_price) {
-                    console.warn(`[Auto-Trade] GPU SL/TP invalid (sl=${c.sl_price}, tp=${c.tp_price}, side=${side}, entry=${entryPrice}), using fallback`);
-                  }
-                  const stopDistancePct = Math.max(0.003, Math.min(0.05, 0.015));
-                  const stopDistance = entryPrice * stopDistancePct;
-                  const rrRatio = 2.0;
-                  if (side === "LONG") {
-                    stopLoss = entryPrice - stopDistance;
-                    takeProfit = entryPrice + (stopDistance * rrRatio);
-                  } else {
-                    stopLoss = entryPrice + stopDistance;
-                    takeProfit = entryPrice - (stopDistance * rrRatio);
-                  }
-                  console.log(`[Auto-Trade] Using fallback SL/TP (1.5% stop): SL=$${stopLoss.toFixed(2)} TP=$${takeProfit.toFixed(2)}`);
-                }
-
-                const position = await manualOpenPosition({
-                  symbol: c.symbol,
-                  side,
-                  entryPrice,
-                  stopLoss: Number(stopLoss.toFixed(6)),
-                  takeProfit: Number(takeProfit.toFixed(6)),
-                  riskPercent: paperConfig.riskPerTradePct,
-                  source: "v5_signal",
-                  signalConfidence: c.p_enter ?? null,
-                  v5Score: c.v5_score ?? undefined,
-                });
-
-                autoTradeResult = { opened: true, positionId: position.id };
-                console.log(`[Auto-Trade] Opened ${side} ${c.symbol} @ $${entryPrice} | ${position.leverage}x leverage | SL: $${stopLoss.toFixed(4)} | TP: $${takeProfit.toFixed(4)} | v5Score: ${c.v5_score} | p_enter: ${c.p_enter}`);
-              }
-            }
-          } catch (err: any) {
-            autoTradeResult = { opened: false, reason: err.message };
-            console.error(`[Auto-Trade] Failed to open ${c.symbol}:`, err.message);
-          }
-        }
+      } catch (neuralErr: any) {
+        console.error(`[Neural PM] Error checking positions for ${c.symbol}:`, neuralErr.message);
       }
 
       broadcast("CYCLE_UPDATE", {
