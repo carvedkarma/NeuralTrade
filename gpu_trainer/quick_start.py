@@ -4749,10 +4749,38 @@ Examples:
                         help="Cap per-symbol training samples to smallest symbol's count for balanced training (default: on)")
     parser.add_argument("--no-symbol-balanced-sampling", action="store_true", default=False,
                         help="Disable symbol-balanced sampling (allow BTC to dominate training)")
+    parser.add_argument("--balanced-sampling-mode", type=str, choices=["cap", "weighted", "none"],
+                        default="cap",
+                        help="Symbol balancing mode: 'cap' truncates to min count, 'weighted' keeps all data with inverse-frequency loss weights, 'none' disables (default: cap)")
     parser.add_argument("--v5-symbol-embed-dim", type=int, default=8,
                         help="Symbol embedding dimension for multi-asset models (default: 8)")
     parser.add_argument("--per-symbol-scaler", action="store_true", default=False,
                         help="Fit/apply RobustScaler per symbol instead of global (default: off)")
+
+    parser.add_argument("--v6", action="store_true", default=False,
+                        help="Use V6Forecaster (Temporal-MoE-Attention) instead of V5 (default: off)")
+    parser.add_argument("--v6-seq-len", type=int, default=16,
+                        help="V6 sequence window length in bars (default: 16)")
+    parser.add_argument("--v6-conv-channels", type=int, default=128,
+                        help="V6 causal conv1d channel width (default: 128)")
+    parser.add_argument("--v6-n-conv-layers", type=int, default=3,
+                        help="V6 number of causal conv layers (default: 3)")
+    parser.add_argument("--v6-attn-heads", type=int, default=4,
+                        help="V6 number of self-attention heads (default: 4)")
+    parser.add_argument("--v6-attn-layers", type=int, default=2,
+                        help="V6 number of transformer blocks (default: 2)")
+    parser.add_argument("--v6-n-experts", type=int, default=4,
+                        help="V6 number of MoE experts (default: 4)")
+    parser.add_argument("--v6-expert-top-k", type=int, default=2,
+                        help="V6 top-k expert routing (default: 2)")
+    parser.add_argument("--v6-feature-mask-ratio", type=float, default=0.15,
+                        help="V6 random feature masking ratio during training (default: 0.15)")
+    parser.add_argument("--v6-aux-weight", type=float, default=0.1,
+                        help="V6 auxiliary next-bar prediction loss weight (default: 0.1)")
+    parser.add_argument("--v6-confidence-weight", type=float, default=0.15,
+                        help="V6 confidence calibration loss weight (default: 0.15)")
+    parser.add_argument("--v6-moe-balance-weight", type=float, default=0.01,
+                        help="V6 MoE load balancing loss weight (default: 0.01)")
     parser.add_argument("--loss-warmup-epochs", type=int, default=10,
                         help="Number of warmup epochs using plain BCE before switching to focal/OHEM (default: 10)")
     parser.add_argument("--warmup-pos-weight", type=float, default=2.0,
@@ -5694,6 +5722,16 @@ Examples:
                     v5_regime_side_map[k.strip()] = v.strip().upper()
                 log.info(f"[V5] Regime side map: {v5_regime_side_map}")
 
+            _effective_balanced_mode = args.balanced_sampling_mode
+            if args.no_symbol_balanced_sampling:
+                _effective_balanced_sampling = False
+                _effective_balanced_mode = 'none'
+            elif _effective_balanced_mode == 'none':
+                _effective_balanced_sampling = False
+            else:
+                _effective_balanced_sampling = True
+            log.info(f"[BALANCE] balanced_sampling={_effective_balanced_sampling} mode={_effective_balanced_mode}")
+
             if args.v5_walk_forward:
                 log.info("[MODE] V5 Walk-Forward Analysis")
                 run_v5_walk_forward(
@@ -5765,7 +5803,8 @@ Examples:
                     temp_scale=args.v5_temp_scale,
                     promote_metric=args.v5_promote_metric,
                     stage_a_epochs=10 if args.v5_staged_training else 0,
-                    balanced_sampling=args.symbol_balanced_sampling and not args.no_symbol_balanced_sampling,
+                    balanced_sampling=_effective_balanced_sampling,
+                    balanced_sampling_mode=_effective_balanced_mode,
                     symbol_embed_dim=args.v5_symbol_embed_dim,
                     per_symbol_scaler=args.per_symbol_scaler,
                     ultra_conviction=args.v5_ultra_conviction,
@@ -5811,6 +5850,18 @@ Examples:
                     per_symbol_r_kill=args.v5_per_symbol_r_kill,
                     per_symbol_threshold=args.v5_per_symbol_threshold,
                     replit_url=getattr(args, 'url', None),
+                    model_version='v6' if args.v6 else 'v5',
+                    v6_seq_len=args.v6_seq_len,
+                    v6_conv_channels=args.v6_conv_channels,
+                    v6_n_conv_layers=args.v6_n_conv_layers,
+                    v6_attn_heads=args.v6_attn_heads,
+                    v6_attn_layers=args.v6_attn_layers,
+                    v6_n_experts=args.v6_n_experts,
+                    v6_expert_top_k=args.v6_expert_top_k,
+                    v6_feature_mask_ratio=args.v6_feature_mask_ratio,
+                    v6_aux_weight=args.v6_aux_weight,
+                    v6_confidence_weight=args.v6_confidence_weight,
+                    v6_moe_balance_weight=args.v6_moe_balance_weight,
                 )
                 return
 
@@ -5895,7 +5946,8 @@ Examples:
                 temp_scale=args.v5_temp_scale,
                 promote_metric=args.v5_promote_metric,
                 stage_a_epochs=10 if args.v5_staged_training else 0,
-                balanced_sampling=args.symbol_balanced_sampling and not args.no_symbol_balanced_sampling,
+                balanced_sampling=_effective_balanced_sampling,
+                balanced_sampling_mode=_effective_balanced_mode,
                 symbol_embed_dim=args.v5_symbol_embed_dim,
                 per_symbol_scaler=args.per_symbol_scaler,
                 ultra_conviction=args.v5_ultra_conviction,
@@ -5939,10 +5991,23 @@ Examples:
                 feature_report=args.v5_feature_report,
                 per_symbol_r_kill=args.v5_per_symbol_r_kill,
                 per_symbol_threshold=args.v5_per_symbol_threshold,
+                model_version='v6' if args.v6 else 'v5',
+                v6_seq_len=args.v6_seq_len,
+                v6_conv_channels=args.v6_conv_channels,
+                v6_n_conv_layers=args.v6_n_conv_layers,
+                v6_attn_heads=args.v6_attn_heads,
+                v6_attn_layers=args.v6_attn_layers,
+                v6_n_experts=args.v6_n_experts,
+                v6_expert_top_k=args.v6_expert_top_k,
+                v6_feature_mask_ratio=args.v6_feature_mask_ratio,
+                v6_aux_weight=args.v6_aux_weight,
+                v6_confidence_weight=args.v6_confidence_weight,
+                v6_moe_balance_weight=args.v6_moe_balance_weight,
             )
 
+            tag = "V6" if args.v6 else "V5"
             log.info("=" * 60)
-            log.info("  V5 TRAINING COMPLETE")
+            log.info(f"  {tag} TRAINING COMPLETE")
             log.info("=" * 60)
             return
 

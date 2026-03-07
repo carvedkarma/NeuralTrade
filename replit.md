@@ -66,6 +66,23 @@ The core trading intelligence is provided by a v5 neural network, `V5Forecaster`
 -   **Side Balance fix** (`v5_train.py`): KL divergence loss uses balanced 50/50 LONG/SHORT target instead of biased training label distribution. Training data (2021-2026 bull market) had more LONG labels, causing the model to systematically favor LONG. Fix requires retraining.
 -   **Live feature pipeline** (`gpu_trainer/live_runner.py`): `_compute_features_for_symbol()` fetches real funding rate (from Binance FAPI `/fapi/v1/fundingRate`) and open interest (`/futures/data/openInterestHist`) during live inference, matching the training pipeline. Funding cached 30min (TTL), OI cached 15min. Falls back to zeros on fetch failure. One-time `[Feature Check]` diagnostic log per symbol per session.
 
+### v6 Neural Network (V6Forecaster)
+Next-generation model upgrade in `gpu_trainer/models/v6_forecaster.py`. Same output dict interface as V5 — all existing scoring, forward test, and live runner infrastructure works unchanged.
+-   **Architecture:** Causal Conv1D (3 layers, 128ch) → Positional Encoding → 2x Transformer Blocks (4-head self-attention, causal mask) → Mixture-of-Experts trunk (4 experts, top-2 sparse routing) → 6 output heads. ~1.5M params vs V5's ~300K.
+-   **New capabilities:**
+    - Temporal context: sees 16 bars (4 hours) of history via sliding window, not just 1 bar.
+    - MoE routing: 4 specialized expert MLPs (trending, reverting, volatile, breakout), top-2 gating per sample. Load-balancing loss prevents expert collapse.
+    - Feature masking: randomly zeros 15% of features during training (like BERT). Forces robustness.
+    - Auxiliary self-supervised loss: next-bar feature prediction forces trunk to learn market structure.
+    - Confidence calibration head: sigmoid output (0-1) predicting its own accuracy. Live runner gates signals with `confidence >= 0.4`.
+-   **Training:** `python quick_start.py --train-v5 --v6` activates V6. V6-specific args: `--v6-seq-len`, `--v6-conv-channels`, `--v6-n-conv-layers`, `--v6-attn-heads`, `--v6-attn-layers`, `--v6-n-experts`, `--v6-expert-top-k`, `--v6-feature-mask-ratio`, `--v6-aux-weight`, `--v6-confidence-weight`, `--v6-moe-balance-weight`.
+-   **Dataset:** `V6SequenceDataset` builds sliding windows per symbol (no cross-symbol boundaries), with zero-padding for early bars.
+-   **Loss:** `compute_v6_loss` = all V5 loss components + MoE balance (w=0.01) + aux next-bar MSE (w=0.1) + confidence calibration BCE (w=0.15).
+-   **Balanced sampling:** `--balanced-sampling-mode weighted` uses inverse-frequency loss weighting instead of truncation.
+-   **Live inference:** `live_runner.py` detects `model_type='v6_forecaster'` in checkpoint, instantiates V6Forecaster, computes seq_len bars of scaled features per symbol, and uses confidence output to gate signals.
+-   **Checkpoint model_type:** `'v6_forecaster'`. Config saves all V6 hyperparameters for reproducible loading.
+-   **Files:** `gpu_trainer/models/v6_forecaster.py`, `gpu_trainer/train/v5_train.py` (V6SequenceDataset, compute_v6_loss, train_v5_model with model_version='v6'), `gpu_trainer/quick_start.py` (--v6 CLI args), `gpu_trainer/live_runner.py` (V6 model loading + seq inference + confidence gating).
+
 ## External Dependencies
 
 ### Database

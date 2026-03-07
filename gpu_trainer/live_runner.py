@@ -133,7 +133,37 @@ def _load_model(device: str, symbol: Optional[str] = None):
     cfg = checkpoint.get('model_config', {})
     model_type = checkpoint.get('model_type', 'legacy')
 
-    if model_type == 'v5_forecaster':
+    if model_type == 'v6_forecaster':
+        from models.v6_forecaster import V6Forecaster, V6ForecasterConfig
+        v6_config = V6ForecasterConfig(
+            input_dim=cfg.get('input_dim', 85),
+            seq_len=cfg.get('seq_len', 16),
+            conv_channels=cfg.get('conv_channels', 128),
+            n_conv_layers=cfg.get('n_conv_layers', 3),
+            conv_kernel_size=cfg.get('conv_kernel_size', 3),
+            n_attn_layers=cfg.get('n_attn_layers', 2),
+            n_attn_heads=cfg.get('n_attn_heads', 4),
+            attn_ff_dim=cfg.get('attn_ff_dim', 256),
+            n_experts=cfg.get('n_experts', 4),
+            expert_top_k=cfg.get('expert_top_k', 2),
+            expert_hidden_dims=cfg.get('expert_hidden_dims', [192, 128, 96]),
+            trunk_output_dim=cfg.get('trunk_output_dim', 96),
+            dropout=cfg.get('dropout', 0.15),
+            n_symbols=cfg.get('n_symbols', 1),
+            symbol_embed_dim=cfg.get('symbol_embed_dim', 16),
+            feature_mask_ratio=0.0,
+            enable_aux_head=False,
+            enable_confidence_head=cfg.get('enable_confidence_head', True),
+            n_barrier_presets=cfg.get('n_barrier_presets', 0),
+            enable_regime_head=cfg.get('enable_regime_head', False),
+        )
+        model = V6Forecaster(v6_config)
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        model._is_v5 = True
+        model._is_v6 = True
+        model._v6_seq_len = v6_config.seq_len
+        log.info(f"Loaded V6Forecaster ({model.parameters_count():,} params, seq_len={v6_config.seq_len})")
+    elif model_type == 'v5_forecaster':
         from models.v5_forecaster import V5Forecaster, V5ForecasterConfig
         v5_config = V5ForecasterConfig(
             input_dim=cfg.get('input_dim', 85),
@@ -149,6 +179,7 @@ def _load_model(device: str, symbol: Optional[str] = None):
         model = V5Forecaster(v5_config)
         model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         model._is_v5 = True
+        model._is_v6 = False
         log.info(f"Loaded V5Forecaster ({model.parameters_count():,} params)")
     else:
         from models.simple_mlp import EnhancedMultiHeadMLP, EnhancedMultiHeadMLP_Config
@@ -426,8 +457,13 @@ def _compute_features_for_symbol(df: pd.DataFrame, engineer, feature_columns: li
                                   symbol: str,
                                   funding_cache: Optional[Dict] = None,
                                   oi_cache: Optional[Dict] = None,
-                                  feature_check_logged: Optional[Dict] = None) -> Optional[np.ndarray]:
-    """Compute features for the latest bar of a symbol's candle data.
+                                  feature_check_logged: Optional[Dict] = None,
+                                  seq_len: int = 1) -> Optional[np.ndarray]:
+    """Compute features for the latest bar(s) of a symbol's candle data.
+
+    When seq_len=1 (default/V5): returns (1, n_features) scaled array for latest bar.
+    When seq_len>1 (V6): returns (seq_len, n_features) scaled array for last seq_len bars,
+    zero-padded at the start if fewer bars are available.
 
     Uses the same pipeline as make_enter_prediction: FeatureEngineer.compute_all_features,
     then real funding + OI features from Binance FAPI, then scale + clip.
@@ -461,20 +497,29 @@ def _compute_features_for_symbol(df: pd.DataFrame, engineer, feature_columns: li
 
         features_df = features_df.reindex(columns=feature_columns, fill_value=0)
 
-        last_features = features_df.iloc[-1:].copy()
+        n_bars = min(seq_len, len(features_df))
+        tail_features = features_df.iloc[-n_bars:].copy()
+
         if hasattr(engineer, '_v5_global_scaler'):
-            raw = last_features.values.astype(np.float32)
-            last_scaled = engineer._v5_global_scaler.transform(raw).astype(np.float32)
-            last_scaled = np.clip(last_scaled, -5.0, 5.0)
+            raw = tail_features.values.astype(np.float32)
+            tail_scaled = engineer._v5_global_scaler.transform(raw).astype(np.float32)
+            tail_scaled = np.clip(tail_scaled, -5.0, 5.0)
         else:
-            last_scaled = engineer.transform_and_clip(
-                pd.DataFrame(last_features.values, columns=feature_columns),
+            tail_scaled = engineer.transform_and_clip(
+                pd.DataFrame(tail_features.values, columns=feature_columns),
                 clip_range=5.0
             ).values.astype(np.float32)
-        last_scaled = np.where(np.isinf(last_scaled), 0, last_scaled)
-        last_scaled = np.where(np.isnan(last_scaled), 0, last_scaled)
+        tail_scaled = np.where(np.isinf(tail_scaled), 0, tail_scaled)
+        tail_scaled = np.where(np.isnan(tail_scaled), 0, tail_scaled)
 
-        return last_scaled, features_df
+        if seq_len > 1 and n_bars < seq_len:
+            pad = np.zeros((seq_len - n_bars, tail_scaled.shape[1]), dtype=np.float32)
+            tail_scaled = np.concatenate([pad, tail_scaled], axis=0)
+
+        if seq_len == 1:
+            return tail_scaled, features_df
+        else:
+            return tail_scaled, features_df
 
     except Exception as e:
         log.error(f"Feature computation failed for {symbol}: {e}")
@@ -484,26 +529,59 @@ def _compute_features_for_symbol(df: pd.DataFrame, engineer, feature_columns: li
 
 def _run_inference(model, scaled_features: np.ndarray, device: str,
                    temperature: float = 1.0, symbol_id: Optional[int] = None) -> dict:
-    """Run single-row model inference with temperature calibration.
+    """Run single-row or sequence model inference with temperature calibration.
     
-    Supports both legacy EnhancedMultiHeadMLP and V5Forecaster models.
+    Supports V6Forecaster (3D seq input), V5Forecaster (2D single bar), and
+    legacy EnhancedMultiHeadMLP.
+    
+    For V6: scaled_features is (seq_len, n_features) — passed as (1, seq_len, features).
+    For V5: scaled_features is (1, n_features) — passed as (1, features).
     
     Returns dict with:
-      p_enter: calibrated probability of entering a trade
-      e_net_pred: predicted E[net R] (ret_mu for V5, value_logits for legacy)
-      enter_logit: raw logit before calibration
-      v5_action_probs: [hold, long, short] probabilities (V5 only)
-      v5_ret_mu: predicted return in R-units (V5 only)
-      v5_mfe: predicted max favorable excursion (V5 only)
-      v5_mae: predicted max adverse excursion (V5 only)
+      p_enter, e_net_pred, enter_logit, v5_action_probs, v5_ret_mu, v5_mfe, v5_mae
+      v6_confidence (V6 only): model's self-assessed prediction accuracy (0-1)
     """
     import torch
     is_v5 = getattr(model, '_is_v5', False)
+    is_v6 = getattr(model, '_is_v6', False)
 
     with torch.no_grad():
         x = torch.FloatTensor(scaled_features).to(device)
 
-        if is_v5:
+        if is_v6:
+            if x.dim() == 2:
+                x = x.unsqueeze(0)
+            sym_ids = None
+            if symbol_id is not None and model.symbol_embedding is not None:
+                sym_ids = torch.tensor([symbol_id], dtype=torch.long, device=device)
+            output = model(x, symbol_ids=sym_ids)
+
+            action_logits = output['action_logits']
+            calibrated_logits = action_logits / max(temperature, 0.01)
+            action_probs = torch.softmax(calibrated_logits, dim=-1).cpu().numpy().flatten()
+
+            p_hold = float(action_probs[0])
+            p_enter = 1.0 - p_hold
+
+            ret_mu = float(output['ret_mu'].cpu().item())
+            mfe = float(output['mfe'].cpu().item())
+            mae = float(output['mae'].cpu().item())
+            confidence = float(output.get('confidence', torch.tensor(0.5)).cpu().item())
+
+            enter_logit = float(action_logits[0, 1].cpu().item() - action_logits[0, 0].cpu().item())
+
+            return {
+                'p_enter': p_enter,
+                'e_net_pred': ret_mu,
+                'enter_logit': enter_logit,
+                'temperature_used': temperature,
+                'v5_action_probs': action_probs.tolist(),
+                'v5_ret_mu': ret_mu,
+                'v5_mfe': mfe,
+                'v5_mae': mae,
+                'v6_confidence': confidence,
+            }
+        elif is_v5:
             sym_ids = None
             if symbol_id is not None and model.symbol_embedding is not None:
                 sym_ids = torch.tensor([symbol_id], dtype=torch.long, device=device)
@@ -1222,6 +1300,8 @@ class LiveRunner:
         self._start_execution_service()
 
         self.model, self.engineer, self.feature_columns, self.temperature, self.symbol_map = _load_model(self.device)
+        if getattr(self.model, '_is_v6', False):
+            log.info(f"[V6] V6Forecaster active — seq_len={self.model._v6_seq_len}, confidence gating enabled (min=0.4)")
         self._init_fetcher()
 
         for sym in self.symbols:
@@ -1523,11 +1603,14 @@ class LiveRunner:
 
         model, engineer, feature_columns, temperature, symbol_map = self._get_model_for_symbol(symbol)
 
+        v6_seq_len = getattr(model, '_v6_seq_len', 1) if getattr(model, '_is_v6', False) else 1
+
         scaled, features_df = _compute_features_for_symbol(
             df_candles, engineer, feature_columns, symbol,
             funding_cache=self._funding_cache,
             oi_cache=self._oi_cache,
             feature_check_logged=self._feature_check_logged,
+            seq_len=v6_seq_len,
         )
         if scaled is None:
             return None
@@ -1576,9 +1659,13 @@ class LiveRunner:
         htf = _apply_htf_gates(features_df) if not (use_direct_htf and htf_direct) else self._compute_htf_from_direct(htf_direct, df_candles)
         htf_score = _compute_htf_score(htf, side)
 
+        v6_confidence = infer_result.get('v6_confidence', None)
+        v6_conf_str = f" conf={v6_confidence:.3f}" if v6_confidence is not None else ""
         log.info(f"  {symbol}: price={current_price:.2f} v5_score={v5_score:.4f} thr={self.v5_score_threshold} "
                  f"p_enter={p_enter:.4f} ret_mu={ret_mu:.4f} mfe={v5_mfe:.4f} mae={v5_mae:.4f} "
-                 f"p_long={p_long:.3f} p_short={p_short:.3f} side={side}")
+                 f"p_long={p_long:.3f} p_short={p_short:.3f} side={side}{v6_conf_str}")
+
+        V6_CONFIDENCE_MIN = 0.4
 
         reasons = []
         decision = "HOLD"
@@ -1606,6 +1693,8 @@ class LiveRunner:
             return None
 
         score_pass = v5_score >= self.v5_score_threshold
+        if v6_confidence is not None and v6_confidence < V6_CONFIDENCE_MIN:
+            score_pass = False
 
         v5_info = {
             'v5_score': round(v5_score, 4), 'v5_threshold': self.v5_score_threshold,
@@ -1613,12 +1702,16 @@ class LiveRunner:
             'ret_mu': round(ret_mu, 4), 'p_long': round(p_long, 4), 'p_short': round(p_short, 4),
             'htf_score': htf_score, 'threshold_used': self.v5_score_threshold,
         }
+        if v6_confidence is not None:
+            v5_info['v6_confidence'] = round(v6_confidence, 4)
 
         if not score_pass:
             hold_reasons = []
+            if v6_confidence is not None and v6_confidence < V6_CONFIDENCE_MIN:
+                hold_reasons.append(f"v6_conf={v6_confidence:.3f}<{V6_CONFIDENCE_MIN}")
             if abs_mu < self.v5_min_mu_r:
                 hold_reasons.append(f"abs_mu={abs_mu:.4f}<min={self.v5_min_mu_r}")
-            else:
+            elif v5_score < self.v5_score_threshold:
                 hold_reasons.append(f"v5_score={v5_score:.4f}<thr={self.v5_score_threshold}")
             hold_reason = '; '.join(hold_reasons)
             reasons.append(hold_reason)

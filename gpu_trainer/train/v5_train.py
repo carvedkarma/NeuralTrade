@@ -469,7 +469,8 @@ class V5TPDControllerConfig:
 
 class V5Dataset(Dataset):
     def __init__(self, features, ret_R, mfe_R, mae_R, vol_h, action_labels,
-                 valid_mask, symbol_ids=None, barrier_labels=None, barrier_soft=None):
+                 valid_mask, symbol_ids=None, barrier_labels=None, barrier_soft=None,
+                 sample_weights=None):
         self.features = torch.tensor(features, dtype=torch.float32)
         self.ret_R = torch.tensor(ret_R, dtype=torch.float32)
         self.mfe_R = torch.tensor(mfe_R, dtype=torch.float32)
@@ -480,6 +481,7 @@ class V5Dataset(Dataset):
         self.symbol_ids = torch.tensor(symbol_ids, dtype=torch.long) if symbol_ids is not None else None
         self.barrier_labels = torch.tensor(barrier_labels, dtype=torch.long) if barrier_labels is not None else None
         self.barrier_soft = torch.tensor(barrier_soft, dtype=torch.float32) if barrier_soft is not None else None
+        self.sample_weights = torch.tensor(sample_weights, dtype=torch.float32) if sample_weights is not None else None
 
     def __len__(self):
         return len(self.features)
@@ -500,20 +502,138 @@ class V5Dataset(Dataset):
             item['barrier_label'] = self.barrier_labels[idx]
         if self.barrier_soft is not None:
             item['barrier_soft'] = self.barrier_soft[idx]
+        if self.sample_weights is not None:
+            item['sample_weight'] = self.sample_weights[idx]
+        return item
+
+
+class V6SequenceDataset(Dataset):
+    """Sequence dataset for V6Forecaster — builds sliding windows per symbol.
+
+    Each sample returns (seq_len, n_features) window plus targets for the last bar.
+    Windows never cross symbol boundaries. Zero-padded at the start of each symbol.
+    """
+
+    def __init__(self, features_per_symbol, ret_R_per_symbol, mfe_R_per_symbol,
+                 mae_R_per_symbol, vol_h_per_symbol, action_per_symbol,
+                 valid_per_symbol, symbol_ids_per_symbol,
+                 barrier_oracle_per_symbol=None, barrier_soft_per_symbol=None,
+                 seq_len=16, sample_weights_per_symbol=None):
+        self.seq_len = seq_len
+        self.index_map = []
+        self.features_list = []
+        self.ret_R_list = []
+        self.mfe_R_list = []
+        self.mae_R_list = []
+        self.vol_h_list = []
+        self.action_list = []
+        self.valid_list = []
+        self.sym_id_list = []
+        self.barrier_oracle_list = []
+        self.barrier_soft_list = []
+        self.sample_weights = []
+
+        n_features = features_per_symbol[0].shape[1] if len(features_per_symbol) > 0 and len(features_per_symbol[0]) > 0 else 85
+
+        for si in range(len(features_per_symbol)):
+            n_bars = len(features_per_symbol[si])
+            if n_bars == 0:
+                continue
+            self.features_list.append(torch.tensor(features_per_symbol[si], dtype=torch.float32))
+            self.ret_R_list.append(torch.tensor(ret_R_per_symbol[si], dtype=torch.float32))
+            self.mfe_R_list.append(torch.tensor(mfe_R_per_symbol[si], dtype=torch.float32))
+            self.mae_R_list.append(torch.tensor(mae_R_per_symbol[si], dtype=torch.float32))
+            self.vol_h_list.append(torch.tensor(vol_h_per_symbol[si], dtype=torch.float32))
+            self.action_list.append(torch.tensor(action_per_symbol[si], dtype=torch.long))
+            self.valid_list.append(torch.tensor(valid_per_symbol[si], dtype=torch.bool))
+            self.sym_id_list.append(torch.tensor(symbol_ids_per_symbol[si], dtype=torch.long))
+
+            if barrier_oracle_per_symbol is not None:
+                self.barrier_oracle_list.append(torch.tensor(barrier_oracle_per_symbol[si], dtype=torch.long))
+            if barrier_soft_per_symbol is not None:
+                self.barrier_soft_list.append(torch.tensor(barrier_soft_per_symbol[si], dtype=torch.float32))
+
+            sym_idx_in_list = len(self.features_list) - 1
+            for bar_idx in range(n_bars):
+                self.index_map.append((sym_idx_in_list, bar_idx))
+
+            if sample_weights_per_symbol is not None and si < len(sample_weights_per_symbol):
+                w = sample_weights_per_symbol[si]
+                if hasattr(w, '__len__'):
+                    self.sample_weights.extend(w)
+                else:
+                    self.sample_weights.extend([w] * n_bars)
+
+        self.n_features = n_features
+        self.has_barriers = len(self.barrier_oracle_list) > 0
+        self.has_barrier_soft = len(self.barrier_soft_list) > 0
+        self.has_weights = len(self.sample_weights) > 0
+        if self.has_weights:
+            self.sample_weights = torch.tensor(self.sample_weights, dtype=torch.float32)
+
+    def __len__(self):
+        return len(self.index_map)
+
+    def __getitem__(self, idx):
+        sym_idx, bar_idx = self.index_map[idx]
+        features = self.features_list[sym_idx]
+        n_bars = features.shape[0]
+
+        start = max(0, bar_idx - self.seq_len + 1)
+        end = bar_idx + 1
+        window = features[start:end]
+
+        if window.shape[0] < self.seq_len:
+            pad_size = self.seq_len - window.shape[0]
+            padding = torch.zeros(pad_size, self.n_features, dtype=torch.float32)
+            window = torch.cat([padding, window], dim=0)
+
+        next_bar_features = torch.zeros(self.n_features, dtype=torch.float32)
+        if bar_idx + 1 < n_bars:
+            next_bar_features = features[bar_idx + 1]
+
+        item = {
+            'features': window,
+            'ret_R': self.ret_R_list[sym_idx][bar_idx],
+            'mfe_R': self.mfe_R_list[sym_idx][bar_idx],
+            'mae_R': self.mae_R_list[sym_idx][bar_idx],
+            'vol_h': self.vol_h_list[sym_idx][bar_idx],
+            'action_label': self.action_list[sym_idx][bar_idx],
+            'valid': self.valid_list[sym_idx][bar_idx],
+            'symbol_id': self.sym_id_list[sym_idx][bar_idx],
+            'next_bar_features': next_bar_features,
+            'has_next_bar': torch.tensor(bar_idx + 1 < n_bars, dtype=torch.bool),
+        }
+
+        if self.has_barriers:
+            item['barrier_label'] = self.barrier_oracle_list[sym_idx][bar_idx]
+        if self.has_barrier_soft:
+            item['barrier_soft'] = self.barrier_soft_list[sym_idx][bar_idx]
+        if self.has_weights:
+            item['sample_weight'] = self.sample_weights[idx]
+
         return item
 
 
 def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
                     w_action=2.0, w_barrier=0.25, w_regime=0.1,
-                    barrier_mode='fixed', action_weights=None, epoch=0):
+                    barrier_mode='fixed', action_weights=None, epoch=0,
+                    sample_weights=None):
     """Compute v5 composite loss with class-balanced action CE.
 
     Uses clamped Gaussian NLL to prevent log(sigma) term from dominating.
     Three-stage schedule: epochs 0-5 action-heavy, 6-15 balanced, 16+ full.
+
+    If sample_weights is provided, computes per-sample losses and applies
+    inverse-frequency weighting: loss = (per_sample_loss * weights).sum() / weights.sum()
     """
     valid = batch['valid']
     if valid.sum() == 0:
         return torch.tensor(0.0, device=outputs['ret_mu'].device, requires_grad=True), {}
+
+    sw = None
+    if sample_weights is not None:
+        sw = sample_weights[valid]
 
     ret_mu = outputs['ret_mu'][valid].squeeze(-1)
     ret_log_sigma = outputs['ret_log_sigma'][valid].squeeze(-1)
@@ -523,20 +643,34 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
     squared_error = ((ret_true - ret_mu) / (sigma + 1e-8)) ** 2
     log_term = torch.log(sigma + 1e-8)
     nll = log_term + 0.5 * squared_error
-    L_ret = nll.mean()
+    if sw is not None:
+        L_ret = (nll * sw).sum() / sw.sum()
+    else:
+        L_ret = nll.mean()
 
-    huber = nn.SmoothL1Loss()
     mfe_pred = outputs['mfe'][valid].squeeze(-1)
     mfe_true = batch['mfe_R'][valid]
-    L_mfe = huber(mfe_pred, mfe_true)
+    if sw is not None:
+        mfe_err = F.smooth_l1_loss(mfe_pred, mfe_true, reduction='none')
+        L_mfe = (mfe_err * sw).sum() / sw.sum()
+    else:
+        L_mfe = F.smooth_l1_loss(mfe_pred, mfe_true)
 
     mae_pred = outputs['mae'][valid].squeeze(-1)
     mae_true = batch['mae_R'][valid]
-    L_mae = huber(mae_pred, mae_true)
+    if sw is not None:
+        mae_err = F.smooth_l1_loss(mae_pred, mae_true, reduction='none')
+        L_mae = (mae_err * sw).sum() / sw.sum()
+    else:
+        L_mae = F.smooth_l1_loss(mae_pred, mae_true)
 
     action_logits = outputs['action_logits'][valid]
     action_true = batch['action_label'][valid]
-    if action_weights is not None:
+    if sw is not None:
+        action_per_sample = F.cross_entropy(action_logits, action_true,
+                                            weight=action_weights, reduction='none')
+        L_action = (action_per_sample * sw).sum() / sw.sum()
+    elif action_weights is not None:
         L_action = F.cross_entropy(action_logits, action_true, weight=action_weights)
     else:
         L_action = F.cross_entropy(action_logits, action_true)
@@ -610,6 +744,77 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
         losses['L_regime'] = L_regime.item()
     elif 'regime_logits' in outputs:
         losses['L_regime'] = 0.0
+
+    losses['total'] = total.item()
+    return total, losses
+
+
+def compute_v6_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
+                    w_action=2.0, w_barrier=0.25, w_regime=0.1,
+                    w_moe_balance=0.01, w_aux=0.1, w_confidence=0.15,
+                    barrier_mode='fixed', action_weights=None, epoch=0,
+                    sample_weights=None):
+    """Compute V6 composite loss: all V5 components + MoE balance + aux + confidence.
+
+    Additional V6 loss components:
+      - MoE load balancing: prevents expert collapse (weight: 0.01)
+      - Auxiliary self-supervised: next-bar feature prediction MSE (weight: 0.1)
+      - Confidence calibration: BCE on predicted vs actual correctness (weight: 0.15)
+    """
+    v5_loss, losses = compute_v5_loss(
+        outputs, batch, w_ret=w_ret, w_mfe=w_mfe, w_mae=w_mae,
+        w_action=w_action, w_barrier=w_barrier, w_regime=w_regime,
+        barrier_mode=barrier_mode, action_weights=action_weights,
+        epoch=epoch, sample_weights=sample_weights,
+    )
+
+    total = v5_loss
+
+    if 'moe_balance_loss' in outputs:
+        L_moe = outputs['moe_balance_loss']
+        total = total + w_moe_balance * L_moe
+        losses['L_moe_balance'] = L_moe.item()
+
+    if 'aux_next_bar' in outputs and 'next_bar_features' in batch:
+        valid = batch['valid']
+        has_next = batch.get('has_next_bar', None)
+        if has_next is not None:
+            aux_mask = valid & has_next
+        else:
+            aux_mask = valid
+
+        if aux_mask.sum() > 0:
+            aux_pred = outputs['aux_next_bar'][aux_mask]
+            aux_true = batch['next_bar_features'][aux_mask]
+            per_sample_aux = F.mse_loss(aux_pred, aux_true, reduction='none').mean(dim=-1)
+            if sample_weights is not None:
+                sw = sample_weights[aux_mask]
+                L_aux = (per_sample_aux * sw).sum() / sw.sum()
+            else:
+                L_aux = per_sample_aux.mean()
+            total = total + w_aux * L_aux
+            losses['L_aux'] = L_aux.item()
+        else:
+            losses['L_aux'] = 0.0
+
+    if 'confidence' in outputs:
+        valid = batch['valid']
+        if valid.sum() > 0:
+            conf_pred = outputs['confidence'][valid].squeeze(-1)
+            action_logits = outputs['action_logits'][valid]
+            action_true = batch['action_label'][valid]
+            predicted_action = action_logits.argmax(dim=-1)
+            correct = (predicted_action == action_true).float()
+            per_sample_conf = F.binary_cross_entropy(conf_pred, correct.detach(), reduction='none')
+            if sample_weights is not None:
+                sw = sample_weights[valid]
+                L_conf = (per_sample_conf * sw).sum() / sw.sum()
+            else:
+                L_conf = per_sample_conf.mean()
+            total = total + w_confidence * L_conf
+            losses['L_confidence'] = L_conf.item()
+        else:
+            losses['L_confidence'] = 0.0
 
     losses['total'] = total.item()
     return total, losses
@@ -3147,7 +3352,7 @@ def run_v5_walk_forward(
     conviction_confidence_threshold=0.65, conviction_confidence_boost=1.3,
     adx_gate=False, adx_period=14, adx_min=18.0, adx_exception_top_pct=10.0,
     temp_scale=False, promote_metric='expectancy', stage_a_epochs=0,
-    balanced_sampling=True, per_symbol_scaler=False, symbol_embed_dim=8,
+    balanced_sampling=True, balanced_sampling_mode='cap', per_symbol_scaler=False, symbol_embed_dim=8,
     ultra_conviction=False, ultra_risk_cap=0.05, ultra_score_pct=0.95,
     ultra_adx_min=25.0, ultra_edge_min=0.03, ultra_dd_max=0.10,
     ultra_max_per_day=1, ultra_mult=3.0,
@@ -3338,6 +3543,7 @@ def run_v5_walk_forward(
             promote_metric=promote_metric,
             stage_a_epochs=stage_a_epochs,
             balanced_sampling=balanced_sampling,
+            balanced_sampling_mode=balanced_sampling_mode,
             symbol_embed_dim=symbol_embed_dim,
             per_symbol_scaler=per_symbol_scaler,
             ultra_conviction=ultra_conviction,
@@ -3607,7 +3813,7 @@ def train_v5_model(
     temp_scale=False,
     stage_a_epochs=0, stage_a_w_action_mult=2.0, stage_a_w_regime_mult=1.5, stage_a_w_reg_mult=0.5,
     symbol_embed_dim=8,
-    balanced_sampling=True, per_symbol_scaler=False,
+    balanced_sampling=True, balanced_sampling_mode='cap', per_symbol_scaler=False,
     ultra_conviction=False, ultra_risk_cap=0.05, ultra_score_pct=0.95,
     ultra_adx_min=25.0, ultra_edge_min=0.03, ultra_dd_max=0.10,
     ultra_max_per_day=1, ultra_mult=3.0,
@@ -3628,8 +3834,20 @@ def train_v5_model(
     feature_report=False,
     per_symbol_r_kill=None,
     per_symbol_threshold=False,
+    model_version='v5',
+    v6_seq_len=16,
+    v6_conv_channels=128,
+    v6_n_conv_layers=3,
+    v6_attn_heads=4,
+    v6_attn_layers=2,
+    v6_n_experts=4,
+    v6_expert_top_k=2,
+    v6_feature_mask_ratio=0.15,
+    v6_aux_weight=0.1,
+    v6_confidence_weight=0.15,
+    v6_moe_balance_weight=0.01,
 ):
-    """V5.0.1 Forecaster training pipeline with quality gating + TPD controller."""
+    """V5/V6 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
     from data.candidate_generator import (
         CandidateConfig, generate_candidate_mask,
@@ -3638,6 +3856,11 @@ def train_v5_model(
     )
     from data.v5_target_generator import build_v5_targets, build_barrier_preset_labels
     from models.v5_forecaster import V5Forecaster, V5ForecasterConfig
+
+    use_v6 = (model_version == 'v6')
+    if use_v6:
+        from models.v6_forecaster import V6Forecaster, V6ForecasterConfig
+        log.info("[V6] V6Forecaster architecture enabled — Temporal-MoE-Attention model")
 
     if candidate_config is None:
         candidate_config = CandidateConfig(enabled=False)
@@ -3678,7 +3901,7 @@ def train_v5_model(
     log.info(f"[V5_CONFIG] cand_warmup_epochs={cand_warmup_epochs}")
     log.info(f"[V5_CONFIG] horizon={horizon} epochs={epochs} batch={batch_size} lr={lr}")
     log.info(f"[V5_CONFIG] ALL targets in R-units (price_change / ATR)")
-    log.info(f"[V5_CONFIG] balanced_sampling={balanced_sampling} per_symbol_scaler={per_symbol_scaler}")
+    log.info(f"[V5_CONFIG] balanced_sampling={balanced_sampling} balanced_sampling_mode={balanced_sampling_mode} per_symbol_scaler={per_symbol_scaler}")
     log.info(f"[V5_QUAL_CONFIG] sigma_max={quality_gate_cfg.sigma_max} mae_max={quality_gate_cfg.mae_max} "
              f"mu_R_min={quality_gate_cfg.mu_R_min} p_trade_min={quality_gate_cfg.p_trade_min} "
              f"enable_calib={quality_gate_cfg.enable_calib}")
@@ -3891,7 +4114,36 @@ def train_v5_model(
     for si_log, sym_log in enumerate(symbols):
         log.info(f"[V5_BALANCE] {sym_log}: train={per_sym_train_counts[si_log]} val={per_sym_val_counts[si_log]}")
 
+    effective_mode = 'none'
     if balanced_sampling and len(symbols) > 1 and len(train_features) > 1:
+        effective_mode = balanced_sampling_mode if balanced_sampling_mode in ('cap', 'weighted') else 'cap'
+
+    per_symbol_sample_weights = None
+
+    if effective_mode == 'weighted':
+        nonzero_counts = [c for c in per_sym_train_counts if c > 0]
+        zero_syms = [symbols[i] for i, c in enumerate(per_sym_train_counts) if c == 0]
+        if zero_syms:
+            log.info(f"[V6_BALANCE] Symbols with 0 train samples: {zero_syms}")
+        if nonzero_counts:
+            max_count = max(nonzero_counts)
+            per_symbol_sample_weights = []
+            weight_log_parts = []
+            for i in range(len(train_features)):
+                count_i = per_sym_train_counts[i]
+                if count_i > 0:
+                    w_i = max_count / count_i
+                else:
+                    w_i = 1.0
+                per_symbol_sample_weights.append(np.full(count_i, w_i, dtype=np.float32))
+                sym_name = symbols[i] if i < len(symbols) else f"sym_{i}"
+                weight_log_parts.append(f"{sym_name}: {w_i:.2f}x")
+            log.info(f"[V6_BALANCE] Weighted mode — keeping ALL data, inverse-frequency weights: "
+                     f"{', '.join(weight_log_parts)}")
+        else:
+            log.warning(f"[V6_BALANCE] ALL symbols have 0 train samples — skipping balance step")
+
+    elif effective_mode == 'cap':
         nonzero_counts = [c for c in per_sym_train_counts if c > 0]
         zero_syms = [symbols[i] for i, c in enumerate(per_sym_train_counts) if c == 0]
         if zero_syms:
@@ -4103,21 +4355,65 @@ def train_v5_model(
                  f"std={np.std(train_ret_valid):.4f} p5={np.percentile(train_ret_valid,5):.4f} "
                  f"p95={np.percentile(train_ret_valid,95):.4f}")
 
-    train_ds = V5Dataset(
-        train_feat, train_ret_R, train_mfe_R,
-        train_mae_R, train_vol_h, train_action,
-        train_valid, train_sym_ids,
-        train_barrier_oracle, train_barrier_soft,
-    )
-    val_ds = V5Dataset(
-        val_feat, val_ret_R, val_mfe_R,
-        val_mae_R, val_vol_h, val_action_arr,
-        val_valid, val_sym_ids_arr,
-        val_barrier_oracle, val_barrier_soft,
-    )
+    concat_sample_weights = None
+    if per_symbol_sample_weights is not None:
+        concat_sample_weights = np.concatenate(per_symbol_sample_weights, axis=0)
+        log.info(f"[V6_BALANCE] Concatenated sample_weights: len={len(concat_sample_weights)} "
+                 f"min={concat_sample_weights.min():.2f} max={concat_sample_weights.max():.2f}")
+
+    n_barrier = len(presets) if len(presets) > 1 and barrier_mode != 'fixed' else 0
+    n_syms = len(symbols) if len(symbols) > 1 else 1
+
+    if use_v6:
+        train_sw_per_sym = None
+        if per_symbol_sample_weights is not None:
+            train_sw_per_sym = per_symbol_sample_weights
+
+        train_ds = V6SequenceDataset(
+            features_per_symbol=train_features,
+            ret_R_per_symbol=train_ret_R_list,
+            mfe_R_per_symbol=train_mfe_R_list,
+            mae_R_per_symbol=train_mae_R_list,
+            vol_h_per_symbol=train_vol_h_list,
+            action_per_symbol=train_action_list,
+            valid_per_symbol=train_valid_list,
+            symbol_ids_per_symbol=train_sym_ids_list,
+            barrier_oracle_per_symbol=train_barrier_oracle_list,
+            barrier_soft_per_symbol=train_barrier_soft_list,
+            seq_len=v6_seq_len,
+            sample_weights_per_symbol=train_sw_per_sym,
+        )
+        val_ds = V6SequenceDataset(
+            features_per_symbol=val_features,
+            ret_R_per_symbol=val_ret_R_list,
+            mfe_R_per_symbol=val_mfe_R_list,
+            mae_R_per_symbol=val_mae_R_list,
+            vol_h_per_symbol=val_vol_h_list,
+            action_per_symbol=val_action_list,
+            valid_per_symbol=val_valid_list,
+            symbol_ids_per_symbol=val_sym_ids_list,
+            barrier_oracle_per_symbol=val_barrier_oracle_list,
+            barrier_soft_per_symbol=val_barrier_soft_list,
+            seq_len=v6_seq_len,
+        )
+        log.info(f"[V6] V6SequenceDataset created: train={len(train_ds)} val={len(val_ds)} seq_len={v6_seq_len}")
+    else:
+        train_ds = V5Dataset(
+            train_feat, train_ret_R, train_mfe_R,
+            train_mae_R, train_vol_h, train_action,
+            train_valid, train_sym_ids,
+            train_barrier_oracle, train_barrier_soft,
+            sample_weights=concat_sample_weights,
+        )
+        val_ds = V5Dataset(
+            val_feat, val_ret_R, val_mfe_R,
+            val_mae_R, val_vol_h, val_action_arr,
+            val_valid, val_sym_ids_arr,
+            val_barrier_oracle, val_barrier_soft,
+        )
 
     regime_sample_weights = None
-    if train_regime_trend_raw is not None:
+    if train_regime_trend_raw is not None and not use_v6:
         regime_trend_vals = train_regime_trend_raw
         regime_sample_weights = np.ones(len(train_feat), dtype=np.float64)
         trending_mask = np.abs(regime_trend_vals) > 0.5
@@ -4143,20 +4439,45 @@ def train_v5_model(
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
 
-    n_barrier = len(presets) if len(presets) > 1 and barrier_mode != 'fixed' else 0
-    model_config = V5ForecasterConfig(
-        input_dim=input_dim,
-        hidden_dims=[512, 256, 128, 64],
-        dropout=0.3,
-        use_layer_norm=True,
-        use_residual=True,
-        n_barrier_presets=n_barrier,
-        enable_regime_head=use_regime_head,
-        n_symbols=len(symbols) if len(symbols) > 1 else 1,
-        symbol_embed_dim=symbol_embed_dim,
-    )
-    model = V5Forecaster(model_config).to(device)
-    log.info(f"[V5] Model parameters: {model.parameters_count():,}")
+    if use_v6:
+        v6_config = V6ForecasterConfig(
+            input_dim=input_dim,
+            seq_len=v6_seq_len,
+            conv_channels=v6_conv_channels,
+            n_conv_layers=v6_n_conv_layers,
+            n_attn_layers=v6_attn_layers,
+            n_attn_heads=v6_attn_heads,
+            n_experts=v6_n_experts,
+            expert_top_k=v6_expert_top_k,
+            dropout=0.15,
+            n_symbols=n_syms,
+            symbol_embed_dim=symbol_embed_dim,
+            feature_mask_ratio=v6_feature_mask_ratio,
+            enable_aux_head=True,
+            enable_confidence_head=True,
+            n_barrier_presets=n_barrier,
+            enable_regime_head=use_regime_head,
+        )
+        model = V6Forecaster(v6_config).to(device)
+        model_config = v6_config
+        log.info(f"[V6] V6Forecaster: {model.parameters_count():,} params | "
+                 f"{v6_n_experts} experts (top-{v6_expert_top_k}) | "
+                 f"seq_len={v6_seq_len} | conv={v6_conv_channels} | "
+                 f"attn={v6_attn_layers}x{v6_attn_heads}h | mask={v6_feature_mask_ratio}")
+    else:
+        model_config = V5ForecasterConfig(
+            input_dim=input_dim,
+            hidden_dims=[512, 256, 128, 64],
+            dropout=0.3,
+            use_layer_norm=True,
+            use_residual=True,
+            n_barrier_presets=n_barrier,
+            enable_regime_head=use_regime_head,
+            n_symbols=n_syms,
+            symbol_embed_dim=symbol_embed_dim,
+        )
+        model = V5Forecaster(model_config).to(device)
+        log.info(f"[V5] Model parameters: {model.parameters_count():,}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     warmup_sched = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
@@ -4186,15 +4507,39 @@ def train_v5_model(
 
     current_score_threshold = tpd_ctrl_cfg.score_threshold
 
-    ckpt_model_config = {
-        'input_dim': input_dim,
-        'hidden_dims': model_config.hidden_dims,
-        'dropout': model_config.dropout,
-        'n_barrier_presets': model_config.n_barrier_presets,
-        'enable_regime_head': model_config.enable_regime_head,
-        'n_symbols': model_config.n_symbols,
-        'symbol_embed_dim': model_config.symbol_embed_dim,
-    }
+    if use_v6:
+        ckpt_model_config = {
+            'input_dim': input_dim,
+            'model_version': 'v6',
+            'seq_len': v6_seq_len,
+            'conv_channels': v6_conv_channels,
+            'n_conv_layers': v6_n_conv_layers,
+            'n_attn_layers': v6_attn_layers,
+            'n_attn_heads': v6_attn_heads,
+            'attn_ff_dim': model_config.attn_ff_dim,
+            'n_experts': v6_n_experts,
+            'expert_top_k': v6_expert_top_k,
+            'expert_hidden_dims': model_config.expert_hidden_dims,
+            'trunk_output_dim': model_config.trunk_output_dim,
+            'dropout': model_config.dropout,
+            'n_barrier_presets': model_config.n_barrier_presets,
+            'enable_regime_head': model_config.enable_regime_head,
+            'n_symbols': model_config.n_symbols,
+            'symbol_embed_dim': model_config.symbol_embed_dim,
+            'feature_mask_ratio': v6_feature_mask_ratio,
+            'enable_aux_head': True,
+            'enable_confidence_head': True,
+        }
+    else:
+        ckpt_model_config = {
+            'input_dim': input_dim,
+            'hidden_dims': model_config.hidden_dims,
+            'dropout': model_config.dropout,
+            'n_barrier_presets': model_config.n_barrier_presets,
+            'enable_regime_head': model_config.enable_regime_head,
+            'n_symbols': model_config.n_symbols,
+            'symbol_embed_dim': model_config.symbol_embed_dim,
+        }
     ckpt_train_config = {
         'w_ret': w_ret, 'w_mfe': w_mfe, 'w_mae': w_mae,
         'w_action': w_action, 'w_barrier': w_barrier, 'w_regime': w_regime,
@@ -4268,14 +4613,31 @@ def train_v5_model(
                          for k, v in batch.items()}
 
             outputs = model(feat, symbol_ids=sym_id)
-            loss, ld = compute_v5_loss(
-                outputs, batch_gpu,
-                w_ret=epoch_w_ret, w_mfe=epoch_w_mfe, w_mae=epoch_w_mae,
-                w_action=epoch_w_action, w_barrier=w_barrier, w_regime=epoch_w_regime,
-                barrier_mode=barrier_mode,
-                action_weights=action_weights_tensor,
-                epoch=epoch,
-            )
+
+            batch_sw = batch_gpu.get('sample_weight')
+
+            if use_v6:
+                loss, ld = compute_v6_loss(
+                    outputs, batch_gpu,
+                    w_ret=epoch_w_ret, w_mfe=epoch_w_mfe, w_mae=epoch_w_mae,
+                    w_action=epoch_w_action, w_barrier=w_barrier, w_regime=epoch_w_regime,
+                    w_moe_balance=v6_moe_balance_weight,
+                    w_aux=v6_aux_weight, w_confidence=v6_confidence_weight,
+                    barrier_mode=barrier_mode,
+                    action_weights=action_weights_tensor,
+                    epoch=epoch,
+                    sample_weights=batch_sw,
+                )
+            else:
+                loss, ld = compute_v5_loss(
+                    outputs, batch_gpu,
+                    w_ret=epoch_w_ret, w_mfe=epoch_w_mfe, w_mae=epoch_w_mae,
+                    w_action=epoch_w_action, w_barrier=w_barrier, w_regime=epoch_w_regime,
+                    barrier_mode=barrier_mode,
+                    action_weights=action_weights_tensor,
+                    epoch=epoch,
+                    sample_weights=batch_sw,
+                )
 
             optimizer.zero_grad()
             loss.backward()
@@ -4307,14 +4669,26 @@ def train_v5_model(
                              for k, v in batch.items()}
 
                 outputs = model(feat, symbol_ids=sym_id)
-                vloss, _ = compute_v5_loss(
-                    outputs, batch_gpu,
-                    w_ret=w_ret, w_mfe=w_mfe, w_mae=w_mae,
-                    w_action=w_action, w_barrier=w_barrier, w_regime=w_regime,
-                    barrier_mode=barrier_mode,
-                    action_weights=action_weights_tensor,
-                    epoch=epoch,
-                )
+                if use_v6:
+                    vloss, _ = compute_v6_loss(
+                        outputs, batch_gpu,
+                        w_ret=w_ret, w_mfe=w_mfe, w_mae=w_mae,
+                        w_action=w_action, w_barrier=w_barrier, w_regime=w_regime,
+                        w_moe_balance=v6_moe_balance_weight,
+                        w_aux=v6_aux_weight, w_confidence=v6_confidence_weight,
+                        barrier_mode=barrier_mode,
+                        action_weights=action_weights_tensor,
+                        epoch=epoch,
+                    )
+                else:
+                    vloss, _ = compute_v5_loss(
+                        outputs, batch_gpu,
+                        w_ret=w_ret, w_mfe=w_mfe, w_mae=w_mae,
+                        w_action=w_action, w_barrier=w_barrier, w_regime=w_regime,
+                        barrier_mode=barrier_mode,
+                        action_weights=action_weights_tensor,
+                        epoch=epoch,
+                    )
                 val_losses.append(vloss.item())
 
                 for k in all_val_outputs:
@@ -4335,9 +4709,16 @@ def train_v5_model(
         pred_long = np.sum(action_preds[:n_pred] == 1)
         pred_short = np.sum(action_preds[:n_pred] == 2)
 
-        log.info(f"[V5] Epoch {epoch:03d}/{epochs} | train={avg_train_loss:.4f} val={avg_val_loss:.4f} "
+        tag = "[V6]" if use_v6 else "[V5]"
+        log.info(f"{tag} Epoch {epoch:03d}/{epochs} | train={avg_train_loss:.4f} val={avg_val_loss:.4f} "
                  f"lr={current_lr:.2e} act_acc={action_acc:.3f} "
                  f"pred[H/L/S]={pred_hold}/{pred_long}/{pred_short} | {lb_str}")
+
+        if use_v6 and hasattr(model, 'get_expert_usage'):
+            expert_usage = model.get_expert_usage()
+            if expert_usage:
+                usage_str = " ".join(f"{k}={v:.1f}%" for k, v in expert_usage.items())
+                log.info(f"[V6_MoE] Expert usage: {usage_str}")
 
         do_sweep = (epoch % 5 == 0) or (epoch == epochs) or (epoch <= 3)
         if do_sweep:
@@ -4471,7 +4852,7 @@ def train_v5_model(
                     'feature_columns': features_df_columns,
                     'n_features': input_dim,
                     'feature_version': V5_FEATURE_VERSION,
-                    'model_type': 'v5_forecaster',
+                    'model_type': 'v6_forecaster' if use_v6 else 'v5_forecaster',
                     'scaler_center': scaler.center_,
                     'scaler_scale': scaler.scale_,
                     'barrier_config': {
@@ -4505,7 +4886,7 @@ def train_v5_model(
                 'feature_columns': features_df_columns,
                 'n_features': input_dim,
                 'feature_version': V5_FEATURE_VERSION,
-                'model_type': 'v5_forecaster',
+                'model_type': 'v6_forecaster' if use_v6 else 'v5_forecaster',
                 'scaler_center': scaler.center_,
                 'scaler_scale': scaler.scale_,
                 'symbol_map': {s: i for i, s in enumerate(symbols)},
