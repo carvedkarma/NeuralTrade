@@ -203,6 +203,30 @@ class MixtureOfExperts(nn.Module):
         loss = self.n_experts * (fraction_soft * fraction_soft).sum()
         return loss
 
+    def reinit_dead_experts(self, dead_indices: list):
+        if not dead_indices:
+            return
+        alive = [i for i in range(self.n_experts) if i not in dead_indices]
+        if not alive:
+            return
+        best_idx = alive[0]
+        if self._last_hard_usage is not None:
+            best_val = -1.0
+            for i in alive:
+                if self._last_hard_usage[i].item() > best_val:
+                    best_val = self._last_hard_usage[i].item()
+                    best_idx = i
+        with torch.no_grad():
+            for dead_idx in dead_indices:
+                self.gate.weight[dead_idx].copy_(self.gate.weight[best_idx])
+                self.gate.weight[dead_idx].add_(torch.randn_like(self.gate.weight[dead_idx]) * 0.01)
+                if self.gate.bias is not None:
+                    self.gate.bias[dead_idx] = self.gate.bias[best_idx] + 0.1
+
+                self.gate_noise.weight[dead_idx].copy_(self.gate_noise.weight[best_idx])
+                if self.gate_noise.bias is not None:
+                    self.gate_noise.bias[dead_idx] = self.gate_noise.bias[best_idx]
+
 
 @dataclass
 class V6ForecasterConfig:
@@ -379,6 +403,10 @@ class V6Forecaster(nn.Module):
                     nn.init.zeros_(module.bias)
             elif isinstance(module, nn.Embedding):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+        with torch.no_grad():
+            nn.init.uniform_(self.moe.gate.bias, -0.1, 0.1)
+            nn.init.xavier_uniform_(self.moe.gate.weight, gain=1.0)
 
     def _get_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1).bool()

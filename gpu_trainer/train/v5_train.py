@@ -4619,6 +4619,7 @@ def train_v5_model(
 
     moe_collapse_counter = 0
     moe_base_weight = v6_moe_balance_weight
+    moe_reinit_done = False
 
     for epoch in range(1, epochs + 1):
         use_candidates_this_epoch = candidate_config.enabled and epoch > cand_warmup_epochs
@@ -4766,9 +4767,17 @@ def train_v5_model(
                 if any_collapsed:
                     moe_collapse_counter += 1
                     if moe_collapse_counter >= 3:
-                        v6_moe_balance_weight = moe_base_weight * 5.0
+                        v6_moe_balance_weight = moe_base_weight * 20.0
                         log.warning(f"[V6_MoE] COLLAPSE DETECTED for {moe_collapse_counter} consecutive epochs — "
-                                    f"boosting w_moe_balance to {v6_moe_balance_weight:.3f} (5x base)")
+                                    f"boosting w_moe_balance to {v6_moe_balance_weight:.3f} (20x base)")
+
+                    if moe_collapse_counter >= 5 and not moe_reinit_done and hasattr(model, 'moe'):
+                        dead_indices = [i for i, v in enumerate(usage_vals) if v < 5.0]
+                        if dead_indices:
+                            model.moe.reinit_dead_experts(dead_indices)
+                            moe_reinit_done = True
+                            moe_collapse_counter = 0
+                            log.warning(f"[V6_MoE] REINIT: dead experts {dead_indices} gate weights cloned from strongest alive expert + noise")
                 else:
                     if moe_collapse_counter >= 3:
                         v6_moe_balance_weight = moe_base_weight
