@@ -3373,6 +3373,18 @@ def run_v5_walk_forward(
     per_symbol_r_kill=None,
     per_symbol_threshold=False,
     replit_url=None,
+    model_version='v5',
+    v6_seq_len=16,
+    v6_conv_channels=128,
+    v6_n_conv_layers=3,
+    v6_attn_heads=4,
+    v6_attn_layers=2,
+    v6_n_experts=4,
+    v6_expert_top_k=2,
+    v6_feature_mask_ratio=0.15,
+    v6_aux_weight=0.1,
+    v6_confidence_weight=0.15,
+    v6_moe_balance_weight=0.05,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -3589,6 +3601,18 @@ def run_v5_walk_forward(
             fold_id=fold['fold'],
             per_symbol_r_kill=per_symbol_r_kill,
             per_symbol_threshold=per_symbol_threshold,
+            model_version=model_version,
+            v6_seq_len=v6_seq_len,
+            v6_conv_channels=v6_conv_channels,
+            v6_n_conv_layers=v6_n_conv_layers,
+            v6_attn_heads=v6_attn_heads,
+            v6_attn_layers=v6_attn_layers,
+            v6_n_experts=v6_n_experts,
+            v6_expert_top_k=v6_expert_top_k,
+            v6_feature_mask_ratio=v6_feature_mask_ratio,
+            v6_aux_weight=v6_aux_weight,
+            v6_confidence_weight=v6_confidence_weight,
+            v6_moe_balance_weight=v6_moe_balance_weight,
         )
 
         report_path = Path("checkpoints") / "v5_forward_report.json"
