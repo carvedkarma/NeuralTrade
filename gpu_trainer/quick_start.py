@@ -32,7 +32,7 @@ log = logging.getLogger("QuickStart")
 
 FEATURE_VERSION = "v4.6.0_directional_separation"
 DIST_FEATURE_VERSION = "v4.9.1_enhanced_distributional"
-SYSTEM_VERSION = "v4.6.0_directional_separation"
+SYSTEM_VERSION = "v6.0.0_temporal_moe_attention"
 
 FUNDING_FEATURE_NAMES = ["funding_rate", "funding_rate_delta_8h", "funding_rate_zscore_30d"]
 FUNDING_FEATURE_COUNT = len(FUNDING_FEATURE_NAMES)

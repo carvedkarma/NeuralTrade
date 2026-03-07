@@ -3887,25 +3887,37 @@ def train_v5_model(
     if min_lr is None:
         min_lr = lr * 0.01
 
+    vtag = "V6" if use_v6 else "V5"
+    ctag = f"[{vtag}_CONFIG]"
+
     log.info("=" * 60)
-    log.info("  V5.0.1 FORECASTER - TRAINING")
+    if use_v6:
+        log.info("  V6.0 TEMPORAL-MoE-ATTENTION FORECASTER - TRAINING")
+    else:
+        log.info("  V5.0.1 FORECASTER - TRAINING")
     log.info("=" * 60)
-    log.info(f"Version: {V5_FEATURE_VERSION}")
-    log.info(f"[V5_CONFIG] w_ret={w_ret} w_mfe={w_mfe} w_mae={w_mae} w_action={w_action}")
-    log.info(f"[V5_CONFIG] w_barrier={w_barrier} w_regime={w_regime}")
-    log.info(f"[V5_CONFIG] score_lambda={score_lambda} risk_proxy={risk_proxy}")
-    log.info(f"[V5_CONFIG] hold_target={hold_target} mfe_min={mfe_min}")
-    log.info(f"[V5_CONFIG] barrier_mode={barrier_mode} presets={[p.get('label','?') for p in presets]}")
-    log.info(f"[V5_CONFIG] target_tpd={target_tpd} tpd_tol={target_tpd_tol}")
-    log.info(f"[V5_CONFIG] candidates={candidate_config.enabled} regime_head={use_regime_head}")
-    log.info(f"[V5_CONFIG] cand_warmup_epochs={cand_warmup_epochs}")
-    log.info(f"[V5_CONFIG] horizon={horizon} epochs={epochs} batch={batch_size} lr={lr}")
-    log.info(f"[V5_CONFIG] ALL targets in R-units (price_change / ATR)")
-    log.info(f"[V5_CONFIG] balanced_sampling={balanced_sampling} balanced_sampling_mode={balanced_sampling_mode} per_symbol_scaler={per_symbol_scaler}")
-    log.info(f"[V5_QUAL_CONFIG] sigma_max={quality_gate_cfg.sigma_max} mae_max={quality_gate_cfg.mae_max} "
+    log.info(f"Version: {V5_FEATURE_VERSION} (model: {vtag})")
+    if use_v6:
+        log.info(f"{ctag} seq_len={v6_seq_len} conv_channels={v6_conv_channels} n_conv_layers={v6_n_conv_layers}")
+        log.info(f"{ctag} attn_heads={v6_attn_heads} attn_layers={v6_attn_layers}")
+        log.info(f"{ctag} n_experts={v6_n_experts} expert_top_k={v6_expert_top_k}")
+        log.info(f"{ctag} feature_mask_ratio={v6_feature_mask_ratio}")
+        log.info(f"{ctag} loss weights: aux={v6_aux_weight} confidence={v6_confidence_weight} moe_balance={v6_moe_balance_weight}")
+    log.info(f"{ctag} w_ret={w_ret} w_mfe={w_mfe} w_mae={w_mae} w_action={w_action}")
+    log.info(f"{ctag} w_barrier={w_barrier} w_regime={w_regime}")
+    log.info(f"{ctag} score_lambda={score_lambda} risk_proxy={risk_proxy}")
+    log.info(f"{ctag} hold_target={hold_target} mfe_min={mfe_min}")
+    log.info(f"{ctag} barrier_mode={barrier_mode} presets={[p.get('label','?') for p in presets]}")
+    log.info(f"{ctag} target_tpd={target_tpd} tpd_tol={target_tpd_tol}")
+    log.info(f"{ctag} candidates={candidate_config.enabled} regime_head={use_regime_head}")
+    log.info(f"{ctag} cand_warmup_epochs={cand_warmup_epochs}")
+    log.info(f"{ctag} horizon={horizon} epochs={epochs} batch={batch_size} lr={lr}")
+    log.info(f"{ctag} ALL targets in R-units (price_change / ATR)")
+    log.info(f"{ctag} balanced_sampling={balanced_sampling} balanced_sampling_mode={balanced_sampling_mode} per_symbol_scaler={per_symbol_scaler}")
+    log.info(f"[{vtag}_QUAL_CONFIG] sigma_max={quality_gate_cfg.sigma_max} mae_max={quality_gate_cfg.mae_max} "
              f"mu_R_min={quality_gate_cfg.mu_R_min} p_trade_min={quality_gate_cfg.p_trade_min} "
              f"enable_calib={quality_gate_cfg.enable_calib}")
-    log.info(f"[V5_TPD_CONFIG] target={tpd_ctrl_cfg.target_tpd}±{tpd_ctrl_cfg.tpd_tol} "
+    log.info(f"[{vtag}_TPD_CONFIG] target={tpd_ctrl_cfg.target_tpd}±{tpd_ctrl_cfg.tpd_tol} "
              f"warmup={tpd_ctrl_cfg.thr_warmup_epochs} step_mult={tpd_ctrl_cfg.thr_step_mult} "
              f"mae_cap={tpd_ctrl_cfg.mae_cap} init_thr={tpd_ctrl_cfg.score_threshold}")
 
@@ -4203,7 +4215,7 @@ def train_v5_model(
             per_symbol_scalers[sym_name] = sym_scaler
             tr_mean = np.mean(train_features[si], axis=0)
             tr_std = np.std(train_features[si], axis=0)
-            log.info(f"[V5_SCALER] {sym_name}: fitted on {len(train_features[si])} train bars, "
+            log.info(f"[{vtag}_SCALER] {sym_name}: fitted on {len(train_features[si])} train bars, "
                      f"applied to {len(val_features[si])} val bars | "
                      f"post-scale mean=[{tr_mean.min():.3f}, {tr_mean.max():.3f}] "
                      f"std=[{tr_std.min():.3f}, {tr_std.max():.3f}]")
@@ -4216,16 +4228,16 @@ def train_v5_model(
         scaler = RobustScaler()
         scaler.center_ = np.zeros(train_feat.shape[1])
         scaler.scale_ = np.ones(train_feat.shape[1])
-        log.info(f"[V5_SCALER] Per-symbol scaling complete. Identity global scaler set for checkpoint compat.")
+        log.info(f"[{vtag}_SCALER] Per-symbol scaling complete. Identity global scaler set for checkpoint compat.")
 
         import joblib
         scalers_path = Path("checkpoints") / "per_symbol_scalers.joblib"
         scalers_path.parent.mkdir(exist_ok=True)
         joblib.dump(per_symbol_scalers, scalers_path)
-        log.info(f"[V5_SCALER] Saved {len(per_symbol_scalers)} per-symbol scalers to {scalers_path}")
+        log.info(f"[{vtag}_SCALER] Saved {len(per_symbol_scalers)} per-symbol scalers to {scalers_path}")
     else:
         if per_symbol_scaler and len(symbols) <= 1:
-            log.info("[V5_SCALER] --per-symbol-scaler enabled but only 1 symbol — using global scaler")
+            log.info(f"[{vtag}_SCALER] --per-symbol-scaler enabled but only 1 symbol — using global scaler")
 
         train_feat = np.concatenate(train_features, axis=0)
         val_feat = np.concatenate(val_features, axis=0)
@@ -4233,7 +4245,7 @@ def train_v5_model(
         scaler = RobustScaler()
         train_feat = scaler.fit_transform(train_feat).astype(np.float32)
         val_feat = scaler.transform(val_feat).astype(np.float32)
-        log.info(f"[V5] RobustScaler fitted on {len(train_feat)} train bars, applied to {len(val_feat)} val bars")
+        log.info(f"[{vtag}] RobustScaler fitted on {len(train_feat)} train bars, applied to {len(val_feat)} val bars")
 
     train_regime_trend_raw = None
     if features_df_columns is not None and 'regime_trend' in features_df_columns:
@@ -4287,13 +4299,13 @@ def train_v5_model(
     ]:
         nan_in_valid = np.sum(np.isnan(arr[vmask])) if np.any(vmask) else 0
         if nan_in_valid > 0:
-            log.warning("[V5_NAN_AUDIT] %s has %d NaNs in %d valid bars (%.1f%%)",
+            log.warning(f"[{vtag}_NAN_AUDIT] %s has %d NaNs in %d valid bars (%.1f%%)",
                         label, nan_in_valid, int(np.sum(vmask)),
                         100.0 * nan_in_valid / max(int(np.sum(vmask)), 1))
     nan_feats_train = np.sum(np.isnan(train_feat))
     nan_feats_val = np.sum(np.isnan(val_feat))
     if nan_feats_train > 0 or nan_feats_val > 0:
-        log.warning("[V5_NAN_AUDIT] Features NaN: train=%d val=%d", nan_feats_train, nan_feats_val)
+        log.warning(f"[{vtag}_NAN_AUDIT] Features NaN: train=%d val=%d", nan_feats_train, nan_feats_val)
 
     train_ret_R = np.nan_to_num(train_ret_R, nan=0.0)
     train_mfe_R = np.nan_to_num(train_mfe_R, nan=0.0)
@@ -4308,14 +4320,14 @@ def train_v5_model(
     total_val = len(val_feat)
     total_bars = total_train + total_val
     input_dim = train_feat.shape[1]
-    log.info(f"[V5] Total bars: {total_bars} (train={total_train}, val={total_val}) | "
+    log.info(f"[{vtag}] Total bars: {total_bars} (train={total_train}, val={total_val}) | "
              f"Features: {input_dim} | Symbols: {len(symbols)}")
 
     if len(symbols) > 1:
         for si_log, sym_log in enumerate(symbols):
             sym_train_n = int(np.sum(train_sym_ids == si_log))
             sym_val_n = int(np.sum(val_sym_ids_arr == si_log))
-            log.info(f"[V5_SYM_DIST] {sym_log} (id={si_log}): train={sym_train_n} val={sym_val_n}")
+            log.info(f"[{vtag}_SYM_DIST] {sym_log} (id={si_log}): train={sym_train_n} val={sym_val_n}")
 
     valid_train_action = train_action[train_valid]
     n_hold = int(np.sum(valid_train_action == 0))
@@ -4323,11 +4335,11 @@ def train_v5_model(
     n_short = int(np.sum(valid_train_action == 2))
     n_total_act = max(n_hold + n_long + n_short, 1)
 
-    log.info(f"[V5_ACTION_DIST] TRAIN: HOLD={n_hold} ({n_hold/n_total_act:.1%}) "
+    log.info(f"[{vtag}_ACTION_DIST] TRAIN: HOLD={n_hold} ({n_hold/n_total_act:.1%}) "
              f"LONG={n_long} ({n_long/n_total_act:.1%}) SHORT={n_short} ({n_short/n_total_act:.1%})")
     long_pct = n_long / max(n_long + n_short, 1) * 100
     short_pct = n_short / max(n_long + n_short, 1) * 100
-    log.info(f"[V5_SIDE_BALANCE] Training label bias: LONG={long_pct:.1f}% SHORT={short_pct:.1f}% | "
+    log.info(f"[{vtag}_SIDE_BALANCE] Training label bias: LONG={long_pct:.1f}% SHORT={short_pct:.1f}% | "
              f"Using balanced 50/50 KL target (not training distribution)")
 
     action_class_weights = np.ones(3, dtype=np.float32)
@@ -4336,7 +4348,7 @@ def train_v5_model(
         inv_freq = n_total_act / (3.0 * counts)
         inv_freq = np.clip(inv_freq, 0.5, 3.0)
         action_class_weights = inv_freq.astype(np.float32)
-    log.info(f"[V5_ACTION_DIST] Class weights: HOLD={action_class_weights[0]:.3f} "
+    log.info(f"[{vtag}_ACTION_DIST] Class weights: HOLD={action_class_weights[0]:.3f} "
              f"LONG={action_class_weights[1]:.3f} SHORT={action_class_weights[2]:.3f}")
 
     action_weights_tensor = torch.tensor(action_class_weights, dtype=torch.float32).to(device)
@@ -4346,12 +4358,12 @@ def train_v5_model(
     vn_long = int(np.sum(valid_val_action == 1))
     vn_short = int(np.sum(valid_val_action == 2))
     vn_total = max(vn_hold + vn_long + vn_short, 1)
-    log.info(f"[V5_ACTION_DIST] VAL: HOLD={vn_hold} ({vn_hold/vn_total:.1%}) "
+    log.info(f"[{vtag}_ACTION_DIST] VAL: HOLD={vn_hold} ({vn_hold/vn_total:.1%}) "
              f"LONG={vn_long} ({vn_long/vn_total:.1%}) SHORT={vn_short} ({vn_short/vn_total:.1%})")
 
     train_ret_valid = train_ret_R[train_valid]
     if len(train_ret_valid) > 0:
-        log.info(f"[V5_DATA_DIAG] ret_R train: mean={np.mean(train_ret_valid):.4f} "
+        log.info(f"[{vtag}_DATA_DIAG] ret_R train: mean={np.mean(train_ret_valid):.4f} "
                  f"std={np.std(train_ret_valid):.4f} p5={np.percentile(train_ret_valid,5):.4f} "
                  f"p95={np.percentile(train_ret_valid,95):.4f}")
 
@@ -4477,7 +4489,7 @@ def train_v5_model(
             symbol_embed_dim=symbol_embed_dim,
         )
         model = V5Forecaster(model_config).to(device)
-        log.info(f"[V5] Model parameters: {model.parameters_count():,}")
+        log.info(f"[{vtag}] Model parameters: {model.parameters_count():,}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     warmup_sched = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
@@ -4497,7 +4509,7 @@ def train_v5_model(
     max_patience = 25
     promote_patience = 0
     max_promote_patience = 25
-    log.info(f"[V5_CONFIG] promote_metric={promote_metric}")
+    log.info(f"{ctag} promote_metric={promote_metric}")
 
     val_cand_mask = val_cand_mask_arr
     val_outcomes = val_outcomes_arr
@@ -4575,7 +4587,7 @@ def train_v5_model(
     }
 
     if stage_a_epochs > 0:
-        log.info(f"[V5_STAGED] 3-phase training enabled: "
+        log.info(f"[{vtag}_STAGED] 3-phase training enabled: "
                  f"Phase A (epochs 1-{stage_a_epochs}): w_action×{stage_a_w_action_mult}, "
                  f"w_regime×{stage_a_w_regime_mult}, w_reg×{stage_a_w_reg_mult} | "
                  f"Phase B (epochs {stage_a_epochs+1}-{epochs}): normal weights")
@@ -4583,7 +4595,7 @@ def train_v5_model(
     for epoch in range(1, epochs + 1):
         use_candidates_this_epoch = candidate_config.enabled and epoch > cand_warmup_epochs
         if candidate_config.enabled and epoch == cand_warmup_epochs + 1:
-            log.info(f"[V5] Candidate warmup complete (epoch {epoch}), enabling candidate mask for sweep")
+            log.info(f"[{vtag}] Candidate warmup complete (epoch {epoch}), enabling candidate mask for sweep")
 
         in_stage_a = stage_a_epochs > 0 and epoch <= stage_a_epochs
         epoch_w_action = w_action * stage_a_w_action_mult if in_stage_a else w_action
@@ -4593,10 +4605,10 @@ def train_v5_model(
         epoch_w_mae = w_mae * stage_a_w_reg_mult if in_stage_a else w_mae
 
         if in_stage_a and epoch == 1:
-            log.info(f"[V5_STAGED] Phase A active: w_action={epoch_w_action:.2f} "
+            log.info(f"[{vtag}_STAGED] Phase A active: w_action={epoch_w_action:.2f} "
                      f"w_regime={epoch_w_regime:.2f} w_ret={epoch_w_ret:.2f}")
         if stage_a_epochs > 0 and epoch == stage_a_epochs + 1:
-            log.info(f"[V5_STAGED] Phase B starts: normal weights restored "
+            log.info(f"[{vtag}_STAGED] Phase B starts: normal weights restored "
                      f"w_action={w_action:.2f} w_regime={w_regime:.2f} w_ret={w_ret:.2f}")
 
         model.train()
@@ -4741,7 +4753,7 @@ def train_v5_model(
                 rr_weight=tpd_ctrl_cfg.rr_weight,
             )
 
-            log.info(f"[V5_SCORE_DIAG] mu_R: mean={score_diag['mu_R_mean']:.4f} std={score_diag['mu_R_std']:.4f} | "
+            log.info(f"[{vtag}_SCORE_DIAG] mu_R: mean={score_diag['mu_R_mean']:.4f} std={score_diag['mu_R_std']:.4f} | "
                      f"mae_R: mean={score_diag['mae_R_mean']:.3f} mfe_R: mean={score_diag['mfe_R_mean']:.3f} | "
                      f"p_long={score_diag['p_long_mean']:.3f} p_short={score_diag['p_short_mean']:.3f} | "
                      f"edge_L={score_diag['edge_long_mean']:.4f} edge_S={score_diag['edge_short_mean']:.4f} "
@@ -4753,7 +4765,7 @@ def train_v5_model(
             sig_arr = arrays['sigma'] if arrays['sigma'] is not None else np.zeros_like(mu_arr)
             mae_arr_diag = arrays['mae']
             pt_arr = arrays['p_trade']
-            log.info(f"[V5_OUTPUT_DIST] mu_R: p5={np.percentile(mu_arr,5):.4f} p50={np.percentile(mu_arr,50):.4f} "
+            log.info(f"[{vtag}_OUTPUT_DIST] mu_R: p5={np.percentile(mu_arr,5):.4f} p50={np.percentile(mu_arr,50):.4f} "
                      f"p95={np.percentile(mu_arr,95):.4f} | "
                      f"sigma: p5={np.percentile(sig_arr,5):.4f} p50={np.percentile(sig_arr,50):.4f} "
                      f"p95={np.percentile(sig_arr,95):.4f} | "
@@ -4789,7 +4801,7 @@ def train_v5_model(
                 weekly_loss_cap=weekly_loss_cap,
             )
 
-            log.info(f"[V5_EPOCH_TRADING] epoch={epoch:03d} | expect={sweep_expect:+.4f} PF={sweep_pf:.2f} "
+            log.info(f"[{vtag}_EPOCH_TRADING] epoch={epoch:03d} | expect={sweep_expect:+.4f} PF={sweep_pf:.2f} "
                      f"maxDD={sweep_max_dd:.2f} T/day={sweep_tpd:.1f} thr={sweep_threshold:.4f} "
                      f"best_at={sweep_label}")
 
@@ -4873,7 +4885,7 @@ def train_v5_model(
                         for sym, s in per_symbol_scalers.items() if s is not None
                     } if per_symbol_scalers else None,
                 }, checkpoint_dir / "best_v5_expectancy.pt")
-                log.info(f"[V5_CKPT] New best ({promote_metric}): expect={best_expectancy:.4f} "
+                log.info(f"[{vtag}_CKPT] New best ({promote_metric}): expect={best_expectancy:.4f} "
                          f"PF={best_promote_pf:.2f} maxDD={best_promote_max_dd:.2f} at {sweep_label}")
 
         if avg_val_loss < best_val_loss:
@@ -4898,13 +4910,13 @@ def train_v5_model(
                     for sym, s in per_symbol_scalers.items() if s is not None
                 }
             torch.save(ckpt_loss_data, checkpoint_dir / "best_v5_loss.pt")
-            log.info(f"[V5_CKPT] New best val_loss={best_val_loss:.4f}")
+            log.info(f"[{vtag}_CKPT] New best val_loss={best_val_loss:.4f}")
         else:
             patience += 1
 
         if promote_metric == 'val_loss':
             if patience >= max_patience:
-                log.info(f"[V5] Early stopping at epoch {epoch} (val_loss patience={max_patience})")
+                log.info(f"[{vtag}] Early stopping at epoch {epoch} (val_loss patience={max_patience})")
                 break
         else:
             if do_sweep and not promote_better:
@@ -4912,17 +4924,17 @@ def train_v5_model(
             elif do_sweep and promote_better:
                 promote_patience = 0
             if promote_patience >= max_promote_patience:
-                log.info(f"[V5] Early stopping at epoch {epoch} ({promote_metric} patience={max_promote_patience})")
+                log.info(f"[{vtag}] Early stopping at epoch {epoch} ({promote_metric} patience={max_promote_patience})")
                 break
 
     log.info("=" * 60)
-    log.info(f"[V5] Training complete. Best expectancy={best_expectancy:.4f} best_loss={best_val_loss:.4f}")
-    log.info(f"[V5] Final score_threshold={current_score_threshold}")
+    log.info(f"[{vtag}] Training complete. Best expectancy={best_expectancy:.4f} best_loss={best_val_loss:.4f}")
+    log.info(f"[{vtag}] Final score_threshold={current_score_threshold}")
     log.info("=" * 60)
 
     fitted_temperature = 1.0
     if temp_scale:
-        log.info("[V5_TEMP_SCALE] Fitting temperature scaling on validation set...")
+        log.info(f"[{vtag}_TEMP_SCALE] Fitting temperature scaling on validation set...")
         best_ckpt_for_temp = checkpoint_dir / "best_v5_expectancy.pt"
         if not best_ckpt_for_temp.exists():
             best_ckpt_for_temp = checkpoint_dir / "best_v5_loss.pt"
@@ -4948,7 +4960,7 @@ def train_v5_model(
             temp_ckpt['ece_before_temp'] = ece_before
             temp_ckpt['ece_after_temp'] = ece_after
             torch.save(temp_ckpt, best_ckpt_for_temp)
-            log.info(f"[V5_TEMP_SCALE] Saved temperature={fitted_temperature:.4f} to checkpoint")
+            log.info(f"[{vtag}_TEMP_SCALE] Saved temperature={fitted_temperature:.4f} to checkpoint")
 
     fwd_report = None
 
