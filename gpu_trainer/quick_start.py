@@ -4779,8 +4779,8 @@ Examples:
                         help="V6 auxiliary next-bar prediction loss weight (default: 0.1)")
     parser.add_argument("--v6-confidence-weight", type=float, default=0.15,
                         help="V6 confidence calibration loss weight (default: 0.15)")
-    parser.add_argument("--v6-moe-balance-weight", type=float, default=0.01,
-                        help="V6 MoE load balancing loss weight (default: 0.01)")
+    parser.add_argument("--v6-moe-balance-weight", type=float, default=0.05,
+                        help="V6 MoE load balancing loss weight (default: 0.05)")
     parser.add_argument("--loss-warmup-epochs", type=int, default=10,
                         help="Number of warmup epochs using plain BCE before switching to focal/OHEM (default: 10)")
     parser.add_argument("--warmup-pos-weight", type=float, default=2.0,

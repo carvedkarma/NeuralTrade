@@ -71,13 +71,13 @@ Next-generation model upgrade in `gpu_trainer/models/v6_forecaster.py`. Same out
 -   **Architecture:** Causal Conv1D (3 layers, 128ch) → Positional Encoding → 2x Transformer Blocks (4-head self-attention, causal mask) → Mixture-of-Experts trunk (4 experts, top-2 sparse routing) → 6 output heads. ~1.5M params vs V5's ~300K.
 -   **New capabilities:**
     - Temporal context: sees 16 bars (4 hours) of history via sliding window, not just 1 bar.
-    - MoE routing: 4 specialized expert MLPs (trending, reverting, volatile, breakout), top-2 gating per sample. Load-balancing loss prevents expert collapse.
+    - MoE routing: 4 specialized expert MLPs (trending, reverting, volatile, breakout), top-2 gating per sample. Uses noisy top-k gating (learnable Gaussian noise on gate logits during training, Shazeer et al.), expert dropout (p=0.1, randomly masks one expert per batch), and differentiable CV balance loss (w=0.05). Auto-recovery detects expert collapse (<5% usage for 3 epochs) and temporarily boosts balance weight 5x.
     - Feature masking: randomly zeros 15% of features during training (like BERT). Forces robustness.
     - Auxiliary self-supervised loss: next-bar feature prediction forces trunk to learn market structure.
     - Confidence calibration head: sigmoid output (0-1) predicting its own accuracy. Live runner gates signals with `confidence >= 0.4`.
 -   **Training:** `python quick_start.py --train-v5 --v6` activates V6. V6-specific args: `--v6-seq-len`, `--v6-conv-channels`, `--v6-n-conv-layers`, `--v6-attn-heads`, `--v6-attn-layers`, `--v6-n-experts`, `--v6-expert-top-k`, `--v6-feature-mask-ratio`, `--v6-aux-weight`, `--v6-confidence-weight`, `--v6-moe-balance-weight`.
 -   **Dataset:** `V6SequenceDataset` builds sliding windows per symbol (no cross-symbol boundaries), with zero-padding for early bars.
--   **Loss:** `compute_v6_loss` = all V5 loss components + MoE balance (w=0.01) + aux next-bar MSE (w=0.1) + confidence calibration BCE (w=0.15).
+-   **Loss:** `compute_v6_loss` = all V5 loss components + MoE balance (w=0.05, differentiable CV loss) + aux next-bar MSE (w=0.1) + confidence calibration BCE (w=0.15).
 -   **Balanced sampling:** `--balanced-sampling-mode weighted` uses inverse-frequency loss weighting instead of truncation.
 -   **Live inference:** `live_runner.py` detects `model_type='v6_forecaster'` in checkpoint, instantiates V6Forecaster, computes seq_len bars of scaled features per symbol, and uses confidence output to gate signals.
 -   **Checkpoint model_type:** `'v6_forecaster'`. Config saves all V6 hyperparameters for reproducible loading.

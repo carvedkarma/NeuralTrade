@@ -139,27 +139,49 @@ class ExpertMLP(nn.Module):
 
 class MixtureOfExperts(nn.Module):
     def __init__(self, input_dim: int, n_experts: int = 4, top_k: int = 2,
-                 expert_hidden_dims: list = None, dropout: float = 0.15):
+                 expert_hidden_dims: list = None, dropout: float = 0.15,
+                 expert_dropout_p: float = 0.1):
         super().__init__()
         if expert_hidden_dims is None:
             expert_hidden_dims = [192, 128, 96]
         self.n_experts = n_experts
         self.top_k = top_k
+        self.expert_dropout_p = expert_dropout_p
         self.gate = nn.Linear(input_dim, n_experts)
+        self.gate_noise = nn.Linear(input_dim, n_experts)
         self.experts = nn.ModuleList([
             ExpertMLP(input_dim, expert_hidden_dims, dropout)
             for _ in range(n_experts)
         ])
         self.output_dim = expert_hidden_dims[-1]
         self._last_gate_probs = None
+        self._last_hard_usage = None
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         gate_logits = self.gate(x)
+
+        if self.training:
+            noise_std = F.softplus(self.gate_noise(x))
+            noise = noise_std * torch.randn_like(gate_logits)
+            gate_logits = gate_logits + noise
+
+            if self.expert_dropout_p > 0 and self.n_experts > self.top_k + 1:
+                if torch.rand(1).item() < self.expert_dropout_p:
+                    drop_idx = torch.randint(0, self.n_experts, (1,)).item()
+                    gate_logits[:, drop_idx] = -1e9
+
         gate_probs = F.softmax(gate_logits, dim=-1)
         self._last_gate_probs = gate_probs.detach()
 
         top_k_vals, top_k_idx = torch.topk(gate_probs, self.top_k, dim=-1)
         top_k_vals = top_k_vals / (top_k_vals.sum(dim=-1, keepdim=True) + 1e-8)
+
+        n = gate_probs.size(0)
+        hard_usage = torch.zeros(self.n_experts, device=gate_probs.device)
+        for k in range(self.top_k):
+            for e in range(self.n_experts):
+                hard_usage[e] += (top_k_idx[:, k] == e).float().sum()
+        self._last_hard_usage = (hard_usage / (n * self.top_k)).detach()
 
         batch_size = x.size(0)
         output = torch.zeros(batch_size, self.output_dim, device=x.device, dtype=x.dtype)
@@ -173,18 +195,12 @@ class MixtureOfExperts(nn.Module):
                     expert_out = self.experts[e_idx](x[mask])
                     output[mask] += weight[mask] * expert_out
 
-        load_balance_loss = self._compute_load_balance_loss(gate_probs, top_k_idx)
+        load_balance_loss = self._compute_load_balance_loss(gate_probs)
         return output, load_balance_loss
 
-    def _compute_load_balance_loss(self, gate_probs: torch.Tensor, top_k_idx: torch.Tensor) -> torch.Tensor:
-        n = gate_probs.size(0)
-        fraction = torch.zeros(self.n_experts, device=gate_probs.device)
-        for k in range(self.top_k):
-            for e in range(self.n_experts):
-                fraction[e] += (top_k_idx[:, k] == e).float().sum()
-        fraction = fraction / (n * self.top_k)
-        mean_gate = gate_probs.mean(dim=0)
-        loss = self.n_experts * (fraction * mean_gate).sum()
+    def _compute_load_balance_loss(self, gate_probs: torch.Tensor) -> torch.Tensor:
+        fraction_soft = gate_probs.mean(dim=0)
+        loss = self.n_experts * (fraction_soft * fraction_soft).sum()
         return loss
 
 

@@ -14,7 +14,7 @@ class TrainingProgressPusher:
         self.session_id = None
         self.enabled = replit_url is not None
         self._last_epoch_push = 0
-        self._epoch_push_interval = 5
+        self._epoch_push_interval = 2
         self._fold_start_times = {}
         self._session_start_time = None
 
@@ -43,13 +43,13 @@ class TrainingProgressPusher:
                 if body.get("status") == "blocked":
                     log.warning(f"[TrainingPush] BLOCKED: {body.get('reason', 'unknown')}")
                     return body
-                log.debug(f"[TrainingPush] HTTP {e.code} for {event_type}: {body}")
+                log.warning(f"[TrainingPush] HTTP {e.code} for {event_type}: {body}")
                 return body
             except Exception:
-                log.debug(f"[TrainingPush] HTTP {e.code} for {event_type}")
+                log.warning(f"[TrainingPush] HTTP {e.code} for {event_type}")
                 return {}
         except Exception as e:
-            log.debug(f"[TrainingPush] Failed to push {event_type}: {e}")
+            log.warning(f"[TrainingPush] Failed to push {event_type}: {e}")
             return {}
 
     def session_start(self, session_type: str, total_folds: int, total_epochs: int,
@@ -74,6 +74,7 @@ class TrainingProgressPusher:
             return
         if result.get("status") == "accepted":
             self.session_id = result.get("session_id")
+            log.info(f"[TrainingPush] Session accepted by server (id={self.session_id})")
         if not self.session_id:
             try:
                 url = f"{self.replit_url}/api/training/active"
@@ -84,7 +85,10 @@ class TrainingProgressPusher:
                         self.session_id = data["active"]["id"]
             except Exception:
                 pass
-        log.info(f"[TrainingPush] Session started (id={self.session_id})")
+        if self.session_id:
+            log.info(f"[TrainingPush] Session started (id={self.session_id})")
+        else:
+            log.warning("[TrainingPush] Session started but session_id is None — push connectivity may have failed")
 
     def session_end(self, status: str = "completed", completed_folds: int = 0,
                     aggregate_metrics: dict = None, error_message: str = None):
@@ -148,7 +152,7 @@ class TrainingProgressPusher:
                      total_folds: int = 1):
         if not self.session_id:
             return
-        if epoch % self._epoch_push_interval != 0 and epoch != total_epochs - 1 and epoch != 0:
+        if epoch % self._epoch_push_interval != 0 and epoch != total_epochs - 1 and epoch != 1:
             return
 
         elapsed = time.time() - self._session_start_time if self._session_start_time else 0

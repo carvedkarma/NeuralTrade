@@ -12,6 +12,7 @@ Changes from v5.0:
 - (C) Trade Frequency Controller: adaptive threshold to hit target TPD
 """
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -751,7 +752,7 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
 
 def compute_v6_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
                     w_action=2.0, w_barrier=0.25, w_regime=0.1,
-                    w_moe_balance=0.01, w_aux=0.1, w_confidence=0.15,
+                    w_moe_balance=0.05, w_aux=0.1, w_confidence=0.15,
                     barrier_mode='fixed', action_weights=None, epoch=0,
                     sample_weights=None):
     """Compute V6 composite loss: all V5 components + MoE balance + aux + confidence.
@@ -3845,7 +3846,7 @@ def train_v5_model(
     v6_feature_mask_ratio=0.15,
     v6_aux_weight=0.1,
     v6_confidence_weight=0.15,
-    v6_moe_balance_weight=0.01,
+    v6_moe_balance_weight=0.05,
 ):
     """V5/V6 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -4592,6 +4593,9 @@ def train_v5_model(
                  f"w_regime×{stage_a_w_regime_mult}, w_reg×{stage_a_w_reg_mult} | "
                  f"Phase B (epochs {stage_a_epochs+1}-{epochs}): normal weights")
 
+    moe_collapse_counter = 0
+    moe_base_weight = v6_moe_balance_weight
+
     for epoch in range(1, epochs + 1):
         use_candidates_this_epoch = candidate_config.enabled and epoch > cand_warmup_epochs
         if candidate_config.enabled and epoch == cand_warmup_epochs + 1:
@@ -4729,8 +4733,23 @@ def train_v5_model(
         if use_v6 and hasattr(model, 'get_expert_usage'):
             expert_usage = model.get_expert_usage()
             if expert_usage:
+                usage_vals = list(expert_usage.values())
                 usage_str = " ".join(f"{k}={v:.1f}%" for k, v in expert_usage.items())
-                log.info(f"[V6_MoE] Expert usage: {usage_str}")
+                gate_entropy = -sum((v/100) * math.log(v/100 + 1e-10) for v in usage_vals) / math.log(len(usage_vals))
+                log.info(f"[V6_MoE] Expert usage: {usage_str} | entropy={gate_entropy:.3f} (1.0=perfect balance)")
+
+                any_collapsed = any(v < 5.0 for v in usage_vals)
+                if any_collapsed:
+                    moe_collapse_counter += 1
+                    if moe_collapse_counter >= 3:
+                        v6_moe_balance_weight = moe_base_weight * 5.0
+                        log.warning(f"[V6_MoE] COLLAPSE DETECTED for {moe_collapse_counter} consecutive epochs — "
+                                    f"boosting w_moe_balance to {v6_moe_balance_weight:.3f} (5x base)")
+                else:
+                    if moe_collapse_counter >= 3:
+                        v6_moe_balance_weight = moe_base_weight
+                        log.info(f"[V6_MoE] Collapse recovered — restoring w_moe_balance to {moe_base_weight:.3f}")
+                    moe_collapse_counter = 0
 
         do_sweep = (epoch % 5 == 0) or (epoch == epochs) or (epoch <= 3)
         if do_sweep:
