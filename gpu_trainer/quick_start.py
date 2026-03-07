@@ -5865,7 +5865,37 @@ Examples:
                 )
                 return
 
-            train_v5_model(
+            replit_url = getattr(args, 'url', None)
+            _single_pusher = None
+            if replit_url:
+                import train.v5_train as _v5mod
+                from train.training_push import TrainingProgressPusher
+                _single_pusher = TrainingProgressPusher(replit_url=replit_url)
+                try:
+                    import torch as _torch
+                    _gpu_name = _torch.cuda.get_device_name(0) if _torch.cuda.is_available() else "CPU"
+                except Exception:
+                    _gpu_name = "Unknown"
+                _single_pusher.session_start(
+                    session_type="single_train",
+                    total_folds=1,
+                    total_epochs=args.epochs,
+                    symbols=symbols_list,
+                    config={
+                        "lr": args.lr, "batch_size": args.batch_size, "epochs": args.epochs,
+                        "horizon": args.horizon, "tp_mult": args.tp_mult, "sl_mult": args.sl_mult,
+                        "model_version": "v6" if args.v6 else "v5",
+                    },
+                    gpu_name=_gpu_name,
+                )
+                _single_pusher.fold_start(fold_num=1, train_start="", train_end="",
+                                           test_start="", test_end="")
+                _v5mod._active_pusher = _single_pusher
+                _v5mod._active_fold_num = 1
+                _v5mod._active_total_folds = 1
+
+            try:
+              train_v5_model(
                 data_path, device, args.epochs, args.batch_size, args.lr,
                 checkpoint_interval=args.checkpoint_interval,
                 warmup_epochs=args.warmup_epochs, min_lr=args.min_lr,
@@ -6004,6 +6034,16 @@ Examples:
                 v6_confidence_weight=args.v6_confidence_weight,
                 v6_moe_balance_weight=args.v6_moe_balance_weight,
             )
+
+              if _single_pusher is not None:
+                _single_pusher.fold_end(fold_num=1, completed_folds=1)
+                _single_pusher.session_end(status="completed", completed_folds=1)
+                _v5mod._active_pusher = None
+            except Exception as _train_err:
+              if _single_pusher is not None:
+                _single_pusher.session_end(status="failed", error_message=str(_train_err))
+                _v5mod._active_pusher = None
+              raise
 
             tag = "V6" if args.v6 else "V5"
             log.info("=" * 60)
