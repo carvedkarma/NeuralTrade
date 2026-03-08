@@ -109,7 +109,11 @@ class V5Forecaster(nn.Module):
         )
 
         self.mfe_head = nn.Sequential(
-            nn.Linear(self.trunk_dim, 32),
+            nn.Linear(self.trunk_dim, 64),
+            nn.LayerNorm(64),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, 32),
             nn.LayerNorm(32),
             nn.GELU(),
             nn.Dropout(0.2),
@@ -117,7 +121,11 @@ class V5Forecaster(nn.Module):
         )
 
         self.mae_head = nn.Sequential(
-            nn.Linear(self.trunk_dim, 32),
+            nn.Linear(self.trunk_dim, 64),
+            nn.LayerNorm(64),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, 32),
             nn.LayerNorm(32),
             nn.GELU(),
             nn.Dropout(0.2),

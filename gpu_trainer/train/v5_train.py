@@ -193,6 +193,8 @@ class V5ForwardTestConfig:
     calibration_block_ece: float = 0.15
     feature_psi: bool = False
     head_disagreement_gate: bool = False
+    sigma_discount: bool = False
+    min_p_side: float = 0.0
     slippage_base_bps: float = 0.0
     slippage_impact_mult: float = 0.0
     ood_gate: bool = False
@@ -619,7 +621,7 @@ class V6SequenceDataset(Dataset):
 def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
                     w_action=2.0, w_barrier=0.25, w_regime=0.1,
                     barrier_mode='fixed', action_weights=None, epoch=0,
-                    sample_weights=None):
+                    sample_weights=None, mae_asym_weight=1.0):
     """Compute v5 composite loss with class-balanced action CE.
 
     Uses clamped Gaussian NLL to prevent log(sigma) term from dominating.
@@ -659,11 +661,15 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
 
     mae_pred = outputs['mae'][valid].squeeze(-1)
     mae_true = batch['mae_R'][valid]
+    mae_err = F.smooth_l1_loss(mae_pred, mae_true, reduction='none')
+    if mae_asym_weight > 1.0:
+        underest_mask = (mae_pred < mae_true).float()
+        asym_mult = 1.0 + underest_mask * (mae_asym_weight - 1.0)
+        mae_err = mae_err * asym_mult
     if sw is not None:
-        mae_err = F.smooth_l1_loss(mae_pred, mae_true, reduction='none')
         L_mae = (mae_err * sw).sum() / sw.sum()
     else:
-        L_mae = F.smooth_l1_loss(mae_pred, mae_true)
+        L_mae = mae_err.mean()
 
     action_logits = outputs['action_logits'][valid]
     action_true = batch['action_label'][valid]
@@ -754,7 +760,7 @@ def compute_v6_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
                     w_action=2.0, w_barrier=0.25, w_regime=0.1,
                     w_moe_balance=0.05, w_aux=0.1, w_confidence=0.15,
                     barrier_mode='fixed', action_weights=None, epoch=0,
-                    sample_weights=None):
+                    sample_weights=None, mae_asym_weight=1.0):
     """Compute V6 composite loss: all V5 components + MoE balance + aux + confidence.
 
     Additional V6 loss components:
@@ -767,6 +773,7 @@ def compute_v6_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
         w_action=w_action, w_barrier=w_barrier, w_regime=w_regime,
         barrier_mode=barrier_mode, action_weights=action_weights,
         epoch=epoch, sample_weights=sample_weights,
+        mae_asym_weight=mae_asym_weight,
     )
 
     total = v5_loss
@@ -1082,7 +1089,8 @@ def fit_temperature_scaling(logits, labels, n_classes=3, lr=0.01, max_iter=200):
 def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
                       risk_proxy='mae', mae_cap=2.0, _arrays=None,
                       side_mode='action_head', rr_weight=0.0,
-                      min_mu_r_score=0.03, slippage_bps=0.0):
+                      min_mu_r_score=0.03, slippage_bps=0.0,
+                      sigma_discount=False, min_p_side=0.0):
     """Compute execution-aware v5 scores -- all in R-units.
 
     Two side-selection modes:
@@ -1179,6 +1187,20 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         rr_bonus = rr_weight * rr_ratio * mu_over_risk
         scores = scores + rr_bonus
 
+    n_sigma_discounted = 0
+    if sigma_discount and _arrays is not None and _arrays.get('sigma') is not None:
+        sigma = _arrays['sigma']
+        sharpness = 1.0 / (1.0 + np.maximum(sigma, 0.0))
+        scores = scores * sharpness
+        n_sigma_discounted = int(np.sum(np.isfinite(scores) & (sharpness < 0.667)))
+
+    n_pside_killed = 0
+    if min_p_side > 0 and side_mode == 'action_head':
+        p_side = np.where(sides == 1, p_long, p_short)
+        low_conviction = p_side < min_p_side
+        n_pside_killed = int(np.sum(low_conviction & np.isfinite(scores)))
+        scores[low_conviction] = -np.inf
+
     n_suppressed = 0
     if min_mu_r_score > 0:
         tiny_mu_mask = abs_mu < min_mu_r_score
@@ -1223,6 +1245,8 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         'rr_weight': rr_weight,
         'min_mu_r_score': min_mu_r_score,
         'n_mu_suppressed': n_suppressed,
+        'n_sigma_discounted': n_sigma_discounted,
+        'n_pside_killed': n_pside_killed,
         'n_long_all': n_long_sides,
         'n_short_all': n_short_sides,
         'long_pct_all': float(100 * n_long_sides / max(n_long_sides + n_short_sides, 1)),
@@ -1855,6 +1879,8 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
         side_mode=config.side_mode,
         rr_weight=config.rr_weight,
         slippage_bps=config.slippage_base_bps,
+        sigma_discount=config.sigma_discount,
+        min_p_side=config.min_p_side,
     )
     ref_arrays['_train_scores'] = train_scores
 
@@ -2088,6 +2114,8 @@ def run_v5_forward_test(
         side_mode=config.side_mode,
         rr_weight=config.rr_weight,
         slippage_bps=config.slippage_base_bps,
+        sigma_discount=config.sigma_discount,
+        min_p_side=config.min_p_side,
     )
 
     if 'edge_L' in score_diag:
@@ -3922,6 +3950,7 @@ def train_v5_model(
     edge_first=False, edge_min=0.03, edge_pct_floor=70, edge_topn_per_day=4,
     regime_side_map=None, size_floor=0.0,
     head_disagreement_gate=False, slippage_base_bps=0.0,
+    sigma_discount=False, min_p_side=0.0, mae_asym_weight=1.0,
     mu_debias=True, mu_debias_alpha=0.01,
     min_trades=20,
     wf_threshold_override=None,
@@ -4741,6 +4770,7 @@ def train_v5_model(
                     action_weights=action_weights_tensor,
                     epoch=epoch,
                     sample_weights=batch_sw,
+                    mae_asym_weight=mae_asym_weight,
                 )
             else:
                 loss, ld = compute_v5_loss(
@@ -4751,6 +4781,7 @@ def train_v5_model(
                     action_weights=action_weights_tensor,
                     epoch=epoch,
                     sample_weights=batch_sw,
+                    mae_asym_weight=mae_asym_weight,
                 )
 
             optimizer.zero_grad()
@@ -4793,6 +4824,7 @@ def train_v5_model(
                         barrier_mode=barrier_mode,
                         action_weights=action_weights_tensor,
                         epoch=epoch,
+                        mae_asym_weight=mae_asym_weight,
                     )
                 else:
                     vloss, _ = compute_v5_loss(
@@ -4802,6 +4834,7 @@ def train_v5_model(
                         barrier_mode=barrier_mode,
                         action_weights=action_weights_tensor,
                         epoch=epoch,
+                        mae_asym_weight=mae_asym_weight,
                     )
                 val_losses.append(vloss.item())
 
@@ -5245,6 +5278,8 @@ def train_v5_model(
                 regime_side_map=regime_side_map,
                 size_floor=size_floor,
                 head_disagreement_gate=head_disagreement_gate,
+                sigma_discount=sigma_discount,
+                min_p_side=min_p_side,
                 slippage_base_bps=slippage_base_bps,
                 mu_debias=mu_debias,
                 mu_debias_alpha=mu_debias_alpha,

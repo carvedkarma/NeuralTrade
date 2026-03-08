@@ -5133,6 +5133,14 @@ Examples:
                         help="v5.2: block trades when model heads disagree (action side vs mu_R sign)")
     parser.add_argument("--slippage-base-bps", type=float, default=0.0,
                         help="v5.2: slippage deduction in basis points before edge calc (default: 0 = disabled)")
+    parser.add_argument("--v5-sigma-discount", action="store_true", default=True,
+                        help="v5.3: apply sigma sharpness multiplier 1/(1+sigma) to scores (default: enabled)")
+    parser.add_argument("--v5-no-sigma-discount", action="store_true", default=False,
+                        help="v5.3: disable sigma discount")
+    parser.add_argument("--v5-min-p-side", type=float, default=0.45,
+                        help="v5.3: minimum p_side conviction to allow a trade (default: 0.45, 0=disabled)")
+    parser.add_argument("--v5-mae-asym-weight", type=float, default=2.0,
+                        help="v5.3: asymmetric MAE loss penalty for underestimation (default: 2.0, 1.0=symmetric)")
 
     parser.add_argument("--v5-temp-scale", action="store_true", default=False,
                         help="v5.0.9+: enable post-training temperature scaling calibration")
@@ -5842,6 +5850,9 @@ Examples:
                     size_floor=args.v5_size_floor,
                     head_disagreement_gate=getattr(args, 'v5_head_disagree_gate', False),
                     slippage_base_bps=getattr(args, 'slippage_base_bps', 0.0),
+                    sigma_discount=args.v5_sigma_discount and not args.v5_no_sigma_discount,
+                    min_p_side=args.v5_min_p_side,
+                    mae_asym_weight=args.v5_mae_asym_weight,
                     min_trades=args.v5_min_trades,
                     wf_threshold_ema=args.v5_wf_threshold_ema and not args.v5_no_wf_threshold_ema,
                     wf_threshold_ema_alpha=args.v5_wf_threshold_ema_alpha,
@@ -6015,6 +6026,9 @@ Examples:
                 size_floor=args.v5_size_floor,
                 head_disagreement_gate=args.v5_head_disagree_gate,
                 slippage_base_bps=args.slippage_base_bps,
+                sigma_discount=args.v5_sigma_discount and not args.v5_no_sigma_discount,
+                min_p_side=args.v5_min_p_side,
+                mae_asym_weight=args.v5_mae_asym_weight,
                 mu_debias=args.v5_mu_debias,
                 mu_debias_alpha=args.v5_mu_debias_alpha,
                 min_trades=args.v5_min_trades,

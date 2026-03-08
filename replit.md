@@ -65,6 +65,11 @@ The core trading intelligence is provided by a v5 neural network, `V5Forecaster`
 -   **Live Feature Pipeline:** Integrates real-time funding rates and open interest data during live inference to ensure feature consistency with training.
 -   **Side Balance fix** (`v5_train.py`): KL divergence loss uses balanced 50/50 LONG/SHORT target instead of biased training label distribution. Training data (2021-2026 bull market) had more LONG labels, causing the model to systematically favor LONG. Fix requires retraining.
 -   **Live feature pipeline** (`gpu_trainer/live_runner.py`): `_compute_features_for_symbol()` fetches real funding rate (from Binance FAPI `/fapi/v1/fundingRate`) and open interest (`/futures/data/openInterestHist`) during live inference, matching the training pipeline. Funding cached 30min (TTL), OI cached 15min. Falls back to zeros on fetch failure. One-time `[Feature Check]` diagnostic log per symbol per session.
+-   **V5 Sharpness Improvements (v5.3):**
+    - **Sigma discount** (`--v5-sigma-discount`, default ON): Multiplies scores by `1/(1+sigma)`, penalizing uncertain predictions. `--v5-no-sigma-discount` to disable.
+    - **Minimum conviction gate** (`--v5-min-p-side 0.45`, default 0.45): Kills trades where `p_side < min_p_side`, filtering low-conviction signals.
+    - **Larger MFE/MAE heads**: Expanded from `[32, 1]` to `[64, 32, 1]` for better risk prediction across 20 symbols. Requires retraining.
+    - **Asymmetric MAE loss** (`--v5-mae-asym-weight 2.0`, default 2.0): Penalizes MAE underestimation 2x more than overestimation, producing conservative risk estimates. `1.0` = symmetric (old behavior).
 
 ### v6 Neural Network (V6Forecaster)
 Next-generation model upgrade in `gpu_trainer/models/v6_forecaster.py`. Same output dict interface as V5 — all existing scoring, forward test, and live runner infrastructure works unchanged.
