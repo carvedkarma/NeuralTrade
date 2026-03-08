@@ -1030,6 +1030,7 @@ class FeatureEngineer:
         atr_15m = self._compute_atr(df, 14)
         
         htf_features = pd.DataFrame(index=ohlcv.index)
+        htf_shifted_indexes = {}
         
         for tf_label, resample_rule in [("h1", "1h"), ("h4", "4h")]:
             htf_bars = ohlcv.resample(resample_rule, label='left', closed='left').agg({
@@ -1067,6 +1068,7 @@ class FeatureEngineer:
             }, index=htf_bars.index)
             
             htf_indicators = htf_indicators.shift(1)
+            htf_shifted_indexes[tf_label] = htf_indicators.dropna(how='all').index
             
             htf_indicators = htf_indicators.reset_index()
             htf_indicators.columns = ['htf_ts'] + list(htf_indicators.columns[1:])
@@ -1132,15 +1134,17 @@ class FeatureEngineer:
             nan_cols = {col: int(nan_counts[col]) for col in result.columns if nan_counts[col] > 0}
             logger.info(f"HTF NaNs summary: total={total_nans} (expected during warmup) | {nan_cols}")
         
-        self._sanity_check_htf_leakage(ohlcv, df)
+        self._sanity_check_htf_leakage(ohlcv, df, htf_shifted_indexes)
         
         return result
     
-    def _sanity_check_htf_leakage(self, ohlcv: pd.DataFrame, original_df: pd.DataFrame, n_samples: int = 20):
+    def _sanity_check_htf_leakage(self, ohlcv: pd.DataFrame, original_df: pd.DataFrame,
+                                   htf_shifted_indexes: dict, n_samples: int = 20):
         """One-time diagnostic: verify HTF bars are strictly in the past for each 15m row.
         
-        For 20 random rows, prints: 15m timestamp t, matched 1H timestamp t1h, matched 4H timestamp t4h.
-        Asserts: t1h <= t, t4h <= t, and t1h is the last COMPLETED 1H bar (not the current forming one).
+        Uses pre-computed shifted bar indexes from compute_htf_features() to avoid
+        redundant resampling. For 20 random rows, prints: 15m timestamp t, matched
+        1H timestamp t1h, matched 4H timestamp t4h.
         """
         import random
         
@@ -1150,15 +1154,13 @@ class FeatureEngineer:
         
         sample_indices = sorted(random.sample(range(valid_start, len(ohlcv)), n_samples))
         
-        h1_bars = ohlcv.resample('1h', label='left', closed='left').agg({
-            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
-        }).dropna(subset=['open'])
-        h4_bars = ohlcv.resample('4h', label='left', closed='left').agg({
-            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
-        }).dropna(subset=['open'])
+        h1_idx = htf_shifted_indexes.get('h1')
+        h4_idx = htf_shifted_indexes.get('h4')
+        if h1_idx is None or h4_idx is None:
+            return
         
-        h1_shifted = h1_bars.shift(1).dropna()
-        h4_shifted = h4_bars.shift(1).dropna()
+        h1_vals = h1_idx.values
+        h4_vals = h4_idx.values
         
         logger.info("=" * 70)
         logger.info("HTF LEAKAGE SANITY CHECK (20 random rows)")
@@ -1168,12 +1170,13 @@ class FeatureEngineer:
         violations = 0
         for idx in sample_indices:
             t = ohlcv.index[idx]
+            t_val = t.value if hasattr(t, 'value') else pd.Timestamp(t).value
             
-            h1_match_candidates = h1_shifted.index[h1_shifted.index <= t]
-            h4_match_candidates = h4_shifted.index[h4_shifted.index <= t]
+            h1_mask = h1_vals <= t_val
+            h4_mask = h4_vals <= t_val
             
-            t1h = h1_match_candidates[-1] if len(h1_match_candidates) > 0 else None
-            t4h = h4_match_candidates[-1] if len(h4_match_candidates) > 0 else None
+            t1h = h1_idx[h1_mask][-1] if h1_mask.any() else None
+            t4h = h4_idx[h4_mask][-1] if h4_mask.any() else None
             
             t_str = str(t)[:19]
             t1h_str = str(t1h)[:19] if t1h is not None else "N/A"
@@ -1186,7 +1189,7 @@ class FeatureEngineer:
                 ok = False
             if t1h is not None:
                 next_h1 = t1h + pd.Timedelta(hours=1)
-                if next_h1 <= t and next_h1 in h1_shifted.index:
+                if next_h1 <= t and next_h1 in h1_idx:
                     ok = False
             
             status = "OK" if ok else "LEAK!"
