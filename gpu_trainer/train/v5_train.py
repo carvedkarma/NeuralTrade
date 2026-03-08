@@ -4689,7 +4689,10 @@ def train_v5_model(
 
     moe_collapse_counter = 0
     moe_base_weight = v6_moe_balance_weight
-    moe_reinit_done = False
+    moe_reinit_count = 0
+    moe_last_reinit_epoch = -999
+    MOE_MAX_REINITS = 3
+    MOE_REINIT_COOLDOWN = 10
 
     for epoch in range(1, epochs + 1):
         use_candidates_this_epoch = candidate_config.enabled and epoch > cand_warmup_epochs
@@ -4838,20 +4841,42 @@ def train_v5_model(
                     moe_collapse_counter += 1
                     if moe_collapse_counter >= 3:
                         v6_moe_balance_weight = moe_base_weight * 20.0
+                        if hasattr(model, 'moe'):
+                            model.moe._entropy_bonus = True
                         log.warning(f"[V6_MoE] COLLAPSE DETECTED for {moe_collapse_counter} consecutive epochs — "
-                                    f"boosting w_moe_balance to {v6_moe_balance_weight:.3f} (20x base)")
+                                    f"boosting w_moe_balance to {v6_moe_balance_weight:.3f} (20x base) + entropy bonus ON")
 
-                    if moe_collapse_counter >= 5 and not moe_reinit_done and hasattr(model, 'moe'):
+                    can_reinit = (moe_reinit_count < MOE_MAX_REINITS and
+                                  (epoch - moe_last_reinit_epoch) >= MOE_REINIT_COOLDOWN)
+                    if moe_collapse_counter >= 5 and can_reinit and hasattr(model, 'moe'):
                         dead_indices = [i for i, v in enumerate(usage_vals) if v < 5.0]
                         if dead_indices:
                             model.moe.reinit_dead_experts(dead_indices)
-                            moe_reinit_done = True
+                            reinit_params = set()
+                            for di in dead_indices:
+                                for p in model.moe.experts[di].parameters():
+                                    reinit_params.add(id(p))
+                            reinit_params.add(id(model.moe.gate.weight))
+                            reinit_params.add(id(model.moe.gate_noise.weight))
+                            if model.moe.gate.bias is not None:
+                                reinit_params.add(id(model.moe.gate.bias))
+                            for group in optimizer.param_groups:
+                                for gp in group['params']:
+                                    if id(gp) in reinit_params and gp in optimizer.state:
+                                        for sk, sv in optimizer.state[gp].items():
+                                            if isinstance(sv, torch.Tensor):
+                                                optimizer.state[gp][sk] = torch.zeros_like(sv)
+                            moe_reinit_count += 1
+                            moe_last_reinit_epoch = epoch
                             moe_collapse_counter = 0
-                            log.warning(f"[V6_MoE] REINIT: dead experts {dead_indices} gate weights cloned from strongest alive expert + noise")
+                            log.warning(f"[V6_MoE] REINIT #{moe_reinit_count}/{MOE_MAX_REINITS}: "
+                                        f"dead experts {dead_indices} — full MLP+gate cloned from strongest alive expert + noise + optimizer state reset")
                 else:
                     if moe_collapse_counter >= 3:
                         v6_moe_balance_weight = moe_base_weight
-                        log.info(f"[V6_MoE] Collapse recovered — restoring w_moe_balance to {moe_base_weight:.3f}")
+                        if hasattr(model, 'moe'):
+                            model.moe._entropy_bonus = False
+                        log.info(f"[V6_MoE] Collapse recovered — restoring w_moe_balance to {moe_base_weight:.3f}, entropy bonus OFF")
                     moe_collapse_counter = 0
 
         do_sweep = (epoch % 5 == 0) or (epoch == epochs) or (epoch <= 3)

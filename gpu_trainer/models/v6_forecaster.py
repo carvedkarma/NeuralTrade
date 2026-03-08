@@ -156,6 +156,7 @@ class MixtureOfExperts(nn.Module):
         self.output_dim = expert_hidden_dims[-1]
         self._last_gate_probs = None
         self._last_hard_usage = None
+        self._entropy_bonus = False
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         gate_logits = self.gate(x)
@@ -203,6 +204,13 @@ class MixtureOfExperts(nn.Module):
                                    fraction_hard: torch.Tensor) -> torch.Tensor:
         fraction_soft = gate_probs.mean(dim=0)
         loss = self.n_experts * (fraction_hard.detach() * fraction_soft).sum()
+
+        if self._entropy_bonus and self.training:
+            avg_probs = gate_probs.mean(dim=0)
+            entropy = -(avg_probs * torch.log(avg_probs + 1e-8)).sum()
+            max_entropy = math.log(self.n_experts)
+            loss = loss + 2.0 * (max_entropy - entropy)
+
         return loss
 
     def reinit_dead_experts(self, dead_indices: list):
@@ -219,13 +227,21 @@ class MixtureOfExperts(nn.Module):
                     best_val = self._last_hard_usage[i].item()
                     best_idx = i
         with torch.no_grad():
+            best_expert_state = self.experts[best_idx].state_dict()
             for dead_idx in dead_indices:
+                self.experts[dead_idx].load_state_dict(
+                    {k: v.clone() for k, v in best_expert_state.items()}
+                )
+                for p in self.experts[dead_idx].parameters():
+                    p.add_(torch.randn_like(p) * 0.02)
+
                 self.gate.weight[dead_idx].copy_(self.gate.weight[best_idx])
-                self.gate.weight[dead_idx].add_(torch.randn_like(self.gate.weight[dead_idx]) * 0.01)
+                self.gate.weight[dead_idx].add_(torch.randn_like(self.gate.weight[dead_idx]) * 0.05)
                 if self.gate.bias is not None:
-                    self.gate.bias[dead_idx] = self.gate.bias[best_idx] + 0.1
+                    self.gate.bias[dead_idx] = self.gate.bias[best_idx] + 0.2
 
                 self.gate_noise.weight[dead_idx].copy_(self.gate_noise.weight[best_idx])
+                self.gate_noise.weight[dead_idx].add_(torch.randn_like(self.gate_noise.weight[dead_idx]) * 0.05)
                 if self.gate_noise.bias is not None:
                     self.gate_noise.bias[dead_idx] = self.gate_noise.bias[best_idx]
 
