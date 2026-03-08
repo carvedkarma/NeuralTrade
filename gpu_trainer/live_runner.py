@@ -26,6 +26,7 @@ from typing import List, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import joblib
 
 log = logging.getLogger("LiveRunner")
 
@@ -215,14 +216,30 @@ def _load_model(device: str, symbol: Optional[str] = None):
     engineer = FeatureEngineer()
     scaler_loaded = False
 
-    if model_type == 'v5_forecaster' and 'scaler_center' in checkpoint and 'scaler_scale' in checkpoint:
+    if model_type in ('v5_forecaster', 'v6_forecaster') and 'scaler_center' in checkpoint and 'scaler_scale' in checkpoint:
         from sklearn.preprocessing import RobustScaler
-        v5_scaler = RobustScaler()
-        v5_scaler.center_ = np.array(checkpoint['scaler_center'])
-        v5_scaler.scale_ = np.array(checkpoint['scaler_scale'])
-        engineer._v5_global_scaler = v5_scaler
-        scaler_loaded = True
-        log.info("Scaler loaded from checkpoint (embedded)")
+        global_scaler = RobustScaler()
+        global_scaler.center_ = np.array(checkpoint['scaler_center'])
+        global_scaler.scale_ = np.array(checkpoint['scaler_scale'])
+        is_identity = (np.all(global_scaler.center_ == 0) and np.all(global_scaler.scale_ == 1))
+
+        if 'per_symbol_scalers' in checkpoint and checkpoint['per_symbol_scalers']:
+            per_sym = {}
+            for sym, sdata in checkpoint['per_symbol_scalers'].items():
+                s = RobustScaler()
+                s.center_ = np.array(sdata.get('center_', sdata.get('center', [])))
+                s.scale_ = np.array(sdata.get('scale_', sdata.get('scale', [])))
+                per_sym[sym] = s
+            engineer._per_symbol_scalers = per_sym
+            scaler_loaded = True
+            log.info(f"Per-symbol scalers loaded from checkpoint ({len(per_sym)} symbols)")
+        elif not is_identity:
+            engineer._v5_global_scaler = global_scaler
+            scaler_loaded = True
+            log.info("Global scaler loaded from checkpoint (embedded)")
+        else:
+            scaler_loaded = False
+            log.info("Checkpoint has identity global scaler — looking for per-symbol scalers on disk")
 
     if not scaler_loaded:
         scaler_path = None
@@ -235,9 +252,28 @@ def _load_model(device: str, symbol: Optional[str] = None):
             if scaler_path:
                 break
         if scaler_path:
-            engineer.load_scalers(str(scaler_path))
-            log.info(f"Scaler loaded from {scaler_path}")
-        else:
+            if 'per_symbol' in str(scaler_path):
+                from sklearn.preprocessing import RobustScaler as _RS
+                raw_scalers = joblib.load(str(scaler_path))
+                if isinstance(raw_scalers, dict) and raw_scalers:
+                    first_val = next(iter(raw_scalers.values()))
+                    if hasattr(first_val, 'center_'):
+                        engineer._per_symbol_scalers = raw_scalers
+                        scaler_loaded = True
+                        log.info(f"Per-symbol scalers loaded from {scaler_path} ({len(raw_scalers)} symbols)")
+                    else:
+                        engineer.load_scalers(str(scaler_path))
+                        scaler_loaded = True
+                        log.info(f"Column scalers loaded from {scaler_path}")
+                else:
+                    engineer.load_scalers(str(scaler_path))
+                    scaler_loaded = True
+                    log.info(f"Scaler loaded from {scaler_path}")
+            else:
+                engineer.load_scalers(str(scaler_path))
+                scaler_loaded = True
+                log.info(f"Scaler loaded from {scaler_path}")
+        if not scaler_loaded:
             log.warning("No saved scaler — prediction quality may be reduced")
 
     temperature = 1.0
@@ -500,7 +536,23 @@ def _compute_features_for_symbol(df: pd.DataFrame, engineer, feature_columns: li
         n_bars = min(seq_len, len(features_df))
         tail_features = features_df.iloc[-n_bars:].copy()
 
-        if hasattr(engineer, '_v5_global_scaler'):
+        if hasattr(engineer, '_per_symbol_scalers') and symbol in engineer._per_symbol_scalers:
+            sym_scaler = engineer._per_symbol_scalers[symbol]
+            raw = tail_features.values.astype(np.float32)
+            tail_scaled = sym_scaler.transform(raw).astype(np.float32)
+            tail_scaled = np.clip(tail_scaled, -5.0, 5.0)
+        elif hasattr(engineer, '_per_symbol_scalers') and symbol not in engineer._per_symbol_scalers:
+            log.warning(f"Per-symbol scalers loaded but {symbol} not found — falling back to global/column scaler")
+            if hasattr(engineer, '_v5_global_scaler'):
+                raw = tail_features.values.astype(np.float32)
+                tail_scaled = engineer._v5_global_scaler.transform(raw).astype(np.float32)
+                tail_scaled = np.clip(tail_scaled, -5.0, 5.0)
+            else:
+                tail_scaled = engineer.transform_and_clip(
+                    pd.DataFrame(tail_features.values, columns=feature_columns),
+                    clip_range=5.0
+                ).values.astype(np.float32)
+        elif hasattr(engineer, '_v5_global_scaler'):
             raw = tail_features.values.astype(np.float32)
             tail_scaled = engineer._v5_global_scaler.transform(raw).astype(np.float32)
             tail_scaled = np.clip(tail_scaled, -5.0, 5.0)

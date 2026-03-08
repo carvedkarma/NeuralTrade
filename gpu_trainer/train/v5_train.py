@@ -5028,7 +5028,7 @@ def train_v5_model(
             }
             if per_symbol_scalers:
                 ckpt_loss_data['per_symbol_scalers'] = {
-                    sym: {'center': s.center_, 'scale': s.scale_}
+                    sym: {'center_': s.center_.tolist(), 'scale_': s.scale_.tolist()}
                     for sym, s in per_symbol_scalers.items() if s is not None
                 }
             torch.save(ckpt_loss_data, checkpoint_dir / "best_v5_loss.pt")

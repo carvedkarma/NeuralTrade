@@ -79,8 +79,9 @@ Next-generation model upgrade in `gpu_trainer/models/v6_forecaster.py`. Same out
 -   **Dataset:** `V6SequenceDataset` builds sliding windows per symbol (no cross-symbol boundaries), with zero-padding for early bars.
 -   **Loss:** `compute_v6_loss` = all V5 loss components + MoE balance (w=0.05, Switch Transformer f×P cross-term) + aux next-bar MSE (w=0.1) + confidence calibration BCE (w=0.15).
 -   **Balanced sampling:** `--balanced-sampling-mode weighted` uses inverse-frequency loss weighting instead of truncation.
--   **Live inference:** `live_runner.py` detects `model_type='v6_forecaster'` in checkpoint, instantiates V6Forecaster, computes seq_len bars of scaled features per symbol, and uses confidence output to gate signals.
--   **Checkpoint model_type:** `'v6_forecaster'`. Config saves all V6 hyperparameters for reproducible loading.
+-   **Live inference:** `live_runner.py` detects `model_type='v6_forecaster'` in checkpoint, instantiates V6Forecaster, computes seq_len bars of scaled features per symbol, and uses confidence output to gate signals. Scaler loading supports both V5 and V6 model types, with priority: per-symbol scalers from checkpoint → global scaler from checkpoint → per-symbol scalers from disk (joblib) → column scalers from disk.
+-   **Per-symbol scaling:** `_compute_features_for_symbol` checks `engineer._per_symbol_scalers[symbol]` first, then `_v5_global_scaler`, then falls back to `transform_and_clip`. Per-symbol scalers loaded from checkpoint or `per_symbol_scalers.joblib` are stored as `{symbol: RobustScaler}` on the engineer.
+-   **Checkpoint model_type:** `'v6_forecaster'`. Config saves all V6 hyperparameters for reproducible loading. Per-symbol scaler keys standardized to `center_`/`scale_` (matching scikit-learn attributes). Loading code handles both old `center`/`scale` and new `center_`/`scale_` keys for backwards compatibility.
 -   **Files:** `gpu_trainer/models/v6_forecaster.py`, `gpu_trainer/train/v5_train.py` (V6SequenceDataset, compute_v6_loss, train_v5_model with model_version='v6'), `gpu_trainer/quick_start.py` (--v6 CLI args), `gpu_trainer/live_runner.py` (V6 model loading + seq inference + confidence gating).
 
 ## External Dependencies
