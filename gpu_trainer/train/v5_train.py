@@ -188,6 +188,12 @@ class V5ForwardTestConfig:
     edge_pct_floor: int = 70
     edge_topn_per_day: int = 4
     regime_side_map: Optional[dict] = None
+    regime_soft: bool = True
+    regime_disagree_mult: float = 0.3
+    regime_none_mult: float = 0.2
+    per_symbol_soft_kill: bool = True
+    edge_topn_soft: bool = True
+    edge_topn_decay: float = 0.7
     size_floor: float = 0.0
     calibration_monitor: bool = False
     calibration_warn_ece: float = 0.10
@@ -2455,8 +2461,11 @@ def run_v5_forward_test(
     ef_topn_current_count = defaultdict(int)
 
     gate_blocks = Counter()
+    gate_blocked_r = defaultdict(list)
     post_ema200_indices = []
     post_regime_indices = []
+
+    soft_gate_sizing = {}
 
     sym_cumulative_r = defaultdict(float)
     killed_symbols = set()
@@ -2560,28 +2569,58 @@ def run_v5_forward_test(
         log.info(f"[V5_REGIME] Pre-computed regime labels for {mrd['total_classified']}/{n_bars} bars: "
                  f"counts={mrd['regime_counts']} pct={mrd['regime_pct']}")
 
+    def _oracle_r(i):
+        """Get oracle R for bar i (side-conditional)."""
+        if r_long is not None and r_short is not None:
+            s = sides[i]
+            v = float(r_long[i]) if s == 1 else float(r_short[i])
+            return v if not np.isnan(v) else 0.0
+        if test_realized_r is not None:
+            v = float(test_realized_r[i])
+            return v if not np.isnan(v) else 0.0
+        return 0.0
+
     for idx in chronological_idx:
         if config.warmup_skip_bars > 0 and idx < config.warmup_skip_bars:
             warmup_blocked += 1
             gate_blocks["warmup"] += 1
+            gate_blocked_r["warmup"].append(_oracle_r(idx))
             continue
         if getattr(config, 'per_symbol_cooldown', True) and test_sym_ids is not None:
             bar_sym_id = int(test_sym_ids[idx])
             if idx - per_sym_last_bar[bar_sym_id] < config.cooldown:
                 cooldown_blocked += 1
                 gate_blocks["cooldown"] += 1
+                gate_blocked_r["cooldown"].append(_oracle_r(idx))
                 continue
         elif idx - last_bar < config.cooldown:
             cooldown_blocked += 1
             gate_blocks["cooldown"] += 1
+            gate_blocked_r["cooldown"].append(_oracle_r(idx))
             continue
 
         if config.per_symbol_r_kill is not None and test_sym_ids is not None:
             sym_name_kill = sym_id_to_name.get(int(test_sym_ids[idx]), None)
             if sym_name_kill and sym_name_kill in killed_symbols:
-                per_sym_kill_blocked += 1
-                gate_blocks["per_symbol_kill"] += 1
-                continue
+                if config.per_symbol_soft_kill:
+                    cum_r = sym_cumulative_r[sym_name_kill]
+                    kill_floor = config.per_symbol_r_kill
+                    half_floor = kill_floor * 0.5
+                    if cum_r <= kill_floor:
+                        mult = 0.1
+                    elif cum_r <= half_floor:
+                        frac = (cum_r - kill_floor) / (half_floor - kill_floor)
+                        mult = 0.1 + frac * 0.65
+                    else:
+                        frac = min(1.0, (cum_r - half_floor) / abs(half_floor)) if half_floor != 0 else 1.0
+                        mult = 0.75 + frac * 0.25
+                    soft_gate_sizing[idx] = soft_gate_sizing.get(idx, 1.0) * mult
+                    gate_blocks["per_symbol_kill_soft"] += 1
+                else:
+                    per_sym_kill_blocked += 1
+                    gate_blocks["per_symbol_kill"] += 1
+                    gate_blocked_r["per_symbol_kill"].append(_oracle_r(idx))
+                    continue
 
         if adx_values is not None:
             adx_val = adx_values[idx]
@@ -2590,6 +2629,7 @@ def run_v5_forward_test(
                 if adx_val < config.adx_min and not is_exception:
                     adx_blocked += 1
                     gate_blocks["adx"] += 1
+                    gate_blocked_r["adx"].append(_oracle_r(idx))
                     continue
 
         expired = [k for k, v in open_positions.items() if v['expiry'] <= idx]
@@ -2618,12 +2658,14 @@ def run_v5_forward_test(
                           close_val, ema_val)
                 ema_blocked += 1
                 gate_blocks["ema200"] += 1
+                gate_blocked_r["ema200"].append(_oracle_r(idx))
                 continue
             if side_val == -1 and close_val > ema_val:
                 log.debug("[V5_GATE] blocked_by=ema200 side=SHORT close=%.2f ema200=%.2f",
                           close_val, ema_val)
                 ema_blocked += 1
                 gate_blocks["ema200"] += 1
+                gate_blocked_r["ema200"].append(_oracle_r(idx))
                 continue
 
         post_ema200_indices.append(idx)
@@ -2646,18 +2688,23 @@ def run_v5_forward_test(
             if config.ultra_conviction and allowed == "NONE":
                 is_ultra_override = True
             if not is_ultra_override:
+                regime_disagrees = False
                 if allowed == "NONE":
-                    regime_side_blocked += 1
-                    gate_blocks["multi_regime"] += 1
-                    continue
-                if allowed == "LONG" and side_val != 1:
-                    regime_side_blocked += 1
-                    gate_blocks["multi_regime"] += 1
-                    continue
-                if allowed == "SHORT" and side_val != -1:
-                    regime_side_blocked += 1
-                    gate_blocks["multi_regime"] += 1
-                    continue
+                    regime_disagrees = True
+                elif allowed == "LONG" and side_val != 1:
+                    regime_disagrees = True
+                elif allowed == "SHORT" and side_val != -1:
+                    regime_disagrees = True
+                if regime_disagrees:
+                    if config.regime_soft:
+                        mult = config.regime_none_mult if allowed == "NONE" else config.regime_disagree_mult
+                        soft_gate_sizing[idx] = soft_gate_sizing.get(idx, 1.0) * mult
+                        gate_blocks["multi_regime_soft"] += 1
+                    else:
+                        regime_side_blocked += 1
+                        gate_blocks["multi_regime"] += 1
+                        gate_blocked_r["multi_regime"].append(_oracle_r(idx))
+                        continue
 
         post_regime_indices.append(idx)
 
@@ -2668,10 +2715,25 @@ def run_v5_forward_test(
             if ef_topn_current_date.get(topn_sym_id) != bar_date:
                 ef_topn_current_date[topn_sym_id] = bar_date
                 ef_topn_current_count[topn_sym_id] = 0
-            if ef_topn_current_count[topn_sym_id] >= config.edge_topn_per_day:
-                edge_topn_blocked += 1
-                gate_blocks["edge_topn"] += 1
-                continue
+            sym_count = ef_topn_current_count[topn_sym_id]
+            if sym_count >= config.edge_topn_per_day:
+                if config.edge_topn_soft:
+                    excess = sym_count - config.edge_topn_per_day
+                    decay = config.edge_topn_decay ** (excess + 1)
+                    decay = max(decay, 0.15)
+                    penalized_score = scores_work[idx] * decay
+                    if penalized_score < effective_threshold:
+                        edge_topn_blocked += 1
+                        gate_blocks["edge_topn"] += 1
+                        gate_blocked_r["edge_topn"].append(_oracle_r(idx))
+                        continue
+                    soft_gate_sizing[idx] = soft_gate_sizing.get(idx, 1.0) * decay
+                    gate_blocks["edge_topn_soft"] += 1
+                else:
+                    edge_topn_blocked += 1
+                    gate_blocks["edge_topn"] += 1
+                    gate_blocked_r["edge_topn"].append(_oracle_r(idx))
+                    continue
 
         if config.weekly_loss_cap is not None and week_boundaries is not None:
             wk = week_boundaries[idx]
@@ -2682,6 +2744,7 @@ def run_v5_forward_test(
             if week_killed:
                 weekly_blocked += 1
                 gate_blocks["weekly_cap"] += 1
+                gate_blocked_r["weekly_cap"].append(_oracle_r(idx))
                 continue
 
         if corr_blocker is not None and test_sym_ids is not None:
@@ -2692,6 +2755,7 @@ def run_v5_forward_test(
             if sym_name and corr_blocker.should_block(sym_name, side_val, open_by_sym):
                 corr_blocked += 1
                 gate_blocks["correlation"] += 1
+                gate_blocked_r["correlation"].append(_oracle_r(idx))
                 continue
 
         if daily_tracker is not None and test_timestamps is not None:
@@ -2704,11 +2768,13 @@ def run_v5_forward_test(
             if daily_tracker.should_block(symbol=trade_sym):
                 daily_blocked += 1
                 gate_blocks["daily_loss"] += 1
+                gate_blocked_r["daily_loss"].append(_oracle_r(idx))
                 continue
 
         if equity_stop is not None and equity_stop.should_block():
             equity_blocked += 1
             gate_blocks["equity_stop"] += 1
+            gate_blocked_r["equity_stop"].append(_oracle_r(idx))
             continue
 
         if config.max_trades_per_day is not None and test_timestamps is not None:
@@ -2720,6 +2786,7 @@ def run_v5_forward_test(
             if tpd_current_count >= config.max_trades_per_day:
                 tpd_blocked += 1
                 gate_blocks["max_tpd"] += 1
+                gate_blocked_r["max_tpd"].append(_oracle_r(idx))
                 continue
 
         if ddt is not None:
@@ -2727,6 +2794,7 @@ def run_v5_forward_test(
             if scores_work[idx] < ddt_thr:
                 ddt_blocked += 1
                 gate_blocks["ddt"] += 1
+                gate_blocked_r["ddt"].append(_oracle_r(idx))
                 ddt.record_block()
                 continue
 
@@ -2749,6 +2817,7 @@ def run_v5_forward_test(
             if disagreements >= 2:
                 head_disagree_blocked += 1
                 gate_blocks["head_disagreement"] += 1
+                gate_blocked_r["head_disagreement"].append(_oracle_r(idx))
                 continue
 
         taken.append(idx)
@@ -2763,10 +2832,10 @@ def run_v5_forward_test(
             topn_inc_sym = int(test_sym_ids[idx]) if test_sym_ids is not None else 0
             ef_topn_current_count[topn_inc_sym] += 1
 
-        trade_size_mult = 1.0
+        trade_size_mult = soft_gate_sizing.get(idx, 1.0)
         if position_sizer is not None:
             p_win = float(arrays['p_long'][idx]) if sides[idx] == 1 else float(arrays['p_short'][idx])
-            trade_size_mult = position_sizer.compute_size_multiplier(
+            trade_size_mult *= position_sizer.compute_size_multiplier(
                 score=float(scores[idx]),
                 p_win=p_win,
                 mu_r=float(arrays['mu_R'][idx]),
@@ -2950,6 +3019,29 @@ def run_v5_forward_test(
              f"daily={daily_blocked} equity={equity_blocked} tpd={tpd_blocked} "
              f"head_disagree={head_disagree_blocked} per_sym_kill={per_sym_kill_blocked} "
              f"ddt={ddt_blocked} edge_first_pre={edge_first_blocked} → trades_taken={n_taken}")
+
+    if gate_blocked_r:
+        log.info("=" * 80)
+        log.info("  GATE IMPACT ANALYSIS (oracle R of blocked trades)")
+        log.info("=" * 80)
+        log.info(f"  {'Gate':<25s} {'Blocked':>8s} {'E[R]':>10s} {'TotalR':>10s} {'WinR%':>8s}")
+        log.info(f"  {'-'*25} {'-'*8} {'-'*10} {'-'*10} {'-'*8}")
+        for gate_name, r_list in sorted(gate_blocked_r.items(), key=lambda x: -len(x[1])):
+            if len(r_list) == 0:
+                continue
+            arr = np.array(r_list)
+            mean_r = float(np.mean(arr))
+            total_r = float(np.sum(arr))
+            win_pct = float(np.mean(arr > 0) * 100)
+            verdict = "DESTROYING VALUE" if mean_r > 0.02 else ("PROTECTING" if mean_r < -0.05 else "neutral")
+            log.info(f"  {gate_name:<25s} {len(r_list):>8d} {mean_r:>+10.4f} {total_r:>+10.2f} {win_pct:>7.1f}%  ← {verdict}")
+        log.info("=" * 80)
+
+    soft_counts = {k: v for k, v in gate_blocks.items() if k.endswith("_soft")}
+    if soft_counts:
+        log.info("[V5_SOFT_GATES] Soft gate pass-throughs (reduced size, not blocked):")
+        for name, count in sorted(soft_counts.items(), key=lambda x: -x[1]):
+            log.info(f"  {name}: {count} trades passed with reduced size")
 
     if config.edge_first and edge_bar_values is not None and len(taken) > 0:
         taken_arr = np.array(taken)

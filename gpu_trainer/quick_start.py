@@ -5139,6 +5139,24 @@ Examples:
                         help="v5.4: per-symbol cooldown instead of global (default: on)")
     parser.add_argument("--v5-global-cooldown", dest="v5_per_symbol_cooldown", action="store_false",
                         help="v5.4: revert to global cooldown across all symbols")
+    parser.add_argument("--v5-regime-soft", action="store_true", default=True,
+                        help="v5.5: soft regime gate — disagree trades get reduced size instead of blocked (default: on)")
+    parser.add_argument("--v5-regime-hard", dest="v5_regime_soft", action="store_false",
+                        help="v5.5: revert to hard regime blocking")
+    parser.add_argument("--v5-regime-disagree-mult", type=float, default=0.3,
+                        help="v5.5: size multiplier when regime disagrees with side (default: 0.3)")
+    parser.add_argument("--v5-regime-none-mult", type=float, default=0.2,
+                        help="v5.5: size multiplier when regime is NONE (default: 0.2)")
+    parser.add_argument("--v5-per-symbol-soft-kill", action="store_true", default=True,
+                        help="v5.5: soft kill — bad symbols get reduced size instead of being killed (default: on)")
+    parser.add_argument("--v5-per-symbol-hard-kill", dest="v5_per_symbol_soft_kill", action="store_false",
+                        help="v5.5: revert to permanent symbol kill")
+    parser.add_argument("--v5-edge-topn-soft", action="store_true", default=True,
+                        help="v5.5: soft edge topn — trades above cap get decaying size instead of blocked (default: on)")
+    parser.add_argument("--v5-edge-topn-hard", dest="v5_edge_topn_soft", action="store_false",
+                        help="v5.5: revert to hard edge topn cap")
+    parser.add_argument("--v5-edge-topn-decay", type=float, default=0.7,
+                        help="v5.5: decay factor per excess trade above topn cap (default: 0.7)")
     parser.add_argument("--v5-sigma-discount", action="store_true", default=True,
                         help="v5.3: apply sigma sharpness multiplier 1/(1+sigma) to scores (default: enabled)")
     parser.add_argument("--v5-no-sigma-discount", action="store_true", default=False,
@@ -5854,6 +5872,12 @@ Examples:
                     edge_pct_floor=args.v5_edge_pct_floor,
                     edge_topn_per_day=args.v5_edge_topn_per_day,
                     regime_side_map=v5_regime_side_map,
+                    regime_soft=args.v5_regime_soft,
+                    regime_disagree_mult=args.v5_regime_disagree_mult,
+                    regime_none_mult=args.v5_regime_none_mult,
+                    per_symbol_soft_kill=args.v5_per_symbol_soft_kill,
+                    edge_topn_soft=args.v5_edge_topn_soft,
+                    edge_topn_decay=args.v5_edge_topn_decay,
                     size_floor=args.v5_size_floor,
                     head_disagreement_gate=getattr(args, 'v5_head_disagree_gate', False),
                     slippage_base_bps=getattr(args, 'slippage_base_bps', 0.0),
@@ -6031,6 +6055,12 @@ Examples:
                 edge_pct_floor=args.v5_edge_pct_floor,
                 edge_topn_per_day=args.v5_edge_topn_per_day,
                 regime_side_map=v5_regime_side_map,
+                regime_soft=args.v5_regime_soft,
+                regime_disagree_mult=args.v5_regime_disagree_mult,
+                regime_none_mult=args.v5_regime_none_mult,
+                per_symbol_soft_kill=args.v5_per_symbol_soft_kill,
+                edge_topn_soft=args.v5_edge_topn_soft,
+                edge_topn_decay=args.v5_edge_topn_decay,
                 size_floor=args.v5_size_floor,
                 head_disagreement_gate=args.v5_head_disagree_gate,
                 slippage_base_bps=args.slippage_base_bps,

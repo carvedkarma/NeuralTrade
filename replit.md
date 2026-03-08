@@ -48,7 +48,7 @@ A v5 neural network, `V5Forecaster`, runs on a local GPU.
 -   **Composite Scoring:** Employs a V5 Composite Scoring Engine.
 -   **Per-symbol Edge Learning:** Incorporates symbol-specific scalers, thresholds, and kill switches.
 -   **Live Feature Pipeline:** Integrates real-time funding rates and open interest data during live inference.
--   **Improvements:** Side balance fix for biased training labels, sigma discount for penalizing uncertain predictions, minimum conviction gate, larger MFE/MAE heads, asymmetric MAE loss, per-symbol cooldowns, per-symbol edge topN, EMA200 auto-skip with multi-regime, correlation max-block cap, and prediction quality diagnostics.
+-   **Improvements:** Side balance fix for biased training labels, sigma discount for penalizing uncertain predictions, minimum conviction gate, larger MFE/MAE heads, asymmetric MAE loss, per-symbol cooldowns, per-symbol edge topN, EMA200 auto-skip with multi-regime, correlation max-block cap, prediction quality diagnostics, and v5.5 soft gates (regime soft sizing, graduated symbol kill, edge topn decay, gate impact diagnostics).
 
 ### v6 Neural Network (V6Forecaster)
 The next-generation `V6Forecaster` offers advanced capabilities while maintaining the same output interface as V5.
