@@ -3086,13 +3086,47 @@ def run_v5_forward_test(
     safe_r = np.where(np.isnan(side_r), 0.0, side_r)
     log.info("[V5_FWD] Using side-conditional outcomes (predicted side selects LONG/SHORT R)")
 
+    low_confidence = False
     if 0 < len(taken) < config.min_trades:
-        log.warning(f"[V5_FWD] NO EDGE: only {len(taken)} trades (minimum {config.min_trades}). "
-                    f"Insufficient signal quality — clearing trades to avoid noise.")
-        taken = []
+        log.warning(f"[V5_FWD] LOW CONFIDENCE: only {len(taken)} trades (minimum {config.min_trades}). "
+                    f"Keeping trades but marking fold as low-confidence (threshold EMA will not blend).")
+        low_confidence = True
 
     if len(taken) == 0:
+        n_finite = int(np.sum(np.isfinite(scores_work))) if scores_work is not None else 0
+        n_candidates = len(chronological_idx)
+        n_inf_symbols = 0
+        if config.per_symbol_thresholds:
+            n_inf_symbols = sum(1 for v in config.per_symbol_thresholds.values() if not np.isfinite(v))
+        total_blocked = sum(gate_blocks.values())
         log.warning("[V5_FWD] No trades taken in forward test!")
+        log.info("=" * 80)
+        log.info("  DEAD FOLD DIAGNOSTICS — why 0 trades?")
+        log.info("=" * 80)
+        log.info(f"  Total test bars:          {len(scores) if scores is not None else 0}")
+        log.info(f"  Finite scores (post QG):  {n_finite}")
+        if n_finite > 0:
+            finite_vals = scores_work[np.isfinite(scores_work)]
+            log.info(f"  Score distribution:       p50={float(np.percentile(finite_vals, 50)):.4f} "
+                     f"p90={float(np.percentile(finite_vals, 90)):.4f} "
+                     f"max={float(np.max(finite_vals)):.4f}")
+        log.info(f"  Effective threshold:      {effective_threshold:.4f}")
+        log.info(f"  Candidates (above thr):   {n_candidates}")
+        if config.per_symbol_thresholds:
+            log.info(f"  Per-symbol thr active:    {len(config.per_symbol_thresholds)} symbols, "
+                     f"{n_inf_symbols} have threshold=inf (killed)")
+        if total_blocked > 0:
+            log.info(f"  Total gate blocks:        {total_blocked}")
+            for gname, gcount in sorted(gate_blocks.items(), key=lambda x: -x[1]):
+                if gcount > 0:
+                    log.info(f"    {gname:<25s} {gcount:>6d} blocked")
+        if n_finite == 0:
+            log.info("  → CAUSE: No finite scores. Model produced no usable predictions for this window.")
+        elif n_candidates == 0:
+            log.info(f"  → CAUSE: Threshold too high ({effective_threshold:.4f}) — no scores passed it.")
+        elif total_blocked >= n_candidates:
+            log.info(f"  → CAUSE: All {n_candidates} candidates were blocked by gates.")
+        log.info("=" * 80)
         from collections import OrderedDict
         stage_distributions_empty = OrderedDict()
         stage_distributions_empty['pre'] = _compute_side_distribution(sides, chronological_idx)
@@ -3155,6 +3189,7 @@ def run_v5_forward_test(
         test_bars, config, test_start_date, test_end_date,
         trade_timestamps=t_timestamps,
     )
+    report['low_confidence'] = low_confidence
 
     report['ddt_diagnostics'] = ddt.diagnostics() if ddt is not None else None
     report['ddt_blocked'] = ddt_blocked if ddt is not None else 0
@@ -3348,6 +3383,7 @@ def _build_empty_report(test_start_date, test_end_date, config):
         'cooldown': config.cooldown,
         'ddt_diagnostics': None,
         'ddt_blocked': 0,
+        'low_confidence': False,
     }
 
 
@@ -3642,6 +3678,7 @@ def run_v5_walk_forward(
     per_symbol_cooldown=True,
     min_trades=20,
     wf_threshold_ema=True, wf_threshold_ema_alpha=0.5,
+    wf_threshold_decay=0.5,
     mu_debias=True, mu_debias_alpha=0.01,
     per_symbol_r_kill=None,
     per_symbol_threshold=False,
@@ -3749,6 +3786,7 @@ def run_v5_walk_forward(
     data_path = data_dir / f"{symbols[0]}_15m.parquet"
     threshold_ema = None
     blended_threshold = None
+    wf_threshold_decay = max(0.01, min(1.0, wf_threshold_decay))
 
     for fold in folds:
         log.info(f"\n{'='*80}")
@@ -3907,7 +3945,25 @@ def run_v5_walk_forward(
             fold_report['fold'] = fold['fold']
 
             fold_threshold = fold_report.get('score_threshold', None)
-            if fold_threshold is not None:
+            fold_total_trades = fold_report.get('total_trades', 0)
+            fold_low_conf = fold_report.get('low_confidence', False)
+
+            if fold_total_trades == 0 and threshold_ema is not None:
+                min_threshold = 0.01
+                old_ema = threshold_ema
+                threshold_ema = max(min_threshold, threshold_ema * wf_threshold_decay)
+                log.info(f"[V5_WF_THR] Fold {fold['fold']}: DEAD FOLD (0 trades) — "
+                         f"decaying threshold_ema {old_ema:.4f} × {wf_threshold_decay} → {threshold_ema:.4f}")
+                fold_report['threshold_ema'] = threshold_ema
+            elif fold_low_conf:
+                log.info(f"[V5_WF_THR] Fold {fold['fold']}: LOW_CONF ({fold_total_trades} trades) — "
+                         f"skipping EMA blend, keeping threshold_ema={threshold_ema:.4f}" if threshold_ema is not None else
+                         f"[V5_WF_THR] Fold {fold['fold']}: LOW_CONF ({fold_total_trades} trades) — "
+                         f"no prior EMA, using sweep={fold_threshold}")
+                if threshold_ema is None and fold_threshold is not None:
+                    threshold_ema = fold_threshold
+                fold_report['threshold_ema'] = threshold_ema
+            elif fold_threshold is not None:
                 if wf_threshold_ema and threshold_ema is not None:
                     blended_threshold = wf_threshold_ema_alpha * fold_threshold + (1 - wf_threshold_ema_alpha) * threshold_ema
                     log.info(f"[V5_WF_THR] Fold {fold['fold']}: sweep={fold_threshold:.4f} "
@@ -3927,6 +3983,12 @@ def run_v5_walk_forward(
 
             all_reports.append(fold_report)
         else:
+            if threshold_ema is not None:
+                min_threshold = 0.01
+                old_ema = threshold_ema
+                threshold_ema = max(min_threshold, threshold_ema * wf_threshold_decay)
+                log.info(f"[V5_WF_THR] Fold {fold['fold']}: NO REPORT FILE — "
+                         f"decaying threshold_ema {old_ema:.4f} × {wf_threshold_decay} → {threshold_ema:.4f}")
             pusher.fold_end(
                 fold_num=fold['fold'],
                 completed_folds=len(all_reports),
@@ -3953,11 +4015,11 @@ def run_v5_walk_forward(
         for r in all_reports:
             window = f"{r.get('window_start','?')}→{r.get('window_end','?')}"
             n_trades = r['total_trades']
-            thr = r.get('score_threshold', r.get('threshold_ema', 0.0))
+            thr = r.get('threshold_ema', r.get('score_threshold', 0.0))
             thr_str = f"{thr:.4f}" if thr else "-"
 
             if n_trades == 0:
-                status = "NO EDGE"
+                status = "DEAD"
                 log.info(f"{r['fold']:>6} {window:>25} {n_trades:>8} {'-/-':>10} {'-':>7} "
                          f"{'-':>10} {'-':>7} {'-':>8} {'-':>10} "
                          f"{'+0.0000':>10} {thr_str:>10} {status:>10}")
@@ -3965,7 +4027,8 @@ def run_v5_walk_forward(
                 n_long = r.get('n_long', 0)
                 n_short = r.get('n_short', 0)
                 ls_str = f"{n_long}/{n_short}"
-                status = "ACTIVE"
+                is_low_conf = r.get('low_confidence', False)
+                status = "LOW_CONF" if is_low_conf else "ACTIVE"
                 active_folds += 1
                 total_long += n_long
                 total_short += n_short

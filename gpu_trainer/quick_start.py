@@ -5188,8 +5188,10 @@ Examples:
                         help="v5.3.1+: disable threshold carry-forward EMA")
     parser.add_argument("--v5-wf-threshold-ema-alpha", type=float, default=0.5,
                         help="v5.3.1+: EMA blending weight for threshold carry-forward (default: 0.5 = 50%% new, 50%% prior)")
+    parser.add_argument("--v5-wf-threshold-decay", type=float, default=0.5,
+                        help="v5.5+: decay factor for threshold EMA on dead folds (0 trades). Range 0-1. Halves threshold per dead fold (default: 0.5)")
     parser.add_argument("--v5-min-trades", type=int, default=20,
-                        help="v5.3.1+: minimum trades for valid fold. Below this → NO EDGE, 0R (default: 20)")
+                        help="v5.3.1+: minimum trades for valid fold. Below this → LOW_CONF, trades kept but threshold EMA skips (default: 20)")
 
     parser.add_argument("--multi-horizon", action="store_true", default=False,
                         help="Train multiple horizons (8,16,32) and select best per bar")
@@ -5888,6 +5890,7 @@ Examples:
                     min_trades=args.v5_min_trades,
                     wf_threshold_ema=args.v5_wf_threshold_ema and not args.v5_no_wf_threshold_ema,
                     wf_threshold_ema_alpha=args.v5_wf_threshold_ema_alpha,
+                    wf_threshold_decay=args.v5_wf_threshold_decay,
                     mu_debias=args.v5_mu_debias,
                     mu_debias_alpha=args.v5_mu_debias_alpha,
                     per_symbol_r_kill=args.v5_per_symbol_r_kill,
