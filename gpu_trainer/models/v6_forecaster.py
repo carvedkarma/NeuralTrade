@@ -181,7 +181,8 @@ class MixtureOfExperts(nn.Module):
         for k in range(self.top_k):
             for e in range(self.n_experts):
                 hard_usage[e] += (top_k_idx[:, k] == e).float().sum()
-        self._last_hard_usage = (hard_usage / (n * self.top_k)).detach()
+        fraction_hard = hard_usage / (n * self.top_k)
+        self._last_hard_usage = fraction_hard.detach()
 
         batch_size = x.size(0)
         output = torch.zeros(batch_size, self.output_dim, device=x.device, dtype=x.dtype)
@@ -195,12 +196,13 @@ class MixtureOfExperts(nn.Module):
                     expert_out = self.experts[e_idx](x[mask])
                     output[mask] += weight[mask] * expert_out
 
-        load_balance_loss = self._compute_load_balance_loss(gate_probs)
+        load_balance_loss = self._compute_load_balance_loss(gate_probs, fraction_hard)
         return output, load_balance_loss
 
-    def _compute_load_balance_loss(self, gate_probs: torch.Tensor) -> torch.Tensor:
+    def _compute_load_balance_loss(self, gate_probs: torch.Tensor,
+                                   fraction_hard: torch.Tensor) -> torch.Tensor:
         fraction_soft = gate_probs.mean(dim=0)
-        loss = self.n_experts * (fraction_soft * fraction_soft).sum()
+        loss = self.n_experts * (fraction_hard.detach() * fraction_soft).sum()
         return loss
 
     def reinit_dead_experts(self, dead_indices: list):
@@ -500,6 +502,12 @@ class V6Forecaster(nn.Module):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
     def get_expert_usage(self) -> Optional[Dict[str, float]]:
+        if self.moe._last_hard_usage is None:
+            return None
+        return {f"E{i}": self.moe._last_hard_usage[i].item() * 100
+                for i in range(self.config.n_experts)}
+
+    def get_expert_soft_probs(self) -> Optional[Dict[str, float]]:
         if self.moe._last_gate_probs is None:
             return None
         probs = self.moe._last_gate_probs.mean(dim=0)

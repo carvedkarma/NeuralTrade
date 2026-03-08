@@ -1764,7 +1764,8 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
 
 
 def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
-                            config, total_train):
+                            config, total_train,
+                            use_v6=False, v6_seq_len=16):
     """Run inference on training data to build reference arrays for quality gate.
 
     These training-set statistics prevent lookahead bias in the forward test
@@ -1773,19 +1774,53 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
     log.info(f"[V5_REF] Building training reference arrays ({total_train} bars) for quality gate...")
     model.eval()
 
-    train_valid = np.ones(total_train, dtype=np.float32)
-    train_ds = V5Dataset(
-        train_feat,
-        np.zeros(total_train, dtype=np.float32),
-        np.zeros(total_train, dtype=np.float32),
-        np.zeros(total_train, dtype=np.float32),
-        np.zeros(total_train, dtype=np.float32),
-        np.zeros(total_train, dtype=np.int64),
-        train_valid,
-        train_sym_ids,
-        np.zeros(total_train, dtype=np.int64),
-        np.zeros((total_train, 1), dtype=np.float32),
-    )
+    if use_v6:
+        unique_syms = np.unique(train_sym_ids)
+        feat_per_sym = []
+        ret_per_sym = []
+        mfe_per_sym = []
+        mae_per_sym = []
+        vol_per_sym = []
+        act_per_sym = []
+        valid_per_sym = []
+        symid_per_sym = []
+        for s in unique_syms:
+            mask = train_sym_ids == s
+            n_s = int(mask.sum())
+            feat_per_sym.append(train_feat[mask])
+            ret_per_sym.append(np.zeros(n_s, dtype=np.float32))
+            mfe_per_sym.append(np.zeros(n_s, dtype=np.float32))
+            mae_per_sym.append(np.zeros(n_s, dtype=np.float32))
+            vol_per_sym.append(np.zeros(n_s, dtype=np.float32))
+            act_per_sym.append(np.zeros(n_s, dtype=np.int64))
+            valid_per_sym.append(np.ones(n_s, dtype=np.bool_))
+            symid_per_sym.append(train_sym_ids[mask])
+        train_ds = V6SequenceDataset(
+            features_per_symbol=feat_per_sym,
+            ret_R_per_symbol=ret_per_sym,
+            mfe_R_per_symbol=mfe_per_sym,
+            mae_R_per_symbol=mae_per_sym,
+            vol_h_per_symbol=vol_per_sym,
+            action_per_symbol=act_per_sym,
+            valid_per_symbol=valid_per_sym,
+            symbol_ids_per_symbol=symid_per_sym,
+            seq_len=v6_seq_len,
+        )
+        log.info(f"[V6_REF] Using V6SequenceDataset for ref arrays: {len(train_ds)} samples, seq_len={v6_seq_len}")
+    else:
+        train_valid = np.ones(total_train, dtype=np.float32)
+        train_ds = V5Dataset(
+            train_feat,
+            np.zeros(total_train, dtype=np.float32),
+            np.zeros(total_train, dtype=np.float32),
+            np.zeros(total_train, dtype=np.float32),
+            np.zeros(total_train, dtype=np.float32),
+            np.zeros(total_train, dtype=np.int64),
+            train_valid,
+            train_sym_ids,
+            np.zeros(total_train, dtype=np.int64),
+            np.zeros((total_train, 1), dtype=np.float32),
+        )
     train_loader = DataLoader(train_ds, batch_size=512, shuffle=False)
 
     all_outputs = {
@@ -1920,6 +1955,7 @@ def run_v5_forward_test(
     close_prices=None, ema200_regime_gate=False,
     high_prices=None, low_prices=None,
     train_ref_arrays=None,
+    use_v6=False, v6_seq_len=16,
 ):
     """Run forward test with completely frozen decision layer.
 
@@ -1930,18 +1966,52 @@ def run_v5_forward_test(
 
     model.eval()
 
-    test_ds = V5Dataset(
-        test_features,
-        np.zeros(len(test_features), dtype=np.float32),
-        np.zeros(len(test_features), dtype=np.float32),
-        np.zeros(len(test_features), dtype=np.float32),
-        np.zeros(len(test_features), dtype=np.float32),
-        np.zeros(len(test_features), dtype=np.int64),
-        test_valid,
-        test_sym_ids,
-        np.zeros(len(test_features), dtype=np.int64),
-        np.zeros((len(test_features), 1), dtype=np.float32),
-    )
+    if use_v6:
+        unique_syms = np.unique(test_sym_ids)
+        feat_per_sym = []
+        ret_per_sym = []
+        mfe_per_sym = []
+        mae_per_sym = []
+        vol_per_sym = []
+        act_per_sym = []
+        valid_per_sym = []
+        symid_per_sym = []
+        for s in unique_syms:
+            mask = test_sym_ids == s
+            n_s = int(mask.sum())
+            feat_per_sym.append(test_features[mask])
+            ret_per_sym.append(np.zeros(n_s, dtype=np.float32))
+            mfe_per_sym.append(np.zeros(n_s, dtype=np.float32))
+            mae_per_sym.append(np.zeros(n_s, dtype=np.float32))
+            vol_per_sym.append(np.zeros(n_s, dtype=np.float32))
+            act_per_sym.append(np.zeros(n_s, dtype=np.int64))
+            valid_per_sym.append(np.array(test_valid[mask], dtype=np.bool_))
+            symid_per_sym.append(test_sym_ids[mask])
+        test_ds = V6SequenceDataset(
+            features_per_symbol=feat_per_sym,
+            ret_R_per_symbol=ret_per_sym,
+            mfe_R_per_symbol=mfe_per_sym,
+            mae_R_per_symbol=mae_per_sym,
+            vol_h_per_symbol=vol_per_sym,
+            action_per_symbol=act_per_sym,
+            valid_per_symbol=valid_per_sym,
+            symbol_ids_per_symbol=symid_per_sym,
+            seq_len=v6_seq_len,
+        )
+        log.info(f"[V6_FWD] Using V6SequenceDataset for forward test: {len(test_ds)} samples, seq_len={v6_seq_len}")
+    else:
+        test_ds = V5Dataset(
+            test_features,
+            np.zeros(len(test_features), dtype=np.float32),
+            np.zeros(len(test_features), dtype=np.float32),
+            np.zeros(len(test_features), dtype=np.float32),
+            np.zeros(len(test_features), dtype=np.float32),
+            np.zeros(len(test_features), dtype=np.int64),
+            test_valid,
+            test_sym_ids,
+            np.zeros(len(test_features), dtype=np.int64),
+            np.zeros((len(test_features), 1), dtype=np.float32),
+        )
     test_loader = DataLoader(test_ds, batch_size=512, shuffle=False)
 
     all_outputs = {
@@ -5160,7 +5230,8 @@ def train_v5_model(
 
             train_ref_arrays = _build_train_ref_arrays(
                 model, device, train_feat, train_sym_ids,
-                fwd_config, total_train
+                fwd_config, total_train,
+                use_v6=use_v6, v6_seq_len=v6_seq_len,
             )
 
             fwd_report = run_v5_forward_test(
@@ -5186,6 +5257,7 @@ def train_v5_model(
                 high_prices=val_high_arr,
                 low_prices=val_low_arr,
                 train_ref_arrays=train_ref_arrays,
+                use_v6=use_v6, v6_seq_len=v6_seq_len,
             )
 
             report_path = checkpoint_dir / "v5_forward_report.json"
