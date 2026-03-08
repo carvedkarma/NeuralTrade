@@ -123,6 +123,7 @@ class V5ForwardTestConfig:
     corr_thresh: float = 0.70
     corr_same_side_only: bool = True
     corr_log_matrix: bool = True
+    corr_max_block: int = 5
     symbols_list: Optional[list] = None
     adaptive_sizing: bool = False
     kelly_fraction: float = 0.25
@@ -195,6 +196,7 @@ class V5ForwardTestConfig:
     head_disagreement_gate: bool = False
     sigma_discount: bool = False
     min_p_side: float = 0.0
+    per_symbol_cooldown: bool = True
     slippage_base_bps: float = 0.0
     slippage_impact_mult: float = 0.0
     ood_gate: bool = False
@@ -2296,10 +2298,10 @@ def run_v5_forward_test(
 
     ema200 = None
     if ema200_regime_gate and close_prices is not None:
-        ema200 = _compute_ema(close_prices, 200)
-        if config.multi_regime:
-            log.info("[V5_FWD] EMA200 regime gate ENABLED (alongside multi-regime)")
+        if config.multi_regime and config.regime_side_map:
+            log.info("[V5_GATE] EMA200 hard gate skipped — multi-regime active")
         else:
+            ema200 = _compute_ema(close_prices, 200)
             log.info("[V5_FWD] EMA200 regime gate ENABLED")
 
     week_boundaries = None
@@ -2422,6 +2424,7 @@ def run_v5_forward_test(
             threshold=config.corr_thresh,
             same_side_only=config.corr_same_side_only,
             log_matrix=config.corr_log_matrix,
+            max_block=getattr(config, 'corr_max_block', 5),
         )
         corr_tracker = RollingDailyCorr(sym_names, window_days=config.corr_window_days)
         corr_blocker = CorrBlocker(corr_tracker, corr_cfg)
@@ -2441,14 +2444,15 @@ def run_v5_forward_test(
     current_week_id = -1
     week_killed = False
     last_bar = -config.cooldown - 1
+    per_sym_last_bar = defaultdict(lambda: -config.cooldown - 1)
     daily_blocked = 0
     equity_blocked = 0
     tpd_blocked = 0
     tpd_current_date = ""
     tpd_current_count = 0
     edge_topn_blocked = 0
-    ef_topn_current_date = ""
-    ef_topn_current_count = 0
+    ef_topn_current_date = {}
+    ef_topn_current_count = defaultdict(int)
 
     gate_blocks = Counter()
     post_ema200_indices = []
@@ -2561,7 +2565,13 @@ def run_v5_forward_test(
             warmup_blocked += 1
             gate_blocks["warmup"] += 1
             continue
-        if idx - last_bar < config.cooldown:
+        if getattr(config, 'per_symbol_cooldown', True) and test_sym_ids is not None:
+            bar_sym_id = int(test_sym_ids[idx])
+            if idx - per_sym_last_bar[bar_sym_id] < config.cooldown:
+                cooldown_blocked += 1
+                gate_blocks["cooldown"] += 1
+                continue
+        elif idx - last_bar < config.cooldown:
             cooldown_blocked += 1
             gate_blocks["cooldown"] += 1
             continue
@@ -2595,6 +2605,8 @@ def run_v5_forward_test(
                     date_str = datetime.utcfromtimestamp(
                         test_timestamps[entry_idx] / 1000).strftime('%Y-%m-%d')
                     corr_tracker.record_trade(pos['symbol'], date_str, tr)
+            if corr_blocker is not None and pos.get('symbol'):
+                corr_blocker.on_position_closed(pos['symbol'])
             del open_positions[k]
 
         if ema200 is not None:
@@ -2652,10 +2664,11 @@ def run_v5_forward_test(
         if config.edge_first and config.edge_topn_per_day > 0 and test_timestamps is not None:
             bar_date = datetime.utcfromtimestamp(
                 test_timestamps[idx] / 1000).strftime('%Y-%m-%d')
-            if bar_date != ef_topn_current_date:
-                ef_topn_current_date = bar_date
-                ef_topn_current_count = 0
-            if ef_topn_current_count >= config.edge_topn_per_day:
+            topn_sym_id = int(test_sym_ids[idx]) if test_sym_ids is not None else 0
+            if ef_topn_current_date.get(topn_sym_id) != bar_date:
+                ef_topn_current_date[topn_sym_id] = bar_date
+                ef_topn_current_count[topn_sym_id] = 0
+            if ef_topn_current_count[topn_sym_id] >= config.edge_topn_per_day:
                 edge_topn_blocked += 1
                 gate_blocks["edge_topn"] += 1
                 continue
@@ -2740,12 +2753,15 @@ def run_v5_forward_test(
 
         taken.append(idx)
         last_bar = idx
+        if test_sym_ids is not None:
+            per_sym_last_bar[int(test_sym_ids[idx])] = idx
 
         if config.max_trades_per_day is not None:
             tpd_current_count += 1
 
         if config.edge_first and config.edge_topn_per_day > 0:
-            ef_topn_current_count += 1
+            topn_inc_sym = int(test_sym_ids[idx]) if test_sym_ids is not None else 0
+            ef_topn_current_count[topn_inc_sym] += 1
 
         trade_size_mult = 1.0
         if position_sizer is not None:
@@ -3083,6 +3099,67 @@ def run_v5_forward_test(
             'blocked_trades': per_sym_kill_blocked,
             'cumulative_r': {k: round(v, 4) for k, v in sym_cumulative_r.items()},
         }
+
+    if len(taken_valid) > 0:
+        pred_quality = {}
+        t_mu_R = arrays['mu_R'][taken_valid]
+        t_actual_r = t_r_valid
+        t_pred_mae = arrays['mae'][taken_valid]
+        t_pred_mfe = arrays['mfe'][taken_valid]
+        t_pred_sigma = arrays['sigma'][taken_valid] if arrays['sigma'] is not None else None
+        t_p_long = arrays['p_long'][taken_valid]
+        t_p_short = arrays['p_short'][taken_valid]
+        t_pred_sides = t_sides_valid
+
+        correct_side = ((t_pred_sides == 1) & (t_actual_r > 0)) | ((t_pred_sides == -1) & (t_actual_r < 0))
+        action_accuracy = float(np.mean(correct_side))
+        pred_quality['action_accuracy'] = round(action_accuracy, 4)
+
+        finite_mask = np.isfinite(t_mu_R) & np.isfinite(t_actual_r)
+        if np.sum(finite_mask) > 5:
+            mu_r_corr = float(np.corrcoef(t_mu_R[finite_mask], t_actual_r[finite_mask])[0, 1])
+            pred_quality['mu_r_correlation'] = round(mu_r_corr, 4)
+        else:
+            pred_quality['mu_r_correlation'] = None
+
+        pred_quality['mean_predicted_mae'] = round(float(np.nanmean(t_pred_mae)), 4)
+        pred_quality['mean_predicted_mfe'] = round(float(np.nanmean(t_pred_mfe)), 4)
+        pred_quality['mean_predicted_mu_R'] = round(float(np.nanmean(t_mu_R)), 4)
+        pred_quality['mean_actual_R'] = round(float(np.mean(t_actual_r)), 4)
+
+        if t_pred_sigma is not None and np.sum(np.isfinite(t_pred_sigma)) > 0:
+            sigma_finite = np.isfinite(t_pred_sigma) & np.isfinite(t_mu_R) & np.isfinite(t_actual_r)
+            if np.sum(sigma_finite) > 5:
+                residuals = np.abs(t_actual_r[sigma_finite] - t_mu_R[sigma_finite])
+                within_1sigma = float(np.mean(residuals <= t_pred_sigma[sigma_finite]))
+                within_2sigma = float(np.mean(residuals <= 2 * t_pred_sigma[sigma_finite]))
+                pred_quality['sigma_1std_coverage'] = round(within_1sigma, 4)
+                pred_quality['sigma_2std_coverage'] = round(within_2sigma, 4)
+                pred_quality['mean_predicted_sigma'] = round(float(np.mean(t_pred_sigma[sigma_finite])), 4)
+
+        p_side_for_taken = np.where(t_pred_sides == 1, t_p_long, t_p_short)
+        pred_quality['mean_p_side'] = round(float(np.mean(p_side_for_taken)), 4)
+        winners_mask = t_actual_r > 0
+        losers_mask = t_actual_r < 0
+        if np.sum(winners_mask) > 0:
+            pred_quality['mean_p_side_winners'] = round(float(np.mean(p_side_for_taken[winners_mask])), 4)
+        if np.sum(losers_mask) > 0:
+            pred_quality['mean_p_side_losers'] = round(float(np.mean(p_side_for_taken[losers_mask])), 4)
+
+        report['prediction_quality'] = pred_quality
+        log.info(f"[V5_PRED_QUALITY] Action accuracy: {action_accuracy:.1%} "
+                 f"| mu_R↔actual_R corr: {pred_quality.get('mu_r_correlation', 'N/A')} "
+                 f"| mean mu_R: {pred_quality['mean_predicted_mu_R']:+.4f} vs actual: {pred_quality['mean_actual_R']:+.4f}")
+        log.info(f"[V5_PRED_QUALITY] MAE pred: {pred_quality['mean_predicted_mae']:.4f} "
+                 f"| MFE pred: {pred_quality['mean_predicted_mfe']:.4f} "
+                 f"| mean p_side: {pred_quality['mean_p_side']:.4f}")
+        if 'sigma_1std_coverage' in pred_quality:
+            log.info(f"[V5_PRED_QUALITY] Sigma calibration: {pred_quality['sigma_1std_coverage']:.1%} within ±1σ "
+                     f"(expect ~68%) | {pred_quality['sigma_2std_coverage']:.1%} within ±2σ (expect ~95%) "
+                     f"| mean σ: {pred_quality['mean_predicted_sigma']:.4f}")
+        if 'mean_p_side_winners' in pred_quality:
+            log.info(f"[V5_PRED_QUALITY] Conviction: winners p_side={pred_quality.get('mean_p_side_winners', 'N/A'):.4f} "
+                     f"vs losers p_side={pred_quality.get('mean_p_side_losers', 'N/A'):.4f}")
 
     if corr_tracker is not None:
         for k, pos in open_positions.items():
@@ -3440,7 +3517,7 @@ def run_v5_walk_forward(
     use_regime_head=False, cand_warmup_epochs=3,
     ema200_regime_gate=False, weekly_loss_cap=None, warmup_skip_bars=0,
     corr_block=False, corr_window_days=30, corr_thresh=0.70,
-    corr_same_side_only=True, corr_log_matrix=True,
+    corr_same_side_only=True, corr_log_matrix=True, corr_max_block=5,
     adaptive_sizing=False, kelly_fraction=0.25, max_size_mult=2.5, min_size_mult=0.25,
     regime_scaling=False, regime_bull_mult=1.5, regime_bear_mult=0.5, regime_lookback=20,
     daily_loss_cap=None, trailing_equity_stop=None, per_symbol_daily_r_budget=None,
@@ -3466,6 +3543,7 @@ def run_v5_walk_forward(
     regime_side_map=None, size_floor=0.0,
     head_disagreement_gate=False, slippage_base_bps=0.0,
     sigma_discount=False, min_p_side=0.0, mae_asym_weight=1.0,
+    per_symbol_cooldown=True,
     min_trades=20,
     wf_threshold_ema=True, wf_threshold_ema_alpha=0.5,
     mu_debias=True, mu_debias_alpha=0.01,
@@ -3621,6 +3699,7 @@ def run_v5_walk_forward(
             corr_thresh=corr_thresh,
             corr_same_side_only=corr_same_side_only,
             corr_log_matrix=corr_log_matrix,
+            corr_max_block=corr_max_block,
             adaptive_sizing=adaptive_sizing,
             kelly_fraction=kelly_fraction,
             max_size_mult=max_size_mult,
@@ -3696,6 +3775,7 @@ def run_v5_walk_forward(
             sigma_discount=sigma_discount,
             min_p_side=min_p_side,
             mae_asym_weight=mae_asym_weight,
+            per_symbol_cooldown=per_symbol_cooldown,
             min_trades=min_trades,
             mu_debias=mu_debias,
             mu_debias_alpha=mu_debias_alpha,
@@ -3916,6 +3996,7 @@ def train_v5_model(
     corr_thresh=0.70,
     corr_same_side_only=True,
     corr_log_matrix=True,
+    corr_max_block=5,
     adaptive_sizing=False,
     kelly_fraction=0.25,
     max_size_mult=2.5,
@@ -3955,6 +4036,7 @@ def train_v5_model(
     regime_side_map=None, size_floor=0.0,
     head_disagreement_gate=False, slippage_base_bps=0.0,
     sigma_discount=False, min_p_side=0.0, mae_asym_weight=1.0,
+    per_symbol_cooldown=True,
     mu_debias=True, mu_debias_alpha=0.01,
     min_trades=20,
     wf_threshold_override=None,
@@ -5216,6 +5298,7 @@ def train_v5_model(
                 corr_thresh=corr_thresh,
                 corr_same_side_only=corr_same_side_only,
                 corr_log_matrix=corr_log_matrix,
+                corr_max_block=corr_max_block,
                 symbols_list=symbols if symbols else None,
                 adaptive_sizing=adaptive_sizing,
                 kelly_fraction=kelly_fraction,
@@ -5284,6 +5367,7 @@ def train_v5_model(
                 head_disagreement_gate=head_disagreement_gate,
                 sigma_discount=sigma_discount,
                 min_p_side=min_p_side,
+                per_symbol_cooldown=per_symbol_cooldown,
                 slippage_base_bps=slippage_base_bps,
                 mu_debias=mu_debias,
                 mu_debias_alpha=mu_debias_alpha,

@@ -25,6 +25,7 @@ class CorrConfig:
     same_side_only: bool = True
     log_matrix: bool = True
     min_aligned_days: int = 10
+    max_block: int = 5
 
 
 class RollingDailyCorr:
@@ -96,6 +97,10 @@ class CorrBlocker:
         self.config = config
         self.blocked_count = 0
         self.block_log: List[Dict] = []
+        self._blocks_by_position: Dict[str, int] = defaultdict(int)
+
+    def on_position_closed(self, symbol: str):
+        self._blocks_by_position.pop(symbol, None)
 
     def should_block(self, symbol: str, side: int,
                      open_positions: Dict[str, int]) -> bool:
@@ -117,15 +122,21 @@ class CorrBlocker:
             if corr is None:
                 continue
             if abs(corr) >= self.config.threshold:
+                if self.config.max_block > 0 and self._blocks_by_position[other_sym] >= self.config.max_block:
+                    continue
                 self.blocked_count += 1
+                self._blocks_by_position[other_sym] += 1
                 entry = {
                     'symbol': symbol, 'side': side,
                     'blocked_by': other_sym, 'other_side': other_side,
                     'corr': round(corr, 4), 'thresh': self.config.threshold,
+                    'blocker_count': self._blocks_by_position[other_sym],
+                    'blocker_cap': self.config.max_block,
                 }
                 self.block_log.append(entry)
-                log.info("[V5_CORR_BLOCK] blocked %s side=%+d due to corr(%s,%s)=%.3f >= %.2f",
-                         symbol, side, symbol, other_sym, corr, self.config.threshold)
+                log.info("[V5_CORR_BLOCK] blocked %s side=%+d due to corr(%s,%s)=%.3f >= %.2f (%d/%d blocks by %s)",
+                         symbol, side, symbol, other_sym, corr, self.config.threshold,
+                         self._blocks_by_position[other_sym], self.config.max_block, other_sym)
                 return True
         return False
 

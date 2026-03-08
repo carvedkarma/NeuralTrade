@@ -4988,6 +4988,8 @@ Examples:
                         help="v5.0.8: block correlated entries regardless of side")
     parser.add_argument("--v5-log-corr-matrix", action="store_true", default=True,
                         help="v5.0.8: log correlation matrix at fold end (default: on)")
+    parser.add_argument("--v5-corr-max-block", type=int, default=5,
+                        help="v5.4: max symbols one open position can block via correlation (default: 5, 0=unlimited)")
 
     parser.add_argument("--v5-adaptive-sizing", action="store_true", default=False,
                         help="v5.0.8+: enable adaptive position sizing via fractional Kelly criterion (default: off)")
@@ -5133,6 +5135,10 @@ Examples:
                         help="v5.2: block trades when model heads disagree (action side vs mu_R sign)")
     parser.add_argument("--slippage-base-bps", type=float, default=0.0,
                         help="v5.2: slippage deduction in basis points before edge calc (default: 0 = disabled)")
+    parser.add_argument("--v5-per-symbol-cooldown", action="store_true", default=True,
+                        help="v5.4: per-symbol cooldown instead of global (default: on)")
+    parser.add_argument("--v5-global-cooldown", dest="v5_per_symbol_cooldown", action="store_false",
+                        help="v5.4: revert to global cooldown across all symbols")
     parser.add_argument("--v5-sigma-discount", action="store_true", default=True,
                         help="v5.3: apply sigma sharpness multiplier 1/(1+sigma) to scores (default: enabled)")
     parser.add_argument("--v5-no-sigma-discount", action="store_true", default=False,
@@ -5778,6 +5784,7 @@ Examples:
                     corr_thresh=args.v5_corr_thresh,
                     corr_same_side_only=args.v5_corr_same_side_only,
                     corr_log_matrix=args.v5_log_corr_matrix,
+                    corr_max_block=args.v5_corr_max_block,
                     adaptive_sizing=args.v5_adaptive_sizing,
                     kelly_fraction=args.v5_kelly_fraction,
                     max_size_mult=args.v5_max_size_mult,
@@ -5853,6 +5860,7 @@ Examples:
                     sigma_discount=args.v5_sigma_discount and not args.v5_no_sigma_discount,
                     min_p_side=args.v5_min_p_side,
                     mae_asym_weight=args.v5_mae_asym_weight,
+                    per_symbol_cooldown=args.v5_per_symbol_cooldown,
                     min_trades=args.v5_min_trades,
                     wf_threshold_ema=args.v5_wf_threshold_ema and not args.v5_no_wf_threshold_ema,
                     wf_threshold_ema_alpha=args.v5_wf_threshold_ema_alpha,
@@ -6029,6 +6037,7 @@ Examples:
                 sigma_discount=args.v5_sigma_discount and not args.v5_no_sigma_discount,
                 min_p_side=args.v5_min_p_side,
                 mae_asym_weight=args.v5_mae_asym_weight,
+                per_symbol_cooldown=args.v5_per_symbol_cooldown,
                 mu_debias=args.v5_mu_debias,
                 mu_debias_alpha=args.v5_mu_debias_alpha,
                 min_trades=args.v5_min_trades,
