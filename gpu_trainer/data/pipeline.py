@@ -1159,8 +1159,10 @@ class FeatureEngineer:
         if h1_idx is None or h4_idx is None:
             return
         
-        h1_vals = h1_idx.values
-        h4_vals = h4_idx.values
+        h1_ts = pd.DatetimeIndex(h1_idx)
+        h4_ts = pd.DatetimeIndex(h4_idx)
+        h1_ns = h1_ts.view('int64')
+        h4_ns = h4_ts.view('int64')
         
         logger.info("=" * 70)
         logger.info("HTF LEAKAGE SANITY CHECK (20 random rows)")
@@ -1170,13 +1172,13 @@ class FeatureEngineer:
         violations = 0
         for idx in sample_indices:
             t = ohlcv.index[idx]
-            t_val = t.value if hasattr(t, 'value') else pd.Timestamp(t).value
+            t_ns = t.value if hasattr(t, 'value') else pd.Timestamp(t).value
             
-            h1_mask = h1_vals <= t_val
-            h4_mask = h4_vals <= t_val
+            h1_mask = h1_ns <= t_ns
+            h4_mask = h4_ns <= t_ns
             
-            t1h = h1_idx[h1_mask][-1] if h1_mask.any() else None
-            t4h = h4_idx[h4_mask][-1] if h4_mask.any() else None
+            t1h = h1_ts[h1_mask][-1] if h1_mask.any() else None
+            t4h = h4_ts[h4_mask][-1] if h4_mask.any() else None
             
             t_str = str(t)[:19]
             t1h_str = str(t1h)[:19] if t1h is not None else "N/A"
@@ -1189,7 +1191,7 @@ class FeatureEngineer:
                 ok = False
             if t1h is not None:
                 next_h1 = t1h + pd.Timedelta(hours=1)
-                if next_h1 <= t and next_h1 in h1_idx:
+                if next_h1 <= t and next_h1 in h1_ts:
                     ok = False
             
             status = "OK" if ok else "LEAK!"
