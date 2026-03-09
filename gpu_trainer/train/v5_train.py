@@ -202,6 +202,8 @@ class V5ForwardTestConfig:
     head_disagreement_gate: bool = False
     sigma_discount: bool = False
     min_p_side: float = 0.0
+    min_p_short: float = 0.0
+    side_aware_scoring: bool = False
     per_symbol_cooldown: bool = True
     slippage_base_bps: float = 0.0
     slippage_impact_mult: float = 0.0
@@ -1098,7 +1100,8 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
                       risk_proxy='mae', mae_cap=2.0, _arrays=None,
                       side_mode='action_head', rr_weight=0.0,
                       min_mu_r_score=0.03, slippage_bps=0.0,
-                      sigma_discount=False, min_p_side=0.0):
+                      sigma_discount=False, min_p_side=0.0,
+                      min_p_short=0.0, side_aware_scoring=False):
     """Compute execution-aware v5 scores -- all in R-units.
 
     Two side-selection modes:
@@ -1166,7 +1169,12 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
     abs_mu = np.abs(mu_R_adj)
     mu_over_risk = np.divide(abs_mu, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
 
-    if side_mode == 'action_head':
+    if side_mode == 'action_head' and side_aware_scoring:
+        mu_long = np.maximum(mu_R_adj, 0.0)
+        mu_short = np.maximum(-mu_R_adj, 0.0)
+        edge_long = p_long * np.divide(mu_long, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
+        edge_short = p_short * np.divide(mu_short, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
+    elif side_mode == 'action_head':
         edge_long = p_long * mu_over_risk
         edge_short = p_short * mu_over_risk
     else:
@@ -1208,6 +1216,12 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         low_conviction = p_side < min_p_side
         n_pside_killed = int(np.sum(low_conviction & np.isfinite(scores)))
         scores[low_conviction] = -np.inf
+
+    n_pshort_killed = 0
+    if min_p_short > 0 and side_mode == 'action_head':
+        short_low_conv = (sides == -1) & (p_short < min_p_short)
+        n_pshort_killed = int(np.sum(short_low_conv & np.isfinite(scores)))
+        scores[short_low_conv] = -np.inf
 
     n_suppressed = 0
     if min_mu_r_score > 0:
@@ -1255,6 +1269,8 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         'n_mu_suppressed': n_suppressed,
         'n_sigma_discounted': n_sigma_discounted,
         'n_pside_killed': n_pside_killed,
+        'n_pshort_killed': n_pshort_killed,
+        'side_aware_scoring': side_aware_scoring,
         'n_long_all': n_long_sides,
         'n_short_all': n_short_sides,
         'long_pct_all': float(100 * n_long_sides / max(n_long_sides + n_short_sides, 1)),
@@ -1891,6 +1907,8 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
         slippage_bps=config.slippage_base_bps,
         sigma_discount=config.sigma_discount,
         min_p_side=config.min_p_side,
+        min_p_short=config.min_p_short,
+        side_aware_scoring=config.side_aware_scoring,
     )
     ref_arrays['_train_scores'] = train_scores
 
@@ -2126,6 +2144,8 @@ def run_v5_forward_test(
         slippage_bps=config.slippage_base_bps,
         sigma_discount=config.sigma_discount,
         min_p_side=config.min_p_side,
+        min_p_short=config.min_p_short,
+        side_aware_scoring=config.side_aware_scoring,
     )
 
     if 'edge_L' in score_diag:
@@ -3201,6 +3221,40 @@ def run_v5_forward_test(
     )
     report['low_confidence'] = low_confidence
 
+    side_quality = {}
+    if len(taken_valid) > 0 and arrays is not None:
+        t_scores_valid = scores[taken_valid]
+        t_mu_r_valid = arrays['mu_R'][taken_valid]
+        t_p_long_valid = arrays['p_long'][taken_valid]
+        t_p_short_valid = arrays['p_short'][taken_valid]
+        t_p_side_valid = np.where(t_sides_valid == 1, t_p_long_valid, t_p_short_valid)
+
+        long_mask_v = t_sides_valid == 1
+        short_mask_v = t_sides_valid == -1
+        n_long_v = int(np.sum(long_mask_v))
+        n_short_v = int(np.sum(short_mask_v))
+
+        if n_long_v > 0:
+            side_quality['long_avg_score'] = float(np.mean(t_scores_valid[long_mask_v]))
+            side_quality['long_avg_p_side'] = float(np.mean(t_p_side_valid[long_mask_v]))
+            side_quality['long_avg_mu_r'] = float(np.mean(t_mu_r_valid[long_mask_v]))
+            side_quality['long_head_agree_pct'] = float(100 * np.mean(t_mu_r_valid[long_mask_v] > 0))
+
+        if n_short_v > 0:
+            side_quality['short_avg_score'] = float(np.mean(t_scores_valid[short_mask_v]))
+            side_quality['short_avg_p_side'] = float(np.mean(t_p_side_valid[short_mask_v]))
+            side_quality['short_avg_mu_r'] = float(np.mean(t_mu_r_valid[short_mask_v]))
+            side_quality['short_head_agree_pct'] = float(100 * np.mean(t_mu_r_valid[short_mask_v] < 0))
+            short_disagree = t_mu_r_valid[short_mask_v] > 0
+            n_disagree = int(np.sum(short_disagree))
+            side_quality['short_disagree_trades'] = n_disagree
+            side_quality['short_disagree_pct'] = float(100 * n_disagree / max(n_short_v, 1))
+            if n_disagree > 0:
+                disagree_r = t_r_valid[short_mask_v][short_disagree]
+                side_quality['short_disagree_expect'] = float(np.mean(disagree_r))
+
+    report['side_quality'] = side_quality
+
     report['ddt_diagnostics'] = ddt.diagnostics() if ddt is not None else None
     report['ddt_blocked'] = ddt_blocked if ddt is not None else 0
 
@@ -3624,6 +3678,22 @@ def _print_forward_report(report):
                  f"Expect {ds.get('long_expectancy_r',0):+.4f} R | Total {ds.get('long_total_r',0):+.4f} R")
         log.info(f"    SHORT: {ds.get('short_trades',0)} trades | WR {ds.get('short_win_rate',0):.1%} | "
                  f"Expect {ds.get('short_expectancy_r',0):+.4f} R | Total {ds.get('short_total_r',0):+.4f} R")
+    sq = report.get('side_quality', {})
+    if sq:
+        log.info("-" * 80)
+        log.info("  Side Quality Diagnostics:")
+        log.info(f"    LONG  avg_score={sq.get('long_avg_score',0):+.4f}  "
+                 f"avg_p_side={sq.get('long_avg_p_side',0):.4f}  "
+                 f"avg_mu_R={sq.get('long_avg_mu_r',0):+.4f}  "
+                 f"head_agree={sq.get('long_head_agree_pct',0):.0f}%")
+        log.info(f"    SHORT avg_score={sq.get('short_avg_score',0):+.4f}  "
+                 f"avg_p_side={sq.get('short_avg_p_side',0):.4f}  "
+                 f"avg_mu_R={sq.get('short_avg_mu_r',0):+.4f}  "
+                 f"head_agree={sq.get('short_head_agree_pct',0):.0f}%")
+        if sq.get('short_disagree_trades', 0) > 0:
+            log.info(f"    SHORT head-disagree trades (mu_R>0): {sq['short_disagree_trades']} "
+                     f"({sq.get('short_disagree_pct',0):.0f}%) → "
+                     f"expect={sq.get('short_disagree_expect',0):+.4f} R")
     log.info("-" * 80)
     if report.get('weekly_stats'):
         log.info("  Weekly Breakdown:")
@@ -3684,7 +3754,8 @@ def run_v5_walk_forward(
     edge_topn_soft=True, edge_topn_decay=0.7,
     size_floor=0.0,
     head_disagreement_gate=False, slippage_base_bps=0.0,
-    sigma_discount=False, min_p_side=0.0, mae_asym_weight=1.0,
+    sigma_discount=False, min_p_side=0.0, min_p_short=0.0,
+    side_aware_scoring=False, mae_asym_weight=1.0,
     per_symbol_cooldown=True,
     cooldown=4,
     min_trades=20,
@@ -3925,6 +3996,8 @@ def run_v5_walk_forward(
             slippage_base_bps=slippage_base_bps,
             sigma_discount=sigma_discount,
             min_p_side=min_p_side,
+            min_p_short=min_p_short,
+            side_aware_scoring=side_aware_scoring,
             mae_asym_weight=mae_asym_weight,
             per_symbol_cooldown=per_symbol_cooldown,
             cooldown=cooldown,
@@ -4216,7 +4289,8 @@ def train_v5_model(
     edge_topn_soft=True, edge_topn_decay=0.7,
     size_floor=0.0,
     head_disagreement_gate=False, slippage_base_bps=0.0,
-    sigma_discount=False, min_p_side=0.0, mae_asym_weight=1.0,
+    sigma_discount=False, min_p_side=0.0, min_p_short=0.0,
+    side_aware_scoring=False, mae_asym_weight=1.0,
     per_symbol_cooldown=True,
     cooldown=4,
     mu_debias=True, mu_debias_alpha=0.01,
@@ -5199,6 +5273,11 @@ def train_v5_model(
                 _arrays=arrays,
                 side_mode=tpd_ctrl_cfg.side_mode,
                 rr_weight=tpd_ctrl_cfg.rr_weight,
+                sigma_discount=sigma_discount,
+                min_p_side=min_p_side,
+                min_p_short=min_p_short,
+                side_aware_scoring=side_aware_scoring,
+                slippage_bps=slippage_base_bps,
             )
 
             log.info(f"[{vtag}_SCORE_DIAG] mu_R: mean={score_diag['mu_R_mean']:.4f} std={score_diag['mu_R_std']:.4f} | "
@@ -5557,6 +5636,8 @@ def train_v5_model(
                 head_disagreement_gate=head_disagreement_gate,
                 sigma_discount=sigma_discount,
                 min_p_side=min_p_side,
+                min_p_short=min_p_short,
+                side_aware_scoring=side_aware_scoring,
                 per_symbol_cooldown=per_symbol_cooldown,
                 slippage_base_bps=slippage_base_bps,
                 mu_debias=mu_debias,

@@ -5163,6 +5163,10 @@ Examples:
                         help="v5.3: disable sigma discount")
     parser.add_argument("--v5-min-p-side", type=float, default=0.45,
                         help="v5.3: minimum p_side conviction to allow a trade (default: 0.45, 0=disabled)")
+    parser.add_argument("--v5-min-p-short", type=float, default=0.0,
+                        help="v5.3: minimum p_short to allow SHORT trades (default: 0=disabled, e.g. 0.55)")
+    parser.add_argument("--v5-side-aware-scoring", action="store_true", default=False,
+                        help="v5.3: require mu_R direction to agree with side (shorts need mu_R<0, longs need mu_R>0)")
     parser.add_argument("--v5-mae-asym-weight", type=float, default=2.0,
                         help="v5.3: asymmetric MAE loss penalty for underestimation (default: 2.0, 1.0=symmetric)")
 
@@ -5885,6 +5889,8 @@ Examples:
                     slippage_base_bps=getattr(args, 'slippage_base_bps', 0.0),
                     sigma_discount=args.v5_sigma_discount and not args.v5_no_sigma_discount,
                     min_p_side=args.v5_min_p_side,
+                    min_p_short=args.v5_min_p_short,
+                    side_aware_scoring=args.v5_side_aware_scoring,
                     mae_asym_weight=args.v5_mae_asym_weight,
                     per_symbol_cooldown=args.v5_per_symbol_cooldown,
                     cooldown=args.cooldown,
@@ -6070,6 +6076,8 @@ Examples:
                 slippage_base_bps=args.slippage_base_bps,
                 sigma_discount=args.v5_sigma_discount and not args.v5_no_sigma_discount,
                 min_p_side=args.v5_min_p_side,
+                min_p_short=args.v5_min_p_short,
+                side_aware_scoring=args.v5_side_aware_scoring,
                 mae_asym_weight=args.v5_mae_asym_weight,
                 per_symbol_cooldown=args.v5_per_symbol_cooldown,
                 cooldown=args.cooldown,
