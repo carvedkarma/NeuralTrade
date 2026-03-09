@@ -1366,7 +1366,7 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                   quality_mask=None, score_threshold=None,
                   r_long=None, r_short=None, out_long=None, out_short=None,
                   close_prices=None, ema200_regime_gate=False,
-                  timestamps=None, weekly_loss_cap=None):
+                  timestamps=None, weekly_loss_cap=None, cooldown=4):
     """Score-based sweep for v5 model.
 
     If side-conditional arrays (r_long, r_short, out_long, out_short) are provided,
@@ -1382,7 +1382,7 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     """
     from data.candidate_generator import apply_risk_controls, RiskControls
 
-    COOLDOWN = 4
+    COOLDOWN = cooldown
 
     ema200 = None
     if ema200_regime_gate and close_prices is not None:
@@ -1653,13 +1653,13 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                           val_bars, symbol_ids, symbols_list, global_threshold,
                           r_long=None, r_short=None, out_long=None, out_short=None,
                           quality_mask=None, candidate_mask=None,
-                          min_trades_per_symbol=10):
+                          min_trades_per_symbol=10, cooldown=4):
     """Per-symbol threshold sweep: find optimal threshold per symbol.
 
     For each symbol, runs a mini-sweep on its bars only.
-    Returns dict mapping symbol_id -> threshold (or np.inf for NO EDGE symbols).
+    Returns dict mapping symbol_id -> threshold (or global_threshold*3 for NO EDGE symbols).
     """
-    COOLDOWN = 4
+    COOLDOWN = cooldown
     _VALID_OUTCOMES = ["TP", "SL", "EXP_WIN", "EXP_LOSS", "TRAIL_WIN", "TRAIL_BE"]
 
     use_side_conditional = (r_long is not None and r_short is not None
@@ -1704,10 +1704,11 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
 
         sym_finite = sym_scores[np.isfinite(sym_scores)]
         if len(sym_finite) < min_trades_per_symbol:
-            per_sym_thresholds[int(sym_id)] = float('inf')
+            high_bar = global_threshold * 3.0
+            per_sym_thresholds[int(sym_id)] = high_bar
             no_edge_symbols.append(sym_name)
-            log.info(f"{sym_name:>12} {n_sym_bars:>6} {'inf':>10} {0:>7} {'-':>10} "
-                     f"{'-':>7} {'-':>7} {'-':>10} {'NO EDGE':>10}")
+            log.info(f"{sym_name:>12} {n_sym_bars:>6} {high_bar:>10.4f} {0:>7} {'-':>10} "
+                     f"{'-':>7} {'-':>7} {'-':>10} {'HIGH_BAR':>10}")
             continue
 
         thresholds_to_try = [global_threshold]
@@ -1775,16 +1776,17 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                      f"{m['expect']:>+10.4f} {m['winrate']:>6.1%} {m['pf']:>7.2f} "
                      f"{m['total_r']:>+10.4f} {'ACTIVE':>10}")
         else:
-            per_sym_thresholds[int(sym_id)] = float('inf')
+            high_bar = global_threshold * 3.0
+            per_sym_thresholds[int(sym_id)] = high_bar
             no_edge_symbols.append(sym_name)
             if best_sym_metrics is not None:
                 m = best_sym_metrics
-                log.info(f"{sym_name:>12} {n_sym_bars:>6} {'-':>10} {m['trades']:>7} "
+                log.info(f"{sym_name:>12} {n_sym_bars:>6} {high_bar:>10.4f} {m['trades']:>7} "
                          f"{m['expect']:>+10.4f} {m['winrate']:>6.1%} {m['pf']:>7.2f} "
-                         f"{m['total_r']:>+10.4f} {'NO EDGE':>10}")
+                         f"{m['total_r']:>+10.4f} {'HIGH_BAR':>10}")
             else:
-                log.info(f"{sym_name:>12} {n_sym_bars:>6} {'-':>10} {0:>7} {'-':>10} "
-                         f"{'-':>7} {'-':>7} {'-':>10} {'NO EDGE':>10}")
+                log.info(f"{sym_name:>12} {n_sym_bars:>6} {high_bar:>10.4f} {0:>7} {'-':>10} "
+                         f"{'-':>7} {'-':>7} {'-':>10} {'HIGH_BAR':>10}")
 
     log.info("-" * 100)
     active = [s for s in symbols_list if s not in no_edge_symbols] if symbols_list else []
@@ -2832,16 +2834,18 @@ def run_v5_forward_test(
             topn_inc_sym = int(test_sym_ids[idx]) if test_sym_ids is not None else 0
             ef_topn_current_count[topn_inc_sym] += 1
 
-        trade_size_mult = soft_gate_sizing.get(idx, 1.0)
+        soft_gate_mult = soft_gate_sizing.get(idx, 1.0)
+
+        pos_sizer_mults = []
         if position_sizer is not None:
             p_win = float(arrays['p_long'][idx]) if sides[idx] == 1 else float(arrays['p_short'][idx])
-            trade_size_mult *= position_sizer.compute_size_multiplier(
+            pos_sizer_mults.append(position_sizer.compute_size_multiplier(
                 score=float(scores[idx]),
                 p_win=p_win,
                 mu_r=float(arrays['mu_R'][idx]),
                 mfe=float(arrays['mfe'][idx]),
                 mae=float(arrays['mae'][idx]),
-            )
+            ))
 
         if regime_scaler is not None:
             regime_mult = regime_scaler.compute_regime_multiplier(
@@ -2850,7 +2854,7 @@ def run_v5_forward_test(
                 ema200=ema200_for_regime,
                 atr_values=atr_for_regime,
             )
-            trade_size_mult *= regime_mult
+            pos_sizer_mults.append(regime_mult)
 
         if conviction_sizer is not None:
             p_dir = float(arrays['p_long'][idx]) if sides[idx] == 1 else float(arrays['p_short'][idx])
@@ -2859,7 +2863,12 @@ def run_v5_forward_test(
                 p_directional=p_dir,
                 side=int(sides[idx]),
             )
-            trade_size_mult *= conv_mult
+            pos_sizer_mults.append(conv_mult)
+
+        if pos_sizer_mults:
+            trade_size_mult = soft_gate_mult * max(pos_sizer_mults)
+        else:
+            trade_size_mult = soft_gate_mult
 
         if ultra_sizer is not None:
             ultra_sizer.record_score(float(scores[idx]))
@@ -3095,9 +3104,10 @@ def run_v5_forward_test(
     if len(taken) == 0:
         n_finite = int(np.sum(np.isfinite(scores_work))) if scores_work is not None else 0
         n_candidates = len(chronological_idx)
-        n_inf_symbols = 0
+        n_high_bar_symbols = 0
         if config.per_symbol_thresholds:
-            n_inf_symbols = sum(1 for v in config.per_symbol_thresholds.values() if not np.isfinite(v))
+            n_high_bar_symbols = sum(1 for v in config.per_symbol_thresholds.values()
+                                     if not np.isfinite(v) or v > effective_threshold * 2)
         total_blocked = sum(gate_blocks.values())
         log.warning("[V5_FWD] No trades taken in forward test!")
         log.info("=" * 80)
@@ -3114,7 +3124,7 @@ def run_v5_forward_test(
         log.info(f"  Candidates (above thr):   {n_candidates}")
         if config.per_symbol_thresholds:
             log.info(f"  Per-symbol thr active:    {len(config.per_symbol_thresholds)} symbols, "
-                     f"{n_inf_symbols} have threshold=inf (killed)")
+                     f"{n_high_bar_symbols} have HIGH_BAR threshold")
         if total_blocked > 0:
             log.info(f"  Total gate blocks:        {total_blocked}")
             for gname, gcount in sorted(gate_blocks.items(), key=lambda x: -x[1]):
@@ -3676,6 +3686,7 @@ def run_v5_walk_forward(
     head_disagreement_gate=False, slippage_base_bps=0.0,
     sigma_discount=False, min_p_side=0.0, mae_asym_weight=1.0,
     per_symbol_cooldown=True,
+    cooldown=4,
     min_trades=20,
     wf_threshold_ema=True, wf_threshold_ema_alpha=0.5,
     wf_threshold_decay=0.5,
@@ -3916,6 +3927,7 @@ def run_v5_walk_forward(
             min_p_side=min_p_side,
             mae_asym_weight=mae_asym_weight,
             per_symbol_cooldown=per_symbol_cooldown,
+            cooldown=cooldown,
             min_trades=min_trades,
             mu_debias=mu_debias,
             mu_debias_alpha=mu_debias_alpha,
@@ -4206,6 +4218,7 @@ def train_v5_model(
     head_disagreement_gate=False, slippage_base_bps=0.0,
     sigma_discount=False, min_p_side=0.0, mae_asym_weight=1.0,
     per_symbol_cooldown=True,
+    cooldown=4,
     mu_debias=True, mu_debias_alpha=0.01,
     min_trades=20,
     wf_threshold_override=None,
@@ -5214,7 +5227,7 @@ def train_v5_model(
             current_score_threshold, tpd_trades, tpd_val, tpd_action = _tpd_controller_step(
                 scores, quality_mask, sweep_cand_mask,
                 current_score_threshold, epoch, val_bars,
-                tpd_ctrl_cfg,
+                tpd_ctrl_cfg, cooldown=cooldown,
             )
 
             (sweep_results, sweep_label, sweep_expect, sweep_pct,
@@ -5234,6 +5247,7 @@ def train_v5_model(
                 ema200_regime_gate=ema200_regime_gate,
                 timestamps=val_timestamps_arr,
                 weekly_loss_cap=weekly_loss_cap,
+                cooldown=cooldown,
             )
 
             log.info(f"[{vtag}_EPOCH_TRADING] epoch={epoch:03d} | expect={sweep_expect:+.4f} PF={sweep_pf:.2f} "
@@ -5267,6 +5281,7 @@ def train_v5_model(
                     out_long=val_out_long_arr, out_short=val_out_short_arr,
                     quality_mask=quality_mask, candidate_mask=sweep_cand_mask,
                     min_trades_per_symbol=max(5, min_trades // 2),
+                    cooldown=cooldown,
                 )
 
             if quality_gate_cfg.enable_calib:
@@ -5456,7 +5471,7 @@ def train_v5_model(
                 tp_mult=tp_mult,
                 sl_mult=sl_mult,
                 horizon=horizon,
-                cooldown=4,
+                cooldown=cooldown,
                 quality_gate_cfg=quality_gate_cfg,
                 side_mode=tpd_ctrl_cfg.side_mode,
                 rr_weight=tpd_ctrl_cfg.rr_weight,
