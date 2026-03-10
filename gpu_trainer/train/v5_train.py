@@ -215,6 +215,17 @@ class V5ForwardTestConfig:
     min_trades: int = 20
     per_symbol_r_kill: Optional[float] = None
     per_symbol_thresholds: Optional[dict] = None
+    soft_gate_floor: bool = True
+    weekly_cap_dynamic: bool = False
+    weekly_cap_scale: float = 2.0
+    quality_gate_enabled: bool = False
+    quality_gate_window: int = 50
+    quality_gate_min_accuracy: float = 0.30
+    quality_gate_min_wr: float = 0.35
+    quality_gate_severe_accuracy: float = 0.20
+    direction_balance_cap: bool = False
+    direction_balance_threshold: float = 0.75
+    direction_balance_severe: float = 0.85
 
 
 def compute_feature_importance_report(
@@ -2392,6 +2403,20 @@ def run_v5_forward_test(
     if config.per_symbol_r_kill is not None:
         log.info(f"[V5_FWD] Per-symbol cumulative R kill switch ENABLED: floor={config.per_symbol_r_kill}R")
 
+    if config.soft_gate_floor and config.size_floor > 0:
+        log.info(f"[V5_FWD] Soft gate floor ENABLED: soft gates clamped to min={config.size_floor}")
+    if config.weekly_cap_dynamic:
+        log.info(f"[V5_FWD] Dynamic weekly cap ENABLED: scale={config.weekly_cap_scale}")
+    if config.quality_gate_enabled:
+        if config.quality_gate_window < 1:
+            log.warning("[V5_FWD] quality_gate_window < 1, clamping to 1")
+            config.quality_gate_window = 1
+        log.info(f"[V5_FWD] Rolling quality gate ENABLED: window={config.quality_gate_window} "
+                 f"min_accuracy={config.quality_gate_min_accuracy} min_wr={config.quality_gate_min_wr}")
+    if config.direction_balance_cap:
+        log.info(f"[V5_FWD] Direction balance cap ENABLED: threshold={config.direction_balance_threshold} "
+                 f"severe={config.direction_balance_severe}")
+
     if config.trailing_equity_stop is not None:
         from train.v5_position_sizer import TrailingEquityStop
         equity_stop = TrailingEquityStop(config.trailing_equity_stop)
@@ -2471,6 +2496,8 @@ def run_v5_forward_test(
     current_week_r = 0.0
     current_week_id = -1
     week_killed = False
+    weekly_r_history = []
+    dynamic_weekly_cap = config.weekly_loss_cap
     last_bar = -config.cooldown - 1
     per_sym_last_bar = defaultdict(lambda: -config.cooldown - 1)
     daily_blocked = 0
@@ -2488,6 +2515,12 @@ def run_v5_forward_test(
     post_regime_indices = []
 
     soft_gate_sizing = {}
+
+    quality_gate_recent_correct = []
+    quality_gate_recent_wins = []
+    quality_gate_blocked = 0
+    direction_balance_recent = []
+    direction_balance_reductions = 0
 
     sym_cumulative_r = defaultdict(float)
     killed_symbols = set()
@@ -2760,6 +2793,16 @@ def run_v5_forward_test(
         if config.weekly_loss_cap is not None and week_boundaries is not None:
             wk = week_boundaries[idx]
             if wk != current_week_id:
+                if current_week_id >= 0:
+                    weekly_r_history.append(current_week_r)
+                    if config.weekly_cap_dynamic and len(weekly_r_history) >= 4:
+                        rolling_4w = sum(weekly_r_history[-4:]) / 4.0
+                        if rolling_4w > 0:
+                            dynamic_weekly_cap = config.weekly_loss_cap * config.weekly_cap_scale
+                        else:
+                            dynamic_weekly_cap = config.weekly_loss_cap * 0.5
+                        log.debug("[V5_GATE] dynamic weekly_cap: base=%.1f effective=%.1f rolling_4w_avg=%.2f",
+                                  config.weekly_loss_cap, dynamic_weekly_cap, rolling_4w)
                 current_week_id = wk
                 current_week_r = 0.0
                 week_killed = False
@@ -2854,7 +2897,11 @@ def run_v5_forward_test(
             topn_inc_sym = int(test_sym_ids[idx]) if test_sym_ids is not None else 0
             ef_topn_current_count[topn_inc_sym] += 1
 
-        soft_gate_mult = soft_gate_sizing.get(idx, 1.0)
+        soft_gate_mult_raw = soft_gate_sizing.get(idx, 1.0)
+        if config.soft_gate_floor and config.size_floor > 0 and soft_gate_mult_raw < config.size_floor:
+            soft_gate_mult = config.size_floor
+        else:
+            soft_gate_mult = soft_gate_mult_raw
 
         pos_sizer_mults = []
         if position_sizer is not None:
@@ -2929,6 +2976,36 @@ def run_v5_forward_test(
             if sf_allow:
                 trade_size_mult = config.size_floor
 
+        if config.quality_gate_enabled and len(quality_gate_recent_correct) >= config.quality_gate_window:
+            rolling_acc = sum(quality_gate_recent_correct) / len(quality_gate_recent_correct)
+            rolling_wr = sum(quality_gate_recent_wins) / len(quality_gate_recent_wins)
+            if rolling_acc < config.quality_gate_severe_accuracy:
+                quality_mult = 0.1
+                trade_size_mult *= quality_mult
+                quality_gate_blocked += 1
+            elif rolling_acc < config.quality_gate_min_accuracy and rolling_wr < config.quality_gate_min_wr:
+                quality_mult = 0.25
+                trade_size_mult *= quality_mult
+                quality_gate_blocked += 1
+
+        if config.direction_balance_cap:
+            direction_balance_recent.append(int(sides[idx]))
+            if len(direction_balance_recent) > 100:
+                direction_balance_recent.pop(0)
+            if len(direction_balance_recent) >= 20:
+                n_long = sum(1 for s in direction_balance_recent if s == 1)
+                long_pct = n_long / len(direction_balance_recent)
+                dominant_is_long = long_pct > 0.5
+                dominant_pct = long_pct if dominant_is_long else (1.0 - long_pct)
+                is_dominant_side = (dominant_is_long and sides[idx] == 1) or (not dominant_is_long and sides[idx] == -1)
+                if is_dominant_side:
+                    if dominant_pct >= config.direction_balance_severe:
+                        trade_size_mult *= 0.25
+                        direction_balance_reductions += 1
+                    elif dominant_pct >= config.direction_balance_threshold:
+                        trade_size_mult *= 0.5
+                        direction_balance_reductions += 1
+
         size_multipliers[idx] = trade_size_mult
 
         if corr_tracker is not None and test_sym_ids is not None:
@@ -2949,7 +3026,8 @@ def run_v5_forward_test(
                         or regime_scaler is not None
                         or ultra_sizer is not None
                         or ddt is not None
-                        or config.per_symbol_r_kill is not None)
+                        or config.per_symbol_r_kill is not None
+                        or config.quality_gate_enabled)
         if needs_post_r:
             if use_side_conditional_for_cap:
                 post_trade_r = float(r_long[idx]) if sides[idx] == 1 else float(r_short[idx])
@@ -2960,10 +3038,11 @@ def run_v5_forward_test(
             if config.weekly_loss_cap is not None and week_boundaries is not None:
                 if post_r_valid:
                     current_week_r += post_trade_r
-                if current_week_r <= config.weekly_loss_cap:
+                effective_wcap = dynamic_weekly_cap if config.weekly_cap_dynamic else config.weekly_loss_cap
+                if current_week_r <= effective_wcap:
                     week_killed = True
                     log.info("[V5_GATE] weekly_cap hit: week=%d cumR=%.2f cap=%.2f",
-                             current_week_id, current_week_r, config.weekly_loss_cap)
+                             current_week_id, current_week_r, effective_wcap)
 
             if daily_tracker is not None and post_r_valid:
                 trade_sym = None
@@ -2997,6 +3076,18 @@ def run_v5_forward_test(
                         killed_symbols.add(kill_sym_name)
                         log.warning(f"[V5_GATE] Symbol {kill_sym_name} killed at cumR={sym_cumulative_r[kill_sym_name]:.2f}R (floor={config.per_symbol_r_kill}R)")
 
+            if config.quality_gate_enabled and post_r_valid:
+                side_val = int(sides[idx])
+                raw_long_r = float(r_long[idx]) if r_long is not None else post_trade_r
+                price_went_up = not np.isnan(raw_long_r) and raw_long_r > 0
+                is_correct = (side_val == 1 and price_went_up) or (side_val == -1 and not price_went_up)
+                is_win = post_trade_r > 0
+                quality_gate_recent_correct.append(1.0 if is_correct else 0.0)
+                quality_gate_recent_wins.append(1.0 if is_win else 0.0)
+                if len(quality_gate_recent_correct) > config.quality_gate_window:
+                    quality_gate_recent_correct.pop(0)
+                    quality_gate_recent_wins.pop(0)
+
     if ema200 is not None:
         log.info(f"[V5_GATE] EMA200 blocked {ema_blocked} trades")
     if warmup_blocked > 0:
@@ -3019,6 +3110,16 @@ def run_v5_forward_test(
         log.info(f"[V5_GATE] Regime side map blocked {regime_side_blocked} trades")
     if edge_topn_blocked > 0:
         log.info(f"[V5_GATE] Edge top-N/day blocked {edge_topn_blocked} trades")
+    if quality_gate_blocked > 0:
+        final_acc = sum(quality_gate_recent_correct) / len(quality_gate_recent_correct) if quality_gate_recent_correct else 0
+        final_wr = sum(quality_gate_recent_wins) / len(quality_gate_recent_wins) if quality_gate_recent_wins else 0
+        log.info(f"[V5_QUALITY] Rolling quality gate reduced sizing on {quality_gate_blocked} trades "
+                 f"(final rolling_acc={final_acc:.1%} rolling_wr={final_wr:.1%})")
+    if direction_balance_reductions > 0:
+        log.info(f"[V5_BALANCE] Direction balance cap reduced sizing on {direction_balance_reductions} trades")
+    if config.weekly_cap_dynamic and weekly_r_history:
+        log.info(f"[V5_GATE] Dynamic weekly cap: final_effective={dynamic_weekly_cap:.1f} "
+                 f"base={config.weekly_loss_cap:.1f} weeks_tracked={len(weekly_r_history)}")
     if head_disagree_blocked > 0:
         log.info(f"[V5_GATE] Head disagreement blocked {head_disagree_blocked} trades")
     if per_sym_kill_blocked > 0:
@@ -3753,6 +3854,10 @@ def run_v5_walk_forward(
     per_symbol_soft_kill=True,
     edge_topn_soft=True, edge_topn_decay=0.7,
     size_floor=0.0,
+    soft_gate_floor=True,
+    weekly_cap_dynamic=False, weekly_cap_scale=2.0,
+    quality_gate_enabled=False, quality_gate_window=50,
+    direction_balance_cap=False, direction_balance_threshold=0.75,
     head_disagreement_gate=False, slippage_base_bps=0.0,
     sigma_discount=False, min_p_side=0.0, min_p_short=0.0,
     side_aware_scoring=False, mae_asym_weight=1.0,
@@ -3992,6 +4097,13 @@ def run_v5_walk_forward(
             edge_topn_soft=edge_topn_soft,
             edge_topn_decay=edge_topn_decay,
             size_floor=size_floor,
+            soft_gate_floor=soft_gate_floor,
+            weekly_cap_dynamic=weekly_cap_dynamic,
+            weekly_cap_scale=weekly_cap_scale,
+            quality_gate_enabled=quality_gate_enabled,
+            quality_gate_window=quality_gate_window,
+            direction_balance_cap=direction_balance_cap,
+            direction_balance_threshold=direction_balance_threshold,
             head_disagreement_gate=head_disagreement_gate,
             slippage_base_bps=slippage_base_bps,
             sigma_discount=sigma_discount,
@@ -4288,6 +4400,10 @@ def train_v5_model(
     per_symbol_soft_kill=True,
     edge_topn_soft=True, edge_topn_decay=0.7,
     size_floor=0.0,
+    soft_gate_floor=True,
+    weekly_cap_dynamic=False, weekly_cap_scale=2.0,
+    quality_gate_enabled=False, quality_gate_window=50,
+    direction_balance_cap=False, direction_balance_threshold=0.75,
     head_disagreement_gate=False, slippage_base_bps=0.0,
     sigma_discount=False, min_p_side=0.0, min_p_short=0.0,
     side_aware_scoring=False, mae_asym_weight=1.0,
@@ -5633,6 +5749,13 @@ def train_v5_model(
                 edge_topn_soft=edge_topn_soft,
                 edge_topn_decay=edge_topn_decay,
                 size_floor=size_floor,
+                soft_gate_floor=soft_gate_floor,
+                weekly_cap_dynamic=weekly_cap_dynamic,
+                weekly_cap_scale=weekly_cap_scale,
+                quality_gate_enabled=quality_gate_enabled,
+                quality_gate_window=quality_gate_window,
+                direction_balance_cap=direction_balance_cap,
+                direction_balance_threshold=direction_balance_threshold,
                 head_disagreement_gate=head_disagreement_gate,
                 sigma_discount=sigma_discount,
                 min_p_side=min_p_side,

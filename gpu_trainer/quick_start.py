@@ -5170,6 +5170,23 @@ Examples:
     parser.add_argument("--v5-mae-asym-weight", type=float, default=2.0,
                         help="v5.3: asymmetric MAE loss penalty for underestimation (default: 2.0, 1.0=symmetric)")
 
+    parser.add_argument("--v5-soft-gate-floor", action="store_true", default=True,
+                        help="v5.6: clamp soft gate mult to size_floor minimum so position sizers can amplify (default: on)")
+    parser.add_argument("--v5-no-soft-gate-floor", dest="v5_soft_gate_floor", action="store_false",
+                        help="v5.6: disable soft gate floor clamping")
+    parser.add_argument("--v5-weekly-cap-dynamic", action="store_true", default=False,
+                        help="v5.6: scale weekly cap based on rolling 4-week performance (default: off)")
+    parser.add_argument("--v5-weekly-cap-scale", type=float, default=2.0,
+                        help="v5.6: multiplier for weekly cap when rolling performance is positive (default: 2.0)")
+    parser.add_argument("--v5-quality-gate", action="store_true", default=False,
+                        help="v5.6: rolling quality gate — reduce sizing when action accuracy drops below threshold (default: off)")
+    parser.add_argument("--v5-quality-gate-window", type=int, default=50,
+                        help="v5.6: number of recent trades to track for quality gate (default: 50)")
+    parser.add_argument("--v5-direction-balance-cap", action="store_true", default=False,
+                        help="v5.6: reduce sizing on dominant direction when balance exceeds threshold (default: off)")
+    parser.add_argument("--v5-direction-balance-threshold", type=float, default=0.75,
+                        help="v5.6: direction balance threshold for 0.5x sizing reduction (default: 0.75)")
+
     parser.add_argument("--v5-temp-scale", action="store_true", default=False,
                         help="v5.0.9+: enable post-training temperature scaling calibration")
 
@@ -5885,6 +5902,13 @@ Examples:
                     edge_topn_soft=args.v5_edge_topn_soft,
                     edge_topn_decay=args.v5_edge_topn_decay,
                     size_floor=args.v5_size_floor,
+                    soft_gate_floor=args.v5_soft_gate_floor,
+                    weekly_cap_dynamic=args.v5_weekly_cap_dynamic,
+                    weekly_cap_scale=args.v5_weekly_cap_scale,
+                    quality_gate_enabled=getattr(args, 'v5_quality_gate', False),
+                    quality_gate_window=getattr(args, 'v5_quality_gate_window', 50),
+                    direction_balance_cap=getattr(args, 'v5_direction_balance_cap', False),
+                    direction_balance_threshold=getattr(args, 'v5_direction_balance_threshold', 0.75),
                     head_disagreement_gate=getattr(args, 'v5_head_disagree_gate', False),
                     slippage_base_bps=getattr(args, 'slippage_base_bps', 0.0),
                     sigma_discount=args.v5_sigma_discount and not args.v5_no_sigma_discount,
@@ -6072,6 +6096,13 @@ Examples:
                 edge_topn_soft=args.v5_edge_topn_soft,
                 edge_topn_decay=args.v5_edge_topn_decay,
                 size_floor=args.v5_size_floor,
+                soft_gate_floor=args.v5_soft_gate_floor,
+                weekly_cap_dynamic=args.v5_weekly_cap_dynamic,
+                weekly_cap_scale=args.v5_weekly_cap_scale,
+                quality_gate_enabled=getattr(args, 'v5_quality_gate', False),
+                quality_gate_window=getattr(args, 'v5_quality_gate_window', 50),
+                direction_balance_cap=getattr(args, 'v5_direction_balance_cap', False),
+                direction_balance_threshold=getattr(args, 'v5_direction_balance_threshold', 0.75),
                 head_disagreement_gate=args.v5_head_disagree_gate,
                 slippage_base_bps=args.slippage_base_bps,
                 sigma_discount=args.v5_sigma_discount and not args.v5_no_sigma_discount,
