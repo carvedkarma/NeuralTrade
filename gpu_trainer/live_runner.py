@@ -461,6 +461,40 @@ def _fetch_oi_cached(df: pd.DataFrame, cache: Dict, symbol: str) -> pd.DataFrame
         )
 
 
+def _fetch_ls_ratio_cached(df: pd.DataFrame, cache: Dict, symbol: str) -> pd.DataFrame:
+    """Fetch L/S ratio features with caching (TTL=15min). Per-symbol L/S data."""
+    from quick_start import (
+        fetch_ls_ratio_hist, compute_ls_ratio_features,
+        LS_RATIO_FEATURE_COUNT, LS_RATIO_FEATURE_NAMES,
+    )
+    n = len(df)
+    now = time.time()
+
+    if symbol in cache and (now - cache[symbol]["fetched_at"]) < _OI_CACHE_TTL:
+        ls_df = cache[symbol]["data"]
+    else:
+        try:
+            ls_df = fetch_ls_ratio_hist(df, _DATA_DIR, symbol=symbol)
+            cache[symbol] = {"data": ls_df, "fetched_at": now}
+        except Exception as e:
+            log.warning(f"[{symbol}] L/S ratio fetch failed, using zeros: {e}")
+            return pd.DataFrame(
+                np.zeros((n, LS_RATIO_FEATURE_COUNT)),
+                columns=LS_RATIO_FEATURE_NAMES,
+                index=df.index,
+            )
+
+    try:
+        return compute_ls_ratio_features(df, ls_df)
+    except Exception as e:
+        log.warning(f"[{symbol}] L/S ratio feature computation failed, using zeros: {e}")
+        return pd.DataFrame(
+            np.zeros((n, LS_RATIO_FEATURE_COUNT)),
+            columns=LS_RATIO_FEATURE_NAMES,
+            index=df.index,
+        )
+
+
 def _log_feature_check(symbol: str, funding_features: pd.DataFrame,
                        oi_features: pd.DataFrame, logged: Dict):
     """One-time diagnostic log per symbol showing funding/OI feature values."""
@@ -493,6 +527,7 @@ def _compute_features_for_symbol(df: pd.DataFrame, engineer, feature_columns: li
                                   symbol: str,
                                   funding_cache: Optional[Dict] = None,
                                   oi_cache: Optional[Dict] = None,
+                                  ls_ratio_cache: Optional[Dict] = None,
                                   feature_check_logged: Optional[Dict] = None,
                                   seq_len: int = 1) -> Optional[np.ndarray]:
     """Compute features for the latest bar(s) of a symbol's candle data.
@@ -513,6 +548,8 @@ def _compute_features_for_symbol(df: pd.DataFrame, engineer, feature_columns: li
         funding_cache = {}
     if oi_cache is None:
         oi_cache = {}
+    if ls_ratio_cache is None:
+        ls_ratio_cache = {}
     if feature_check_logged is None:
         feature_check_logged = {}
 
@@ -527,6 +564,10 @@ def _compute_features_for_symbol(df: pd.DataFrame, engineer, feature_columns: li
 
         oi_features = _fetch_oi_cached(df, oi_cache, symbol)
         features_df = pd.concat([features_df, oi_features], axis=1)
+        features_df = features_df.fillna(0)
+
+        ls_features = _fetch_ls_ratio_cached(df, ls_ratio_cache, symbol)
+        features_df = pd.concat([features_df, ls_features], axis=1)
         features_df = features_df.fillna(0)
 
         _log_feature_check(symbol, funding_features, oi_features, feature_check_logged)
@@ -993,6 +1034,7 @@ class LiveRunner:
         self.warmup_logged: Dict[str, bool] = {}
         self._funding_cache: Dict[str, Dict] = {}
         self._oi_cache: Dict[str, Dict] = {}
+        self._ls_ratio_cache: Dict[str, Dict] = {}
         self._feature_check_logged: Dict[str, bool] = {}
 
         from trade_manager import TradeManager
@@ -1661,6 +1703,7 @@ class LiveRunner:
             df_candles, engineer, feature_columns, symbol,
             funding_cache=self._funding_cache,
             oi_cache=self._oi_cache,
+            ls_ratio_cache=self._ls_ratio_cache,
             feature_check_logged=self._feature_check_logged,
             seq_len=v6_seq_len,
         )

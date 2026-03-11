@@ -3858,6 +3858,9 @@ def run_v5_walk_forward(
     weekly_cap_dynamic=False, weekly_cap_scale=2.0,
     quality_gate_enabled=False, quality_gate_window=50,
     direction_balance_cap=False, direction_balance_threshold=0.75,
+    recency_weight=False, recency_half_life=90,
+    finetune_months=0, finetune_epochs=5, finetune_lr_mult=0.1,
+    warm_start=False, warm_start_lr_mult=0.3,
     head_disagreement_gate=False, slippage_base_bps=0.0,
     sigma_discount=False, min_p_side=0.0, min_p_short=0.0,
     side_aware_scoring=False, mae_asym_weight=1.0,
@@ -3974,6 +3977,7 @@ def run_v5_walk_forward(
     threshold_ema = None
     blended_threshold = None
     wf_threshold_decay = max(0.01, min(1.0, wf_threshold_decay))
+    prev_fold_state_dict = None
 
     for fold in folds:
         log.info(f"\n{'='*80}")
@@ -4104,6 +4108,12 @@ def run_v5_walk_forward(
             quality_gate_window=quality_gate_window,
             direction_balance_cap=direction_balance_cap,
             direction_balance_threshold=direction_balance_threshold,
+            recency_weight=recency_weight,
+            recency_half_life=recency_half_life,
+            finetune_months=finetune_months,
+            finetune_epochs=finetune_epochs,
+            finetune_lr_mult=finetune_lr_mult,
+            warm_start_state_dict=prev_fold_state_dict if warm_start else None,
             head_disagreement_gate=head_disagreement_gate,
             slippage_base_bps=slippage_base_bps,
             sigma_discount=sigma_discount,
@@ -4133,6 +4143,22 @@ def run_v5_walk_forward(
             v6_confidence_weight=v6_confidence_weight,
             v6_moe_balance_weight=v6_moe_balance_weight,
         )
+
+        if warm_start:
+            import torch as _torch
+            best_ckpt = Path("checkpoints") / "best_v5_expectancy.pt"
+            if not best_ckpt.exists():
+                best_ckpt = Path("checkpoints") / "best_v5_loss.pt"
+            if best_ckpt.exists():
+                try:
+                    ckpt = _torch.load(best_ckpt, map_location='cpu', weights_only=False)
+                    prev_fold_state_dict = ckpt['model_state_dict']
+                    log.info(f"[V5_WF] Saved fold {fold['fold']} model for warm-start of next fold")
+                except Exception as e:
+                    log.warning(f"[V5_WF] Failed to load fold {fold['fold']} checkpoint for warm-start: {e}")
+                    prev_fold_state_dict = None
+            else:
+                prev_fold_state_dict = None
 
         report_path = Path("checkpoints") / "v5_forward_report.json"
         if report_path.exists():
@@ -4404,6 +4430,9 @@ def train_v5_model(
     weekly_cap_dynamic=False, weekly_cap_scale=2.0,
     quality_gate_enabled=False, quality_gate_window=50,
     direction_balance_cap=False, direction_balance_threshold=0.75,
+    recency_weight=False, recency_half_life=90,
+    finetune_months=0, finetune_epochs=5, finetune_lr_mult=0.1,
+    warm_start_state_dict=None,
     head_disagreement_gate=False, slippage_base_bps=0.0,
     sigma_discount=False, min_p_side=0.0, min_p_short=0.0,
     side_aware_scoring=False, mae_asym_weight=1.0,
@@ -4525,6 +4554,7 @@ def train_v5_model(
     train_realized_r_list = []
     train_barrier_oracle_list = []
     train_barrier_soft_list = []
+    train_timestamps_list = []
 
     val_features = []
     val_ret_R_list = []
@@ -4680,6 +4710,7 @@ def train_v5_model(
         train_realized_r_list.append(sym_realized_r[train_idx])
         train_barrier_oracle_list.append(barrier_oracle[train_idx])
         train_barrier_soft_list.append(barrier_soft[train_idx])
+        train_timestamps_list.append(sym_df['timestamp'].values[train_idx])
 
         val_features.append(feat_arr[test_idx])
         val_ret_R_list.append(ret_arr[test_idx])
@@ -4767,6 +4798,8 @@ def train_v5_model(
                     train_realized_r_list[i] = train_realized_r_list[i][:min_train]
                     train_barrier_oracle_list[i] = train_barrier_oracle_list[i][:min_train]
                     train_barrier_soft_list[i] = train_barrier_soft_list[i][:min_train]
+                    if i < len(train_timestamps_list):
+                        train_timestamps_list[i] = train_timestamps_list[i][:min_train]
             balanced_counts = [len(arr) for arr in train_features]
             log.info(f"[V5_BALANCE] After balancing: {dict(zip(symbols, balanced_counts))}")
         else:
@@ -4849,6 +4882,7 @@ def train_v5_model(
     train_realized_r = _concat_lists(train_realized_r_list)
     train_barrier_oracle = _concat_lists(train_barrier_oracle_list)
     train_barrier_soft = np.concatenate(train_barrier_soft_list, axis=0)
+    train_timestamps = _concat_lists(train_timestamps_list) if train_timestamps_list else np.array([], dtype=np.float64)
 
     val_ret_R = _concat_lists(val_ret_R_list)
     val_mfe_R = _concat_lists(val_mfe_R_list)
@@ -4954,6 +4988,29 @@ def train_v5_model(
         concat_sample_weights = np.concatenate(per_symbol_sample_weights, axis=0)
         log.info(f"[V6_BALANCE] Concatenated sample_weights: len={len(concat_sample_weights)} "
                  f"min={concat_sample_weights.min():.2f} max={concat_sample_weights.max():.2f}")
+
+    if recency_weight and recency_half_life <= 0:
+        log.warning(f"[V5_RECENCY] Invalid recency_half_life={recency_half_life} — must be > 0, disabling")
+        recency_weight = False
+
+    if recency_weight and len(train_timestamps) > 0:
+        ts_max = train_timestamps.max()
+        ts_min = train_timestamps.min()
+        if ts_max > ts_min:
+            half_life_ms = recency_half_life * 24 * 3600 * 1000
+            decay_rate = np.log(2) / half_life_ms
+            recency_weights = np.exp(decay_rate * (train_timestamps - ts_max))
+            recency_weights = recency_weights / recency_weights.mean()
+            log.info(f"[V5_RECENCY] Recency weighting enabled: half_life={recency_half_life}d "
+                     f"weights min={recency_weights.min():.3f} max={recency_weights.max():.3f} "
+                     f"mean={recency_weights.mean():.3f} median={np.median(recency_weights):.3f}")
+            if concat_sample_weights is not None:
+                recency_weights = recency_weights * concat_sample_weights
+                log.info(f"[V5_RECENCY] Combined with existing weights: "
+                         f"min={recency_weights.min():.3f} max={recency_weights.max():.3f}")
+            concat_sample_weights = recency_weights.astype(np.float32)
+        else:
+            log.warning("[V5_RECENCY] All timestamps identical — skipping recency weighting")
 
     n_barrier = len(presets) if len(presets) > 1 and barrier_mode != 'fixed' else 0
     n_syms = len(symbols) if len(symbols) > 1 else 1
@@ -5072,6 +5129,13 @@ def train_v5_model(
         )
         model = V5Forecaster(model_config).to(device)
         log.info(f"[{vtag}] Model parameters: {model.parameters_count():,}")
+
+    if warm_start_state_dict is not None:
+        try:
+            model.load_state_dict(warm_start_state_dict, strict=False)
+            log.info(f"[{vtag}_WARM_START] Loaded previous fold model weights as initialization")
+        except Exception as e:
+            log.warning(f"[{vtag}_WARM_START] Failed to load previous weights: {e} — using random init")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     warmup_sched = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
@@ -5576,6 +5640,64 @@ def train_v5_model(
     log.info(f"[{vtag}] Training complete. Best expectancy={best_expectancy:.4f} best_loss={best_val_loss:.4f}")
     log.info(f"[{vtag}] Final score_threshold={current_score_threshold}")
     log.info("=" * 60)
+
+    if finetune_months > 0 and len(train_timestamps) > 0 and not use_v6:
+        best_ckpt_ft = checkpoint_dir / "best_v5_expectancy.pt"
+        if not best_ckpt_ft.exists():
+            best_ckpt_ft = checkpoint_dir / "best_v5_loss.pt"
+        if best_ckpt_ft.exists():
+            ft_ckpt = torch.load(best_ckpt_ft, map_location=device, weights_only=False)
+            model.load_state_dict(ft_ckpt['model_state_dict'])
+            ts_max_ft = train_timestamps.max()
+            ft_cutoff_ms = ts_max_ft - finetune_months * 30.44 * 24 * 3600 * 1000
+            ft_mask = train_timestamps >= ft_cutoff_ms
+            ft_count = int(ft_mask.sum())
+            if ft_count >= 100:
+                ft_lr = lr * finetune_lr_mult
+                log.info(f"[{vtag}_FINETUNE] Fine-tuning on last {finetune_months} months: "
+                         f"{ft_count}/{len(train_timestamps)} samples, LR={ft_lr:.2e}, epochs={finetune_epochs}")
+                ft_ds = V5Dataset(
+                    train_feat[ft_mask], train_ret_R[ft_mask], train_mfe_R[ft_mask],
+                    train_mae_R[ft_mask], train_vol_h[ft_mask], train_action[ft_mask],
+                    train_valid[ft_mask], train_sym_ids[ft_mask],
+                    train_barrier_oracle[ft_mask], train_barrier_soft[ft_mask],
+                )
+                ft_loader = DataLoader(ft_ds, batch_size=batch_size, shuffle=True, drop_last=False)
+                ft_optimizer = torch.optim.AdamW(model.parameters(), lr=ft_lr, weight_decay=1e-4)
+                for ft_ep in range(1, finetune_epochs + 1):
+                    model.train()
+                    ft_losses = []
+                    for batch in ft_loader:
+                        feat = batch['features'].to(device)
+                        sym_id = batch.get('symbol_id')
+                        if sym_id is not None:
+                            sym_id = sym_id.to(device)
+                        batch_gpu = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                                     for k, v in batch.items()}
+                        outputs = model(feat, symbol_ids=sym_id)
+                        loss, _ = compute_v5_loss(
+                            outputs, batch_gpu,
+                            w_ret=w_ret, w_mfe=w_mfe, w_mae=w_mae,
+                            w_action=w_action, w_barrier=w_barrier, w_regime=w_regime,
+                            barrier_mode=barrier_mode,
+                            action_weights=action_weights_tensor,
+                            epoch=epochs + ft_ep,
+                            mae_asym_weight=mae_asym_weight,
+                        )
+                        ft_optimizer.zero_grad()
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                        ft_optimizer.step()
+                        ft_losses.append(loss.item())
+                    avg_ft_loss = np.mean(ft_losses)
+                    log.info(f"[{vtag}_FINETUNE] Epoch {ft_ep}/{finetune_epochs} loss={avg_ft_loss:.4f}")
+                ft_ckpt['model_state_dict'] = model.state_dict()
+                torch.save(ft_ckpt, best_ckpt_ft)
+                log.info(f"[{vtag}_FINETUNE] Saved fine-tuned model to {best_ckpt_ft}")
+            else:
+                log.warning(f"[{vtag}_FINETUNE] Only {ft_count} samples in last {finetune_months} months — skipping (need >=100)")
+        else:
+            log.warning(f"[{vtag}_FINETUNE] No checkpoint found for fine-tuning — skipping")
 
     fitted_temperature = 1.0
     if temp_scale:

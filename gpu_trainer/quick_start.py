@@ -40,6 +40,9 @@ FUNDING_FEATURE_COUNT = len(FUNDING_FEATURE_NAMES)
 OI_FEATURE_NAMES = ["open_interest", "oi_delta_1h", "oi_zscore_30d"]
 OI_FEATURE_COUNT = len(OI_FEATURE_NAMES)
 
+LS_RATIO_FEATURE_NAMES = ["ls_ratio", "ls_deviation", "ls_extreme", "crowd_sentiment"]
+LS_RATIO_FEATURE_COUNT = len(LS_RATIO_FEATURE_NAMES)
+
 
 def check_gpu():
     try:
@@ -719,6 +722,134 @@ def _oi_sanity_check(candle_df, oi_df, symbol: str = "BTCUSDT", coverage_thresho
         return True
 
 
+def fetch_ls_ratio_hist(candle_df, data_dir: Path, symbol: str = "BTCUSDT"):
+    """Fetch global long/short account ratio history from Binance Futures."""
+    import requests
+    import numpy as np
+
+    cache_path = data_dir / f"ls_ratio_{symbol}.parquet"
+
+    if cache_path.exists():
+        try:
+            cached = pd.read_parquet(cache_path)
+            if len(cached) > 10:
+                log.info(f"[LS_RATIO] Using cached L/S ratio data for {symbol}: {len(cached)} rows")
+                return cached
+        except Exception:
+            pass
+
+    candle_timestamps = candle_df['timestamp'].values
+    start_ms = int(candle_timestamps.min())
+    end_ms = int(candle_timestamps.max())
+
+    url = "https://fapi.binance.com/futures/data/globalLongShortAccountRatio"
+    all_records = []
+    chunk_ms = 500 * 5 * 60 * 1000
+    current_start = start_ms
+
+    while current_start < end_ms:
+        chunk_end = min(current_start + chunk_ms, end_ms)
+        params = {
+            "symbol": symbol,
+            "period": "5m",
+            "limit": 500,
+            "startTime": current_start,
+            "endTime": chunk_end,
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                for item in data:
+                    all_records.append({
+                        "timestamp": int(item["timestamp"]),
+                        "long_short_ratio": float(item["longShortRatio"]),
+                        "long_account": float(item["longAccount"]),
+                        "short_account": float(item["shortAccount"]),
+                    })
+            else:
+                log.warning(f"[LS_RATIO] HTTP {resp.status_code} for {symbol} chunk {current_start}")
+        except Exception as e:
+            log.warning(f"[LS_RATIO] Error fetching {symbol}: {e}")
+        current_start = chunk_end
+
+    if not all_records:
+        log.warning(f"[LS_RATIO] No L/S ratio data for {symbol}")
+        return pd.DataFrame(columns=["timestamp", "long_short_ratio", "long_account", "short_account"])
+
+    df = pd.DataFrame(all_records).drop_duplicates(subset="timestamp").sort_values("timestamp").reset_index(drop=True)
+    try:
+        df.to_parquet(cache_path, index=False)
+    except Exception:
+        pass
+    log.info(f"[LS_RATIO] Fetched {len(df)} L/S ratio records for {symbol}")
+    return df
+
+
+def compute_ls_ratio_features(candle_df, ls_df):
+    """Compute L/S ratio features aligned to candle timestamps.
+
+    Returns DataFrame with 4 columns: ls_ratio, ls_deviation, ls_extreme, crowd_sentiment
+    """
+    import numpy as np
+
+    n = len(candle_df)
+    result = pd.DataFrame(index=candle_df.index)
+
+    if ls_df.empty or len(ls_df) < 2:
+        for col in LS_RATIO_FEATURE_NAMES:
+            result[col] = 0.0
+        log.info(f"[LS_RATIO_FEAT] No L/S data — returning zeros ({n} rows)")
+        return result
+
+    ls_sorted = ls_df.sort_values("timestamp").copy()
+    ls_sorted["ls_time_ms"] = ls_sorted["timestamp"]
+
+    candle_ts = candle_df["timestamp"].values
+    ls_ts = ls_sorted["ls_time_ms"].values
+    ls_ratio_vals = ls_sorted["long_short_ratio"].values
+
+    ls_ratio_arr = np.ones(n)
+    ls_deviation_arr = np.zeros(n)
+    ls_extreme_arr = np.zeros(n)
+    crowd_sentiment_arr = np.zeros(n)
+
+    rolling_window = 288 * 7
+
+    for i in range(n):
+        mask = ls_ts <= candle_ts[i]
+        recent_idx = np.where(mask)[0]
+        if len(recent_idx) == 0:
+            continue
+        recent_idx = recent_idx[-min(rolling_window, len(recent_idx)):]
+        recent_vals = ls_ratio_vals[recent_idx]
+
+        current = recent_vals[-1]
+        ls_ratio_arr[i] = current
+
+        if len(recent_vals) > 1:
+            avg = recent_vals.mean()
+            std = recent_vals.std()
+            z_score = (current - avg) / max(std, 0.01)
+            ls_deviation_arr[i] = np.clip(z_score, -5, 5)
+            ls_extreme_arr[i] = 1.0 if abs(z_score) > 2 else 0.0
+
+        if current > 2:
+            crowd_sentiment_arr[i] = -1.0
+        elif current < 0.5:
+            crowd_sentiment_arr[i] = 1.0
+
+    result["ls_ratio"] = ls_ratio_arr
+    result["ls_deviation"] = ls_deviation_arr
+    result["ls_extreme"] = ls_extreme_arr
+    result["crowd_sentiment"] = crowd_sentiment_arr
+
+    nz = int(np.sum(ls_ratio_arr != 1.0))
+    log.info(f"[LS_RATIO_FEAT] Computed L/S features: {n} rows, {nz} non-default, "
+             f"ratio range [{ls_ratio_arr.min():.3f}, {ls_ratio_arr.max():.3f}]")
+    return result
+
+
 def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int, lr: float,
                       checkpoint_interval: int = 25, warmup_epochs: int = 5, min_lr: float = None,
                       tp_mult: float = 2.0, sl_mult: float = 1.5, horizon: int = 16, slope_eps: float = 0.05,
@@ -843,6 +974,19 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                     index=sym_df.index,
                 )
             sym_features_df = pd.concat([sym_features_df, sym_oi_features], axis=1)
+            sym_features_df = sym_features_df.fillna(0)
+
+            try:
+                sym_ls_df = fetch_ls_ratio_hist(sym_df, data_dir, symbol=sym)
+                sym_ls_features = compute_ls_ratio_features(sym_df, sym_ls_df)
+            except Exception as e:
+                log.warning(f"[LS_RATIO] Failed for {sym}: {e} — using zeros")
+                sym_ls_features = pd.DataFrame(
+                    np.zeros((len(sym_df), LS_RATIO_FEATURE_COUNT)),
+                    columns=LS_RATIO_FEATURE_NAMES,
+                    index=sym_df.index,
+                )
+            sym_features_df = pd.concat([sym_features_df, sym_ls_features], axis=1)
             sym_features_df = sym_features_df.fillna(0)
 
             if feature_columns_ref is None:
@@ -3721,6 +3865,19 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
             sym_features_df = pd.concat([sym_features_df, sym_oi_features], axis=1)
             sym_features_df = sym_features_df.fillna(0)
 
+            try:
+                sym_ls_df = fetch_ls_ratio_hist(sym_df, data_dir, symbol=sym)
+                sym_ls_features = compute_ls_ratio_features(sym_df, sym_ls_df)
+            except Exception as e:
+                log.warning(f"[LS_RATIO] Failed for {sym}: {e} — using zeros")
+                sym_ls_features = pd.DataFrame(
+                    np.zeros((len(sym_df), LS_RATIO_FEATURE_COUNT)),
+                    columns=LS_RATIO_FEATURE_NAMES,
+                    index=sym_df.index,
+                )
+            sym_features_df = pd.concat([sym_features_df, sym_ls_features], axis=1)
+            sym_features_df = sym_features_df.fillna(0)
+
             if feature_columns_ref is None:
                 feature_columns_ref = list(sym_features_df.columns)
 
@@ -5214,6 +5371,21 @@ Examples:
     parser.add_argument("--v5-min-trades", type=int, default=20,
                         help="v5.3.1+: minimum trades for valid fold. Below this → LOW_CONF, trades kept but threshold EMA skips (default: 20)")
 
+    parser.add_argument("--v5-recency-weight", action="store_true", default=False,
+                        help="v5.7+: exponential recency weighting — recent samples get higher loss weight (default: False)")
+    parser.add_argument("--v5-recency-half-life", type=float, default=90,
+                        help="v5.7+: half-life in days for recency decay. Data this many days old gets 50%% weight (default: 90)")
+    parser.add_argument("--v5-finetune-months", type=int, default=0,
+                        help="v5.7+: fine-tune on last N months after main training (0=disabled, default: 0)")
+    parser.add_argument("--v5-finetune-epochs", type=int, default=5,
+                        help="v5.7+: epochs for fine-tuning phase (default: 5)")
+    parser.add_argument("--v5-finetune-lr-mult", type=float, default=0.1,
+                        help="v5.7+: LR multiplier for fine-tuning phase (default: 0.1)")
+    parser.add_argument("--v5-wf-warm-start", action="store_true", default=False,
+                        help="v5.7+: warm-start each walk-forward fold from previous fold model (default: False)")
+    parser.add_argument("--v5-wf-warm-start-lr-mult", type=float, default=0.3,
+                        help="v5.7+: LR multiplier for warm-start first epoch (default: 0.3, not yet used — reserved)")
+
     parser.add_argument("--multi-horizon", action="store_true", default=False,
                         help="Train multiple horizons (8,16,32) and select best per bar")
     parser.add_argument("--multi-horizons", type=str, default="8,16,32",
@@ -5909,6 +6081,13 @@ Examples:
                     quality_gate_window=getattr(args, 'v5_quality_gate_window', 50),
                     direction_balance_cap=getattr(args, 'v5_direction_balance_cap', False),
                     direction_balance_threshold=getattr(args, 'v5_direction_balance_threshold', 0.75),
+                    recency_weight=args.v5_recency_weight,
+                    recency_half_life=args.v5_recency_half_life,
+                    finetune_months=args.v5_finetune_months,
+                    finetune_epochs=args.v5_finetune_epochs,
+                    finetune_lr_mult=args.v5_finetune_lr_mult,
+                    warm_start=args.v5_wf_warm_start,
+                    warm_start_lr_mult=args.v5_wf_warm_start_lr_mult,
                     head_disagreement_gate=getattr(args, 'v5_head_disagree_gate', False),
                     slippage_base_bps=getattr(args, 'slippage_base_bps', 0.0),
                     sigma_discount=args.v5_sigma_discount and not args.v5_no_sigma_discount,
