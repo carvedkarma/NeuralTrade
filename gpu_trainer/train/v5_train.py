@@ -4144,22 +4144,6 @@ def run_v5_walk_forward(
             v6_moe_balance_weight=v6_moe_balance_weight,
         )
 
-        if warm_start:
-            import torch as _torch
-            best_ckpt = Path("checkpoints") / "best_v5_expectancy.pt"
-            if not best_ckpt.exists():
-                best_ckpt = Path("checkpoints") / "best_v5_loss.pt"
-            if best_ckpt.exists():
-                try:
-                    ckpt = _torch.load(best_ckpt, map_location='cpu', weights_only=False)
-                    prev_fold_state_dict = ckpt['model_state_dict']
-                    log.info(f"[V5_WF] Saved fold {fold['fold']} model for warm-start of next fold")
-                except Exception as e:
-                    log.warning(f"[V5_WF] Failed to load fold {fold['fold']} checkpoint for warm-start: {e}")
-                    prev_fold_state_dict = None
-            else:
-                prev_fold_state_dict = None
-
         report_path = Path("checkpoints") / "v5_forward_report.json"
         if report_path.exists():
             import json
@@ -4170,6 +4154,33 @@ def run_v5_walk_forward(
             fold_threshold = fold_report.get('score_threshold', None)
             fold_total_trades = fold_report.get('total_trades', 0)
             fold_low_conf = fold_report.get('low_confidence', False)
+            fold_total_r = fold_report.get('total_r', 0)
+
+            if warm_start:
+                import torch as _torch
+                if fold_total_r > 0 and fold_total_trades > 0:
+                    best_ckpt = Path("checkpoints") / "best_v5_expectancy.pt"
+                    if not best_ckpt.exists():
+                        best_ckpt = Path("checkpoints") / "best_v5_loss.pt"
+                    if best_ckpt.exists():
+                        try:
+                            ckpt = _torch.load(best_ckpt, map_location='cpu', weights_only=False)
+                            prev_fold_state_dict = ckpt['model_state_dict']
+                            log.info(f"[V5_WF] Fold {fold['fold']} was profitable ({fold_total_r:+.2f}R) "
+                                     f"— warm-start enabled for next fold")
+                        except Exception as e:
+                            log.warning(f"[V5_WF] Failed to load fold {fold['fold']} checkpoint: {e} — resetting to random init")
+                            prev_fold_state_dict = None
+                    else:
+                        prev_fold_state_dict = None
+                else:
+                    prev_fold_state_dict = None
+                    if fold_total_trades == 0:
+                        log.info(f"[V5_WF] Fold {fold['fold']} was DEAD (0 trades) "
+                                 f"— skipping warm-start, next fold uses random init")
+                    else:
+                        log.info(f"[V5_WF] Fold {fold['fold']} was negative ({fold_total_r:+.2f}R) "
+                                 f"— skipping warm-start, next fold uses random init")
 
             if fold_total_trades == 0 and threshold_ema is not None:
                 min_threshold = 0.01
@@ -4206,6 +4217,9 @@ def run_v5_walk_forward(
 
             all_reports.append(fold_report)
         else:
+            if warm_start:
+                prev_fold_state_dict = None
+                log.info(f"[V5_WF] Fold {fold['fold']}: NO REPORT — skipping warm-start, next fold uses random init")
             if threshold_ema is not None:
                 min_threshold = 0.01
                 old_ema = threshold_ema
