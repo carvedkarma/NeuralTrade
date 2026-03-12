@@ -967,7 +967,8 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
                       target_enter_rate_max: float = 0.25,
                       balance_search_steps: int = 30,
                       pos_weight_min: float = 0.5, pos_weight_max: float = 6.0,
-                      verify_v47_labels: bool = False):
+                      verify_v47_labels: bool = False,
+                      symbol_embed_dim: int = 8):
     import torch
     import torch.nn as nn
     import numpy as np
@@ -1478,7 +1479,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         enable_dir_head=True,
         enable_htf_head=True,
         n_symbols=n_symbols,
-        symbol_embed_dim=args.v5_symbol_embed_dim if n_symbols > 1 else 0,
+        symbol_embed_dim=symbol_embed_dim if n_symbols > 1 else 0,
     )
     model = EnhancedMultiHeadMLP(mlp_config)
     model.name = "EnterQualityMLP"
@@ -6504,6 +6505,7 @@ Examples:
                 pos_weight_min=args.pos_weight_min,
                 pos_weight_max=args.pos_weight_max,
                 verify_v47_labels=args.verify_v47_labels,
+                symbol_embed_dim=args.v5_symbol_embed_dim,
             )
 
         print()
