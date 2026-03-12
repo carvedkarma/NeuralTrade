@@ -426,6 +426,10 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "15m", sym
 
     url = "https://fapi.binance.com/futures/data/openInterestHist"
 
+    # Track whether startTime was rejected so we don't repeat the same error
+    # across all three period fallbacks.
+    starttime_rejected = False
+
     for try_period in periods_to_try:
         log.info(f"Fetching OI from Binance Futures for {symbol} (period={try_period})...")
         all_records = []
@@ -439,9 +443,13 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "15m", sym
                 "symbol": symbol,
                 "period": try_period,
                 "limit": 500,
-                "startTime": int(current_start),
                 "endTime": int(fetch_end_ms),
             }
+            # Only include startTime when it hasn't been globally rejected and
+            # this isn't the first page of a startTime-less fallback session.
+            if not starttime_rejected:
+                params["startTime"] = int(current_start)
+
             try:
                 resp = requests.get(url, params=params, timeout=30)
                 if resp.status_code == 429:
@@ -455,15 +463,30 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "15m", sym
                     continue
                 if resp.status_code == 400:
                     resp_text = resp.text[:200] if resp.text else "no body"
-                    log.warning(f"OI period={try_period} HTTP 400: {resp_text}")
-                    period_failed = True
-                    break
+                    if "startTime" in resp_text and not starttime_rejected:
+                        # Binance rejected startTime — retry this period without it.
+                        log.warning(
+                            f"OI period={try_period} startTime rejected by Binance "
+                            f"— retrying without startTime for all subsequent requests"
+                        )
+                        starttime_rejected = True
+                        params.pop("startTime", None)
+                        resp = requests.get(url, params=params, timeout=30)
+                        if resp.status_code != 200:
+                            log.warning(f"OI period={try_period} also failed without startTime — skipping")
+                            period_failed = True
+                            break
+                    else:
+                        log.warning(f"OI period={try_period} HTTP 400: {resp_text}")
+                        period_failed = True
+                        break
                 if resp.status_code in (403, 418, 451):
                     resp_text = resp.text[:200] if resp.text else "no body"
                     log.warning(f"OI period={try_period} blocked (HTTP {resp.status_code}): {resp_text}")
                     period_failed = True
                     break
-                resp.raise_for_status()
+                if resp.status_code != 200:
+                    resp.raise_for_status()
                 data = resp.json()
                 consecutive_errors = 0
             except requests.exceptions.HTTPError as e:
@@ -510,6 +533,11 @@ def fetch_open_interest_hist(candle_df, data_dir: Path, period: str = "15m", sym
             period = try_period
             break
         if period_failed:
+            # If startTime was already rejected globally, remaining period
+            # fallbacks will hit the same issue — bail out early.
+            if starttime_rejected:
+                log.warning(f"OI: startTime rejected by Binance for {symbol} — OI features will be zero")
+                break
             log.warning(f"OI period={try_period} unavailable, trying next fallback...")
             continue
         if not all_records:
