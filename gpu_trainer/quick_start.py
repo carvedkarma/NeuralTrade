@@ -723,18 +723,26 @@ def _oi_sanity_check(candle_df, oi_df, symbol: str = "BTCUSDT", coverage_thresho
 
 
 def fetch_ls_ratio_hist(candle_df, data_dir: Path, symbol: str = "BTCUSDT"):
-    """Fetch global long/short account ratio history from Binance Futures."""
+    """Fetch global long/short account ratio history from Binance Futures.
+
+    Uses a probe-from-end strategy: checks the most recent chunk first to
+    quickly determine if data is available at all, then binary-searches
+    backwards by 30-day jumps to find the earliest available date. This
+    avoids scanning thousands of unavailable historical chunks one-by-one.
+    Results are always cached (even empty) so future folds skip the probe.
+    """
     import requests
-    import numpy as np
 
     cache_path = data_dir / f"ls_ratio_{symbol}.parquet"
+    empty_df = pd.DataFrame(columns=["timestamp", "long_short_ratio", "long_account", "short_account"])
 
+    # Always use cache if it exists and is readable — even an empty cache is
+    # valid (means we already determined data is unavailable for this symbol).
     if cache_path.exists():
         try:
             cached = pd.read_parquet(cache_path)
-            if len(cached) > 10:
-                log.info(f"[LS_RATIO] Using cached L/S ratio data for {symbol}: {len(cached)} rows")
-                return cached
+            log.info(f"[LS_RATIO] Using cached L/S ratio data for {symbol}: {len(cached)} rows")
+            return cached
         except Exception:
             pass
 
@@ -743,46 +751,98 @@ def fetch_ls_ratio_hist(candle_df, data_dir: Path, symbol: str = "BTCUSDT"):
     end_ms = int(candle_timestamps.max())
 
     url = "https://fapi.binance.com/futures/data/globalLongShortAccountRatio"
-    all_records = []
-    chunk_ms = 500 * 5 * 60 * 1000
-    current_start = start_ms
+    chunk_ms = 500 * 5 * 60 * 1000  # 500 × 5-min bars ≈ 41.7 hours
 
-    while current_start < end_ms:
-        chunk_end = min(current_start + chunk_ms, end_ms)
+    def _probe(ts_start, ts_end):
+        """Fetch one chunk. Returns list of records on success, None on HTTP error."""
         params = {
             "symbol": symbol,
             "period": "5m",
             "limit": 500,
-            "startTime": current_start,
-            "endTime": chunk_end,
+            "startTime": int(ts_start),
+            "endTime": int(ts_end),
         }
         try:
             resp = requests.get(url, params=params, timeout=15)
             if resp.status_code == 200:
                 data = resp.json()
-                for item in data:
-                    all_records.append({
-                        "timestamp": int(item["timestamp"]),
-                        "long_short_ratio": float(item["longShortRatio"]),
-                        "long_account": float(item["longAccount"]),
-                        "short_account": float(item["shortAccount"]),
-                    })
-            else:
-                log.warning(f"[LS_RATIO] HTTP {resp.status_code} for {symbol} chunk {current_start}")
-        except Exception as e:
-            log.warning(f"[LS_RATIO] Error fetching {symbol}: {e}")
+                return [
+                    {
+                        "timestamp": int(d["timestamp"]),
+                        "long_short_ratio": float(d["longShortRatio"]),
+                        "long_account": float(d["longAccount"]),
+                        "short_account": float(d["shortAccount"]),
+                    }
+                    for d in data
+                ]
+            return None
+        except Exception:
+            return None
+
+    # Step 1 — probe the most recent chunk to see if ANY data is available.
+    probe_start = max(start_ms, end_ms - chunk_ms)
+    if _probe(probe_start, end_ms) is None:
+        log.warning(f"[LS_RATIO] No data available for {symbol} (recent probe failed) — using zeros")
+        try:
+            empty_df.to_parquet(cache_path, index=False)
+        except Exception:
+            pass
+        return empty_df
+
+    # Step 2 — binary-search backwards by 30-day jumps to find earliest available date.
+    STEP_BACK = 30 * 24 * 60 * 60 * 1000  # 30 days in ms
+    boundary_start = probe_start
+    test_start = boundary_start - STEP_BACK
+    while test_start >= start_ms:
+        if _probe(test_start, test_start + chunk_ms) is not None:
+            boundary_start = test_start
+            test_start -= STEP_BACK
+        else:
+            break  # data not available this far back — boundary found
+
+    log.info(
+        f"[LS_RATIO] Data available from "
+        f"{pd.Timestamp(boundary_start, unit='ms').date()} for {symbol} — fetching forward"
+    )
+
+    # Step 3 — fetch all chunks from the boundary to end_ms.
+    all_records = []
+    current_start = boundary_start
+    gap_logged = False
+    while current_start < end_ms:
+        chunk_end = min(current_start + chunk_ms, end_ms)
+        result = _probe(current_start, chunk_end)
+        if result is not None:
+            all_records.extend(result)
+            gap_logged = False
+        else:
+            if not gap_logged:
+                log.warning(
+                    f"[LS_RATIO] Gap in data at "
+                    f"{pd.Timestamp(current_start, unit='ms').date()} for {symbol}"
+                )
+                gap_logged = True
         current_start = chunk_end
 
     if not all_records:
-        log.warning(f"[LS_RATIO] No L/S ratio data for {symbol}")
-        return pd.DataFrame(columns=["timestamp", "long_short_ratio", "long_account", "short_account"])
+        log.warning(f"[LS_RATIO] No records collected for {symbol} — using zeros")
+        try:
+            empty_df.to_parquet(cache_path, index=False)
+        except Exception:
+            pass
+        return empty_df
 
-    df = pd.DataFrame(all_records).drop_duplicates(subset="timestamp").sort_values("timestamp").reset_index(drop=True)
+    df = (
+        pd.DataFrame(all_records)
+        .drop_duplicates(subset="timestamp")
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
     try:
         df.to_parquet(cache_path, index=False)
     except Exception:
         pass
-    log.info(f"[LS_RATIO] Fetched {len(df)} L/S ratio records for {symbol}")
+    log.info(f"[LS_RATIO] Fetched and cached {len(df)} L/S ratio records for {symbol}")
     return df
 
 
