@@ -1972,7 +1972,7 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
             'enable_dir_head': True,
             'enable_htf_head': True,
             'n_symbols': n_symbols,
-            'symbol_embed_dim': args.v5_symbol_embed_dim if n_symbols > 1 else 0,
+            'symbol_embed_dim': symbol_embed_dim if n_symbols > 1 else 0,
         }
         ckpt_train_config = {
             'use_focal_loss': use_focal_loss,
@@ -3829,7 +3829,8 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
                                 preset_config=None,
                                 use_money_score=False,
                                 risk_controls=None,
-                                use_kelly_sizing=False):
+                                use_kelly_sizing=False,
+                                symbol_embed_dim=8):
     """v4.9.1 Distributional Trade Forecaster with Candidate Engine + Multi-Horizon + Multi-Preset.
 
     Replaces binary ENTER classification with distributional outputs:
@@ -4452,7 +4453,7 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
         enable_dist_quantile_head=True,
         enable_regime_head=use_regime_head,
         n_symbols=n_symbols,
-        symbol_embed_dim=args.v5_symbol_embed_dim if n_symbols > 1 else 0,
+        symbol_embed_dim=symbol_embed_dim if n_symbols > 1 else 0,
     )
     model = EnhancedMultiHeadMLP(mlp_config)
     model.name = "DistributionalForecaster"
@@ -4740,7 +4741,7 @@ def train_distributional_model(data_path, device, epochs, batch_size, lr,
             'enable_dist_quantile_head': True,
             'enable_regime_head': use_regime_head,
             'n_symbols': n_symbols,
-            'symbol_embed_dim': args.v5_symbol_embed_dim if n_symbols > 1 else 0,
+            'symbol_embed_dim': symbol_embed_dim if n_symbols > 1 else 0,
         }
         ckpt_train_config = {
             'model_type': 'distributional_trade_forecaster',
@@ -6455,6 +6456,7 @@ Examples:
                 use_money_score=getattr(args, 'money_score', False),
                 risk_controls=risk_cfg,
                 use_kelly_sizing=getattr(args, 'kelly_sizing', False),
+                symbol_embed_dim=args.v5_symbol_embed_dim,
             )
         else:
             use_focal = args.use_focal_loss and not args.no_focal_loss
