@@ -266,7 +266,10 @@ function NeuralWatchPanel({
 
       <div className="p-3 relative z-10">
         {monitoredPositions.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-4 gap-2">
+          <div className="relative flex flex-col items-center justify-center py-4 gap-2 overflow-hidden">
+            <div className="absolute inset-0 pointer-events-none">
+              <div className="absolute top-1/2 -translate-y-1/2 w-1/4 h-full bg-gradient-to-r from-transparent via-emerald-400/5 to-transparent" style={{ animation: "empty-sweep 4s linear infinite" }} />
+            </div>
             <Brain className="w-6 h-6 text-emerald-400/20 animate-brain-pulse" />
             <span className="text-[10px] font-mono text-muted-foreground/30">Monitoring market...</span>
           </div>
@@ -279,6 +282,7 @@ function NeuralWatchPanel({
               const latestAdj = latestAdjByPos[posId];
               const sweepInfo = latestAdj && isFlash ? NEURAL_SWEEP_COLORS[latestAdj.adjustmentType] : null;
               const adjLabel = latestAdj ? NEURAL_ADJUSTMENT_LABELS[latestAdj.adjustmentType] : null;
+              const isMfeLock = latestAdj?.adjustmentType === "MFE_PROTECTION_EXIT" && isFlash;
 
               return (
                 <div
@@ -298,13 +302,13 @@ function NeuralWatchPanel({
                   <div className="relative z-10 flex flex-col items-center gap-1.5">
                     <div className="flex items-center gap-1.5">
                       <span className="text-[11px] font-mono font-semibold text-foreground/90">{pos.symbol.replace("USDT", "")}</span>
-                      <span className={`text-[9px] font-mono font-bold px-1 rounded ${pos.side === "LONG" ? "text-emerald-400 bg-emerald-500/15" : "text-red-400 bg-red-500/15"}`}>
-                        {pos.side === "LONG" ? "▲" : "▼"}
+                      <span className={`text-[8px] font-mono font-bold px-1.5 py-0.5 rounded ${pos.side === "LONG" ? "text-emerald-400 bg-emerald-500/15" : "text-red-400 bg-red-500/15"}`}>
+                        {pos.side === "LONG" ? "LONG" : "SHORT"}
                       </span>
                     </div>
 
                     <div className="relative">
-                      <Brain className={`w-4 h-4 text-emerald-400/40 ${isFlash ? "animate-brain-pulse" : ""}`} />
+                      <Brain className="w-4 h-4 text-emerald-400/40 animate-brain-pulse" />
                       {isFlash && (
                         <div className="absolute inset-0 rounded-full" style={{ animation: "ping-ring 0.6s ease-out" }}>
                           <div className="w-full h-full rounded-full border border-cyan-400/40" />
@@ -313,6 +317,10 @@ function NeuralWatchPanel({
                     </div>
 
                     {health && <HealthRing score={health.score} size={28} />}
+
+                    {isMfeLock && (
+                      <Shield className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                    )}
 
                     {sweepInfo && adjLabel && (
                       <span className={`text-[8px] font-mono font-bold tracking-wider ${adjLabel.color} animate-pulse`}>
@@ -406,12 +414,13 @@ function AiScannerGrid({ events, lastCycleTs, cycleCount }: { events: CycleEvent
       </div>
 
       <div className="p-3">
-        <div className="grid grid-cols-4 sm:grid-cols-4 md:grid-cols-8 gap-2">
+        <div className="grid grid-cols-4 gap-2">
           {SCANNER_SYMBOLS.map((sym) => {
             const ev = latestBySymbol[sym];
             const isRecent = ev && (now - ev.ts < 10000);
             const isEnter = ev?.decision === "ENTER";
             const isCooldown = ev?.decision === "COOLDOWN";
+            const isHold = ev?.decision === "HOLD";
             const isOpened = ev?.opened === true;
             const shortName = sym.replace("USDT", "");
             const arrow = ev?.direction === "LONG" ? "▲" : ev?.direction === "SHORT" ? "▼" : "";
@@ -426,6 +435,8 @@ function AiScannerGrid({ events, lastCycleTs, cycleCount }: { events: CycleEvent
             } else if (isRecent && isCooldown) {
               tileStyle = "border-amber-400/40 bg-amber-500/8";
               animStyle = "tile-cooldown 1.2s ease-out";
+            } else if (isRecent && isHold) {
+              tileStyle = "border-border/15 bg-black/20 opacity-60";
             } else if (isRecent) {
               tileStyle = "border-cyan-400/20 bg-cyan-500/5";
             }
@@ -437,7 +448,7 @@ function AiScannerGrid({ events, lastCycleTs, cycleCount }: { events: CycleEvent
                 style={animStyle ? { animation: animStyle } : undefined}
                 data-testid={`scanner-tile-${sym}`}
               >
-                {isRecent && (
+                {isRecent && !isHold && (
                   <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                     <div
                       className={`w-6 h-6 rounded-full border ${isEnter ? "border-emerald-400/60" : "border-cyan-400/30"}`}
@@ -446,14 +457,22 @@ function AiScannerGrid({ events, lastCycleTs, cycleCount }: { events: CycleEvent
                   </div>
                 )}
 
-                <span className="text-[11px] font-mono font-bold text-foreground/80">{shortName}</span>
+                <span className={`text-[11px] font-mono font-bold ${isHold && isRecent ? "text-muted-foreground/40" : "text-foreground/80"}`}>{shortName}</span>
 
-                {arrow && (
+                {isRecent && isHold && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/30 my-0.5" />
+                )}
+
+                {arrow && !(isRecent && isHold) && (
                   <span className={`text-sm font-bold leading-none ${arrowColor}`}>{arrow}</span>
                 )}
 
                 {isRecent && isEnter && (
-                  <span className="text-[8px] font-mono font-bold text-emerald-400 bg-emerald-500/20 px-1.5 rounded animate-pulse" data-testid={`badge-enter-${sym}`}>
+                  <span
+                    className="text-[8px] font-mono font-bold text-emerald-400 bg-emerald-500/20 px-1.5 rounded"
+                    style={{ animation: "enter-fade 2s ease-out forwards" }}
+                    data-testid={`badge-enter-${sym}`}
+                  >
                     ENTER
                   </span>
                 )}
