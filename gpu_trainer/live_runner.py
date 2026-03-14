@@ -2012,6 +2012,7 @@ class LiveRunner:
                 sl_price=sl_price, tp_price=tp_price,
                 p_enter=p_enter, size_pct=size_pct, lane_info={
                     'lane': 'V5', 'htf_score': htf_score,
+                    'v5_score': v5_info.get('v5_score'),
                     'threshold_used': self.v5_score_threshold,
                     'lane_size_mult': 1.0,
                     'lane_horizon': 24,
