@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useTradingWs } from "@/hooks/use-trading-ws";
@@ -34,6 +34,8 @@ import {
   Zap,
   Eye,
   ChevronRight,
+  Radio,
+  Star,
 } from "lucide-react";
 import { CloseButton, PartialCloseButton, EditSLTPDialog } from "@/components/position-actions";
 import { usePingMonitor } from "@/hooks/use-ping";
@@ -246,6 +248,110 @@ function NeuralMonitorFeed({
   );
 }
 
+interface CycleEvent {
+  ts: number;
+  symbol: string;
+  direction: string;
+  decision: string;
+  price: number;
+  v5Score: number | null;
+  pEnter: number | null;
+  opened: boolean;
+  holdReason?: string;
+}
+
+const DECISION_STYLES: Record<string, { color: string; bg: string }> = {
+  ENTER: { color: "text-emerald-400", bg: "bg-emerald-500/20" },
+  HOLD: { color: "text-muted-foreground/60", bg: "bg-muted/20" },
+  COOLDOWN: { color: "text-amber-400", bg: "bg-amber-500/20" },
+  SKIP: { color: "text-muted-foreground/40", bg: "bg-muted/10" },
+};
+
+function CliScannerFeed({ events, lastCycleTs, cycleCount }: { events: CycleEvent[]; lastCycleTs: number; cycleCount: number }) {
+  const feedRef = useRef<HTMLDivElement>(null);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(t);
+  }, []);
+  const isLive = lastCycleTs > 0 && now - lastCycleTs < 60000;
+
+  return (
+    <div className="rounded-lg border border-border/40 bg-black/60 overflow-hidden" data-testid="cli-scanner-feed">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border/30 bg-black/40">
+        <div className="flex items-center gap-2">
+          <Radio className="w-3.5 h-3.5 text-cyan-400/80" />
+          <span className="text-[11px] font-mono font-semibold text-cyan-400/90 tracking-wider uppercase">
+            Live Scanner
+          </span>
+          <span
+            className={`w-2 h-2 rounded-full ${isLive ? "bg-emerald-400 animate-pulse" : "bg-muted-foreground/30"}`}
+            data-testid="scanner-status-dot"
+          />
+          {isLive ? (
+            <span className="text-[10px] font-mono text-emerald-400/60">LIVE</span>
+          ) : (
+            <span className="text-[10px] font-mono text-muted-foreground/40">OFFLINE</span>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          {cycleCount > 0 && (
+            <span className="text-[10px] font-mono text-cyan-400/50">
+              {cycleCount} cycles
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div ref={feedRef} className="font-mono text-[10px] leading-5 max-h-[180px] overflow-y-auto px-3 py-2 space-y-0.5">
+        {events.length === 0 ? (
+          <div className="text-muted-foreground/30 py-3 text-center">
+            Waiting for scanner cycles...
+          </div>
+        ) : (
+          events.map((ev, i) => {
+            const style = DECISION_STYLES[ev.decision] ?? DECISION_STYLES.HOLD;
+            const ts = new Date(ev.ts).toLocaleTimeString("en-US", {
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+              hour12: false,
+            });
+            const arrow = ev.direction === "LONG" ? "▲" : ev.direction === "SHORT" ? "▼" : "•";
+            const arrowColor = ev.direction === "LONG" ? "text-emerald-400/70" : ev.direction === "SHORT" ? "text-red-400/70" : "text-muted-foreground/40";
+            return (
+              <div
+                key={`${ev.ts}-${ev.symbol}-${i}`}
+                className={`flex items-center gap-2 ${i === 0 ? "opacity-100" : i < 3 ? "opacity-80" : "opacity-50"}`}
+                style={i === 0 ? { animation: "slideIn 0.3s ease-out" } : undefined}
+              >
+                <span className="text-muted-foreground/40 shrink-0 w-16">{ts}</span>
+                <span className="text-cyan-400/80 shrink-0 w-[72px]">{ev.symbol.replace("USDT", "")}</span>
+                <span className={`shrink-0 ${arrowColor}`}>{arrow}</span>
+                <span className={`shrink-0 px-1.5 py-0 rounded text-[9px] font-semibold ${style.color} ${style.bg}`}>
+                  {ev.decision}
+                </span>
+                <span className="text-muted-foreground/50 shrink-0">${formatPrice(ev.price)}</span>
+                {ev.v5Score != null && (
+                  <span className="text-purple-400/60 shrink-0">v5:{ev.v5Score.toFixed(2)}</span>
+                )}
+                {ev.pEnter != null && (
+                  <span className="text-blue-400/50 shrink-0">p:{(ev.pEnter * 100).toFixed(0)}%</span>
+                )}
+                {ev.opened && (
+                  <span className="text-emerald-400 font-semibold flex items-center gap-0.5 shrink-0">
+                    <Star className="w-2.5 h-2.5" />OPENED
+                  </span>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
 function HealthGauge({ score, riskLevel }: { score: number; riskLevel: string }) {
   const color = score >= 70 ? "text-emerald-400" : score >= 45 ? "text-amber-400" : score >= 25 ? "text-orange-400" : "text-red-400";
   const bgColor = score >= 70 ? "bg-emerald-400" : score >= 45 ? "bg-amber-400" : score >= 25 ? "bg-orange-400" : "bg-red-400";
@@ -299,7 +405,7 @@ function MfeTracker({ currentPnlR, peakPnlR, giveback }: { currentPnlR: number; 
   );
 }
 
-function PositionPriceGauge({ pos, livePrice, health, isFlashing }: { pos: Position; livePrice?: number; health?: PositionHealth; isFlashing?: boolean }) {
+function PositionPriceGauge({ pos, livePrice, health, isFlashing, isNew }: { pos: Position; livePrice?: number; health?: PositionHealth; isFlashing?: boolean; isNew?: boolean }) {
   const { entryPrice, stopLoss, takeProfit, side } = pos;
   const currentPrice = livePrice ?? pos.currentPrice;
   if (!currentPrice || !stopLoss || !takeProfit) return null;
@@ -343,7 +449,9 @@ function PositionPriceGauge({ pos, livePrice, health, isFlashing }: { pos: Posit
     trailPct = Math.max(0, Math.min(100, ((trailPrice - lo) / range) * 100));
   }
 
-  const pulseClass = isFlashing
+  const pulseClass = isNew
+    ? "border-emerald-400/70 shadow-[0_0_14px_2px_rgba(34,197,94,0.3)]"
+    : isFlashing
     ? "border-cyan-400/70 shadow-[0_0_12px_2px_rgba(34,211,238,0.25)]"
     : healthScore !== null && healthScore < 15
     ? "animate-pulse border-red-500/60"
@@ -388,6 +496,12 @@ function PositionPriceGauge({ pos, livePrice, health, isFlashing }: { pos: Posit
           {adjInfo && !isBreakeven && (
             <Badge variant="outline" className={`${adjInfo.color} border-current/30 text-[10px] px-1.5`} data-testid="badge-neural-status">
               <Brain className="w-2.5 h-2.5 mr-0.5" />{adjInfo.label}
+            </Badge>
+          )}
+          {isNew && (
+            <Badge className="no-default-hover-elevate no-default-active-elevate text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 px-1.5 gap-1 animate-pulse" data-testid="badge-new-position">
+              <Star className="w-2.5 h-2.5" />
+              NEW
             </Badge>
           )}
           {isFlashing && (
@@ -551,12 +665,66 @@ export default function PaperTrading() {
   const [healthMap, setHealthMap] = useState<Record<number, PositionHealth>>({});
   const [neuralEvents, setNeuralEvents] = useState<NeuralEvent[]>([]);
   const [flashingPositions, setFlashingPositions] = useState<Set<number>>(new Set());
+  const [newPositions, setNewPositions] = useState<Set<number>>(new Set());
+  const [cycleEvents, setCycleEvents] = useState<CycleEvent[]>([]);
+  const [lastCycleTs, setLastCycleTs] = useState(0);
+  const [cycleCount, setCycleCount] = useState(0);
   const { subscribe } = useTradingWs();
   const ping = usePingMonitor();
 
   useEffect(() => {
     const unsub = subscribe("PRICE_TICK", (payload) => {
       setLivePrices(payload as Record<string, number>);
+    });
+    return unsub;
+  }, [subscribe]);
+
+  useEffect(() => {
+    const unsub = subscribe("CYCLE_UPDATE", (payload) => {
+      const p = payload as {
+        symbol?: string;
+        direction?: string;
+        decision?: string;
+        price?: number;
+        v5Score?: number;
+        pEnter?: number;
+        cycleTs?: number;
+        holdReason?: string;
+        autoTradeResult?: { opened?: boolean; positionId?: number };
+      };
+      if (!p.symbol) return;
+
+      const opened = p.autoTradeResult?.opened === true;
+      const ev: CycleEvent = {
+        ts: p.cycleTs ?? Date.now(),
+        symbol: p.symbol,
+        direction: p.direction ?? "",
+        decision: p.decision ?? "HOLD",
+        price: p.price ?? 0,
+        v5Score: p.v5Score ?? null,
+        pEnter: p.pEnter ?? null,
+        opened,
+        holdReason: p.holdReason,
+      };
+
+      setCycleEvents((prev) => [ev, ...prev].slice(0, 40));
+      setLastCycleTs(Date.now());
+      setCycleCount((c) => c + 1);
+
+      if (opened && p.autoTradeResult?.positionId) {
+        const posId = p.autoTradeResult.positionId;
+        setNewPositions((prev) => new Set([...prev, posId]));
+        setTimeout(() => {
+          setNewPositions((prev) => {
+            const next = new Set(prev);
+            next.delete(posId);
+            return next;
+          });
+        }, 10000);
+
+        queryClient.invalidateQueries({ queryKey: ["/api/paper/positions"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/paper/portfolio"] });
+      }
     });
     return unsub;
   }, [subscribe]);
@@ -824,6 +992,12 @@ export default function PaperTrading() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
+          <CliScannerFeed
+            events={cycleEvents}
+            lastCycleTs={lastCycleTs}
+            cycleCount={cycleCount}
+          />
+
           <NeuralMonitorFeed
             events={neuralEvents}
             monitoredCount={openPositions?.filter(p => p.source === "v5_signal").length ?? 0}
@@ -844,6 +1018,7 @@ export default function PaperTrading() {
                     livePrice={livePrices[pos.symbol]}
                     health={posId > 0 ? healthMap[posId] : undefined}
                     isFlashing={posId > 0 && flashingPositions.has(posId)}
+                    isNew={posId > 0 && newPositions.has(posId)}
                   />
                 );
               })}

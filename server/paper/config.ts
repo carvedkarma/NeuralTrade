@@ -104,13 +104,14 @@ export const defaultConfig: PaperTradingConfig = {
   trackRMultiple: true,         // Track R-multiple per trade
   
   // Signal-strength leverage tiers (v5Score thresholds → leverage)
+  // Calibrated to actual GPU trainer v5_score range (medians 0.44–8.99)
   leverageEnabled: true,
   leverageTiers: [
-    { minScore: 0.50, leverage: 30 },
-    { minScore: 0.40, leverage: 10 },
-    { minScore: 0.15, leverage: 5 },
-    { minScore: 0.10, leverage: 3 },
-    { minScore: 0.05, leverage: 2 },
+    { minScore: 5.0, leverage: 30 },
+    { minScore: 2.0, leverage: 10 },
+    { minScore: 0.8, leverage: 5 },
+    { minScore: 0.3, leverage: 3 },
+    { minScore: 0.1, leverage: 2 },
     { minScore: 0.02, leverage: 1 },
   ],
   maxLeverage: 30,

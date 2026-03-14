@@ -1689,9 +1689,10 @@ export function computeSignalLeverage(v5Score: number | null | undefined): numbe
   const config = getConfig();
   if (!config.leverageEnabled || !v5Score || v5Score <= 0) return 1;
   
+  const capped = Math.min(v5Score, 50);
   const sortedTiers = [...config.leverageTiers].sort((a, b) => b.minScore - a.minScore);
   for (const tier of sortedTiers) {
-    if (v5Score >= tier.minScore) {
+    if (capped >= tier.minScore) {
       return Math.min(tier.leverage, config.maxLeverage);
     }
   }
