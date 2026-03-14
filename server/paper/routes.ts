@@ -10,7 +10,9 @@ import {
   enablePaperTrading,
   disablePaperTrading,
   isPaperTradingEnabled,
-  isAutoTradingEnabled 
+  isAutoTradingEnabled,
+  getAnalyticsClearedAfterTs,
+  setAnalyticsClearedAfterTs,
 } from "./config";
 
 const router = Router();
@@ -341,6 +343,7 @@ router.delete("/trade-history", async (req, res) => {
 router.delete("/equity-curve", async (req, res) => {
   try {
     await storage.clearEquityCurve();
+    setAnalyticsClearedAfterTs(Date.now());
     res.json({ cleared: true });
   } catch (error) {
     console.error("Error clearing equity curve:", error);
@@ -354,6 +357,9 @@ router.get("/equity-curve", async (req, res) => {
     let fromTs = 0;
     if (range === "7d") fromTs = Date.now() - 7 * 86400000;
     else if (range === "30d") fromTs = Date.now() - 30 * 86400000;
+
+    const clearedAfter = getAnalyticsClearedAfterTs();
+    if (clearedAfter > fromTs) fromTs = clearedAfter;
 
     const history = await storage.getTradeHistory({ limit: 10000 });
     const sorted = history

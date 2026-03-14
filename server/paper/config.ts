@@ -118,6 +118,16 @@ export const defaultConfig: PaperTradingConfig = {
 
 let currentConfig: PaperTradingConfig = { ...defaultConfig };
 
+let analyticsClearedAfterTs: number = 0;
+
+export function getAnalyticsClearedAfterTs(): number {
+  return analyticsClearedAfterTs;
+}
+
+export function setAnalyticsClearedAfterTs(ts: number): void {
+  analyticsClearedAfterTs = ts;
+}
+
 export async function loadPaperState(): Promise<void> {
   console.log("[Paper Config] Paper trading starts disabled by default (in-memory state)");
 }
