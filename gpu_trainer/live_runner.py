@@ -1272,6 +1272,7 @@ class LiveRunner:
             "size_pct": size_pct,
             "status": "open",
             "lane": li.get('lane', 'V5'),
+            "v5_score": li.get('v5_score'),
             "htf_score": li.get('htf_score'),
             "lane_threshold_used": li.get('threshold_used'),
             "lane_size_mult": li.get('lane_size_mult', 1.0),
