@@ -4,6 +4,7 @@ export type WsEventType =
   | "CONNECTED"
   | "CYCLE_UPDATE"
   | "TRADE_OPEN"
+  | "TRADE_OPENED"
   | "TRADE_UPDATE"
   | "TRADE_CLOSE"
   | "GPU_STATUS_UPDATE"

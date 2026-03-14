@@ -107,11 +107,11 @@ export const defaultConfig: PaperTradingConfig = {
   // Calibrated to actual GPU trainer v5_score range (medians 0.44–8.99)
   leverageEnabled: true,
   leverageTiers: [
-    { minScore: 5.0, leverage: 30 },
-    { minScore: 2.0, leverage: 10 },
-    { minScore: 0.8, leverage: 5 },
-    { minScore: 0.3, leverage: 3 },
-    { minScore: 0.1, leverage: 2 },
+    { minScore: 8.0, leverage: 30 },
+    { minScore: 5.0, leverage: 10 },
+    { minScore: 2.0, leverage: 5 },
+    { minScore: 0.8, leverage: 3 },
+    { minScore: 0.3, leverage: 2 },
     { minScore: 0.02, leverage: 1 },
   ],
   maxLeverage: 30,

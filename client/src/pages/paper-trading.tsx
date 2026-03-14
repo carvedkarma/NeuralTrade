@@ -405,7 +405,7 @@ function MfeTracker({ currentPnlR, peakPnlR, giveback }: { currentPnlR: number; 
   );
 }
 
-function PositionPriceGauge({ pos, livePrice, health, isFlashing, isNew }: { pos: Position; livePrice?: number; health?: PositionHealth; isFlashing?: boolean; isNew?: boolean }) {
+function PositionPriceGauge({ pos, livePrice, health, isFlashing, isNew, isGlowing }: { pos: Position; livePrice?: number; health?: PositionHealth; isFlashing?: boolean; isNew?: boolean; isGlowing?: boolean }) {
   const { entryPrice, stopLoss, takeProfit, side } = pos;
   const currentPrice = livePrice ?? pos.currentPrice;
   if (!currentPrice || !stopLoss || !takeProfit) return null;
@@ -449,7 +449,7 @@ function PositionPriceGauge({ pos, livePrice, health, isFlashing, isNew }: { pos
     trailPct = Math.max(0, Math.min(100, ((trailPrice - lo) / range) * 100));
   }
 
-  const pulseClass = isNew
+  const pulseClass = isGlowing
     ? "border-emerald-400/70 shadow-[0_0_14px_2px_rgba(34,197,94,0.3)]"
     : isFlashing
     ? "border-cyan-400/70 shadow-[0_0_12px_2px_rgba(34,211,238,0.25)]"
@@ -659,6 +659,27 @@ function PositionPriceGauge({ pos, livePrice, health, isFlashing, isNew }: { pos
   );
 }
 
+function ScannerStatusBadge({ lastCycleTs, cycleCount }: { lastCycleTs: number; cycleCount: number }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(t);
+  }, []);
+  const isLive = lastCycleTs > 0 && now - lastCycleTs < 60000;
+
+  return (
+    <div className="flex items-center gap-1.5" data-testid="scanner-header-badge">
+      <span className={`w-2 h-2 rounded-full ${isLive ? "bg-emerald-400 animate-pulse" : "bg-muted-foreground/30"}`} />
+      <span className={`text-xs font-mono font-semibold ${isLive ? "text-emerald-400" : "text-muted-foreground/50"}`}>
+        {isLive ? "LIVE SCANNER" : "SCANNER OFFLINE"}
+      </span>
+      {cycleCount > 0 && (
+        <span className="text-[10px] font-mono text-muted-foreground/40 ml-1">({cycleCount})</span>
+      )}
+    </div>
+  );
+}
+
 export default function PaperTrading() {
   const [equityRange, setEquityRange] = useState<"7d" | "30d" | "all">("30d");
   const [livePrices, setLivePrices] = useState<Record<string, number>>({});
@@ -666,6 +687,7 @@ export default function PaperTrading() {
   const [neuralEvents, setNeuralEvents] = useState<NeuralEvent[]>([]);
   const [flashingPositions, setFlashingPositions] = useState<Set<number>>(new Set());
   const [newPositions, setNewPositions] = useState<Set<number>>(new Set());
+  const [glowPositions, setGlowPositions] = useState<Set<number>>(new Set());
   const [cycleEvents, setCycleEvents] = useState<CycleEvent[]>([]);
   const [lastCycleTs, setLastCycleTs] = useState(0);
   const [cycleCount, setCycleCount] = useState(0);
@@ -690,11 +712,9 @@ export default function PaperTrading() {
         pEnter?: number;
         cycleTs?: number;
         holdReason?: string;
-        autoTradeResult?: { opened?: boolean; positionId?: number };
       };
       if (!p.symbol) return;
 
-      const opened = p.autoTradeResult?.opened === true;
       const ev: CycleEvent = {
         ts: p.cycleTs ?? Date.now(),
         symbol: p.symbol,
@@ -703,28 +723,50 @@ export default function PaperTrading() {
         price: p.price ?? 0,
         v5Score: p.v5Score ?? null,
         pEnter: p.pEnter ?? null,
-        opened,
+        opened: false,
         holdReason: p.holdReason,
       };
 
       setCycleEvents((prev) => [ev, ...prev].slice(0, 40));
       setLastCycleTs(Date.now());
       setCycleCount((c) => c + 1);
+    });
+    return unsub;
+  }, [subscribe]);
 
-      if (opened && p.autoTradeResult?.positionId) {
-        const posId = p.autoTradeResult.positionId;
-        setNewPositions((prev) => new Set([...prev, posId]));
-        setTimeout(() => {
-          setNewPositions((prev) => {
-            const next = new Set(prev);
-            next.delete(posId);
-            return next;
-          });
-        }, 10000);
+  useEffect(() => {
+    const unsub = subscribe("TRADE_OPENED", (payload) => {
+      const p = payload as { positionId?: number; symbol?: string };
+      if (!p.positionId) return;
+      const posId = p.positionId;
 
-        queryClient.invalidateQueries({ queryKey: ["/api/paper/positions"] });
-        queryClient.invalidateQueries({ queryKey: ["/api/paper/portfolio"] });
-      }
+      setCycleEvents((prev) => {
+        const updated = [...prev];
+        const idx = updated.findIndex((e) => e.symbol === p.symbol && e.decision === "ENTER" && !e.opened);
+        if (idx >= 0) updated[idx] = { ...updated[idx], opened: true };
+        return updated;
+      });
+
+      setGlowPositions((prev) => new Set([...prev, posId]));
+      setTimeout(() => {
+        setGlowPositions((prev) => {
+          const next = new Set(prev);
+          next.delete(posId);
+          return next;
+        });
+      }, 5000);
+
+      setNewPositions((prev) => new Set([...prev, posId]));
+      setTimeout(() => {
+        setNewPositions((prev) => {
+          const next = new Set(prev);
+          next.delete(posId);
+          return next;
+        });
+      }, 10000);
+
+      queryClient.invalidateQueries({ queryKey: ["/api/paper/positions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/paper/portfolio"] });
     });
     return unsub;
   }, [subscribe]);
@@ -942,6 +984,8 @@ export default function PaperTrading() {
             )}
           </div>
 
+          <ScannerStatusBadge lastCycleTs={lastCycleTs} cycleCount={cycleCount} />
+
           <div className="ml-auto flex items-center gap-2">
             <PingBadge ping={ping} />
             <Button
@@ -1019,6 +1063,7 @@ export default function PaperTrading() {
                     health={posId > 0 ? healthMap[posId] : undefined}
                     isFlashing={posId > 0 && flashingPositions.has(posId)}
                     isNew={posId > 0 && newPositions.has(posId)}
+                    isGlowing={posId > 0 && glowPositions.has(posId)}
                   />
                 );
               })}

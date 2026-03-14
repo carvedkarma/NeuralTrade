@@ -4820,6 +4820,15 @@ export async function registerRoutes(
                 });
 
                 autoTradeResult = { opened: true, positionId: position.id };
+                broadcast("TRADE_OPENED", {
+                  symbol: t.symbol,
+                  side,
+                  positionId: position.id,
+                  entryPrice,
+                  leverage: position.leverage,
+                  stopLoss: slPrice,
+                  takeProfit: tpPrice,
+                });
                 console.log(`[Auto-Trade] Opened ${side} ${t.symbol} @ $${entryPrice} | ${position.leverage}x leverage | SL: $${slPrice.toFixed(4)} | TP: $${tpPrice.toFixed(4)} (from /api/live/trade)`);
               }
             }
