@@ -4193,6 +4193,53 @@ export async function registerRoutes(
     }
   });
   
+  app.get("/api/data/candles-history", async (req, res) => {
+    try {
+      const { symbol = "BTCUSDT", timeframe = "15m", limit = "50000", startTime, endTime } = req.query;
+      const limitNum = Math.min(Number(limit), 200000);
+      const sym = String(symbol);
+      const tf = String(timeframe);
+
+      const conditions = [eq(candles.symbol, sym), eq(candles.timeframe, tf)];
+      if (startTime) conditions.push(gte(candles.timestamp, Number(startTime)));
+      if (endTime) conditions.push(lte(candles.timestamp, Number(endTime)));
+
+      const rows = await db
+        .select({
+          timestamp: candles.timestamp,
+          open: candles.open,
+          high: candles.high,
+          low: candles.low,
+          close: candles.close,
+          volume: candles.volume,
+        })
+        .from(candles)
+        .where(and(...conditions))
+        .orderBy(asc(candles.timestamp))
+        .limit(limitNum);
+
+      const result = rows.map((r) => ({
+        timestamp: r.timestamp,
+        open: r.open,
+        high: r.high,
+        low: r.low,
+        close: r.close,
+        volume: r.volume,
+        closeTime: r.timestamp + 15 * 60 * 1000 - 1,
+        quoteVolume: 0,
+        trades: 0,
+        takerBuyBase: 0,
+        takerBuyQuote: 0,
+      }));
+
+      console.log(`[Candles History] ${sym} ${tf}: ${result.length} rows from DB`);
+      res.json({ candles: result, count: result.length, symbol: sym, timeframe: tf, source: "db" });
+    } catch (error: any) {
+      console.error("[Candles History] Error:", error.message);
+      res.status(500).json({ error: "Failed to fetch candles from database" });
+    }
+  });
+
   app.get("/api/data/orderbook", async (req, res) => {
     try {
       const { symbol = "BTCUSDT", limit = "100" } = req.query;
@@ -5050,6 +5097,34 @@ export async function registerRoutes(
     } catch (error) {
       console.error("[Neural Adjustments] Error:", error);
       res.status(500).json({ error: "Failed to get neural adjustments" });
+    }
+  });
+
+  app.get("/api/paper/open-positions-summary", async (req, res) => {
+    try {
+      const openPositions = await db
+        .select({
+          id: paperPositions.id,
+          symbol: paperPositions.symbol,
+          side: paperPositions.side,
+          entryPrice: paperPositions.entryPrice,
+          stopLoss: paperPositions.stopLoss,
+          tp2: paperPositions.tp2,
+          entryTs: paperPositions.entryTs,
+          signalConfidence: paperPositions.signalConfidence,
+        })
+        .from(paperPositions)
+        .where(eq(paperPositions.status, "OPEN"))
+        .orderBy(asc(paperPositions.entryTs));
+
+      res.json({
+        count: openPositions.length,
+        positions: openPositions,
+        symbols: openPositions.map((p) => p.symbol),
+      });
+    } catch (error: any) {
+      console.error("[Paper] open-positions-summary error:", error.message);
+      res.status(500).json({ error: "Failed to fetch open positions summary" });
     }
   });
 

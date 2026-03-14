@@ -138,13 +138,17 @@ class LearningManager:
 
             should_promote, reason = self._evaluate_promotion(symbol, result)
 
+            # Save previous deployed stats BEFORE _promote_model resets them,
+            # so _push_learning_stats can compute an accurate trend comparison.
+            prev_stats = self.deployed_stats.get(symbol)
+
             if should_promote and self.config.auto_promote:
                 self._promote_model(symbol, candidate_dir, deployed_dir)
                 log.info(f"[Learning] Model PROMOTED for {symbol}: {reason}")
             elif not should_promote:
                 log.info(f"[Learning] Model NOT promoted for {symbol}: {reason}")
 
-            self._push_learning_stats(symbol, result, should_promote, reason)
+            self._push_learning_stats(symbol, result, should_promote, reason, prev_stats=prev_stats)
 
             self.last_retrain_time[symbol] = time.time()
             return result
@@ -156,25 +160,74 @@ class LearningManager:
             result.error = str(e)
             return result
 
+    def _fetch_full_history(self, symbol: str) -> List[Dict]:
+        """Fetch full candle history from the PostgreSQL-backed DB endpoint.
+
+        Falls back to paginated Binance API calls if the DB endpoint returns
+        fewer than min_new_bars candles (e.g. symbol not yet in DB).
+        Returns candles sorted oldest-first.
+        """
+        import requests
+        base = self.replit_url.rstrip('/')
+
+        # --- Primary: local PostgreSQL DB (no 1000-bar cap) ---
+        try:
+            resp = requests.get(
+                f"{base}/api/data/candles-history",
+                params={"symbol": symbol, "timeframe": "15m", "limit": 200000},
+                timeout=60,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                candles = data.get("candles", [])
+                if len(candles) >= self.config.min_new_bars:
+                    log.info(f"[Learning] DB history: {len(candles)} candles for {symbol}")
+                    return candles
+                log.warning(f"[Learning] DB returned only {len(candles)} candles for {symbol}, trying Binance fallback")
+        except Exception as e:
+            log.warning(f"[Learning] DB history request failed for {symbol}: {e}")
+
+        # --- Fallback: paginated Binance API (8 pages × 1000 = ~83 days) ---
+        from data.pipeline import BinanceDataFetcher
+        fetcher = BinanceDataFetcher(
+            symbols=[symbol],
+            timeframes=["15m"],
+            replit_proxy_url=base,
+            use_sync=True,
+        )
+
+        all_candles: List[Dict] = []
+        end_time = None
+        pages = 8
+        for page in range(pages):
+            raw = fetcher.fetch_klines_sync(symbol, "15m", limit=1000, end_time=end_time)
+            if not raw:
+                break
+            raw_sorted = sorted(raw, key=lambda c: c["timestamp"])
+            all_candles = raw_sorted + all_candles
+            end_time = raw_sorted[0]["timestamp"] - 1
+            log.info(f"[Learning] Binance page {page+1}/{pages}: {len(raw)} candles (total so far: {len(all_candles)})")
+            if len(raw) < 990:
+                break
+
+        log.info(f"[Learning] Binance fallback total: {len(all_candles)} candles for {symbol}")
+        return all_candles
+
     def _run_training(self, symbol: str, output_dir: Path) -> RetrainResult:
         result = RetrainResult()
 
         try:
             from quick_start import FEATURE_VERSION
-            from data.pipeline import FeatureEngineer, BinanceDataFetcher
             from quick_start import train_enter_model
 
-            log.info(f"[Learning] Fetching data for {symbol}...")
-            fetcher = BinanceDataFetcher(
-                symbols=[symbol],
-                timeframes=["15m"],
-                replit_proxy_url=self.replit_url.rstrip('/'),
-                use_sync=True,
-            )
+            log.info(f"[Learning] Fetching full history for {symbol}...")
+            raw = self._fetch_full_history(symbol)
 
-            raw = fetcher.fetch_klines_sync(symbol, "15m", limit=5000)
-            if not raw or len(raw) < 500:
-                result.error = f"Insufficient data: got {len(raw) if raw else 0} candles"
+            if not raw or len(raw) < self.config.min_new_bars:
+                result.error = (
+                    f"Insufficient data: got {len(raw) if raw else 0} candles "
+                    f"(min_new_bars={self.config.min_new_bars})"
+                )
                 return result
 
             import pandas as pd
@@ -184,13 +237,13 @@ class LearningManager:
                     df[col] = df[col].astype(float)
             if 'timestamp' in df.columns:
                 df['timestamp'] = df['timestamp'].astype(int)
-            df = df.sort_values('timestamp').reset_index(drop=True)
+            df = df.sort_values('timestamp').drop_duplicates(subset=['timestamp']).reset_index(drop=True)
 
             data_cache = Path("data_cache")
             data_cache.mkdir(parents=True, exist_ok=True)
             parquet_path = data_cache / f"{symbol}_15m.parquet"
             df.to_parquet(parquet_path, index=False)
-            log.info(f"[Learning] Saved {len(df)} candles to {parquet_path}")
+            log.info(f"[Learning] Saved {len(df)} candles to {parquet_path} (oldest: {df.iloc[0]['timestamp']}, newest: {df.iloc[-1]['timestamp']})")
 
             log.info(f"[Learning] Training with {len(df)} candles for {symbol}...")
             train_result = train_enter_model(
@@ -215,6 +268,8 @@ class LearningManager:
             result.error = f"Missing training module: {e}"
         except Exception as e:
             result.error = str(e)
+            import traceback
+            traceback.print_exc()
 
         return result
 
@@ -332,10 +387,13 @@ class LearningManager:
         }
 
     def _push_learning_stats(self, symbol: str, result: RetrainResult,
-                             promoted: bool, reason: str):
+                             promoted: bool, reason: str,
+                             prev_stats: Optional[Dict] = None):
         url = f"{self.replit_url.rstrip('/')}/api/live/learning-stats"
 
-        prev = self.deployed_stats.get(symbol)
+        # Use the explicitly passed prev_stats (captured before _promote_model
+        # resets self.deployed_stats) so trend comparison is always accurate.
+        prev = prev_stats if prev_stats is not None else self.deployed_stats.get(symbol)
         trend = "Flat"
         if prev:
             if result.pf_net > prev.get('pf_net', 0) * 1.05:

@@ -43,6 +43,7 @@ import {
   FlaskConical,
   CheckCircle2,
   XCircle,
+  Lock,
 } from "lucide-react";
 import { CloseButton, PartialCloseButton, EditSLTPDialog } from "@/components/position-actions";
 import { usePingMonitor } from "@/hooks/use-ping";
@@ -424,7 +425,19 @@ function RadarIcon({ isLive }: { isLive: boolean }) {
   );
 }
 
-function AiScannerGrid({ events, lastCycleTs, cycleCount }: { events: CycleEvent[]; lastCycleTs: number; cycleCount: number }) {
+function AiScannerGrid({
+  events,
+  lastCycleTs,
+  cycleCount,
+  webOpenCount,
+  maxPositions,
+}: {
+  events: CycleEvent[];
+  lastCycleTs: number;
+  cycleCount: number;
+  webOpenCount: number;
+  maxPositions: number;
+}) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 2000);
@@ -438,6 +451,18 @@ function AiScannerGrid({ events, lastCycleTs, cycleCount }: { events: CycleEvent
   });
 
   const lastScanned = events.length > 0 ? events[0].symbol.replace("USDT", "") : null;
+
+  // Detect "portfolio full" state: how many recent SKIP events cite max positions
+  const recentEvents = Object.values(latestBySymbol).filter(
+    (ev) => now - ev.ts < 90000
+  );
+  const portfolioFullCount = recentEvents.filter(
+    (ev) => ev.holdReason?.toLowerCase().includes("max total positions")
+  ).length;
+  const portfolioFull = portfolioFullCount >= 2;
+
+  // Sync discrepancy: trainer thinks portfolio full but web app shows 0
+  const hasSyncWarning = portfolioFull && webOpenCount === 0 && isLive;
 
   return (
     <div className="rounded-lg border border-border/40 bg-black/60 overflow-hidden" data-testid="ai-scanner-grid">
@@ -453,9 +478,23 @@ function AiScannerGrid({ events, lastCycleTs, cycleCount }: { events: CycleEvent
           ) : (
             <span className="text-[10px] font-mono text-muted-foreground/40">OFFLINE</span>
           )}
+          {portfolioFull && (
+            <div className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30" data-testid="badge-portfolio-full">
+              <Lock className="w-2.5 h-2.5 text-amber-400" />
+              <span className="text-[9px] font-mono font-bold text-amber-400 tracking-wider">
+                {maxPositions}/{maxPositions} FULL
+              </span>
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-3">
-          {lastScanned && isLive && (
+          {hasSyncWarning && (
+            <div className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-orange-500/10 border border-orange-500/25 animate-pulse" data-testid="badge-sync-warning">
+              <ShieldAlert className="w-2.5 h-2.5 text-orange-400" />
+              <span className="text-[8px] font-mono text-orange-400">SYNC WARN</span>
+            </div>
+          )}
+          {lastScanned && isLive && !portfolioFull && (
             <span className="text-[10px] font-mono text-cyan-400/50 animate-pulse">
               SCANNING {lastScanned}...
             </span>
@@ -468,6 +507,15 @@ function AiScannerGrid({ events, lastCycleTs, cycleCount }: { events: CycleEvent
         </div>
       </div>
 
+      {hasSyncWarning && (
+        <div className="px-3 py-1.5 bg-orange-500/8 border-b border-orange-500/20 flex items-center gap-2">
+          <ShieldAlert className="w-3 h-3 text-orange-400 shrink-0" />
+          <span className="text-[10px] font-mono text-orange-400/80">
+            Trainer reports {maxPositions} open positions but web app shows {webOpenCount}. Restart trainer to re-sync, or positions may have closed while trainer was offline.
+          </span>
+        </div>
+      )}
+
       <div className="p-3">
         <div className="grid grid-cols-4 gap-2">
           {SCANNER_SYMBOLS.map((sym) => {
@@ -477,6 +525,7 @@ function AiScannerGrid({ events, lastCycleTs, cycleCount }: { events: CycleEvent
             const isCooldown = ev?.decision === "COOLDOWN";
             const isHold = ev?.decision === "HOLD";
             const isOpened = ev?.opened === true;
+            const isPortfolioBlock = isHold && (ev?.holdReason?.toLowerCase().includes("max total positions") ?? false);
             const shortName = sym.replace("USDT", "");
             const arrow = ev?.direction === "LONG" ? "▲" : ev?.direction === "SHORT" ? "▼" : "";
             const arrowColor = ev?.direction === "LONG" ? "text-emerald-400" : ev?.direction === "SHORT" ? "text-red-400" : "text-muted-foreground/40";
@@ -490,6 +539,8 @@ function AiScannerGrid({ events, lastCycleTs, cycleCount }: { events: CycleEvent
             } else if (isRecent && isCooldown) {
               tileStyle = "border-amber-400/40 bg-amber-500/8";
               animStyle = "tile-cooldown 1.2s ease-out";
+            } else if (isRecent && isPortfolioBlock) {
+              tileStyle = "border-amber-500/30 bg-amber-500/5 opacity-70";
             } else if (isRecent && isHold) {
               tileStyle = "border-border/15 bg-black/20 opacity-60";
             } else if (isRecent) {
@@ -512,9 +563,15 @@ function AiScannerGrid({ events, lastCycleTs, cycleCount }: { events: CycleEvent
                   </div>
                 )}
 
-                <span className={`text-[11px] font-mono font-bold ${isHold && isRecent ? "text-muted-foreground/40" : "text-foreground/80"}`}>{shortName}</span>
+                <span className={`text-[11px] font-mono font-bold ${(isHold || isPortfolioBlock) && isRecent ? "text-muted-foreground/40" : "text-foreground/80"}`}>
+                  {shortName}
+                </span>
 
-                {isRecent && isHold && (
+                {isRecent && isPortfolioBlock && (
+                  <Lock className="w-2.5 h-2.5 text-amber-500/50 my-0.5" />
+                )}
+
+                {isRecent && isHold && !isPortfolioBlock && (
                   <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/30 my-0.5" />
                 )}
 
@@ -1194,6 +1251,11 @@ export default function PaperTrading() {
     refetchInterval: 30000,
   });
 
+  const { data: openPosSummary } = useQuery<{ count: number; symbols: string[] }>({
+    queryKey: ["/api/paper/open-positions-summary"],
+    refetchInterval: 15000,
+  });
+
   useEffect(() => {
     if (!openPositions || openPositions.length === 0) {
       setHealthMap({});
@@ -1532,7 +1594,13 @@ export default function PaperTrading() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <AiScannerGrid events={cycleEvents} lastCycleTs={lastCycleTs} cycleCount={cycleCount} />
+          <AiScannerGrid
+            events={cycleEvents}
+            lastCycleTs={lastCycleTs}
+            cycleCount={cycleCount}
+            webOpenCount={openPosSummary?.count ?? 0}
+            maxPositions={4}
+          />
           <NeuralWatchPanel
             events={neuralEvents}
             monitoredPositions={openPositions?.filter(p => p.source === "v5_signal") ?? []}

@@ -1375,6 +1375,77 @@ class LiveRunner:
             return 60
         return 15 * 60
 
+    def _sync_portfolio_from_web(self, source: str = "cycle"):
+        """Reconcile in-memory portfolio against the web app's open paper positions.
+
+        Fetches /api/paper/open-positions-summary and:
+        - Adds any positions the web app shows as open that are not in memory
+        - Removes any positions that the web app considers closed (no longer in
+          the OPEN list) but are still in the in-memory portfolio
+        This prevents phantom "portfolio full" blocks caused by stale in-memory
+        state after web-app SL/TP closes or trainer restarts.
+        """
+        if not self.replit_url:
+            return
+        try:
+            import requests as _req
+            resp = _req.get(
+                f"{self.replit_url.rstrip('/')}/api/paper/open-positions-summary",
+                timeout=8,
+            )
+            if resp.status_code != 200:
+                log.warning(f"[PortfolioSync/{source}] HTTP {resp.status_code}")
+                return
+
+            data = resp.json()
+            web_positions = {p["symbol"]: p for p in data.get("positions", [])}
+            web_symbols = set(web_positions.keys())
+            mem_symbols = set(self.portfolio.open_positions.keys())
+
+            # Remove positions the web app no longer tracks as OPEN
+            stale = mem_symbols - web_symbols
+            for sym in stale:
+                pos = self.portfolio.open_positions.pop(sym, None)
+                if pos:
+                    log.info(f"[PortfolioSync/{source}] Removed stale in-memory position for {sym} (closed in web app)")
+
+            # Add positions the web app shows as OPEN but not in memory
+            from portfolio import Position as _Pos
+            new_syms = web_symbols - mem_symbols
+            for sym in new_syms:
+                wp = web_positions[sym]
+                entry_price = float(wp.get("entryPrice") or 0)
+                sl_price = float(wp.get("stopLoss") or entry_price)
+                tp_price = float(wp.get("tp2") or entry_price)
+                side = str(wp.get("side", "LONG")).upper()
+                atr = abs(entry_price - sl_price) if sl_price else entry_price * 0.005
+                risk_pct = atr / entry_price * 100 if entry_price > 0 else 1.0
+
+                pos = _Pos(
+                    symbol=sym, side=side,
+                    entry_price=entry_price,
+                    entry_time=float(wp.get("entryTs") or 0) / 1000.0,
+                    atr=atr,
+                    tp_price=tp_price,
+                    sl_price=sl_price,
+                    p_enter=float(wp.get("signalConfidence") or 0.5),
+                    size_mult=1.0,
+                    risk_pct=risk_pct,
+                    bar_index=self.cycle_count,
+                    lane="V5", horizon=96,
+                )
+                self.portfolio.open_positions[sym] = pos
+                log.info(f"[PortfolioSync/{source}] Restored {side} {sym} @ {entry_price:.2f} from web app")
+
+            if stale or new_syms:
+                log.info(f"[PortfolioSync/{source}] Sync complete: +{len(new_syms)} restored, -{len(stale)} removed. "
+                         f"In-memory: {len(self.portfolio.open_positions)} | Web: {len(web_symbols)}")
+            else:
+                log.debug(f"[PortfolioSync/{source}] In sync — {len(mem_symbols)} open positions match web app")
+
+        except Exception as e:
+            log.warning(f"[PortfolioSync/{source}] Sync failed: {e}")
+
     def run(self):
         """Main loop — runs continuously until interrupted."""
         mode_label = {"signal_only": "SIGNAL_ONLY", "paper": "PAPER", "live": "LIVE"}.get(self.execution_mode, "UNKNOWN")
@@ -1408,6 +1479,12 @@ class LiveRunner:
 
         for sym in self.symbols:
             self.cooldown_tracker[sym] = 0
+
+        # Restore portfolio state from the web app so the in-memory portfolio
+        # reflects any positions that were opened in previous runs or by the
+        # web app's paper engine while the trainer was offline.
+        if self.execution_mode == "paper" and self.record_trades:
+            self._sync_portfolio_from_web(source="startup")
 
         if self.dry_run:
             self._run_dry()
@@ -1529,6 +1606,12 @@ class LiveRunner:
         """One 15m cycle: fetch, predict, rank, execute for all symbols."""
         self.cycle_count += 1
         self.portfolio.set_bar(self.cycle_count)
+
+        # Sync portfolio state from web app every cycle in paper mode so that
+        # positions closed by the web app engine (SL/TP) are removed from
+        # the in-memory portfolio and don't phantom-block new entries.
+        if self.execution_mode == "paper" and self.record_trades:
+            self._sync_portfolio_from_web(source=f"cycle_{self.cycle_count}")
 
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
         log.info("")
