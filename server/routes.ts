@@ -22,6 +22,8 @@ import { broadcast } from "./ws";
 import * as bybitClient from "./bybit/client";
 import { executionBridge } from "./execution-bridge";
 import { openLivePosition, closeLivePosition, amendLiveSLTP, getLivePositions, getLiveBalance, isLiveTradingEnabled, getLiveConfig, setLiveTradingEnabled, updateLiveConfig, loadLiveConfig } from "./bybit/live-engine";
+import * as bitgetClient from "./bitget/client";
+import { openBitgetLivePosition, closeBitgetLivePosition, getBitgetLivePositions, getBitgetLiveBalance, isBitgetLiveTradingEnabled, getBitgetLiveConfig, setBitgetLiveTradingEnabled, updateBitgetLiveConfig, loadBitgetLiveConfig } from "./bitget/live-engine";
 import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning, loadCandleTimestamps } from "./unified-learning-controller";
 import { getLatestFeatures } from "./feature-engine";
 import { recalculatePatternLabels } from "./pattern-memory";
@@ -4814,7 +4816,30 @@ export async function registerRoutes(
         console.log(`[Auto-Trade] SKIP ${t.symbol} — invalid SL/TP from GPU trainer (sl=${t.stop_loss}, tp=${t.take_profit}, side=${side}, entry=${entryPrice})`);
         autoTradeResult = { opened: false, reason: "invalid_sl_tp" };
       } else {
-        if (isLiveTradingEnabled()) {
+        if (isBitgetLiveTradingEnabled()) {
+          try {
+            const liveResult = await openBitgetLivePosition({
+              symbol: t.symbol,
+              side,
+              entryPrice,
+              stopLoss: slPrice,
+              takeProfit: tpPrice,
+              v5Score: t.v5_score ?? 0,
+              signalConfidence: t.p_enter ?? undefined,
+            });
+
+            if (liveResult.success) {
+              autoTradeResult = { opened: true, reason: "live_bitget", liveOrderId: liveResult.orderId };
+              console.log(`[Auto-Trade → BITGET LIVE] ${side} ${t.symbol} @ $${entryPrice} | ${liveResult.leverage}x | qty=${liveResult.qty} | orderId=${liveResult.orderId}`);
+            } else {
+              autoTradeResult = { opened: false, reason: `bitget_live_failed: ${liveResult.error}` };
+              console.warn(`[Auto-Trade → BITGET LIVE] Failed ${t.symbol}: ${liveResult.error}`);
+            }
+          } catch (liveErr: any) {
+            autoTradeResult = { opened: false, reason: `bitget_live_error: ${liveErr.message}` };
+            console.error(`[Auto-Trade → BITGET LIVE] Error ${t.symbol}:`, liveErr.message);
+          }
+        } else if (isLiveTradingEnabled()) {
           try {
             const liveResult = await openLivePosition({
               symbol: t.symbol,
@@ -5676,6 +5701,10 @@ Provide your analysis in this JSON format:
     console.log(`[Live Trading] Config loaded: enabled=${getLiveConfig().enabled}`);
   });
 
+  loadBitgetLiveConfig().then(() => {
+    console.log(`[Bitget Live] Config loaded: enabled=${getBitgetLiveConfig().enabled}`);
+  });
+
   app.get("/api/bybit/status", async (_req, res) => {
     try {
       const proxyStatus = bybitClient.getProxyStatus();
@@ -5850,6 +5879,107 @@ Provide your analysis in this JSON format:
       ...executionBridge.getStatus(),
       state: executionBridge.getState(),
     });
+  });
+
+  app.post("/api/bitget/credentials", async (req, res) => {
+    try {
+      const { apiKey, secretKey, passphrase } = req.body || {};
+      if (!apiKey || !secretKey || !passphrase) {
+        return res.status(400).json({ success: false, error: "apiKey, secretKey, and passphrase are required" });
+      }
+      await bitgetClient.saveCredentials({ apiKey, secretKey, passphrase });
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.get("/api/bitget/status", async (_req, res) => {
+    try {
+      if (!bitgetClient.isConfigured()) {
+        const creds = await bitgetClient.loadCredentials();
+        if (!creds) {
+          return res.json({ configured: false, connected: false, error: "API credentials not configured" });
+        }
+      }
+      const test = await bitgetClient.testConnection();
+      res.json({
+        configured: true,
+        connected: test.success,
+        balance: test.balance,
+        error: test.error,
+        liveTradingEnabled: isBitgetLiveTradingEnabled(),
+        config: getBitgetLiveConfig(),
+      });
+    } catch (error: any) {
+      res.json({ configured: false, connected: false, error: error.message });
+    }
+  });
+
+  app.get("/api/bitget/positions", async (_req, res) => {
+    try {
+      const result = await getBitgetLivePositions();
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ positions: [], error: error.message });
+    }
+  });
+
+  app.get("/api/bitget/balance", async (_req, res) => {
+    try {
+      const result = await getBitgetLiveBalance();
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/bitget/toggle", async (req, res) => {
+    try {
+      const { enabled } = req.body;
+      if (typeof enabled !== "boolean") {
+        return res.status(400).json({ error: "enabled must be a boolean" });
+      }
+      await setBitgetLiveTradingEnabled(enabled);
+      res.json({ success: true, enabled: isBitgetLiveTradingEnabled(), config: getBitgetLiveConfig() });
+    } catch (error: any) {
+      res.status(400).json({ success: false, error: error.message });
+    }
+  });
+
+  app.patch("/api/bitget/config", async (req, res) => {
+    try {
+      const { riskPerTradePct, maxDailyLossUsdt } = req.body;
+      const updates: any = {};
+      if (riskPerTradePct !== undefined) {
+        const val = Number(riskPerTradePct);
+        if (!Number.isFinite(val) || val <= 0 || val > 5) {
+          return res.status(400).json({ success: false, error: "riskPerTradePct must be between 0 and 5" });
+        }
+        updates.riskPerTradePct = val;
+      }
+      if (maxDailyLossUsdt !== undefined) {
+        const val = Number(maxDailyLossUsdt);
+        if (!Number.isFinite(val) || val <= 0 || val > 100000) {
+          return res.status(400).json({ success: false, error: "maxDailyLossUsdt must be between 0 and 100000" });
+        }
+        updates.maxDailyLossUsdt = val;
+      }
+      await updateBitgetLiveConfig(updates);
+      res.json({ success: true, config: getBitgetLiveConfig() });
+    } catch (error: any) {
+      res.status(400).json({ success: false, error: error.message });
+    }
+  });
+
+  app.post("/api/bitget/close/:symbol", async (req, res) => {
+    try {
+      const { symbol } = req.params;
+      const result = await closeBitgetLivePosition(symbol);
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
   });
 
   return httpServer;

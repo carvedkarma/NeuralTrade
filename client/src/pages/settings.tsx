@@ -17,6 +17,10 @@ import {
   CheckCircle,
   XCircle,
   Loader2,
+  Key,
+  Eye,
+  EyeOff,
+  DollarSign,
 } from "lucide-react";
 import { TRADING_SYMBOLS } from "@shared/symbols";
 
@@ -27,6 +31,14 @@ export default function SettingsPage() {
   const [riskPct, setRiskPct] = useState<number>(0);
   const [liveRiskPct, setLiveRiskPct] = useState<number>(0.5);
   const [maxDailyLoss, setMaxDailyLoss] = useState<number>(500);
+
+  const [bgApiKey, setBgApiKey] = useState("");
+  const [bgSecretKey, setBgSecretKey] = useState("");
+  const [bgPassphrase, setBgPassphrase] = useState("");
+  const [showBgSecret, setShowBgSecret] = useState(false);
+  const [showBgPassphrase, setShowBgPassphrase] = useState(false);
+  const [bgLiveRiskPct, setBgLiveRiskPct] = useState<number>(0.5);
+  const [bgMaxDailyLoss, setBgMaxDailyLoss] = useState<number>(500);
 
   const { data: systemStatus } = useQuery<any>({
     queryKey: ["/api/system/status"],
@@ -67,6 +79,36 @@ export default function SettingsPage() {
       setMaxDailyLoss(bybitStatus.config.maxDailyLossUsdt ?? 500);
     }
   }, [bybitStatus]);
+
+  const { data: bitgetStatus, refetch: refetchBitget } = useQuery<any>({
+    queryKey: ["/api/bitget/status"],
+    refetchInterval: 30000,
+  });
+
+  const saveBitgetCredsMutation = useMutation({
+    mutationFn: () => apiRequest("POST", "/api/bitget/credentials", { apiKey: bgApiKey, secretKey: bgSecretKey, passphrase: bgPassphrase }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bitget/status"] });
+      refetchBitget();
+      setBgApiKey("");
+      setBgSecretKey("");
+      setBgPassphrase("");
+    },
+  });
+
+  const saveBitgetConfigMutation = useMutation({
+    mutationFn: () => apiRequest("PATCH", "/api/bitget/config", { riskPerTradePct: bgLiveRiskPct, maxDailyLossUsdt: bgMaxDailyLoss }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/bitget/status"] });
+    },
+  });
+
+  useEffect(() => {
+    if (bitgetStatus?.config) {
+      setBgLiveRiskPct(bitgetStatus.config.riskPerTradePct ?? 0.5);
+      setBgMaxDailyLoss(bitgetStatus.config.maxDailyLossUsdt ?? 500);
+    }
+  }, [bitgetStatus]);
 
   const { data: prices } = useQuery<any>({
     queryKey: ["/api/market/prices"],
@@ -307,6 +349,93 @@ export default function SettingsPage() {
                 ? `Execution Service connected — ${bybitStatus.executionService.positionCount} positions, last push ${Math.round((bybitStatus.executionService.lastPushAgo || 0) / 1000)}s ago`
                 : "Execution Service not connected — start GPU trainer with Bybit keys to enable"}
             </p>
+          </div>
+        )}
+      </div>
+
+      <div className={`glass-card rounded-md p-4 ${bitgetStatus?.connected ? "glow-green" : ""}`} data-testid="bitget-settings-card">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Key className="w-5 h-5 text-orange-400" />
+            <h2 className="font-semibold text-lg">Exchange Connection (Bitget)</h2>
+          </div>
+          {bitgetStatus?.connected ? (
+            <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30" data-testid="bitget-connected-badge">
+              <CheckCircle className="w-3 h-3 mr-1" /> Connected
+            </Badge>
+          ) : bitgetStatus?.configured ? (
+            <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/30">
+              <AlertTriangle className="w-3 h-3 mr-1" /> Configured
+            </Badge>
+          ) : (
+            <Badge className="bg-gray-500/20 text-gray-400 border-gray-500/30">Not Configured</Badge>
+          )}
+        </div>
+
+        {bitgetStatus?.connected && (
+          <div className="mb-3 text-sm text-emerald-400/70 flex items-center gap-1">
+            <DollarSign className="w-3.5 h-3.5" /> Available Balance: ${parseFloat(bitgetStatus.balance || "0").toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </div>
+        )}
+
+        {bitgetStatus?.error && !bitgetStatus?.connected && (
+          <p className="text-sm text-red-400 mb-3" data-testid="bitget-error">{bitgetStatus.error}</p>
+        )}
+
+        <div className="space-y-3 mb-3">
+          <div>
+            <Label className="text-sm text-muted-foreground">API Key</Label>
+            <Input value={bgApiKey} onChange={(e) => setBgApiKey(e.target.value)} placeholder={bitgetStatus?.configured ? "••••••••" : "Enter Bitget API Key"} data-testid="input-bitget-api-key" />
+          </div>
+          <div>
+            <Label className="text-sm text-muted-foreground">Secret Key</Label>
+            <div className="relative">
+              <Input type={showBgSecret ? "text" : "password"} value={bgSecretKey} onChange={(e) => setBgSecretKey(e.target.value)} placeholder={bitgetStatus?.configured ? "••••••••" : "Enter Bitget Secret Key"} data-testid="input-bitget-secret-key" />
+              <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onClick={() => setShowBgSecret(!showBgSecret)}>
+                {showBgSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+          <div>
+            <Label className="text-sm text-muted-foreground">Passphrase</Label>
+            <div className="relative">
+              <Input type={showBgPassphrase ? "text" : "password"} value={bgPassphrase} onChange={(e) => setBgPassphrase(e.target.value)} placeholder={bitgetStatus?.configured ? "••••••••" : "Enter Bitget Passphrase"} data-testid="input-bitget-passphrase" />
+              <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onClick={() => setShowBgPassphrase(!showBgPassphrase)}>
+                {showBgPassphrase ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+          <Button
+            onClick={() => saveBitgetCredsMutation.mutate()}
+            disabled={saveBitgetCredsMutation.isPending || !bgApiKey || !bgSecretKey || !bgPassphrase}
+            data-testid="button-save-bitget-creds"
+          >
+            {saveBitgetCredsMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Key className="w-4 h-4 mr-1" />}
+            {saveBitgetCredsMutation.isPending ? "Saving..." : "Save Bitget Credentials"}
+          </Button>
+        </div>
+
+        {bitgetStatus?.connected && (
+          <div className="space-y-3 border-t border-border/20 pt-3">
+            <h3 className="text-sm font-medium">Bitget Live Trading Config</h3>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label className="text-xs text-muted-foreground">Risk Per Trade (%)</Label>
+                <Input type="number" step={0.1} min={0.1} max={5} value={bgLiveRiskPct} onChange={(e) => setBgLiveRiskPct(parseFloat(e.target.value) || 0.5)} data-testid="input-bitget-risk" />
+              </div>
+              <div>
+                <Label className="text-xs text-muted-foreground">Max Daily Loss (USDT)</Label>
+                <Input type="number" step={50} min={50} max={100000} value={bgMaxDailyLoss} onChange={(e) => setBgMaxDailyLoss(parseFloat(e.target.value) || 500)} data-testid="input-bitget-daily-loss" />
+              </div>
+            </div>
+            <Button
+              size="sm"
+              onClick={() => saveBitgetConfigMutation.mutate()}
+              disabled={saveBitgetConfigMutation.isPending}
+              data-testid="button-save-bitget-config"
+            >
+              {saveBitgetConfigMutation.isPending ? "Saving..." : "Save Bitget Config"}
+            </Button>
           </div>
         )}
       </div>

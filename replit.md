@@ -8,7 +8,7 @@ Preferred communication style: Simple, everyday language.
 
 ## System Architecture
 
-### Frontend (6-Page Trading Terminal)
+### Frontend (8-Page Trading Terminal)
 The frontend is built with React, TypeScript, and Vite, utilizing `shadcn/ui` (Radix UI, Tailwind CSS) for UI components and Recharts for data visualization. The design adheres to a dark navy theme with distinct neon accents.
 
 **Core Pages:**
@@ -17,7 +17,9 @@ The frontend is built with React, TypeScript, and Vite, utilizing `shadcn/ui` (R
 -   **Paper Trading:** Portfolio metrics, equity curve, open/closed positions, health gauges, neural status, MFE tracker, breakeven indicator, adaptive trail visualization, configuration.
 -   **Analytics:** Performance metrics, equity curves, rolling performance, hourly heatmaps, per-symbol breakdowns, advanced analytics.
 -   **Training Monitor:** Visualizes live GPU training progress, status, model knowledge, loss curves, action accuracy, walk-forward validation.
--   **Settings:** Manages GPU connection, account configuration, model information, risk parameters, data freshness.
+-   **Bitget Trading:** Live Bitget exchange connection, positions table, balance overview, trading toggle, recent V5 signals, risk config display.
+-   **Trade History:** Complete trade history with filtering and export.
+-   **Settings:** Manages GPU connection, Bybit connection, Bitget credentials & config, account configuration, model information, risk parameters, data freshness.
 
 ### Backend (Node.js + Express + TypeScript)
 The backend provides API routes and services to support the frontend and interact with external systems.
@@ -28,6 +30,7 @@ The backend provides API routes and services to support the frontend and interac
 -   **Live Candle Sync:** Synchronizes real-time 15-minute candle data.
 -   **Paper Trading Engine:** Simulates trades, monitors positions, manages SL/TP, and applies neural position management strategies (direction flip exit, MFE protection, confidence decay tightening, breakeven automation, adaptive trailing).
 -   **Execution Service Bridge:** Caches execution state and monitors connection status from the GPU trainer's execution service.
+-   **Bitget Client & Live Engine:** Interfaces with the Bitget V2 REST API for live trading operations (HMAC-SHA256 auth, credentials stored in DB settings table). Auto-trade signals route through Bitget when enabled (takes priority over Bybit).
 -   **Bybit Client & Live Engine:** Interfaces with the Bybit V5 REST API for live trading operations.
 -   **WebSocket Server:** Enables real-time event streaming for continuous updates.
 

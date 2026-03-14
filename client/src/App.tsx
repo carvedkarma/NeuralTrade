@@ -11,6 +11,7 @@ import Analytics from "@/pages/analytics";
 import TrainingMonitor from "@/pages/training-monitor";
 import TradeHistory from "@/pages/trade-history";
 import SettingsPage from "@/pages/settings";
+import BitgetTrading from "@/pages/bitget-trading";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -19,6 +20,7 @@ function Router() {
       <Switch>
         <Route path="/" component={CommandCenter} />
         <Route path="/live" component={LiveTrading} />
+        <Route path="/bitget" component={BitgetTrading} />
         <Route path="/paper" component={PaperTrading} />
         <Route path="/trade-history" component={TradeHistory} />
         <Route path="/analytics" component={Analytics} />

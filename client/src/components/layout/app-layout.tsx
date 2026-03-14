@@ -12,6 +12,7 @@ import {
   Radio,
   Brain,
   ClipboardList,
+  ArrowRightLeft,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -27,6 +28,7 @@ import RiskAlertBar from "@/components/risk-alert-bar";
 const NAV_ITEMS = [
   { path: "/", label: "Command Center", icon: LayoutDashboard },
   { path: "/live", label: "Live Trading", icon: Activity },
+  { path: "/bitget", label: "Bitget Trading", icon: ArrowRightLeft },
   { path: "/paper", label: "Paper Trading", icon: FileText },
   { path: "/trade-history", label: "Trade History", icon: ClipboardList },
   { path: "/analytics", label: "Analytics", icon: BarChart3 },
