@@ -173,10 +173,12 @@ export default function BitgetTrading() {
       subscribe("LIVE_TRADE_OPEN", () => {
         queryClient.invalidateQueries({ queryKey: ["/api/bitget/positions"] });
         queryClient.invalidateQueries({ queryKey: ["/api/bitget/balance"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/live/trades"] });
       }),
       subscribe("LIVE_TRADE_CLOSE", () => {
         queryClient.invalidateQueries({ queryKey: ["/api/bitget/positions"] });
         queryClient.invalidateQueries({ queryKey: ["/api/bitget/balance"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/live/trades"] });
       }),
     ];
     return () => unsubs.forEach((u) => u());
@@ -239,7 +241,7 @@ export default function BitgetTrading() {
           <Button
             size="sm"
             className={isLiveEnabled
-              ? "bg-red-600 hover:bg-red-700 text-white"
+              ? "bg-red-600 hover:bg-red-700 text-white animate-pulse"
               : "bg-emerald-600 hover:bg-emerald-700 text-white"
             }
             onClick={() => {
