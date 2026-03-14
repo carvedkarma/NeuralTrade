@@ -712,9 +712,11 @@ export default function PaperTrading() {
         pEnter?: number;
         cycleTs?: number;
         holdReason?: string;
+        autoTradeResult?: { opened?: boolean; positionId?: number };
       };
       if (!p.symbol) return;
 
+      const openedFromCycle = p.autoTradeResult?.opened === true;
       const ev: CycleEvent = {
         ts: p.cycleTs ?? Date.now(),
         symbol: p.symbol,
@@ -723,13 +725,27 @@ export default function PaperTrading() {
         price: p.price ?? 0,
         v5Score: p.v5Score ?? null,
         pEnter: p.pEnter ?? null,
-        opened: false,
+        opened: openedFromCycle,
         holdReason: p.holdReason,
       };
 
       setCycleEvents((prev) => [ev, ...prev].slice(0, 40));
       setLastCycleTs(Date.now());
       setCycleCount((c) => c + 1);
+
+      if (openedFromCycle && p.autoTradeResult?.positionId) {
+        const posId = p.autoTradeResult.positionId;
+        setGlowPositions((prev) => new Set([...prev, posId]));
+        setTimeout(() => {
+          setGlowPositions((prev) => { const n = new Set(prev); n.delete(posId); return n; });
+        }, 5000);
+        setNewPositions((prev) => new Set([...prev, posId]));
+        setTimeout(() => {
+          setNewPositions((prev) => { const n = new Set(prev); n.delete(posId); return n; });
+        }, 10000);
+        queryClient.invalidateQueries({ queryKey: ["/api/paper/positions"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/paper/portfolio"] });
+      }
     });
     return unsub;
   }, [subscribe]);
@@ -740,6 +756,8 @@ export default function PaperTrading() {
       if (!p.positionId) return;
       const posId = p.positionId;
 
+      if (newPositions.has(posId)) return;
+
       setCycleEvents((prev) => {
         const updated = [...prev];
         const idx = updated.findIndex((e) => e.symbol === p.symbol && e.decision === "ENTER" && !e.opened);
@@ -749,27 +767,19 @@ export default function PaperTrading() {
 
       setGlowPositions((prev) => new Set([...prev, posId]));
       setTimeout(() => {
-        setGlowPositions((prev) => {
-          const next = new Set(prev);
-          next.delete(posId);
-          return next;
-        });
+        setGlowPositions((prev) => { const n = new Set(prev); n.delete(posId); return n; });
       }, 5000);
 
       setNewPositions((prev) => new Set([...prev, posId]));
       setTimeout(() => {
-        setNewPositions((prev) => {
-          const next = new Set(prev);
-          next.delete(posId);
-          return next;
-        });
+        setNewPositions((prev) => { const n = new Set(prev); n.delete(posId); return n; });
       }, 10000);
 
       queryClient.invalidateQueries({ queryKey: ["/api/paper/positions"] });
       queryClient.invalidateQueries({ queryKey: ["/api/paper/portfolio"] });
     });
     return unsub;
-  }, [subscribe]);
+  }, [subscribe, newPositions]);
 
   useEffect(() => {
     const unsub = subscribe("TRADE_UPDATE", (payload) => {
