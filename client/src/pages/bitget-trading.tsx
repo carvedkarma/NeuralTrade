@@ -16,6 +16,9 @@ import {
   RefreshCw,
   XCircle,
   AlertTriangle,
+  CheckCircle,
+  Copy,
+  User,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -267,6 +270,50 @@ export default function BitgetTrading() {
           </Button>
         </div>
       </div>
+
+      {isConnected && (
+        <div className="glass-card rounded-md p-3 flex flex-wrap items-center gap-x-6 gap-y-2" data-testid="bitget-account-details">
+          <div className="flex items-center gap-1.5">
+            <CheckCircle className="w-4 h-4 text-emerald-400" />
+            <span className="text-xs font-medium text-emerald-400">Account Verified</span>
+          </div>
+          {bitgetStatus?.uid && (
+            <div className="flex items-center gap-1.5">
+              <User className="w-3.5 h-3.5 text-muted-foreground" />
+              <span className="text-xs text-muted-foreground">UID:</span>
+              <span className="text-xs number-mono font-medium" data-testid="text-bitget-uid">{bitgetStatus.uid}</span>
+              <button
+                type="button"
+                className="text-muted-foreground hover:text-foreground transition-colors"
+                onClick={() => {
+                  navigator.clipboard.writeText(bitgetStatus.uid);
+                  toast({ title: "UID copied" });
+                }}
+                data-testid="button-copy-uid"
+              >
+                <Copy className="w-3 h-3" />
+              </button>
+            </div>
+          )}
+          {bitgetStatus?.apiKeyHint && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-muted-foreground">API Key:</span>
+              <span className="text-xs number-mono font-medium" data-testid="text-bitget-api-hint">{bitgetStatus.apiKeyHint}</span>
+            </div>
+          )}
+          <div className="flex items-center gap-1.5">
+            <Badge className="bg-cyan-500/20 text-cyan-400 border-cyan-500/30 text-[10px] px-1.5 py-0" data-testid="badge-account-type">USDT-FUTURES</Badge>
+          </div>
+          {bitgetStatus?.verifiedAt && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-muted-foreground">Verified:</span>
+              <span className="text-xs text-muted-foreground number-mono" data-testid="text-verified-at">
+                {new Date(bitgetStatus.verifiedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Card className="glass-card" data-testid="card-equity">

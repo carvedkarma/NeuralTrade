@@ -5903,6 +5903,10 @@ Provide your analysis in this JSON format:
         }
       }
       const test = await bitgetClient.testConnection();
+      let userInfo: any = {};
+      if (test.success) {
+        userInfo = await bitgetClient.getUserInfo();
+      }
       res.json({
         configured: true,
         connected: test.success,
@@ -5910,6 +5914,12 @@ Provide your analysis in this JSON format:
         error: test.error,
         liveTradingEnabled: isBitgetLiveTradingEnabled(),
         config: getBitgetLiveConfig(),
+        apiKeyHint: bitgetClient.getMaskedApiKey(),
+        uid: userInfo.uid || null,
+        email: userInfo.email || null,
+        userType: userInfo.userType || null,
+        regisTime: userInfo.regisTime || null,
+        verifiedAt: test.success ? Date.now() : null,
       });
     } catch (error: any) {
       res.json({ configured: false, connected: false, error: error.message });

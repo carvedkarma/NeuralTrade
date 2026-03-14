@@ -171,6 +171,30 @@ export async function testConnection(): Promise<{ success: boolean; error?: stri
   }
 }
 
+export function getMaskedApiKey(): string | null {
+  if (!_cachedCredentials) return null;
+  const key = _cachedCredentials.apiKey;
+  if (key.length <= 8) return key.slice(0, 4) + "****";
+  return key.slice(0, 8) + "****";
+}
+
+export async function getUserInfo(): Promise<{ uid?: string; email?: string; userType?: string; regisTime?: string; error?: string }> {
+  try {
+    const resp = await request<any>("GET", "/api/v2/user/info");
+    if (resp.code === "00000" && resp.data) {
+      return {
+        uid: resp.data.userId || resp.data.uid,
+        email: resp.data.email,
+        userType: resp.data.userType,
+        regisTime: resp.data.regisTime,
+      };
+    }
+    return { error: `getUserInfo failed: ${resp.msg}` };
+  } catch (err: any) {
+    return { error: err.message };
+  }
+}
+
 export async function getServerTime(): Promise<BitgetResponse<{ serverTime: string }>> {
   const res = await fetch(`${BITGET_BASE_URL}/api/v2/public/time`, {
     signal: AbortSignal.timeout(10000),
