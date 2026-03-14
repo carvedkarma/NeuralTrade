@@ -30,6 +30,10 @@ import {
   ShieldCheck,
   ArrowUpDown,
   Trash2,
+  Terminal,
+  Zap,
+  Eye,
+  ChevronRight,
 } from "lucide-react";
 import { CloseButton, PartialCloseButton, EditSLTPDialog } from "@/components/position-actions";
 import { usePingMonitor } from "@/hooks/use-ping";
@@ -113,6 +117,15 @@ interface PositionHealth {
   latestAdjustment: string | null;
 }
 
+interface NeuralEvent {
+  ts: number;
+  symbol: string;
+  side: string;
+  adjustmentType: string;
+  reason?: string;
+  positionId?: number;
+}
+
 function formatUsd(value: number): string {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -153,16 +166,85 @@ function formatPrice(price: number): string {
   return price.toFixed(6);
 }
 
-const NEURAL_ADJUSTMENT_LABELS: Record<string, { label: string; color: string }> = {
-  BREAKEVEN: { label: "BE Set", color: "text-amber-400" },
-  TRAIL_TIGHTEN: { label: "Trail Tight", color: "text-cyan-400" },
-  TRAIL_WIDEN: { label: "Trail Wide", color: "text-blue-400" },
-  DIRECTION_FLIP_EXIT: { label: "Flip Exit", color: "text-red-400" },
-  CONFIDENCE_DECAY_EXIT: { label: "Decay Exit", color: "text-orange-400" },
-  CONFIDENCE_DECAY_TIGHTEN: { label: "Decay Tight", color: "text-orange-400" },
-  MFE_PROTECTION_EXIT: { label: "MFE Lock", color: "text-emerald-400" },
-  ADAPTIVE_TRAIL: { label: "Adapt Trail", color: "text-purple-400" },
+const NEURAL_ADJUSTMENT_LABELS: Record<string, { label: string; color: string; termColor: string }> = {
+  BREAKEVEN: { label: "BE Set", color: "text-amber-400", termColor: "text-amber-400" },
+  TRAIL_TIGHTEN: { label: "Trail Tight", color: "text-cyan-400", termColor: "text-cyan-400" },
+  TRAIL_WIDEN: { label: "Trail Wide", color: "text-blue-400", termColor: "text-blue-400" },
+  DIRECTION_FLIP_EXIT: { label: "Flip Exit", color: "text-red-400", termColor: "text-red-400" },
+  CONFIDENCE_DECAY_EXIT: { label: "Decay Exit", color: "text-orange-400", termColor: "text-orange-400" },
+  CONFIDENCE_DECAY_TIGHTEN: { label: "Decay Tight", color: "text-orange-400", termColor: "text-orange-400" },
+  MFE_PROTECTION_EXIT: { label: "MFE Lock", color: "text-emerald-400", termColor: "text-emerald-400" },
+  ADAPTIVE_TRAIL: { label: "Adapt Trail", color: "text-purple-400", termColor: "text-purple-400" },
 };
+
+function NeuralMonitorFeed({
+  events,
+  monitoredCount,
+}: {
+  events: NeuralEvent[];
+  monitoredCount: number;
+}) {
+  const isActive = events.length > 0 && Date.now() - events[0].ts < 60000;
+
+  return (
+    <div className="rounded-lg border border-border/40 bg-black/60 overflow-hidden" data-testid="neural-monitor-feed">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border/30 bg-black/40">
+        <div className="flex items-center gap-2">
+          <Terminal className="w-3.5 h-3.5 text-emerald-400/80" />
+          <span className="text-[11px] font-mono font-semibold text-emerald-400/90 tracking-wider uppercase">
+            Neural Position Monitor
+          </span>
+          <span
+            className={`w-1.5 h-1.5 rounded-full ${isActive ? "bg-emerald-400 animate-pulse" : "bg-emerald-400/30"}`}
+          />
+        </div>
+        <div className="flex items-center gap-3">
+          {monitoredCount > 0 && (
+            <span className="text-[10px] font-mono text-emerald-400/60 flex items-center gap-1">
+              <Eye className="w-3 h-3" />
+              watching {monitoredCount}
+            </span>
+          )}
+          {events.length === 0 && (
+            <span className="text-[10px] font-mono text-muted-foreground/40">no activity</span>
+          )}
+        </div>
+      </div>
+
+      <div className="font-mono text-[10px] leading-5 max-h-[140px] overflow-y-auto px-3 py-2 space-y-0.5">
+        {events.length === 0 ? (
+          <div className="text-muted-foreground/30 py-2 text-center">
+            Waiting for neural adjustments...
+          </div>
+        ) : (
+          events.map((ev, i) => {
+            const adj = NEURAL_ADJUSTMENT_LABELS[ev.adjustmentType];
+            const ts = new Date(ev.ts).toLocaleTimeString("en-US", {
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+              hour12: false,
+            });
+            return (
+              <div key={i} className={`flex items-start gap-2 ${i === 0 ? "opacity-100" : "opacity-60"}`}>
+                <span className="text-muted-foreground/40 shrink-0 w-16">{ts}</span>
+                <ChevronRight className="w-3 h-3 text-emerald-400/40 shrink-0 mt-0.5" />
+                <span className="text-cyan-400/80 shrink-0">{ev.symbol}</span>
+                <span className={`shrink-0 ${ev.side === "LONG" ? "text-emerald-400/70" : "text-red-400/70"}`}>
+                  {ev.side}
+                </span>
+                <span className="text-muted-foreground/40">→</span>
+                <span className={`shrink-0 font-semibold ${adj?.termColor ?? "text-white/70"}`}>
+                  {adj?.label ?? ev.adjustmentType}
+                </span>
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
 
 function HealthGauge({ score, riskLevel }: { score: number; riskLevel: string }) {
   const color = score >= 70 ? "text-emerald-400" : score >= 45 ? "text-amber-400" : score >= 25 ? "text-orange-400" : "text-red-400";
@@ -217,7 +299,7 @@ function MfeTracker({ currentPnlR, peakPnlR, giveback }: { currentPnlR: number; 
   );
 }
 
-function PositionPriceGauge({ pos, livePrice, health }: { pos: Position; livePrice?: number; health?: PositionHealth }) {
+function PositionPriceGauge({ pos, livePrice, health, isFlashing }: { pos: Position; livePrice?: number; health?: PositionHealth; isFlashing?: boolean }) {
   const { entryPrice, stopLoss, takeProfit, side } = pos;
   const currentPrice = livePrice ?? pos.currentPrice;
   if (!currentPrice || !stopLoss || !takeProfit) return null;
@@ -253,7 +335,7 @@ function PositionPriceGauge({ pos, livePrice, health }: { pos: Position; livePri
   const posId = typeof pos.id === "number" ? pos.id : parseInt(String(pos.id ?? "0"));
 
   const healthScore = health?.score ?? null;
-  const isBreakeven = stopLoss != null && Math.abs(stopLoss - entryPrice) / entryPrice < 0.001;
+  const isBreakeven = stopLoss != null && Math.abs(stopLoss - entryPrice) / entryPrice < 0.005;
 
   const trailPrice = pos.trailPrice;
   let trailPct: number | null = null;
@@ -261,18 +343,24 @@ function PositionPriceGauge({ pos, livePrice, health }: { pos: Position; livePri
     trailPct = Math.max(0, Math.min(100, ((trailPrice - lo) / range) * 100));
   }
 
-  const pulseClass =
-    healthScore !== null && healthScore < 15
-      ? "animate-pulse border-red-500/60"
-      : healthScore !== null && healthScore < 30
-      ? "animate-pulse border-amber-500/50"
-      : "border-border/50";
+  const pulseClass = isFlashing
+    ? "border-cyan-400/70 shadow-[0_0_12px_2px_rgba(34,211,238,0.25)]"
+    : healthScore !== null && healthScore < 15
+    ? "animate-pulse border-red-500/60"
+    : healthScore !== null && healthScore < 30
+    ? "animate-pulse border-amber-500/50"
+    : "border-border/50";
 
   const latestAdj = health?.latestAdjustment;
   const adjInfo = latestAdj ? NEURAL_ADJUSTMENT_LABELS[latestAdj] : null;
 
+  const slDistDisplay = isBreakeven ? "BE" : `${slDist.toFixed(0)}%`;
+
   return (
-    <div className={`glass-card rounded-lg border p-3 space-y-3 ${pulseClass}`} data-testid={`position-gauge-${pos.symbol}`}>
+    <div
+      className={`glass-card rounded-lg border p-3 space-y-3 transition-all duration-500 ${pulseClass}`}
+      data-testid={`position-gauge-${pos.symbol}`}
+    >
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-semibold text-sm">{pos.symbol}</span>
@@ -291,13 +379,21 @@ function PositionPriceGauge({ pos, livePrice, health }: { pos: Position; livePri
             </Badge>
           )}
           {isBreakeven && (
-            <Badge variant="outline" className="text-amber-400 border-amber-400/30 text-[10px] px-1.5" data-testid="badge-breakeven">
-              <Shield className="w-2.5 h-2.5 mr-0.5" />BE
+            <Badge variant="outline" className="text-amber-400 border-amber-400/30 text-[10px] px-1.5 gap-1" data-testid="badge-breakeven">
+              <Shield className="w-2.5 h-2.5" />
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+              BE Set
             </Badge>
           )}
-          {adjInfo && (
+          {adjInfo && !isBreakeven && (
             <Badge variant="outline" className={`${adjInfo.color} border-current/30 text-[10px] px-1.5`} data-testid="badge-neural-status">
               <Brain className="w-2.5 h-2.5 mr-0.5" />{adjInfo.label}
+            </Badge>
+          )}
+          {isFlashing && (
+            <Badge className="no-default-hover-elevate no-default-active-elevate text-[10px] bg-cyan-500/20 text-cyan-300 border border-cyan-400/40 px-1.5 gap-1 animate-pulse" data-testid="badge-monitor-active">
+              <Zap className="w-2.5 h-2.5" />
+              ADJUSTING
             </Badge>
           )}
         </div>
@@ -400,8 +496,8 @@ function PositionPriceGauge({ pos, livePrice, health }: { pos: Position; livePri
         <div className="flex gap-3 flex-wrap">
           <div>
             <span className="text-muted-foreground">SL Dist: </span>
-            <span className={`number-mono ${slDist < 30 ? "text-red-400 font-semibold" : "text-muted-foreground"}`}>
-              {slDist.toFixed(0)}%
+            <span className={`number-mono ${isBreakeven ? "text-amber-400 font-semibold" : slDist < 30 ? "text-red-400 font-semibold" : "text-muted-foreground"}`}>
+              {slDistDisplay}
             </span>
           </div>
           <div>
@@ -453,12 +549,45 @@ export default function PaperTrading() {
   const [equityRange, setEquityRange] = useState<"7d" | "30d" | "all">("30d");
   const [livePrices, setLivePrices] = useState<Record<string, number>>({});
   const [healthMap, setHealthMap] = useState<Record<number, PositionHealth>>({});
+  const [neuralEvents, setNeuralEvents] = useState<NeuralEvent[]>([]);
+  const [flashingPositions, setFlashingPositions] = useState<Set<number>>(new Set());
   const { subscribe } = useTradingWs();
   const ping = usePingMonitor();
 
   useEffect(() => {
     const unsub = subscribe("PRICE_TICK", (payload) => {
       setLivePrices(payload as Record<string, number>);
+    });
+    return unsub;
+  }, [subscribe]);
+
+  useEffect(() => {
+    const unsub = subscribe("TRADE_UPDATE", (payload) => {
+      const p = payload as { positionId?: number; symbol?: string; side?: string; adjustmentType?: string; action?: string };
+      if (p.action === "NEURAL_ADJUST" && p.adjustmentType && p.symbol) {
+        const ev: NeuralEvent = {
+          ts: Date.now(),
+          symbol: p.symbol,
+          side: (p.side as string) ?? "UNKNOWN",
+          adjustmentType: p.adjustmentType,
+          positionId: p.positionId,
+        };
+        setNeuralEvents((prev) => [ev, ...prev].slice(0, 20));
+
+        if (p.positionId) {
+          const posId = p.positionId;
+          setFlashingPositions((prev) => new Set([...prev, posId]));
+          setTimeout(() => {
+            setFlashingPositions((prev) => {
+              const next = new Set(prev);
+              next.delete(posId);
+              return next;
+            });
+          }, 3000);
+        }
+
+        queryClient.invalidateQueries({ queryKey: ["/api/paper/positions"] });
+      }
     });
     return unsub;
   }, [subscribe]);
@@ -694,7 +823,12 @@ export default function PaperTrading() {
             )}
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
+          <NeuralMonitorFeed
+            events={neuralEvents}
+            monitoredCount={openPositions?.filter(p => p.source === "v5_signal").length ?? 0}
+          />
+
           {(!openPositions || openPositions.length === 0) ? (
             <p className="text-sm text-muted-foreground text-center py-8" data-testid="text-no-open-positions">
               No open positions
@@ -709,6 +843,7 @@ export default function PaperTrading() {
                     pos={pos}
                     livePrice={livePrices[pos.symbol]}
                     health={posId > 0 ? healthMap[posId] : undefined}
+                    isFlashing={posId > 0 && flashingPositions.has(posId)}
                   />
                 );
               })}

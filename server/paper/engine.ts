@@ -1912,14 +1912,15 @@ export async function neuralPositionManager(
 
   if (pHold > 0.6 && pnlR >= 0.5) {
     const config = getConfig();
-    const feeBuffer = position.entryPrice * (getTotalCostsPct() / 100) * 1.2;
+    const feeBuffer = position.entryPrice * getTotalCostsPct() * 1.2;
     const breakevenSl = sideIsLong
       ? position.entryPrice + feeBuffer + (position.entryPrice * 0.001)
       : position.entryPrice - feeBuffer - (position.entryPrice * 0.001);
     const currentSl = position.stopLoss ?? 0;
+    const BE_EPS = 1e-4;
     const shouldTighten = sideIsLong
-      ? breakevenSl > currentSl
-      : breakevenSl < currentSl;
+      ? breakevenSl > currentSl + BE_EPS
+      : breakevenSl < currentSl - BE_EPS;
 
     if (shouldTighten) {
       const reason = `Confidence decay: p_hold=${pHold.toFixed(3)} (model says HOLD now) while position at ${pnlR.toFixed(2)}R. Moving SL to breakeven+buffer.`;
@@ -1936,12 +1937,13 @@ export async function neuralPositionManager(
   }
 
   if (pnlR >= 1.0 && position.stopLoss) {
-    const feeBuffer = position.entryPrice * (getTotalCostsPct() / 100) * 1.2;
+    const feeBuffer = position.entryPrice * getTotalCostsPct() * 1.2;
     const breakevenPrice = sideIsLong
       ? position.entryPrice + feeBuffer
       : position.entryPrice - feeBuffer;
     const currentSl = position.stopLoss;
-    const slBelowBE = sideIsLong ? currentSl < breakevenPrice : currentSl > breakevenPrice;
+    const BE_EPS = 1e-4;
+    const slBelowBE = sideIsLong ? currentSl < breakevenPrice - BE_EPS : currentSl > breakevenPrice + BE_EPS;
 
     if (slBelowBE) {
       const reason = `Breakeven move: position at ${pnlR.toFixed(2)}R profit. Moving SL to breakeven ($${breakevenPrice.toFixed(2)}).`;
@@ -2015,7 +2017,8 @@ export async function computePositionHealth(
   const riskUsdt = Math.max(position.initialRiskUsdt ?? 1, 0.01);
   const pnlUsdt = calculateUnrealizedPnl(position, currentPrice);
   const pnlR = riskUsdt > 0 ? pnlUsdt / riskUsdt : 0;
-  const peakProfitR = riskUsdt > 0 ? (position.peakProfit ?? 0) / riskUsdt : 0;
+  const storedPeakR = riskUsdt > 0 ? (position.peakProfit ?? 0) / riskUsdt : 0;
+  const peakProfitR = Math.max(storedPeakR, pnlR);
   const giveback = peakProfitR > 0 ? (peakProfitR - pnlR) / peakProfitR : 0;
 
   let pnlScore = 50;
@@ -2113,7 +2116,11 @@ export async function computePositionHealth(
     currentPnlR: Math.round(pnlR * 10000) / 10000,
     peakPnlR: Math.round(peakProfitR * 10000) / 10000,
     giveback: Math.round(giveback * 10000) / 10000,
-    latestV5Score: latestSignal?.v5Score ?? position.v5Score ?? null,
+    latestV5Score: (() => {
+      const raw = latestSignal?.v5Score ?? position.v5Score ?? null;
+      if (raw == null) return null;
+      return Math.min(Math.max(raw, 0), 1);
+    })(),
     latestAdjustment,
   };
 }
