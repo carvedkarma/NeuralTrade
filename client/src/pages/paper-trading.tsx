@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useTradingWs } from "@/hooks/use-trading-ws";
@@ -7,7 +7,6 @@ import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
-  AreaChart,
   Area,
   XAxis,
   YAxis,
@@ -28,14 +27,11 @@ import {
   Shield,
   ShieldAlert,
   ShieldCheck,
-  ArrowUpDown,
   Trash2,
-  Terminal,
   Zap,
   Eye,
-  ChevronRight,
-  Radio,
   Star,
+  Hourglass,
 } from "lucide-react";
 import { CloseButton, PartialCloseButton, EditSLTPDialog } from "@/components/position-actions";
 import { usePingMonitor } from "@/hooks/use-ping";
@@ -179,69 +175,155 @@ const NEURAL_ADJUSTMENT_LABELS: Record<string, { label: string; color: string; t
   ADAPTIVE_TRAIL: { label: "Adapt Trail", color: "text-purple-400", termColor: "text-purple-400" },
 };
 
-function NeuralMonitorFeed({
+const NEURAL_SWEEP_COLORS: Record<string, { gradient: string; animation: string; label: string; icon: string }> = {
+  BREAKEVEN: { gradient: "from-amber-500/40", animation: "neural-sweep-amber", label: "BE LOCKED", icon: "lock" },
+  TRAIL_TIGHTEN: { gradient: "from-cyan-500/30", animation: "neural-sweep-cyan", label: "TRAILING", icon: "trail" },
+  TRAIL_WIDEN: { gradient: "from-cyan-500/30", animation: "neural-sweep-cyan", label: "TRAILING", icon: "trail" },
+  DIRECTION_FLIP_EXIT: { gradient: "from-red-500/40", animation: "neural-sweep-red", label: "EXIT SIGNAL", icon: "exit" },
+  CONFIDENCE_DECAY_EXIT: { gradient: "from-red-500/30", animation: "neural-sweep-red", label: "EXIT SIGNAL", icon: "exit" },
+  CONFIDENCE_DECAY_TIGHTEN: { gradient: "from-orange-500/30", animation: "neural-sweep-amber", label: "DECAY TIGHT", icon: "decay" },
+  MFE_PROTECTION_EXIT: { gradient: "from-emerald-500/30", animation: "neural-sweep-emerald", label: "MFE LOCK", icon: "lock" },
+  ADAPTIVE_TRAIL: { gradient: "from-purple-500/30", animation: "neural-sweep-purple", label: "ADAPT", icon: "trail" },
+};
+
+function HealthRing({ score, size = 32 }: { score: number; size?: number }) {
+  const r = (size - 4) / 2;
+  const circ = 2 * Math.PI * r;
+  const pct = Math.max(0, Math.min(100, score));
+  const offset = circ - (pct / 100) * circ;
+  const color = score >= 70 ? "#34d399" : score >= 45 ? "#fbbf24" : score >= 25 ? "#fb923c" : "#f87171";
+
+  return (
+    <svg width={size} height={size} className="animate-health-ring-pulse" style={{ color }}>
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="currentColor" strokeOpacity={0.15} strokeWidth={2.5} />
+      <circle
+        cx={size / 2} cy={size / 2} r={r}
+        fill="none" stroke="currentColor" strokeWidth={2.5}
+        strokeDasharray={circ} strokeDashoffset={offset}
+        strokeLinecap="round"
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
+        className="transition-all duration-700"
+      />
+      <text x={size / 2} y={size / 2} textAnchor="middle" dominantBaseline="central" fill="currentColor" fontSize={8} fontFamily="var(--font-mono)" fontWeight="bold">
+        {score}
+      </text>
+    </svg>
+  );
+}
+
+function EegWave() {
+  return (
+    <svg className="absolute inset-0 w-full h-full opacity-[0.07] pointer-events-none" preserveAspectRatio="none" viewBox="0 0 300 40">
+      <polyline
+        points="0,20 20,20 30,10 40,30 50,15 60,25 70,20 90,20 100,8 110,32 120,20 140,20 150,12 160,28 170,20 190,20 200,5 210,35 220,20 240,20 260,20 270,10 280,30 290,20 300,20"
+        fill="none" stroke="#34d399" strokeWidth="1.5"
+        strokeDasharray="300" style={{ animation: "eeg-draw 4s linear infinite" }}
+      />
+    </svg>
+  );
+}
+
+function NeuralWatchPanel({
   events,
-  monitoredCount,
+  monitoredPositions,
+  healthMap,
+  flashingPositions,
 }: {
   events: NeuralEvent[];
-  monitoredCount: number;
+  monitoredPositions: Position[];
+  healthMap: Record<number, PositionHealth>;
+  flashingPositions: Set<number>;
 }) {
   const isActive = events.length > 0 && Date.now() - events[0].ts < 60000;
 
+  const latestAdjByPos: Record<number, NeuralEvent> = {};
+  events.forEach((ev) => {
+    if (ev.positionId && !latestAdjByPos[ev.positionId]) {
+      latestAdjByPos[ev.positionId] = ev;
+    }
+  });
+
   return (
-    <div className="rounded-lg border border-border/40 bg-black/60 overflow-hidden" data-testid="neural-monitor-feed">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-border/30 bg-black/40">
+    <div className="rounded-lg border border-border/40 bg-black/60 overflow-hidden relative" data-testid="neural-watch-panel">
+      <EegWave />
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border/30 bg-black/40 relative z-10">
         <div className="flex items-center gap-2">
-          <Terminal className="w-3.5 h-3.5 text-emerald-400/80" />
+          <Brain className={`w-4 h-4 text-emerald-400/80 ${isActive ? "animate-brain-pulse" : ""}`} />
           <span className="text-[11px] font-mono font-semibold text-emerald-400/90 tracking-wider uppercase">
-            Neural Position Monitor
+            Neural Monitor
           </span>
-          <span
-            className={`w-1.5 h-1.5 rounded-full ${isActive ? "bg-emerald-400 animate-pulse" : "bg-emerald-400/30"}`}
-          />
+          <span className={`w-1.5 h-1.5 rounded-full ${isActive ? "bg-emerald-400 animate-pulse" : "bg-emerald-400/30"}`} />
         </div>
         <div className="flex items-center gap-3">
-          {monitoredCount > 0 && (
+          {monitoredPositions.length > 0 && (
             <span className="text-[10px] font-mono text-emerald-400/60 flex items-center gap-1">
               <Eye className="w-3 h-3" />
-              watching {monitoredCount}
+              watching {monitoredPositions.length}
             </span>
-          )}
-          {events.length === 0 && (
-            <span className="text-[10px] font-mono text-muted-foreground/40">no activity</span>
           )}
         </div>
       </div>
 
-      <div className="font-mono text-[10px] leading-5 max-h-[140px] overflow-y-auto px-3 py-2 space-y-0.5">
-        {events.length === 0 ? (
-          <div className="text-muted-foreground/30 py-2 text-center">
-            Waiting for neural adjustments...
+      <div className="p-3 relative z-10">
+        {monitoredPositions.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-4 gap-2">
+            <Brain className="w-6 h-6 text-emerald-400/20 animate-brain-pulse" />
+            <span className="text-[10px] font-mono text-muted-foreground/30">Monitoring market...</span>
           </div>
         ) : (
-          events.map((ev, i) => {
-            const adj = NEURAL_ADJUSTMENT_LABELS[ev.adjustmentType];
-            const ts = new Date(ev.ts).toLocaleTimeString("en-US", {
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit",
-              hour12: false,
-            });
-            return (
-              <div key={i} className={`flex items-start gap-2 ${i === 0 ? "opacity-100" : "opacity-60"}`}>
-                <span className="text-muted-foreground/40 shrink-0 w-16">{ts}</span>
-                <ChevronRight className="w-3 h-3 text-emerald-400/40 shrink-0 mt-0.5" />
-                <span className="text-cyan-400/80 shrink-0">{ev.symbol}</span>
-                <span className={`shrink-0 ${ev.side === "LONG" ? "text-emerald-400/70" : "text-red-400/70"}`}>
-                  {ev.side}
-                </span>
-                <span className="text-muted-foreground/40">→</span>
-                <span className={`shrink-0 font-semibold ${adj?.termColor ?? "text-white/70"}`}>
-                  {adj?.label ?? ev.adjustmentType}
-                </span>
-              </div>
-            );
-          })
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+            {monitoredPositions.map((pos) => {
+              const posId = typeof pos.id === "number" ? pos.id : parseInt(String(pos.id ?? "0"));
+              const health = posId > 0 ? healthMap[posId] : undefined;
+              const isFlash = posId > 0 && flashingPositions.has(posId);
+              const latestAdj = latestAdjByPos[posId];
+              const sweepInfo = latestAdj && isFlash ? NEURAL_SWEEP_COLORS[latestAdj.adjustmentType] : null;
+              const adjLabel = latestAdj ? NEURAL_ADJUSTMENT_LABELS[latestAdj.adjustmentType] : null;
+
+              return (
+                <div
+                  key={posId}
+                  className={`relative rounded-md border p-2 overflow-hidden transition-all duration-300 ${
+                    isFlash ? "border-cyan-400/50 bg-black/60" : "border-border/30 bg-black/40"
+                  }`}
+                  data-testid={`neural-watch-${pos.symbol}`}
+                >
+                  {sweepInfo && (
+                    <div
+                      className={`absolute inset-0 bg-gradient-to-r ${sweepInfo.gradient} to-transparent pointer-events-none`}
+                      style={{ animation: `${sweepInfo.animation} 0.8s ease-out forwards` }}
+                    />
+                  )}
+
+                  <div className="relative z-10 flex flex-col items-center gap-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] font-mono font-semibold text-foreground/90">{pos.symbol.replace("USDT", "")}</span>
+                      <span className={`text-[9px] font-mono font-bold px-1 rounded ${pos.side === "LONG" ? "text-emerald-400 bg-emerald-500/15" : "text-red-400 bg-red-500/15"}`}>
+                        {pos.side === "LONG" ? "▲" : "▼"}
+                      </span>
+                    </div>
+
+                    <div className="relative">
+                      <Brain className={`w-4 h-4 text-emerald-400/40 ${isFlash ? "animate-brain-pulse" : ""}`} />
+                      {isFlash && (
+                        <div className="absolute inset-0 rounded-full" style={{ animation: "ping-ring 0.6s ease-out" }}>
+                          <div className="w-full h-full rounded-full border border-cyan-400/40" />
+                        </div>
+                      )}
+                    </div>
+
+                    {health && <HealthRing score={health.score} size={28} />}
+
+                    {sweepInfo && adjLabel && (
+                      <span className={`text-[8px] font-mono font-bold tracking-wider ${adjLabel.color} animate-pulse`}>
+                        {sweepInfo.label}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
     </div>
@@ -260,34 +342,49 @@ interface CycleEvent {
   holdReason?: string;
 }
 
-const DECISION_STYLES: Record<string, { color: string; bg: string }> = {
-  ENTER: { color: "text-emerald-400", bg: "bg-emerald-500/20" },
-  HOLD: { color: "text-muted-foreground/60", bg: "bg-muted/20" },
-  COOLDOWN: { color: "text-amber-400", bg: "bg-amber-500/20" },
-  SKIP: { color: "text-muted-foreground/40", bg: "bg-muted/10" },
-};
+const SCANNER_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSDT", "LINKUSDT", "ADAUSDT"];
 
-function CliScannerFeed({ events, lastCycleTs, cycleCount }: { events: CycleEvent[]; lastCycleTs: number; cycleCount: number }) {
-  const feedRef = useRef<HTMLDivElement>(null);
+function RadarIcon({ isLive }: { isLive: boolean }) {
+  return (
+    <div className="relative w-4 h-4">
+      <svg viewBox="0 0 20 20" className="w-4 h-4 text-cyan-400/60">
+        <circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" strokeWidth="1" strokeOpacity="0.3" />
+        <circle cx="10" cy="10" r="4" fill="none" stroke="currentColor" strokeWidth="1" strokeOpacity="0.2" />
+        <circle cx="10" cy="10" r="1.5" fill="currentColor" fillOpacity="0.5" />
+      </svg>
+      {isLive && (
+        <svg viewBox="0 0 20 20" className="absolute inset-0 w-4 h-4 text-cyan-400 animate-radar-sweep" style={{ transformOrigin: "center" }}>
+          <line x1="10" y1="10" x2="10" y2="2" stroke="currentColor" strokeWidth="1.5" strokeOpacity="0.6" strokeLinecap="round" />
+        </svg>
+      )}
+    </div>
+  );
+}
+
+function AiScannerGrid({ events, lastCycleTs, cycleCount }: { events: CycleEvent[]; lastCycleTs: number; cycleCount: number }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 5000);
+    const t = setInterval(() => setNow(Date.now()), 2000);
     return () => clearInterval(t);
   }, []);
   const isLive = lastCycleTs > 0 && now - lastCycleTs < 60000;
 
+  const latestBySymbol: Record<string, CycleEvent> = {};
+  events.forEach((ev) => {
+    if (!latestBySymbol[ev.symbol]) latestBySymbol[ev.symbol] = ev;
+  });
+
+  const lastScanned = events.length > 0 ? events[0].symbol.replace("USDT", "") : null;
+
   return (
-    <div className="rounded-lg border border-border/40 bg-black/60 overflow-hidden" data-testid="cli-scanner-feed">
+    <div className="rounded-lg border border-border/40 bg-black/60 overflow-hidden" data-testid="ai-scanner-grid">
       <div className="flex items-center justify-between px-3 py-2 border-b border-border/30 bg-black/40">
         <div className="flex items-center gap-2">
-          <Radio className="w-3.5 h-3.5 text-cyan-400/80" />
+          <RadarIcon isLive={isLive} />
           <span className="text-[11px] font-mono font-semibold text-cyan-400/90 tracking-wider uppercase">
-            Live Scanner
+            AI Scanner
           </span>
-          <span
-            className={`w-2 h-2 rounded-full ${isLive ? "bg-emerald-400 animate-pulse" : "bg-muted-foreground/30"}`}
-            data-testid="scanner-status-dot"
-          />
+          <span className={`w-2 h-2 rounded-full ${isLive ? "bg-emerald-400 animate-pulse" : "bg-muted-foreground/30"}`} data-testid="scanner-status-dot" />
           {isLive ? (
             <span className="text-[10px] font-mono text-emerald-400/60">LIVE</span>
           ) : (
@@ -295,58 +392,100 @@ function CliScannerFeed({ events, lastCycleTs, cycleCount }: { events: CycleEven
           )}
         </div>
         <div className="flex items-center gap-3">
+          {lastScanned && isLive && (
+            <span className="text-[10px] font-mono text-cyan-400/50 animate-pulse">
+              SCANNING {lastScanned}...
+            </span>
+          )}
           {cycleCount > 0 && (
-            <span className="text-[10px] font-mono text-cyan-400/50">
+            <span className="text-[10px] font-mono text-muted-foreground/40">
               {cycleCount} cycles
             </span>
           )}
         </div>
       </div>
 
-      <div ref={feedRef} className="font-mono text-[10px] leading-5 max-h-[180px] overflow-y-auto px-3 py-2 space-y-0.5">
-        {events.length === 0 ? (
-          <div className="text-muted-foreground/30 py-3 text-center">
-            Waiting for scanner cycles...
-          </div>
-        ) : (
-          events.map((ev, i) => {
-            const style = DECISION_STYLES[ev.decision] ?? DECISION_STYLES.HOLD;
-            const ts = new Date(ev.ts).toLocaleTimeString("en-US", {
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit",
-              hour12: false,
-            });
-            const arrow = ev.direction === "LONG" ? "▲" : ev.direction === "SHORT" ? "▼" : "•";
-            const arrowColor = ev.direction === "LONG" ? "text-emerald-400/70" : ev.direction === "SHORT" ? "text-red-400/70" : "text-muted-foreground/40";
+      <div className="p-3">
+        <div className="grid grid-cols-4 sm:grid-cols-4 md:grid-cols-8 gap-2">
+          {SCANNER_SYMBOLS.map((sym) => {
+            const ev = latestBySymbol[sym];
+            const isRecent = ev && (now - ev.ts < 10000);
+            const isEnter = ev?.decision === "ENTER";
+            const isCooldown = ev?.decision === "COOLDOWN";
+            const isOpened = ev?.opened === true;
+            const shortName = sym.replace("USDT", "");
+            const arrow = ev?.direction === "LONG" ? "▲" : ev?.direction === "SHORT" ? "▼" : "";
+            const arrowColor = ev?.direction === "LONG" ? "text-emerald-400" : ev?.direction === "SHORT" ? "text-red-400" : "text-muted-foreground/40";
+            const v5Pct = ev?.v5Score ? Math.min(100, (ev.v5Score / 10) * 100) : 0;
+
+            let tileStyle = "border-border/20 bg-black/30";
+            let animStyle = "";
+            if (isRecent && isEnter) {
+              tileStyle = "border-emerald-400/50 bg-emerald-500/10";
+              animStyle = "tile-enter 1s ease-out";
+            } else if (isRecent && isCooldown) {
+              tileStyle = "border-amber-400/40 bg-amber-500/8";
+              animStyle = "tile-cooldown 1.2s ease-out";
+            } else if (isRecent) {
+              tileStyle = "border-cyan-400/20 bg-cyan-500/5";
+            }
+
             return (
               <div
-                key={`${ev.ts}-${ev.symbol}-${i}`}
-                className={`flex items-center gap-2 ${i === 0 ? "opacity-100" : i < 3 ? "opacity-80" : "opacity-50"}`}
-                style={i === 0 ? { animation: "slideIn 0.3s ease-out" } : undefined}
+                key={sym}
+                className={`relative rounded-md border p-2 flex flex-col items-center gap-1 transition-all duration-500 ${tileStyle}`}
+                style={animStyle ? { animation: animStyle } : undefined}
+                data-testid={`scanner-tile-${sym}`}
               >
-                <span className="text-muted-foreground/40 shrink-0 w-16">{ts}</span>
-                <span className="text-cyan-400/80 shrink-0 w-[72px]">{ev.symbol.replace("USDT", "")}</span>
-                <span className={`shrink-0 ${arrowColor}`}>{arrow}</span>
-                <span className={`shrink-0 px-1.5 py-0 rounded text-[9px] font-semibold ${style.color} ${style.bg}`}>
-                  {ev.decision}
-                </span>
-                <span className="text-muted-foreground/50 shrink-0">${formatPrice(ev.price)}</span>
-                {ev.v5Score != null && (
-                  <span className="text-purple-400/60 shrink-0">v5:{ev.v5Score.toFixed(2)}</span>
+                {isRecent && (
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <div
+                      className={`w-6 h-6 rounded-full border ${isEnter ? "border-emerald-400/60" : "border-cyan-400/30"}`}
+                      style={{ animation: "ping-ring 0.8s ease-out forwards" }}
+                    />
+                  </div>
                 )}
-                {ev.pEnter != null && (
-                  <span className="text-blue-400/50 shrink-0">p:{(ev.pEnter * 100).toFixed(0)}%</span>
+
+                <span className="text-[11px] font-mono font-bold text-foreground/80">{shortName}</span>
+
+                {arrow && (
+                  <span className={`text-sm font-bold leading-none ${arrowColor}`}>{arrow}</span>
                 )}
-                {ev.opened && (
-                  <span className="text-emerald-400 font-semibold flex items-center gap-0.5 shrink-0">
+
+                {isRecent && isEnter && (
+                  <span className="text-[8px] font-mono font-bold text-emerald-400 bg-emerald-500/20 px-1.5 rounded animate-pulse" data-testid={`badge-enter-${sym}`}>
+                    ENTER
+                  </span>
+                )}
+
+                {isOpened && (
+                  <span className="text-[8px] font-mono font-bold text-amber-300 flex items-center gap-0.5" data-testid={`badge-opened-${sym}`}>
                     <Star className="w-2.5 h-2.5" />OPENED
                   </span>
                 )}
+
+                {isRecent && isCooldown && (
+                  <Hourglass className="w-3 h-3 text-amber-400/60 animate-pulse" />
+                )}
+
+                {!isRecent && !arrow && (
+                  <span className="w-1 h-1 rounded-full bg-muted-foreground/20 my-1" />
+                )}
+
+                <div className="w-full h-1 rounded-full bg-muted/30 overflow-hidden mt-0.5">
+                  <div
+                    className="h-full rounded-full transition-all duration-700 bg-purple-400/60"
+                    style={{ width: `${v5Pct}%` }}
+                  />
+                </div>
+
+                {ev?.v5Score != null && (
+                  <span className="text-[7px] font-mono text-purple-400/50">{ev.v5Score.toFixed(1)}</span>
+                )}
               </div>
             );
-          })
-        )}
+          })}
+        </div>
       </div>
     </div>
   );
@@ -735,11 +874,11 @@ export default function PaperTrading() {
 
       if (openedFromCycle && p.autoTradeResult?.positionId) {
         const posId = p.autoTradeResult.positionId;
-        setGlowPositions((prev) => new Set([...prev, posId]));
+        setGlowPositions((prev) => { const n = new Set(prev); n.add(posId); return n; });
         setTimeout(() => {
           setGlowPositions((prev) => { const n = new Set(prev); n.delete(posId); return n; });
         }, 5000);
-        setNewPositions((prev) => new Set([...prev, posId]));
+        setNewPositions((prev) => { const n = new Set(prev); n.add(posId); return n; });
         setTimeout(() => {
           setNewPositions((prev) => { const n = new Set(prev); n.delete(posId); return n; });
         }, 10000);
@@ -765,12 +904,12 @@ export default function PaperTrading() {
         return updated;
       });
 
-      setGlowPositions((prev) => new Set([...prev, posId]));
+      setGlowPositions((prev) => { const n = new Set(prev); n.add(posId); return n; });
       setTimeout(() => {
         setGlowPositions((prev) => { const n = new Set(prev); n.delete(posId); return n; });
       }, 5000);
 
-      setNewPositions((prev) => new Set([...prev, posId]));
+      setNewPositions((prev) => { const n = new Set(prev); n.add(posId); return n; });
       setTimeout(() => {
         setNewPositions((prev) => { const n = new Set(prev); n.delete(posId); return n; });
       }, 10000);
@@ -796,7 +935,7 @@ export default function PaperTrading() {
 
         if (p.positionId) {
           const posId = p.positionId;
-          setFlashingPositions((prev) => new Set([...prev, posId]));
+          setFlashingPositions((prev) => { const n = new Set(prev); n.add(posId); return n; });
           setTimeout(() => {
             setFlashingPositions((prev) => {
               const next = new Set(prev);
@@ -1046,15 +1185,17 @@ export default function PaperTrading() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <CliScannerFeed
+          <AiScannerGrid
             events={cycleEvents}
             lastCycleTs={lastCycleTs}
             cycleCount={cycleCount}
           />
 
-          <NeuralMonitorFeed
+          <NeuralWatchPanel
             events={neuralEvents}
-            monitoredCount={openPositions?.filter(p => p.source === "v5_signal").length ?? 0}
+            monitoredPositions={openPositions?.filter(p => p.source === "v5_signal") ?? []}
+            healthMap={healthMap}
+            flashingPositions={flashingPositions}
           />
 
           {(!openPositions || openPositions.length === 0) ? (

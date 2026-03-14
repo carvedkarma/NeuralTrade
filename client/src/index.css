@@ -342,4 +342,83 @@
     0% { opacity: 0; transform: translateY(-8px); }
     100% { opacity: 1; transform: translateY(0); }
   }
+
+  @keyframes ping-ring {
+    0% { transform: scale(0.8); opacity: 0.8; }
+    100% { transform: scale(2.2); opacity: 0; }
+  }
+
+  @keyframes brain-pulse {
+    0%, 100% { transform: scale(1); opacity: 0.7; }
+    50% { transform: scale(1.12); opacity: 1; }
+  }
+
+  @keyframes card-sweep {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(200%); }
+  }
+
+  @keyframes eeg-draw {
+    0% { stroke-dashoffset: 300; }
+    100% { stroke-dashoffset: 0; }
+  }
+
+  @keyframes radar-sweep {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+  }
+
+  @keyframes tile-enter {
+    0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.6); }
+    50% { box-shadow: 0 0 20px 4px rgba(34, 197, 94, 0.4); }
+    100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+  }
+
+  @keyframes tile-cooldown {
+    0% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.5); }
+    50% { box-shadow: 0 0 12px 2px rgba(245, 158, 11, 0.3); }
+    100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+  }
+
+  @keyframes neural-sweep-amber {
+    0% { transform: translateX(-100%); opacity: 0.6; }
+    100% { transform: translateX(300%); opacity: 0; }
+  }
+
+  @keyframes neural-sweep-cyan {
+    0% { transform: translateX(-100%); opacity: 0.5; }
+    100% { transform: translateX(300%); opacity: 0; }
+  }
+
+  @keyframes neural-sweep-red {
+    0% { transform: translateX(-100%); opacity: 0.7; }
+    100% { transform: translateX(300%); opacity: 0; }
+  }
+
+  @keyframes neural-sweep-emerald {
+    0% { transform: translateX(-100%); opacity: 0.5; }
+    100% { transform: translateX(300%); opacity: 0; }
+  }
+
+  @keyframes neural-sweep-purple {
+    0% { transform: translateX(-100%); opacity: 0.5; }
+    100% { transform: translateX(300%); opacity: 0; }
+  }
+
+  @keyframes health-ring-pulse {
+    0%, 100% { filter: drop-shadow(0 0 2px currentColor); }
+    50% { filter: drop-shadow(0 0 6px currentColor); }
+  }
+
+  .animate-brain-pulse {
+    animation: brain-pulse 3s ease-in-out infinite;
+  }
+
+  .animate-radar-sweep {
+    animation: radar-sweep 3s linear infinite;
+  }
+
+  .animate-health-ring-pulse {
+    animation: health-ring-pulse 2s ease-in-out infinite;
+  }
 }
