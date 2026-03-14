@@ -352,3 +352,15 @@ export async function getBitgetLiveBalance(): Promise<{
     return { equity: "0", walletBalance: "0", availableBalance: "0", unrealisedPnl: "0", error: err.message };
   }
 }
+
+export {
+  isBitgetLiveTradingEnabled as isLiveTradingEnabled,
+  openBitgetLivePosition as openLivePosition,
+  closeBitgetLivePosition as closeLivePosition,
+  getBitgetLivePositions as getLivePositions,
+  getBitgetLiveBalance as getLiveBalance,
+  getBitgetLiveConfig as getLiveConfig,
+  setBitgetLiveTradingEnabled as setLiveTradingEnabled,
+  updateBitgetLiveConfig as updateLiveConfig,
+  loadBitgetLiveConfig as loadLiveConfig,
+};

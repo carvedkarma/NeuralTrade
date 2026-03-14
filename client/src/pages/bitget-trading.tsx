@@ -29,6 +29,82 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
+function BitgetTradeHistory() {
+  const { data: trades, isLoading } = useQuery<any[]>({
+    queryKey: ["/api/live/trades"],
+    refetchInterval: 30000,
+  });
+
+  const bitgetTrades = (trades || []).filter(
+    (t: any) => t.exchange === "bitget" || t.reason?.includes("bitget")
+  );
+
+  const displayTrades = bitgetTrades.length > 0 ? bitgetTrades : (trades || []).slice(0, 20);
+  const showingAll = bitgetTrades.length === 0 && (trades || []).length > 0;
+
+  return (
+    <div className="glass-card rounded-md p-4" data-testid="bitget-trade-history">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="font-semibold text-lg">
+          Trade History {showingAll && <span className="text-xs text-muted-foreground ml-1">(all exchanges)</span>}
+        </h2>
+        <Badge variant="outline" className="text-xs">{displayTrades.length} trades</Badge>
+      </div>
+      {isLoading ? (
+        <div className="flex items-center justify-center py-6 text-muted-foreground">
+          <Loader2 className="w-4 h-4 animate-spin mr-2" /> Loading...
+        </div>
+      ) : displayTrades.length === 0 ? (
+        <p className="text-sm text-muted-foreground text-center py-4" data-testid="no-trade-history">No trade history yet</p>
+      ) : (
+        <div className="overflow-x-auto max-h-[300px] overflow-y-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Symbol</TableHead>
+                <TableHead>Side</TableHead>
+                <TableHead className="text-right">Entry</TableHead>
+                <TableHead className="text-right">Exit</TableHead>
+                <TableHead className="text-right">PnL</TableHead>
+                <TableHead className="text-right">Time</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {displayTrades.map((t: any, idx: number) => {
+                const pnl = parseFloat(t.realizedPnl || t.pnl || "0");
+                return (
+                  <TableRow key={t.id || idx} data-testid={`trade-history-row-${idx}`}>
+                    <TableCell>
+                      <Badge className="bg-primary/10 text-primary border-primary/20 font-mono text-xs">
+                        {(t.symbol || "").replace("USDT", "")}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      {t.side === "LONG" || t.side === "Buy" ? (
+                        <span className="text-emerald-400 text-xs">LONG</span>
+                      ) : (
+                        <span className="text-red-400 text-xs">SHORT</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-right number-mono text-xs">{formatPrice(t.entryPrice || t.avgEntryPrice || 0)}</TableCell>
+                    <TableCell className="text-right number-mono text-xs">{formatPrice(t.exitPrice || t.avgExitPrice || 0)}</TableCell>
+                    <TableCell className={`text-right number-mono text-xs font-medium ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {pnl >= 0 ? "+" : ""}{formatUsd(pnl)}
+                    </TableCell>
+                    <TableCell className="text-right text-xs text-muted-foreground">
+                      {t.closedAt || t.updatedAt ? new Date(t.closedAt || t.updatedAt).toLocaleDateString([], { month: "short", day: "numeric" }) : "-"}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function formatUsd(val: string | number): string {
   const num = typeof val === "string" ? parseFloat(val) : val;
   if (!Number.isFinite(num)) return "$0.00";
@@ -357,6 +433,8 @@ export default function BitgetTrading() {
           </div>
         )}
       </div>
+
+      <BitgetTradeHistory />
 
       {bitgetStatus?.config && (
         <div className="glass-card rounded-md p-4" data-testid="bitget-config-info">

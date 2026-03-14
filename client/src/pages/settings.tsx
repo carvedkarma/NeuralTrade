@@ -96,6 +96,11 @@ export default function SettingsPage() {
     },
   });
 
+  const testBitgetConnectionMutation = useMutation({
+    mutationFn: () => fetch("/api/bitget/status").then(r => r.json()),
+    onSuccess: () => { refetchBitget(); },
+  });
+
   const saveBitgetConfigMutation = useMutation({
     mutationFn: () => apiRequest("PATCH", "/api/bitget/config", { riskPerTradePct: bgLiveRiskPct, maxDailyLossUsdt: bgMaxDailyLoss }),
     onSuccess: () => {
@@ -413,6 +418,18 @@ export default function SettingsPage() {
             {saveBitgetCredsMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Key className="w-4 h-4 mr-1" />}
             {saveBitgetCredsMutation.isPending ? "Saving..." : "Save Bitget Credentials"}
           </Button>
+          {bitgetStatus?.configured && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => testBitgetConnectionMutation.mutate()}
+              disabled={testBitgetConnectionMutation.isPending}
+              data-testid="button-test-bitget-connection"
+            >
+              {testBitgetConnectionMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Zap className="w-4 h-4 mr-1" />}
+              {testBitgetConnectionMutation.isPending ? "Testing..." : "Test Connection"}
+            </Button>
+          )}
         </div>
 
         {bitgetStatus?.connected && (
