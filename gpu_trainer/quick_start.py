@@ -5706,6 +5706,9 @@ Examples:
             budget_core=args.budget_core,
             budget_flow=args.budget_flow,
             budget_scalp=args.budget_scalp,
+            side_aware_scoring=getattr(args, 'v5_side_aware_scoring', False),
+            direction_balance_cap=getattr(args, 'v5_direction_balance_cap', False),
+            direction_balance_threshold=getattr(args, 'v5_direction_balance_threshold', 0.75),
         )
         runner.learning_manager = learning_mgr
 

@@ -992,6 +992,9 @@ class LiveRunner:
         budget_core: float = None,
         budget_flow: float = None,
         budget_scalp: float = None,
+        side_aware_scoring: bool = False,
+        direction_balance_cap: bool = False,
+        direction_balance_threshold: float = 0.75,
     ):
         self.replit_url = replit_url
         self.symbols = symbols
@@ -1012,6 +1015,10 @@ class LiveRunner:
         self.limit_15m = limit_15m
         self.direct_htf = direct_htf
         self.gpu_self_url = self._detect_gpu_self_url()
+        self.side_aware_scoring = side_aware_scoring
+        self.direction_balance_cap = direction_balance_cap
+        self.direction_balance_threshold = direction_balance_threshold
+        self._recent_signal_sides: list = []
 
         self.v5_score_lambda = V5_SCORE_LAMBDA
         self.v5_score_threshold = V5_SCORE_THRESHOLD
@@ -1752,14 +1759,41 @@ class LiveRunner:
         if abs_mu < self.v5_min_mu_r:
             v5_score = -999.0
 
+        # Side-aware scoring: both heads must agree — SHORT needs mu_R<0, LONG needs mu_R>0
+        if self.side_aware_scoring and v5_score > -999.0:
+            if side == "SHORT" and ret_mu >= 0:
+                log.info(f"  {symbol}: side_aware BLOCK SHORT — ret_mu={ret_mu:.4f} is non-negative")
+                v5_score = -999.0
+            elif side == "LONG" and ret_mu <= 0:
+                log.info(f"  {symbol}: side_aware BLOCK LONG — ret_mu={ret_mu:.4f} is non-positive")
+                v5_score = -999.0
+
+        # Direction balance cap: track recent signal sides, cut size when one direction dominates
+        _direction_size_mult = 1.0
+        if self.direction_balance_cap and v5_score > -999.0:
+            self._recent_signal_sides.append(side)
+            if len(self._recent_signal_sides) > 20:
+                self._recent_signal_sides = self._recent_signal_sides[-20:]
+            if len(self._recent_signal_sides) >= 5:
+                short_frac = self._recent_signal_sides.count("SHORT") / len(self._recent_signal_sides)
+                long_frac = 1.0 - short_frac
+                dominant_frac = max(short_frac, long_frac)
+                if dominant_frac >= 0.85:
+                    _direction_size_mult = 0.25
+                    log.info(f"  {symbol}: direction_balance 0.25x — dominant={dominant_frac:.0%}")
+                elif dominant_frac >= self.direction_balance_threshold:
+                    _direction_size_mult = 0.5
+                    log.info(f"  {symbol}: direction_balance 0.5x — dominant={dominant_frac:.0%}")
+
         htf = _apply_htf_gates(features_df) if not (use_direct_htf and htf_direct) else self._compute_htf_from_direct(htf_direct, df_candles)
         htf_score = _compute_htf_score(htf, side)
 
         v6_confidence = infer_result.get('v6_confidence', None)
         v6_conf_str = f" conf={v6_confidence:.3f}" if v6_confidence is not None else ""
+        side_aware_str = " [SIDE-AWARE]" if self.side_aware_scoring else ""
         log.info(f"  {symbol}: price={current_price:.2f} v5_score={v5_score:.4f} thr={self.v5_score_threshold} "
                  f"p_enter={p_enter:.4f} ret_mu={ret_mu:.4f} mfe={v5_mfe:.4f} mae={v5_mae:.4f} "
-                 f"p_long={p_long:.3f} p_short={p_short:.3f} side={side}{v6_conf_str}")
+                 f"p_long={p_long:.3f} p_short={p_short:.3f} side={side}{v6_conf_str}{side_aware_str}")
 
         V6_CONFIDENCE_MIN = 0.4
 

@@ -186,13 +186,20 @@ class LearningManager:
                 df['timestamp'] = df['timestamp'].astype(int)
             df = df.sort_values('timestamp').reset_index(drop=True)
 
+            data_cache = Path("data_cache")
+            data_cache.mkdir(parents=True, exist_ok=True)
+            parquet_path = data_cache / f"{symbol}_15m.parquet"
+            df.to_parquet(parquet_path, index=False)
+            log.info(f"[Learning] Saved {len(df)} candles to {parquet_path}")
+
             log.info(f"[Learning] Training with {len(df)} candles for {symbol}...")
             train_result = train_enter_model(
-                df=df,
-                epochs=self.config.training_epochs,
+                data_path=parquet_path,
                 device=self.device,
-                checkpoint_dir=str(output_dir),
-                symbol=symbol,
+                epochs=self.config.training_epochs,
+                batch_size=128,
+                lr=1e-3,
+                symbols=[symbol],
             )
 
             result.success = True
