@@ -302,7 +302,8 @@ export default function BitgetTrading() {
             </div>
           )}
           <div className="flex items-center gap-1.5">
-            <Badge className="bg-cyan-500/20 text-cyan-400 border-cyan-500/30 text-[10px] px-1.5 py-0" data-testid="badge-account-type">USDT-FUTURES</Badge>
+            <span className="text-xs text-muted-foreground">Type:</span>
+            <Badge className="bg-cyan-500/20 text-cyan-400 border-cyan-500/30 text-[10px] px-1.5 py-0" data-testid="badge-account-type">{bitgetStatus?.userType || "USDT-FUTURES"}</Badge>
           </div>
           {bitgetStatus?.verifiedAt && (
             <div className="flex items-center gap-1.5">
