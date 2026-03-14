@@ -760,6 +760,7 @@ def fetch_ls_ratio_hist(candle_df, data_dir: Path, symbol: str = "BTCUSDT"):
     Results are always cached (even empty) so future folds skip the probe.
     """
     import requests
+    import pandas as pd
 
     cache_path = data_dir / f"ls_ratio_{symbol}.parquet"
     empty_df = pd.DataFrame(columns=["timestamp", "long_short_ratio", "long_account", "short_account"])
@@ -880,6 +881,7 @@ def compute_ls_ratio_features(candle_df, ls_df):
     Returns DataFrame with 4 columns: ls_ratio, ls_deviation, ls_extreme, crowd_sentiment
     """
     import numpy as np
+    import pandas as pd
 
     n = len(candle_df)
     result = pd.DataFrame(index=candle_df.index)
@@ -1249,9 +1251,15 @@ def train_enter_model(data_path: Path, device: str, epochs: int, batch_size: int
         features_df = pd.concat([features_df, oi_features], axis=1)
         features_df = features_df.fillna(0)
 
-        total_features = engineer.STF_FEATURE_COUNT + engineer.HTF_FEATURE_COUNT + FUNDING_FEATURE_COUNT + OI_FEATURE_COUNT
+        sym_for_ls = Path(data_path).stem.split("_15m")[0]
+        ls_df_single = fetch_ls_ratio_hist(df, data_dir, symbol=sym_for_ls)
+        ls_features_single = compute_ls_ratio_features(df, ls_df_single)
+        features_df = pd.concat([features_df, ls_features_single], axis=1)
+        features_df = features_df.fillna(0)
+
+        total_features = FeatureEngineer.TOTAL_FEATURE_COUNT + FUNDING_FEATURE_COUNT + OI_FEATURE_COUNT + LS_RATIO_FEATURE_COUNT
         actual_cols = len(features_df.columns)
-        log.info(f"Total features: {actual_cols} ({engineer.STF_FEATURE_COUNT} STF + {engineer.HTF_FEATURE_COUNT} HTF + {FUNDING_FEATURE_COUNT} funding + {OI_FEATURE_COUNT} OI)")
+        log.info(f"Total features: {actual_cols} ({FeatureEngineer.TOTAL_FEATURE_COUNT} base + {FUNDING_FEATURE_COUNT} funding + {OI_FEATURE_COUNT} OI + {LS_RATIO_FEATURE_COUNT} LS ratio)")
         if actual_cols != total_features:
             log.error(f"FATAL: Feature count mismatch! Expected {total_features}, got {actual_cols}")
             log.error(f"Columns: {sorted(features_df.columns.tolist())}")
