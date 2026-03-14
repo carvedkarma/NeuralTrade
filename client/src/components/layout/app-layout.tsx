@@ -11,6 +11,7 @@ import {
   ChevronLeft,
   Radio,
   Brain,
+  ClipboardList,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -27,6 +28,7 @@ const NAV_ITEMS = [
   { path: "/", label: "Command Center", icon: LayoutDashboard },
   { path: "/live", label: "Live Trading", icon: Activity },
   { path: "/paper", label: "Paper Trading", icon: FileText },
+  { path: "/trade-history", label: "Trade History", icon: ClipboardList },
   { path: "/analytics", label: "Analytics", icon: BarChart3 },
   { path: "/training", label: "Training Monitor", icon: Brain },
   { path: "/settings", label: "Settings", icon: Settings },

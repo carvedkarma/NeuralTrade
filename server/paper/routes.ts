@@ -328,6 +328,26 @@ router.get("/performance", async (req, res) => {
   }
 });
 
+router.delete("/trade-history", async (req, res) => {
+  try {
+    await storage.clearTradeHistory();
+    res.json({ cleared: true });
+  } catch (error) {
+    console.error("Error clearing trade history:", error);
+    res.status(500).json({ error: "Failed to clear trade history" });
+  }
+});
+
+router.delete("/equity-curve", async (req, res) => {
+  try {
+    await storage.clearEquityCurve();
+    res.json({ cleared: true });
+  } catch (error) {
+    console.error("Error clearing equity curve:", error);
+    res.status(500).json({ error: "Failed to clear equity curve" });
+  }
+});
+
 router.get("/equity-curve", async (req, res) => {
   try {
     const range = req.query.range as string || "all";

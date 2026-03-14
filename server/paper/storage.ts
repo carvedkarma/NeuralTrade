@@ -212,6 +212,14 @@ export async function getTradeHistory(options?: { symbol?: string; limit?: numbe
  * Get consecutive losing trades at the end of the trade history
  * Used for institution-grade loss streak tracking
  */
+export async function clearTradeHistory(): Promise<void> {
+  await db.delete(paperTradeHistory);
+}
+
+export async function clearEquityCurve(): Promise<void> {
+  await db.delete(paperEquityCurve);
+}
+
 export async function getRecentLossStreak(): Promise<number> {
   const recentTrades = await db.select()
     .from(paperTrades)

@@ -7,14 +7,6 @@ import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import {
   AreaChart,
   Area,
   XAxis,
@@ -37,6 +29,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   ArrowUpDown,
+  Trash2,
 } from "lucide-react";
 import { CloseButton, PartialCloseButton, EditSLTPDialog } from "@/components/position-actions";
 import { usePingMonitor } from "@/hooks/use-ping";
@@ -58,25 +51,6 @@ interface Portfolio {
   totalTrades: number;
   winRate: number;
   openPositions: number;
-}
-
-interface TradeRecord {
-  id: number;
-  positionId: number;
-  symbol: string;
-  side: string;
-  entryTs: number;
-  entryPrice: number;
-  exitTs: number;
-  exitPrice: number;
-  grossR: number;
-  netR: number;
-  costR: number;
-  pnlUsdt: number;
-  riskUsdt: number;
-  barsHeld: number;
-  exitReason: string;
-  maxFavorableR: number;
 }
 
 interface PaperConfig {
@@ -511,11 +485,6 @@ export default function PaperTrading() {
     refetchInterval: 5000,
   });
 
-  const { data: tradeHistory } = useQuery<TradeRecord[]>({
-    queryKey: ["/api/paper/trade-history", "?limit=100"],
-    refetchInterval: 30000,
-  });
-
   const { data: equityCurve } = useQuery<EquityPoint[]>({
     queryKey: ["/api/paper/equity-curve", `?range=${equityRange}`],
     refetchInterval: 30000,
@@ -586,6 +555,23 @@ export default function PaperTrading() {
     },
   });
 
+  const clearHistoryMutation = useMutation({
+    mutationFn: () => apiRequest("DELETE", "/api/paper/trade-history"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/paper/trade-history"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/paper/equity-curve"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/paper/performance"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/paper/portfolio"] });
+    },
+  });
+
+  const clearAnalyticsMutation = useMutation({
+    mutationFn: () => apiRequest("DELETE", "/api/paper/equity-curve"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/paper/equity-curve"] });
+    },
+  });
+
   const paperEnabled = status?.paperTradingEnabled ?? config?.paperTradingEnabled ?? false;
   const autoTrading = status?.isAutoTrading ?? false;
 
@@ -608,6 +594,18 @@ export default function PaperTrading() {
   const handleReset = () => {
     if (window.confirm("Are you sure you want to reset the paper trading portfolio? This will clear all positions and trade history.")) {
       resetMutation.mutate();
+    }
+  };
+
+  const handleClearHistory = () => {
+    if (window.confirm("Clear all trade history records? This cannot be undone.")) {
+      clearHistoryMutation.mutate();
+    }
+  };
+
+  const handleClearAnalytics = () => {
+    if (window.confirm("Clear the equity curve data? This cannot be undone.")) {
+      clearAnalyticsMutation.mutate();
     }
   };
 
@@ -650,6 +648,26 @@ export default function PaperTrading() {
           <div className="ml-auto flex items-center gap-2">
             <PingBadge ping={ping} />
             <Button
+              variant="outline"
+              size="sm"
+              data-testid="button-clear-history"
+              onClick={handleClearHistory}
+              disabled={clearHistoryMutation.isPending}
+            >
+              <Trash2 className="w-3.5 h-3.5 mr-1" />
+              Clear History
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="button-clear-analytics"
+              onClick={handleClearAnalytics}
+              disabled={clearAnalyticsMutation.isPending}
+            >
+              <Trash2 className="w-3.5 h-3.5 mr-1" />
+              Clear Analytics
+            </Button>
+            <Button
               variant="destructive"
               data-testid="button-reset-portfolio"
               onClick={handleReset}
@@ -661,6 +679,43 @@ export default function PaperTrading() {
           </div>
         </div>
       </div>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <CardTitle className="text-sm font-medium">Open Positions</CardTitle>
+              <Brain className="w-4 h-4 text-purple-400/60" />
+            </div>
+            {openPositions && openPositions.length > 0 && (
+              <Badge variant="outline" className="text-[10px] text-cyan-400 border-cyan-400/30" data-testid="badge-open-count">
+                {openPositions.length} active
+              </Badge>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          {(!openPositions || openPositions.length === 0) ? (
+            <p className="text-sm text-muted-foreground text-center py-8" data-testid="text-no-open-positions">
+              No open positions
+            </p>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-1 md:grid-cols-2 xl:grid-cols-3" data-testid="positions-grid">
+              {openPositions.map((pos, i) => {
+                const posId = typeof pos.id === "number" ? pos.id : parseInt(String(pos.id ?? "0"));
+                return (
+                  <PositionPriceGauge
+                    key={pos.id ?? i}
+                    pos={pos}
+                    livePrice={livePrices[pos.symbol]}
+                    health={posId > 0 ? healthMap[posId] : undefined}
+                  />
+                );
+              })}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <Card>
@@ -798,112 +853,6 @@ export default function PaperTrading() {
           </ResponsiveContainer>
         </div>
       </div>
-
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <CardTitle className="text-sm font-medium">Open Positions</CardTitle>
-              <Brain className="w-4 h-4 text-purple-400/60" />
-            </div>
-            {openPositions && openPositions.length > 0 && (
-              <Badge variant="outline" className="text-[10px] text-cyan-400 border-cyan-400/30" data-testid="badge-open-count">
-                {openPositions.length} active
-              </Badge>
-            )}
-          </div>
-        </CardHeader>
-        <CardContent>
-          {(!openPositions || openPositions.length === 0) ? (
-            <p className="text-sm text-muted-foreground text-center py-8" data-testid="text-no-open-positions">
-              No open positions
-            </p>
-          ) : (
-            <div className="grid gap-3 sm:grid-cols-1 md:grid-cols-2 xl:grid-cols-3" data-testid="positions-grid">
-              {openPositions.map((pos, i) => {
-                const posId = typeof pos.id === "number" ? pos.id : parseInt(String(pos.id ?? "0"));
-                return (
-                  <PositionPriceGauge
-                    key={pos.id ?? i}
-                    pos={pos}
-                    livePrice={livePrices[pos.symbol]}
-                    health={posId > 0 ? healthMap[posId] : undefined}
-                  />
-                );
-              })}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm font-medium">Trade History</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="max-h-96 overflow-auto">
-            {(!tradeHistory || tradeHistory.length === 0) ? (
-              <p className="text-sm text-muted-foreground text-center py-8" data-testid="text-no-trades">
-                No completed trades yet
-              </p>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Date</TableHead>
-                    <TableHead>Symbol</TableHead>
-                    <TableHead>Side</TableHead>
-                    <TableHead>Entry</TableHead>
-                    <TableHead>Exit</TableHead>
-                    <TableHead>P&L R</TableHead>
-                    <TableHead>P&L USD</TableHead>
-                    <TableHead>Duration</TableHead>
-                    <TableHead>Exit Type</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {[...tradeHistory]
-                    .sort((a, b) => (b.exitTs ?? 0) - (a.exitTs ?? 0))
-                    .map((trade, i) => {
-                      const pnl = trade.netR ?? 0;
-                      const dur = trade.entryTs && trade.exitTs ? trade.exitTs - trade.entryTs : 0;
-                      return (
-                        <TableRow key={trade.id ?? i} data-testid={`row-trade-history-${i}`}>
-                          <TableCell className="text-muted-foreground">
-                            {trade.exitTs ? formatDateTime(trade.exitTs) : "-"}
-                          </TableCell>
-                          <TableCell className="font-medium">{trade.symbol}</TableCell>
-                          <TableCell>
-                            <Badge
-                              variant="outline"
-                              className={trade.side === "LONG" ? "text-emerald-400 border-emerald-400/30" : "text-red-400 border-red-400/30"}
-                            >
-                              {trade.side}
-                            </Badge>
-                          </TableCell>
-                          <TableCell className="number-mono">{trade.entryPrice?.toFixed(2)}</TableCell>
-                          <TableCell className="number-mono">{trade.exitPrice?.toFixed(2) ?? "-"}</TableCell>
-                          <TableCell className={`number-mono ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                            {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}R
-                          </TableCell>
-                          <TableCell className={`number-mono ${trade.pnlUsdt >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                            {trade.pnlUsdt != null ? formatUsd(trade.pnlUsdt) : "-"}
-                          </TableCell>
-                          <TableCell className="text-muted-foreground">
-                            {dur > 0 ? formatDuration(dur) : "-"}
-                          </TableCell>
-                          <TableCell>
-                            <span className="text-xs text-muted-foreground">{trade.exitReason ?? "-"}</span>
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
-                </TableBody>
-              </Table>
-            )}
-          </div>
-        </CardContent>
-      </Card>
     </div>
   );
 }
