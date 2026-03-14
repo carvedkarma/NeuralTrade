@@ -3,7 +3,7 @@ import { registerRoutes, hydrateBackfillStateFromDb, initializeStrategyLearner, 
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { checkIncompleteBackfillJobs, backfillHistoricalData } from "./historical-data";
-import { loadPaperState } from "./paper/config";
+import { loadPaperState, loadAnalyticsClearedTs } from "./paper/config";
 import { startPositionMonitor } from "./paper/engine";
 import { gpuBridge } from "./gpu-bridge";
 import { loadCandleTimestamps } from "./unified-learning-controller";
@@ -104,7 +104,8 @@ app.use((req, res, next) => {
       log(`serving on port ${port}`);
       
       startBinanceWs();
-      loadPaperState().then(() => {
+      loadPaperState().then(async () => {
+        await loadAnalyticsClearedTs();
         startPositionMonitor(30000);
         return gpuBridge.hydrateLastActivityFromDb();
       }).then(() => {

@@ -124,8 +124,35 @@ export function getAnalyticsClearedAfterTs(): number {
   return analyticsClearedAfterTs;
 }
 
-export function setAnalyticsClearedAfterTs(ts: number): void {
+export async function setAnalyticsClearedAfterTs(ts: number): Promise<void> {
   analyticsClearedAfterTs = ts;
+  try {
+    const { db } = await import("../db");
+    const { settings } = await import("@shared/schema");
+    const { eq } = await import("drizzle-orm");
+    const existing = await db.select().from(settings).where(eq(settings.key, "analytics_cleared_after_ts")).limit(1);
+    if (existing.length > 0) {
+      await db.update(settings).set({ valueJson: ts, updatedAt: Date.now() }).where(eq(settings.key, "analytics_cleared_after_ts"));
+    } else {
+      await db.insert(settings).values({ key: "analytics_cleared_after_ts", valueJson: ts, updatedAt: Date.now() });
+    }
+  } catch (err) {
+    console.error("[Paper Config] Failed to persist analytics clear timestamp:", err);
+  }
+}
+
+export async function loadAnalyticsClearedTs(): Promise<void> {
+  try {
+    const { db } = await import("../db");
+    const { settings } = await import("@shared/schema");
+    const { eq } = await import("drizzle-orm");
+    const rows = await db.select().from(settings).where(eq(settings.key, "analytics_cleared_after_ts")).limit(1);
+    if (rows.length > 0 && typeof rows[0].valueJson === "number") {
+      analyticsClearedAfterTs = rows[0].valueJson;
+    }
+  } catch (err) {
+    console.error("[Paper Config] Failed to load analytics clear timestamp:", err);
+  }
 }
 
 export async function loadPaperState(): Promise<void> {
