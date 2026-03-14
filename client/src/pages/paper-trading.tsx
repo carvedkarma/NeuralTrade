@@ -15,6 +15,7 @@ import {
   ResponsiveContainer,
   Scatter,
   ComposedChart,
+  ReferenceLine,
 } from "recharts";
 import {
   RotateCcw,
@@ -32,10 +33,30 @@ import {
   Eye,
   Star,
   Hourglass,
+  BarChart2,
+  Target,
+  Award,
+  History,
+  Clock,
+  Percent,
+  Sigma,
+  FlaskConical,
+  CheckCircle2,
+  XCircle,
 } from "lucide-react";
 import { CloseButton, PartialCloseButton, EditSLTPDialog } from "@/components/position-actions";
 import { usePingMonitor } from "@/hooks/use-ping";
 import { PingBadge } from "@/components/ping-badge";
+
+interface MonteCarloStats {
+  medianFinalEquity: number;
+  p5FinalEquity: number;
+  p95FinalEquity: number;
+  medianMaxDrawdown: number;
+  p95MaxDrawdown: number;
+  confidenceLevel: string;
+  isStatisticallySignificant: boolean;
+}
 
 interface Portfolio {
   startingEquity: number;
@@ -51,8 +72,42 @@ interface Portfolio {
   realizedPnl: number;
   tradesCount: number;
   totalTrades: number;
+  winningTrades: number;
+  losingTrades: number;
   winRate: number;
+  avgWin: number;
+  avgLoss: number;
+  sharpe: number;
+  sharpeWarning?: string;
+  expectancy: number;
+  bestTrade: number;
+  worstTrade: number;
+  profitFactor: number;
+  exposure: number;
+  exposurePct: number;
   openPositions: number;
+  monteCarloStats?: MonteCarloStats;
+}
+
+interface TradeHistory {
+  id: number;
+  positionId: number;
+  symbol: string;
+  side: string;
+  entryTs: number;
+  entryPrice: number;
+  exitTs: number;
+  exitPrice: number;
+  grossR: number;
+  netR: number;
+  costR: number;
+  pnlUsdt: number;
+  riskUsdt: number;
+  barsHeld: number;
+  exitReason: string;
+  maxFavorableR: number;
+  signalConfidence: number;
+  createdAt: number;
 }
 
 interface PaperConfig {
@@ -838,6 +893,143 @@ function ScannerStatusBadge({ lastCycleTs, cycleCount }: { lastCycleTs: number; 
   );
 }
 
+function MonteCarloStrip({ mc, totalTrades }: { mc: MonteCarloStats; totalTrades: number }) {
+  const confColor = mc.confidenceLevel.toLowerCase().includes("very high")
+    ? "text-emerald-400"
+    : mc.confidenceLevel.toLowerCase().includes("high")
+    ? "text-cyan-400"
+    : mc.confidenceLevel.toLowerCase().includes("moderate")
+    ? "text-amber-400"
+    : "text-orange-400";
+
+  const confBg = mc.confidenceLevel.toLowerCase().includes("very high")
+    ? "border-emerald-400/20 bg-emerald-400/5"
+    : mc.confidenceLevel.toLowerCase().includes("high")
+    ? "border-cyan-400/20 bg-cyan-400/5"
+    : mc.confidenceLevel.toLowerCase().includes("moderate")
+    ? "border-amber-400/20 bg-amber-400/5"
+    : "border-orange-400/20 bg-orange-400/5";
+
+  return (
+    <div className={`rounded-md border px-4 py-2.5 ${confBg}`} data-testid="monte-carlo-strip">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5">
+        <div className="flex items-center gap-1.5">
+          <FlaskConical className="w-3.5 h-3.5 text-purple-400/70" />
+          <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">Monte Carlo</span>
+          <Badge className={`no-default-hover-elevate no-default-active-elevate text-[9px] px-1.5 py-0 h-4 ${confColor} bg-current/10 border border-current/30`}>
+            {mc.isStatisticallySignificant ? "✓ " : ""}{mc.confidenceLevel}
+          </Badge>
+        </div>
+
+        <div className="flex items-center gap-1 text-[10px]">
+          <span className="text-muted-foreground/60">Median Equity</span>
+          <span className="font-mono font-semibold text-foreground">${mc.medianFinalEquity.toFixed(0)}</span>
+        </div>
+
+        <div className="flex items-center gap-1 text-[10px]">
+          <span className="text-muted-foreground/60">5th–95th pct</span>
+          <span className="font-mono text-red-400/80">${mc.p5FinalEquity.toFixed(0)}</span>
+          <span className="text-muted-foreground/40">→</span>
+          <span className="font-mono text-emerald-400/80">${mc.p95FinalEquity.toFixed(0)}</span>
+        </div>
+
+        <div className="flex items-center gap-1 text-[10px]">
+          <span className="text-muted-foreground/60">DD p95</span>
+          <span className="font-mono text-red-400/80">{mc.p95MaxDrawdown.toFixed(2)}R</span>
+        </div>
+
+        <div className="flex items-center gap-1 text-[10px] ml-auto">
+          <span className="text-muted-foreground/60">n={totalTrades} trades simulated</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const EXIT_REASON_LABELS: Record<string, { label: string; color: string }> = {
+  TAKE_PROFIT: { label: "TP", color: "text-emerald-400" },
+  STOP_LOSS: { label: "SL", color: "text-red-400" },
+  NEURAL_MFE: { label: "MFE", color: "text-cyan-400" },
+  MFE_PROTECTION_EXIT: { label: "MFE Shield", color: "text-purple-400" },
+  BREAKEVEN: { label: "BE", color: "text-amber-400" },
+  DIRECTION_FLIP: { label: "Flip", color: "text-orange-400" },
+  CONFIDENCE_DECAY: { label: "Decay", color: "text-orange-400" },
+  MANUAL: { label: "Manual", color: "text-muted-foreground" },
+  ADAPTIVE_TRAIL: { label: "Trail", color: "text-blue-400" },
+  PARTIAL: { label: "Partial", color: "text-cyan-400/70" },
+};
+
+function TradeHistoryTable({ trades }: { trades: TradeHistory[] }) {
+  if (trades.length === 0) {
+    return (
+      <div className="text-center py-6 text-sm text-muted-foreground" data-testid="text-no-trade-history">
+        No closed trades yet
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-x-auto" data-testid="trade-history-table">
+      <table className="w-full text-[11px]">
+        <thead>
+          <tr className="border-b border-border/40">
+            <th className="text-left py-2 px-2 text-muted-foreground/60 font-medium">Symbol</th>
+            <th className="text-left py-2 px-2 text-muted-foreground/60 font-medium">Side</th>
+            <th className="text-right py-2 px-2 text-muted-foreground/60 font-medium">Net R</th>
+            <th className="text-right py-2 px-2 text-muted-foreground/60 font-medium">P&L $</th>
+            <th className="text-right py-2 px-2 text-muted-foreground/60 font-medium">MFE</th>
+            <th className="text-right py-2 px-2 text-muted-foreground/60 font-medium">Conf</th>
+            <th className="text-center py-2 px-2 text-muted-foreground/60 font-medium">Exit</th>
+            <th className="text-right py-2 px-2 text-muted-foreground/60 font-medium">Duration</th>
+            <th className="text-right py-2 px-2 text-muted-foreground/60 font-medium">Closed</th>
+          </tr>
+        </thead>
+        <tbody>
+          {trades.map((t, i) => {
+            const isWin = t.netR >= 0;
+            const exitInfo = EXIT_REASON_LABELS[t.exitReason] ?? { label: t.exitReason, color: "text-muted-foreground" };
+            const durMs = t.exitTs - t.entryTs;
+            const durStr = durMs > 0 ? formatDuration(durMs) : "-";
+            return (
+              <tr
+                key={t.id}
+                className={`border-b border-border/20 transition-colors hover:bg-muted/20 ${i % 2 === 0 ? "" : "bg-muted/5"}`}
+                data-testid={`trade-row-${t.id}`}
+              >
+                <td className="py-1.5 px-2 font-mono font-semibold text-foreground/90">{t.symbol.replace("USDT", "")}</td>
+                <td className="py-1.5 px-2">
+                  <span className={`font-semibold ${t.side === "LONG" ? "text-emerald-400" : "text-red-400"}`}>
+                    {t.side === "LONG" ? "▲" : "▼"} {t.side}
+                  </span>
+                </td>
+                <td className={`py-1.5 px-2 text-right font-mono font-bold ${isWin ? "text-emerald-400" : "text-red-400"}`}>
+                  {isWin ? "+" : ""}{t.netR.toFixed(2)}R
+                </td>
+                <td className={`py-1.5 px-2 text-right font-mono ${isWin ? "text-emerald-400/70" : "text-red-400/70"}`}>
+                  {t.pnlUsdt >= 0 ? "+" : ""}${t.pnlUsdt.toFixed(2)}
+                </td>
+                <td className="py-1.5 px-2 text-right font-mono text-cyan-400/70">
+                  {t.maxFavorableR > 0 ? `${t.maxFavorableR.toFixed(2)}R` : "-"}
+                </td>
+                <td className="py-1.5 px-2 text-right font-mono text-muted-foreground/60">
+                  {t.signalConfidence > 0 ? `${(t.signalConfidence * 100).toFixed(0)}%` : "-"}
+                </td>
+                <td className="py-1.5 px-2 text-center">
+                  <span className={`font-mono font-semibold ${exitInfo.color}`}>{exitInfo.label}</span>
+                </td>
+                <td className="py-1.5 px-2 text-right font-mono text-muted-foreground/50">{durStr}</td>
+                <td className="py-1.5 px-2 text-right font-mono text-muted-foreground/40">
+                  {new Date(t.exitTs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export default function PaperTrading() {
   const [equityRange, setEquityRange] = useState<"7d" | "30d" | "all">("30d");
   const [livePrices, setLivePrices] = useState<Record<string, number>>({});
@@ -997,6 +1189,11 @@ export default function PaperTrading() {
     refetchInterval: 30000,
   });
 
+  const { data: tradeHistory } = useQuery<TradeHistory[]>({
+    queryKey: ["/api/paper/trade-history"],
+    refetchInterval: 30000,
+  });
+
   useEffect(() => {
     if (!openPositions || openPositions.length === 0) {
       setHealthMap({});
@@ -1122,103 +1319,228 @@ export default function PaperTrading() {
 
   const pnlPositive = (portfolio?.totalPnlR ?? 0) >= 0;
 
+  const winRate = portfolio?.winRate ?? 0;
+  const sharpe = portfolio?.sharpe ?? 0;
+  const profitFactor = portfolio?.profitFactor ?? 0;
+  const expectancy = portfolio?.expectancy ?? 0;
+  const totalTrades = portfolio?.totalTrades ?? 0;
+  const winningTrades = portfolio?.winningTrades ?? 0;
+  const losingTrades = portfolio?.losingTrades ?? 0;
+  const mc = portfolio?.monteCarloStats;
+
+  const recentTrades = (tradeHistory ?? []).slice(0, 15);
+
   return (
     <div className="p-4 space-y-4" data-testid="paper-trading">
-      <div className="glass-card rounded-md p-4">
-        <div className="flex flex-wrap items-center gap-4">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-muted-foreground">Paper Trading</span>
-            <Switch
-              data-testid="switch-paper-trading"
-              checked={paperEnabled}
-              onCheckedChange={handlePaperToggle}
-              disabled={enableMutation.isPending || disableMutation.isPending}
-            />
-            {paperEnabled && (
-              <span className="w-2 h-2 rounded-full bg-emerald-400 pulse-dot" />
-            )}
+
+      {/* ── Control Bar ─────────────────────────────────────────── */}
+      <div className="glass-card rounded-md px-4 py-3">
+        <div className="flex flex-wrap items-center gap-3">
+
+          <div className="flex items-center gap-4 divide-x divide-border/40">
+            <div className="flex items-center gap-2 pr-4">
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Paper</span>
+              <Switch
+                data-testid="switch-paper-trading"
+                checked={paperEnabled}
+                onCheckedChange={handlePaperToggle}
+                disabled={enableMutation.isPending || disableMutation.isPending}
+              />
+              <span className={`w-1.5 h-1.5 rounded-full transition-colors ${paperEnabled ? "bg-emerald-400 animate-pulse" : "bg-muted-foreground/20"}`} />
+            </div>
+
+            <div className="flex items-center gap-2 pl-4">
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Auto</span>
+              <Switch
+                data-testid="switch-auto-trading"
+                checked={autoTrading}
+                onCheckedChange={handleAutoToggle}
+                disabled={!paperEnabled || startAutoMutation.isPending || stopAutoMutation.isPending}
+              />
+              <span className={`w-1.5 h-1.5 rounded-full transition-colors ${autoTrading ? "bg-emerald-400 animate-pulse" : "bg-muted-foreground/20"}`} />
+            </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-muted-foreground">Auto Trading</span>
-            <Switch
-              data-testid="switch-auto-trading"
-              checked={autoTrading}
-              onCheckedChange={handleAutoToggle}
-              disabled={!paperEnabled || startAutoMutation.isPending || stopAutoMutation.isPending}
-            />
-            {autoTrading && (
-              <span className="w-2 h-2 rounded-full bg-emerald-400 pulse-dot" />
-            )}
-          </div>
-
+          <div className="h-4 w-px bg-border/40" />
           <ScannerStatusBadge lastCycleTs={lastCycleTs} cycleCount={cycleCount} />
 
           <div className="ml-auto flex items-center gap-2">
             <PingBadge ping={ping} />
-            <Button
-              variant="outline"
-              size="sm"
-              data-testid="button-clear-history"
-              onClick={handleClearHistory}
-              disabled={clearHistoryMutation.isPending}
-            >
+            <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground h-8 px-2.5"
+              data-testid="button-clear-history" onClick={handleClearHistory} disabled={clearHistoryMutation.isPending}>
               <Trash2 className="w-3.5 h-3.5 mr-1" />
-              Clear History
+              <span className="text-xs">History</span>
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              data-testid="button-clear-analytics"
-              onClick={handleClearAnalytics}
-              disabled={clearAnalyticsMutation.isPending}
-            >
+            <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-foreground h-8 px-2.5"
+              data-testid="button-clear-analytics" onClick={handleClearAnalytics} disabled={clearAnalyticsMutation.isPending}>
               <Trash2 className="w-3.5 h-3.5 mr-1" />
-              Clear Analytics
+              <span className="text-xs">Equity</span>
             </Button>
-            <Button
-              variant="destructive"
-              data-testid="button-reset-portfolio"
-              onClick={handleReset}
-              disabled={resetMutation.isPending}
-            >
-              <RotateCcw className="w-4 h-4 mr-1" />
-              Reset Portfolio
+            <Button variant="destructive" size="sm" className="h-8 px-3"
+              data-testid="button-reset-portfolio" onClick={handleReset} disabled={resetMutation.isPending}>
+              <RotateCcw className="w-3.5 h-3.5 mr-1" />
+              <span className="text-xs">Reset</span>
             </Button>
           </div>
         </div>
       </div>
 
+      {/* ── Primary KPI Row ──────────────────────────────────────── */}
+      <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-1 space-y-0 pb-1 pt-3 px-4">
+            <CardTitle className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Starting Equity</CardTitle>
+            <DollarSign className="w-3.5 h-3.5 text-muted-foreground/50" />
+          </CardHeader>
+          <CardContent className="px-4 pb-3">
+            <div className="number-mono text-xl font-bold" data-testid="text-starting-equity">
+              {portfolioLoading ? "..." : formatUsd(portfolio?.startingEquity ?? 0)}
+            </div>
+            <p className="text-[10px] text-muted-foreground/50 mt-0.5">paper capital</p>
+          </CardContent>
+        </Card>
+
+        <Card className={pctChange >= 0 ? "glow-green" : "glow-red"}>
+          <CardHeader className="flex flex-row items-center justify-between gap-1 space-y-0 pb-1 pt-3 px-4">
+            <CardTitle className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Current Equity</CardTitle>
+            {pctChange >= 0 ? <TrendingUp className="w-3.5 h-3.5 text-emerald-400" /> : <TrendingDown className="w-3.5 h-3.5 text-red-400" />}
+          </CardHeader>
+          <CardContent className="px-4 pb-3">
+            <div className="number-mono text-xl font-bold" data-testid="text-current-equity">
+              {portfolioLoading ? "..." : formatUsd(portfolio?.currentEquity ?? 0)}
+            </div>
+            <p className={`text-[10px] mt-0.5 font-mono ${pctChange >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {pctChange >= 0 ? "+" : ""}{pctChange.toFixed(2)}%
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className={pnlPositive ? "glow-green" : "glow-red"}>
+          <CardHeader className="flex flex-row items-center justify-between gap-1 space-y-0 pb-1 pt-3 px-4">
+            <CardTitle className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Total P&amp;L</CardTitle>
+            <Activity className="w-3.5 h-3.5 text-cyan-500/70" />
+          </CardHeader>
+          <CardContent className="px-4 pb-3">
+            <div className={`number-mono text-xl font-bold ${pnlPositive ? "text-emerald-400" : "text-red-400"}`} data-testid="text-total-pnl">
+              {portfolioLoading ? "..." : `${(portfolio?.totalPnlR ?? 0) >= 0 ? "+" : ""}${(portfolio?.totalPnlR ?? 0).toFixed(2)}R`}
+            </div>
+            <p className={`text-[10px] mt-0.5 font-mono ${pnlPositive ? "text-emerald-400/70" : "text-red-400/70"}`}>
+              {portfolioLoading ? "" : formatUsd(portfolio?.totalPnlUsdt ?? 0)}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="glow-red">
+          <CardHeader className="flex flex-row items-center justify-between gap-1 space-y-0 pb-1 pt-3 px-4">
+            <CardTitle className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Max Drawdown</CardTitle>
+            <AlertTriangle className="w-3.5 h-3.5 text-red-400/70" />
+          </CardHeader>
+          <CardContent className="px-4 pb-3">
+            <div className="number-mono text-xl font-bold text-red-400" data-testid="text-max-drawdown">
+              {portfolioLoading ? "..." : `${(portfolio?.maxDrawdownR ?? 0).toFixed(2)}R`}
+            </div>
+            <p className="text-[10px] text-muted-foreground/50 mt-0.5">
+              {portfolioLoading ? "" : `${(portfolio?.maxDrawdown ?? 0).toFixed(2)}%`}
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* ── Secondary KPI Row ────────────────────────────────────── */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="glass-card rounded-md px-4 py-3 flex items-center justify-between gap-3" data-testid="kpi-winrate">
+          <div>
+            <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Win Rate</p>
+            <p className="number-mono text-lg font-bold text-foreground mt-0.5" data-testid="text-win-rate">
+              {portfolioLoading ? "..." : `${winRate.toFixed(1)}%`}
+            </p>
+            <p className="text-[10px] text-muted-foreground/50 font-mono">
+              {portfolioLoading ? "" : `${winningTrades}W / ${losingTrades}L`}
+            </p>
+          </div>
+          <div className="relative w-10 h-10 shrink-0">
+            <svg viewBox="0 0 36 36" className="w-10 h-10 -rotate-90">
+              <circle cx="18" cy="18" r="14" fill="none" stroke="hsl(var(--muted))" strokeWidth="3" />
+              <circle cx="18" cy="18" r="14" fill="none"
+                stroke={winRate >= 55 ? "#34d399" : winRate >= 45 ? "#fbbf24" : "#f87171"}
+                strokeWidth="3"
+                strokeDasharray={`${(winRate / 100) * 87.96} 87.96`}
+                strokeLinecap="round"
+                className="transition-all duration-700"
+              />
+            </svg>
+          </div>
+        </div>
+
+        <div className="glass-card rounded-md px-4 py-3" data-testid="kpi-sharpe">
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Sharpe Ratio</p>
+          <p className={`number-mono text-lg font-bold mt-0.5 ${sharpe >= 2 ? "text-emerald-400" : sharpe >= 1 ? "text-cyan-400" : "text-amber-400"}`} data-testid="text-sharpe">
+            {portfolioLoading ? "..." : sharpe.toFixed(2)}
+          </p>
+          {portfolio?.sharpeWarning ? (
+            <p className="text-[10px] text-amber-400/70 mt-0.5 flex items-center gap-1">
+              <AlertTriangle className="w-2.5 h-2.5 shrink-0" />
+              may overfit
+            </p>
+          ) : (
+            <p className="text-[10px] text-muted-foreground/50 mt-0.5">annualized</p>
+          )}
+        </div>
+
+        <div className="glass-card rounded-md px-4 py-3" data-testid="kpi-pf">
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Profit Factor</p>
+          <p className={`number-mono text-lg font-bold mt-0.5 ${profitFactor >= 2 ? "text-emerald-400" : profitFactor >= 1.2 ? "text-cyan-400" : "text-red-400"}`} data-testid="text-profit-factor">
+            {portfolioLoading ? "..." : profitFactor > 0 ? profitFactor.toFixed(2) : "—"}
+          </p>
+          <p className="text-[10px] text-muted-foreground/50 mt-0.5">gross wins / losses</p>
+        </div>
+
+        <div className="glass-card rounded-md px-4 py-3" data-testid="kpi-expectancy">
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Expectancy</p>
+          <p className={`number-mono text-lg font-bold mt-0.5 ${expectancy >= 0 ? "text-emerald-400" : "text-red-400"}`} data-testid="text-expectancy">
+            {portfolioLoading ? "..." : `${expectancy >= 0 ? "+" : ""}${expectancy.toFixed(3)}R`}
+          </p>
+          <p className="text-[10px] text-muted-foreground/50 mt-0.5">
+            {totalTrades > 0 ? `per trade · n=${totalTrades}` : "no trades yet"}
+          </p>
+        </div>
+      </div>
+
+      {/* ── Monte Carlo Strip ────────────────────────────────────── */}
+      {mc && <MonteCarloStrip mc={mc} totalTrades={totalTrades} />}
+
+      {/* ── Open Positions + Scanner ─────────────────────────────── */}
       <Card>
-        <CardHeader>
+        <CardHeader className="pb-2">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <CardTitle className="text-sm font-medium">Open Positions</CardTitle>
+              <CardTitle className="text-sm font-semibold">Open Positions</CardTitle>
               <Brain className="w-4 h-4 text-purple-400/60" />
             </div>
-            {openPositions && openPositions.length > 0 && (
-              <Badge variant="outline" className="text-[10px] text-cyan-400 border-cyan-400/30" data-testid="badge-open-count">
-                {openPositions.length} active
-              </Badge>
-            )}
+            <div className="flex items-center gap-2">
+              {openPositions && openPositions.length > 0 && (
+                <Badge variant="outline" className="text-[10px] text-cyan-400 border-cyan-400/30" data-testid="badge-open-count">
+                  {openPositions.length} active
+                </Badge>
+              )}
+              {portfolio?.unrealizedPnl != null && portfolio.unrealizedPnl !== 0 && (
+                <Badge variant="outline" className={`text-[10px] ${portfolio.unrealizedPnl >= 0 ? "text-emerald-400 border-emerald-400/30" : "text-red-400 border-red-400/30"}`}>
+                  Float {portfolio.unrealizedPnl >= 0 ? "+" : ""}{portfolio.unrealizedPnlR?.toFixed(2) ?? "0.00"}R
+                </Badge>
+              )}
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <AiScannerGrid
-            events={cycleEvents}
-            lastCycleTs={lastCycleTs}
-            cycleCount={cycleCount}
-          />
-
+          <AiScannerGrid events={cycleEvents} lastCycleTs={lastCycleTs} cycleCount={cycleCount} />
           <NeuralWatchPanel
             events={neuralEvents}
             monitoredPositions={openPositions?.filter(p => p.source === "v5_signal") ?? []}
             healthMap={healthMap}
             flashingPositions={flashingPositions}
           />
-
           {(!openPositions || openPositions.length === 0) ? (
-            <p className="text-sm text-muted-foreground text-center py-8" data-testid="text-no-open-positions">
+            <p className="text-sm text-muted-foreground text-center py-6" data-testid="text-no-open-positions">
               No open positions
             </p>
           ) : (
@@ -1242,78 +1564,23 @@ export default function PaperTrading() {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between gap-1 space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Starting Equity</CardTitle>
-            <DollarSign className="w-4 h-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="number-mono text-2xl font-bold" data-testid="text-starting-equity">
-              {portfolioLoading ? "..." : formatUsd(portfolio?.startingEquity ?? 0)}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className={pctChange >= 0 ? "glow-green" : "glow-red"}>
-          <CardHeader className="flex flex-row items-center justify-between gap-1 space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Current Equity</CardTitle>
-            {pctChange >= 0 ? (
-              <TrendingUp className="w-4 h-4 text-emerald-400" />
-            ) : (
-              <TrendingDown className="w-4 h-4 text-red-400" />
-            )}
-          </CardHeader>
-          <CardContent>
-            <div className="number-mono text-2xl font-bold" data-testid="text-current-equity">
-              {portfolioLoading ? "..." : formatUsd(portfolio?.currentEquity ?? 0)}
-            </div>
-            <p className={`text-xs mt-1 ${pctChange >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-              {pctChange >= 0 ? "+" : ""}{pctChange.toFixed(2)}%
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card className={pnlPositive ? "glow-green" : "glow-red"}>
-          <CardHeader className="flex flex-row items-center justify-between gap-1 space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Total P&L</CardTitle>
-            <Activity className="w-4 h-4 text-cyan-500" />
-          </CardHeader>
-          <CardContent>
-            <div
-              className={`number-mono text-2xl font-bold ${pnlPositive ? "text-emerald-400" : "text-red-400"}`}
-              data-testid="text-total-pnl"
-            >
-              {portfolioLoading ? "..." : `${(portfolio?.totalPnlR ?? 0) >= 0 ? "+" : ""}${(portfolio?.totalPnlR ?? 0).toFixed(2)}R`}
-            </div>
-            <p className={`text-xs mt-1 ${pnlPositive ? "text-emerald-400" : "text-red-400"}`}>
-              {portfolioLoading ? "" : formatUsd(portfolio?.totalPnlUsdt ?? 0)}
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card className="glow-red">
-          <CardHeader className="flex flex-row items-center justify-between gap-1 space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Max Drawdown</CardTitle>
-            <AlertTriangle className="w-4 h-4 text-red-400" />
-          </CardHeader>
-          <CardContent>
-            <div className="number-mono text-2xl font-bold text-red-400" data-testid="text-max-drawdown">
-              {portfolioLoading ? "..." : `${(portfolio?.maxDrawdownR ?? 0).toFixed(2)}R`}
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
+      {/* ── Equity Curve ─────────────────────────────────────────── */}
       <div className="glass-card rounded-md p-4">
         <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-          <h3 className="text-sm font-medium text-muted-foreground">Equity Curve</h3>
+          <div className="flex items-center gap-2">
+            <BarChart2 className="w-4 h-4 text-cyan-400/60" />
+            <h3 className="text-sm font-semibold">Equity Curve</h3>
+            {equityCurve && equityCurve.length > 0 && (
+              <span className="text-[10px] font-mono text-muted-foreground/40">{equityCurve.length} trades</span>
+            )}
+          </div>
           <div className="flex gap-1">
             {(["7d", "30d", "all"] as const).map((range) => (
               <Button
                 key={range}
                 variant={equityRange === range ? "default" : "outline"}
                 size="sm"
+                className="h-7 text-xs px-2.5"
                 data-testid={`button-range-${range}`}
                 onClick={() => setEquityRange(range)}
               >
@@ -1322,38 +1589,47 @@ export default function PaperTrading() {
             ))}
           </div>
         </div>
-        <div className="h-64" data-testid="chart-equity-curve">
+        <div className="h-80" data-testid="chart-equity-curve">
           <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={equityCurve ?? []}>
+            <ComposedChart data={equityCurve ?? []} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
               <defs>
-                <linearGradient id="greenGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#34d399" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#34d399" stopOpacity={0} />
+                <linearGradient id="equityGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#34d399" stopOpacity={0.25} />
+                  <stop offset="80%" stopColor="#34d399" stopOpacity={0.02} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.5} />
               <XAxis
                 dataKey="ts"
                 tickFormatter={formatDate}
                 stroke="hsl(var(--muted-foreground))"
-                fontSize={12}
+                fontSize={11}
+                tick={{ fill: "hsl(var(--muted-foreground))" }}
               />
               <YAxis
                 stroke="hsl(var(--muted-foreground))"
-                fontSize={12}
+                fontSize={11}
+                tick={{ fill: "hsl(var(--muted-foreground))" }}
                 tickFormatter={(v: number) => `${v}R`}
+                width={42}
               />
+              <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" strokeOpacity={0.4} strokeDasharray="4 4" />
               <Tooltip
                 contentStyle={{
                   backgroundColor: "hsl(var(--card))",
                   border: "1px solid hsl(var(--border))",
-                  borderRadius: "6px",
-                  fontSize: 12,
+                  borderRadius: "8px",
+                  fontSize: 11,
+                  boxShadow: "0 4px 16px rgba(0,0,0,0.3)",
                 }}
                 labelFormatter={(v: number) => formatDateTime(v)}
-                formatter={(value: number, name: string) => {
-                  if (name === "r") return [`${value}R`, "Cumulative"];
-                  if (name === "tradeR") return [`${value}R`, "Trade"];
+                formatter={(value: number, name: string, props: any) => {
+                  if (name === "r") return [`${(value as number).toFixed(2)}R`, "Cumulative"];
+                  if (name === "tradeR") {
+                    const sym = props?.payload?.symbol ?? "";
+                    const side = props?.payload?.side ?? "";
+                    return [`${(value as number) >= 0 ? "+" : ""}${(value as number).toFixed(2)}R`, `Trade${sym ? ` · ${sym}` : ""}${side ? ` ${side}` : ""}`];
+                  }
                   return [value, name];
                 }}
               />
@@ -1361,8 +1637,9 @@ export default function PaperTrading() {
                 type="monotone"
                 dataKey="r"
                 stroke="#34d399"
-                fill="url(#greenGradient)"
+                fill="url(#equityGradient)"
                 strokeWidth={2}
+                dot={false}
               />
               <Scatter
                 dataKey="tradeR"
@@ -1371,13 +1648,49 @@ export default function PaperTrading() {
                   const { cx, cy, payload } = props;
                   if (!cx || !cy) return <circle r={0} />;
                   const color = (payload?.tradeR ?? 0) >= 0 ? "#34d399" : "#f87171";
-                  return <circle cx={cx} cy={cy} r={4} fill={color} stroke="none" />;
+                  const r = Math.abs(payload?.tradeR ?? 1) > 3 ? 6 : 4;
+                  return <circle cx={cx} cy={cy} r={r} fill={color} stroke="rgba(0,0,0,0.3)" strokeWidth={1} />;
                 }}
               />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
       </div>
+
+      {/* ── Recent Trade History ──────────────────────────────────── */}
+      <Card>
+        <CardHeader className="pb-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <History className="w-4 h-4 text-muted-foreground/60" />
+              <CardTitle className="text-sm font-semibold">Recent Trades</CardTitle>
+              {recentTrades.length > 0 && (
+                <span className="text-[10px] font-mono text-muted-foreground/40">last {recentTrades.length}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-3 text-[10px] font-mono text-muted-foreground/60">
+              {portfolio && (
+                <>
+                  <span className="flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-400/60" />
+                    Avg W: <span className="text-emerald-400/80 ml-0.5">+{((portfolio.avgWin ?? 0) * 100).toFixed(1)}%</span>
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <XCircle className="w-3 h-3 text-red-400/60" />
+                    Avg L: <span className="text-red-400/80 ml-0.5">-{((portfolio.avgLoss ?? 0) * 100).toFixed(1)}%</span>
+                  </span>
+                  <span>Best: <span className="text-emerald-400/80">+{((portfolio.bestTrade ?? 0) * 100).toFixed(1)}%</span></span>
+                  <span>Worst: <span className="text-red-400/80">{((portfolio.worstTrade ?? 0) * 100).toFixed(1)}%</span></span>
+                </>
+              )}
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="px-4 pb-4">
+          <TradeHistoryTable trades={recentTrades} />
+        </CardContent>
+      </Card>
+
     </div>
   );
 }
