@@ -38,7 +38,7 @@ async function getCurrentMarketPrice(symbol: string): Promise<number> {
   return rows[0]?.close ?? 0;
 }
 
-export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK" | "NEURAL_FLIP" | "NEURAL_MFE" | "NEURAL_DECAY" | "NEURAL_LOW_CONVICTION" | "NEURAL_MFE_AGGRESSIVE";
+export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK" | "NEURAL_FLIP" | "NEURAL_MFE" | "NEURAL_DECAY" | "NEURAL_LOW_CONVICTION" | "NEURAL_MFE_AGGRESSIVE" | "NEURAL_CHOP_EXIT";
 
 interface TradeContext {
   candle: Candle;
@@ -1957,6 +1957,15 @@ export async function neuralPositionManager(
     const reason = `Aggressive MFE exit: position at ${pnlR.toFixed(2)}R profit, model conviction dropped to p_side=${pSide.toFixed(3)}. Securing 3R+ gain.`;
     console.log(`[Neural PM] ${position.symbol} — ${reason}`);
     return await refetchAndClose("NEURAL_MFE_AGGRESSIVE", reason, "MFE_PROTECTION_EXIT");
+  }
+
+  // Neural Chop Exit — model has lost directional conviction (balanced p_long/p_short) while position is stuck near zero
+  // Chop signature: |p_long - p_short| < 0.18 (neither direction dominates) AND pnlR between -0.7 and +0.3 (no progress)
+  const chopBalance = Math.abs(pLong - pShort);
+  if (chopBalance < 0.18 && pnlR < 0.3 && pnlR > -0.7 && v5Score < 4.0) {
+    const reason = `Chop exit: model balanced (p_long=${pLong.toFixed(3)}, p_short=${pShort.toFixed(3)}, diff=${chopBalance.toFixed(3)}) with position stuck at ${pnlR.toFixed(2)}R. V5=${v5Score.toFixed(2)}. Exiting chop.`;
+    console.log(`[Neural PM] ${position.symbol} — ${reason}`);
+    return await refetchAndClose("NEURAL_CHOP_EXIT", reason, "CHOP_EXIT");
   }
 
   // NEW: Neural TP extension — mfePred says there's more room than current TP allows; widen TP

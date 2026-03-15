@@ -229,6 +229,8 @@ const NEURAL_ADJUSTMENT_LABELS: Record<string, { label: string; color: string; t
   CONFIDENCE_DECAY_TIGHTEN: { label: "Decay Tight", color: "text-orange-400", termColor: "text-orange-400" },
   MFE_PROTECTION_EXIT: { label: "MFE Lock", color: "text-emerald-400", termColor: "text-emerald-400" },
   ADAPTIVE_TRAIL: { label: "Adapt Trail", color: "text-purple-400", termColor: "text-purple-400" },
+  CHOP_EXIT: { label: "Chop Exit", color: "text-yellow-400", termColor: "text-yellow-400" },
+  LOW_CONVICTION_EXIT: { label: "Low Conv", color: "text-orange-300", termColor: "text-orange-300" },
 };
 
 const NEURAL_SWEEP_COLORS: Record<string, { gradient: string; animation: string; label: string; icon: string }> = {
@@ -240,6 +242,8 @@ const NEURAL_SWEEP_COLORS: Record<string, { gradient: string; animation: string;
   CONFIDENCE_DECAY_TIGHTEN: { gradient: "from-orange-500/30", animation: "neural-sweep-amber", label: "DECAY TIGHT", icon: "decay" },
   MFE_PROTECTION_EXIT: { gradient: "from-emerald-500/30", animation: "neural-sweep-emerald", label: "MFE LOCK", icon: "lock" },
   ADAPTIVE_TRAIL: { gradient: "from-purple-500/30", animation: "neural-sweep-purple", label: "ADAPT", icon: "trail" },
+  CHOP_EXIT: { gradient: "from-yellow-500/30", animation: "neural-sweep-amber", label: "CHOP EXIT", icon: "exit" },
+  LOW_CONVICTION_EXIT: { gradient: "from-orange-500/30", animation: "neural-sweep-amber", label: "LOW CONV", icon: "exit" },
 };
 
 function HealthRing({ score, size = 32 }: { score: number; size?: number }) {
@@ -1006,6 +1010,10 @@ function MonteCarloStrip({ mc, totalTrades }: { mc: MonteCarloStats; totalTrades
 const EXIT_REASON_LABELS: Record<string, { label: string; color: string }> = {
   TAKE_PROFIT: { label: "TP", color: "text-emerald-400" },
   STOP_LOSS: { label: "SL", color: "text-red-400" },
+  TP1: { label: "TP1", color: "text-emerald-400" },
+  TP2: { label: "TP2", color: "text-emerald-500" },
+  SL: { label: "SL", color: "text-red-400" },
+  TRAIL: { label: "Trail", color: "text-blue-400" },
   NEURAL_MFE: { label: "MFE", color: "text-cyan-400" },
   MFE_GIVEBACK: { label: "MFE", color: "text-cyan-400" },
   MFE_PROTECTION_EXIT: { label: "MFE Shield", color: "text-purple-400" },
@@ -1015,6 +1023,9 @@ const EXIT_REASON_LABELS: Record<string, { label: string; color: string }> = {
   CONFIDENCE_DECAY: { label: "Decay", color: "text-orange-400" },
   NEURAL_FLIP: { label: "Flip", color: "text-orange-400" },
   NEURAL_DECAY: { label: "Decay", color: "text-orange-300" },
+  NEURAL_LOW_CONVICTION: { label: "Low Conv", color: "text-orange-300" },
+  NEURAL_MFE_AGGRESSIVE: { label: "MFE+", color: "text-emerald-300" },
+  NEURAL_CHOP_EXIT: { label: "Chop", color: "text-yellow-400" },
   FAILURE: { label: "Fail", color: "text-red-300" },
   TIME: { label: "Time", color: "text-muted-foreground" },
   FLIP: { label: "Flip", color: "text-orange-400" },
