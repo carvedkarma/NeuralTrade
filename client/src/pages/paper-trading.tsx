@@ -229,6 +229,7 @@ const NEURAL_ADJUSTMENT_LABELS: Record<string, { label: string; color: string; t
   CONFIDENCE_DECAY_TIGHTEN: { label: "Decay Tight", color: "text-orange-400", termColor: "text-orange-400" },
   MFE_PROTECTION_EXIT: { label: "MFE Lock", color: "text-emerald-400", termColor: "text-emerald-400" },
   ADAPTIVE_TRAIL: { label: "Adapt Trail", color: "text-purple-400", termColor: "text-purple-400" },
+  CHOP_RESCUE_EXIT: { label: "Chop Rescue", color: "text-orange-400", termColor: "text-orange-400" },
 };
 
 const NEURAL_SWEEP_COLORS: Record<string, { gradient: string; animation: string; label: string; icon: string }> = {
@@ -240,6 +241,7 @@ const NEURAL_SWEEP_COLORS: Record<string, { gradient: string; animation: string;
   CONFIDENCE_DECAY_TIGHTEN: { gradient: "from-orange-500/30", animation: "neural-sweep-amber", label: "DECAY TIGHT", icon: "decay" },
   MFE_PROTECTION_EXIT: { gradient: "from-emerald-500/30", animation: "neural-sweep-emerald", label: "MFE LOCK", icon: "lock" },
   ADAPTIVE_TRAIL: { gradient: "from-purple-500/30", animation: "neural-sweep-purple", label: "ADAPT", icon: "trail" },
+  CHOP_RESCUE_EXIT: { gradient: "from-orange-500/30", animation: "neural-sweep-amber", label: "CHOP RESCUE", icon: "exit" },
 };
 
 function HealthRing({ score, size = 32 }: { score: number; size?: number }) {
@@ -1021,6 +1023,7 @@ const EXIT_REASON_LABELS: Record<string, { label: string; color: string }> = {
   MANUAL: { label: "Manual", color: "text-muted-foreground" },
   ADAPTIVE_TRAIL: { label: "Trail", color: "text-blue-400" },
   PARTIAL: { label: "Partial", color: "text-cyan-400/70" },
+  NEURAL_CHOP_EXIT: { label: "Chop Rescue", color: "text-orange-400" },
 };
 
 function TradeHistoryTable({ trades }: { trades: TradeHistory[] }) {

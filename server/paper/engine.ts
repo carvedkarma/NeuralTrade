@@ -38,7 +38,7 @@ async function getCurrentMarketPrice(symbol: string): Promise<number> {
   return rows[0]?.close ?? 0;
 }
 
-export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK" | "NEURAL_FLIP" | "NEURAL_MFE" | "NEURAL_DECAY" | "NEURAL_LOW_CONVICTION" | "NEURAL_MFE_AGGRESSIVE";
+export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK" | "NEURAL_FLIP" | "NEURAL_MFE" | "NEURAL_DECAY" | "NEURAL_LOW_CONVICTION" | "NEURAL_MFE_AGGRESSIVE" | "NEURAL_CHOP_EXIT";
 
 interface TradeContext {
   candle: Candle;
@@ -1353,7 +1353,7 @@ export async function monitorAllPositions(): Promise<void> {
   }
 }
 
-export function startPositionMonitor(intervalMs: number = 30000): void {
+export function startPositionMonitor(intervalMs: number = 1000): void {
   if (monitorIntervalId) return;
   console.log(`[Position Monitor] Started — checking all open positions every ${intervalMs / 1000}s`);
   monitorIntervalId = setInterval(() => {
@@ -1977,6 +1977,33 @@ export async function neuralPositionManager(
       const reason = `Neural TP extension: mfePred=${mfePred.toFixed(2)}R > currentTP=${currentTpDistR.toFixed(2)}R, p_side=${pSide.toFixed(3)}. Extended TP from ${prevTp.toFixed(4)} → ${newTp.toFixed(4)}`;
       console.log(`[Neural PM] ${position.symbol} — ${reason}`);
       return { action: "EXTEND_TP", adjustmentType: "TP_EXTENSION", reason, positionClosed: false };
+    }
+  }
+
+  if (peakProfitR >= 0.3 && pnlR >= 0.1) {
+    const givebackRatio = (peakProfitR - pnlR) / peakProfitR;
+    if (givebackRatio >= 0.60) {
+      const isChoppy = pHold > 0.45 || (pSide < 0.52 && v5Score < 4.0);
+      if (isChoppy) {
+        const allOpen = await storage.getPositions("OPEN", 100);
+        let avgPortfolioPnlR = 0;
+        if (allOpen.length > 0) {
+          let totalPnlR = 0;
+          for (const p of allOpen) {
+            const px = await getCurrentMarketPrice(p.symbol);
+            if (px > 0) {
+              const uPnl = calculateUnrealizedPnl(p, px);
+              totalPnlR += uPnl / Math.max(p.initialRiskUsdt ?? 1, 0.01);
+            }
+          }
+          avgPortfolioPnlR = totalPnlR / allOpen.length;
+        }
+        if (avgPortfolioPnlR <= 0.4) {
+          const reason = `Chop rescue: peaked at ${peakProfitR.toFixed(2)}R, now ${pnlR.toFixed(2)}R (${(givebackRatio * 100).toFixed(0)}% giveback). Chop signals: pHold=${pHold.toFixed(3)}, pSide=${pSide.toFixed(3)}, v5Score=${v5Score.toFixed(1)}. Portfolio avg: ${avgPortfolioPnlR.toFixed(2)}R. Rescuing remaining profit.`;
+          console.log(`[Neural PM] ${position.symbol} — ${reason}`);
+          return await refetchAndClose("NEURAL_CHOP_EXIT", reason, "CHOP_RESCUE_EXIT");
+        }
+      }
     }
   }
 
