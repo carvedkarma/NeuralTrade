@@ -711,7 +711,7 @@ function PositionPriceGauge({ pos, livePrice, health, isFlashing, isNew, isGlowi
   const posId = typeof pos.id === "number" ? pos.id : parseInt(String(pos.id ?? "0"));
 
   const healthScore = health?.score ?? null;
-  const isBreakeven = stopLoss != null && Math.abs(stopLoss - entryPrice) / entryPrice < 0.005;
+  const isBreakeven = stopLoss != null && Math.abs(stopLoss - entryPrice) / entryPrice < 0.0015;
 
   const trailPrice = pos.trailPrice;
   let trailPct: number | null = null;
