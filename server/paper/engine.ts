@@ -16,7 +16,6 @@ import {
 } from "../trade-decision-engine";
 import { HORIZON_CONFIG, NO_TRADE_CONDITIONS } from "../gpu-data-export";
 import { edgeTracker } from "../edge-tracker";
-import { getLatestPrice } from "../binance-ws";
 import { db } from "../db";
 import { eq, and, desc } from "drizzle-orm";
 
@@ -1947,38 +1946,6 @@ export async function neuralPositionManager(
     return await refetchAndClose("NEURAL_LOW_CONVICTION", reason, "LOW_CONVICTION_EXIT");
   }
 
-  // NEW: Chop Rescue Exit — position peaked meaningfully but is bleeding back while model shows chop
-  // Rescues remaining small profit before it erodes to zero or worse
-  // Per-symbol: evaluated independently against ITS OWN peak/giveback and the model's current read
-  // Portfolio guard: if the overall portfolio is healthy (avgPnlR > 0.4), skip rescue and let winners run
-  if (peakProfitR >= 0.3 && pnlR >= 0.1) {
-    const givebackRatio = (peakProfitR - pnlR) / peakProfitR;
-    const chopSignal = pHold > 0.45 || (pSide < 0.52 && v5Score < 4.0);
-    if (givebackRatio >= 0.60 && chopSignal) {
-      const allOpenPositions = await storage.getPositions("OPEN", 100);
-      const portPnlRValues = allOpenPositions.map(p => {
-        const r = Math.max(p.initialRiskUsdt ?? 1, 0.01);
-        const mark = p.id === position.id ? currentPrice : (getLatestPrice(p.symbol) ?? p.entryPrice);
-        const priceDiff = mark - p.entryPrice;
-        const pnl = p.side === "LONG" ? priceDiff * p.qty : -priceDiff * p.qty;
-        return pnl / r;
-      });
-      const avgPortfolioPnlR = portPnlRValues.length > 0
-        ? portPnlRValues.reduce((a, b) => a + b, 0) / portPnlRValues.length
-        : 0;
-      if (avgPortfolioPnlR <= 0.4) {
-        const chopDesc = pHold > 0.45
-          ? `pHold=${pHold.toFixed(3)} (model indecisive)`
-          : `pSide=${pSide.toFixed(3)}, v5Score=${v5Score.toFixed(2)} (conviction+edge lost)`;
-        const reason = `Chop Rescue: ${position.symbol} peaked at ${peakProfitR.toFixed(2)}R, now at ${pnlR.toFixed(2)}R (${(givebackRatio * 100).toFixed(0)}% giveback). Chop signal: ${chopDesc}. Portfolio avgPnlR=${avgPortfolioPnlR.toFixed(2)}R — rescuing remaining profit.`;
-        console.log(`[Neural PM] ${position.symbol} — ${reason}`);
-        return await refetchAndClose("NEURAL_CHOP_EXIT", reason, "CHOP_RESCUE_EXIT");
-      } else {
-        console.log(`[Neural PM] ${position.symbol} — Chop rescue suppressed: portfolio avgPnlR=${avgPortfolioPnlR.toFixed(2)}R > 0.4 (portfolio healthy, letting run)`);
-      }
-    }
-  }
-
   if (pnlR >= 2.0 && retMu < -0.001) {
     const reason = `MFE Protection: position at ${pnlR.toFixed(2)}R profit but model predicts negative return (ret_mu=${retMu.toFixed(5)}). Locking in profit.`;
     console.log(`[Neural PM] ${position.symbol} — ${reason}`);
@@ -1990,15 +1957,6 @@ export async function neuralPositionManager(
     const reason = `Aggressive MFE exit: position at ${pnlR.toFixed(2)}R profit, model conviction dropped to p_side=${pSide.toFixed(3)}. Securing 3R+ gain.`;
     console.log(`[Neural PM] ${position.symbol} — ${reason}`);
     return await refetchAndClose("NEURAL_MFE_AGGRESSIVE", reason, "MFE_PROTECTION_EXIT");
-  }
-
-  // Neural Chop Exit — model has lost directional conviction (balanced p_long/p_short) while position is stuck near zero
-  // Chop signature: |p_long - p_short| < 0.18 (neither direction dominates) AND pnlR between -0.7 and +0.3 (no progress)
-  const chopBalance = Math.abs(pLong - pShort);
-  if (chopBalance < 0.18 && pnlR < 0.3 && pnlR > -0.7 && v5Score < 4.0) {
-    const reason = `Chop exit: model balanced (p_long=${pLong.toFixed(3)}, p_short=${pShort.toFixed(3)}, diff=${chopBalance.toFixed(3)}) with position stuck at ${pnlR.toFixed(2)}R. V5=${v5Score.toFixed(2)}. Exiting chop.`;
-    console.log(`[Neural PM] ${position.symbol} — ${reason}`);
-    return await refetchAndClose("NEURAL_CHOP_EXIT", reason, "CHOP_EXIT");
   }
 
   // NEW: Neural TP extension — mfePred says there's more room than current TP allows; widen TP

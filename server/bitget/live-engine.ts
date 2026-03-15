@@ -18,7 +18,7 @@ interface BitgetLiveConfig {
 
 let liveConfig: BitgetLiveConfig = {
   enabled: false,
-  riskPerTradePct: 0.3,  // Base margin pct — multiplied by exchange leverage (e.g. 35x × 0.3% = 10.5% effective risk)
+  riskPerTradePct: 0.3,   // Base margin pct — multiplied by exchange leverage (e.g. 25x × 0.3% = 7.5% effective risk)
   maxDailyLossUsdt: 500,
   dailyLossUsdt: 0,
   lastResetDate: new Date().toISOString().split("T")[0],

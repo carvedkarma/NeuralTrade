@@ -5183,6 +5183,54 @@
       "tradingCost": 0.0009,
       "confidence": 0.99062866,
       "isWin": true
+    },
+    {
+      "timestamp": "2026-03-15T15:36:00.455Z",
+      "action": "SHORT",
+      "entryPrice": 1.4169,
+      "exitPrice": 1.4181418,
+      "horizon": 16,
+      "actualReturn": -0.0008764203542944799,
+      "netReturn": -0.00177642035429448,
+      "tradingCost": 0.0009,
+      "confidence": 0.90148914,
+      "isWin": false
+    },
+    {
+      "timestamp": "2026-03-15T15:36:00.694Z",
+      "action": "SHORT",
+      "entryPrice": 87.81,
+      "exitPrice": 87.94879399999999,
+      "horizon": 16,
+      "actualReturn": -0.001580617241771895,
+      "netReturn": -0.002480617241771895,
+      "tradingCost": 0.0009,
+      "confidence": 0.94464254,
+      "isWin": false
+    },
+    {
+      "timestamp": "2026-03-15T15:36:03.819Z",
+      "action": "SHORT",
+      "entryPrice": 2095.8,
+      "exitPrice": 2094.4294219999997,
+      "horizon": 16,
+      "actualReturn": 0.0006539641187138457,
+      "netReturn": -0.0002460358812861543,
+      "tradingCost": 0.0009,
+      "confidence": 0.94478184,
+      "isWin": false
+    },
+    {
+      "timestamp": "2026-03-15T15:36:07.690Z",
+      "action": "SHORT",
+      "entryPrice": 9.15,
+      "exitPrice": 9.160916,
+      "horizon": 16,
+      "actualReturn": -0.0011930054644808661,
+      "netReturn": -0.0020930054644808663,
+      "tradingCost": 0.0009,
+      "confidence": 0.91788787,
+      "isWin": false
     }
   ],
   "tradingCostMode": "taker_taker"
