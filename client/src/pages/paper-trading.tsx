@@ -230,6 +230,7 @@ const NEURAL_ADJUSTMENT_LABELS: Record<string, { label: string; color: string; t
   MFE_PROTECTION_EXIT: { label: "MFE Lock", color: "text-emerald-400", termColor: "text-emerald-400" },
   ADAPTIVE_TRAIL: { label: "Adapt Trail", color: "text-purple-400", termColor: "text-purple-400" },
   CHOP_EXIT: { label: "Chop Exit", color: "text-yellow-400", termColor: "text-yellow-400" },
+  CHOP_RESCUE_EXIT: { label: "Chop Rescue", color: "text-amber-400", termColor: "text-amber-400" },
   LOW_CONVICTION_EXIT: { label: "Low Conv", color: "text-orange-300", termColor: "text-orange-300" },
 };
 
@@ -243,6 +244,7 @@ const NEURAL_SWEEP_COLORS: Record<string, { gradient: string; animation: string;
   MFE_PROTECTION_EXIT: { gradient: "from-emerald-500/30", animation: "neural-sweep-emerald", label: "MFE LOCK", icon: "lock" },
   ADAPTIVE_TRAIL: { gradient: "from-purple-500/30", animation: "neural-sweep-purple", label: "ADAPT", icon: "trail" },
   CHOP_EXIT: { gradient: "from-yellow-500/30", animation: "neural-sweep-amber", label: "CHOP EXIT", icon: "exit" },
+  CHOP_RESCUE_EXIT: { gradient: "from-amber-500/30", animation: "neural-sweep-amber", label: "CHOP RESCUE", icon: "exit" },
   LOW_CONVICTION_EXIT: { gradient: "from-orange-500/30", animation: "neural-sweep-amber", label: "LOW CONV", icon: "exit" },
 };
 
