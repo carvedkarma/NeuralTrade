@@ -5441,6 +5441,12 @@ Examples:
                         help="v5.6: reduce sizing on dominant direction when balance exceeds threshold (default: off)")
     parser.add_argument("--v5-direction-balance-threshold", type=float, default=0.75,
                         help="v5.6: direction balance threshold for 0.5x sizing reduction (default: 0.75)")
+    parser.add_argument("--v5-live-threshold", type=float, default=None,
+                        help="Live mode v5_score threshold override (default: V5_SCORE_THRESHOLD=0.5). "
+                             "Signals with score below this are blocked. Range: 0.1–5.0")
+    parser.add_argument("--v5-live-mae-floor", type=float, default=0.5,
+                        help="Live mode MAE floor to prevent score explosion in low-vol markets "
+                             "(default: 0.5). Was 0.001 which caused scores of 5000+)")
 
     parser.add_argument("--v5-temp-scale", action="store_true", default=False,
                         help="v5.0.9+: enable post-training temperature scaling calibration")
@@ -5717,6 +5723,8 @@ Examples:
             side_aware_scoring=getattr(args, 'v5_side_aware_scoring', False),
             direction_balance_cap=getattr(args, 'v5_direction_balance_cap', False),
             direction_balance_threshold=getattr(args, 'v5_direction_balance_threshold', 0.75),
+            v5_live_threshold=getattr(args, 'v5_live_threshold', None),
+            v5_mae_floor=getattr(args, 'v5_live_mae_floor', None),
         )
         runner.learning_manager = learning_mgr
 

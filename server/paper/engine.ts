@@ -1730,13 +1730,17 @@ export async function manualOpenPosition(params: {
   if (side === "LONG" && takeProfit <= entryPrice) throw new Error("LONG TP must be above entry");
   if (side === "SHORT" && takeProfit >= entryPrice) throw new Error("SHORT TP must be below entry");
 
-  const leverage = source === "v5_signal" ? computeSignalLeverage(v5Score) : 1;
+  const riskMultiplier = source === "v5_signal" ? computeSignalLeverage(v5Score) : 1;
   const stopDistance = Math.abs(entryPrice - stopLoss);
   const riskUsd = portfolio.currentEquityUsdt * (riskPercent / 100);
   const baseQty = riskUsd / stopDistance;
-  const qty = baseQty * leverage;
+  const qty = baseQty * riskMultiplier;
   const notional = qty * entryPrice;
   const entryFee = calculateFee(notional, config.takerFeePct);
+  // initialRiskUsdt must match the actual capital at risk (qty × stopDistance).
+  // Storing riskUsd × riskMultiplier keeps R-math correct:
+  //   net_R = realizedPnl / initialRiskUsdt → always ≈ ±1R at SL/TP.
+  const initialRiskUsdt = riskUsd * riskMultiplier;
 
   const position = await storage.createPosition({
     symbol,
@@ -1746,7 +1750,7 @@ export async function manualOpenPosition(params: {
     entryPrice,
     qty,
     notionalUsdt: notional,
-    leverage,
+    leverage: riskMultiplier,
     stopLoss,
     tp1: takeProfit,
     tp2: null,
@@ -1755,7 +1759,7 @@ export async function manualOpenPosition(params: {
     timeStopBars: 60,
     barsOpen: 0,
     primaryHorizon: 15,
-    initialRiskUsdt: riskUsd,
+    initialRiskUsdt,
     feesPaidUsdt: entryFee,
     fundingPaidUsdt: 0,
     exitTs: null,

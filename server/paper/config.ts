@@ -103,18 +103,19 @@ export const defaultConfig: PaperTradingConfig = {
   // Performance metrics tracking
   trackRMultiple: true,         // Track R-multiple per trade
   
-  // Signal-strength leverage tiers (v5Score thresholds → leverage)
-  // Calibrated to actual GPU trainer v5_score range (medians 0.44–8.99)
+  // Signal-strength RISK MULTIPLIER tiers (v5Score thresholds → risk multiplier)
+  // After MAE floor fix, scores land in 0.2–15 range. Multiplier is applied to
+  // BOTH qty AND initialRiskUsdt, so R-math stays correct (no more -30R SL hits).
   leverageEnabled: true,
   leverageTiers: [
-    { minScore: 8.0, leverage: 30 },
-    { minScore: 5.0, leverage: 10 },
-    { minScore: 2.0, leverage: 5 },
-    { minScore: 0.8, leverage: 3 },
-    { minScore: 0.3, leverage: 2 },
-    { minScore: 0.02, leverage: 1 },
+    { minScore: 8.0, leverage: 2.0 },
+    { minScore: 5.0, leverage: 1.75 },
+    { minScore: 2.0, leverage: 1.5 },
+    { minScore: 0.8, leverage: 1.25 },
+    { minScore: 0.3, leverage: 1.1 },
+    { minScore: 0.02, leverage: 1.0 },
   ],
-  maxLeverage: 30,
+  maxLeverage: 2.0,
 };
 
 let currentConfig: PaperTradingConfig = { ...defaultConfig };

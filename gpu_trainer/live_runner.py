@@ -42,8 +42,9 @@ MIN_H1_BARS = 100
 MIN_H4_BARS = 50
 
 V5_SCORE_LAMBDA = 0.5
-V5_SCORE_THRESHOLD = 0.02
+V5_SCORE_THRESHOLD = 0.5   # default live threshold — calibrated for MAE floor of 0.5
 V5_MIN_MU_R = 0.03
+V5_MAE_FLOOR = 0.5         # minimum MAE to prevent score explosion in low-vol markets
 
 COST_BPS = 8.0
 
@@ -995,6 +996,8 @@ class LiveRunner:
         side_aware_scoring: bool = False,
         direction_balance_cap: bool = False,
         direction_balance_threshold: float = 0.75,
+        v5_live_threshold: float = None,
+        v5_mae_floor: float = None,
     ):
         self.replit_url = replit_url
         self.symbols = symbols
@@ -1021,13 +1024,15 @@ class LiveRunner:
         self._recent_signal_sides: list = []
 
         self.v5_score_lambda = V5_SCORE_LAMBDA
-        self.v5_score_threshold = V5_SCORE_THRESHOLD
+        self.v5_score_threshold = v5_live_threshold if v5_live_threshold is not None else V5_SCORE_THRESHOLD
         self.v5_min_mu_r = V5_MIN_MU_R
+        self.v5_mae_floor = v5_mae_floor if v5_mae_floor is not None else V5_MAE_FLOOR
 
         log.info(f"[INIT] LiveRunner {SYSTEM_VERSION} execution_mode={execution_mode} "
                  f"record_trades={record_trades} symbols={symbols}")
         log.info(f"[CONFIG] V5 scoring: lambda={self.v5_score_lambda} "
-                 f"threshold={self.v5_score_threshold} min_mu_r={self.v5_min_mu_r}")
+                 f"threshold={self.v5_score_threshold} min_mu_r={self.v5_min_mu_r} "
+                 f"mae_floor={self.v5_mae_floor}")
 
         self.model = None
         self.engineer = None
@@ -1828,7 +1833,7 @@ class LiveRunner:
         v5_mae = infer_result.get('v5_mae', 0.0)
         ret_mu = infer_result.get('v5_ret_mu', e_net_pred)
 
-        risk = max(v5_mae, 0.001)
+        risk = max(v5_mae, self.v5_mae_floor)  # floor prevents score explosion in low-vol
         abs_mu = abs(ret_mu)
         mu_over_risk = abs_mu / risk if risk > 0 else 0.0
         edge_long = p_long * mu_over_risk
