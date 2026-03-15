@@ -38,7 +38,7 @@ async function getCurrentMarketPrice(symbol: string): Promise<number> {
   return rows[0]?.close ?? 0;
 }
 
-export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK" | "NEURAL_FLIP" | "NEURAL_MFE" | "NEURAL_DECAY" | "NEURAL_LOW_CONVICTION" | "NEURAL_MFE_AGGRESSIVE" | "NEURAL_CHOP_EXIT";
+export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK" | "NEURAL_FLIP" | "NEURAL_MFE" | "NEURAL_DECAY" | "NEURAL_LOW_CONVICTION" | "NEURAL_MFE_AGGRESSIVE" | "NEURAL_CHOP_EXIT" | "CYCLE_RESCUE";
 
 interface TradeContext {
   candle: Candle;
@@ -1321,6 +1321,31 @@ export async function monitorAllPositions(): Promise<void> {
           await storage.updatePosition(position.id, { peakProfit: newPeakProfit });
         }
 
+        // Cycle-aware profit rescue: in the last 2.5 min of every 15m signal cycle,
+        // close any profitable fading position to free the slot for the next signal.
+        const nowMs = Date.now();
+        const cycleMs = 15 * 60 * 1000;
+        const msUntilNextCycle = cycleMs - (nowMs % cycleMs);
+        if (msUntilNextCycle <= 2.5 * 60 * 1000) {
+          const riskUsdt = Math.max(position.initialRiskUsdt ?? 1, 0.01);
+          const pnlR = unrealizedPnl / riskUsdt;
+          const peakProfitR = newPeakProfit / riskUsdt;
+          if (pnlR > 0 && peakProfitR >= 0.2) {
+            const givebackRatio = peakProfitR > 0 ? (peakProfitR - pnlR) / peakProfitR : 0;
+            if (givebackRatio >= 0.40) {
+              const freshPos = await storage.getPositionById(position.id);
+              if (freshPos && freshPos.status === "OPEN") {
+                const minsLeft = (msUntilNextCycle / 60000).toFixed(1);
+                const reason = `Cycle rescue: ${minsLeft}min to next signal cycle. Peaked ${peakProfitR.toFixed(2)}R → now ${pnlR.toFixed(2)}R (${(givebackRatio * 100).toFixed(0)}% giveback). Locking profit, freeing slot.`;
+                console.log(`[Position Monitor → Cycle Rescue] ${position.symbol} — ${reason}`);
+                await closePosition(freshPos, currentPrice, "CYCLE_RESCUE", syntheticCtx);
+                broadcast("TRADE_CLOSE", { positionId: position.id, symbol: position.symbol, reason: "CYCLE_RESCUE", exitPrice: currentPrice });
+                continue;
+              }
+            }
+          }
+        }
+
         const cachedSignal = getCachedSignal(position.symbol);
         if (cachedSignal) {
           try {
@@ -1980,7 +2005,7 @@ export async function neuralPositionManager(
     }
   }
 
-  if (peakProfitR >= 0.3 && pnlR >= 0.1) {
+  if (peakProfitR >= 0.3 && pnlR >= 0.03) {
     const givebackRatio = (peakProfitR - pnlR) / peakProfitR;
     if (givebackRatio >= 0.60) {
       const isChoppy = pHold > 0.45 || (pSide < 0.52 && v5Score < 4.0);
