@@ -998,6 +998,7 @@ class LiveRunner:
         direction_balance_threshold: float = 0.75,
         v5_live_threshold: float = None,
         v5_mae_floor: float = None,
+        predictive_sltp: bool = False,
     ):
         self.replit_url = replit_url
         self.symbols = symbols
@@ -1027,6 +1028,7 @@ class LiveRunner:
         self.v5_score_threshold = v5_live_threshold if v5_live_threshold is not None else V5_SCORE_THRESHOLD
         self.v5_min_mu_r = V5_MIN_MU_R
         self.v5_mae_floor = v5_mae_floor if v5_mae_floor is not None else V5_MAE_FLOOR
+        self.predictive_sltp = predictive_sltp
 
         log.info(f"[INIT] LiveRunner {SYSTEM_VERSION} execution_mode={execution_mode} "
                  f"record_trades={record_trades} symbols={symbols}")
@@ -1953,14 +1955,32 @@ class LiveRunner:
         v5_info['hold_reason'] = None
 
         if atr and atr > 0 and not (atr != atr):
-            sl_dist = self.sl_mult * atr
-            tp_dist = self.tp_mult * atr
+            base_sl_dist = self.sl_mult * atr
+            base_tp_dist = self.tp_mult * atr
+            if self.predictive_sltp and v5_mfe > 0 and v5_mae > 0:
+                # MFE/MAE heads are in R-units (1R = sl_mult × ATR).
+                # Widen SL only (never tighten) when model expects larger adverse move.
+                mae_dist = v5_mae * self.sl_mult * atr
+                sl_dist = max(base_sl_dist, mae_dist)
+                sl_dist = min(sl_dist, base_sl_dist * 2.5)
+                # Use MFE prediction for TP, floored at base TP so RR never degrades.
+                mfe_dist = v5_mfe * self.sl_mult * atr
+                tp_dist = max(base_tp_dist, mfe_dist)
+                tp_dist = min(tp_dist, base_tp_dist * 3.0)
+                log.info(f"  [PRED_SLTP] {symbol}: mae={v5_mae:.3f}R→sl={sl_dist/atr:.2f}×ATR "
+                         f"mfe={v5_mfe:.3f}R→tp={tp_dist/atr:.2f}×ATR "
+                         f"(base sl={base_sl_dist/atr:.1f} tp={base_tp_dist/atr:.1f}×ATR)")
+            else:
+                sl_dist = base_sl_dist
+                tp_dist = base_tp_dist
             if side == "LONG":
                 v5_info['sl_price'] = round(current_price - sl_dist, 6)
                 v5_info['tp_price'] = round(current_price + tp_dist, 6)
             else:
                 v5_info['sl_price'] = round(current_price + sl_dist, 6)
                 v5_info['tp_price'] = round(current_price - tp_dist, 6)
+            v5_info['sl_dist_atr'] = round(sl_dist / atr, 3)
+            v5_info['tp_dist_atr'] = round(tp_dist / atr, 3)
             log.info(f"[V5_DECISION] sym={symbol} score={v5_score:.4f} thr={self.v5_score_threshold} "
                      f"side={side} -> ENTER | SL: ${v5_info['sl_price']:.2f} | TP: ${v5_info['tp_price']:.2f}")
         else:
@@ -2060,8 +2080,20 @@ class LiveRunner:
 
             entry_price = exec_result.entry_price
 
-        sl_dist = self.sl_mult * atr
-        tp_dist = self.tp_mult * atr
+        v5_mae = v5_info.get('v5_mae', 0.0)
+        v5_mfe = v5_info.get('v5_mfe', 0.0)
+        base_sl_dist = self.sl_mult * atr
+        base_tp_dist = self.tp_mult * atr
+        if self.predictive_sltp and v5_mfe > 0 and v5_mae > 0:
+            mae_dist = v5_mae * self.sl_mult * atr
+            sl_dist = max(base_sl_dist, mae_dist)
+            sl_dist = min(sl_dist, base_sl_dist * 2.5)
+            mfe_dist = v5_mfe * self.sl_mult * atr
+            tp_dist = max(base_tp_dist, mfe_dist)
+            tp_dist = min(tp_dist, base_tp_dist * 3.0)
+        else:
+            sl_dist = base_sl_dist
+            tp_dist = base_tp_dist
 
         if side == "LONG":
             sl_price = entry_price - sl_dist

@@ -13,6 +13,7 @@ import TradeHistory from "@/pages/trade-history";
 import SettingsPage from "@/pages/settings";
 import BitgetTrading from "@/pages/bitget-trading";
 import NotFound from "@/pages/not-found";
+import NeuralMonitor from "@/pages/neural-monitor";
 
 function Router() {
   return (
@@ -26,6 +27,7 @@ function Router() {
         <Route path="/analytics" component={Analytics} />
         <Route path="/training" component={TrainingMonitor} />
         <Route path="/settings" component={SettingsPage} />
+        <Route path="/neural" component={NeuralMonitor} />
         <Route component={NotFound} />
       </Switch>
     </AppLayout>

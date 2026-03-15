@@ -5447,6 +5447,11 @@ Examples:
     parser.add_argument("--v5-live-mae-floor", type=float, default=0.5,
                         help="Live mode MAE floor to prevent score explosion in low-vol markets "
                              "(default: 0.5). Was 0.001 which caused scores of 5000+)")
+    parser.add_argument("--v5-predictive-sltp", action="store_true", default=False,
+                        help="Use model MFE/MAE head predictions to set dynamic SL/TP. "
+                             "SL widens when model expects large adverse excursion. "
+                             "TP widens when model expects large favorable excursion. "
+                             "Never tightens SL below base (sl_mult×ATR). Recommended with V5+ models.")
 
     parser.add_argument("--v5-temp-scale", action="store_true", default=False,
                         help="v5.0.9+: enable post-training temperature scaling calibration")
@@ -5725,6 +5730,7 @@ Examples:
             direction_balance_threshold=getattr(args, 'v5_direction_balance_threshold', 0.75),
             v5_live_threshold=getattr(args, 'v5_live_threshold', None),
             v5_mae_floor=getattr(args, 'v5_live_mae_floor', None),
+            predictive_sltp=getattr(args, 'v5_predictive_sltp', False),
         )
         runner.learning_manager = learning_mgr
 

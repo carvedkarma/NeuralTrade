@@ -5417,6 +5417,78 @@ Provide your analysis in this JSON format:
     }
   });
 
+  app.get("/api/neural-intelligence", async (req, res) => {
+    try {
+      const symbols = [...TRADING_SYMBOLS];
+      const results: Record<string, {
+        symbol: string;
+        price: number | null;
+        direction: string | null;
+        decision: string | null;
+        holdReason: string | null;
+        pLong: number | null;
+        pShort: number | null;
+        pHold: number | null;
+        retMu: number | null;
+        mfePred: number | null;
+        maePred: number | null;
+        v5Score: number | null;
+        v5Threshold: number | null;
+        htfH1Trend: number | null;
+        htfH4Trend: number | null;
+        htfScore: number | null;
+        cycleTs: number | null;
+        slopeOk: boolean | null;
+        rangeOk: boolean | null;
+        pEnter: number | null;
+        retMuDirection: string | null;
+      }> = {};
+
+      await Promise.all(symbols.map(async (sym) => {
+        const rows = await db
+          .select()
+          .from(liveCycleLogs)
+          .where(eq(liveCycleLogs.symbol, sym))
+          .orderBy(desc(liveCycleLogs.cycleTs))
+          .limit(1);
+
+        const row = rows[0] ?? null;
+        const retMu = row?.retMu ?? null;
+        results[sym] = {
+          symbol: sym,
+          price: row?.price ?? null,
+          direction: row?.direction ?? null,
+          decision: row?.decision ?? null,
+          holdReason: row?.holdReason ?? null,
+          pLong: row?.pLong ?? null,
+          pShort: row?.pShort ?? null,
+          pHold: row?.pHold ?? null,
+          retMu,
+          mfePred: row?.mfePred ?? null,
+          maePred: row?.maePred ?? null,
+          v5Score: row?.v5Score ?? null,
+          v5Threshold: row?.v5Threshold ?? null,
+          htfH1Trend: row?.htfH1Trend ?? null,
+          htfH4Trend: row?.htfH4Trend ?? null,
+          htfScore: row?.htfScore ?? null,
+          cycleTs: row?.cycleTs ?? null,
+          slopeOk: row?.slopeOk ?? null,
+          rangeOk: row?.rangeOk ?? null,
+          pEnter: row?.pEnter ?? null,
+          retMuDirection: retMu !== null ? (retMu > 0 ? "BULLISH" : retMu < 0 ? "BEARISH" : "NEUTRAL") : null,
+        };
+      }));
+
+      res.json({
+        symbols: results,
+        updatedAt: Date.now(),
+      });
+    } catch (error) {
+      console.error("[Neural Intelligence] Error:", error);
+      res.status(500).json({ error: "Failed to get neural intelligence" });
+    }
+  });
+
   app.get("/api/live/summary", async (req, res) => {
     try {
       const symbols = (req.query.symbols as string || TRADING_SYMBOLS.join(",")).split(",").map(s => s.trim());

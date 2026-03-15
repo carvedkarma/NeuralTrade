@@ -13,6 +13,7 @@ import {
   Brain,
   ClipboardList,
   ArrowRightLeft,
+  Cpu,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -30,6 +31,7 @@ const NAV_ITEMS = [
   { path: "/live", label: "Live Trading", icon: Activity },
   { path: "/bitget", label: "Bitget Trading", icon: ArrowRightLeft },
   { path: "/paper", label: "Paper Trading", icon: FileText },
+  { path: "/neural", label: "Neural Monitor", icon: Cpu },
   { path: "/trade-history", label: "Trade History", icon: ClipboardList },
   { path: "/analytics", label: "Analytics", icon: BarChart3 },
   { path: "/training", label: "Training Monitor", icon: Brain },
