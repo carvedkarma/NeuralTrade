@@ -56,8 +56,8 @@ export const defaultConfig: PaperTradingConfig = {
   paperTradingEnabled: false,
   isAutoTrading: false,
   
-  riskPerTradePct: 0.3,             // Base margin pct per trade — multiplied by exchange leverage (e.g. 25x × 0.3% = 7.5% effective risk)
-  maxRiskPerTradePct: 0.6,          // Max base risk pct (50x × 0.6% = 30% max per trade)
+  riskPerTradePct: 0.04,            // Base margin pct per trade — multiplied by exchange leverage (e.g. 25x × 0.04% = 1% effective risk)
+  maxRiskPerTradePct: 0.08,         // Max base risk pct (50x × 0.08% = 4% max per trade)
   maxAccountExposurePct: 3000,      // 3000% allows up to 50x leveraged multi-symbol positions
   minConfidence: 0.35,              // Lowered from 65% to 35% - more aggressive
   
@@ -104,9 +104,9 @@ export const defaultConfig: PaperTradingConfig = {
   trackRMultiple: true,         // Track R-multiple per trade
   
   // Exchange leverage tiers (v5Score thresholds → exchange leverage multiplier)
-  // These represent real exchange leverage (15x–50x). Combined with riskPerTradePct=0.3%:
-  //   50x × 0.3% = 15.0% equity at risk for highest conviction signals
-  //   15x × 0.3% = 4.5% equity at risk for minimum conviction signals
+  // These represent real exchange leverage (15x–50x). Combined with riskPerTradePct=0.04%:
+  //   50x × 0.04% = 2.0% equity at risk for highest conviction signals
+  //   15x × 0.04% = 0.6% equity at risk for minimum conviction signals
   // Applied to BOTH qty AND initialRiskUsdt to keep R-math correct at SL.
   leverageEnabled: true,
   leverageTiers: [
