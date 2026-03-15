@@ -328,7 +328,7 @@ function NeuralWatchPanel({
             <span className="text-[9px] font-mono text-muted-foreground/25">Monitoring...</span>
           </div>
         ) : (
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex gap-1.5 overflow-x-auto scrollbar-hide" style={{ scrollbarWidth: "none" }}>
             {monitoredPositions.map((pos) => {
               const posId = typeof pos.id === "number" ? pos.id : parseInt(String(pos.id ?? "0"));
               const health = posId > 0 ? healthMap[posId] : undefined;
@@ -344,7 +344,7 @@ function NeuralWatchPanel({
               return (
                 <div
                   key={posId}
-                  className={`relative flex items-center gap-1.5 px-2 py-1 rounded-full border transition-all duration-300 ${borderColor}`}
+                  className={`relative flex items-center gap-1.5 px-2 py-1 rounded-full border transition-all duration-300 shrink-0 ${borderColor}`}
                   data-testid={`neural-watch-${pos.symbol}`}
                 >
                   {sweepInfo && (
