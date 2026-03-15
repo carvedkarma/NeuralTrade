@@ -38,7 +38,7 @@ async function getCurrentMarketPrice(symbol: string): Promise<number> {
   return rows[0]?.close ?? 0;
 }
 
-export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK" | "NEURAL_FLIP" | "NEURAL_MFE" | "NEURAL_DECAY" | "NEURAL_LOW_CONVICTION" | "NEURAL_MFE_AGGRESSIVE";
+export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK" | "NEURAL_FLIP" | "NEURAL_MFE" | "NEURAL_DECAY" | "NEURAL_LOW_CONVICTION" | "NEURAL_MFE_AGGRESSIVE" | "NEURAL_CHOP_EXIT";
 
 interface TradeContext {
   candle: Candle;
@@ -1353,7 +1353,7 @@ export async function monitorAllPositions(): Promise<void> {
   }
 }
 
-export function startPositionMonitor(intervalMs: number = 30000): void {
+export function startPositionMonitor(intervalMs: number = 1000): void {
   if (monitorIntervalId) return;
   console.log(`[Position Monitor] Started — checking all open positions every ${intervalMs / 1000}s`);
   monitorIntervalId = setInterval(() => {
