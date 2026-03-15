@@ -38,7 +38,7 @@ async function getCurrentMarketPrice(symbol: string): Promise<number> {
   return rows[0]?.close ?? 0;
 }
 
-export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK" | "NEURAL_FLIP" | "NEURAL_MFE" | "NEURAL_DECAY";
+export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK" | "NEURAL_FLIP" | "NEURAL_MFE" | "NEURAL_DECAY" | "NEURAL_LOW_CONVICTION" | "NEURAL_MFE_AGGRESSIVE";
 
 interface TradeContext {
   candle: Candle;
@@ -1849,6 +1849,23 @@ export async function neuralPositionManager(
     }
   };
 
+  const propagateToBitget = async (action: "close") => {
+    try {
+      const { isBitgetLiveTradingEnabled, closeBitgetLivePosition } = await import("../bitget/live-engine");
+      if (!isBitgetLiveTradingEnabled()) return;
+      if (action === "close") {
+        const result = await closeBitgetLivePosition(position.symbol);
+        if (result.success) {
+          console.log(`[Neural PM → Bitget] Closed ${position.symbol} on exchange`);
+        } else if (result.error && !result.error.includes("No open position")) {
+          console.warn(`[Neural PM → Bitget] Close ${position.symbol} failed: ${result.error}`);
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[Neural PM → Bitget] Error propagating to exchange: ${err.message}`);
+    }
+  };
+
   const currentPrice = signal.price;
   if (!currentPrice || currentPrice <= 0) return null;
 
@@ -1908,6 +1925,7 @@ export async function neuralPositionManager(
     broadcast("TRADE_CLOSE", { positionId: position.id, symbol: position.symbol, reason: exitReason, exitPrice: currentPrice });
     await recordAdjustment(adjType, position.stopLoss, null, reason);
     await propagateToBybit("close");
+    await propagateToBitget("close");
     return { action: "CLOSE", adjustmentType: adjType, reason, positionClosed: true, exitReason };
   };
 
@@ -1920,10 +1938,46 @@ export async function neuralPositionManager(
     }
   }
 
+  // NEW: Low conviction exit — model hasn't fully flipped but has lost belief; lock in any profit
+  const pSide = sideIsLong ? pLong : pShort;
+  if (pSide < 0.30 && pnlR >= 0.3) {
+    const reason = `Low conviction exit: model p_${sideIsLong ? "long" : "short"}=${pSide.toFixed(3)} (conviction lost) while position at ${pnlR.toFixed(2)}R profit. Locking in.`;
+    console.log(`[Neural PM] ${position.symbol} — ${reason}`);
+    return await refetchAndClose("NEURAL_LOW_CONVICTION", reason, "LOW_CONVICTION_EXIT");
+  }
+
   if (pnlR >= 2.0 && retMu < -0.001) {
     const reason = `MFE Protection: position at ${pnlR.toFixed(2)}R profit but model predicts negative return (ret_mu=${retMu.toFixed(5)}). Locking in profit.`;
     console.log(`[Neural PM] ${position.symbol} — ${reason}`);
     return await refetchAndClose("NEURAL_MFE", reason, "MFE_PROTECTION_EXIT");
+  }
+
+  // NEW: Aggressive MFE protection — at 3R+ profit with meaningfully reduced side conviction
+  if (pnlR >= 3.0 && pSide < 0.50) {
+    const reason = `Aggressive MFE exit: position at ${pnlR.toFixed(2)}R profit, model conviction dropped to p_side=${pSide.toFixed(3)}. Securing 3R+ gain.`;
+    console.log(`[Neural PM] ${position.symbol} — ${reason}`);
+    return await refetchAndClose("NEURAL_MFE_AGGRESSIVE", reason, "MFE_PROTECTION_EXIT");
+  }
+
+  // NEW: Neural TP extension — mfePred says there's more room than current TP allows; widen TP
+  const mfePred = signal.mfePred ?? 0;
+  if (mfePred > 1.5 && pSide > 0.75 && pnlR >= 0.2 && position.tp1 && position.initialStopDistance && position.qty > 0) {
+    const stopDist = position.initialStopDistance;
+    const currentTpDistR = Math.abs(position.tp1 - position.entryPrice) / stopDist;
+    const targetTpDistR = Math.min(mfePred * 0.85, currentTpDistR * 2.5);  // extend, but cap at 2.5x original TP
+    if (targetTpDistR > currentTpDistR + 0.3) {
+      const newTp = sideIsLong
+        ? position.entryPrice + (targetTpDistR * stopDist)
+        : position.entryPrice - (targetTpDistR * stopDist);
+      const prevTp = position.tp1;
+      await storage.updatePosition(position.id, { tp1: newTp });
+      broadcast("TRADE_UPDATE", { positionId: position.id, symbol: position.symbol, side: position.side, action: "NEURAL_ADJUST", tp1: newTp, adjustmentType: "TP_EXTENSION" });
+      await recordAdjustment("TP_EXTENSION", position.stopLoss, null, `Neural TP extended: mfePred=${mfePred.toFixed(2)}R, p_side=${pSide.toFixed(3)}, old_TP=${prevTp.toFixed(4)}, new_TP=${newTp.toFixed(4)}`);
+      await propagateToBybit("amend", { takeProfit: newTp });
+      const reason = `Neural TP extension: mfePred=${mfePred.toFixed(2)}R > currentTP=${currentTpDistR.toFixed(2)}R, p_side=${pSide.toFixed(3)}. Extended TP from ${prevTp.toFixed(4)} → ${newTp.toFixed(4)}`;
+      console.log(`[Neural PM] ${position.symbol} — ${reason}`);
+      return { action: "EXTEND_TP", adjustmentType: "TP_EXTENSION", reason, positionClosed: false };
+    }
   }
 
   if (pHold > 0.6 && pnlR >= 0.5) {

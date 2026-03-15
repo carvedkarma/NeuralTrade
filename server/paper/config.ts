@@ -56,9 +56,9 @@ export const defaultConfig: PaperTradingConfig = {
   paperTradingEnabled: false,
   isAutoTrading: false,
   
-  riskPerTradePct: 0.5,             // Increased from 0.25% to 0.5% risk per trade
-  maxRiskPerTradePct: 1.0,          // Increased from 0.5% to 1.0% max risk
-  maxAccountExposurePct: 500,       // AGGRESSIVE: Increased to 500% for 5x leverage futures
+  riskPerTradePct: 0.04,            // Base margin pct per trade — multiplied by exchange leverage (e.g. 25x × 0.04% = 1% effective risk)
+  maxRiskPerTradePct: 0.08,         // Max base risk pct (50x × 0.08% = 4% max per trade)
+  maxAccountExposurePct: 3000,      // 3000% allows up to 50x leveraged multi-symbol positions
   minConfidence: 0.35,              // Lowered from 65% to 35% - more aggressive
   
   // STANDARDIZED: 0.10% round-trip total (aligned with pattern-memory & signal-engine)
@@ -103,19 +103,21 @@ export const defaultConfig: PaperTradingConfig = {
   // Performance metrics tracking
   trackRMultiple: true,         // Track R-multiple per trade
   
-  // Signal-strength RISK MULTIPLIER tiers (v5Score thresholds → risk multiplier)
-  // After MAE floor fix, scores land in 0.2–15 range. Multiplier is applied to
-  // BOTH qty AND initialRiskUsdt, so R-math stays correct (no more -30R SL hits).
+  // Exchange leverage tiers (v5Score thresholds → exchange leverage multiplier)
+  // These represent real exchange leverage (15x–50x). Combined with riskPerTradePct=0.04%:
+  //   50x × 0.04% = 2.0% equity at risk for highest conviction signals
+  //   15x × 0.04% = 0.6% equity at risk for minimum conviction signals
+  // Applied to BOTH qty AND initialRiskUsdt to keep R-math correct at SL.
   leverageEnabled: true,
   leverageTiers: [
-    { minScore: 8.0, leverage: 2.0 },
-    { minScore: 5.0, leverage: 1.75 },
-    { minScore: 2.0, leverage: 1.5 },
-    { minScore: 0.8, leverage: 1.25 },
-    { minScore: 0.3, leverage: 1.1 },
-    { minScore: 0.02, leverage: 1.0 },
+    { minScore: 10.0, leverage: 50 },
+    { minScore: 7.0,  leverage: 35 },
+    { minScore: 5.0,  leverage: 25 },
+    { minScore: 3.0,  leverage: 20 },
+    { minScore: 1.0,  leverage: 15 },
+    { minScore: 0.02, leverage: 15 },
   ],
-  maxLeverage: 2.0,
+  maxLeverage: 50,
 };
 
 let currentConfig: PaperTradingConfig = { ...defaultConfig };
