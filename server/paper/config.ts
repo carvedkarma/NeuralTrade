@@ -90,7 +90,7 @@ export const defaultConfig: PaperTradingConfig = {
   chopTp1: 0.8,                 // Chop/mean-reversion: TP1 = 0.8x ATR (RR = 1.14 vs 0.7x stop)
   
   // MFE-aware trailing stops
-  mfeTrailActivation: 0.6,      // Activate trail when profit >= 0.6x ATR_pct
+  mfeTrailActivation: 1.5,      // Activate trail when profit >= 1.5x ATR_pct (raised from 0.6 to give trades room to breathe)
   mfeGivebackPct: 0.5,          // Exit if giveback >= 50% of TP1
   mfeMinGiveback: 0.35,         // Min giveback = 0.35x ATR_pct
   

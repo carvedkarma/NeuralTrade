@@ -425,8 +425,15 @@ function updateMfeAwareTrailingStop(
   if (position.trailMode === "none") {
     return { newTrailPrice: null, shouldExit: false, exitReason: "", newPeakProfit };
   }
+
+  // FIX: Don't allow MFE to act on brand-new positions (< 2 bars old).
+  // This prevents the trail from arming and firing within the very first candle
+  // when price noise can briefly cross the activation threshold.
+  if ((position.barsOpen ?? 0) < 2) {
+    return { newTrailPrice: null, shouldExit: false, exitReason: "", newPeakProfit };
+  }
   
-  // Only activate trailing after reaching activation threshold (0.6x ATR_pct)
+  // Only activate trailing after reaching activation threshold (now 1.5x ATR_pct)
   const activationThreshold = config.mfeTrailActivation * atrPct;
   if (newPeakProfitPct < activationThreshold) {
     return { newTrailPrice: null, shouldExit: false, exitReason: "", newPeakProfit };
@@ -441,8 +448,12 @@ function updateMfeAwareTrailingStop(
     : atrPct;
   const minGiveback = config.mfeMinGiveback * atrPct;
   const maxGiveback = Math.max(minGiveback, config.mfeGivebackPct * tp1Distance);
-  
-  if (givebackPct >= maxGiveback && currentProfitPct > 0) {
+
+  // FIX: Require profit to cover round-trip fees before MFE can close the position.
+  // Previously checked currentProfitPct > 0 (raw price), which allowed exits at
+  // breakeven-raw-price that became net losses after fees were applied.
+  const feeCoverPct = getTotalCostsPct();
+  if (givebackPct >= maxGiveback && currentProfitPct > feeCoverPct) {
     return { 
       newTrailPrice: null, 
       shouldExit: true, 
