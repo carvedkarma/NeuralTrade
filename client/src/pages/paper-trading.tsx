@@ -300,35 +300,37 @@ function NeuralWatchPanel({
   });
 
   return (
-    <div className="relative overflow-hidden" data-testid="neural-watch-panel">
+    <div className="rounded-lg border border-border/40 bg-black/60 overflow-hidden relative" data-testid="neural-watch-panel">
       <EegWave />
-      <div className="flex items-center justify-between px-3 py-1.5 relative z-10">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border/30 bg-black/40 relative z-10">
         <div className="flex items-center gap-2">
-          <Brain className={`w-3.5 h-3.5 text-emerald-400/70 ${isActive ? "animate-brain-pulse" : ""}`} />
-          <span className="text-[10px] font-mono font-medium text-emerald-400/80 tracking-wider uppercase">
+          <Brain className={`w-4 h-4 text-emerald-400/80 ${isActive ? "animate-brain-pulse" : ""}`} />
+          <span className="text-[11px] font-mono font-semibold text-emerald-400/90 tracking-wider uppercase">
             Neural Monitor
           </span>
-          <span className={`w-1.5 h-1.5 rounded-full ${isActive ? "bg-emerald-400 animate-pulse" : "bg-emerald-400/20"}`} />
+          <span className={`w-1.5 h-1.5 rounded-full ${isActive ? "bg-emerald-400 animate-pulse" : "bg-emerald-400/30"}`} />
         </div>
-        {monitoredPositions.length > 0 && (
-          <span className="text-[9px] font-mono text-emerald-400/50 flex items-center gap-1">
-            <Eye className="w-2.5 h-2.5" />
-            {monitoredPositions.length}
-          </span>
-        )}
+        <div className="flex items-center gap-3">
+          {monitoredPositions.length > 0 && (
+            <span className="text-[10px] font-mono text-emerald-400/60 flex items-center gap-1">
+              <Eye className="w-3 h-3" />
+              watching {monitoredPositions.length}
+            </span>
+          )}
+        </div>
       </div>
 
-      <div className="px-3 pb-2.5 pt-1 relative z-10">
+      <div className="p-3 relative z-10">
         {monitoredPositions.length === 0 ? (
-          <div className="relative flex items-center justify-center py-3 gap-2 overflow-hidden">
+          <div className="relative flex flex-col items-center justify-center py-4 gap-2 overflow-hidden">
             <div className="absolute inset-0 pointer-events-none">
               <div className="absolute top-1/2 -translate-y-1/2 w-1/4 h-full bg-gradient-to-r from-transparent via-emerald-400/5 to-transparent" style={{ animation: "empty-sweep 4s linear infinite" }} />
             </div>
-            <Brain className="w-4 h-4 text-emerald-400/15 animate-brain-pulse" />
-            <span className="text-[9px] font-mono text-muted-foreground/25">Monitoring...</span>
+            <Brain className="w-6 h-6 text-emerald-400/20 animate-brain-pulse" />
+            <span className="text-[10px] font-mono text-muted-foreground/30">Monitoring market...</span>
           </div>
         ) : (
-          <div className="flex gap-1.5 overflow-x-auto scrollbar-hide" style={{ scrollbarWidth: "none" }}>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
             {monitoredPositions.map((pos) => {
               const posId = typeof pos.id === "number" ? pos.id : parseInt(String(pos.id ?? "0"));
               const health = posId > 0 ? healthMap[posId] : undefined;
@@ -337,38 +339,49 @@ function NeuralWatchPanel({
               const sweepInfo = latestAdj && isFlash ? NEURAL_SWEEP_COLORS[latestAdj.adjustmentType] : null;
               const adjLabel = latestAdj ? NEURAL_ADJUSTMENT_LABELS[latestAdj.adjustmentType] : null;
               const isMfeLock = latestAdj?.adjustmentType === "MFE_PROTECTION_EXIT" && isFlash;
-              const healthScore = health?.score ?? 0;
-              const healthColor = healthScore >= 70 ? "text-emerald-400" : healthScore >= 45 ? "text-amber-400" : healthScore >= 25 ? "text-orange-400" : "text-red-400";
-              const borderColor = isFlash ? "border-cyan-400/50 bg-cyan-400/5" : "border-border/20 bg-black/20";
 
               return (
                 <div
                   key={posId}
-                  className={`relative flex items-center gap-1.5 px-2 py-1 rounded-full border transition-all duration-300 shrink-0 ${borderColor}`}
+                  className={`relative rounded-md border p-2 overflow-hidden transition-all duration-300 ${
+                    isFlash ? "border-cyan-400/50 bg-black/60" : "border-border/30 bg-black/40"
+                  }`}
                   data-testid={`neural-watch-${pos.symbol}`}
                 >
                   {sweepInfo && (
                     <div
-                      className={`absolute inset-0 rounded-full bg-gradient-to-r ${sweepInfo.gradient} to-transparent pointer-events-none`}
+                      className={`absolute inset-0 bg-gradient-to-r ${sweepInfo.gradient} to-transparent pointer-events-none`}
                       style={{ animation: `${sweepInfo.animation} 0.8s ease-out forwards` }}
                     />
                   )}
-                  <div className="relative z-10 flex items-center gap-1.5">
-                    <span className="text-[10px] font-mono font-semibold text-foreground/80">{pos.symbol.replace("USDT", "")}</span>
-                    <span className={`text-[7px] font-mono font-bold px-1 py-px rounded ${pos.side === "LONG" ? "text-emerald-400 bg-emerald-500/10" : "text-red-400 bg-red-500/10"}`}>
-                      {pos.side === "LONG" ? "L" : "S"}
-                    </span>
-                    {health && (
-                      <span className={`text-[9px] font-mono font-bold ${healthColor}`}>{healthScore}</span>
+
+                  <div className="relative z-10 flex flex-col items-center gap-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] font-mono font-semibold text-foreground/90">{pos.symbol.replace("USDT", "")}</span>
+                      <span className={`text-[8px] font-mono font-bold px-1.5 py-0.5 rounded ${pos.side === "LONG" ? "text-emerald-400 bg-emerald-500/15" : "text-red-400 bg-red-500/15"}`}>
+                        {pos.side === "LONG" ? "LONG" : "SHORT"}
+                      </span>
+                    </div>
+
+                    <div className="relative">
+                      <Brain className="w-4 h-4 text-emerald-400/40 animate-brain-pulse" />
+                      {isFlash && (
+                        <div className="absolute inset-0 rounded-full" style={{ animation: "ping-ring 0.6s ease-out" }}>
+                          <div className="w-full h-full rounded-full border border-cyan-400/40" />
+                        </div>
+                      )}
+                    </div>
+
+                    {health && <HealthRing score={health.score} size={28} />}
+
+                    {isMfeLock && (
+                      <Shield className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
                     )}
-                    {isMfeLock && <Shield className="w-2.5 h-2.5 text-emerald-400 animate-pulse" />}
+
                     {sweepInfo && adjLabel && (
-                      <span className={`text-[7px] font-mono font-bold tracking-wider ${adjLabel.color} animate-pulse`}>
+                      <span className={`text-[8px] font-mono font-bold tracking-wider ${adjLabel.color} animate-pulse`}>
                         {sweepInfo.label}
                       </span>
-                    )}
-                    {isFlash && !sweepInfo && (
-                      <Zap className="w-2.5 h-2.5 text-cyan-400/60 animate-pulse" />
                     )}
                   </div>
                 </div>
@@ -439,6 +452,7 @@ function AiScannerGrid({
 
   const lastScanned = events.length > 0 ? events[0].symbol.replace("USDT", "") : null;
 
+  // Detect "portfolio full" state: how many recent SKIP events cite max positions
   const recentEvents = Object.values(latestBySymbol).filter(
     (ev) => now - ev.ts < 90000
   );
@@ -447,59 +461,63 @@ function AiScannerGrid({
   ).length;
   const portfolioFull = portfolioFullCount >= 2;
 
+  // Sync discrepancy: trainer thinks portfolio full but web app shows 0
   const hasSyncWarning = portfolioFull && webOpenCount === 0 && isLive;
 
   return (
-    <div className="overflow-hidden" data-testid="ai-scanner-grid">
-      <div className="flex items-center justify-between px-3 py-1.5">
+    <div className="rounded-lg border border-border/40 bg-black/60 overflow-hidden" data-testid="ai-scanner-grid">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border/30 bg-black/40">
         <div className="flex items-center gap-2">
           <RadarIcon isLive={isLive} />
-          <span className="text-[10px] font-mono font-medium text-cyan-400/80 tracking-wider uppercase">
-            Scanner
+          <span className="text-[11px] font-mono font-semibold text-cyan-400/90 tracking-wider uppercase">
+            AI Scanner
           </span>
-          <span className={`w-1.5 h-1.5 rounded-full ${isLive ? "bg-emerald-400 animate-pulse" : "bg-muted-foreground/20"}`} data-testid="scanner-status-dot" />
+          <span className={`w-2 h-2 rounded-full ${isLive ? "bg-emerald-400 animate-pulse" : "bg-muted-foreground/30"}`} data-testid="scanner-status-dot" />
           {isLive ? (
-            <span className="text-[9px] font-mono text-emerald-400/50">LIVE</span>
+            <span className="text-[10px] font-mono text-emerald-400/60">LIVE</span>
           ) : (
-            <span className="text-[9px] font-mono text-muted-foreground/30">OFF</span>
+            <span className="text-[10px] font-mono text-muted-foreground/40">OFFLINE</span>
           )}
           {portfolioFull && (
-            <span className="text-[8px] font-mono font-bold text-amber-400/80 flex items-center gap-1" data-testid="badge-portfolio-full">
-              <Lock className="w-2.5 h-2.5" />
-              {maxPositions}/{maxPositions}
-            </span>
+            <div className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30" data-testid="badge-portfolio-full">
+              <Lock className="w-2.5 h-2.5 text-amber-400" />
+              <span className="text-[9px] font-mono font-bold text-amber-400 tracking-wider">
+                {maxPositions}/{maxPositions} FULL
+              </span>
+            </div>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
           {hasSyncWarning && (
-            <span className="text-[8px] font-mono text-orange-400 flex items-center gap-1 animate-pulse" data-testid="badge-sync-warning">
-              <ShieldAlert className="w-2.5 h-2.5" />SYNC
-            </span>
+            <div className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-orange-500/10 border border-orange-500/25 animate-pulse" data-testid="badge-sync-warning">
+              <ShieldAlert className="w-2.5 h-2.5 text-orange-400" />
+              <span className="text-[8px] font-mono text-orange-400">SYNC WARN</span>
+            </div>
           )}
           {lastScanned && isLive && !portfolioFull && (
-            <span className="text-[9px] font-mono text-cyan-400/40 animate-pulse">
-              {lastScanned}
+            <span className="text-[10px] font-mono text-cyan-400/50 animate-pulse">
+              SCANNING {lastScanned}...
             </span>
           )}
           {cycleCount > 0 && (
-            <span className="text-[9px] font-mono text-muted-foreground/30">
-              {cycleCount}
+            <span className="text-[10px] font-mono text-muted-foreground/40">
+              {cycleCount} cycles
             </span>
           )}
         </div>
       </div>
 
       {hasSyncWarning && (
-        <div className="px-3 py-1 flex items-center gap-2">
-          <ShieldAlert className="w-2.5 h-2.5 text-orange-400 shrink-0" />
-          <span className="text-[9px] font-mono text-orange-400/70">
-            Trainer reports {maxPositions} open but web shows {webOpenCount}
+        <div className="px-3 py-1.5 bg-orange-500/8 border-b border-orange-500/20 flex items-center gap-2">
+          <ShieldAlert className="w-3 h-3 text-orange-400 shrink-0" />
+          <span className="text-[10px] font-mono text-orange-400/80">
+            Trainer reports {maxPositions} open positions but web app shows {webOpenCount}. Restart trainer to re-sync, or positions may have closed while trainer was offline.
           </span>
         </div>
       )}
 
-      <div className="px-3 pb-2.5 pt-1">
-        <div className="grid grid-cols-4 sm:grid-cols-8 gap-1">
+      <div className="p-3">
+        <div className="grid grid-cols-4 gap-2">
           {SCANNER_SYMBOLS.map((sym) => {
             const ev = latestBySymbol[sym];
             const isRecent = ev && (now - ev.ts < 10000);
@@ -509,43 +527,61 @@ function AiScannerGrid({
             const isOpened = ev?.opened === true;
             const isPortfolioBlock = isHold && (ev?.holdReason?.toLowerCase().includes("max total positions") ?? false);
             const shortName = sym.replace("USDT", "");
+            const arrow = ev?.direction === "LONG" ? "▲" : ev?.direction === "SHORT" ? "▼" : "";
+            const arrowColor = ev?.direction === "LONG" ? "text-emerald-400" : ev?.direction === "SHORT" ? "text-red-400" : "text-muted-foreground/40";
             const v5Pct = ev?.v5Score ? Math.min(100, (ev.v5Score / 10) * 100) : 0;
 
-            const dirColor = ev?.direction === "LONG" ? "border-l-emerald-400/60" : ev?.direction === "SHORT" ? "border-l-red-400/60" : "border-l-transparent";
-            let bgStyle = "bg-black/20";
+            let tileStyle = "border-border/20 bg-black/30";
             let animStyle = "";
             if (isRecent && isEnter) {
-              bgStyle = "bg-emerald-500/8";
+              tileStyle = "border-emerald-400/50 bg-emerald-500/10";
               animStyle = "tile-enter 1s ease-out";
             } else if (isRecent && isCooldown) {
-              bgStyle = "bg-amber-500/5";
+              tileStyle = "border-amber-400/40 bg-amber-500/8";
               animStyle = "tile-cooldown 1.2s ease-out";
             } else if (isRecent && isPortfolioBlock) {
-              bgStyle = "bg-amber-500/3 opacity-60";
+              tileStyle = "border-amber-500/30 bg-amber-500/5 opacity-70";
             } else if (isRecent && isHold) {
-              bgStyle = "bg-black/10 opacity-50";
+              tileStyle = "border-border/15 bg-black/20 opacity-60";
             } else if (isRecent) {
-              bgStyle = "bg-cyan-500/3";
+              tileStyle = "border-cyan-400/20 bg-cyan-500/5";
             }
 
             return (
               <div
                 key={sym}
-                className={`relative rounded border-l-2 ${dirColor} px-1.5 py-1 flex flex-col items-center gap-0.5 transition-all duration-500 ${bgStyle}`}
+                className={`relative rounded-md border p-2 flex flex-col items-center gap-1 transition-all duration-500 ${tileStyle}`}
                 style={animStyle ? { animation: animStyle } : undefined}
                 data-testid={`scanner-tile-${sym}`}
               >
-                <div className="flex items-center gap-1">
-                  <span className={`text-[10px] font-mono font-bold leading-none ${(isHold || isPortfolioBlock) && isRecent ? "text-muted-foreground/30" : "text-foreground/70"}`}>
-                    {shortName}
-                  </span>
-                  {isRecent && isPortfolioBlock && <Lock className="w-2 h-2 text-amber-500/40" />}
-                  {isRecent && isCooldown && <Hourglass className="w-2 h-2 text-amber-400/50" />}
-                </div>
+                {isRecent && !isHold && (
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <div
+                      className={`w-6 h-6 rounded-full border ${isEnter ? "border-emerald-400/60" : "border-cyan-400/30"}`}
+                      style={{ animation: "ping-ring 0.8s ease-out forwards" }}
+                    />
+                  </div>
+                )}
+
+                <span className={`text-[11px] font-mono font-bold ${(isHold || isPortfolioBlock) && isRecent ? "text-muted-foreground/40" : "text-foreground/80"}`}>
+                  {shortName}
+                </span>
+
+                {isRecent && isPortfolioBlock && (
+                  <Lock className="w-2.5 h-2.5 text-amber-500/50 my-0.5" />
+                )}
+
+                {isRecent && isHold && !isPortfolioBlock && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/30 my-0.5" />
+                )}
+
+                {arrow && !(isRecent && isHold) && (
+                  <span className={`text-sm font-bold leading-none ${arrowColor}`}>{arrow}</span>
+                )}
 
                 {isRecent && isEnter && (
                   <span
-                    className="text-[7px] font-mono font-bold text-emerald-400 tracking-wider"
+                    className="text-[8px] font-mono font-bold text-emerald-400 bg-emerald-500/20 px-1.5 rounded"
                     style={{ animation: "enter-fade 2s ease-out forwards" }}
                     data-testid={`badge-enter-${sym}`}
                   >
@@ -554,22 +590,29 @@ function AiScannerGrid({
                 )}
 
                 {isOpened && (
-                  <span className="text-[7px] font-mono font-bold text-amber-300 flex items-center gap-0.5" data-testid={`badge-opened-${sym}`}>
-                    <Star className="w-2 h-2" />OPEN
+                  <span className="text-[8px] font-mono font-bold text-amber-300 flex items-center gap-0.5" data-testid={`badge-opened-${sym}`}>
+                    <Star className="w-2.5 h-2.5" />OPENED
                   </span>
                 )}
 
-                <div className="w-full flex items-center gap-1">
-                  <div className="flex-1 h-[2px] rounded-full bg-muted/20 overflow-hidden">
-                    <div
-                      className="h-full rounded-full transition-all duration-700 bg-cyan-400/50"
-                      style={{ width: `${v5Pct}%` }}
-                    />
-                  </div>
-                  {ev?.v5Score != null && (
-                    <span className="text-[7px] font-mono text-cyan-400/40 leading-none">{ev.v5Score.toFixed(1)}</span>
-                  )}
+                {isRecent && isCooldown && (
+                  <Hourglass className="w-3 h-3 text-amber-400/60 animate-pulse" />
+                )}
+
+                {!isRecent && !arrow && (
+                  <span className="w-1 h-1 rounded-full bg-muted-foreground/20 my-1" />
+                )}
+
+                <div className="w-full h-1 rounded-full bg-muted/30 overflow-hidden mt-0.5">
+                  <div
+                    className="h-full rounded-full transition-all duration-700 bg-purple-400/60"
+                    style={{ width: `${v5Pct}%` }}
+                  />
                 </div>
+
+                {ev?.v5Score != null && (
+                  <span className="text-[7px] font-mono text-purple-400/50">{ev.v5Score.toFixed(1)}</span>
+                )}
               </div>
             );
           })}
@@ -676,15 +719,15 @@ function PositionPriceGauge({ pos, livePrice, health, isFlashing, isNew, isGlowi
     trailPct = Math.max(0, Math.min(100, ((trailPrice - lo) / range) * 100));
   }
 
-  const borderAccent = isGlowing
-    ? "border-l-emerald-400 shadow-[0_0_12px_1px_rgba(34,197,94,0.15)]"
+  const pulseClass = isGlowing
+    ? "border-emerald-400/70 shadow-[0_0_14px_2px_rgba(34,197,94,0.3)]"
     : isFlashing
-    ? "border-l-cyan-400 shadow-[0_0_10px_1px_rgba(34,211,238,0.12)]"
+    ? "border-cyan-400/70 shadow-[0_0_12px_2px_rgba(34,211,238,0.25)]"
     : healthScore !== null && healthScore < 15
-    ? "border-l-red-500 animate-pulse"
+    ? "animate-pulse border-red-500/60"
     : healthScore !== null && healthScore < 30
-    ? "border-l-amber-500"
-    : isLong ? "border-l-emerald-400/40" : "border-l-red-400/40";
+    ? "animate-pulse border-amber-500/50"
+    : "border-border/50";
 
   const latestAdj = health?.latestAdjustment;
   const adjInfo = latestAdj ? NEURAL_ADJUSTMENT_LABELS[latestAdj] : null;
@@ -693,46 +736,57 @@ function PositionPriceGauge({ pos, livePrice, health, isFlashing, isNew, isGlowi
 
   return (
     <div
-      className={`rounded-lg border border-border/20 border-l-2 bg-black/30 p-2.5 space-y-2 transition-all duration-500 ${borderAccent}`}
+      className={`glass-card rounded-lg border p-3 space-y-3 transition-all duration-500 ${pulseClass}`}
       data-testid={`position-gauge-${pos.symbol}`}
     >
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <span className="font-mono font-bold text-[13px] text-foreground/90">{pos.symbol.replace("USDT", "")}</span>
-          <span className={`text-[8px] font-mono font-bold px-1 py-px rounded ${isLong ? "text-emerald-400 bg-emerald-500/10" : "text-red-400 bg-red-500/10"}`}>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-semibold text-sm">{pos.symbol}</span>
+          <Badge
+            variant="outline"
+            className={isLong ? "text-emerald-400 border-emerald-400/30 text-[10px] px-1.5" : "text-red-400 border-red-400/30 text-[10px] px-1.5"}
+          >
             {side}
-          </span>
-          {pos.leverage != null && pos.leverage > 1 && (
-            <span className="text-[8px] font-mono text-amber-400/70" data-testid="badge-leverage">{pos.leverage}x</span>
-          )}
+          </Badge>
           {pos.source === "v5_signal" && (
-            <span className="text-[7px] font-mono text-cyan-400/60 bg-cyan-500/8 px-1 rounded">V5</span>
+            <Badge className="no-default-hover-elevate no-default-active-elevate text-[10px] bg-cyan-500/20 text-cyan-400 px-1.5">V5</Badge>
+          )}
+          {pos.leverage != null && pos.leverage > 1 && (
+            <Badge variant="outline" className="text-amber-400 border-amber-400/30 text-[10px] px-1.5" data-testid="badge-leverage">
+              {pos.leverage}x
+            </Badge>
           )}
           {isBreakeven && (
-            <span className="text-[7px] font-mono text-amber-400 flex items-center gap-0.5" data-testid="badge-breakeven">
-              <Shield className="w-2.5 h-2.5" />BE
-            </span>
+            <Badge variant="outline" className="text-amber-400 border-amber-400/30 text-[10px] px-1.5 gap-1" data-testid="badge-breakeven">
+              <Shield className="w-2.5 h-2.5" />
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+              BE Set
+            </Badge>
           )}
           {adjInfo && !isBreakeven && (
-            <span className={`text-[7px] font-mono font-bold ${adjInfo.color} flex items-center gap-0.5`} data-testid="badge-neural-status">
-              <Brain className="w-2.5 h-2.5" />{adjInfo.label}
-            </span>
+            <Badge variant="outline" className={`${adjInfo.color} border-current/30 text-[10px] px-1.5`} data-testid="badge-neural-status">
+              <Brain className="w-2.5 h-2.5 mr-0.5" />{adjInfo.label}
+            </Badge>
           )}
           {isNew && (
-            <span className="text-[7px] font-mono text-emerald-300 animate-pulse" data-testid="badge-new-position">NEW</span>
+            <Badge className="no-default-hover-elevate no-default-active-elevate text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 px-1.5 gap-1 animate-pulse" data-testid="badge-new-position">
+              <Star className="w-2.5 h-2.5" />
+              NEW
+            </Badge>
           )}
           {isFlashing && (
-            <span className="text-[7px] font-mono text-cyan-300 animate-pulse flex items-center gap-0.5" data-testid="badge-monitor-active">
-              <Zap className="w-2 h-2" />ADJ
-            </span>
+            <Badge className="no-default-hover-elevate no-default-active-elevate text-[10px] bg-cyan-500/20 text-cyan-300 border border-cyan-400/40 px-1.5 gap-1 animate-pulse" data-testid="badge-monitor-active">
+              <Zap className="w-2.5 h-2.5" />
+              ADJUSTING
+            </Badge>
           )}
         </div>
-        <div className="flex items-center gap-1.5">
-          <span className={`text-base font-bold number-mono ${isProfit ? "text-emerald-400" : "text-red-400"}`} data-testid={`text-pnlr-${pos.symbol}`}>
+        <div className="flex items-center gap-2">
+          <span className={`text-sm font-bold number-mono ${isProfit ? "text-emerald-400" : "text-red-400"}`} data-testid={`text-pnlr-${pos.symbol}`}>
             {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}R
           </span>
-          <span className={`text-[10px] number-mono ${isProfit ? "text-emerald-400/50" : "text-red-400/50"}`} data-testid={`text-pnlusdt-${pos.symbol}`}>
-            {pnlUsd >= 0 ? "+" : ""}${pnlUsd.toFixed(0)}
+          <span className={`text-xs number-mono ${isProfit ? "text-emerald-400/70" : "text-red-400/70"}`} data-testid={`text-pnlusdt-${pos.symbol}`}>
+            {pnlUsd >= 0 ? "+" : ""}${pnlUsd.toFixed(2)}
           </span>
         </div>
       </div>
@@ -744,16 +798,18 @@ function PositionPriceGauge({ pos, livePrice, health, isFlashing, isNew, isGlowi
         </div>
       )}
 
-      <div className="space-y-1">
-        <div className="relative h-1 rounded-full overflow-hidden bg-muted/20">
+      <div className="space-y-1.5">
+        <div className="relative h-8 rounded-md overflow-hidden bg-muted/30">
           <div
-            className="absolute top-0 bottom-0 w-px bg-amber-400/60 z-10"
+            className="absolute top-0 bottom-0 w-0.5 bg-amber-400/80 z-10"
             style={{ left: `${Math.max(1, Math.min(99, entryPct))}%` }}
-          />
+          >
+            <div className="absolute -top-0.5 left-1/2 -translate-x-1/2 w-0 h-0 border-l-[3px] border-r-[3px] border-t-[4px] border-l-transparent border-r-transparent border-t-amber-400" />
+          </div>
 
           <div
-            className={`absolute top-0 bottom-0 rounded-full transition-all duration-500 ${
-              isProfit ? "bg-emerald-500/25" : "bg-red-500/25"
+            className={`absolute top-0 bottom-0 rounded-sm transition-all duration-500 ${
+              isProfit ? "bg-emerald-500/20" : "bg-red-500/20"
             }`}
             style={{
               left: `${Math.min(clampedPricePct, Math.max(0, Math.min(100, entryPct)))}%`,
@@ -762,55 +818,94 @@ function PositionPriceGauge({ pos, livePrice, health, isFlashing, isNew, isGlowi
           />
 
           <div
-            className={`absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full z-20 transition-all duration-500 ${
-              isProfit ? "bg-emerald-400 shadow-[0_0_6px_rgba(34,197,94,0.6)]" : "bg-red-400 shadow-[0_0_6px_rgba(248,113,113,0.6)]"
+            className={`absolute top-0 bottom-0 w-[3px] z-20 rounded-full transition-all duration-500 ${
+              isProfit ? "bg-emerald-400 shadow-[0_0_8px_rgba(34,197,94,0.5)]" : "bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.5)]"
             }`}
-            style={{ left: `${clampedPricePct}%`, marginLeft: "-4px" }}
+            style={{ left: `${clampedPricePct}%` }}
           />
 
           {trailPct !== null && (
             <div
-              className="absolute top-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full z-15 bg-purple-400/70 transition-all duration-500"
-              style={{ left: `${trailPct}%`, marginLeft: "-3px" }}
+              className="absolute top-0 bottom-0 w-[2px] z-15 rounded-full bg-purple-400/70 transition-all duration-500"
+              style={{ left: `${trailPct}%` }}
               data-testid="trail-level-indicator"
-            />
+            >
+              <div className="absolute -bottom-0.5 left-1/2 -translate-x-1/2 w-0 h-0 border-l-[2px] border-r-[2px] border-b-[3px] border-l-transparent border-r-transparent border-b-purple-400" />
+            </div>
           )}
+
+          {isBreakeven && (
+            <div
+              className="absolute top-0 bottom-0 w-[2px] z-12 bg-amber-400/40"
+              style={{ left: `${Math.max(1, Math.min(99, entryPct))}%` }}
+            >
+              <div className="absolute top-0 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full bg-amber-400/60" />
+            </div>
+          )}
+
+          <div
+            className="absolute inset-y-0 left-0 flex items-center pl-1.5"
+          >
+            <span className="text-[9px] font-semibold text-red-400/80 number-mono">
+              {isLong ? "SL" : "TP"}
+            </span>
+          </div>
+          <div
+            className="absolute inset-y-0 right-0 flex items-center pr-1.5"
+          >
+            <span className="text-[9px] font-semibold text-emerald-400/80 number-mono">
+              {isLong ? "TP" : "SL"}
+            </span>
+          </div>
         </div>
 
-        <div className="flex justify-between items-center text-[9px] number-mono text-muted-foreground/50">
-          <span className="text-red-400/50">{isLong ? "SL" : "TP"}</span>
-          <div className="flex items-center gap-1">
-            <span className="text-amber-400/50">{formatPrice(entryPrice)}</span>
-            <span className="text-foreground/20">→</span>
-            <span className={isProfit ? "text-emerald-400/70" : "text-red-400/70"}>{formatPrice(currentPrice)}</span>
+        <div className="flex justify-between items-center text-[10px] number-mono text-muted-foreground">
+          <span className="text-red-400/70">${formatPrice(isLong ? stopLoss : takeProfit)}</span>
+          <div className="flex items-center gap-1 flex-wrap">
+            <span className="text-amber-400/70">Entry ${formatPrice(entryPrice)}</span>
+            <span className="text-foreground/50">→</span>
+            <span className={isProfit ? "text-emerald-400" : "text-red-400"}>Now ${formatPrice(currentPrice)}</span>
             {trailPrice && (
               <>
-                <span className="text-foreground/15">|</span>
-                <span className="text-purple-400/50">T {formatPrice(trailPrice)}</span>
+                <span className="text-foreground/50">|</span>
+                <span className="text-purple-400/70">Trail ${formatPrice(trailPrice)}</span>
               </>
             )}
           </div>
-          <span className="text-emerald-400/50">{isLong ? "TP" : "SL"}</span>
+          <span className="text-emerald-400/70">${formatPrice(isLong ? takeProfit : stopLoss)}</span>
         </div>
       </div>
 
-      <div className="flex items-center justify-between text-[9px]">
-        <div className="flex items-center gap-2 text-muted-foreground/40 font-mono">
-          <span className={isBreakeven ? "text-amber-400/70" : slDist < 30 ? "text-red-400/70" : ""}>SL {slDistDisplay}</span>
-          <span className="text-foreground/10">|</span>
-          <span className={tpDist < 30 ? "text-emerald-400/70" : ""}>TP {tpDist.toFixed(0)}%</span>
-          <span className="text-foreground/10">|</span>
-          <span data-testid={`text-duration-${pos.symbol}`}>
-            {dur > 0 ? formatDuration(dur) : "-"}
-          </span>
-          {pos.v5Score != null && (
-            <>
-              <span className="text-foreground/10">|</span>
-              <span className="text-cyan-400/40" data-testid={`text-v5score-${pos.symbol}`}>V5 {pos.v5Score.toFixed(2)}</span>
-            </>
-          )}
+      <div className="flex items-center justify-between text-[10px]">
+        <div className="flex gap-3 flex-wrap">
+          <div>
+            <span className="text-muted-foreground">SL Dist: </span>
+            <span className={`number-mono ${isBreakeven ? "text-amber-400 font-semibold" : slDist < 30 ? "text-red-400 font-semibold" : "text-muted-foreground"}`}>
+              {slDistDisplay}
+            </span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">TP Dist: </span>
+            <span className={`number-mono ${tpDist < 30 ? "text-emerald-400 font-semibold" : "text-muted-foreground"}`}>
+              {tpDist.toFixed(0)}%
+            </span>
+          </div>
+          <div className="text-muted-foreground" data-testid={`text-duration-${pos.symbol}`}>
+            {pos.entryTime ? (
+              <span title={new Date(pos.entryTime).toLocaleString()}>
+                {formatDateTime(pos.entryTime)} · {dur > 0 ? formatDuration(dur) : "-"}
+              </span>
+            ) : "-"}
+          </div>
           {pos.leverage != null && (
-            <span className="text-amber-400/30" data-testid={`text-leverage-${pos.symbol}`}>{pos.leverage}x</span>
+            <div className="text-amber-400/70" data-testid={`text-leverage-${pos.symbol}`}>
+              {pos.leverage}x
+              {pos.v5Score != null && (
+                <span className="ml-1 text-cyan-400/70" data-testid={`text-v5score-${pos.symbol}`}>
+                  (V5: {pos.v5Score.toFixed(3)})
+                </span>
+              )}
+            </div>
           )}
         </div>
         <div className="flex items-center gap-0.5">
@@ -1484,26 +1579,28 @@ export default function PaperTrading() {
       {mc && <MonteCarloStrip mc={mc} totalTrades={totalTrades} />}
 
       {/* ── Open Positions + Scanner ─────────────────────────────── */}
-      <div className="rounded-xl border border-border/20 bg-black/50 backdrop-blur-sm overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-2.5 border-b border-border/10">
-          <div className="flex items-center gap-2">
-            <span className="text-[12px] font-mono font-semibold text-foreground/80 tracking-wide">Positions</span>
+      <Card>
+        <CardHeader className="pb-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <CardTitle className="text-sm font-semibold">Open Positions</CardTitle>
+              <Brain className="w-4 h-4 text-purple-400/60" />
+            </div>
+            <div className="flex items-center gap-2">
+              {openPositions && openPositions.length > 0 && (
+                <Badge variant="outline" className="text-[10px] text-cyan-400 border-cyan-400/30" data-testid="badge-open-count">
+                  {openPositions.length} active
+                </Badge>
+              )}
+              {portfolio?.unrealizedPnl != null && portfolio.unrealizedPnl !== 0 && (
+                <Badge variant="outline" className={`text-[10px] ${portfolio.unrealizedPnl >= 0 ? "text-emerald-400 border-emerald-400/30" : "text-red-400 border-red-400/30"}`}>
+                  Float {portfolio.unrealizedPnl >= 0 ? "+" : ""}{portfolio.unrealizedPnlR?.toFixed(2) ?? "0.00"}R
+                </Badge>
+              )}
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            {openPositions && openPositions.length > 0 && (
-              <span className="text-[9px] font-mono text-cyan-400/60" data-testid="badge-open-count">
-                {openPositions.length} active
-              </span>
-            )}
-            {portfolio?.unrealizedPnl != null && portfolio.unrealizedPnl !== 0 && (
-              <span className={`text-[10px] font-mono font-bold number-mono ${portfolio.unrealizedPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                {portfolio.unrealizedPnl >= 0 ? "+" : ""}{portfolio.unrealizedPnlR?.toFixed(2) ?? "0.00"}R
-              </span>
-            )}
-          </div>
-        </div>
-
-        <div className="border-b border-border/10">
+        </CardHeader>
+        <CardContent className="space-y-4">
           <AiScannerGrid
             events={cycleEvents}
             lastCycleTs={lastCycleTs}
@@ -1511,24 +1608,18 @@ export default function PaperTrading() {
             webOpenCount={openPosSummary?.count ?? 0}
             maxPositions={4}
           />
-        </div>
-
-        <div className="border-b border-border/10">
           <NeuralWatchPanel
             events={neuralEvents}
             monitoredPositions={openPositions?.filter(p => p.source === "v5_signal") ?? []}
             healthMap={healthMap}
             flashingPositions={flashingPositions}
           />
-        </div>
-
-        <div className="p-3">
           {(!openPositions || openPositions.length === 0) ? (
-            <p className="text-[11px] font-mono text-muted-foreground/30 text-center py-6" data-testid="text-no-open-positions">
+            <p className="text-sm text-muted-foreground text-center py-6" data-testid="text-no-open-positions">
               No open positions
             </p>
           ) : (
-            <div className="grid gap-2 sm:grid-cols-1 md:grid-cols-2" data-testid="positions-grid">
+            <div className="grid gap-3 sm:grid-cols-1 md:grid-cols-2 xl:grid-cols-3" data-testid="positions-grid">
               {openPositions.map((pos, i) => {
                 const posId = typeof pos.id === "number" ? pos.id : parseInt(String(pos.id ?? "0"));
                 return (
@@ -1545,8 +1636,8 @@ export default function PaperTrading() {
               })}
             </div>
           )}
-        </div>
-      </div>
+        </CardContent>
+      </Card>
 
       {/* ── Equity Curve ─────────────────────────────────────────── */}
       <div className="glass-card rounded-md p-4">

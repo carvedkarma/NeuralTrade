@@ -106,7 +106,7 @@ app.use((req, res, next) => {
       startBinanceWs();
       loadPaperState().then(async () => {
         await loadAnalyticsClearedTs();
-        startPositionMonitor(1000);
+        startPositionMonitor(30000);
         return gpuBridge.hydrateLastActivityFromDb();
       }).then(() => {
         return hydrateBackfillStateFromDb();
