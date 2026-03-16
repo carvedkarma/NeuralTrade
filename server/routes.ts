@@ -33,7 +33,8 @@ import {
   startLiveCandleSync, 
   stopLiveCandleSync, 
   getSyncStatus, 
-  checkDataFreshness 
+  checkDataFreshness,
+  syncSymbolCandles 
 } from "./live-candle-sync";
 import { 
   getAvailableTimeframes, 
@@ -6125,6 +6126,130 @@ Provide your analysis in this JSON format:
       res.json(result);
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.get("/api/data/freshness", async (req, res) => {
+    try {
+      const { getMultiAssetDataSummary } = await import("./historical-data");
+      const summary = await getMultiAssetDataSummary();
+      const now = Date.now();
+      const FIFTEEN_MIN_MS = 15 * 60 * 1000;
+      const expectedLastCandleTs = Math.floor(now / FIFTEEN_MIN_MS) * FIFTEEN_MIN_MS - FIFTEEN_MIN_MS;
+
+      const symbols = summary.assets.map((a) => {
+        const staleMinutes = a.endTs ? Math.max(0, Math.floor((expectedLastCandleTs - a.endTs) / 60000)) : Infinity;
+        let status: "fresh" | "stale" | "critical" | "no_data" = "no_data";
+        if (a.totalCandles === 0) status = "no_data";
+        else if (staleMinutes <= 30) status = "fresh";
+        else if (staleMinutes <= 120) status = "stale";
+        else status = "critical";
+
+        const h1Status = staleMinutes <= 120 ? "synced" : "stale";
+        const h4Status = staleMinutes <= 240 ? "synced" : "stale";
+
+        return {
+          symbol: a.symbol,
+          totalCandles: a.totalCandles,
+          lastCandleTs: a.endTs,
+          lastCandleDate: a.endTs ? new Date(a.endTs).toISOString() : null,
+          staleMinutes: a.totalCandles === 0 ? null : staleMinutes,
+          status,
+          h1Status,
+          h4Status,
+          daysOfData: a.daysOfData,
+        };
+      });
+
+      res.json({
+        symbols,
+        totalSymbols: symbols.length,
+        freshCount: symbols.filter((s) => s.status === "fresh").length,
+        staleCount: symbols.filter((s) => s.status === "stale").length,
+        criticalCount: symbols.filter((s) => s.status === "critical").length,
+        noDataCount: symbols.filter((s) => s.status === "no_data").length,
+        queriedAt: now,
+      });
+    } catch (error: any) {
+      console.error("Error fetching data freshness:", error);
+      res.status(500).json({ error: "Failed to fetch data freshness" });
+    }
+  });
+
+  app.get("/api/data/retrain-readiness", async (req, res) => {
+    try {
+      const { getMultiAssetDataSummary } = await import("./historical-data");
+      const summary = await getMultiAssetDataSummary();
+      const now = Date.now();
+      const FIFTEEN_MIN_MS = 15 * 60 * 1000;
+      const expectedLastCandleTs = Math.floor(now / FIFTEEN_MIN_MS) * FIFTEEN_MIN_MS - FIFTEEN_MIN_MS;
+      const MIN_CANDLES = 50000;
+
+      const allFresh = summary.assets.every((a) => {
+        if (a.totalCandles === 0) return false;
+        const staleMin = Math.floor((expectedLastCandleTs - (a.endTs ?? 0)) / 60000);
+        return staleMin <= 120;
+      });
+
+      const allMinCandles = summary.assets.every((a) => a.totalCandles >= MIN_CANDLES);
+      const lowCandleSymbols = summary.assets.filter((a) => a.totalCandles < MIN_CANDLES).map((a) => ({
+        symbol: a.symbol,
+        count: a.totalCandles,
+        needed: MIN_CANDLES,
+      }));
+
+      const gpuStatus = gpuBridge.getPushedStatus();
+      const gpuConnected = gpuStatus.connected;
+
+      const activeTraining = await db.select()
+        .from(trainingSessions)
+        .where(eq(trainingSessions.status, "running"))
+        .limit(1);
+      const noActiveSession = activeTraining.length === 0;
+
+      const allPassed = allFresh && allMinCandles && gpuConnected && noActiveSession;
+
+      res.json({
+        ready: allPassed,
+        checks: {
+          allSymbolsFresh: { passed: allFresh, label: "All 20 symbols have data within 2 hours" },
+          minCandleCount: { passed: allMinCandles, label: "All symbols have ≥ 50,000 candles (~520 days)", details: lowCandleSymbols },
+          gpuConnected: { passed: gpuConnected, label: "GPU trainer is connected" },
+          noActiveSession: { passed: noActiveSession, label: "No active training session running" },
+        },
+        summary: allPassed ? "Ready to retrain" : "Not ready — fix the issues above",
+      });
+    } catch (error: any) {
+      console.error("Error checking retrain readiness:", error);
+      res.status(500).json({ error: "Failed to check retrain readiness" });
+    }
+  });
+
+  app.post("/api/data/sync-all", async (req, res) => {
+    try {
+      const { TRADING_SYMBOLS } = await import("@shared/symbols");
+      const results: { symbol: string; inserted: number; error?: string }[] = [];
+
+      for (const symbol of TRADING_SYMBOLS) {
+        try {
+          const inserted = await syncSymbolCandles(symbol);
+          results.push({ symbol, inserted });
+        } catch (err: any) {
+          results.push({ symbol, inserted: 0, error: err.message || String(err) });
+        }
+      }
+
+      const totalInserted = results.reduce((sum, r) => sum + r.inserted, 0);
+      const errors = results.filter((r) => r.error);
+      res.json({
+        success: errors.length === 0,
+        totalInserted,
+        errorCount: errors.length,
+        results,
+      });
+    } catch (error: any) {
+      console.error("Error in sync-all:", error);
+      res.status(500).json({ error: "Failed to sync all symbols" });
     }
   });
 

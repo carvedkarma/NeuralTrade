@@ -1,11 +1,12 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useTradingWs } from "@/hooks/use-trading-ws";
 import { queryClient, apiRequest } from "@/lib/queryClient";
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
@@ -17,6 +18,7 @@ import {
   CheckCircle2, XCircle, Loader2, Target, History,
   Trash2, ShieldCheck, AlertTriangle, Gauge, Trophy,
   ArrowUpRight, ArrowDownRight, Cpu, Hash,
+  Database, RefreshCw, Download, CircleDot,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -1095,6 +1097,348 @@ function SessionHistory({ sessions, onSelect, onDelete, deletePending }: {
   );
 }
 
+interface FreshnessSymbol {
+  symbol: string;
+  totalCandles: number;
+  lastCandleTs: number | null;
+  lastCandleDate: string | null;
+  staleMinutes: number | null;
+  status: "fresh" | "stale" | "critical" | "no_data";
+  h1Status: string;
+  h4Status: string;
+  daysOfData: number;
+}
+
+interface FreshnessResponse {
+  symbols: FreshnessSymbol[];
+  totalSymbols: number;
+  freshCount: number;
+  staleCount: number;
+  criticalCount: number;
+  noDataCount: number;
+  queriedAt: number;
+}
+
+interface ReadinessCheck {
+  passed: boolean;
+  label: string;
+  details?: { symbol: string; count: number; needed: number }[];
+}
+
+interface RetrainReadinessResponse {
+  ready: boolean;
+  checks: {
+    allSymbolsFresh: ReadinessCheck;
+    minCandleCount: ReadinessCheck;
+    gpuConnected: ReadinessCheck;
+    noActiveSession: ReadinessCheck;
+  };
+  summary: string;
+}
+
+interface SyncResult {
+  success: boolean;
+  totalInserted: number;
+  errorCount: number;
+  results: { symbol: string; inserted: number; error?: string }[];
+}
+
+function DataReadinessTab() {
+  const { toast } = useToast();
+  const [countdown, setCountdown] = useState(3600);
+  const countdownRef = useRef(3600);
+
+  const { data: freshness, isLoading: freshnessLoading, refetch: refetchFreshness } = useQuery<FreshnessResponse>({
+    queryKey: ["/api/data/freshness"],
+    refetchInterval: 3600000,
+  });
+
+  const { data: readiness, isLoading: readinessLoading, refetch: refetchReadiness } = useQuery<RetrainReadinessResponse>({
+    queryKey: ["/api/data/retrain-readiness"],
+    refetchInterval: 3600000,
+  });
+
+  const syncMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/data/sync-all");
+      return res.json() as Promise<SyncResult>;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/data/freshness"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/data/retrain-readiness"] });
+      toast({
+        title: data.success ? "Sync complete" : "Sync completed with errors",
+        description: data.success
+          ? `Inserted ${data.totalInserted} new candles across ${data.results.filter((r) => r.inserted > 0).length} symbols`
+          : `Inserted ${data.totalInserted} candles but ${data.errorCount} symbol(s) had errors`,
+        variant: data.success ? "default" : "destructive",
+      });
+    },
+    onError: (err: any) => {
+      toast({ title: "Sync failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  useEffect(() => {
+    countdownRef.current = 3600;
+    setCountdown(3600);
+    const timer = setInterval(() => {
+      countdownRef.current -= 1;
+      if (countdownRef.current <= 0) {
+        countdownRef.current = 3600;
+      }
+      setCountdown(countdownRef.current);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const handleManualRefresh = useCallback(() => {
+    refetchFreshness();
+    refetchReadiness();
+    countdownRef.current = 3600;
+    setCountdown(3600);
+  }, [refetchFreshness, refetchReadiness]);
+
+  const countdownMin = Math.floor(countdown / 60);
+  const countdownSec = countdown % 60;
+
+  const statusColor = (status: string) => {
+    switch (status) {
+      case "fresh": return "text-emerald-400 bg-emerald-500/10 border-emerald-500/30";
+      case "stale": return "text-amber-400 bg-amber-500/10 border-amber-500/30";
+      case "critical": return "text-red-400 bg-red-500/10 border-red-500/30";
+      default: return "text-muted-foreground bg-muted/10 border-border/30";
+    }
+  };
+
+  const statusLabel = (status: string) => {
+    switch (status) {
+      case "fresh": return "Fresh";
+      case "stale": return "Stale";
+      case "critical": return "Critical";
+      default: return "No Data";
+    }
+  };
+
+  const rowBg = (status: string) => {
+    switch (status) {
+      case "fresh": return "";
+      case "stale": return "bg-amber-500/5";
+      case "critical": return "bg-red-500/5";
+      default: return "bg-muted/5";
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          {freshness && (
+            <div className="flex gap-2 text-xs">
+              <Badge variant="outline" className="border-emerald-500/30 text-emerald-400" data-testid="badge-fresh-count">
+                <CircleDot className="w-3 h-3 mr-1" />{freshness.freshCount} Fresh
+              </Badge>
+              {freshness.staleCount > 0 && (
+                <Badge variant="outline" className="border-amber-500/30 text-amber-400" data-testid="badge-stale-count">
+                  <AlertTriangle className="w-3 h-3 mr-1" />{freshness.staleCount} Stale
+                </Badge>
+              )}
+              {freshness.criticalCount > 0 && (
+                <Badge variant="outline" className="border-red-500/30 text-red-400" data-testid="badge-critical-count">
+                  <XCircle className="w-3 h-3 mr-1" />{freshness.criticalCount} Critical
+                </Badge>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-muted-foreground" data-testid="text-auto-refresh-countdown">
+            Next auto-refresh in {countdownMin}m {countdownSec.toString().padStart(2, "0")}s
+          </span>
+          <Button variant="outline" size="sm" onClick={handleManualRefresh} className="border-border/50" data-testid="button-refresh-freshness">
+            <RefreshCw className={cn("w-3 h-3 mr-1", freshnessLoading && "animate-spin")} />
+            Refresh
+          </Button>
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => syncMutation.mutate()}
+            disabled={syncMutation.isPending}
+            className="bg-cyan-600 hover:bg-cyan-700"
+            data-testid="button-sync-all"
+          >
+            {syncMutation.isPending ? (
+              <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+            ) : (
+              <Download className="w-3 h-3 mr-1" />
+            )}
+            Sync All Now
+          </Button>
+        </div>
+      </div>
+
+      {syncMutation.isPending && (
+        <Card className="glass-card border border-cyan-500/30" data-testid="card-sync-progress">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <Loader2 className="w-5 h-5 text-cyan-400 animate-spin" />
+              <div>
+                <p className="text-sm font-medium text-cyan-400">Syncing all 20 symbols...</p>
+                <p className="text-xs text-muted-foreground">Fetching latest 15m candles from Binance for each symbol</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {syncMutation.isSuccess && syncMutation.data && (
+        <Card className="glass-card border border-emerald-500/30" data-testid="card-sync-results">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3 mb-3">
+              <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+              <p className="text-sm font-medium text-emerald-400">
+                Sync complete — {syncMutation.data.totalInserted} new candles inserted
+              </p>
+            </div>
+            {syncMutation.data.results.some((r) => r.inserted > 0 || r.error) && (
+              <div className="grid grid-cols-4 md:grid-cols-5 gap-1 text-xs">
+                {syncMutation.data.results
+                  .filter((r) => r.inserted > 0 || r.error)
+                  .map((r) => (
+                    <div key={r.symbol} className={cn("px-2 py-1 rounded", r.error ? "bg-red-500/10 text-red-400" : "bg-emerald-500/10 text-emerald-400")}>
+                      {r.symbol.replace("USDT", "")}: {r.error ? "Error" : `+${r.inserted}`}
+                    </div>
+                  ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      <Card className="glass-card border border-border/50" data-testid="card-freshness-table">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Database className="w-4 h-4 text-cyan-400" />
+            Per-Symbol Data Freshness (15m Candles)
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {freshnessLoading ? (
+            <div className="flex items-center justify-center h-32">
+              <Loader2 className="w-6 h-6 text-cyan-400 animate-spin" />
+            </div>
+          ) : freshness ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs" data-testid="table-freshness">
+                <thead>
+                  <tr className="border-b border-border/30 text-muted-foreground">
+                    <th className="text-left py-2 px-2 font-medium">Symbol</th>
+                    <th className="text-left py-2 px-2 font-medium">Last 15m Candle</th>
+                    <th className="text-right py-2 px-2 font-medium">Staleness</th>
+                    <th className="text-center py-2 px-2 font-medium">Status</th>
+                    <th className="text-center py-2 px-2 font-medium">1H (Resampled)</th>
+                    <th className="text-center py-2 px-2 font-medium">4H (Resampled)</th>
+                    <th className="text-right py-2 px-2 font-medium">Candles</th>
+                    <th className="text-right py-2 px-2 font-medium">Days</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {freshness.symbols.map((s) => (
+                    <tr key={s.symbol} className={cn("border-b border-border/10 hover:bg-muted/10 transition-colors", rowBg(s.status))} data-testid={`row-symbol-${s.symbol}`}>
+                      <td className="py-2 px-2 font-medium text-foreground">{s.symbol.replace("USDT", "")}</td>
+                      <td className="py-2 px-2 text-muted-foreground">
+                        {s.lastCandleDate ? format(new Date(s.lastCandleDate), "MMM dd, HH:mm") : "—"}
+                      </td>
+                      <td className="py-2 px-2 text-right">
+                        {s.staleMinutes !== null ? (
+                          <span className={cn(
+                            s.status === "fresh" ? "text-emerald-400" : s.status === "stale" ? "text-amber-400" : "text-red-400"
+                          )}>
+                            {s.staleMinutes < 60 ? `${s.staleMinutes}m` : `${Math.floor(s.staleMinutes / 60)}h ${s.staleMinutes % 60}m`}
+                          </span>
+                        ) : "—"}
+                      </td>
+                      <td className="py-2 px-2 text-center">
+                        <Badge variant="outline" className={cn("text-[10px] py-0 px-1.5", statusColor(s.status))} data-testid={`badge-status-${s.symbol}`}>
+                          {statusLabel(s.status)}
+                        </Badge>
+                      </td>
+                      <td className="py-2 px-2 text-center">
+                        <Badge variant="outline" className={cn("text-[10px] py-0 px-1.5",
+                          s.h1Status === "synced" ? "text-emerald-400 border-emerald-500/30" : "text-amber-400 border-amber-500/30"
+                        )}>
+                          {s.h1Status === "synced" ? "In-Sync" : "Stale"}
+                        </Badge>
+                      </td>
+                      <td className="py-2 px-2 text-center">
+                        <Badge variant="outline" className={cn("text-[10px] py-0 px-1.5",
+                          s.h4Status === "synced" ? "text-emerald-400 border-emerald-500/30" : "text-amber-400 border-amber-500/30"
+                        )}>
+                          {s.h4Status === "synced" ? "In-Sync" : "Stale"}
+                        </Badge>
+                      </td>
+                      <td className="py-2 px-2 text-right number-mono text-muted-foreground">{s.totalCandles.toLocaleString()}</td>
+                      <td className="py-2 px-2 text-right number-mono text-muted-foreground">{s.daysOfData}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">Failed to load freshness data</p>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card className="glass-card border border-border/50" data-testid="card-retrain-readiness">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-cyan-400" />
+            Retrain Readiness Checklist
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {readinessLoading ? (
+            <div className="flex items-center justify-center h-20">
+              <Loader2 className="w-6 h-6 text-cyan-400 animate-spin" />
+            </div>
+          ) : readiness ? (
+            <div className="space-y-3">
+              {Object.entries(readiness.checks).map(([key, check]) => (
+                <div key={key} className="flex items-start gap-3" data-testid={`check-${key}`}>
+                  {check.passed ? (
+                    <CheckCircle2 className="w-5 h-5 text-emerald-400 mt-0.5 shrink-0" />
+                  ) : (
+                    <XCircle className="w-5 h-5 text-red-400 mt-0.5 shrink-0" />
+                  )}
+                  <div>
+                    <p className={cn("text-sm", check.passed ? "text-emerald-400" : "text-red-400")}>{check.label}</p>
+                    {check.details && check.details.length > 0 && (
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        Missing: {check.details.map((d) => `${d.symbol.replace("USDT", "")} (${d.count.toLocaleString()}/${d.needed.toLocaleString()})`).join(", ")}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ))}
+              <div className={cn(
+                "mt-4 p-3 rounded-lg border text-sm font-medium text-center",
+                readiness.ready
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                  : "border-red-500/30 bg-red-500/10 text-red-400"
+              )} data-testid="text-readiness-summary">
+                {readiness.summary}
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">Failed to load readiness data</p>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 export default function TrainingMonitor() {
   const { data: activeData, isLoading } = useActiveTraining();
   const { data: sessionsData } = useSessions();
@@ -1232,53 +1576,72 @@ export default function TrainingMonitor() {
         </div>
       </div>
 
-      {readyData && <ReadinessGate ready={readyData} />}
+      <Tabs defaultValue="training" className="w-full">
+        <TabsList className="mb-4 bg-muted/20 border border-border/30" data-testid="tabs-training-monitor">
+          <TabsTrigger value="training" className="data-[state=active]:bg-cyan-500/20 data-[state=active]:text-cyan-400" data-testid="tab-training">
+            <Brain className="w-3.5 h-3.5 mr-1.5" />
+            Training
+          </TabsTrigger>
+          <TabsTrigger value="data-readiness" className="data-[state=active]:bg-cyan-500/20 data-[state=active]:text-cyan-400" data-testid="tab-data-readiness">
+            <Database className="w-3.5 h-3.5 mr-1.5" />
+            Data Readiness
+          </TabsTrigger>
+        </TabsList>
 
-      <StatusBanner
-        session={viewingSession}
-        isActive={isActive && viewingSession?.id === activeSession?.id}
-        onClear={(id) => clearSessionMutation.mutate(id)}
-        onClearAll={() => clearAllMutation.mutate()}
-        clearPending={clearSessionMutation.isPending}
-      />
+        <TabsContent value="training">
+          {readyData && <ReadinessGate ready={readyData} />}
 
-      {viewingSession && (
-        <>
-          <OverviewCards session={viewingSession} />
-          <ModelKnowledge epochs={allEpochs} session={viewingSession} />
-          <LossCurves epochs={allEpochs} folds={viewingFolds} />
+          <StatusBanner
+            session={viewingSession}
+            isActive={isActive && viewingSession?.id === activeSession?.id}
+            onClear={(id) => clearSessionMutation.mutate(id)}
+            onClearAll={() => clearAllMutation.mutate()}
+            clearPending={clearSessionMutation.isPending}
+          />
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-            <AccuracyChart epochs={allEpochs} />
-            <ExpectancyChart epochs={allEpochs} />
-          </div>
+          {viewingSession && (
+            <>
+              <OverviewCards session={viewingSession} />
+              <ModelKnowledge epochs={allEpochs} session={viewingSession} />
+              <LossCurves epochs={allEpochs} folds={viewingFolds} />
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-            <WinRatePFChart epochs={allEpochs} />
-            <CumulativeRCurve folds={viewingFolds} />
-          </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                <AccuracyChart epochs={allEpochs} />
+                <ExpectancyChart epochs={allEpochs} />
+              </div>
 
-          <FoldResultsTable folds={viewingFolds} />
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                <WinRatePFChart epochs={allEpochs} />
+                <CumulativeRCurve folds={viewingFolds} />
+              </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-            <FoldBarChart folds={viewingFolds} />
-            {viewingSession.symbols && viewingSession.symbols.length > 0 && (
-              <PerSymbolEdge folds={viewingFolds} symbols={viewingSession.symbols} />
-            )}
-          </div>
+              <FoldResultsTable folds={viewingFolds} />
 
-          <ConfigPanel session={viewingSession} />
-        </>
-      )}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                <FoldBarChart folds={viewingFolds} />
+                {viewingSession.symbols && viewingSession.symbols.length > 0 && (
+                  <PerSymbolEdge folds={viewingFolds} symbols={viewingSession.symbols} />
+                )}
+              </div>
 
-      {historySessions.length > 0 && (
-        <SessionHistory
-          sessions={historySessions}
-          onSelect={setSelectedSessionId}
-          onDelete={(id) => clearSessionMutation.mutate(id)}
-          deletePending={clearSessionMutation.isPending}
-        />
-      )}
+              <ConfigPanel session={viewingSession} />
+            </>
+          )}
+
+          {historySessions.length > 0 && (
+            <SessionHistory
+              sessions={historySessions}
+              onSelect={setSelectedSessionId}
+              onDelete={(id) => clearSessionMutation.mutate(id)}
+              deletePending={clearSessionMutation.isPending}
+            />
+          )}
+        </TabsContent>
+
+        <TabsContent value="data-readiness">
+          <DataReadinessTab />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

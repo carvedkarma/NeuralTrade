@@ -36,7 +36,7 @@ export function getSyncStatus(): SyncStatus {
   return { ...syncStatus };
 }
 
-async function syncSymbolCandles(symbol: string): Promise<number> {
+export async function syncSymbolCandles(symbol: string): Promise<number> {
   const lastCandle = await db.select()
     .from(candles)
     .where(and(
