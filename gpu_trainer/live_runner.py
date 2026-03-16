@@ -1024,6 +1024,15 @@ class LiveRunner:
         self.direction_balance_threshold = direction_balance_threshold
         self._recent_signal_sides: list = []
 
+        # ── Regime-aware signal router ─────────────────────────────────────────
+        # Tracks H4 SMA20 regime per symbol with 3-bar confirmation.
+        # Blocks signals that contradict the broader market trend.
+        self._regime_history: Dict[str, list] = {}   # symbol -> last 3 regime readings
+        self._regime_confirmed: Dict[str, str] = {}  # symbol -> 'BULL' | 'BEAR'
+        # Direction-aware threshold: LONGs score lower by model design (dip-buy
+        # vs momentum-follow), so they use a separate, tighter threshold.
+        self.regime_long_threshold: float = 0.20
+
         self.v5_score_lambda = V5_SCORE_LAMBDA
         self.v5_score_threshold = v5_live_threshold if v5_live_threshold is not None else V5_SCORE_THRESHOLD
         self.v5_min_mu_r = V5_MIN_MU_R
@@ -1912,15 +1921,21 @@ class LiveRunner:
                 log.warning(f"Failed to push cycle log for {symbol}: {e}")
             return None
 
-        score_pass = v5_score >= self.v5_score_threshold
+        # ── Direction-aware threshold ─────────────────────────────────────────
+        # LONGs are dip-buy signals that score lower (0.20-0.39) by model design.
+        # SHORTs are momentum-follow signals that score higher (0.5+).
+        # Using one universal threshold would filter out all valid LONG entries.
+        effective_threshold = self.regime_long_threshold if side == "LONG" else self.v5_score_threshold
+
+        score_pass = v5_score >= effective_threshold
         if v6_confidence is not None and v6_confidence < V6_CONFIDENCE_MIN:
             score_pass = False
 
         v5_info = {
-            'v5_score': round(v5_score, 4), 'v5_threshold': self.v5_score_threshold,
+            'v5_score': round(v5_score, 4), 'v5_threshold': effective_threshold,
             'v5_side': side, 'v5_mfe': round(v5_mfe, 4), 'v5_mae': round(v5_mae, 4),
             'ret_mu': round(ret_mu, 4), 'p_long': round(p_long, 4), 'p_short': round(p_short, 4),
-            'htf_score': htf_score, 'threshold_used': self.v5_score_threshold,
+            'htf_score': htf_score, 'threshold_used': effective_threshold,
         }
         if v6_confidence is not None:
             v5_info['v6_confidence'] = round(v6_confidence, 4)
@@ -1931,13 +1946,13 @@ class LiveRunner:
                 hold_reasons.append(f"v6_conf={v6_confidence:.3f}<{V6_CONFIDENCE_MIN}")
             if abs_mu < self.v5_min_mu_r:
                 hold_reasons.append(f"abs_mu={abs_mu:.4f}<min={self.v5_min_mu_r}")
-            elif v5_score < self.v5_score_threshold:
-                hold_reasons.append(f"v5_score={v5_score:.4f}<thr={self.v5_score_threshold}")
+            elif v5_score < effective_threshold:
+                hold_reasons.append(f"v5_score={v5_score:.4f}<thr={effective_threshold:.4f}({side})")
             hold_reason = '; '.join(hold_reasons)
             reasons.append(hold_reason)
             v5_info['hold_reason'] = hold_reason
 
-            log.info(f"[V5_DECISION] sym={symbol} score={v5_score:.4f} thr={self.v5_score_threshold} "
+            log.info(f"[V5_DECISION] sym={symbol} score={v5_score:.4f} thr={effective_threshold:.4f}({side}) "
                      f"side={side} -> HOLD reason={hold_reason}")
 
             try:
@@ -1951,8 +1966,95 @@ class LiveRunner:
             return None
 
         decision = "ENTER"
-        reasons.append(f"v5_score={v5_score:.4f}>=thr={self.v5_score_threshold} side={side} p_enter={p_enter:.1%}")
+        reasons.append(f"v5_score={v5_score:.4f}>=thr={effective_threshold:.4f}({side}) p_enter={p_enter:.1%}")
         v5_info['hold_reason'] = None
+
+        # ── REGIME-AWARE GATE ────────────────────────────────────────────────────
+        # Gate 1 — EMA REGIME BLOCK: H4 SMA20 as the broad trend boundary.
+        #   BULL regime (price > H4_SMA20): block SHORTs (model is contrarian).
+        #   BEAR regime (price < H4_SMA20): block LONGs (buying into downtrend).
+        #   3-bar confirmation prevents whipsaw at boundaries.
+        # Gate 2 — H4 DIRECTION GATE: H4 trend sign must agree with trade side.
+        _regime_blocked = False
+        _regime_reason = ''
+        try:
+            n_candles = len(df_candles)
+            H4_PERIOD = 16          # 16 × 15m bars = 4 hours
+            H4_SMA_BARS = 20        # SMA over last 20 H4 bars = 80 hours
+            h4_closes: list = []
+            for _i in range((n_candles - (H4_PERIOD - 1)) // H4_PERIOD):
+                _idx = _i * H4_PERIOD + (H4_PERIOD - 1)
+                if _idx < n_candles:
+                    h4_closes.append(float(df_candles.iloc[_idx]['close']))
+
+            if len(h4_closes) >= H4_SMA_BARS:
+                h4_sma20 = sum(h4_closes[-H4_SMA_BARS:]) / H4_SMA_BARS
+                regime_now = 'BULL' if current_price > h4_sma20 else 'BEAR'
+
+                # 3-bar rolling confirmation — prevents reacting to single wicks
+                _hist = self._regime_history.setdefault(symbol, [])
+                _hist.append(regime_now)
+                if len(_hist) > 3:
+                    self._regime_history[symbol] = _hist[-3:]
+                    _hist = self._regime_history[symbol]
+                if len(_hist) >= 3 and all(r == _hist[-1] for r in _hist[-3:]):
+                    self._regime_confirmed[symbol] = _hist[-1]
+                confirmed_regime = self._regime_confirmed.get(symbol, regime_now)
+
+                # Gate 1: EMA regime block
+                if confirmed_regime == 'BULL' and side == 'SHORT':
+                    _regime_blocked = True
+                    _regime_reason = (
+                        f"REGIME_BLOCK_BULL: price=${current_price:.0f} > "
+                        f"H4_SMA20=${h4_sma20:.0f} — shorting a bull market")
+                elif confirmed_regime == 'BEAR' and side == 'LONG':
+                    _regime_blocked = True
+                    _regime_reason = (
+                        f"REGIME_BLOCK_BEAR: price=${current_price:.0f} < "
+                        f"H4_SMA20=${h4_sma20:.0f} — longing a bear market")
+
+                # Gate 2: H4 direction hard gate (only if not already blocked)
+                if not _regime_blocked:
+                    _h4_trend_val = int(htf.get('h4_trend', 0))
+                    _h4_dir_sign = 1 if side == 'LONG' else -1
+                    if _h4_trend_val != 0 and _h4_trend_val != _h4_dir_sign:
+                        _regime_blocked = True
+                        _regime_reason = (
+                            f"H4_DIR_GATE: H4_trend={_h4_trend_val:+d} opposes "
+                            f"side={side} — H4 must agree with trade direction")
+
+                # Annotate the cycle log with regime metadata
+                v5_info['h4_sma20'] = round(h4_sma20, 2)
+                v5_info['regime_confirmed'] = confirmed_regime
+                if not _regime_blocked:
+                    v5_info['regime_gate'] = f'PASS_{confirmed_regime}'
+                    log.info(
+                        f"[REGIME_GATE] {symbol}: PASS — regime={confirmed_regime} "
+                        f"side={side} H4_SMA20=${h4_sma20:.0f} price=${current_price:.0f}")
+            else:
+                log.info(
+                    f"[REGIME_GATE] {symbol}: SKIP "
+                    f"(only {len(h4_closes)} H4 bars available, need {H4_SMA_BARS})")
+        except Exception as _rge:
+            log.warning(f"[REGIME_GATE] {symbol}: error computing regime gate — {_rge}")
+
+        if _regime_blocked:
+            log.info(f"[REGIME_GATE] {symbol}: BLOCKED — {_regime_reason}")
+            decision = "HOLD"
+            reasons.clear()
+            reasons.append(_regime_reason)
+            v5_info['hold_reason'] = _regime_reason
+            v5_info['regime_gate'] = _regime_reason
+            try:
+                self._push_cycle_log(symbol=symbol, price=current_price, p_enter=p_enter,
+                    htf=htf, direction=side, decision=decision, reasons=reasons,
+                    lane_info=v5_info,
+                    e_net_pred=e_net_pred, enter_logit=enter_logit,
+                    temperature_used=temperature_used)
+            except Exception as e:
+                log.warning(f"Failed to push cycle log for {symbol}: {e}")
+            return None
+        # ── END REGIME-AWARE GATE ─────────────────────────────────────────────────
 
         if atr and atr > 0 and not (atr != atr):
             base_sl_dist = self.sl_mult * atr

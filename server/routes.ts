@@ -97,6 +97,47 @@ export async function registerRoutes(
     res.json({ ts: Date.now() });
   });
 
+  // ── SESSION CIRCUIT BREAKER ─────────────────────────────────────────────────
+  // Blocks all new positions when intra-day equity drops ≥5% from session open.
+  // Resets at midnight UTC. Prevents a bad-model session from blowing the account.
+  let _sessionStartEquity: number | null = null;
+  let _sessionDate = '';
+  let _sessionCircuitBreakerTripped = false;
+
+  function _getSessionDate() {
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  async function _checkSessionCircuitBreaker(): Promise<{ tripped: boolean; reason: string }> {
+    try {
+      const portfolio = await storage.getOrCreatePortfolio();
+      const currentEquity = portfolio.currentEquityUsdt ?? 0;
+      const today = _getSessionDate();
+      if (_sessionDate !== today || _sessionStartEquity === null) {
+        _sessionDate = today;
+        _sessionStartEquity = currentEquity;
+        _sessionCircuitBreakerTripped = false;
+        console.log(`[CircuitBreaker] New session started — equity: $${currentEquity.toFixed(2)}`);
+      }
+      if (_sessionCircuitBreakerTripped) {
+        return { tripped: true, reason: 'circuit_breaker_tripped_today' };
+      }
+      if (_sessionStartEquity > 0 && currentEquity < _sessionStartEquity * 0.95) {
+        _sessionCircuitBreakerTripped = true;
+        const lossPct = ((1 - currentEquity / _sessionStartEquity) * 100).toFixed(1);
+        console.log(
+          `[CircuitBreaker] TRIPPED — session loss ${lossPct}% ` +
+          `(start=$${_sessionStartEquity.toFixed(2)} now=$${currentEquity.toFixed(2)})`
+        );
+        return { tripped: true, reason: `session_drawdown_${lossPct}pct_exceeds_5pct` };
+      }
+      return { tripped: false, reason: 'ok' };
+    } catch {
+      return { tripped: false, reason: 'check_error' };
+    }
+  }
+  // ── END SESSION CIRCUIT BREAKER ──────────────────────────────────────────────
+
   app.get("/api/v5/signals", async (req, res) => {
     try {
       const symbol = req.query.symbol as string | undefined;
@@ -4816,6 +4857,29 @@ export async function registerRoutes(
         console.log(`[Auto-Trade] SKIP ${t.symbol} — invalid SL/TP from GPU trainer (sl=${t.stop_loss}, tp=${t.take_profit}, side=${side}, entry=${entryPrice})`);
         autoTradeResult = { opened: false, reason: "invalid_sl_tp" };
       } else {
+        // ── Node.js safety gates (defense-in-depth — GPU trainer also gates) ──
+
+        // Gate 1: Session circuit breaker (-5% intra-day drawdown = no new trades)
+        const _cbCheck = await _checkSessionCircuitBreaker();
+        if (_cbCheck.tripped) {
+          console.log(`[Auto-Trade] CIRCUIT BREAKER — blocked: ${_cbCheck.reason}`);
+          autoTradeResult = { opened: false, reason: _cbCheck.reason };
+          res.json({ success: true, id: record.id, autoTrade: autoTradeResult });
+          return;
+        }
+
+        // Gate 2: H4 direction hard gate — H4 trend must agree with trade side
+        const _htfH4 = t.htf_h4_trend ? Number(t.htf_h4_trend) : 0;
+        const _sideSign = side === 'LONG' ? 1 : -1;
+        if (_htfH4 !== 0 && _htfH4 !== _sideSign) {
+          const _h4Reason = `H4_DIR_GATE: H4_trend=${_htfH4 > 0 ? '+1' : '-1'} opposes side=${side}`;
+          console.log(`[Auto-Trade] H4 GATE — blocked: ${_h4Reason}`);
+          autoTradeResult = { opened: false, reason: _h4Reason };
+          res.json({ success: true, id: record.id, autoTrade: autoTradeResult });
+          return;
+        }
+        // ── End safety gates ─────────────────────────────────────────────────
+
         if (isBitgetLiveTradingEnabled()) {
           try {
             const liveResult = await openBitgetLivePosition({
