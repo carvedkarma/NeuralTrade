@@ -28,6 +28,7 @@ import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearni
 import { getLatestFeatures } from "./feature-engine";
 import { recalculatePatternLabels } from "./pattern-memory";
 import { edgeTracker } from "./edge-tracker";
+import { getSymbolRegimeState, getChopGateDecision, getAllRegimeStates } from "./market-regime";
 import { 
   syncLatest15mCandles, 
   startLiveCandleSync, 
@@ -771,6 +772,16 @@ export async function registerRoutes(
         .limit(limit);
 
       res.json(rows.reverse());
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/market/regime", async (req, res) => {
+    try {
+      const states = await getAllRegimeStates();
+      const blockedCount = states.filter((s) => s.tier === "HARD_CHOP" || s.tier === "SOFT_CHOP").length;
+      res.json({ symbols: states, blockedCount });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -4879,6 +4890,19 @@ export async function registerRoutes(
           res.json({ success: true, id: record.id, autoTrade: autoTradeResult });
           return;
         }
+        // Gate 3: Chop Protection — ADX-based market regime filter
+        const _regimeState = await getSymbolRegimeState(t.symbol);
+        const _chopGate = getChopGateDecision(_regimeState.tier, side as "LONG" | "SHORT", t.v5_score ?? 0);
+        if (_chopGate.blocked) {
+          console.log(`[Auto-Trade] CHOP GATE — blocked: ${_chopGate.reason} (ADX=${_regimeState.adx.toFixed(1)})`);
+          autoTradeResult = { opened: false, reason: _chopGate.reason };
+          res.json({ success: true, id: record.id, autoTrade: autoTradeResult });
+          return;
+        }
+        // If soft chop, log the throttle (leverage reduction applied downstream)
+        if (_regimeState.tier === "SOFT_CHOP") {
+          console.log(`[Auto-Trade] CHOP THROTTLE: ${_chopGate.reason} | leverage mult=${_chopGate.adjustedLeverageMult}`);
+        }
         // ── End safety gates ─────────────────────────────────────────────────
 
         if (isBitgetLiveTradingEnabled()) {
@@ -4891,6 +4915,7 @@ export async function registerRoutes(
               takeProfit: tpPrice,
               v5Score: t.v5_score ?? 0,
               signalConfidence: t.p_enter ?? undefined,
+              chopLeverageMult: _chopGate.adjustedLeverageMult,
             });
 
             if (liveResult.success) {
@@ -4914,6 +4939,7 @@ export async function registerRoutes(
               takeProfit: tpPrice,
               v5Score: t.v5_score ?? 0,
               signalConfidence: t.p_enter ?? undefined,
+              chopLeverageMult: _chopGate.adjustedLeverageMult,
             });
 
             if (liveResult.success) {
@@ -4954,6 +4980,7 @@ export async function registerRoutes(
                   source: "v5_signal",
                   signalConfidence: t.p_enter ?? null,
                   v5Score: t.v5_score ?? undefined,
+                  chopLeverageMult: _chopGate.adjustedLeverageMult,
                 });
 
                 autoTradeResult = { opened: true, positionId: position.id };

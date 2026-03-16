@@ -33,6 +33,7 @@ The backend provides API routes and services to support the frontend and interac
 -   **Execution Service Bridge:** Caches execution state and monitors connection status from the GPU trainer's execution service.
 -   **Bitget Client & Live Engine:** Interfaces with the Bitget V2 REST API for live trading operations (HMAC-SHA256 auth, credentials stored in DB settings table). Auto-trade signals route through Bitget when enabled (takes priority over Bybit).
 -   **Bybit Client & Live Engine:** Interfaces with the Bybit V5 REST API for live trading operations.
+-   **Market Regime / Chop Protection:** `server/market-regime.ts` computes ADX (14-period), Chop Index, and Bollinger Band Width from DB candles. Three tiers: HARD_CHOP (ADX<15, signal blocked), SOFT_CHOP (ADX 15-25, threshold raised to 0.62 + leverage cut to 0.4x), TRENDING (ADX>25, no changes). Applied as Gate 3 in auto-trade ingestion. `GET /api/market/regime` returns all 20 symbols' regime state.
 -   **WebSocket Server:** Enables real-time event streaming for continuous updates.
 
 ### Symbol Configuration

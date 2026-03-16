@@ -18,6 +18,7 @@ import {
   Radio,
   ScanLine,
   Layers,
+  Shield,
 } from "lucide-react";
 import {
   ComposedChart,
@@ -415,6 +416,13 @@ export default function LiveTrading() {
     queryKey: ["/api/v5/signals", "?limit=50"],
     refetchInterval: 60000,
   });
+
+  const { data: regimeData } = useQuery<{ symbols: Array<{ symbol: string; adx: number; tier: string }> }>({
+    queryKey: ["/api/market/regime"],
+    refetchInterval: 60000,
+  });
+
+  const selectedRegime = regimeData?.symbols?.find((s) => s.symbol === selectedSymbol);
 
   const { data: cycleLog } = useQuery<
     Array<{
@@ -840,6 +848,30 @@ export default function LiveTrading() {
                   <div className="flex justify-between items-center">
                     <span className="text-muted-foreground">Regime</span>
                     <Badge variant="secondary" data-testid="signal-regime">{signal.regime ?? "-"}</Badge>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground flex items-center gap-1">
+                      <Shield className="w-3 h-3" /> ADX
+                    </span>
+                    {selectedRegime ? (
+                      <div className="flex items-center gap-1.5">
+                        <span className="number-mono text-xs" data-testid="signal-adx-value">{selectedRegime.adx.toFixed(1)}</span>
+                        <Badge
+                          className={`no-default-hover-elevate no-default-active-elevate text-[10px] ${
+                            selectedRegime.tier === "TRENDING"
+                              ? "bg-emerald-500/20 text-emerald-400"
+                              : selectedRegime.tier === "SOFT_CHOP"
+                                ? "bg-amber-500/20 text-amber-400"
+                                : "bg-red-500/20 text-red-400"
+                          }`}
+                          data-testid="signal-adx-tier"
+                        >
+                          {selectedRegime.tier === "TRENDING" ? "TRENDING" : selectedRegime.tier === "SOFT_CHOP" ? "SOFT CHOP" : "BLOCKED"}
+                        </Badge>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">-</span>
+                    )}
                   </div>
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">HTF Score</span>

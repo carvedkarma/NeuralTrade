@@ -1745,8 +1745,9 @@ export async function manualOpenPosition(params: {
   source?: string;
   signalConfidence?: number;
   v5Score?: number;
+  chopLeverageMult?: number;
 }): Promise<PaperPosition> {
-  const { symbol, side, entryPrice, stopLoss, takeProfit, riskPercent, source = "manual", signalConfidence = null, v5Score } = params;
+  const { symbol, side, entryPrice, stopLoss, takeProfit, riskPercent, source = "manual", signalConfidence = null, v5Score, chopLeverageMult } = params;
   const portfolio = await storage.getOrCreatePortfolio();
   const config = getConfig();
 
@@ -1755,7 +1756,10 @@ export async function manualOpenPosition(params: {
   if (side === "LONG" && takeProfit <= entryPrice) throw new Error("LONG TP must be above entry");
   if (side === "SHORT" && takeProfit >= entryPrice) throw new Error("SHORT TP must be below entry");
 
-  const riskMultiplier = source === "v5_signal" ? computeSignalLeverage(v5Score) : 1;
+  let riskMultiplier = source === "v5_signal" ? computeSignalLeverage(v5Score) : 1;
+  if (chopLeverageMult != null && chopLeverageMult < 1) {
+    riskMultiplier = Math.max(1, Math.round(riskMultiplier * chopLeverageMult));
+  }
   const stopDistance = Math.abs(entryPrice - stopLoss);
   const riskUsd = portfolio.currentEquityUsdt * (riskPercent / 100);
   const baseQty = riskUsd / stopDistance;

@@ -115,8 +115,9 @@ export async function openBitgetLivePosition(params: {
   takeProfit: number;
   v5Score: number;
   signalConfidence?: number;
+  chopLeverageMult?: number;
 }): Promise<{ success: boolean; orderId?: string; qty?: string; leverage?: number; error?: string }> {
-  const { symbol, side, entryPrice, stopLoss, takeProfit, v5Score } = params;
+  const { symbol, side, entryPrice, stopLoss, takeProfit, v5Score, chopLeverageMult } = params;
 
   if (!isBitgetLiveTradingEnabled()) {
     return { success: false, error: "Bitget live trading is not enabled" };
@@ -161,7 +162,11 @@ export async function openBitgetLivePosition(params: {
       return { success: false, error: "No USDT equity available" };
     }
 
-    const leverage = computeSignalLeverage(v5Score);
+    let leverage = computeSignalLeverage(v5Score);
+    if (chopLeverageMult != null && chopLeverageMult < 1) {
+      leverage = Math.max(1, Math.round(leverage * chopLeverageMult));
+      console.log(`[Bitget Live] Chop throttle applied: leverage reduced to ${leverage}x (mult=${chopLeverageMult})`);
+    }
     const stopDistance = Math.abs(entryPrice - stopLoss);
     if (stopDistance <= 0 || !Number.isFinite(stopDistance)) {
       return { success: false, error: `Invalid stop distance: ${stopDistance} (entry=${entryPrice}, SL=${stopLoss})` };

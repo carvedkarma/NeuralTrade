@@ -15,6 +15,9 @@ import {
   Radio,
   Crosshair,
   Zap,
+  Shield,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { CloseButton } from "@/components/position-actions";
 import { useTradingWs } from "@/hooks/use-trading-ws";
@@ -161,9 +164,18 @@ function ActionProbBar({ pHold, pLong, pShort }: { pHold: number | null; pLong: 
   );
 }
 
+interface RegimeSymbol {
+  symbol: string;
+  adx: number;
+  chopIndex: number;
+  bbw: number;
+  tier: "TRENDING" | "SOFT_CHOP" | "HARD_CHOP";
+}
+
 export default function CommandCenter() {
   const { subscribe } = useTradingWs();
   const [realtimeCycles, setRealtimeCycles] = useState<CycleLog[]>([]);
+  const [chopExpanded, setChopExpanded] = useState(false);
 
   const { data: systemStatus, isLoading: statusLoading } = useQuery<{
     moneyConfig?: { account_equity_usd?: number };
@@ -208,6 +220,11 @@ export default function CommandCenter() {
 
   const { data: equityCurve } = useQuery<Array<{ ts: number; r: number }>>({
     queryKey: ["/api/v5/equity-curve"],
+  });
+
+  const { data: regimeData } = useQuery<{ symbols: RegimeSymbol[]; blockedCount: number }>({
+    queryKey: ["/api/market/regime"],
+    refetchInterval: 60000,
   });
 
   const handleCycleUpdate = useCallback((payload: Record<string, unknown>) => {
@@ -306,6 +323,62 @@ export default function CommandCenter() {
           </div>
         )}
       </div>
+
+      {regimeData && (() => {
+        const hardChop = regimeData.symbols.filter((s) => s.tier === "HARD_CHOP");
+        const softChop = regimeData.symbols.filter((s) => s.tier === "SOFT_CHOP");
+        const affectedCount = hardChop.length + softChop.length;
+        if (affectedCount < 3) return null;
+        return (
+          <div
+            className="glass-card rounded-lg p-3 border border-amber-500/30 animate-fade-in-up"
+            data-testid="chop-shield-strip"
+          >
+            <button
+              className="flex items-center gap-2 w-full text-left"
+              onClick={() => setChopExpanded(!chopExpanded)}
+              data-testid="button-chop-toggle"
+            >
+              <Shield className="w-4 h-4 text-amber-400" />
+              <span className="text-sm font-semibold text-amber-400">CHOP PROTECTION ACTIVE</span>
+              <Badge className="no-default-hover-elevate no-default-active-elevate bg-amber-500/20 text-amber-400 text-xs" data-testid="badge-chop-count">
+                {affectedCount} symbols affected
+              </Badge>
+              <span className="ml-auto text-muted-foreground">
+                {chopExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              </span>
+            </button>
+            {chopExpanded && (
+              <div className="mt-3 grid grid-cols-2 gap-2" data-testid="chop-shield-details">
+                {hardChop.length > 0 && (
+                  <div>
+                    <span className="text-xs text-red-400 uppercase tracking-wider font-semibold">Blocked (Hard Chop)</span>
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {hardChop.map((s) => (
+                        <Badge key={s.symbol} className="no-default-hover-elevate no-default-active-elevate text-[10px] bg-red-500/20 text-red-400" data-testid={`badge-hard-chop-${s.symbol}`}>
+                          {s.symbol.replace("USDT", "")} ADX:{s.adx.toFixed(0)}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {softChop.length > 0 && (
+                  <div>
+                    <span className="text-xs text-amber-400 uppercase tracking-wider font-semibold">Throttled (Soft Chop)</span>
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {softChop.map((s) => (
+                        <Badge key={s.symbol} className="no-default-hover-elevate no-default-active-elevate text-[10px] bg-amber-500/20 text-amber-400" data-testid={`badge-soft-chop-${s.symbol}`}>
+                          {s.symbol.replace("USDT", "")} ADX:{s.adx.toFixed(0)}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       <div className="grid grid-cols-6 gap-3" data-testid="metrics-bar">
         {statusLoading ? (
