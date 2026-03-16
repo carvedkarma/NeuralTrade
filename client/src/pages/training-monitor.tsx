@@ -1242,7 +1242,7 @@ function DataReadinessTab() {
 
   const rowBg = (status: string) => {
     switch (status) {
-      case "fresh": return "";
+      case "fresh": return "bg-emerald-500/5";
       case "stale": return "bg-amber-500/5";
       case "critical": return "bg-red-500/5";
       default: return "bg-muted/5";
