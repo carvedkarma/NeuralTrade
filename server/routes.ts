@@ -6145,8 +6145,8 @@ Provide your analysis in this JSON format:
         else if (staleMinutes <= 120) status = "stale";
         else status = "critical";
 
-        const h1Status = staleMinutes <= 120 ? "synced" : "stale";
-        const h4Status = staleMinutes <= 240 ? "synced" : "stale";
+        const h1Status = status === "fresh" || status === "stale" ? "synced" : "stale";
+        const h4Status = status === "fresh" || status === "stale" ? "synced" : "stale";
 
         return {
           symbol: a.symbol,
@@ -6199,7 +6199,8 @@ Provide your analysis in this JSON format:
       }));
 
       const gpuStatus = gpuBridge.getPushedStatus();
-      const gpuConnected = gpuStatus.connected;
+      const GPU_STALE_MS = 5 * 60 * 1000;
+      const gpuConnected = gpuStatus.connected && gpuStatus.lastPush !== null && (now - gpuStatus.lastPush < GPU_STALE_MS);
 
       const activeTraining = await db.select()
         .from(trainingSessions)
@@ -6225,19 +6226,44 @@ Provide your analysis in this JSON format:
     }
   });
 
+  let syncAllProgress: { running: boolean; current: string | null; completed: { symbol: string; inserted: number; error?: string }[]; total: number } = {
+    running: false,
+    current: null,
+    completed: [],
+    total: 0,
+  };
+
+  app.get("/api/data/sync-progress", (req, res) => {
+    res.json(syncAllProgress);
+  });
+
   app.post("/api/data/sync-all", async (req, res) => {
     try {
+      if (syncAllProgress.running) {
+        return res.status(409).json({ error: "Sync already in progress" });
+      }
+
       const { TRADING_SYMBOLS } = await import("@shared/symbols");
+      syncAllProgress = { running: true, current: null, completed: [], total: TRADING_SYMBOLS.length };
+
       const results: { symbol: string; inserted: number; error?: string }[] = [];
 
       for (const symbol of TRADING_SYMBOLS) {
+        syncAllProgress.current = symbol;
         try {
           const inserted = await syncSymbolCandles(symbol);
-          results.push({ symbol, inserted });
+          const entry = { symbol, inserted };
+          results.push(entry);
+          syncAllProgress.completed.push(entry);
         } catch (err: any) {
-          results.push({ symbol, inserted: 0, error: err.message || String(err) });
+          const entry = { symbol, inserted: 0, error: err.message || String(err) };
+          results.push(entry);
+          syncAllProgress.completed.push(entry);
         }
       }
+
+      syncAllProgress.running = false;
+      syncAllProgress.current = null;
 
       const totalInserted = results.reduce((sum, r) => sum + r.inserted, 0);
       const errors = results.filter((r) => r.error);
@@ -6248,6 +6274,8 @@ Provide your analysis in this JSON format:
         results,
       });
     } catch (error: any) {
+      syncAllProgress.running = false;
+      syncAllProgress.current = null;
       console.error("Error in sync-all:", error);
       res.status(500).json({ error: "Failed to sync all symbols" });
     }

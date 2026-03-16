@@ -1143,6 +1143,13 @@ interface SyncResult {
   results: { symbol: string; inserted: number; error?: string }[];
 }
 
+interface SyncProgress {
+  running: boolean;
+  current: string | null;
+  completed: { symbol: string; inserted: number; error?: string }[];
+  total: number;
+}
+
 function DataReadinessTab() {
   const { toast } = useToast();
   const [countdown, setCountdown] = useState(3600);
@@ -1158,6 +1165,12 @@ function DataReadinessTab() {
     refetchInterval: 3600000,
   });
 
+  const { data: syncProgress } = useQuery<SyncProgress>({
+    queryKey: ["/api/data/sync-progress"],
+    refetchInterval: (query) => query.state.data?.running ? 1000 : false,
+    enabled: true,
+  });
+
   const syncMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/data/sync-all");
@@ -1166,6 +1179,7 @@ function DataReadinessTab() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/data/freshness"] });
       queryClient.invalidateQueries({ queryKey: ["/api/data/retrain-readiness"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/data/sync-progress"] });
       toast({
         title: data.success ? "Sync complete" : "Sync completed with errors",
         description: data.success
@@ -1277,16 +1291,41 @@ function DataReadinessTab() {
         </div>
       </div>
 
-      {syncMutation.isPending && (
+      {(syncMutation.isPending || (syncProgress?.running)) && (
         <Card className="glass-card border border-cyan-500/30" data-testid="card-sync-progress">
           <CardContent className="p-4">
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 mb-3">
               <Loader2 className="w-5 h-5 text-cyan-400 animate-spin" />
-              <div>
-                <p className="text-sm font-medium text-cyan-400">Syncing all 20 symbols...</p>
-                <p className="text-xs text-muted-foreground">Fetching latest 15m candles from Binance for each symbol</p>
+              <div className="flex-1">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-medium text-cyan-400">
+                    Syncing {syncProgress?.current?.replace("USDT", "") || "..."} ({(syncProgress?.completed.length ?? 0)}/{syncProgress?.total ?? 20})
+                  </p>
+                  <span className="text-xs text-muted-foreground">
+                    {syncProgress?.total ? Math.round(((syncProgress.completed.length) / syncProgress.total) * 100) : 0}%
+                  </span>
+                </div>
+                <Progress value={syncProgress?.total ? ((syncProgress.completed.length) / syncProgress.total) * 100 : 0} className="h-1.5 mt-2" />
               </div>
             </div>
+            {syncProgress && syncProgress.completed.length > 0 && (
+              <div className="grid grid-cols-4 md:grid-cols-5 gap-1 text-xs">
+                {syncProgress.completed.map((r) => (
+                  <div key={r.symbol} className={cn("px-2 py-1 rounded flex items-center gap-1",
+                    r.error ? "bg-red-500/10 text-red-400" : r.inserted > 0 ? "bg-emerald-500/10 text-emerald-400" : "bg-muted/10 text-muted-foreground"
+                  )}>
+                    {r.error ? <XCircle className="w-3 h-3" /> : <CheckCircle2 className="w-3 h-3" />}
+                    {r.symbol.replace("USDT", "")}: {r.error ? "Err" : `+${r.inserted}`}
+                  </div>
+                ))}
+                {syncProgress.current && (
+                  <div className="px-2 py-1 rounded flex items-center gap-1 bg-cyan-500/10 text-cyan-400">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    {syncProgress.current.replace("USDT", "")}...
+                  </div>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
