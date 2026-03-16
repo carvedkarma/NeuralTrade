@@ -1165,16 +1165,22 @@ function DataReadinessTab() {
     refetchInterval: 3600000,
   });
 
+  const [isSyncing, setIsSyncing] = useState(false);
+
   const { data: syncProgress } = useQuery<SyncProgress>({
     queryKey: ["/api/data/sync-progress"],
-    refetchInterval: (query) => query.state.data?.running ? 1000 : false,
-    enabled: true,
+    refetchInterval: isSyncing ? 1000 : false,
   });
 
   const syncMutation = useMutation({
     mutationFn: async () => {
+      setIsSyncing(true);
+      queryClient.invalidateQueries({ queryKey: ["/api/data/sync-progress"] });
       const res = await apiRequest("POST", "/api/data/sync-all");
       return res.json() as Promise<SyncResult>;
+    },
+    onSettled: () => {
+      setIsSyncing(false);
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/data/freshness"] });
@@ -1291,7 +1297,7 @@ function DataReadinessTab() {
         </div>
       </div>
 
-      {(syncMutation.isPending || (syncProgress?.running)) && (
+      {(isSyncing || syncProgress?.running) && (
         <Card className="glass-card border border-cyan-500/30" data-testid="card-sync-progress">
           <CardContent className="p-4">
             <div className="flex items-center gap-3 mb-3">

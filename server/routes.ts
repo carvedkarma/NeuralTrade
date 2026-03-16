@@ -6141,12 +6141,12 @@ Provide your analysis in this JSON format:
         const staleMinutes = a.endTs ? Math.max(0, Math.floor((expectedLastCandleTs - a.endTs) / 60000)) : Infinity;
         let status: "fresh" | "stale" | "critical" | "no_data" = "no_data";
         if (a.totalCandles === 0) status = "no_data";
-        else if (staleMinutes <= 30) status = "fresh";
+        else if (staleMinutes < 30) status = "fresh";
         else if (staleMinutes <= 120) status = "stale";
         else status = "critical";
 
-        const h1Status = status === "fresh" || status === "stale" ? "synced" : "stale";
-        const h4Status = status === "fresh" || status === "stale" ? "synced" : "stale";
+        const h1Status = status === "fresh" ? "synced" : "stale";
+        const h4Status = status === "fresh" ? "synced" : "stale";
 
         return {
           symbol: a.symbol,
