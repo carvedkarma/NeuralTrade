@@ -287,20 +287,43 @@ interface OrderFlowData {
   ts: number;
 }
 
-function OrderFlowMini({ of }: { of: OrderFlowData | null }) {
+function OrderFlowMini({ of, direction }: { of: OrderFlowData | null; direction?: string }) {
   if (!of) return null;
   const c = of.composite;
   const isBull = c > 0.15;
   const isBear = c < -0.15;
+  const ob = of.obImbalance;
+  const agg = of.aggressorRatio;
+  const cvdS = of.cvdSlope;
+  const isDefault = ob === 0.5 && agg === 0.5 && c === 0;
+  const side = direction === "LONG" ? "LONG" : direction === "SHORT" ? "SHORT" : null;
+  let gateStatus: "PASS" | "BLOCKED" | "NO_DATA" = "PASS";
+  if (isDefault) {
+    gateStatus = "NO_DATA";
+  } else if (side === "LONG" && ((ob < 0.35 && agg < 0.40) || (cvdS < 0 && c < -0.3))) {
+    gateStatus = "BLOCKED";
+  } else if (side === "SHORT" && ((ob > 0.65 && agg > 0.60) || (cvdS > 0 && c > 0.3))) {
+    gateStatus = "BLOCKED";
+  }
   return (
-    <div className="flex items-center gap-1.5" data-testid="of-mini">
+    <div className="flex items-center gap-1.5 flex-wrap" data-testid="of-mini">
       <BarChart3 className="w-3 h-3 text-slate-500" />
       <span className={cn("text-[10px] font-mono font-semibold", isBull ? "text-emerald-400" : isBear ? "text-rose-400" : "text-slate-500")}>
         {c > 0 ? "+" : ""}{c.toFixed(2)}
       </span>
+      {cvdS !== 0 && (
+        <span className={cn("text-[9px]", cvdS > 0 ? "text-emerald-500" : "text-rose-500")}>
+          {cvdS > 0 ? "\u25B2" : "\u25BC"}
+        </span>
+      )}
       <span className={cn("text-[9px] px-1 py-0.5 rounded font-mono", isBull ? "bg-emerald-900/40 text-emerald-400" : isBear ? "bg-rose-900/30 text-rose-400" : "bg-slate-800 text-slate-500")}>
         {isBull ? "BUY FLOW" : isBear ? "SELL FLOW" : "NEUTRAL"}
       </span>
+      {side && gateStatus !== "NO_DATA" && (
+        <span data-testid="of-gate-mini" className={cn("text-[8px] px-1 py-0.5 rounded font-mono", gateStatus === "PASS" ? "bg-emerald-900/30 text-emerald-500" : "bg-red-900/30 text-red-400")}>
+          {gateStatus === "PASS" ? "G4\u2713" : "G4\u2717"}
+        </span>
+      )}
     </div>
   );
 }
@@ -354,7 +377,7 @@ function SymbolCard({ data, orderFlow }: { data: SymbolIntelligence; orderFlow: 
 
       <ScoreBar score={data.v5Score} threshold={data.v5Threshold} />
 
-      <OrderFlowMini of={orderFlow} />
+      <OrderFlowMini of={orderFlow} direction={data.direction} />
 
       <div className="flex items-center justify-between">
         <HtfDots h1={data.htfH1Trend} h4={data.htfH4Trend} slopeOk={data.slopeOk} />

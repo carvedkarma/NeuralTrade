@@ -803,6 +803,17 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/orderflow/:symbol", async (req, res) => {
+    try {
+      const snapshot = await fetchOrderFlowSnapshot(req.params.symbol);
+      const side = (req.query.side as string)?.toUpperCase() as "LONG" | "SHORT" | undefined;
+      const gate = side ? evaluateOrderFlowGate(snapshot, side) : null;
+      res.json({ ...snapshot, gate: gate ? { passed: gate.passed, reason: gate.reason } : null });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get("/api/pro/cycles", async (req, res) => {
     try {
       const from = Number(req.query.from) || (Date.now() - 24 * 60 * 60 * 1000);
@@ -4922,16 +4933,54 @@ export async function registerRoutes(
 
         // Gate 4: Order Flow — OB imbalance + aggressor ratio + CVD direction
         let _ofGateResult: { passed: boolean; reason: string } = { passed: true, reason: "OF_GATE: skipped (fetch error)" };
+        let _ofSnapshotData: { obImbalance: number; aggressorRatio: number; cvd: number; liqProximityUp: number; liqProximityDown: number } | null = null;
         try {
           const _ofSnapshot = await fetchOrderFlowSnapshot(t.symbol);
+          _ofSnapshotData = { obImbalance: _ofSnapshot.obImbalance, aggressorRatio: _ofSnapshot.aggressorRatio, cvd: _ofSnapshot.cvd, liqProximityUp: _ofSnapshot.liqProximityUp, liqProximityDown: _ofSnapshot.liqProximityDown };
           _ofGateResult = evaluateOrderFlowGate(_ofSnapshot, side);
           if (!_ofGateResult.passed) {
             console.log(`[Auto-Trade] ORDER FLOW GATE — blocked: ${_ofGateResult.reason}`);
             autoTradeResult = { opened: false, reason: _ofGateResult.reason };
-            res.json({ success: true, id: record.id, autoTrade: autoTradeResult });
+            try {
+              const recentWindow = Date.now() - 5 * 60_000;
+              const latestSig = await db.select({ id: v5Signals.id }).from(v5Signals)
+                .where(and(eq(v5Signals.symbol, t.symbol), gte(v5Signals.signalTs, recentWindow)))
+                .orderBy(desc(v5Signals.signalTs)).limit(1);
+              if (latestSig.length > 0) {
+                await db.update(v5Signals).set({
+                  obImbalance: _ofSnapshot.obImbalance,
+                  aggressorRatio: _ofSnapshot.aggressorRatio,
+                  cvdAtSignal: _ofSnapshot.cvd,
+                  liqProximity: _ofSnapshot.liqProximityUp,
+                  ofGatePassed: false,
+                  ofGateReason: _ofGateResult.reason,
+                }).where(eq(v5Signals.id, latestSig[0].id));
+              }
+            } catch (e: any) {
+              console.warn(`[Auto-Trade] Failed to persist OF data to v5_signals: ${e.message}`);
+            }
+            res.json({ success: true, id: record.id, autoTrade: autoTradeResult, orderFlow: _ofSnapshotData });
             return;
           }
           console.log(`[Auto-Trade] ORDER FLOW: ${_ofGateResult.reason}`);
+          try {
+            const recentWindow = Date.now() - 5 * 60_000;
+            const latestSig = await db.select({ id: v5Signals.id }).from(v5Signals)
+              .where(and(eq(v5Signals.symbol, t.symbol), gte(v5Signals.signalTs, recentWindow)))
+              .orderBy(desc(v5Signals.signalTs)).limit(1);
+            if (latestSig.length > 0) {
+              await db.update(v5Signals).set({
+                obImbalance: _ofSnapshot.obImbalance,
+                aggressorRatio: _ofSnapshot.aggressorRatio,
+                cvdAtSignal: _ofSnapshot.cvd,
+                liqProximity: _ofSnapshot.liqProximityUp,
+                ofGatePassed: true,
+                ofGateReason: _ofGateResult.reason,
+              }).where(eq(v5Signals.id, latestSig[0].id));
+            }
+          } catch (e: any) {
+            console.warn(`[Auto-Trade] Failed to persist OF data to v5_signals: ${e.message}`);
+          }
         } catch (ofErr: any) {
           console.warn(`[Auto-Trade] Order flow fetch failed for ${t.symbol}, allowing trade: ${ofErr.message}`);
         }

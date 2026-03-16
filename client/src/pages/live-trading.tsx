@@ -1160,9 +1160,25 @@ export default function LiveTrading() {
               <BarChart3 className="w-4 h-4 text-violet-400" />
               Order Flow — {selectedSymbol}
             </CardTitle>
-            <span className="text-[10px] text-muted-foreground number-mono" data-testid="text-of-age">
-              {orderFlow.ts ? formatDistanceToNow(new Date(orderFlow.ts), { addSuffix: true }) : "-"}
-            </span>
+            <div className="flex items-center gap-2">
+              {(() => {
+                const ob = orderFlow.obImbalance;
+                const agg = orderFlow.aggressorRatio;
+                const cvdS = orderFlow.cvdSlope;
+                const comp = orderFlow.composite;
+                const isDefault = ob === 0.5 && agg === 0.5 && comp === 0;
+                if (isDefault) return <Badge data-testid="of-gate-status" className="text-[9px] bg-slate-700/50 text-slate-400">GATE 4: NO DATA</Badge>;
+                const longBlocked = (ob < 0.35 && agg < 0.40) || (cvdS < 0 && comp < -0.3);
+                const shortBlocked = (ob > 0.65 && agg > 0.60) || (cvdS > 0 && comp > 0.3);
+                if (longBlocked && shortBlocked) return <Badge data-testid="of-gate-status" className="text-[9px] bg-red-500/20 text-red-400">GATE 4: BOTH BLOCKED</Badge>;
+                if (longBlocked) return <Badge data-testid="of-gate-status" className="text-[9px] bg-amber-500/20 text-amber-400">GATE 4: LONG BLOCKED</Badge>;
+                if (shortBlocked) return <Badge data-testid="of-gate-status" className="text-[9px] bg-amber-500/20 text-amber-400">GATE 4: SHORT BLOCKED</Badge>;
+                return <Badge data-testid="of-gate-status" className="text-[9px] bg-emerald-500/20 text-emerald-400">GATE 4: PASS</Badge>;
+              })()}
+              <span className="text-[10px] text-muted-foreground number-mono" data-testid="text-of-age">
+                {orderFlow.ts ? formatDistanceToNow(new Date(orderFlow.ts), { addSuffix: true }) : "-"}
+              </span>
+            </div>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -1245,6 +1261,28 @@ export default function LiveTrading() {
                 </div>
               </div>
             </div>
+            {(orderFlow.liqProximityUp !== undefined && orderFlow.liqProximityUp < 999) && (
+              <div className="mt-3 pt-3 border-t border-slate-700/50 grid grid-cols-2 gap-4" data-testid="of-liq-proximity">
+                <div className="space-y-1">
+                  <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Liq Proximity (Up)</span>
+                  <div className="flex items-center gap-2">
+                    <span className={`text-sm font-bold number-mono ${orderFlow.liqProximityUp < 1.0 ? "text-amber-400" : "text-emerald-400"}`}>
+                      {orderFlow.liqProximityUp.toFixed(2)}%
+                    </span>
+                    {orderFlow.liqProximityUp < 0.5 && <Badge className="text-[8px] bg-red-500/20 text-red-400">CLOSE</Badge>}
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Liq Proximity (Down)</span>
+                  <div className="flex items-center gap-2">
+                    <span className={`text-sm font-bold number-mono ${orderFlow.liqProximityDown < 1.0 ? "text-amber-400" : "text-emerald-400"}`}>
+                      {orderFlow.liqProximityDown.toFixed(2)}%
+                    </span>
+                    {orderFlow.liqProximityDown < 0.5 && <Badge className="text-[8px] bg-red-500/20 text-red-400">CLOSE</Badge>}
+                  </div>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}

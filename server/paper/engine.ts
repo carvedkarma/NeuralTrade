@@ -5,6 +5,7 @@ import type { Candle } from "@shared/schema";
 import { candles as candlesTable } from "@shared/schema";
 import type { ShotPlan } from "../signal-engine";
 import { getSymbolRegimeState } from "../market-regime";
+import { fetchOrderFlowSnapshot, evaluateOrderFlowGate } from "../order-flow";
 import { getRegimeRiskParams, classifyRegime, type MarketRegime } from "../feature-engine";
 import { strategyLearner } from "../strategy-learner";
 import { 
@@ -1128,7 +1129,37 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
     // Use combined intelligence signal when available
     const tradeSignal = (shotPlan.combinedIntelligence?.finalSignal || shotPlan.signal) as "LONG" | "SHORT";
     const tradeConfidence = shotPlan.combinedIntelligence?.finalConfidence || shotPlan.confidence;
-    
+
+    try {
+      const _ofSnapshot = await fetchOrderFlowSnapshot(_ctxSymbol);
+      const _ofGateResult = evaluateOrderFlowGate(_ofSnapshot, tradeSignal);
+      if (!_ofGateResult.passed) {
+        console.log(`[Paper] ORDER FLOW GATE blocked ${tradeSignal} ${_ctxSymbol}: ${_ofGateResult.reason}`);
+        logAudit({
+          timestamp: Date.now(),
+          signal: tradeSignal,
+          confidence: tradeConfidence,
+          regime: shotPlan.regime || "unknown",
+          edge: shotPlanEdge,
+          costs: shotPlanCosts,
+          edgeVsCosts: shotPlanEdge > shotPlanCosts ? "PASS" : "FAIL",
+          edgeBucket: shotPlan.edgeBucket || "none",
+          edgeMultiple: shotPlanEdgeMultiple,
+          expansionConfirmed: shotPlan.expansionGate?.confirmed || false,
+          expansionDetails: shotPlan.expansionGate?.details || "N/A",
+          positionSize: 0,
+          sizingMethod: "N/A (OF gate blocked)",
+          exposureAfter: 0,
+          decision: "BLOCKED",
+          reason: _ofGateResult.reason,
+        });
+        return;
+      }
+      console.log(`[Paper] ORDER FLOW: ${_ofGateResult.reason}`);
+    } catch (ofErr: any) {
+      console.warn(`[Paper] Order flow fetch failed for ${_ctxSymbol}, allowing trade: ${ofErr.message}`);
+    }
+
     await openPosition(
       ctx,
       tradeSignal,
