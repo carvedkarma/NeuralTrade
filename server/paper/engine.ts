@@ -4,6 +4,7 @@ import type { PaperPosition } from "@shared/schema";
 import type { Candle } from "@shared/schema";
 import { candles as candlesTable } from "@shared/schema";
 import type { ShotPlan } from "../signal-engine";
+import { getSymbolRegimeState } from "../market-regime";
 import { getRegimeRiskParams, classifyRegime, type MarketRegime } from "../feature-engine";
 import { strategyLearner } from "../strategy-learner";
 import { 
@@ -47,8 +48,9 @@ interface TradeContext {
   atr: number;
   kalmanFast: number;
   shotPlan: ShotPlan | null;
-  macdHistogram?: number;       // For failure stop detection
-  prevMacdHistogram?: number;   // Previous MACD histogram value
+  macdHistogram?: number;
+  prevMacdHistogram?: number;
+  symbol?: string;
 }
 
 interface TradeAudit {
@@ -587,7 +589,7 @@ interface GatingResult {
   tradeDecision?: TradeDecision;  // Include decision for use in openPosition
 }
 
-function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConfig, ctx?: TradeContext): GatingResult {
+function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConfig, ctx?: TradeContext, chopTier?: "TRENDING" | "SOFT_CHOP" | "HARD_CHOP"): GatingResult {
   if (!shotPlan) {
     return { allowed: false, reason: "No shot plan available" };
   }
@@ -660,6 +662,20 @@ function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConf
     return { 
       allowed: false, 
       reason: `${shotPlan.regime} regime detected - no directional edge. HOLD until trend emerges.` 
+    };
+  }
+
+  // ADX-based chop protection (aligns paper engine with live Gate 3)
+  if (chopTier === "HARD_CHOP") {
+    return {
+      allowed: false,
+      reason: `ADX HARD_CHOP: ADX < 15 — no directional trend detected`,
+    };
+  }
+  if (chopTier === "SOFT_CHOP" && shotPlan.confidence < 0.62) {
+    return {
+      allowed: false,
+      reason: `ADX SOFT_CHOP: confidence ${(shotPlan.confidence * 100).toFixed(0)}% < 62% raised threshold`,
     };
   }
   
@@ -1074,7 +1090,9 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
   }
   
   if (!position) {
-    const gating = checkShotPlanGating(ctx.shotPlan, config, ctx);
+    const _ctxSymbol = ctx.symbol || "BTCUSDT";
+    const _regimeState = await getSymbolRegimeState(_ctxSymbol);
+    const gating = checkShotPlanGating(ctx.shotPlan, config, ctx, _regimeState.tier);
     const shotPlanCosts = ctx.shotPlan?.estimatedCosts || getTotalCostsPct();
     const shotPlanEdge = ctx.shotPlan?.edge || 0;
     const shotPlanEdgeMultiple = shotPlanCosts > 0 ? shotPlanEdge / shotPlanCosts : 0;
@@ -1202,7 +1220,9 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
   }
 
   if (shouldFlip(position, ctx.shotPlan, config)) {
-    const gating = checkShotPlanGating(ctx.shotPlan, config, ctx);
+    const _flipSymbol = ctx.symbol || position.symbol || "BTCUSDT";
+    const _flipRegime = await getSymbolRegimeState(_flipSymbol);
+    const gating = checkShotPlanGating(ctx.shotPlan, config, ctx, _flipRegime.tier);
     if (gating.allowed) {
       await closePosition(position, ctx.markPrice, "FLIP", ctx);
       const shotPlan = ctx.shotPlan!;

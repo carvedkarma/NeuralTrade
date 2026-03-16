@@ -4854,7 +4854,7 @@ export async function registerRoutes(
       if (t.gpu_callback_url) gpuBridge.registerGpuUrl(t.gpu_callback_url);
       console.log(`[Live Trade] Recorded ${t.side} ${t.symbol} @ ${t.entry_price} (id=${record.id})`);
 
-      let autoTradeResult: { opened: boolean; positionId?: number; reason?: string; liveOrderId?: string } = { opened: false };
+      let autoTradeResult: { opened: boolean; positionId?: number; reason?: string; liveOrderId?: string; chopThrottled?: boolean } = { opened: false };
 
       const side: "LONG" | "SHORT" = t.side.toUpperCase() === "SHORT" ? "SHORT" : "LONG";
       const entryPrice = Number(t.entry_price);
@@ -4899,8 +4899,8 @@ export async function registerRoutes(
           res.json({ success: true, id: record.id, autoTrade: autoTradeResult });
           return;
         }
-        // If soft chop, log the throttle (leverage reduction applied downstream)
-        if (_regimeState.tier === "SOFT_CHOP") {
+        const _isChopThrottled = _regimeState.tier === "SOFT_CHOP";
+        if (_isChopThrottled) {
           console.log(`[Auto-Trade] CHOP THROTTLE: ${_chopGate.reason} | leverage mult=${_chopGate.adjustedLeverageMult}`);
         }
         // ── End safety gates ─────────────────────────────────────────────────
@@ -4919,8 +4919,8 @@ export async function registerRoutes(
             });
 
             if (liveResult.success) {
-              autoTradeResult = { opened: true, reason: "live_bitget", liveOrderId: liveResult.orderId };
-              console.log(`[Auto-Trade → BITGET LIVE] ${side} ${t.symbol} @ $${entryPrice} | ${liveResult.leverage}x | qty=${liveResult.qty} | orderId=${liveResult.orderId}`);
+              autoTradeResult = { opened: true, reason: "live_bitget", liveOrderId: liveResult.orderId, chopThrottled: _isChopThrottled };
+              console.log(`[Auto-Trade → BITGET LIVE] ${side} ${t.symbol} @ $${entryPrice} | ${liveResult.leverage}x | qty=${liveResult.qty} | orderId=${liveResult.orderId}${_isChopThrottled ? " [CHOP THROTTLED]" : ""}`);
             } else {
               autoTradeResult = { opened: false, reason: `bitget_live_failed: ${liveResult.error}` };
               console.warn(`[Auto-Trade → BITGET LIVE] Failed ${t.symbol}: ${liveResult.error}`);
@@ -4943,8 +4943,8 @@ export async function registerRoutes(
             });
 
             if (liveResult.success) {
-              autoTradeResult = { opened: true, reason: "live_bybit", liveOrderId: liveResult.orderId };
-              console.log(`[Auto-Trade → BYBIT LIVE] ${side} ${t.symbol} @ $${entryPrice} | ${liveResult.leverage}x | qty=${liveResult.qty} | orderId=${liveResult.orderId}`);
+              autoTradeResult = { opened: true, reason: "live_bybit", liveOrderId: liveResult.orderId, chopThrottled: _isChopThrottled };
+              console.log(`[Auto-Trade → BYBIT LIVE] ${side} ${t.symbol} @ $${entryPrice} | ${liveResult.leverage}x | qty=${liveResult.qty} | orderId=${liveResult.orderId}${_isChopThrottled ? " [CHOP THROTTLED]" : ""}`);
             } else {
               autoTradeResult = { opened: false, reason: `live_failed: ${liveResult.error}` };
               console.warn(`[Auto-Trade → BYBIT LIVE] Failed ${t.symbol}: ${liveResult.error}`);
@@ -4983,7 +4983,7 @@ export async function registerRoutes(
                   chopLeverageMult: _chopGate.adjustedLeverageMult,
                 });
 
-                autoTradeResult = { opened: true, positionId: position.id };
+                autoTradeResult = { opened: true, positionId: position.id, chopThrottled: _isChopThrottled };
                 broadcast("TRADE_OPENED", {
                   symbol: t.symbol,
                   side,

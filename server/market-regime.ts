@@ -28,19 +28,18 @@ const CACHE_TTL_MS = 15 * 60 * 1000;
 const regimeCache = new Map<string, MarketRegimeState>();
 
 export function calcADX(candles: Candle[], period: number = 14): number {
-  if (candles.length < period + 2) return 0;
-  const recent = candles.slice(-(period + 1));
+  if (candles.length < 2 * period + 1) return 0;
 
   const plusDM: number[] = [];
   const minusDM: number[] = [];
   const trueRanges: number[] = [];
 
-  for (let i = 1; i < recent.length; i++) {
-    const h = recent[i].high;
-    const l = recent[i].low;
-    const ph = recent[i - 1].high;
-    const pl = recent[i - 1].low;
-    const pc = recent[i - 1].close;
+  for (let i = 1; i < candles.length; i++) {
+    const h = candles[i].high;
+    const l = candles[i].low;
+    const ph = candles[i - 1].high;
+    const pl = candles[i - 1].low;
+    const pc = candles[i - 1].close;
 
     const upMove = h - ph;
     const downMove = pl - l;
@@ -50,20 +49,60 @@ export function calcADX(candles: Candle[], period: number = 14): number {
     trueRanges.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
   }
 
-  const smoothTR = trueRanges.reduce((a, b) => a + b, 0);
-  const smoothPlusDM = plusDM.reduce((a, b) => a + b, 0);
-  const smoothMinusDM = minusDM.reduce((a, b) => a + b, 0);
+  let smoothTR = 0;
+  let smoothPlusDM = 0;
+  let smoothMinusDM = 0;
 
-  if (smoothTR === 0) return 0;
+  for (let i = 0; i < period; i++) {
+    smoothTR += trueRanges[i];
+    smoothPlusDM += plusDM[i];
+    smoothMinusDM += minusDM[i];
+  }
 
-  const pdi = (smoothPlusDM / smoothTR) * 100;
-  const mdi = (smoothMinusDM / smoothTR) * 100;
-  const diSum = pdi + mdi;
+  const dxSeries: number[] = [];
 
-  if (diSum === 0) return 0;
+  for (let i = period; i < trueRanges.length; i++) {
+    if (i === period) {
+      // nothing — use the initial sums
+    } else {
+      smoothTR = smoothTR - smoothTR / period + trueRanges[i];
+      smoothPlusDM = smoothPlusDM - smoothPlusDM / period + plusDM[i];
+      smoothMinusDM = smoothMinusDM - smoothMinusDM / period + minusDM[i];
+    }
 
-  const dx = (Math.abs(pdi - mdi) / diSum) * 100;
-  return dx;
+    if (smoothTR === 0) {
+      dxSeries.push(0);
+      continue;
+    }
+
+    const pdi = (smoothPlusDM / smoothTR) * 100;
+    const mdi = (smoothMinusDM / smoothTR) * 100;
+    const diSum = pdi + mdi;
+
+    if (diSum === 0) {
+      dxSeries.push(0);
+      continue;
+    }
+
+    dxSeries.push((Math.abs(pdi - mdi) / diSum) * 100);
+  }
+
+  if (dxSeries.length === 0) return 0;
+  if (dxSeries.length < period) {
+    return dxSeries.reduce((a, b) => a + b, 0) / dxSeries.length;
+  }
+
+  let adx = 0;
+  for (let i = 0; i < period; i++) {
+    adx += dxSeries[i];
+  }
+  adx /= period;
+
+  for (let i = period; i < dxSeries.length; i++) {
+    adx = (adx * (period - 1) + dxSeries[i]) / period;
+  }
+
+  return adx;
 }
 
 export function calcChopIndex(candles: Candle[], period: number = 14): number {
@@ -127,7 +166,7 @@ export async function getSymbolRegimeState(
       and(eq(candlesTable.symbol, symbol), eq(candlesTable.timeframe, "15m"))
     )
     .orderBy(desc(candlesTable.timestamp))
-    .limit(30);
+    .limit(50);
 
   const candles: Candle[] = rows
     .reverse()
