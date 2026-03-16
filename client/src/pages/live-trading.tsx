@@ -19,6 +19,7 @@ import {
   ScanLine,
   Layers,
   Shield,
+  BarChart3,
 } from "lucide-react";
 import {
   ComposedChart,
@@ -419,6 +420,21 @@ export default function LiveTrading() {
 
   const { data: regimeData } = useQuery<{ symbols: Array<{ symbol: string; adx: number; tier: string }> }>({
     queryKey: ["/api/market/regime"],
+    refetchInterval: 60000,
+  });
+
+  const { data: orderFlow } = useQuery<{
+    symbol: string;
+    obImbalance: number;
+    aggressorRatio: number;
+    cvd: number;
+    cvdSlope: number;
+    liqProximityUp: number;
+    liqProximityDown: number;
+    composite: number;
+    ts: number;
+  }>({
+    queryKey: [`/api/market/order-flow?symbol=${selectedSymbol}`],
     refetchInterval: 60000,
   });
 
@@ -1136,6 +1152,102 @@ export default function LiveTrading() {
           </CardContent>
         </Card>
       </div>
+
+      {orderFlow && (
+        <Card className="glass-card" data-testid="order-flow-panel">
+          <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <BarChart3 className="w-4 h-4 text-violet-400" />
+              Order Flow — {selectedSymbol}
+            </CardTitle>
+            <span className="text-[10px] text-muted-foreground number-mono" data-testid="text-of-age">
+              {orderFlow.ts ? formatDistanceToNow(new Date(orderFlow.ts), { addSuffix: true }) : "-"}
+            </span>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="space-y-1" data-testid="of-ob-imbalance">
+                <span className="text-[10px] text-muted-foreground uppercase tracking-wider">OB Imbalance</span>
+                <div className="flex items-center gap-2">
+                  <span className={`text-lg font-bold number-mono ${orderFlow.obImbalance > 0.55 ? "text-emerald-400" : orderFlow.obImbalance < 0.45 ? "text-red-400" : "text-foreground"}`}>
+                    {(orderFlow.obImbalance * 100).toFixed(1)}%
+                  </span>
+                </div>
+                <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
+                  <div className="h-full rounded-full transition-all duration-500" style={{
+                    width: `${orderFlow.obImbalance * 100}%`,
+                    background: orderFlow.obImbalance > 0.55 ? "rgb(52, 211, 153)" : orderFlow.obImbalance < 0.45 ? "rgb(248, 113, 113)" : "rgb(148, 163, 184)"
+                  }} />
+                </div>
+                <div className="flex justify-between text-[9px] text-muted-foreground">
+                  <span>Sells</span>
+                  <span>Buys</span>
+                </div>
+              </div>
+
+              <div className="space-y-1" data-testid="of-aggressor">
+                <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Aggressor Ratio</span>
+                <div className="flex items-center gap-2">
+                  <span className={`text-lg font-bold number-mono ${orderFlow.aggressorRatio > 0.55 ? "text-emerald-400" : orderFlow.aggressorRatio < 0.45 ? "text-red-400" : "text-foreground"}`}>
+                    {(orderFlow.aggressorRatio * 100).toFixed(1)}%
+                  </span>
+                </div>
+                <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
+                  <div className="h-full rounded-full transition-all duration-500" style={{
+                    width: `${orderFlow.aggressorRatio * 100}%`,
+                    background: orderFlow.aggressorRatio > 0.55 ? "rgb(52, 211, 153)" : orderFlow.aggressorRatio < 0.45 ? "rgb(248, 113, 113)" : "rgb(148, 163, 184)"
+                  }} />
+                </div>
+                <div className="flex justify-between text-[9px] text-muted-foreground">
+                  <span>Sell Aggressor</span>
+                  <span>Buy Aggressor</span>
+                </div>
+              </div>
+
+              <div className="space-y-1" data-testid="of-cvd">
+                <span className="text-[10px] text-muted-foreground uppercase tracking-wider">CVD</span>
+                <div className="flex items-center gap-2">
+                  <span className={`text-lg font-bold number-mono ${orderFlow.cvd > 0 ? "text-emerald-400" : orderFlow.cvd < 0 ? "text-red-400" : "text-foreground"}`}>
+                    {orderFlow.cvd > 0 ? "+" : ""}{(orderFlow.cvd / 1000).toFixed(1)}K
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5 mt-1">
+                  <span className="text-[9px] text-muted-foreground">Slope:</span>
+                  <span className={`text-[11px] number-mono font-semibold ${orderFlow.cvdSlope > 0 ? "text-emerald-400" : orderFlow.cvdSlope < 0 ? "text-red-400" : "text-foreground"}`}>
+                    {orderFlow.cvdSlope > 0 ? "+" : ""}{(orderFlow.cvdSlope / 1000).toFixed(2)}K
+                  </span>
+                  <Badge className={`text-[9px] ${orderFlow.cvdSlope > 0 ? "bg-emerald-500/20 text-emerald-400" : orderFlow.cvdSlope < 0 ? "bg-red-500/20 text-red-400" : "bg-muted text-muted-foreground"}`}>
+                    {orderFlow.cvdSlope > 0 ? "RISING" : orderFlow.cvdSlope < 0 ? "FALLING" : "FLAT"}
+                  </Badge>
+                </div>
+              </div>
+
+              <div className="space-y-1" data-testid="of-composite">
+                <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Composite Score</span>
+                <div className="flex items-center gap-2">
+                  <span className={`text-lg font-bold number-mono ${orderFlow.composite > 0.15 ? "text-emerald-400" : orderFlow.composite < -0.15 ? "text-red-400" : "text-foreground"}`}>
+                    {orderFlow.composite > 0 ? "+" : ""}{orderFlow.composite.toFixed(3)}
+                  </span>
+                </div>
+                <div className="relative w-full h-2 bg-muted rounded-full overflow-hidden mt-1">
+                  <div className="absolute left-1/2 top-0 bottom-0 w-px bg-slate-500" />
+                  {orderFlow.composite >= 0 ? (
+                    <div className="absolute left-1/2 top-0 h-full bg-emerald-500 rounded-full transition-all duration-500"
+                      style={{ width: `${Math.min(Math.abs(orderFlow.composite) * 50, 50)}%` }} />
+                  ) : (
+                    <div className="absolute top-0 h-full bg-red-500 rounded-full transition-all duration-500"
+                      style={{ width: `${Math.min(Math.abs(orderFlow.composite) * 50, 50)}%`, right: "50%" }} />
+                  )}
+                </div>
+                <div className="flex justify-between text-[9px] text-muted-foreground">
+                  <span>Bearish</span>
+                  <span>Bullish</span>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <Card className="glass-card" data-testid="signal-history-panel">
         <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">

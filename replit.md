@@ -13,7 +13,7 @@ The frontend is built with React, TypeScript, and Vite, utilizing `shadcn/ui` (R
 
 **Core Pages:**
 -   **Command Center:** Live system status, KPIs, market overview, real-time signal feed, active positions, mini equity curve.
--   **Live Trading:** Symbol selector, price charts, market scanner, detailed signal analysis, position management, manual trade entry, signal history.
+-   **Live Trading:** Symbol selector, price charts, market scanner, detailed signal analysis, order flow panel (OB imbalance, aggressor ratio, CVD, composite score), position management, manual trade entry, signal history.
 -   **Paper Trading:** Portfolio metrics, equity curve, open/closed positions, health gauges, neural status, MFE tracker, breakeven indicator, adaptive trail visualization, configuration.
 -   **Analytics:** Performance metrics, equity curves, rolling performance, hourly heatmaps, per-symbol breakdowns, advanced analytics.
 -   **Training Monitor:** Visualizes live GPU training progress, status, model knowledge, loss curves, action accuracy, walk-forward validation.
@@ -34,6 +34,7 @@ The backend provides API routes and services to support the frontend and interac
 -   **Bitget Client & Live Engine:** Interfaces with the Bitget V2 REST API for live trading operations (HMAC-SHA256 auth, credentials stored in DB settings table). Auto-trade signals route through Bitget when enabled (takes priority over Bybit).
 -   **Bybit Client & Live Engine:** Interfaces with the Bybit V5 REST API for live trading operations.
 -   **Market Regime / Chop Protection:** `server/market-regime.ts` computes ADX (14-period), Chop Index, and Bollinger Band Width from DB candles. Three tiers: HARD_CHOP (ADX<15, signal blocked), SOFT_CHOP (ADX 15-25, threshold raised to 0.62 + leverage cut to 0.4x), TRENDING (ADX>25, no changes). Applied as Gate 3 in auto-trade ingestion. `GET /api/market/regime` returns all 20 symbols' regime state.
+-   **Order Flow Pipeline (Gate 4):** `server/order-flow.ts` fetches real-time orderbook, recent trades, and ticker data from Bybit V5 public API. Computes OB imbalance, buy/sell aggressor ratio, CVD (cumulative volume delta) with slope, liquidation proximity, and a weighted composite score. Applied as Gate 4 in auto-trade ingestion after chop protection. LONG blocked when OB imbalance<0.35 AND aggressor<0.40, or CVD falling AND composite<-0.3. SHORT blocked when OB imbalance>0.65 AND aggressor>0.60, or CVD rising AND composite>0.3. Falls back gracefully (allows trade) when Bybit public API is unreachable. `GET /api/market/order-flow` returns per-symbol snapshots (60s TTL cache). 6 new columns on `v5_signals` table: `ob_imbalance`, `aggressor_ratio`, `cvd_at_signal`, `liq_proximity`, `of_gate_passed`, `of_gate_reason`.
 -   **WebSocket Server:** Enables real-time event streaming for continuous updates.
 
 ### Symbol Configuration

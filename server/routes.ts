@@ -29,6 +29,7 @@ import { getLatestFeatures } from "./feature-engine";
 import { recalculatePatternLabels } from "./pattern-memory";
 import { edgeTracker } from "./edge-tracker";
 import { getSymbolRegimeState, getChopGateDecision, getAllRegimeStates } from "./market-regime";
+import { fetchOrderFlowSnapshot, evaluateOrderFlowGate, getAllSnapshots } from "./order-flow";
 import { 
   syncLatest15mCandles, 
   startLiveCandleSync, 
@@ -782,6 +783,21 @@ export async function registerRoutes(
       const states = await getAllRegimeStates();
       const blockedCount = states.filter((s) => s.tier === "HARD_CHOP" || s.tier === "SOFT_CHOP").length;
       res.json({ symbols: states, blockedCount });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/market/order-flow", async (req, res) => {
+    try {
+      const symbol = req.query.symbol as string | undefined;
+      if (symbol) {
+        const snapshot = await fetchOrderFlowSnapshot(symbol);
+        res.json({ symbol, ...snapshot });
+      } else {
+        const snapshots = getAllSnapshots();
+        res.json({ snapshots });
+      }
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -4902,6 +4918,22 @@ export async function registerRoutes(
         const _isChopThrottled = _regimeState.tier === "SOFT_CHOP";
         if (_isChopThrottled) {
           console.log(`[Auto-Trade] CHOP THROTTLE: ${_chopGate.reason} | leverage mult=${_chopGate.adjustedLeverageMult}`);
+        }
+
+        // Gate 4: Order Flow — OB imbalance + aggressor ratio + CVD direction
+        let _ofGateResult: { passed: boolean; reason: string } = { passed: true, reason: "OF_GATE: skipped (fetch error)" };
+        try {
+          const _ofSnapshot = await fetchOrderFlowSnapshot(t.symbol);
+          _ofGateResult = evaluateOrderFlowGate(_ofSnapshot, side);
+          if (!_ofGateResult.passed) {
+            console.log(`[Auto-Trade] ORDER FLOW GATE — blocked: ${_ofGateResult.reason}`);
+            autoTradeResult = { opened: false, reason: _ofGateResult.reason };
+            res.json({ success: true, id: record.id, autoTrade: autoTradeResult });
+            return;
+          }
+          console.log(`[Auto-Trade] ORDER FLOW: ${_ofGateResult.reason}`);
+        } catch (ofErr: any) {
+          console.warn(`[Auto-Trade] Order flow fetch failed for ${t.symbol}, allowing trade: ${ofErr.message}`);
         }
         // ── End safety gates ─────────────────────────────────────────────────
 

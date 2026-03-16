@@ -15,6 +15,7 @@ import {
   Eye,
   Activity,
   Shield,
+  BarChart3,
 } from "lucide-react";
 import { TRADING_SYMBOLS } from "@shared/symbols";
 
@@ -277,7 +278,34 @@ function DecisionBadge({ decision, holdReason }: { decision: string | null; hold
   );
 }
 
-function SymbolCard({ data }: { data: SymbolIntelligence }) {
+interface OrderFlowData {
+  obImbalance: number;
+  aggressorRatio: number;
+  cvd: number;
+  cvdSlope: number;
+  composite: number;
+  ts: number;
+}
+
+function OrderFlowMini({ of }: { of: OrderFlowData | null }) {
+  if (!of) return null;
+  const c = of.composite;
+  const isBull = c > 0.15;
+  const isBear = c < -0.15;
+  return (
+    <div className="flex items-center gap-1.5" data-testid="of-mini">
+      <BarChart3 className="w-3 h-3 text-slate-500" />
+      <span className={cn("text-[10px] font-mono font-semibold", isBull ? "text-emerald-400" : isBear ? "text-rose-400" : "text-slate-500")}>
+        {c > 0 ? "+" : ""}{c.toFixed(2)}
+      </span>
+      <span className={cn("text-[9px] px-1 py-0.5 rounded font-mono", isBull ? "bg-emerald-900/40 text-emerald-400" : isBear ? "bg-rose-900/30 text-rose-400" : "bg-slate-800 text-slate-500")}>
+        {isBull ? "BUY FLOW" : isBear ? "SELL FLOW" : "NEUTRAL"}
+      </span>
+    </div>
+  );
+}
+
+function SymbolCard({ data, orderFlow }: { data: SymbolIntelligence; orderFlow: OrderFlowData | null }) {
   const stale = isStale(data.cycleTs);
   const shortSym = data.symbol.replace("USDT", "");
   const isEnter = data.decision === "ENTER";
@@ -325,6 +353,8 @@ function SymbolCard({ data }: { data: SymbolIntelligence }) {
       <MfeMaeRatio mfe={data.mfePred} mae={data.maePred} />
 
       <ScoreBar score={data.v5Score} threshold={data.v5Threshold} />
+
+      <OrderFlowMini of={orderFlow} />
 
       <div className="flex items-center justify-between">
         <HtfDots h1={data.htfH1Trend} h4={data.htfH4Trend} slopeOk={data.slopeOk} />
@@ -405,6 +435,11 @@ export default function NeuralMonitor() {
     refetchInterval: 30000,
   });
 
+  const { data: orderFlowData } = useQuery<{ snapshots: Record<string, OrderFlowData | null> }>({
+    queryKey: ["/api/market/order-flow"],
+    refetchInterval: 60000,
+  });
+
   useEffect(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
@@ -479,7 +514,7 @@ export default function NeuralMonitor() {
 
         {!isLoading &&
           sortedSymbols.map((sym) => (
-            <SymbolCard key={sym.symbol} data={sym} />
+            <SymbolCard key={sym.symbol} data={sym} orderFlow={orderFlowData?.snapshots?.[sym.symbol] ?? null} />
           ))}
       </div>
 

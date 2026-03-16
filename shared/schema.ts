@@ -1649,6 +1649,12 @@ export const v5Signals = pgTable("v5_signals", {
   thresholdUsed: real("threshold_used"),
   htfScore: real("htf_score"),
   sizeMultiplier: real("size_multiplier"),
+  obImbalance: real("ob_imbalance"),
+  aggressorRatio: real("aggressor_ratio"),
+  cvdAtSignal: real("cvd_at_signal"),
+  liqProximity: real("liq_proximity"),
+  ofGatePassed: boolean("of_gate_passed"),
+  ofGateReason: varchar("of_gate_reason", { length: 200 }),
   signalTs: bigint("signal_ts", { mode: "number" }).notNull(),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (table) => ({
