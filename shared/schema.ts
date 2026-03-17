@@ -701,6 +701,8 @@ export const paperPositions = pgTable("paper_positions", {
   tp2: real("tp2"),
   trailMode: varchar("trail_mode", { length: 20 }).default("none"),
   trailPrice: real("trail_price"),
+  trailActive: integer("trail_active").default(0),   // 1 when ATR trail has activated
+  trailBestPrice: real("trail_best_price"),           // Highest/lowest mark price seen since entry
   timeStopBars: integer("time_stop_bars"),
   barsOpen: integer("bars_open").default(0),
   primaryHorizon: integer("primary_horizon").default(15),

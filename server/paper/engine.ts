@@ -557,18 +557,31 @@ function updateTrailingStop(
 function updateAtrTrailingStop(
   position: PaperPosition,
   atr: number,
-  config: PaperTradingConfig
-): { newTrailPrice: number | null; newTrailMode: string | null } {
+  config: PaperTradingConfig,
+  currentPrice: number
+): { newTrailPrice: number | null; newTrailMode: string | null; newBestPrice: number; trailActivated: boolean } {
   if (!position.entryPrice || !position.qty || position.qty <= 0) {
-    return { newTrailPrice: null, newTrailMode: null };
+    return { newTrailPrice: null, newTrailMode: null, newBestPrice: currentPrice, trailActivated: false };
   }
 
-  // Derive best price from peakProfit (stored as absolute PnL: priceDiff × qty)
-  const peakPnl = position.peakProfit ?? 0;
-  const bestPriceMoveAbs = position.qty > 0 ? peakPnl / position.qty : 0;
-  const bestPrice = position.side === "LONG"
-    ? position.entryPrice + bestPriceMoveAbs
-    : position.entryPrice - bestPriceMoveAbs;
+  // Update best price: persisted trailBestPrice ratcheted with current mark price
+  let bestPrice: number;
+  const storedBest = position.trailBestPrice;
+  if (storedBest != null) {
+    bestPrice = position.side === "LONG"
+      ? Math.max(storedBest, currentPrice)
+      : Math.min(storedBest, currentPrice);
+  } else {
+    // Bootstrap from peakProfit on first tick for existing positions
+    const peakPnl = position.peakProfit ?? 0;
+    const bestPriceMoveAbs = position.qty > 0 ? peakPnl / position.qty : 0;
+    const derivedBest = position.side === "LONG"
+      ? position.entryPrice + bestPriceMoveAbs
+      : position.entryPrice - bestPriceMoveAbs;
+    bestPrice = position.side === "LONG"
+      ? Math.max(derivedBest, currentPrice)
+      : Math.min(derivedBest, currentPrice);
+  }
 
   // Minimum profit floor (lock in at least minProfitR × stopDistance above entry)
   const stopDist = position.initialStopDistance ?? atr * config.atrStopMultiplier;
@@ -578,7 +591,7 @@ function updateAtrTrailingStop(
   const activationDist = config.atrTrailActivation * atr;
   const peakPriceMove = Math.abs(bestPrice - position.entryPrice);
   if (peakPriceMove < activationDist) {
-    return { newTrailPrice: null, newTrailMode: null };
+    return { newTrailPrice: null, newTrailMode: null, newBestPrice: bestPrice, trailActivated: false };
   }
 
   // Determine if runner mode (best price has passed TP1)
@@ -610,7 +623,8 @@ function updateAtrTrailingStop(
   }
 
   const newMode = isRunner ? "atr_runner" : "atr";
-  return { newTrailPrice: finalTrail, newTrailMode: newMode };
+  const trailActivated = !(position.trailActive);  // was not active before
+  return { newTrailPrice: finalTrail, newTrailMode: newMode, newBestPrice: bestPrice, trailActivated };
 }
 
 // Determine TRAIL_WIN vs TRAIL_BE based on how much profit was locked in at the trail exit
@@ -623,8 +637,8 @@ function classifyTrailExit(
   const profitDist = position.side === "LONG"
     ? exitPrice - position.entryPrice
     : position.entryPrice - exitPrice;
-  // TRAIL_WIN if profit covers at least 0.3 R (30% of initial stop distance)
-  return profitDist >= stopDist * 0.3 ? "TRAIL_WIN" : "TRAIL_BE";
+  // TRAIL_WIN if profit covers at least 0.15 R — matches atrTrailMinProfitR in trainer
+  return profitDist >= stopDist * 0.15 ? "TRAIL_WIN" : "TRAIL_BE";
 }
 
 function checkTimeStop(position: PaperPosition, pnlR: number, config: PaperTradingConfig): boolean {
@@ -1351,7 +1365,14 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
   }
 
   // ATR-distance trailing stop (mirrors GPU trainer logic)
-  const atrTrail = updateAtrTrailingStop(position, ctx.atr, config);
+  const atrTrail = updateAtrTrailingStop(position, ctx.atr, config, ctx.markPrice);
+
+  // Always persist updated best price for accurate trail calculation across partial closes
+  const bestPriceChanged = atrTrail.newBestPrice !== position.trailBestPrice;
+  if (bestPriceChanged) {
+    await storage.updatePosition(position.id, { trailBestPrice: atrTrail.newBestPrice });
+  }
+
   if (atrTrail.newTrailPrice !== null) {
     const updates: Partial<PaperPosition> = {};
     if (atrTrail.newTrailPrice !== position.trailPrice) {
@@ -1359,6 +1380,9 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
     }
     if (atrTrail.newTrailMode !== null && atrTrail.newTrailMode !== position.trailMode) {
       updates.trailMode = atrTrail.newTrailMode;
+    }
+    if (!position.trailActive) {
+      updates.trailActive = 1;  // Mark trail as activated (persisted flag)
     }
     if (Object.keys(updates).length > 0) {
       await storage.updatePosition(position.id, updates);

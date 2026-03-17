@@ -568,14 +568,14 @@ let trailMonitorIntervalId: ReturnType<typeof setInterval> | null = null;
 
 export function startBitgetTrailMonitor(): void {
   if (trailMonitorIntervalId) return;
-  console.log("[Bitget Trail] Trail monitor started (30s interval)");
+  console.log("[Bitget Trail] Trail monitor started (5s interval)");
   trailMonitorIntervalId = setInterval(() => {
     if (isBitgetLiveTradingEnabled()) {
       updateBitgetTrailingStops().catch((err) =>
         console.error("[Bitget Trail] Monitor tick error:", err.message)
       );
     }
-  }, 30_000);
+  }, 5_000);
 }
 
 export function stopBitgetTrailMonitor(): void {
