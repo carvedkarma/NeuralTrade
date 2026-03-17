@@ -4875,13 +4875,14 @@ export async function registerRoutes(
         breakevenMoved: t.breakeven_moved ?? null,
         trailUpdates: t.trail_updates ?? 0,
         tmActions: t.tm_actions ?? null,
+        fillType: t.fill_type ?? null,
         createdAt: Date.now(),
       });
       gpuBridge.recordActivity();
       if (t.gpu_callback_url) gpuBridge.registerGpuUrl(t.gpu_callback_url);
       console.log(`[Live Trade] Recorded ${t.side} ${t.symbol} @ ${t.entry_price} (id=${record.id})`);
 
-      let autoTradeResult: { opened: boolean; positionId?: number; reason?: string; liveOrderId?: string; chopThrottled?: boolean } = { opened: false };
+      let autoTradeResult: { opened: boolean; positionId?: number; reason?: string; liveOrderId?: string; chopThrottled?: boolean; fillType?: string } = { opened: false };
 
       const side: "LONG" | "SHORT" = t.side.toUpperCase() === "SHORT" ? "SHORT" : "LONG";
       const entryPrice = Number(t.entry_price);
@@ -5000,8 +5001,12 @@ export async function registerRoutes(
             });
 
             if (liveResult.success) {
-              autoTradeResult = { opened: true, reason: "live_bitget", liveOrderId: liveResult.orderId, chopThrottled: _isChopThrottled };
-              console.log(`[Auto-Trade → BITGET LIVE] ${side} ${t.symbol} @ $${entryPrice} | ${liveResult.leverage}x | qty=${liveResult.qty} | orderId=${liveResult.orderId}${_isChopThrottled ? " [CHOP THROTTLED]" : ""}`);
+              autoTradeResult = { opened: true, reason: "live_bitget", liveOrderId: liveResult.orderId, chopThrottled: _isChopThrottled, fillType: liveResult.fillType };
+              // Persist fillType to the trade record
+              if (liveResult.fillType) {
+                await storage.updateLiveTradeRecord(record.id, { fillType: liveResult.fillType });
+              }
+              console.log(`[Auto-Trade → BITGET LIVE] ${side} ${t.symbol} @ $${entryPrice} | ${liveResult.leverage}x | qty=${liveResult.qty} | orderId=${liveResult.orderId} | fill=${liveResult.fillType}${_isChopThrottled ? " [CHOP THROTTLED]" : ""}`);
             } else {
               autoTradeResult = { opened: false, reason: `bitget_live_failed: ${liveResult.error}` };
               console.warn(`[Auto-Trade → BITGET LIVE] Failed ${t.symbol}: ${liveResult.error}`);
@@ -6205,7 +6210,7 @@ Provide your analysis in this JSON format:
 
   app.patch("/api/bitget/config", async (req, res) => {
     try {
-      const { riskPerTradePct, maxDailyLossUsdt, trailActivation, trailDistance } = req.body;
+      const { riskPerTradePct, maxDailyLossUsdt, trailActivation, trailDistance, makerEntry } = req.body;
       const updates: any = {};
       if (riskPerTradePct !== undefined) {
         const val = Number(riskPerTradePct);
@@ -6234,6 +6239,9 @@ Provide your analysis in this JSON format:
           return res.status(400).json({ success: false, error: "trailDistance must be between 0 and 10" });
         }
         updates.trailDistance = val;
+      }
+      if (makerEntry !== undefined) {
+        updates.makerEntry = Boolean(makerEntry);
       }
       await updateBitgetLiveConfig(updates);
       res.json({ success: true, config: getBitgetLiveConfig() });

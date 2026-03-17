@@ -28,6 +28,7 @@ interface TradeRecord {
   barsHeld: number;
   exitReason: string;
   maxFavorableR: number;
+  fillType?: string | null;
 }
 
 function formatUsd(value: number): string {
@@ -117,6 +118,7 @@ export default function TradeHistory() {
                     <TableHead>Date</TableHead>
                     <TableHead>Symbol</TableHead>
                     <TableHead>Side</TableHead>
+                    <TableHead>Fill</TableHead>
                     <TableHead>Entry</TableHead>
                     <TableHead>Exit</TableHead>
                     <TableHead>P&L R</TableHead>
@@ -143,6 +145,21 @@ export default function TradeHistory() {
                           >
                             {trade.side}
                           </Badge>
+                        </TableCell>
+                        <TableCell>
+                          {trade.fillType ? (
+                            <Badge
+                              variant="outline"
+                              className={trade.fillType === "MAKER"
+                                ? "text-cyan-400 border-cyan-400/30 font-mono text-[10px] px-1"
+                                : "text-amber-400 border-amber-400/30 font-mono text-[10px] px-1"}
+                              data-testid={`badge-fill-type-${i}`}
+                            >
+                              {trade.fillType === "MAKER" ? "M" : "T"}
+                            </Badge>
+                          ) : (
+                            <span className="text-muted-foreground/40 text-xs">—</span>
+                          )}
                         </TableCell>
                         <TableCell className="number-mono">{trade.entryPrice?.toFixed(2)}</TableCell>
                         <TableCell className="number-mono">{trade.exitPrice?.toFixed(2) ?? "-"}</TableCell>

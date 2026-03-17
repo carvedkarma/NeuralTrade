@@ -8,6 +8,9 @@ import { TRADING_SYMBOLS, QTY_PRECISION, PRICE_PRECISION } from "@shared/symbols
 const SUPPORTED_SYMBOLS: readonly string[] = TRADING_SYMBOLS;
 const MAX_OPEN_POSITIONS = 6;
 
+const MAKER_FILL_POLL_MS = 15_000;     // Poll order status every 15s
+const MAKER_FILL_TIMEOUT_MS = 30 * 60 * 1000;  // 2 bars × 15 min = 30 min
+
 interface BitgetLiveConfig {
   enabled: boolean;
   riskPerTradePct: number;
@@ -16,6 +19,7 @@ interface BitgetLiveConfig {
   lastResetDate: string;
   trailActivation: number;  // Activate trail when profit >= N × ATR (default 1.0)
   trailDistance: number;    // Trail sits N × ATR behind best price (default 0.8)
+  makerEntry: boolean;      // Use limit orders for entry (default true)
 }
 
 let liveConfig: BitgetLiveConfig = {
@@ -26,6 +30,7 @@ let liveConfig: BitgetLiveConfig = {
   lastResetDate: new Date().toISOString().split("T")[0],
   trailActivation: 1.0,
   trailDistance: 0.8,
+  makerEntry: true,
 };
 
 export function isBitgetLiveTradingEnabled(): boolean {
@@ -51,11 +56,12 @@ export async function setBitgetLiveTradingEnabled(enabled: boolean): Promise<voi
   console.log(`[Bitget Live] ${enabled ? "ENABLED" : "DISABLED"}`);
 }
 
-export async function updateBitgetLiveConfig(updates: Partial<Pick<BitgetLiveConfig, "riskPerTradePct" | "maxDailyLossUsdt" | "trailActivation" | "trailDistance">>): Promise<void> {
+export async function updateBitgetLiveConfig(updates: Partial<Pick<BitgetLiveConfig, "riskPerTradePct" | "maxDailyLossUsdt" | "trailActivation" | "trailDistance" | "makerEntry">>): Promise<void> {
   if (updates.riskPerTradePct !== undefined) liveConfig.riskPerTradePct = updates.riskPerTradePct;
   if (updates.maxDailyLossUsdt !== undefined) liveConfig.maxDailyLossUsdt = updates.maxDailyLossUsdt;
   if (updates.trailActivation !== undefined) liveConfig.trailActivation = updates.trailActivation;
   if (updates.trailDistance !== undefined) liveConfig.trailDistance = updates.trailDistance;
+  if (updates.makerEntry !== undefined) liveConfig.makerEntry = updates.makerEntry;
   await saveBitgetLiveConfig();
 }
 
@@ -87,6 +93,7 @@ export async function loadBitgetLiveConfig(): Promise<void> {
         lastResetDate: saved.lastResetDate ?? new Date().toISOString().split("T")[0],
         trailActivation: saved.trailActivation ?? 1.0,
         trailDistance: saved.trailDistance ?? 0.8,
+        makerEntry: saved.makerEntry ?? true,
       };
       if (!bitget.isConfigured()) {
         liveConfig.enabled = false;
@@ -124,7 +131,7 @@ export async function openBitgetLivePosition(params: {
   v5Score: number;
   signalConfidence?: number;
   chopLeverageMult?: number;
-}): Promise<{ success: boolean; orderId?: string; qty?: string; leverage?: number; error?: string }> {
+}): Promise<{ success: boolean; orderId?: string; qty?: string; leverage?: number; fillType?: string; error?: string }> {
   const { symbol, side, entryPrice, stopLoss, takeProfit, v5Score, chopLeverageMult } = params;
 
   if (!isBitgetLiveTradingEnabled()) {
@@ -198,12 +205,15 @@ export async function openBitgetLivePosition(params: {
 
     console.log(`[Bitget Live] Opening ${side} ${symbol}: qty=${qtyStr}, leverage=${leverage}x, risk=$${riskUsd.toFixed(2)}, SL=${formatPrice(symbol, stopLoss)}, TP=${formatPrice(symbol, takeProfit)}, v5Score=${v5Score}`);
 
+    const useMaker = liveConfig.makerEntry;
+    const fillType = useMaker ? "MAKER" : "TAKER";
     const orderResp = await bitget.placeOrder({
       symbol,
       side: bitgetSide as "buy" | "sell",
       tradeSide: "open",
-      orderType: "market",
+      orderType: useMaker ? "limit" : "market",
       size: qtyStr,
+      price: useMaker ? formatPrice(symbol, entryPrice) : undefined,
       presetStopLossPrice: formatPrice(symbol, stopLoss),
       presetStopSurplusPrice: formatPrice(symbol, takeProfit),
     });
@@ -213,7 +223,43 @@ export async function openBitgetLivePosition(params: {
       return { success: false, error: `Order failed: ${orderResp.msg}` };
     }
 
-    console.log(`[Bitget Live] Order placed for ${symbol}: orderId=${orderResp.data?.orderId}`);
+    const orderId = orderResp.data?.orderId;
+    console.log(`[Bitget Live] ${useMaker ? "LIMIT" : "MARKET"} order placed for ${symbol}: orderId=${orderId}`);
+
+    // For maker/limit orders: poll until filled or timeout, then cancel
+    if (useMaker && orderId) {
+      const deadline = Date.now() + MAKER_FILL_TIMEOUT_MS;
+      let filled = false;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, MAKER_FILL_POLL_MS));
+        try {
+          const detail = await bitget.getOrderDetail(symbol, orderId);
+          if (detail.code === "00000" && detail.data) {
+            const state: string = detail.data.state || detail.data.status || "";
+            if (state === "filled" || state === "full_fill") {
+              filled = true;
+              break;
+            }
+            if (state === "cancelled" || state === "canceled" || state === "partial_cancel") {
+              console.log(`[Bitget Live] MAKER order ${orderId} for ${symbol} was already cancelled`);
+              return { success: false, error: "MAKER_MISS: order cancelled externally" };
+            }
+          }
+        } catch (pollErr: any) {
+          console.warn(`[Bitget Live] Poll error for ${symbol} order ${orderId}: ${pollErr.message}`);
+        }
+      }
+      if (!filled) {
+        console.log(`[Bitget Live] MAKER_MISS: limit order ${orderId} for ${symbol} timed out after ${MAKER_FILL_TIMEOUT_MS / 60000} min — cancelling`);
+        try {
+          await bitget.cancelOrder(symbol, orderId);
+        } catch (cancelErr: any) {
+          console.warn(`[Bitget Live] Cancel failed for ${symbol} ${orderId}: ${cancelErr.message}`);
+        }
+        return { success: false, error: `MAKER_MISS: limit order for ${symbol} not filled within ${MAKER_FILL_TIMEOUT_MS / 60000} minutes` };
+      }
+      console.log(`[Bitget Live] MAKER order ${orderId} for ${symbol} filled`);
+    }
 
     const { broadcast } = await import("../ws");
     broadcast("LIVE_TRADE_OPEN", {
@@ -221,16 +267,18 @@ export async function openBitgetLivePosition(params: {
       side,
       qty: qtyStr,
       leverage,
-      orderId: orderResp.data?.orderId,
+      orderId,
       v5Score,
       exchange: "bitget",
+      fillType,
     });
 
     return {
       success: true,
-      orderId: orderResp.data?.orderId,
+      orderId,
       qty: qtyStr,
       leverage,
+      fillType,
     };
   } catch (err: any) {
     console.error(`[Bitget Live] Error opening ${symbol}:`, err.message);

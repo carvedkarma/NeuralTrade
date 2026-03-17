@@ -254,6 +254,22 @@ export async function getOrderFills(symbol?: string, limit: number = 50): Promis
   return request("GET", "/api/v2/mix/order/fills", params);
 }
 
+export async function getOrderDetail(symbol: string, orderId: string): Promise<BitgetResponse<any>> {
+  return request("GET", "/api/v2/mix/order/detail", {
+    symbol,
+    orderId,
+    productType: "USDT-FUTURES",
+  });
+}
+
+export async function cancelOrder(symbol: string, orderId: string): Promise<BitgetResponse<any>> {
+  return request("POST", "/api/v2/mix/order/cancel-order", {
+    symbol,
+    orderId,
+    productType: "USDT-FUTURES",
+  });
+}
+
 export async function setMarginMode(symbol: string, marginMode: "isolated" | "crossed"): Promise<BitgetResponse<any>> {
   return request("POST", "/api/v2/mix/account/set-margin-mode", {
     symbol,

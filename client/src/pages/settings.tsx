@@ -39,6 +39,7 @@ export default function SettingsPage() {
   const [showBgPassphrase, setShowBgPassphrase] = useState(false);
   const [bgLiveRiskPct, setBgLiveRiskPct] = useState<number>(0.5);
   const [bgMaxDailyLoss, setBgMaxDailyLoss] = useState<number>(500);
+  const [bgMakerEntry, setBgMakerEntry] = useState<boolean>(true);
 
   const { data: systemStatus } = useQuery<any>({
     queryKey: ["/api/system/status"],
@@ -102,7 +103,7 @@ export default function SettingsPage() {
   });
 
   const saveBitgetConfigMutation = useMutation({
-    mutationFn: () => apiRequest("PATCH", "/api/bitget/config", { riskPerTradePct: bgLiveRiskPct, maxDailyLossUsdt: bgMaxDailyLoss }),
+    mutationFn: () => apiRequest("PATCH", "/api/bitget/config", { riskPerTradePct: bgLiveRiskPct, maxDailyLossUsdt: bgMaxDailyLoss, makerEntry: bgMakerEntry }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/bitget/status"] });
     },
@@ -112,6 +113,7 @@ export default function SettingsPage() {
     if (bitgetStatus?.config) {
       setBgLiveRiskPct(bitgetStatus.config.riskPerTradePct ?? 0.5);
       setBgMaxDailyLoss(bitgetStatus.config.maxDailyLossUsdt ?? 500);
+      setBgMakerEntry(bitgetStatus.config.makerEntry ?? true);
     }
   }, [bitgetStatus]);
 
@@ -444,6 +446,17 @@ export default function SettingsPage() {
                 <Label className="text-xs text-muted-foreground">Max Daily Loss (USDT)</Label>
                 <Input type="number" step={50} min={50} max={100000} value={bgMaxDailyLoss} onChange={(e) => setBgMaxDailyLoss(parseFloat(e.target.value) || 500)} data-testid="input-bitget-daily-loss" />
               </div>
+            </div>
+            <div className="flex items-center justify-between py-1.5 px-2 rounded-md bg-background/30 border border-border/20">
+              <div>
+                <Label className="text-sm font-medium">Maker Entry Mode</Label>
+                <p className="text-xs text-muted-foreground mt-0.5">Limit orders at candle close price (0.02% vs 0.06% taker fee)</p>
+              </div>
+              <Switch
+                checked={bgMakerEntry}
+                onCheckedChange={setBgMakerEntry}
+                data-testid="switch-maker-entry"
+              />
             </div>
             <Button
               size="sm"
