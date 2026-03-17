@@ -6205,7 +6205,7 @@ Provide your analysis in this JSON format:
 
   app.patch("/api/bitget/config", async (req, res) => {
     try {
-      const { riskPerTradePct, maxDailyLossUsdt } = req.body;
+      const { riskPerTradePct, maxDailyLossUsdt, trailActivation, trailDistance } = req.body;
       const updates: any = {};
       if (riskPerTradePct !== undefined) {
         const val = Number(riskPerTradePct);
@@ -6220,6 +6220,20 @@ Provide your analysis in this JSON format:
           return res.status(400).json({ success: false, error: "maxDailyLossUsdt must be between 0 and 100000" });
         }
         updates.maxDailyLossUsdt = val;
+      }
+      if (trailActivation !== undefined) {
+        const val = Number(trailActivation);
+        if (!Number.isFinite(val) || val <= 0 || val > 10) {
+          return res.status(400).json({ success: false, error: "trailActivation must be between 0 and 10" });
+        }
+        updates.trailActivation = val;
+      }
+      if (trailDistance !== undefined) {
+        const val = Number(trailDistance);
+        if (!Number.isFinite(val) || val <= 0 || val > 10) {
+          return res.status(400).json({ success: false, error: "trailDistance must be between 0 and 10" });
+        }
+        updates.trailDistance = val;
       }
       await updateBitgetLiveConfig(updates);
       res.json({ success: true, config: getBitgetLiveConfig() });

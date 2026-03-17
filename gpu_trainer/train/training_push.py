@@ -142,8 +142,8 @@ class TrainingProgressPusher:
                 "long_short_ratio": f"{report.get('n_long', 0)}/{report.get('n_short', 0)}",
                 "per_symbol": report.get("per_symbol_r"),
                 "final_threshold": report.get("score_threshold"),
-                "trail_win_pct": report.get("trail_win_pct"),
-                "trail_be_pct": report.get("trail_be_pct"),
+                "trail_win_pct": (report.get("n_trail_win", 0) / max(report.get("total_trades", 1), 1)),
+                "trail_be_pct": (report.get("n_trail_be", 0) / max(report.get("total_trades", 1), 1)),
             })
         self._push_event("TRAINING_FOLD_END", payload)
 
