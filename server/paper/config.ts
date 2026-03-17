@@ -46,6 +46,12 @@ export interface PaperTradingConfig {
   // Performance metrics tracking
   trackRMultiple: boolean;          // Track R-multiple per trade
   
+  // ATR-distance trailing stop (mirrors GPU trainer --v5-trailing-sl)
+  atrTrailActivation: number;    // ATR multiples profit before trail activates (default 1.0)
+  atrTrailDistance: number;      // ATR multiples behind best price (default 0.8)
+  atrTrailMinProfitR: number;    // Fraction of stopDistance for minimum profit floor (default 0.15)
+  atrTrailAllowRunner: boolean;  // Tighten trail past TP1 and keep running (default true)
+
   // Signal-strength leverage tiers
   leverageEnabled: boolean;
   leverageTiers: { minScore: number; leverage: number }[];
@@ -102,6 +108,12 @@ export const defaultConfig: PaperTradingConfig = {
   
   // Performance metrics tracking
   trackRMultiple: true,         // Track R-multiple per trade
+
+  // ATR-distance trailing stop (mirrors GPU trainer --v5-trailing-sl)
+  atrTrailActivation: 1.0,      // Trail activates at 1.0× ATR profit (from entry)
+  atrTrailDistance: 0.8,        // Trail sits 0.8× ATR behind best price
+  atrTrailMinProfitR: 0.15,     // Lock in at least 15% of stopDistance as minimum profit
+  atrTrailAllowRunner: true,    // After TP1 hit, tighten to 0.4× ATR and keep running
   
   // Exchange leverage tiers (v5Score thresholds → exchange leverage multiplier)
   // These represent real exchange leverage (15x–50x). Combined with riskPerTradePct=0.3%:

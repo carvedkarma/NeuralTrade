@@ -447,6 +447,8 @@ async function processEvent(
             completedAt: ts,
             bestEpoch: p.best_epoch ?? null,
             finalThreshold: p.final_threshold ?? null,
+            trailWinPct: p.trail_win_pct ?? null,
+            trailBePct: p.trail_be_pct ?? null,
           }).where(eq(trainingFolds.id, fold.id));
         }
         await db.update(trainingSessions).set({

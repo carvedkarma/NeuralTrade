@@ -760,6 +760,15 @@ function PositionPriceGauge({ pos, livePrice, health, isFlashing, isNew, isGlowi
               {pos.leverage}x
             </Badge>
           )}
+          {(pos.trailMode === "atr" || pos.trailMode === "atr_runner") && (
+            <Badge variant="outline" className="text-purple-400 border-purple-400/40 text-[10px] px-1.5 gap-1 animate-pulse" data-testid="badge-trail-active">
+              <TrendingUp className="w-2.5 h-2.5" />
+              {pos.trailMode === "atr_runner" ? "Runner" : "Trail Active"}
+              {pos.trailPrice != null && (
+                <span className="text-purple-300/80 ml-0.5">${pos.trailPrice.toFixed(pos.trailPrice > 100 ? 2 : pos.trailPrice > 1 ? 4 : 6)}</span>
+              )}
+            </Badge>
+          )}
           {isBreakeven && (
             <Badge variant="outline" className="text-amber-400 border-amber-400/30 text-[10px] px-1.5 gap-1" data-testid="badge-breakeven">
               <Shield className="w-2.5 h-2.5" />

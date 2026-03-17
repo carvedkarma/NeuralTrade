@@ -74,6 +74,8 @@ interface TrainingFold {
   completedAt: number | null;
   bestEpoch: number | null;
   finalThreshold: number | null;
+  trailWinPct: number | null;
+  trailBePct: number | null;
 }
 
 interface TrainingEpoch {
@@ -795,6 +797,8 @@ function FoldResultsTable({ folds }: { folds: TrainingFold[] }) {
                 <th className="text-right py-2.5 px-2 text-muted-foreground font-medium">Sharpe</th>
                 <th className="text-right py-2.5 px-2 text-muted-foreground font-medium">MaxDD</th>
                 <th className="text-right py-2.5 px-2 text-muted-foreground font-medium">Total R</th>
+                <th className="text-right py-2.5 px-2 text-muted-foreground font-medium">Trail Win%</th>
+                <th className="text-right py-2.5 px-2 text-muted-foreground font-medium">Trail BE%</th>
                 <th className="text-right py-2.5 px-2 text-muted-foreground font-medium">Threshold</th>
               </tr>
             </thead>
@@ -838,6 +842,12 @@ function FoldResultsTable({ folds }: { folds: TrainingFold[] }) {
                     <td className="py-2.5 px-2 text-right number-mono text-red-400">{fold.maxDrawdown?.toFixed(2) ?? "—"}</td>
                     <td className={cn("py-2.5 px-2 text-right number-mono font-medium", foldR >= 0 ? "text-emerald-400" : "text-red-400")}>
                       {fold.totalR !== null ? `${foldR >= 0 ? "+" : ""}${foldR.toFixed(2)}` : "—"}
+                    </td>
+                    <td className="py-2.5 px-2 text-right number-mono text-cyan-400">
+                      {fold.trailWinPct != null ? `${(fold.trailWinPct * 100).toFixed(1)}%` : "—"}
+                    </td>
+                    <td className="py-2.5 px-2 text-right number-mono text-blue-400">
+                      {fold.trailBePct != null ? `${(fold.trailBePct * 100).toFixed(1)}%` : "—"}
                     </td>
                     <td className="py-2.5 px-2 text-right number-mono text-muted-foreground">{fold.finalThreshold?.toFixed(4) ?? "—"}</td>
                   </tr>

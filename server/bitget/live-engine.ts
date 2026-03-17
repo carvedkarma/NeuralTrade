@@ -1,8 +1,8 @@
 import * as bitget from "./client";
 import { computeSignalLeverage } from "../paper/engine";
 import { db } from "../db";
-import { settings } from "@shared/schema";
-import { eq } from "drizzle-orm";
+import { settings, candles as candlesTable } from "@shared/schema";
+import { eq, and, desc } from "drizzle-orm";
 import { TRADING_SYMBOLS, QTY_PRECISION, PRICE_PRECISION } from "@shared/symbols";
 
 const SUPPORTED_SYMBOLS: readonly string[] = TRADING_SYMBOLS;
@@ -357,6 +357,207 @@ export async function getBitgetLiveBalance(): Promise<{
     return { equity: "0", walletBalance: "0", availableBalance: "0", unrealisedPnl: "0", error: err.message };
   }
 }
+
+// ─── ATR-Distance Trailing Stop Monitor ──────────────────────────────────────
+
+interface BitgetTrailState {
+  entryPrice: number;
+  stopDistance: number;  // Initial SL distance in price units (for floor calc)
+  side: "LONG" | "SHORT";
+  bestPrice: number;
+  trailActive: boolean;
+  trailPrice: number | null;
+  isRunner: boolean;
+}
+
+// In-memory trail state per symbol (survives position lifecycle within one server run)
+const trailStates = new Map<string, BitgetTrailState>();
+
+// Trail configuration (mirrors paper engine defaults)
+const TRAIL_ACTIVATION = 1.0;   // Activate when profit >= 1.0 × ATR
+const TRAIL_DISTANCE  = 0.8;    // Trail sits 0.8 × ATR behind best price
+const TRAIL_MIN_PROFIT_R = 0.15; // Lock in at least 15% of stopDistance
+const TRAIL_ALLOW_RUNNER = true; // Tighten to 0.4× after TP is passed
+
+async function computeAtr(symbol: string, periods: number = 14): Promise<number | null> {
+  try {
+    const rows = await db
+      .select({ high: candlesTable.high, low: candlesTable.low, close: candlesTable.close })
+      .from(candlesTable)
+      .where(and(eq(candlesTable.symbol, symbol), eq(candlesTable.timeframe, "15m")))
+      .orderBy(desc(candlesTable.timestamp))
+      .limit(periods + 1);
+
+    if (rows.length < 2) return null;
+    const reversed = rows.reverse();
+    let atrSum = 0;
+    let count = 0;
+    for (let i = 1; i < reversed.length; i++) {
+      const prev = reversed[i - 1];
+      const curr = reversed[i];
+      const tr = Math.max(
+        curr.high - curr.low,
+        Math.abs(curr.high - prev.close),
+        Math.abs(curr.low - prev.close)
+      );
+      atrSum += tr;
+      count++;
+    }
+    return count > 0 ? atrSum / count : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function updateBitgetTrailingStops(): Promise<void> {
+  if (!bitget.isConfigured()) return;
+
+  try {
+    const posResp = await bitget.getAllPositions();
+    if (posResp.code !== "00000") return;
+
+    const openPositions = (posResp.data || []).filter(
+      (p: any) => parseFloat(p.total || "0") > 0
+    );
+
+    // Clear stale trail states for symbols no longer open
+    const openSymbols = new Set(openPositions.map((p: any) => p.symbol as string));
+    for (const sym of trailStates.keys()) {
+      if (!openSymbols.has(sym)) trailStates.delete(sym);
+    }
+
+    for (const pos of openPositions) {
+      const symbol: string = pos.symbol;
+      const side: "LONG" | "SHORT" = pos.holdSide === "long" ? "LONG" : "SHORT";
+      const entryPrice = parseFloat(pos.openPriceAvg || "0");
+      const markPrice  = parseFloat(pos.markPrice || "0");
+      const slPrice    = parseFloat(pos.stopLossPrice || "0");
+      const tpPrice    = parseFloat(pos.stopSurplusPrice || "0");
+
+      if (!entryPrice || !markPrice) continue;
+
+      // Compute stop distance from original SL (or fall back to ATR-based estimate)
+      const originalStopDist = slPrice > 0 ? Math.abs(entryPrice - slPrice) : 0;
+
+      // Initialize trail state on first encounter
+      if (!trailStates.has(symbol)) {
+        trailStates.set(symbol, {
+          entryPrice,
+          stopDistance: originalStopDist,
+          side,
+          bestPrice: markPrice,
+          trailActive: false,
+          trailPrice: null,
+          isRunner: false,
+        });
+      }
+
+      const state = trailStates.get(symbol)!;
+      // Sync side/entry in case position was replaced
+      state.side = side;
+      state.entryPrice = entryPrice;
+
+      // Update best price
+      if (side === "LONG") {
+        state.bestPrice = Math.max(state.bestPrice, markPrice);
+      } else {
+        state.bestPrice = Math.min(state.bestPrice, markPrice);
+      }
+
+      // Get ATR for this symbol
+      const atr = await computeAtr(symbol);
+      if (!atr || atr <= 0) continue;
+
+      // Use stopDistance for floor; fall back to ATR×1.2 if not set
+      const stopDist = state.stopDistance > 0 ? state.stopDistance : atr * 1.2;
+      const minProfitDist = TRAIL_MIN_PROFIT_R * stopDist;
+      const activationDist = TRAIL_ACTIVATION * atr;
+
+      // Check activation
+      const peakPriceMove = Math.abs(state.bestPrice - entryPrice);
+      if (peakPriceMove < activationDist) continue;
+
+      // Runner mode: best price has passed TP
+      const isRunner = TRAIL_ALLOW_RUNNER && tpPrice > 0 && (
+        side === "LONG" ? state.bestPrice >= tpPrice : state.bestPrice <= tpPrice
+      );
+      state.isRunner = isRunner;
+
+      // Compute trail distance
+      const trailDist = isRunner ? TRAIL_DISTANCE * 0.4 * atr : TRAIL_DISTANCE * atr;
+
+      // Compute candidate trail stop
+      let candidateTrail: number;
+      if (side === "LONG") {
+        candidateTrail = Math.max(entryPrice + minProfitDist, state.bestPrice - trailDist);
+      } else {
+        candidateTrail = Math.min(entryPrice - minProfitDist, state.bestPrice + trailDist);
+      }
+
+      // Ratchet
+      let finalTrail = candidateTrail;
+      if (state.trailPrice !== null) {
+        if (side === "LONG") {
+          finalTrail = Math.max(candidateTrail, state.trailPrice);
+        } else {
+          finalTrail = Math.min(candidateTrail, state.trailPrice);
+        }
+      }
+
+      const wasActive = state.trailActive;
+      state.trailActive = true;
+      state.trailPrice = finalTrail;
+
+      if (!wasActive) {
+        console.log(`[Bitget Trail] ACTIVATED ${side} ${symbol}: trailStop=${formatPrice(symbol, finalTrail)}, bestPrice=${formatPrice(symbol, state.bestPrice)}, ATR=${atr.toFixed(4)}`);
+      }
+
+      // Check if current mark price has crossed the trail stop
+      const trailHit = side === "LONG"
+        ? markPrice <= finalTrail
+        : markPrice >= finalTrail;
+
+      if (trailHit) {
+        const profitPct = side === "LONG"
+          ? ((markPrice - entryPrice) / entryPrice * 100).toFixed(2)
+          : ((entryPrice - markPrice) / entryPrice * 100).toFixed(2);
+        console.log(`[Bitget Trail] TRAIL HIT ${side} ${symbol}: markPrice=${formatPrice(symbol, markPrice)}, trailStop=${formatPrice(symbol, finalTrail)}, P&L pct=${profitPct}%`);
+        trailStates.delete(symbol);
+        await closeBitgetLivePosition(symbol);
+      }
+    }
+  } catch (err: any) {
+    console.error("[Bitget Trail] Monitor error:", err.message);
+  }
+}
+
+export function getBitgetTrailStates(): Map<string, BitgetTrailState> {
+  return trailStates;
+}
+
+let trailMonitorIntervalId: ReturnType<typeof setInterval> | null = null;
+
+export function startBitgetTrailMonitor(): void {
+  if (trailMonitorIntervalId) return;
+  console.log("[Bitget Trail] Trail monitor started (30s interval)");
+  trailMonitorIntervalId = setInterval(() => {
+    if (isBitgetLiveTradingEnabled()) {
+      updateBitgetTrailingStops().catch((err) =>
+        console.error("[Bitget Trail] Monitor tick error:", err.message)
+      );
+    }
+  }, 30_000);
+}
+
+export function stopBitgetTrailMonitor(): void {
+  if (trailMonitorIntervalId) {
+    clearInterval(trailMonitorIntervalId);
+    trailMonitorIntervalId = null;
+    console.log("[Bitget Trail] Trail monitor stopped");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 export {
   isBitgetLiveTradingEnabled as isLiveTradingEnabled,

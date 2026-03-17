@@ -40,7 +40,7 @@ async function getCurrentMarketPrice(symbol: string): Promise<number> {
   return rows[0]?.close ?? 0;
 }
 
-export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK" | "NEURAL_FLIP" | "NEURAL_MFE" | "NEURAL_DECAY" | "NEURAL_LOW_CONVICTION" | "NEURAL_MFE_AGGRESSIVE" | "NEURAL_CHOP_EXIT" | "CYCLE_RESCUE";
+export type ExitReason = "SL" | "TP1" | "TP2" | "TRAIL" | "TRAIL_WIN" | "TRAIL_BE" | "TIME" | "FLIP" | "MANUAL" | "FAILURE" | "MFE_GIVEBACK" | "NEURAL_FLIP" | "NEURAL_MFE" | "NEURAL_DECAY" | "NEURAL_LOW_CONVICTION" | "NEURAL_MFE_AGGRESSIVE" | "NEURAL_CHOP_EXIT" | "CYCLE_RESCUE";
 
 interface TradeContext {
   candle: Candle;
@@ -549,6 +549,82 @@ function updateTrailingStop(
     }
   }
   return position.trailPrice;
+}
+
+// ATR-distance trailing stop — mirrors GPU trainer _simulate_trade_trailing logic
+// Activate at atrTrailActivation × ATR profit, trail at atrTrailDistance × ATR behind best price
+// Tighten to 0.4× in runner mode (past TP1), floor at entry + minProfitR × stopDistance
+function updateAtrTrailingStop(
+  position: PaperPosition,
+  atr: number,
+  config: PaperTradingConfig
+): { newTrailPrice: number | null; newTrailMode: string | null } {
+  if (!position.entryPrice || !position.qty || position.qty <= 0) {
+    return { newTrailPrice: null, newTrailMode: null };
+  }
+
+  // Derive best price from peakProfit (stored as absolute PnL: priceDiff × qty)
+  const peakPnl = position.peakProfit ?? 0;
+  const bestPriceMoveAbs = position.qty > 0 ? peakPnl / position.qty : 0;
+  const bestPrice = position.side === "LONG"
+    ? position.entryPrice + bestPriceMoveAbs
+    : position.entryPrice - bestPriceMoveAbs;
+
+  // Minimum profit floor (lock in at least minProfitR × stopDistance above entry)
+  const stopDist = position.initialStopDistance ?? atr * config.atrStopMultiplier;
+  const minProfitDist = config.atrTrailMinProfitR * stopDist;
+
+  // Check activation: peak profit in price terms >= activation × ATR
+  const activationDist = config.atrTrailActivation * atr;
+  const peakPriceMove = Math.abs(bestPrice - position.entryPrice);
+  if (peakPriceMove < activationDist) {
+    return { newTrailPrice: null, newTrailMode: null };
+  }
+
+  // Determine if runner mode (best price has passed TP1)
+  const isRunner = config.atrTrailAllowRunner && position.tp1 != null && (
+    position.side === "LONG" ? bestPrice >= position.tp1 : bestPrice <= position.tp1
+  );
+
+  // Trail distance: normal or tightened for runner
+  const trailDist = isRunner
+    ? config.atrTrailDistance * 0.4 * atr  // Runner: 0.4× tighter (matches trainer allow_runner)
+    : config.atrTrailDistance * atr;
+
+  // Compute candidate trail stop
+  let candidateTrail: number;
+  if (position.side === "LONG") {
+    candidateTrail = Math.max(position.entryPrice + minProfitDist, bestPrice - trailDist);
+  } else {
+    candidateTrail = Math.min(position.entryPrice - minProfitDist, bestPrice + trailDist);
+  }
+
+  // Ratchet: trail can only move in the favorable direction
+  let finalTrail = candidateTrail;
+  if (position.trailPrice != null && (position.trailMode === "atr" || position.trailMode === "atr_runner")) {
+    if (position.side === "LONG") {
+      finalTrail = Math.max(candidateTrail, position.trailPrice);
+    } else {
+      finalTrail = Math.min(candidateTrail, position.trailPrice);
+    }
+  }
+
+  const newMode = isRunner ? "atr_runner" : "atr";
+  return { newTrailPrice: finalTrail, newTrailMode: newMode };
+}
+
+// Determine TRAIL_WIN vs TRAIL_BE based on how much profit was locked in at the trail exit
+function classifyTrailExit(
+  position: PaperPosition,
+  exitPrice: number
+): "TRAIL_WIN" | "TRAIL_BE" {
+  const stopDist = position.initialStopDistance ?? 0;
+  if (stopDist <= 0) return "TRAIL_WIN";
+  const profitDist = position.side === "LONG"
+    ? exitPrice - position.entryPrice
+    : position.entryPrice - exitPrice;
+  // TRAIL_WIN if profit covers at least 0.3 R (30% of initial stop distance)
+  return profitDist >= stopDist * 0.3 ? "TRAIL_WIN" : "TRAIL_BE";
 }
 
 function checkTimeStop(position: PaperPosition, pnlR: number, config: PaperTradingConfig): boolean {
@@ -1238,7 +1314,10 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
   }
 
   if (trailHit) {
-    await closePosition(position, position.trailPrice!, "TRAIL", ctx);
+    const trailExitReason = (position.trailMode === "atr" || position.trailMode === "atr_runner")
+      ? classifyTrailExit(position, position.trailPrice!)
+      : "TRAIL";
+    await closePosition(position, position.trailPrice!, trailExitReason, ctx);
     return;
   }
 
@@ -1271,9 +1350,25 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
     return;
   }
 
-  const newTrailPrice = updateTrailingStop(position, ctx.kalmanFast, ctx.atr, config);
-  if (newTrailPrice && newTrailPrice !== position.trailPrice) {
-    await storage.updatePosition(position.id, { trailPrice: newTrailPrice });
+  // ATR-distance trailing stop (mirrors GPU trainer logic)
+  const atrTrail = updateAtrTrailingStop(position, ctx.atr, config);
+  if (atrTrail.newTrailPrice !== null) {
+    const updates: Partial<PaperPosition> = {};
+    if (atrTrail.newTrailPrice !== position.trailPrice) {
+      updates.trailPrice = atrTrail.newTrailPrice;
+    }
+    if (atrTrail.newTrailMode !== null && atrTrail.newTrailMode !== position.trailMode) {
+      updates.trailMode = atrTrail.newTrailMode;
+    }
+    if (Object.keys(updates).length > 0) {
+      await storage.updatePosition(position.id, updates);
+    }
+  } else if (!atrTrail.newTrailPrice) {
+    // Fall back to Kalman trail only if ATR trail not yet activated
+    const newKalmanTrail = updateTrailingStop(position, ctx.kalmanFast, ctx.atr, config);
+    if (newKalmanTrail && newKalmanTrail !== position.trailPrice) {
+      await storage.updatePosition(position.id, { trailPrice: newKalmanTrail });
+    }
   }
 
   const equity = portfolio.currentEquityUsdt + unrealizedPnl;

@@ -1618,6 +1618,8 @@ export const trainingFolds = pgTable("training_folds", {
   completedAt: bigint("completed_at", { mode: "number" }),
   bestEpoch: integer("best_epoch"),
   finalThreshold: real("final_threshold"),
+  trailWinPct: real("trail_win_pct"),
+  trailBePct: real("trail_be_pct"),
 }, (table) => ({
   sessionIdx: index("training_folds_session_idx").on(table.sessionId),
   foldNumIdx: index("training_folds_fold_num_idx").on(table.sessionId, table.foldNum),
