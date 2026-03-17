@@ -262,3 +262,20 @@ export async function setMarginMode(symbol: string, marginMode: "isolated" | "cr
     marginMode,
   });
 }
+
+export async function setPositionTpSl(params: {
+  symbol: string;
+  holdSide: "long" | "short";
+  stopLossPrice: string;
+  stopSurplusPrice?: string;
+}): Promise<BitgetResponse<any>> {
+  const body: Record<string, any> = {
+    symbol: params.symbol,
+    productType: "USDT-FUTURES",
+    marginCoin: "USDT",
+    holdSide: params.holdSide,
+    stopLossPrice: params.stopLossPrice,
+  };
+  if (params.stopSurplusPrice) body.stopSurplusPrice = params.stopSurplusPrice;
+  return request("POST", "/api/v2/mix/order/place-tpsl-order", body);
+}

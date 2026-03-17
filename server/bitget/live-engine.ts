@@ -14,6 +14,8 @@ interface BitgetLiveConfig {
   maxDailyLossUsdt: number;
   dailyLossUsdt: number;
   lastResetDate: string;
+  trailActivation: number;  // Activate trail when profit >= N × ATR (default 1.0)
+  trailDistance: number;    // Trail sits N × ATR behind best price (default 0.8)
 }
 
 let liveConfig: BitgetLiveConfig = {
@@ -22,6 +24,8 @@ let liveConfig: BitgetLiveConfig = {
   maxDailyLossUsdt: 500,
   dailyLossUsdt: 0,
   lastResetDate: new Date().toISOString().split("T")[0],
+  trailActivation: 1.0,
+  trailDistance: 0.8,
 };
 
 export function isBitgetLiveTradingEnabled(): boolean {
@@ -47,9 +51,11 @@ export async function setBitgetLiveTradingEnabled(enabled: boolean): Promise<voi
   console.log(`[Bitget Live] ${enabled ? "ENABLED" : "DISABLED"}`);
 }
 
-export async function updateBitgetLiveConfig(updates: Partial<Pick<BitgetLiveConfig, "riskPerTradePct" | "maxDailyLossUsdt">>): Promise<void> {
+export async function updateBitgetLiveConfig(updates: Partial<Pick<BitgetLiveConfig, "riskPerTradePct" | "maxDailyLossUsdt" | "trailActivation" | "trailDistance">>): Promise<void> {
   if (updates.riskPerTradePct !== undefined) liveConfig.riskPerTradePct = updates.riskPerTradePct;
   if (updates.maxDailyLossUsdt !== undefined) liveConfig.maxDailyLossUsdt = updates.maxDailyLossUsdt;
+  if (updates.trailActivation !== undefined) liveConfig.trailActivation = updates.trailActivation;
+  if (updates.trailDistance !== undefined) liveConfig.trailDistance = updates.trailDistance;
   await saveBitgetLiveConfig();
 }
 
@@ -79,6 +85,8 @@ export async function loadBitgetLiveConfig(): Promise<void> {
         maxDailyLossUsdt: saved.maxDailyLossUsdt ?? 500,
         dailyLossUsdt: saved.dailyLossUsdt ?? 0,
         lastResetDate: saved.lastResetDate ?? new Date().toISOString().split("T")[0],
+        trailActivation: saved.trailActivation ?? 1.0,
+        trailDistance: saved.trailDistance ?? 0.8,
       };
       if (!bitget.isConfigured()) {
         liveConfig.enabled = false;
@@ -373,11 +381,10 @@ interface BitgetTrailState {
 // In-memory trail state per symbol (survives position lifecycle within one server run)
 const trailStates = new Map<string, BitgetTrailState>();
 
-// Trail configuration (mirrors paper engine defaults)
-const TRAIL_ACTIVATION = 1.0;   // Activate when profit >= 1.0 × ATR
-const TRAIL_DISTANCE  = 0.8;    // Trail sits 0.8 × ATR behind best price
+// Trail configuration — static constants for non-configurable params
 const TRAIL_MIN_PROFIT_R = 0.15; // Lock in at least 15% of stopDistance
 const TRAIL_ALLOW_RUNNER = true; // Tighten to 0.4× after TP is passed
+// trailActivation and trailDistance come from liveConfig (DB-persisted)
 
 async function computeAtr(symbol: string, periods: number = 14): Promise<number | null> {
   try {
@@ -471,7 +478,7 @@ export async function updateBitgetTrailingStops(): Promise<void> {
       // Use stopDistance for floor; fall back to ATR×1.2 if not set
       const stopDist = state.stopDistance > 0 ? state.stopDistance : atr * 1.2;
       const minProfitDist = TRAIL_MIN_PROFIT_R * stopDist;
-      const activationDist = TRAIL_ACTIVATION * atr;
+      const activationDist = liveConfig.trailActivation * atr;
 
       // Check activation
       const peakPriceMove = Math.abs(state.bestPrice - entryPrice);
@@ -483,8 +490,8 @@ export async function updateBitgetTrailingStops(): Promise<void> {
       );
       state.isRunner = isRunner;
 
-      // Compute trail distance
-      const trailDist = isRunner ? TRAIL_DISTANCE * 0.4 * atr : TRAIL_DISTANCE * atr;
+      // Compute trail distance (uses DB-backed liveConfig)
+      const trailDist = isRunner ? liveConfig.trailDistance * 0.4 * atr : liveConfig.trailDistance * atr;
 
       // Compute candidate trail stop
       let candidateTrail: number;
@@ -505,14 +512,36 @@ export async function updateBitgetTrailingStops(): Promise<void> {
       }
 
       const wasActive = state.trailActive;
+      const prevTrailPrice = state.trailPrice;
       state.trailActive = true;
       state.trailPrice = finalTrail;
+
+      const trailMoved = !wasActive || prevTrailPrice === null || Math.abs(finalTrail - prevTrailPrice) > 0.000001;
 
       if (!wasActive) {
         console.log(`[Bitget Trail] ACTIVATED ${side} ${symbol}: trailStop=${formatPrice(symbol, finalTrail)}, bestPrice=${formatPrice(symbol, state.bestPrice)}, ATR=${atr.toFixed(4)}`);
       }
 
-      // Check if current mark price has crossed the trail stop
+      // ── Update exchange stop-loss order when trail advances ──────────────────
+      if (trailMoved) {
+        try {
+          const holdSide = side === "LONG" ? "long" : "short";
+          const slResp = await bitget.setPositionTpSl({
+            symbol,
+            holdSide,
+            stopLossPrice: formatPrice(symbol, finalTrail),
+          });
+          if (slResp.code !== "00000") {
+            console.warn(`[Bitget Trail] SL update failed for ${symbol}: ${slResp.msg} — will market-close if trail hit`);
+          } else if (!wasActive) {
+            console.log(`[Bitget Trail] Exchange SL set to ${formatPrice(symbol, finalTrail)} for ${symbol}`);
+          }
+        } catch (slErr: any) {
+          console.warn(`[Bitget Trail] SL API error for ${symbol}: ${slErr.message}`);
+        }
+      }
+
+      // Check if current mark price has crossed the trail stop (app-level safety net)
       const trailHit = side === "LONG"
         ? markPrice <= finalTrail
         : markPrice >= finalTrail;
