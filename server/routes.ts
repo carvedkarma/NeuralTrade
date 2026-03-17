@@ -23,7 +23,7 @@ import * as bybitClient from "./bybit/client";
 import { executionBridge } from "./execution-bridge";
 import { openLivePosition, closeLivePosition, amendLiveSLTP, getLivePositions, getLiveBalance, isLiveTradingEnabled, getLiveConfig, setLiveTradingEnabled, updateLiveConfig, loadLiveConfig } from "./bybit/live-engine";
 import * as bitgetClient from "./bitget/client";
-import { openBitgetLivePosition, closeBitgetLivePosition, getBitgetLivePositions, getBitgetLiveBalance, isBitgetLiveTradingEnabled, getBitgetLiveConfig, setBitgetLiveTradingEnabled, updateBitgetLiveConfig, loadBitgetLiveConfig, startBitgetTrailMonitor, getBitgetTrailStates } from "./bitget/live-engine";
+import { openBitgetLivePosition, closeBitgetLivePosition, getBitgetLivePositions, getBitgetLiveBalance, isBitgetLiveTradingEnabled, getBitgetLiveConfig, setBitgetLiveTradingEnabled, updateBitgetLiveConfig, loadBitgetLiveConfig, startBitgetTrailMonitor } from "./bitget/live-engine";
 import { getUnifiedProgressReport, initializeUnifiedLearning, resetUnifiedLearning, loadCandleTimestamps } from "./unified-learning-controller";
 import { getLatestFeatures } from "./feature-engine";
 import { recalculatePatternLabels } from "./pattern-memory";
