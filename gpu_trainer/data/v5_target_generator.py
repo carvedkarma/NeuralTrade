@@ -202,7 +202,7 @@ def build_v5_targets(
             rs = b_r_short[i] if np.isfinite(b_r_short[i]) else -999.0
             dz = deadzone_per_bar[i]
 
-            side_conf = min(1.0, abs(rl - rs) / 0.5)
+            side_conf = min(1.0, abs(rl - rs) / 1.0)
             sample_weight[i] = float(side_conf)
 
             long_positive = rl > 0
@@ -225,20 +225,24 @@ def build_v5_targets(
                     action_label[i] = 0
                     n_barrier_hold += 1
             else:
-                if rl >= rs:
+                BOTH_POS_MARGIN = 1.20
+                if rl > rs * BOTH_POS_MARGIN:
                     if rl >= dz:
                         action_label[i] = 1
                         n_barrier_long += 1
                     else:
                         action_label[i] = 0
                         n_barrier_hold += 1
-                else:
+                elif rs > rl * BOTH_POS_MARGIN:
                     if rs >= dz:
                         action_label[i] = 2
                         n_barrier_short += 1
                     else:
                         action_label[i] = 0
                         n_barrier_hold += 1
+                else:
+                    action_label[i] = 0
+                    n_barrier_hold += 1
         logger.info(f"[V5_TARGETS] BARRIER-BASED labels: LONG={n_barrier_long} SHORT={n_barrier_short} HOLD={n_barrier_hold}")
     else:
         for i in range(n):

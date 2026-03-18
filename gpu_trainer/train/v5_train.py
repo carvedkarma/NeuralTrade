@@ -704,7 +704,7 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
         L_action = F.cross_entropy(action_logits, action_true)
 
     LONG_IDX, SHORT_IDX = 1, 2
-    SIDE_BAL_W = 0.1
+    SIDE_BAL_W = 0.35
     action_probs = F.softmax(action_logits, dim=-1)
     p_long_mean = action_probs[:, LONG_IDX].mean()
     p_short_mean = action_probs[:, SHORT_IDX].mean()
@@ -5132,7 +5132,7 @@ def train_v5_model(
     else:
         model_config = V5ForecasterConfig(
             input_dim=input_dim,
-            hidden_dims=[512, 256, 128, 64],
+            hidden_dims=[768, 384, 192, 96],
             dropout=0.3,
             use_layer_norm=True,
             use_residual=True,

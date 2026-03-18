@@ -746,13 +746,14 @@ class FeatureEngineer:
     # Version string documents the exact computation method
     # Format: major.minor.patch-mode-details
     # Increment when ANY computation changes (windows, formulas, normalization)
-    VERSION = "5.1.0-stf44-enh24-htf12-regime5"
+    VERSION = "5.2.0-stf44-enh24-htf12-regime5-ema3"
     
     STF_FEATURE_COUNT = 44
     ENH_FEATURE_COUNT = 24
     HTF_FEATURE_COUNT = 12
     REGIME_FEATURE_COUNT = 5
-    TOTAL_FEATURE_COUNT = 85
+    EMA200_FEATURE_COUNT = 3
+    TOTAL_FEATURE_COUNT = 88
     
     HTF_FEATURE_NAMES = [
         "h1_sma20_slope", "h1_trend_sign", "h1_rsi14", "h1_atr_ratio", "h1_range_pos",
@@ -763,6 +764,10 @@ class FeatureEngineer:
     REGIME_FEATURE_NAMES = [
         "regime_trend", "regime_volatility", "regime_momentum",
         "regime_session_sin", "regime_session_cos",
+    ]
+    
+    EMA200_FEATURE_NAMES = [
+        "ema200_pos_15m", "above_ema200_15m", "h1_ema200_pos",
     ]
     
     VERSION_DETAILS = {
@@ -1246,8 +1251,34 @@ class FeatureEngineer:
         
         return features
     
+    def compute_ema200_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Compute 3 EMA200-based macro trend position features.
+
+        These give the model direct knowledge of where price sits relative to the
+        200-period trend — the most important trend filter used in all live gates.
+
+          1. ema200_pos_15m:  (close / EMA200_15m) - 1, clipped ±0.15
+          2. above_ema200_15m: sign(close - EMA200_15m) ∈ {-1, +1}
+          3. h1_ema200_pos:   (close / EMA200_approx_1h) - 1, clipped ±0.20
+                               approximated as EMA(800) on 15m bars (≈200 × 4-bar 1h period)
+        """
+        features = pd.DataFrame(index=df.index)
+        close = df["close"]
+
+        ema200_15m = close.ewm(span=200, adjust=False).mean()
+        features["ema200_pos_15m"] = ((close / ema200_15m.clip(lower=1e-10)) - 1.0).clip(-0.15, 0.15)
+        features["above_ema200_15m"] = np.sign(close - ema200_15m).fillna(0.0)
+
+        ema200_1h_approx = close.ewm(span=800, adjust=False).mean()
+        features["h1_ema200_pos"] = ((close / ema200_1h_approx.clip(lower=1e-10)) - 1.0).clip(-0.20, 0.20)
+
+        assert len(features.columns) == self.EMA200_FEATURE_COUNT, \
+            f"Expected {self.EMA200_FEATURE_COUNT} EMA200 features, got {len(features.columns)}: {list(features.columns)}"
+
+        return features
+
     def compute_all_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Compute all features: STF + ENH + HTF + REGIME = total.
+        """Compute all features: STF + ENH + HTF + REGIME + EMA200 = total.
         
         Returns a single DataFrame with deterministic column order.
         """
@@ -1255,8 +1286,9 @@ class FeatureEngineer:
         enh = self.compute_enhanced_features(df)
         htf = self.compute_htf_features(df)
         regime = self.compute_regime_features(df)
+        ema200 = self.compute_ema200_features(df)
         
-        combined = pd.concat([stf, enh, htf, regime], axis=1)
+        combined = pd.concat([stf, enh, htf, regime, ema200], axis=1)
         
         assert combined.shape[1] == self.TOTAL_FEATURE_COUNT, \
             f"Expected {self.TOTAL_FEATURE_COUNT} features, got {combined.shape[1]}: {list(combined.columns)}"
