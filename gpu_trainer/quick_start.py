@@ -47,13 +47,17 @@ LS_RATIO_FEATURE_COUNT = len(LS_RATIO_FEATURE_NAMES)
 def check_gpu():
     try:
         import torch
-        if torch.cuda.is_available():
-            name = torch.cuda.get_device_name(0)
-            mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
-            log.info(f"GPU: {name} ({mem:.1f} GB)")
-            return "cuda"
-        else:
-            log.warning("No GPU found - training will be slow on CPU")
+        try:
+            if torch.cuda.device_count() > 0:
+                name = torch.cuda.get_device_name(0)
+                mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                log.info(f"GPU: {name} ({mem:.1f} GB)")
+                return "cuda"
+            else:
+                log.warning("No GPU found - training will be slow on CPU")
+                return "cpu"
+        except Exception as e:
+            log.warning(f"CUDA device check failed ({e}) - falling back to CPU")
             return "cpu"
     except ImportError:
         log.error("PyTorch not installed! Run: pip install -r requirements.txt")

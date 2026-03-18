@@ -120,7 +120,7 @@ class V5ForwardTestConfig:
     warmup_skip_bars: int = 0
     corr_block: bool = False
     corr_window_days: int = 30
-    corr_thresh: float = 0.70
+    corr_thresh: float = 0.90
     corr_same_side_only: bool = True
     corr_log_matrix: bool = True
     corr_max_block: int = 5
@@ -141,8 +141,8 @@ class V5ForwardTestConfig:
     min_threshold_pct: Optional[float] = None
     max_trades_per_day: Optional[int] = None
     trailing_sl: bool = False
-    trail_activation: float = 1.5
-    trail_distance: float = 1.0
+    trail_activation: float = 1.2
+    trail_distance: float = 0.9
     allow_runner: bool = False
     conviction_sizing: bool = False
     conviction_tier_top_pct: float = 5.0
@@ -154,7 +154,7 @@ class V5ForwardTestConfig:
     temperature: float = 1.0
     adx_gate: bool = False
     adx_period: int = 14
-    adx_min: float = 18.0
+    adx_min: float = 12.0
     adx_exception_top_pct: float = 10.0
     ultra_conviction: bool = False
     ultra_risk_cap: float = 0.05
@@ -1167,7 +1167,7 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         p_long = action_probs[:, 1]
         p_short = action_probs[:, 2]
 
-    risk = np.maximum(mae_pred, 1e-3)
+    risk = np.maximum(mae_pred, 0.25)
 
     if slippage_bps > 0:
         slippage_r = slippage_bps / 10000.0 / np.maximum(risk, 1e-6)
@@ -2313,7 +2313,7 @@ def run_v5_forward_test(
             edge_bar_values = np.maximum(edge_L, edge_S)
         else:
             mu_R = arrays['mu_R']
-            risk = np.maximum(arrays.get('mae', arrays.get('sigma', np.ones_like(mu_R))), 1e-6)
+            risk = np.maximum(arrays.get('mae', arrays.get('sigma', np.ones_like(mu_R))), 0.25)
             edge_bar_values = np.abs(mu_R) / risk
 
         ef_pct_threshold = 0.0
@@ -3952,7 +3952,10 @@ def run_v5_walk_forward(
 
     try:
         import torch
-        gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+        try:
+            gpu_name = torch.cuda.get_device_name(0) if torch.cuda.device_count() > 0 else "CPU"
+        except Exception:
+            gpu_name = "CPU (CUDA unavailable)"
     except Exception:
         gpu_name = "Unknown"
 

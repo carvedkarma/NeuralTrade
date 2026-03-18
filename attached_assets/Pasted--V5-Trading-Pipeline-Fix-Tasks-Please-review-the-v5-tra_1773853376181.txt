@@ -1,0 +1,222 @@
+### V5 Trading Pipeline Fix Tasks
+
+Please review the **v5 training and inference pipeline** and implement the following improvements and bug fixes.
+
+---
+
+## 1. Fix Risk Normalization Instability (Critical)
+
+Current edge calculation can explode when `mae_R` becomes very small.
+
+Update risk normalization logic in the edge scoring function.
+
+Current pattern:
+
+```
+risk = mae_R + eps
+edge = p * (mu_R / risk)
+```
+
+Replace with:
+
+```
+risk = max(mae_R, 0.25)
+edge = p * (mu_R / risk)
+```
+
+or:
+
+```
+risk = np.clip(mae_R, 0.25, None)
+```
+
+Goal:
+
+* Prevent extreme edge values
+* Stabilize signal ranking
+
+---
+
+## 2. Ensure Side-Aware Edge Scoring Is Always Used
+
+Confirm the pipeline always uses the **side-aware scoring mode**.
+
+Expected logic:
+
+```
+abs_mu = abs(mu_R)
+
+edge_long  = p_long  * abs_mu / risk
+edge_short = p_short * abs_mu / risk
+```
+
+Ensure legacy logic is not used anywhere.
+
+---
+
+## 3. Fix Walk-Forward Threshold Decay
+
+Current decay:
+
+```
+--v5-wf-threshold-decay 0.5
+```
+
+This collapses thresholds across folds.
+
+Change logic to:
+
+```
+--v5-wf-threshold-decay 0.9
+```
+
+or disable decay entirely if fold stability becomes an issue.
+
+---
+
+## 4. Improve Trade Selection (Symbol Fairness)
+
+Currently:
+
+```
+--v5-edge-topn-per-day
+```
+
+This ranks signals globally across all symbols.
+
+Modify the selection system so that ranking happens:
+
+```
+Top N per symbol per day
+```
+
+instead of:
+
+```
+Top N across all symbols
+```
+
+Goal:
+
+* Prevent BTC/ETH dominating signals
+* Allow smaller coins to generate trades
+
+---
+
+## 5. Relax Correlation Filter
+
+Current filter:
+
+```
+--v5-corr-thresh 0.80
+```
+
+Crypto assets often exceed this correlation during trends.
+
+Update default to:
+
+```
+--v5-corr-thresh 0.90
+```
+
+Goal:
+
+* Avoid blocking valid trades during strong market moves
+
+---
+
+## 6. Adjust ADX Regime Gate
+
+Current config:
+
+```
+--v5-adx-min 14
+```
+
+This can block early trend breakouts.
+
+Update default:
+
+```
+--v5-adx-min 12
+```
+
+Goal:
+
+* Allow early trend signals
+
+---
+
+## 7. Restore Trailing Runner System
+
+Re-enable runner logic to capture large trends.
+
+Add support for:
+
+```
+--v5-trailing-sl
+--v5-trail-activation 1.2
+--v5-trail-distance 0.9
+--v5-allow-runner
+```
+
+Goal:
+
+* Increase R multiple
+* Allow trades to exceed TP target
+
+---
+
+## 8. Improve GPU Safety Check
+
+Current code may crash if CUDA is partially installed.
+
+Wrap device detection with:
+
+```
+if torch.cuda.device_count() > 0:
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
+```
+
+---
+
+## 9. Improve Data Download Robustness
+
+Add retry logic for market data downloads.
+
+Expected behavior:
+
+* Retry API requests 3 times
+* Skip symbol if repeated failures occur
+* Log errors instead of crashing pipeline
+
+---
+
+## 10. (Future Improvement) Side-Specific Entry Labels
+
+Current model predicts a single `ENTER` signal.
+
+Future architecture should use:
+
+```
+LONG_ENTER
+SHORT_ENTER
+```
+
+This allows the model to learn asymmetric long/short edges.
+
+---
+
+## Expected Outcome
+
+These fixes should produce:
+
+* More stable edge scoring
+* Better trade distribution across symbols
+* Improved trend capture
+* Higher R per trade
+* More stable walk-forward results
+
+Please implement changes without breaking current CLI flags.

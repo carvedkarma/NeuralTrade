@@ -267,8 +267,13 @@ class BinanceDataFetcher:
                 if progress_callback:
                     progress_callback(current, total_pairs, symbol, timeframe)
                 
-                df = self.fetch_historical_sync(symbol, timeframe, num_candles)
-                results[symbol][timeframe] = df
+                try:
+                    df = self.fetch_historical_sync(symbol, timeframe, num_candles)
+                    results[symbol][timeframe] = df
+                except Exception as e:
+                    print(f"[Sync] ERROR: Failed to fetch {symbol} {timeframe} after retries: {e}")
+                    print(f"[Sync] Skipping {symbol} {timeframe} and continuing...")
+                    results[symbol][timeframe] = None
         
         if progress_callback:
             progress_callback(total_pairs, total_pairs, "", "")
