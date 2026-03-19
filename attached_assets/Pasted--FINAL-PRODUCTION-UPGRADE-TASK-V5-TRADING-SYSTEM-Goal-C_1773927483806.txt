@@ -1,0 +1,274 @@
+### 🚀 FINAL PRODUCTION UPGRADE TASK — V5 TRADING SYSTEM
+
+Goal: Convert the current pipeline into a **high-performance, production-grade trading system** that maximizes **Expected R, Profit Factor, and Trend Capture**.
+
+---
+
+# 1. Replace Edge Formula with True Expected Value
+
+Current (incorrect / unstable):
+
+```python
+edge = p * (mu_R / risk)
+```
+
+Replace with:
+
+```python
+edge = p * mu_R - (1 - p) * risk
+```
+
+OR (preferred simplified version):
+
+```python
+edge = (p - 0.5) * (mu_R / risk)
+```
+
+Goal:
+
+* Align scoring with **true expected return**
+* Improve ranking stability
+* Remove bias from noisy mu_R
+
+---
+
+# 2. Convert Hard Filters → Soft Scoring Modifiers
+
+Remove hard rejections like:
+
+```python
+if adx < threshold:
+    reject_trade()
+```
+
+Replace with:
+
+```python
+edge *= adx_weight
+```
+
+Apply to:
+
+* ADX filter
+* EMA regime filter
+* correlation filter
+* multi-regime filter
+
+Example:
+
+```python
+if adx < 12:
+    edge *= 0.7
+
+if corr > 0.9:
+    edge *= 0.6
+```
+
+Goal:
+
+* Preserve signal flow
+* Reduce information loss
+* Improve trade frequency + PF
+
+---
+
+# 3. Remove Top-N Trade Selection (CRITICAL)
+
+Remove:
+
+```python
+top_n_trades_per_day
+```
+
+Replace with:
+
+```python
+take all trades where edge > threshold
+```
+
+Control risk via:
+
+* position sizing
+* max concurrent trades
+* exposure caps
+
+Goal:
+
+* Stop artificially capping profits
+* Capture full opportunity set
+
+---
+
+# 4. Implement Multi-Stage Trailing Stop (MAJOR PROFIT DRIVER)
+
+Replace current trailing logic with:
+
+```python
+if R < 1.5:
+    no trailing
+
+elif 1.5 <= R < 3:
+    trail_distance = 1.2
+
+elif R >= 3:
+    trail_distance = 0.8
+```
+
+Goal:
+
+* Let trades breathe early
+* Lock profits late
+* Capture 3R–6R trend moves
+
+---
+
+# 5. Fix Cooldown Logic
+
+Current:
+
+```python
+cooldown after every trade
+```
+
+Replace with:
+
+```python
+cooldown only after losing trades
+```
+
+Goal:
+
+* Allow trend stacking
+* Increase returns in strong markets
+
+---
+
+# 6. Relax Symbol Kill Logic
+
+Current:
+
+```python
+disable symbol after drawdown
+```
+
+Replace with:
+
+```python
+use rolling performance window
+disable only if long-term underperformance
+```
+
+Goal:
+
+* Avoid killing profitable symbols during temporary drawdowns
+
+---
+
+# 7. Upgrade Training Target (ADVANCED - HIGH IMPACT)
+
+Move toward predicting:
+
+```python
+target = realized_R
+```
+
+Instead of:
+
+* probability (p)
+* mu_R
+* mae_R
+
+Model should directly output:
+
+```python
+expected_R
+```
+
+Goal:
+
+* Align training with actual trading objective
+* Simplify inference logic
+* Improve performance significantly
+
+---
+
+# 8. Execution Layer Improvements
+
+Add:
+
+### Position sizing based on volatility
+
+```python
+size ∝ 1 / ATR
+```
+
+### Max exposure control
+
+```python
+max 3–5 concurrent trades
+```
+
+### Risk caps
+
+* daily loss cap
+* weekly loss cap (already exists)
+
+---
+
+# 9. Logging Upgrade (MANDATORY)
+
+Track per trade:
+
+```python
+entry_time
+exit_time
+R achieved
+max_R_seen
+exit_reason (TP, SL, trailing, filter)
+```
+
+Goal:
+
+* Diagnose profit leakage
+* Identify early exits
+
+---
+
+# 10. Final Objective
+
+System should optimize for:
+
+```text
+MAXIMIZE:
+- Expected R per trade
+- Profit Factor
+- Right-tail distribution (big winners)
+
+NOT:
+- Win rate
+- Trade frequency alone
+```
+
+---
+
+# Expected Result After Implementation
+
+* Profit Factor: 1.4 → 2.0+
+* Avg R: 0.05 → 0.15+
+* Big winners (3R–6R) become common
+* Stable walk-forward performance
+
+---
+
+# IMPORTANT
+
+Do NOT:
+
+* Add more filters
+* Increase complexity unnecessarily
+
+Focus on:
+
+* better execution
+* better ranking
+* better profit extraction
