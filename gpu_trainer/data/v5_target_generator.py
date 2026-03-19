@@ -225,7 +225,7 @@ def build_v5_targets(
                     action_label[i] = 0
                     n_barrier_hold += 1
             else:
-                BOTH_POS_MARGIN = 1.20
+                BOTH_POS_MARGIN = 1.05
                 if rl > rs * BOTH_POS_MARGIN:
                     if rl >= dz:
                         action_label[i] = 1

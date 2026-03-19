@@ -12,6 +12,26 @@ Usage:
     python quick_start.py --url https://YOUR-APP.replit.app
 
 That's it. Everything else is automatic.
+
+===========================================================================
+RECOMMENDED V5 TRAINING COMMAND (as of v5.2.0)
+===========================================================================
+Use this command for walk-forward training. Key rules:
+  - DO NOT add --v5-multi-regime (it disables the EMA200 hard gate)
+  - DO NOT add --v5-sigma-discount (reduces trade frequency without benefit)
+  - Use --v5-ema200-regime-gate as a hard block (standalone, not with multi-regime)
+  - Use --v5-min-threshold 0.04 (prevents threshold collapsing to 0.015 floor)
+  - Use --v5-trail-activation 1.5 --v5-trail-distance 1.0 (gives trades room to run)
+
+python quick_start.py --train-v5 --v5-walk-forward --v5-ema200-regime-gate \\
+    --v5-adx-gate --v5-adx-min 18 --v5-min-threshold 0.04 \\
+    --v5-trailing-sl --v5-trail-activation 1.5 --v5-trail-distance 1.0 \\
+    --v5-corr-thresh 0.90 --v5-side-aware-scoring --v5-recency-weight
+
+Model size: [512, 256, 128, 64] hidden dims (~250K params for ~32K samples)
+Target label mix: HOLD ~25-30%, LONG ~35-40%, SHORT ~25-30%
+Target trades/day in forward test: 3-6
+===========================================================================
 """
 
 import argparse

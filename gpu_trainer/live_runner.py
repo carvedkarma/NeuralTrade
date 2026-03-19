@@ -1029,9 +1029,6 @@ class LiveRunner:
         # Blocks signals that contradict the broader market trend.
         self._regime_history: Dict[str, list] = {}   # symbol -> last 3 regime readings
         self._regime_confirmed: Dict[str, str] = {}  # symbol -> 'BULL' | 'BEAR'
-        # Direction-aware threshold: LONGs score lower by model design (dip-buy
-        # vs momentum-follow), so they use a separate, tighter threshold.
-        self.regime_long_threshold: float = 0.20
 
         self.v5_score_lambda = V5_SCORE_LAMBDA
         self.v5_score_threshold = v5_live_threshold if v5_live_threshold is not None else V5_SCORE_THRESHOLD
@@ -1921,11 +1918,8 @@ class LiveRunner:
                 log.warning(f"Failed to push cycle log for {symbol}: {e}")
             return None
 
-        # ── Direction-aware threshold ─────────────────────────────────────────
-        # LONGs are dip-buy signals that score lower (0.20-0.39) by model design.
-        # SHORTs are momentum-follow signals that score higher (0.5+).
-        # Using one universal threshold would filter out all valid LONG entries.
-        effective_threshold = self.regime_long_threshold if side == "LONG" else self.v5_score_threshold
+        # ── Unified threshold for all directions ────────────────────────────────
+        effective_threshold = self.v5_score_threshold
 
         score_pass = v5_score >= effective_threshold
         if v6_confidence is not None and v6_confidence < V6_CONFIDENCE_MIN:

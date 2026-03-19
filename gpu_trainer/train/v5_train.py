@@ -141,8 +141,8 @@ class V5ForwardTestConfig:
     min_threshold_pct: Optional[float] = None
     max_trades_per_day: Optional[int] = None
     trailing_sl: bool = False
-    trail_activation: float = 1.2
-    trail_distance: float = 0.9
+    trail_activation: float = 1.5
+    trail_distance: float = 1.0
     allow_runner: bool = False
     conviction_sizing: bool = False
     conviction_tier_top_pct: float = 5.0
@@ -154,7 +154,7 @@ class V5ForwardTestConfig:
     temperature: float = 1.0
     adx_gate: bool = False
     adx_period: int = 14
-    adx_min: float = 12.0
+    adx_min: float = 18.0
     adx_exception_top_pct: float = 10.0
     ultra_conviction: bool = False
     ultra_risk_cap: float = 0.05
@@ -704,7 +704,7 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
         L_action = F.cross_entropy(action_logits, action_true)
 
     LONG_IDX, SHORT_IDX = 1, 2
-    SIDE_BAL_W = 0.35
+    SIDE_BAL_W = 0.10
     action_probs = F.softmax(action_logits, dim=-1)
     p_long_mean = action_probs[:, LONG_IDX].mean()
     p_short_mean = action_probs[:, SHORT_IDX].mean()
@@ -5135,7 +5135,7 @@ def train_v5_model(
     else:
         model_config = V5ForecasterConfig(
             input_dim=input_dim,
-            hidden_dims=[768, 384, 192, 96],
+            hidden_dims=[512, 256, 128, 64],
             dropout=0.3,
             use_layer_norm=True,
             use_residual=True,
