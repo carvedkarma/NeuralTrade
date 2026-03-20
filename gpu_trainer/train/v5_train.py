@@ -721,7 +721,7 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
 
     group_kl_list = []
     for mask, p_long_target in [(bull_mask, 0.60), (bear_mask, 0.40), (chop_mask, 0.50)]:
-        if mask.sum() == 0:
+        if mask.sum() < 2:
             continue
         p_long_g = action_probs[mask, LONG_IDX].mean()
         p_short_g = action_probs[mask, SHORT_IDX].mean()
@@ -5075,6 +5075,12 @@ def train_v5_model(
                 train_barrier_soft = np.concatenate([train_barrier_soft, train_barrier_soft[oversample_idx]], axis=0)
                 if len(train_timestamps) > 0 and len(train_timestamps) == len(train_feat) - extra_needed:
                     train_timestamps = np.concatenate([train_timestamps, train_timestamps[oversample_idx]])
+                if concat_sample_weights is not None and len(concat_sample_weights) == len(train_feat) - extra_needed:
+                    concat_sample_weights = np.concatenate(
+                        [concat_sample_weights, concat_sample_weights[oversample_idx]]
+                    ).astype(np.float32)
+                    log.info(f"[V5_SHORT_OS] Extended sample_weights by {extra_needed} rows — "
+                             f"new length={len(concat_sample_weights)}")
                 before_n = n_short
                 n_short = int(np.sum(train_valid & (train_action == 2)))
                 n_total_act = max(int(np.sum(train_valid & (train_action == 0))) + n_long + n_short, 1)
