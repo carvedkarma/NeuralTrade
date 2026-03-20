@@ -1181,10 +1181,22 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
     mu_over_risk = np.divide(abs_mu, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
 
     if side_mode == 'action_head' and side_aware_scoring:
-        mu_long = np.maximum(mu_R_adj, 0.0)
-        mu_short = np.maximum(-mu_R_adj, 0.0)
-        edge_long = p_long * np.divide(mu_long, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
-        edge_short = p_short * np.divide(mu_short, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
+        # Use abs_mu (magnitude) for both directions so the action head
+        # (p_long / p_short) drives direction-selection, not mu_R sign.
+        # Apply a 0.5x soft multiplier when mu_R sign disagrees with the
+        # chosen direction — penalises but does NOT zero out counter-mu_R
+        # signals.  The previous hard-zero approach (mu_short = max(-mu_R,0))
+        # caused edge_short = 0 whenever mu_R > 0, which prevented ALL short
+        # trades in models trained primarily on bull-market data.
+        MU_DISAGREE_MULT = 0.5
+        edge_long = p_long * mu_over_risk
+        edge_short = p_short * mu_over_risk
+        # Scale down longs when mu_R disagrees (mu_R < 0)
+        long_mu_agrees = (mu_R_adj >= 0)
+        edge_long = np.where(long_mu_agrees, edge_long, edge_long * MU_DISAGREE_MULT)
+        # Scale down shorts when mu_R disagrees (mu_R > 0)
+        short_mu_agrees = (mu_R_adj <= 0)
+        edge_short = np.where(short_mu_agrees, edge_short, edge_short * MU_DISAGREE_MULT)
     elif side_mode == 'action_head':
         edge_long = p_long * mu_over_risk
         edge_short = p_short * mu_over_risk
