@@ -226,6 +226,8 @@ class V5ForwardTestConfig:
     direction_balance_cap: bool = False
     direction_balance_threshold: float = 0.75
     direction_balance_severe: float = 0.85
+    ema200_soft_mult: Optional[float] = None
+    per_side_threshold: bool = False
 
 
 def compute_feature_importance_report(
@@ -704,23 +706,41 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
         L_action = F.cross_entropy(action_logits, action_true)
 
     LONG_IDX, SHORT_IDX = 1, 2
-    SIDE_BAL_W = 0.10
+    SIDE_BAL_W = 0.30
     action_probs = F.softmax(action_logits, dim=-1)
-    p_long_mean = action_probs[:, LONG_IDX].mean()
-    p_short_mean = action_probs[:, SHORT_IDX].mean()
-
-    is_long_label = (action_true == LONG_IDX)
-    is_short_label = (action_true == SHORT_IDX)
-
     eps = 1e-8
-    target_dist = torch.tensor([0.5, 0.5], device=action_logits.device)
-    pred_dist = torch.stack([p_long_mean, p_short_mean])
-    pred_dist = pred_dist / (pred_dist.sum() + eps)
-    L_side_balance = F.kl_div(
-        (pred_dist + eps).log(),
-        target_dist.detach(),
-        reduction="batchmean"
-    )
+
+    ret_true_valid = batch['ret_R'][valid]
+    bull_mask = ret_true_valid > 0.20
+    bear_mask = ret_true_valid < -0.20
+    chop_mask = ~bull_mask & ~bear_mask
+
+    n_bull = int(bull_mask.sum().item())
+    n_bear = int(bear_mask.sum().item())
+    n_chop = int(chop_mask.sum().item())
+
+    group_kl_list = []
+    for mask, p_long_target in [(bull_mask, 0.60), (bear_mask, 0.40), (chop_mask, 0.50)]:
+        if mask.sum() == 0:
+            continue
+        p_long_g = action_probs[mask, LONG_IDX].mean()
+        p_short_g = action_probs[mask, SHORT_IDX].mean()
+        pred_g = torch.stack([p_long_g, p_short_g])
+        pred_g = pred_g / (pred_g.sum() + eps)
+        p_short_target = 1.0 - p_long_target
+        target_g = torch.tensor([p_long_target, p_short_target],
+                                 dtype=pred_g.dtype, device=pred_g.device)
+        kl_g = F.kl_div((pred_g + eps).log(), target_g.detach(), reduction="batchmean")
+        group_kl_list.append(kl_g)
+
+    if group_kl_list:
+        L_side_balance = torch.stack(group_kl_list).mean()
+    else:
+        L_side_balance = torch.tensor(0.0, device=action_logits.device)
+
+    if epoch == 0 or epoch % 10 == 0:
+        log.info(f"[V5_SIDE_BAL] regime_conditional=True SIDE_BAL_W={SIDE_BAL_W} "
+                 f"bull={n_bull} bear={n_bear} chop={n_chop} L_side_bal={float(L_side_balance.item()):.4f}")
 
     L_action = L_action + SIDE_BAL_W * L_side_balance
 
@@ -2298,20 +2318,41 @@ def run_v5_forward_test(
     if config.per_symbol_thresholds and test_sym_ids is not None:
         hard_floor = config.min_threshold if config.min_threshold is not None else 0.02
         per_bar_threshold = np.full(len(scores_work), ddt_base_threshold, dtype=np.float64)
-        for sym_id_key, sym_thr in config.per_symbol_thresholds.items():
-            clamped_thr = sym_thr
-            if np.isfinite(clamped_thr):
-                clamped_thr = max(clamped_thr, hard_floor)
-                if config.max_threshold is not None:
-                    clamped_thr = min(clamped_thr, config.max_threshold)
-            sym_mask = test_sym_ids == int(sym_id_key)
-            per_bar_threshold[sym_mask] = clamped_thr
+        _first_val = next(iter(config.per_symbol_thresholds.values()), None)
+        _is_per_side_format = isinstance(_first_val, dict)
+        if _is_per_side_format and config.per_side_threshold:
+            for sym_id_key, side_thrs in config.per_symbol_thresholds.items():
+                sym_mask = test_sym_ids == int(sym_id_key)
+                long_thr = side_thrs.get('long', ddt_base_threshold)
+                short_thr = side_thrs.get('short', ddt_base_threshold)
+                for thr_val, side_val in [(long_thr, 1), (short_thr, -1)]:
+                    clamped = thr_val
+                    if np.isfinite(clamped):
+                        clamped = max(clamped, hard_floor)
+                        if config.max_threshold is not None:
+                            clamped = min(clamped, config.max_threshold)
+                    side_bar_mask = sym_mask & (sides == side_val)
+                    per_bar_threshold[side_bar_mask] = clamped
+            n_inf_thr = int(np.sum(np.isinf(per_bar_threshold) & (per_bar_threshold > 0)))
+            log.info(f"[V5_FWD] Per-symbol per-side thresholds active: "
+                     f"{len(config.per_symbol_thresholds)} symbols configured, "
+                     f"{n_inf_thr} bars have inf threshold (NO EDGE), "
+                     f"floor={hard_floor:.4f} ceiling={config.max_threshold}")
+        else:
+            for sym_id_key, sym_thr in config.per_symbol_thresholds.items():
+                clamped_thr = sym_thr if not isinstance(sym_thr, dict) else ddt_base_threshold
+                if np.isfinite(clamped_thr):
+                    clamped_thr = max(clamped_thr, hard_floor)
+                    if config.max_threshold is not None:
+                        clamped_thr = min(clamped_thr, config.max_threshold)
+                sym_mask = test_sym_ids == int(sym_id_key)
+                per_bar_threshold[sym_mask] = clamped_thr
+            n_inf_thr = int(np.sum(np.isinf(per_bar_threshold) & (per_bar_threshold > 0)))
+            log.info(f"[V5_FWD] Per-symbol thresholds active: "
+                     f"{len(config.per_symbol_thresholds)} symbols configured, "
+                     f"{n_inf_thr} bars have inf threshold (NO EDGE symbols), "
+                     f"floor={hard_floor:.4f} ceiling={config.max_threshold}")
         selected = scores_work >= per_bar_threshold
-        n_inf_thr = int(np.sum(np.isinf(per_bar_threshold) & (per_bar_threshold > 0)))
-        log.info(f"[V5_FWD] Per-symbol thresholds active: "
-                 f"{len(config.per_symbol_thresholds)} symbols configured, "
-                 f"{n_inf_thr} bars have inf threshold (NO EDGE symbols), "
-                 f"floor={hard_floor:.4f} ceiling={config.max_threshold}")
     else:
         selected = scores_work >= ddt_base_threshold
     sel_indices = np.where(selected)[0]
@@ -2720,20 +2761,21 @@ def run_v5_forward_test(
             side_val = sides[idx]
             close_val = close_prices[idx]
             ema_val = ema200[idx]
-            if side_val == 1 and close_val < ema_val:
-                log.debug("[V5_GATE] blocked_by=ema200 side=LONG close=%.2f ema200=%.2f",
-                          close_val, ema_val)
-                ema_blocked += 1
-                gate_blocks["ema200"] += 1
-                gate_blocked_r["ema200"].append(_oracle_r(idx))
-                continue
-            if side_val == -1 and close_val > ema_val:
-                log.debug("[V5_GATE] blocked_by=ema200 side=SHORT close=%.2f ema200=%.2f",
-                          close_val, ema_val)
-                ema_blocked += 1
-                gate_blocks["ema200"] += 1
-                gate_blocked_r["ema200"].append(_oracle_r(idx))
-                continue
+            _ema200_against = (side_val == 1 and close_val < ema_val) or (side_val == -1 and close_val > ema_val)
+            if _ema200_against:
+                _side_str = "LONG" if side_val == 1 else "SHORT"
+                if config.ema200_soft_mult is not None:
+                    log.debug("[V5_GATE] ema200_soft side=%s close=%.2f ema200=%.2f mult=%.2f",
+                              _side_str, close_val, ema_val, config.ema200_soft_mult)
+                    soft_gate_sizing[idx] = soft_gate_sizing.get(idx, 1.0) * config.ema200_soft_mult
+                    gate_blocks["ema200_soft"] += 1
+                else:
+                    log.debug("[V5_GATE] blocked_by=ema200 side=%s close=%.2f ema200=%.2f",
+                              _side_str, close_val, ema_val)
+                    ema_blocked += 1
+                    gate_blocks["ema200"] += 1
+                    gate_blocked_r["ema200"].append(_oracle_r(idx))
+                    continue
 
         post_ema200_indices.append(idx)
 
@@ -3884,6 +3926,10 @@ def run_v5_walk_forward(
     mu_debias=True, mu_debias_alpha=0.01,
     per_symbol_r_kill=None,
     per_symbol_threshold=False,
+    short_oversample=False,
+    short_min_fraction=0.35,
+    ema200_soft_mult=None,
+    per_side_threshold=False,
     replit_url=None,
     model_version='v5',
     v6_seq_len=16,
@@ -4145,6 +4191,10 @@ def run_v5_walk_forward(
             fold_id=fold['fold'],
             per_symbol_r_kill=per_symbol_r_kill,
             per_symbol_threshold=per_symbol_threshold,
+            short_oversample=short_oversample,
+            short_min_fraction=short_min_fraction,
+            ema200_soft_mult=ema200_soft_mult,
+            per_side_threshold=per_side_threshold,
             model_version=model_version,
             v6_seq_len=v6_seq_len,
             v6_conv_channels=v6_conv_channels,
@@ -4474,6 +4524,10 @@ def train_v5_model(
     feature_report=False,
     per_symbol_r_kill=None,
     per_symbol_threshold=False,
+    short_oversample=False,
+    short_min_fraction=0.35,
+    ema200_soft_mult=None,
+    per_side_threshold=False,
     model_version='v5',
     v6_seq_len=16,
     v6_conv_channels=128,
@@ -4995,6 +5049,48 @@ def train_v5_model(
         action_class_weights = inv_freq.astype(np.float32)
     log.info(f"[{vtag}_ACTION_DIST] Class weights: HOLD={action_class_weights[0]:.3f} "
              f"LONG={action_class_weights[1]:.3f} SHORT={action_class_weights[2]:.3f}")
+
+    if short_oversample and n_long > 0:
+        import math
+        min_frac = float(short_min_fraction)
+        target_short = int(math.ceil(n_long * min_frac / max(1.0 - min_frac, 1e-8)))
+        if n_short < target_short:
+            extra_needed = target_short - n_short
+            short_indices_all = np.where(train_valid & (train_action == 2))[0]
+            if len(short_indices_all) > 0:
+                rng = np.random.default_rng(seed=42)
+                oversample_idx = rng.choice(short_indices_all, size=extra_needed, replace=True)
+                train_feat = np.concatenate([train_feat, train_feat[oversample_idx]], axis=0)
+                train_ret_R = np.concatenate([train_ret_R, train_ret_R[oversample_idx]])
+                train_mfe_R = np.concatenate([train_mfe_R, train_mfe_R[oversample_idx]])
+                train_mae_R = np.concatenate([train_mae_R, train_mae_R[oversample_idx]])
+                train_vol_h = np.concatenate([train_vol_h, train_vol_h[oversample_idx]])
+                train_action = np.concatenate([train_action, train_action[oversample_idx]])
+                train_valid = np.concatenate([train_valid, train_valid[oversample_idx]])
+                train_sym_ids = np.concatenate([train_sym_ids, train_sym_ids[oversample_idx]])
+                train_barrier_oracle = np.concatenate([train_barrier_oracle, train_barrier_oracle[oversample_idx]])
+                train_barrier_soft = np.concatenate([train_barrier_soft, train_barrier_soft[oversample_idx]], axis=0)
+                if len(train_timestamps) > 0 and len(train_timestamps) == len(train_feat) - extra_needed:
+                    train_timestamps = np.concatenate([train_timestamps, train_timestamps[oversample_idx]])
+                before_n = n_short
+                n_short = int(np.sum(train_valid & (train_action == 2)))
+                n_total_act = max(int(np.sum(train_valid & (train_action == 0))) + n_long + n_short, 1)
+                new_frac = n_short / max(n_long + n_short, 1)
+                log.info(f"[V5_SHORT_OS] Oversampled {extra_needed} SHORT: {before_n} → {n_short} "
+                         f"({new_frac:.1%} of LONG+SHORT) target_frac={min_frac:.0%} target_count={target_short}")
+                action_class_weights = np.ones(3, dtype=np.float32)
+                n_hold_new = int(np.sum(train_valid & (train_action == 0)))
+                if n_hold_new > 0 and n_long > 0 and n_short > 0:
+                    counts_new = np.array([n_hold_new, n_long, n_short], dtype=np.float64)
+                    inv_freq_new = n_total_act / (3.0 * counts_new)
+                    inv_freq_new = np.clip(inv_freq_new, 0.5, 3.0)
+                    action_class_weights = inv_freq_new.astype(np.float32)
+                    log.info(f"[V5_SHORT_OS] Updated class weights after oversample: "
+                             f"HOLD={action_class_weights[0]:.3f} LONG={action_class_weights[1]:.3f} "
+                             f"SHORT={action_class_weights[2]:.3f}")
+        else:
+            log.info(f"[V5_SHORT_OS] n_short={n_short} already >= target={target_short} "
+                     f"(min_frac={min_frac:.0%}) — no oversampling needed")
 
     action_weights_tensor = torch.tensor(action_class_weights, dtype=torch.float32).to(device)
 
@@ -5562,15 +5658,59 @@ def train_v5_model(
 
             best_per_sym_thresholds = None
             if per_symbol_threshold and symbols and len(symbols) > 1:
-                best_per_sym_thresholds, no_edge_syms = _run_per_symbol_sweep(
-                    scores, sides, val_outcomes, val_realized_r,
-                    val_bars, val_sym_ids, symbols, sweep_threshold,
-                    r_long=val_r_long_arr, r_short=val_r_short_arr,
-                    out_long=val_out_long_arr, out_short=val_out_short_arr,
-                    quality_mask=quality_mask, candidate_mask=sweep_cand_mask,
-                    min_trades_per_symbol=max(5, min_trades // 2),
-                    cooldown=cooldown,
-                )
+                if per_side_threshold:
+                    log.info("[V5_PER_SIDE_THR] Running per-side threshold sweep (LONG then SHORT)...")
+                    long_mask_sweep = sides == 1
+                    short_mask_sweep = sides == -1
+                    scores_long_only = scores.copy()
+                    scores_long_only[~long_mask_sweep] = -np.inf
+                    scores_short_only = scores.copy()
+                    scores_short_only[~short_mask_sweep] = -np.inf
+                    _MIN_SIDE_TRADES = 5
+                    log.info("[V5_PER_SIDE_THR] === LONG threshold sweep ===")
+                    per_sym_long, _ = _run_per_symbol_sweep(
+                        scores_long_only, sides, val_outcomes, val_realized_r,
+                        val_bars, val_sym_ids, symbols, sweep_threshold,
+                        r_long=val_r_long_arr, r_short=val_r_short_arr,
+                        out_long=val_out_long_arr, out_short=val_out_short_arr,
+                        quality_mask=quality_mask, candidate_mask=sweep_cand_mask,
+                        min_trades_per_symbol=_MIN_SIDE_TRADES,
+                        cooldown=cooldown,
+                    )
+                    log.info("[V5_PER_SIDE_THR] === SHORT threshold sweep ===")
+                    per_sym_short, _ = _run_per_symbol_sweep(
+                        scores_short_only, sides, val_outcomes, val_realized_r,
+                        val_bars, val_sym_ids, symbols, sweep_threshold,
+                        r_long=val_r_long_arr, r_short=val_r_short_arr,
+                        out_long=val_out_long_arr, out_short=val_out_short_arr,
+                        quality_mask=quality_mask, candidate_mask=sweep_cand_mask,
+                        min_trades_per_symbol=_MIN_SIDE_TRADES,
+                        cooldown=cooldown,
+                    )
+                    best_per_sym_thresholds = {}
+                    all_sym_ids_sweep = set(per_sym_long.keys()) | set(per_sym_short.keys())
+                    for _sid in all_sym_ids_sweep:
+                        best_per_sym_thresholds[_sid] = {
+                            'long': per_sym_long.get(_sid, sweep_threshold * 3.0),
+                            'short': per_sym_short.get(_sid, sweep_threshold * 3.0),
+                        }
+                    no_edge_syms = []
+                    log.info(f"[V5_PER_SIDE_THR] Per-side thresholds computed for {len(best_per_sym_thresholds)} symbols")
+                    for _sid in sorted(best_per_sym_thresholds.keys()):
+                        _sym = symbols[_sid] if _sid < len(symbols) else f"sym_{_sid}"
+                        _lt = best_per_sym_thresholds[_sid]['long']
+                        _st = best_per_sym_thresholds[_sid]['short']
+                        log.info(f"  {_sym:>12}: LONG={_lt:.4f} SHORT={_st:.4f}")
+                else:
+                    best_per_sym_thresholds, no_edge_syms = _run_per_symbol_sweep(
+                        scores, sides, val_outcomes, val_realized_r,
+                        val_bars, val_sym_ids, symbols, sweep_threshold,
+                        r_long=val_r_long_arr, r_short=val_r_short_arr,
+                        out_long=val_out_long_arr, out_short=val_out_short_arr,
+                        quality_mask=quality_mask, candidate_mask=sweep_cand_mask,
+                        min_trades_per_symbol=max(5, min_trades // 2),
+                        cooldown=cooldown,
+                    )
 
             if quality_gate_cfg.enable_calib:
                 val_p_trade = arrays['p_trade'][:len(val_realized_r)]
@@ -5802,10 +5942,17 @@ def train_v5_model(
                 if ckpt_per_sym_thr:
                     log.info(f"[V5_FWD] Per-symbol thresholds loaded from checkpoint: "
                              f"{len(ckpt_per_sym_thr)} symbols")
+                    _first_ckpt_val = next(iter(ckpt_per_sym_thr.values()), None)
+                    _is_per_side = isinstance(_first_ckpt_val, dict)
                     for sym_id_k, sym_thr_v in sorted(ckpt_per_sym_thr.items(), key=lambda x: int(x[0])):
                         sym_name_k = symbols[int(sym_id_k)] if symbols and int(sym_id_k) < len(symbols) else f"sym_{sym_id_k}"
-                        thr_str = f"{sym_thr_v:.4f}" if np.isfinite(sym_thr_v) else "inf (NO EDGE)"
-                        log.info(f"  {sym_name_k}: threshold={thr_str}")
+                        if _is_per_side:
+                            lt = sym_thr_v.get('long', float('inf'))
+                            st = sym_thr_v.get('short', float('inf'))
+                            log.info(f"  {sym_name_k}: LONG={lt:.4f} SHORT={st:.4f}")
+                        else:
+                            thr_str = f"{sym_thr_v:.4f}" if np.isfinite(sym_thr_v) else "inf (NO EDGE)"
+                            log.info(f"  {sym_name_k}: threshold={thr_str}")
                 else:
                     log.warning("[V5_FWD] Per-symbol threshold enabled but not found in checkpoint — using global threshold")
 
@@ -5919,6 +6066,8 @@ def train_v5_model(
                 min_trades=min_trades,
                 per_symbol_r_kill=per_symbol_r_kill,
                 per_symbol_thresholds=ckpt_per_sym_thr,
+                ema200_soft_mult=ema200_soft_mult,
+                per_side_threshold=per_side_threshold,
             )
 
             train_ref_arrays = _build_train_ref_arrays(

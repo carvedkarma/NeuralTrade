@@ -14,26 +14,31 @@ Usage:
 That's it. Everything else is automatic.
 
 ===========================================================================
-RECOMMENDED V5 TRAINING COMMAND (as of v5.2.1)
+RECOMMENDED V5 TRAINING COMMAND (as of v5.3.0)
 ===========================================================================
 Use this command for walk-forward training. Key rules:
   - DO NOT add --v5-multi-regime (it disables the EMA200 hard gate)
   - DO NOT add --v5-sigma-discount (reduces trade frequency without benefit)
-  - Use --v5-ema200-regime-gate as a hard block (standalone, not with multi-regime)
+  - Use --v5-ema200-soft-mult 0.50 instead of --v5-ema200-regime-gate (soft gate
+    reduces size by 50% against-trend instead of hard blocking — recovers +21R/fold)
   - Use --v5-regime-side-map WITHOUT --v5-multi-regime: the side map routes
-    short signals in downtrend regimes; the multi-regime flag disables the
-    EMA200 hard gate (bad).
+    short signals in downtrend regimes
   - Use --v5-min-threshold 0.04 (prevents threshold collapsing to 0.015 floor)
   - Use --v5-trail-activation 1.5 --v5-trail-distance 1.0 (gives trades room to run)
+  - Use --v5-short-oversample --v5-short-min-fraction 0.35 to fix LONG bias in labels
+  - Use --v5-per-side-threshold with --v5-per-symbol-threshold for separate
+    LONG/SHORT thresholds per symbol
 
-python quick_start.py --train-v5 --v5-walk-forward --v5-ema200-regime-gate \\
+python quick_start.py --train-v5 --v5-walk-forward --v5-ema200-soft-mult 0.50 \\
     --v5-adx-gate --v5-adx-min 18 --v5-min-threshold 0.04 \\
     --v5-trailing-sl --v5-trail-activation 1.5 --v5-trail-distance 1.0 \\
     --v5-corr-thresh 0.90 --v5-side-aware-scoring --v5-recency-weight \\
+    --v5-short-oversample --v5-short-min-fraction 0.35 \\
+    --v5-per-symbol-threshold --v5-per-side-threshold \\
     --v5-regime-side-map "trending_up=LONG,trending_down=SHORT,choppy=BOTH"
 
 Model size: [512, 256, 128, 64] hidden dims (~250K params for ~32K samples)
-Target label mix: HOLD ~25-30%, LONG ~35-40%, SHORT ~25-30%
+Target label mix: HOLD ~25-30%, LONG ~30-35%, SHORT ~30-35% (with oversample)
 Target trades/day in forward test: 3-6
 Bear-market folds: expect balanced LONG/SHORT split (not 100% LONG)
 ===========================================================================
@@ -5303,6 +5308,14 @@ Examples:
                         help="Per-symbol cumulative R kill switch. When a symbol's cumulative R drops below this floor (e.g. -8.0), stop trading it for the rest of the fold. Default: None (disabled)")
     parser.add_argument("--v5-per-symbol-threshold", action="store_true", default=False,
                         help="Enable per-symbol threshold sweep. Finds optimal threshold per symbol during training; symbols with no edge get threshold=inf (never traded). Default: off")
+    parser.add_argument("--v5-short-oversample", action="store_true", default=False,
+                        help="v5.3.0: oversample SHORT labels to reach min fraction of LONG+SHORT. Fixes persistent LONG bias in training data. Default: off")
+    parser.add_argument("--v5-short-min-fraction", type=float, default=0.35,
+                        help="v5.3.0: minimum SHORT fraction of LONG+SHORT after oversampling (default: 0.35 = 35%%)")
+    parser.add_argument("--v5-ema200-soft-mult", type=float, default=None,
+                        help="v5.3.0: EMA200 soft gate multiplier. When set, replaces hard EMA200 block with size reduction (e.g. 0.50 = half size). Default: None (hard block)")
+    parser.add_argument("--v5-per-side-threshold", action="store_true", default=False,
+                        help="v5.3.0: per-side threshold in forward test. Uses separate LONG and SHORT thresholds from per-symbol sweep. Requires --v5-per-symbol-threshold. Default: off")
     parser.add_argument("--v5-min-threshold", type=float, default=None,
                         help="v5.0.8+: minimum score threshold floor. Prevents calibrated threshold from dropping too low (e.g. 0.05). Default: None (disabled)")
     parser.add_argument("--v5-max-threshold", type=float, default=None,
@@ -6249,6 +6262,10 @@ Examples:
                     mu_debias_alpha=args.v5_mu_debias_alpha,
                     per_symbol_r_kill=args.v5_per_symbol_r_kill,
                     per_symbol_threshold=args.v5_per_symbol_threshold,
+                    short_oversample=args.v5_short_oversample,
+                    short_min_fraction=args.v5_short_min_fraction,
+                    ema200_soft_mult=args.v5_ema200_soft_mult,
+                    per_side_threshold=args.v5_per_side_threshold,
                     replit_url=getattr(args, 'url', None),
                     model_version='v6' if args.v6 else 'v5',
                     v6_seq_len=args.v6_seq_len,
@@ -6441,6 +6458,10 @@ Examples:
                 feature_report=args.v5_feature_report,
                 per_symbol_r_kill=args.v5_per_symbol_r_kill,
                 per_symbol_threshold=args.v5_per_symbol_threshold,
+                short_oversample=args.v5_short_oversample,
+                short_min_fraction=args.v5_short_min_fraction,
+                ema200_soft_mult=args.v5_ema200_soft_mult,
+                per_side_threshold=args.v5_per_side_threshold,
                 model_version='v6' if args.v6 else 'v5',
                 v6_seq_len=args.v6_seq_len,
                 v6_conv_channels=args.v6_conv_channels,
