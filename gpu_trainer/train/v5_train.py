@@ -738,10 +738,6 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
     else:
         L_side_balance = torch.tensor(0.0, device=action_logits.device)
 
-    if epoch == 0 or epoch % 10 == 0:
-        log.info(f"[V5_SIDE_BAL] regime_conditional=True SIDE_BAL_W={SIDE_BAL_W} "
-                 f"bull={n_bull} bear={n_bear} chop={n_chop} L_side_bal={float(L_side_balance.item()):.4f}")
-
     L_action = L_action + SIDE_BAL_W * L_side_balance
 
     losses = {
@@ -750,6 +746,7 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
         'L_mae': L_mae.item(),
         'L_action': L_action.item(),
         'L_side_balance': float(L_side_balance.item()) if torch.is_tensor(L_side_balance) else 0.0,
+        '_side_bal_diag': (n_bull, n_bear, n_chop),
     }
 
     if epoch <= 5:
@@ -3281,8 +3278,14 @@ def run_v5_forward_test(
         n_candidates = len(chronological_idx)
         n_high_bar_symbols = 0
         if config.per_symbol_thresholds:
-            n_high_bar_symbols = sum(1 for v in config.per_symbol_thresholds.values()
-                                     if not np.isfinite(v) or v > effective_threshold * 2)
+            def _is_high_bar(v):
+                if isinstance(v, dict):
+                    lt = v.get('long', float('inf'))
+                    st = v.get('short', float('inf'))
+                    return (not np.isfinite(lt) or lt > effective_threshold * 2) and \
+                           (not np.isfinite(st) or st > effective_threshold * 2)
+                return not np.isfinite(v) or v > effective_threshold * 2
+            n_high_bar_symbols = sum(1 for v in config.per_symbol_thresholds.values() if _is_high_bar(v))
         total_blocked = sum(gate_blocks.values())
         log.warning("[V5_FWD] No trades taken in forward test!")
         log.info("=" * 80)
@@ -5442,6 +5445,16 @@ def train_v5_model(
 
         scheduler.step()
         avg_train_loss = np.mean(train_losses)
+
+        if not use_v6 and '_side_bal_diag' in loss_breakdown:
+            diag_tuples = loss_breakdown.pop('_side_bal_diag')
+            n_bull_ep = sum(t[0] for t in diag_tuples)
+            n_bear_ep = sum(t[1] for t in diag_tuples)
+            n_chop_ep = sum(t[2] for t in diag_tuples)
+            avg_side_bal = float(np.mean(loss_breakdown.get('L_side_balance', [0.0])))
+            log.info(f"[V5_SIDE_BAL] Epoch {epoch:03d}: regime_conditional=True SIDE_BAL_W=0.30 "
+                     f"bull={n_bull_ep} bear={n_bear_ep} chop={n_chop_ep} "
+                     f"avg_L_side_bal={avg_side_bal:.4f}")
 
         model.eval()
         val_losses = []
