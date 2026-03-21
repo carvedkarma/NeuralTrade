@@ -864,25 +864,31 @@ function checkShotPlanGating(shotPlan: ShotPlan | null, config: PaperTradingConf
 async function checkExposureLimits(
   notional: number,
   equity: number,
-  config: PaperTradingConfig
+  config: PaperTradingConfig,
+  symbol?: string
 ): Promise<GatingResult> {
-  const existingPosition = await storage.getOpenPosition();
-  
-  if (existingPosition) {
-    return { allowed: false, reason: "Position already open - one position at a time" };
+  // Check all open positions (multi-symbol aware), not just the first one
+  const allOpenPositions = await storage.getPositions("OPEN", 100);
+
+  if (symbol) {
+    const sameSym = allOpenPositions.find(p => p.symbol === symbol);
+    if (sameSym) {
+      return { allowed: false, reason: `Position already open for ${symbol}` };
+    }
   }
-  
-  const newExposure = notional;
-  const exposurePct = (newExposure / equity) * 100;
-  
+
+  const totalExistingNotional = allOpenPositions.reduce((sum, p) => sum + (p.notionalUsdt ?? 0), 0);
+  const totalExposure = totalExistingNotional + notional;
+  const exposurePct = (totalExposure / equity) * 100;
+
   if (exposurePct > config.maxAccountExposurePct) {
-    return { 
-      allowed: false, 
-      reason: `Exposure ${exposurePct.toFixed(1)}% > ${config.maxAccountExposurePct}% max` 
+    return {
+      allowed: false,
+      reason: `Total exposure ${exposurePct.toFixed(1)}% > ${config.maxAccountExposurePct}% max (${allOpenPositions.length} open positions)`,
     };
   }
-  
-  return { allowed: true, reason: "Exposure within limits" };
+
+  return { allowed: true, reason: `Exposure within limits (${allOpenPositions.length} open positions, total ${exposurePct.toFixed(1)}%)` };
 }
 
 export async function openPosition(
@@ -937,7 +943,7 @@ export async function openPosition(
 
   const notional = qty * entryPrice;
   
-  const exposureCheck = await checkExposureLimits(notional, portfolio.currentEquityUsdt, config);
+  const exposureCheck = await checkExposureLimits(notional, portfolio.currentEquityUsdt, config, ctx.symbol);
   const costs = getTotalCostsPct();
   const edgeMultiple = costs > 0 ? edge / costs : 0;
   
@@ -985,7 +991,7 @@ export async function openPosition(
   });
 
   const position = await storage.createPosition({
-    symbol: "BTCUSDT",
+    symbol: ctx.symbol ?? "BTCUSDT",
     side,
     status: "OPEN",
     entryTs: ctx.candle.timestamp,

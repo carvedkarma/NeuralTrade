@@ -122,6 +122,39 @@ function formatPrice(symbol: string, price: number): string {
   return price.toFixed(precision);
 }
 
+function _pollMakerOrderInBackground(symbol: string, orderId: string): void {
+  const deadline = Date.now() + MAKER_FILL_TIMEOUT_MS;
+  const poll = async () => {
+    if (Date.now() >= deadline) {
+      console.log(`[Bitget Live] MAKER_MISS: limit order ${orderId} for ${symbol} timed out after ${MAKER_FILL_TIMEOUT_MS / 60000} min — cancelling`);
+      try {
+        await bitget.cancelOrder(symbol, orderId);
+      } catch (cancelErr: any) {
+        console.warn(`[Bitget Live] Cancel failed for ${symbol} ${orderId}: ${cancelErr.message}`);
+      }
+      return;
+    }
+    try {
+      const detail = await bitget.getOrderDetail(symbol, orderId);
+      if (detail.code === "00000" && detail.data) {
+        const state: string = detail.data.state || detail.data.status || "";
+        if (state === "filled" || state === "full_fill") {
+          console.log(`[Bitget Live] MAKER order ${orderId} for ${symbol} filled (background poll)`);
+          return;
+        }
+        if (state === "cancelled" || state === "canceled" || state === "partial_cancel") {
+          console.log(`[Bitget Live] MAKER order ${orderId} for ${symbol} was cancelled externally`);
+          return;
+        }
+      }
+    } catch (pollErr: any) {
+      console.warn(`[Bitget Live] Background poll error for ${symbol} order ${orderId}: ${pollErr.message}`);
+    }
+    setTimeout(poll, MAKER_FILL_POLL_MS);
+  };
+  setTimeout(poll, MAKER_FILL_POLL_MS);
+}
+
 export async function openBitgetLivePosition(params: {
   symbol: string;
   side: "LONG" | "SHORT";
@@ -226,39 +259,24 @@ export async function openBitgetLivePosition(params: {
     const orderId = orderResp.data?.orderId;
     console.log(`[Bitget Live] ${useMaker ? "LIMIT" : "MARKET"} order placed for ${symbol}: orderId=${orderId}`);
 
-    // For maker/limit orders: poll until filled or timeout, then cancel
+    // For maker/limit orders: return immediately with MAKER_PENDING and poll in background.
+    // This prevents the HTTP connection to the GPU trainer from hanging for up to 30 minutes.
     if (useMaker && orderId) {
-      const deadline = Date.now() + MAKER_FILL_TIMEOUT_MS;
-      let filled = false;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, MAKER_FILL_POLL_MS));
-        try {
-          const detail = await bitget.getOrderDetail(symbol, orderId);
-          if (detail.code === "00000" && detail.data) {
-            const state: string = detail.data.state || detail.data.status || "";
-            if (state === "filled" || state === "full_fill") {
-              filled = true;
-              break;
-            }
-            if (state === "cancelled" || state === "canceled" || state === "partial_cancel") {
-              console.log(`[Bitget Live] MAKER order ${orderId} for ${symbol} was already cancelled`);
-              return { success: false, error: "MAKER_MISS: order cancelled externally" };
-            }
-          }
-        } catch (pollErr: any) {
-          console.warn(`[Bitget Live] Poll error for ${symbol} order ${orderId}: ${pollErr.message}`);
-        }
-      }
-      if (!filled) {
-        console.log(`[Bitget Live] MAKER_MISS: limit order ${orderId} for ${symbol} timed out after ${MAKER_FILL_TIMEOUT_MS / 60000} min — cancelling`);
-        try {
-          await bitget.cancelOrder(symbol, orderId);
-        } catch (cancelErr: any) {
-          console.warn(`[Bitget Live] Cancel failed for ${symbol} ${orderId}: ${cancelErr.message}`);
-        }
-        return { success: false, error: `MAKER_MISS: limit order for ${symbol} not filled within ${MAKER_FILL_TIMEOUT_MS / 60000} minutes` };
-      }
-      console.log(`[Bitget Live] MAKER order ${orderId} for ${symbol} filled`);
+      console.log(`[Bitget Live] MAKER order ${orderId} for ${symbol} placed — polling in background (max ${MAKER_FILL_TIMEOUT_MS / 60000} min)`);
+      _pollMakerOrderInBackground(symbol, orderId);
+      // Return immediately so the GPU trainer's HTTP connection is not blocked
+      const { broadcast } = await import("../ws");
+      broadcast("LIVE_TRADE_OPEN", {
+        symbol,
+        side,
+        qty: qtyStr,
+        leverage,
+        orderId,
+        v5Score,
+        exchange: "bitget",
+        fillType: "MAKER_PENDING",
+      });
+      return { success: true, orderId, qty: Number(qtyStr), leverage, fillType: "MAKER_PENDING" };
     }
 
     const { broadcast } = await import("../ws");

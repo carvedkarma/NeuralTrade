@@ -117,6 +117,9 @@ async function fetchRecentTrades(symbol: string): Promise<{ aggressorRatio: numb
   return { aggressorRatio, cvd, cvdSlope };
 }
 
+// NOTE: This function is misnamed — it measures the 24h high/low price range from current price,
+// NOT actual liquidation proximity (which requires leverage and margin data).
+// It is stored for informational purposes only and is NOT used in gate blocking decisions.
 async function fetchLiquidationProximity(symbol: string): Promise<{ liqUp: number; liqDown: number }> {
   const result = await fetchBybitPublic("/v5/market/tickers", {
     category: "linear",
@@ -130,6 +133,7 @@ async function fetchLiquidationProximity(symbol: string): Promise<{ liqUp: numbe
   const high24h = parseFloat(ticker.highPrice24h);
   const low24h = parseFloat(ticker.lowPrice24h);
 
+  // Distance from current price to 24h high/low as % — used as a price-range proxy
   const liqUp = lastPrice > 0 ? ((high24h - lastPrice) / lastPrice) * 100 : 999;
   const liqDown = lastPrice > 0 ? ((lastPrice - low24h) / lastPrice) * 100 : 999;
 

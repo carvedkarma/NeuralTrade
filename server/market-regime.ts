@@ -23,7 +23,9 @@ interface Candle {
 
 const ADX_HARD_BLOCK = 15;
 const ADX_SOFT_ZONE = 25;
-const CACHE_TTL_MS = 15 * 60 * 1000;
+// 5-minute TTL — reduced from 15 min. At 15 min, combined with 15 min candle sync,
+// regime decisions could be up to 30 min stale. 5 min ensures at most one missed candle.
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
 const regimeCache = new Map<string, MarketRegimeState>();
 

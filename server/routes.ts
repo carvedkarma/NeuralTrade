@@ -4911,7 +4911,10 @@ export async function registerRoutes(
         // Gate 2: H4 direction hard gate — H4 trend must agree with trade side
         const _htfH4 = t.htf_h4_trend ? Number(t.htf_h4_trend) : 0;
         const _sideSign = side === 'LONG' ? 1 : -1;
-        if (_htfH4 !== 0 && _htfH4 !== _sideSign) {
+        if (_htfH4 === 0) {
+          // htf_h4_trend missing or zero — gate silently passes but log it so it's visible
+          console.log(`[Auto-Trade] H4 GATE: htf_h4_trend missing/zero — passing ${side} ${t.symbol} without H4 filter`);
+        } else if (_htfH4 !== _sideSign) {
           const _h4Reason = `H4_DIR_GATE: H4_trend=${_htfH4 > 0 ? '+1' : '-1'} opposes side=${side}`;
           console.log(`[Auto-Trade] H4 GATE — blocked: ${_h4Reason}`);
           autoTradeResult = { opened: false, reason: _h4Reason };
@@ -4933,6 +4936,11 @@ export async function registerRoutes(
         }
 
         // Gate 4: Order Flow — OB imbalance + aggressor ratio + CVD direction
+        // NOTE: Data is sourced from Bybit public API (api.bybit.com). When live trading
+        // on Bitget, this data may not perfectly reflect Bitget's order book. In that case
+        // the gate runs in advisory mode: it logs but does NOT hard-block Bitget live orders.
+        // It still hard-blocks paper trading signals (which are exchange-agnostic).
+        const _isBitgetLive = isBitgetLiveTradingEnabled();
         let _ofGateResult: { passed: boolean; reason: string } = { passed: true, reason: "OF_GATE: skipped (fetch error)" };
         let _ofSnapshotData: { obImbalance: number; aggressorRatio: number; cvd: number; liqProximityUp: number; liqProximityDown: number } | null = null;
         try {
@@ -4940,30 +4948,36 @@ export async function registerRoutes(
           _ofSnapshotData = { obImbalance: _ofSnapshot.obImbalance, aggressorRatio: _ofSnapshot.aggressorRatio, cvd: _ofSnapshot.cvd, liqProximityUp: _ofSnapshot.liqProximityUp, liqProximityDown: _ofSnapshot.liqProximityDown };
           _ofGateResult = evaluateOrderFlowGate(_ofSnapshot, side);
           if (!_ofGateResult.passed) {
-            console.log(`[Auto-Trade] ORDER FLOW GATE — blocked: ${_ofGateResult.reason}`);
-            autoTradeResult = { opened: false, reason: _ofGateResult.reason };
-            try {
-              const recentWindow = Date.now() - 5 * 60_000;
-              const latestSig = await db.select({ id: v5Signals.id }).from(v5Signals)
-                .where(and(eq(v5Signals.symbol, t.symbol), gte(v5Signals.signalTs, recentWindow)))
-                .orderBy(desc(v5Signals.signalTs)).limit(1);
-              if (latestSig.length > 0) {
-                await db.update(v5Signals).set({
-                  obImbalance: _ofSnapshot.obImbalance,
-                  aggressorRatio: _ofSnapshot.aggressorRatio,
-                  cvdAtSignal: _ofSnapshot.cvd,
-                  liqProximity: _ofSnapshot.liqProximityUp,
-                  ofGatePassed: false,
-                  ofGateReason: _ofGateResult.reason,
-                }).where(eq(v5Signals.id, latestSig[0].id));
+            if (_isBitgetLive) {
+              // Advisory mode for Bitget: log but do not block the live order
+              console.log(`[Auto-Trade] ORDER FLOW GATE (ADVISORY/BYBIT-SRC) — would block but Bitget live active: ${_ofGateResult.reason}`);
+            } else {
+              console.log(`[Auto-Trade] ORDER FLOW GATE — blocked: ${_ofGateResult.reason}`);
+              autoTradeResult = { opened: false, reason: _ofGateResult.reason };
+              try {
+                const recentWindow = Date.now() - 5 * 60_000;
+                const latestSig = await db.select({ id: v5Signals.id }).from(v5Signals)
+                  .where(and(eq(v5Signals.symbol, t.symbol), gte(v5Signals.signalTs, recentWindow)))
+                  .orderBy(desc(v5Signals.signalTs)).limit(1);
+                if (latestSig.length > 0) {
+                  await db.update(v5Signals).set({
+                    obImbalance: _ofSnapshot.obImbalance,
+                    aggressorRatio: _ofSnapshot.aggressorRatio,
+                    cvdAtSignal: _ofSnapshot.cvd,
+                    liqProximity: _ofSnapshot.liqProximityUp,
+                    ofGatePassed: false,
+                    ofGateReason: _ofGateResult.reason,
+                  }).where(eq(v5Signals.id, latestSig[0].id));
+                }
+              } catch (e: any) {
+                console.warn(`[Auto-Trade] Failed to persist OF data to v5_signals: ${e.message}`);
               }
-            } catch (e: any) {
-              console.warn(`[Auto-Trade] Failed to persist OF data to v5_signals: ${e.message}`);
+              res.json({ success: true, id: record.id, autoTrade: autoTradeResult, orderFlow: _ofSnapshotData });
+              return;
             }
-            res.json({ success: true, id: record.id, autoTrade: autoTradeResult, orderFlow: _ofSnapshotData });
-            return;
+          } else {
+            console.log(`[Auto-Trade] ORDER FLOW${_isBitgetLive ? " (BYBIT-SRC advisory)" : ""}: ${_ofGateResult.reason}`);
           }
-          console.log(`[Auto-Trade] ORDER FLOW: ${_ofGateResult.reason}`);
           try {
             const recentWindow = Date.now() - 5 * 60_000;
             const latestSig = await db.select({ id: v5Signals.id }).from(v5Signals)
@@ -4975,7 +4989,7 @@ export async function registerRoutes(
                 aggressorRatio: _ofSnapshot.aggressorRatio,
                 cvdAtSignal: _ofSnapshot.cvd,
                 liqProximity: _ofSnapshot.liqProximityUp,
-                ofGatePassed: true,
+                ofGatePassed: _ofGateResult.passed,
                 ofGateReason: _ofGateResult.reason,
               }).where(eq(v5Signals.id, latestSig[0].id));
             }
