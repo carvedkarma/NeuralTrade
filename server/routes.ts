@@ -4912,8 +4912,8 @@ export async function registerRoutes(
         const _htfH4 = t.htf_h4_trend ? Number(t.htf_h4_trend) : 0;
         const _sideSign = side === 'LONG' ? 1 : -1;
         if (_htfH4 === 0) {
-          // htf_h4_trend missing or zero — gate silently passes but log it so it's visible
-          console.log(`[Auto-Trade] H4 GATE: htf_h4_trend missing/zero — passing ${side} ${t.symbol} without H4 filter`);
+          // htf_h4_trend missing or zero — gate silently passes but warn so it's visible
+          console.warn(`[Auto-Trade] H4 GATE: htf_h4_trend missing/zero — passing ${side} ${t.symbol} without H4 filter`);
         } else if (_htfH4 !== _sideSign) {
           const _h4Reason = `H4_DIR_GATE: H4_trend=${_htfH4 > 0 ? '+1' : '-1'} opposes side=${side}`;
           console.log(`[Auto-Trade] H4 GATE — blocked: ${_h4Reason}`);

@@ -276,7 +276,7 @@ export async function openBitgetLivePosition(params: {
         exchange: "bitget",
         fillType: "MAKER_PENDING",
       });
-      return { success: true, orderId, qty: Number(qtyStr), leverage, fillType: "MAKER_PENDING" };
+      return { success: true, orderId, qty: qtyStr, leverage, fillType: "MAKER_PENDING" };
     }
 
     const { broadcast } = await import("../ws");

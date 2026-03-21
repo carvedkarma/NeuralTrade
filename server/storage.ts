@@ -1721,6 +1721,7 @@ export class MemStorage implements IStorage {
         atr,
         kalmanFast,
         shotPlan,
+        symbol: "BTCUSDT",
       });
     } catch (error) {
       console.error("[Paper Trading] Error executing trade:", error);
