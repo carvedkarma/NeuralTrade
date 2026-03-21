@@ -4938,8 +4938,9 @@ export async function registerRoutes(
         // Gate 4: Order Flow — OB imbalance + aggressor ratio + CVD direction
         // NOTE: Data is sourced from Bybit public API (api.bybit.com). When live trading
         // on Bitget, this data may not perfectly reflect Bitget's order book. In that case
-        // the gate runs in advisory mode: it logs but does NOT hard-block Bitget live orders.
-        // It still hard-blocks paper trading signals (which are exchange-agnostic).
+        // the entire gate runs in advisory mode: it logs but does NOT hard-block anything
+        // (neither the Bitget live order nor the paper position). When Bitget live is OFF,
+        // the gate hard-blocks the trade and returns early.
         const _isBitgetLive = isBitgetLiveTradingEnabled();
         let _ofGateResult: { passed: boolean; reason: string } = { passed: true, reason: "OF_GATE: skipped (fetch error)" };
         let _ofSnapshotData: { obImbalance: number; aggressorRatio: number; cvd: number; liqProximityUp: number; liqProximityDown: number } | null = null;
