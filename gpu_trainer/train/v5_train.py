@@ -3537,8 +3537,10 @@ def run_v5_forward_test(
                      f"(expect ~68%) | {pred_quality['sigma_2std_coverage']:.1%} within ±2σ (expect ~95%) "
                      f"| mean σ: {pred_quality['mean_predicted_sigma']:.4f}")
         if 'mean_p_side_winners' in pred_quality:
-            log.info(f"[V5_PRED_QUALITY] Conviction: winners p_side={pred_quality.get('mean_p_side_winners', 'N/A'):.4f} "
-                     f"vs losers p_side={pred_quality.get('mean_p_side_losers', 'N/A'):.4f}")
+            _w = pred_quality.get('mean_p_side_winners', float('nan'))
+            _l = pred_quality.get('mean_p_side_losers', float('nan'))
+            log.info(f"[V5_PRED_QUALITY] Conviction: winners p_side={_w:.4f} "
+                     f"vs losers p_side={_l:.4f}")
 
     if corr_tracker is not None:
         for k, pos in open_positions.items():
