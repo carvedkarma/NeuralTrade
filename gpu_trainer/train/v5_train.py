@@ -1560,10 +1560,16 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
 
         n_above_thr = len(sel_indices)
         n_after_cooldown = len(taken)
-        if ema_blocked > 0 and label == "tpd_ctrl":
-            log.info(f"[V5_SWEEP_GATE] EMA200 blocked {ema_blocked} trades in {label}")
-        if weekly_blocked > 0 and label == "tpd_ctrl":
-            log.info(f"[V5_SWEEP_GATE] Weekly cap blocked {weekly_blocked} trades in {label}")
+        # BUG FIX: Log gate statistics for ALL labels (was tpd_ctrl-only, making
+        # it ambiguous whether the 753-blocked count referred to the full pipeline
+        # or only the tpd_ctrl threshold selection).
+        if ema_blocked > 0:
+            log.info(f"[V5_SWEEP_GATE] EMA200 blocked {ema_blocked}/{len(sel_indices)} trades in {label}")
+        if weekly_blocked > 0:
+            surviving = len(taken)
+            total_cand = weekly_blocked + surviving
+            log.info(f"[V5_SWEEP_GATE] Weekly cap blocked {weekly_blocked}/{total_cand} trades in {label} "
+                     f"({weekly_blocked/max(total_cand,1)*100:.1f}% suppressed, {surviving} survived)")
 
         if len(taken) < 5:
             log.debug("[V5_SWEEP_DIAG] %s: above_thr=%d after_cooldown=%d (<5, skipped)",
@@ -1631,11 +1637,15 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
         sweep_results.append(m)
 
         composite = expect * min(sharpe, 10.0)
-        if tpd_lo <= tpd <= tpd_hi and n_trades >= min_trades:
+        # BUG FIX: Gate on positive expectancy AND PF > 1.0 before composite comparison.
+        # Without this gate, negative expect × negative sharpe = positive composite,
+        # causing the selector to crown a LOSING bin as "BEST".
+        qualifies = expect > 0.0 and pf > 1.0
+        if qualifies and tpd_lo <= tpd <= tpd_hi and n_trades >= min_trades:
             if composite > best_in_freq_score:
                 best_in_freq_score = composite
                 best_in_freq_label = label
-        if composite > best_any_score:
+        if qualifies and composite > best_any_score:
             best_any_score = composite
             best_any_pct = pct_val
             best_any_label = label
@@ -1701,8 +1711,13 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     best_max_dd = best_row['max_dd'] if best_row else 0.0
     best_tpd = best_row['trades_per_day'] if best_row else 0.0
     best_threshold = best_row['threshold'] if best_row else 0.0
+    # BUG FIX: Return actual E[R] (mean R per trade) separately from the composite
+    # score (best_score_val = expect × sharpe). The caller was logging best_score_val
+    # as "expect" which is misleading — a positive composite can come from a negative
+    # expect bin (negative × negative = positive). Now callers have both values.
+    best_expect = best_row['expect'] if best_row else 0.0
 
-    return sweep_results, best_label, best_score_val, best_pct, best_pf, best_max_dd, best_tpd, best_threshold
+    return sweep_results, best_label, best_score_val, best_pct, best_pf, best_max_dd, best_tpd, best_threshold, best_expect
 
 
 def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
@@ -1817,7 +1832,12 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
             total_r = float(np.sum(t_r_valid))
 
             composite = expect * min(sharpe, 10.0)
-            if composite > best_sym_composite and n_trades >= min_trades_per_symbol:
+            # BUG FIX: Mirror the main sweep fix — gate on positive expectancy AND
+            # PF > 1.0 before allowing composite comparison. Without this, a symbol
+            # with negative expect AND negative sharpe gets positive composite
+            # (neg × neg = pos) and incorrectly wins the threshold sweep.
+            sym_qualifies = expect > 0.0 and pf > 1.0
+            if sym_qualifies and composite > best_sym_composite and n_trades >= min_trades_per_symbol:
                 best_sym_composite = composite
                 best_sym_threshold = thr
                 best_sym_metrics = {
@@ -1825,21 +1845,31 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                     'sharpe': sharpe, 'pf': pf, 'total_r': total_r,
                 }
 
-        if best_sym_metrics is not None and best_sym_metrics['expect'] > 0:
+        high_bar = global_threshold * 3.0
+        # BUG FIX: Require BOTH expect > 0 AND pf > 1.0 for ACTIVE status.
+        # Previously only expect > 0 was checked, so symbols with positive
+        # cherry-picked E[R] but PF < 1.0 (net losing) could be activated.
+        sym_is_active = (best_sym_metrics is not None
+                         and best_sym_metrics['expect'] > 0.0
+                         and best_sym_metrics['pf'] > 1.0)
+        if sym_is_active:
             per_sym_thresholds[int(sym_id)] = best_sym_threshold
             m = best_sym_metrics
             log.info(f"{sym_name:>12} {n_sym_bars:>6} {best_sym_threshold:>10.4f} {m['trades']:>7} "
                      f"{m['expect']:>+10.4f} {m['winrate']:>6.1%} {m['pf']:>7.2f} "
                      f"{m['total_r']:>+10.4f} {'ACTIVE':>10}")
         else:
-            high_bar = global_threshold * 3.0
             per_sym_thresholds[int(sym_id)] = high_bar
             no_edge_symbols.append(sym_name)
             if best_sym_metrics is not None:
                 m = best_sym_metrics
-                log.info(f"{sym_name:>12} {n_sym_bars:>6} {high_bar:>10.4f} {m['trades']:>7} "
+                # BUG FIX: Show best_sym_threshold (the tested threshold) in BestThr
+                # column rather than high_bar. Previously HIGH_BAR rows showed high_bar
+                # (global×3) in BestThr, making it look like that threshold was tested.
+                reason = "expect<=0" if best_sym_metrics['expect'] <= 0 else "PF<=1.0"
+                log.info(f"{sym_name:>12} {n_sym_bars:>6} {best_sym_threshold:>10.4f} {m['trades']:>7} "
                          f"{m['expect']:>+10.4f} {m['winrate']:>6.1%} {m['pf']:>7.2f} "
-                         f"{m['total_r']:>+10.4f} {'HIGH_BAR':>10}")
+                         f"{m['total_r']:>+10.4f} {'HIGH_BAR':>10} [{reason}] → thr={high_bar:.4f}")
             else:
                 log.info(f"{sym_name:>12} {n_sym_bars:>6} {high_bar:>10.4f} {0:>7} {'-':>10} "
                          f"{'-':>7} {'-':>7} {'-':>10} {'HIGH_BAR':>10}")
@@ -5633,8 +5663,8 @@ def train_v5_model(
                 tpd_ctrl_cfg, cooldown=cooldown,
             )
 
-            (sweep_results, sweep_label, sweep_expect, sweep_pct,
-             sweep_pf, sweep_max_dd, sweep_tpd, sweep_threshold) = _run_v5_sweep(
+            (sweep_results, sweep_label, sweep_composite, sweep_pct,
+             sweep_pf, sweep_max_dd, sweep_tpd, sweep_threshold, sweep_expect) = _run_v5_sweep(
                 scores, sides, val_outcomes, val_realized_r,
                 val_bars, epoch, tp_mult, sl_mult,
                 target_tpd=target_tpd, target_tpd_tol=target_tpd_tol,
@@ -5653,9 +5683,12 @@ def train_v5_model(
                 cooldown=cooldown,
             )
 
+            # BUG FIX: sweep_expect is now the actual mean R/trade of the best bin.
+            # sweep_composite is the expect×sharpe score used for selection.
+            # Both are logged for transparency; promote logic uses actual E[R].
             log.info(f"[{vtag}_EPOCH_TRADING] epoch={epoch:03d} | expect={sweep_expect:+.4f} PF={sweep_pf:.2f} "
-                     f"maxDD={sweep_max_dd:.2f} T/day={sweep_tpd:.1f} thr={sweep_threshold:.4f} "
-                     f"best_at={sweep_label}")
+                     f"composite={sweep_composite:+.4f} maxDD={sweep_max_dd:.2f} "
+                     f"T/day={sweep_tpd:.1f} thr={sweep_threshold:.4f} best_at={sweep_label}")
 
             if _active_pusher:
                 lb_dict = {k: float(np.mean(v)) for k, v in loss_breakdown.items() if v}
