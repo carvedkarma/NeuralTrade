@@ -2094,12 +2094,32 @@ def run_v5_forward_test(
     try:
         from config.shared_v5_trade_config import load_shared_defaults as _load_shared
         _shared = _load_shared()
+
+        if config.min_p_side == 0.0 and _shared.min_p_side != 0.0:
+            config.min_p_side = _shared.min_p_side
+        if config.min_p_short == 0.0 and _shared.min_p_short != 0.0:
+            config.min_p_short = _shared.min_p_short
+        if config.slippage_base_bps == 0.0 and _shared.slippage_base_bps != 0.0:
+            config.slippage_base_bps = _shared.slippage_base_bps
+        if config.corr_thresh == 0.90 and _shared.corr_thresh != 0.90:
+            config.corr_thresh = _shared.corr_thresh
+        if config.size_floor == 0.0 and _shared.size_floor != 0.0:
+            config.size_floor = _shared.size_floor
+        if config.kill_recovery_bars == 48 and _shared.kill_recovery_bars != 48:
+            config.kill_recovery_bars = _shared.kill_recovery_bars
+        if config.kill_recovery_r_threshold == 2.0 and _shared.kill_recovery_r_threshold != 2.0:
+            config.kill_recovery_r_threshold = _shared.kill_recovery_r_threshold
+        if config.kill_hysteresis_r == 1.0 and _shared.kill_hysteresis_r != 1.0:
+            config.kill_hysteresis_r = _shared.kill_hysteresis_r
+
         log.info(
-            "[V5_FWD] Shared config loaded — "
-            "score_threshold=%s  min_p_side=%s  corr_thresh=%s  "
-            "kill_recovery_bars=%s  size_floor=%s",
-            _shared.score_threshold, _shared.min_p_side, _shared.corr_thresh,
-            _shared.kill_recovery_bars, _shared.size_floor,
+            "[V5_FWD] Effective config (shared defaults + CLI overrides): "
+            "score_threshold=%.4f  score_lambda=%.3f  min_p_side=%.3f  min_p_short=%.3f  "
+            "corr_thresh=%.2f  slippage_bps=%.1f  size_floor=%.3f  "
+            "kill_recovery_bars=%d  kill_recovery_r_threshold=%.2f  kill_hysteresis_r=%.2f",
+            config.score_threshold, config.score_lambda, config.min_p_side, config.min_p_short,
+            config.corr_thresh, config.slippage_base_bps, config.size_floor,
+            config.kill_recovery_bars, config.kill_recovery_r_threshold, config.kill_hysteresis_r,
         )
     except Exception as _cfg_err:
         log.debug("[V5_FWD] Shared config not loaded: %s", _cfg_err)
@@ -3122,6 +3142,13 @@ def run_v5_forward_test(
                         direction_balance_reductions += 1
 
         size_multipliers[idx] = trade_size_mult
+
+        if position_sizer is not None:
+            _sizer_mult = max(pos_sizer_mults) if pos_sizer_mults else 1.0
+            log.debug(
+                "[TRADE_DIAG] idx=%d soft_gate_mult=%.4f sizer_mult=%.4f final_trade_size=%.4f",
+                idx, soft_gate_mult, _sizer_mult, trade_size_mult,
+            )
 
         if corr_tracker is not None and test_sym_ids is not None:
             sym_name = sym_id_to_name.get(int(test_sym_ids[idx]), None)
