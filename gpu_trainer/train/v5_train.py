@@ -2095,45 +2095,62 @@ def run_v5_forward_test(
         from config.shared_v5_trade_config import load_shared_defaults as _load_shared
         _shared = _load_shared()
 
-        if config.score_threshold == 0.0 and _shared.score_threshold != 0.0:
-            config.score_threshold = _shared.score_threshold
-        if config.score_lambda == 0.5 and _shared.score_lambda != 0.5:
-            config.score_lambda = _shared.score_lambda
-        if config.cooldown == 4 and _shared.cooldown_bars != 4:
-            config.cooldown = _shared.cooldown_bars
-        if config.min_p_side == 0.0 and _shared.min_p_side != 0.0:
-            config.min_p_side = _shared.min_p_side
-        if config.min_p_short == 0.0 and _shared.min_p_short != 0.0:
-            config.min_p_short = _shared.min_p_short
-        if config.slippage_base_bps == 0.0 and _shared.slippage_base_bps != 0.0:
-            config.slippage_base_bps = _shared.slippage_base_bps
-        if config.corr_thresh == 0.90 and _shared.corr_thresh != 0.90:
-            config.corr_thresh = _shared.corr_thresh
-        if config.size_floor == 0.0 and _shared.size_floor != 0.0:
-            config.size_floor = _shared.size_floor
-        if config.min_size_mult == 0.25 and _shared.min_size_mult != 0.25:
-            config.min_size_mult = _shared.min_size_mult
-        if config.max_size_mult == 2.5 and _shared.max_size_mult != 2.5:
-            config.max_size_mult = _shared.max_size_mult
-        if config.kill_recovery_bars == 48 and _shared.kill_recovery_bars != 48:
-            config.kill_recovery_bars = _shared.kill_recovery_bars
-        if config.kill_recovery_r_threshold == 2.0 and _shared.kill_recovery_r_threshold != 2.0:
-            config.kill_recovery_r_threshold = _shared.kill_recovery_r_threshold
-        if config.kill_hysteresis_r == 1.0 and _shared.kill_hysteresis_r != 1.0:
-            config.kill_hysteresis_r = _shared.kill_hysteresis_r
+        # Sentinel-based fallback: if the field still holds its V5ForwardTestConfig
+        # class default (meaning it was not explicitly set by the caller / CLI), we
+        # apply the shared default instead.  Limitation: a caller that explicitly
+        # passes the exact class default value will silently receive the shared
+        # default — acceptable in practice because those exact values are "unset"
+        # placeholders (e.g. score_threshold=0.0 would block all trades anyway).
+        # Preferred future direction: make these fields Optional[float]=None so
+        # None unambiguously means "not set", but that requires coordinated
+        # call-site changes across walk-forward and per-fold callers.
+        _DEFAULTS = V5ForwardTestConfig()  # reference object for sentinel comparison
+        def _apply(attr, shared_val):
+            if getattr(config, attr) == getattr(_DEFAULTS, attr):
+                setattr(config, attr, shared_val)
 
+        _apply('score_threshold', _shared.score_threshold)
+        _apply('score_lambda',    _shared.score_lambda)
+        _apply('cooldown',        _shared.cooldown_bars)
+        _apply('min_p_side',      _shared.min_p_side)
+        _apply('min_p_short',     _shared.min_p_short)
+        _apply('slippage_base_bps', _shared.slippage_base_bps)
+        _apply('corr_thresh',     _shared.corr_thresh)
+        _apply('size_floor',      _shared.size_floor)
+        _apply('min_size_mult',   _shared.min_size_mult)
+        _apply('max_size_mult',   _shared.max_size_mult)
+        _apply('kelly_fraction',  _shared.kelly_fraction)
+        _apply('kill_recovery_bars',         _shared.kill_recovery_bars)
+        _apply('kill_recovery_r_threshold',  _shared.kill_recovery_r_threshold)
+        _apply('kill_hysteresis_r',          _shared.kill_hysteresis_r)
+
+        # Full parity-auditable dump of every shared field value now in effect
         log.info(
-            "[V5_FWD] Effective config (shared defaults + CLI overrides): "
+            "[V5_FWD] Effective config — scoring: "
             "score_threshold=%.4f  score_lambda=%.3f  cooldown=%d  "
-            "min_p_side=%.3f  min_p_short=%.3f  "
-            "corr_thresh=%.2f  slippage_bps=%.1f  size_floor=%.3f  "
-            "min_size_mult=%.2f  max_size_mult=%.2f  "
-            "kill_recovery_bars=%d  kill_recovery_r_threshold=%.2f  kill_hysteresis_r=%.2f",
+            "min_p_side=%.3f  min_p_short=%.3f",
             config.score_threshold, config.score_lambda, config.cooldown,
             config.min_p_side, config.min_p_short,
-            config.corr_thresh, config.slippage_base_bps, config.size_floor,
-            config.min_size_mult, config.max_size_mult,
-            config.kill_recovery_bars, config.kill_recovery_r_threshold, config.kill_hysteresis_r,
+        )
+        log.info(
+            "[V5_FWD] Effective config — costs/correlation: "
+            "slippage_bps=%.1f  corr_thresh=%.2f  corr_window_days=%d",
+            config.slippage_base_bps, config.corr_thresh, config.corr_window_days,
+        )
+        log.info(
+            "[V5_FWD] Effective config — sizing: "
+            "size_floor=%.3f  min_size_mult=%.2f  max_size_mult=%.2f  "
+            "kelly_fraction=%.3f  adaptive_sizing=%s",
+            config.size_floor, config.min_size_mult, config.max_size_mult,
+            config.kelly_fraction, config.adaptive_sizing,
+        )
+        log.info(
+            "[V5_FWD] Effective config — kill/recovery: "
+            "kill_recovery_bars=%d  kill_recovery_r_threshold=%.2f  "
+            "kill_hysteresis_r=%.2f  per_symbol_soft_kill=%s",
+            config.kill_recovery_bars, config.kill_recovery_r_threshold,
+            config.kill_hysteresis_r,
+            getattr(config, 'per_symbol_soft_kill', False),
         )
     except Exception as _cfg_err:
         log.debug("[V5_FWD] Shared config not loaded: %s", _cfg_err)
