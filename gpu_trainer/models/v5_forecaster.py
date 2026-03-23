@@ -53,10 +53,22 @@ class V5ForecasterConfig:
     enable_regime_head: bool = False
     n_symbols: int = 1
     symbol_embed_dim: int = 8
+    n_features: int = None  # Alias for input_dim — accepted for back-compat with old configs
 
     def __post_init__(self):
         if self.hidden_dims is None:
             self.hidden_dims = [512, 256, 128, 64]
+        # n_features is a legacy alias for input_dim.  If both are explicitly set to
+        # different non-default values, the caller has a config conflict.
+        if self.n_features is not None:
+            default_input_dim = 63
+            if self.input_dim != default_input_dim and self.input_dim != self.n_features:
+                raise ValueError(
+                    f"V5ForecasterConfig: n_features={self.n_features} and "
+                    f"input_dim={self.input_dim} are both set to different non-default values. "
+                    f"Use only one."
+                )
+            self.input_dim = self.n_features
 
 
 class V5Forecaster(nn.Module):

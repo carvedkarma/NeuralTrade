@@ -209,7 +209,9 @@ class TestT001DirectionalPenalty:
         scores, sides, _ = compute_v5_scores(
             None, _arrays=arrays, side_mode='action_head', score_lambda=lam)
 
-        assert np.all(sides == 1)
+        # p_short (0.567) > p_long (0.433), so the model picks SHORT (side=-1).
+        # p_side = p_short = 0.567 > breakeven (0.333), so score is still positive.
+        assert np.all(sides == -1)
         assert np.all(scores > 0), \
             f"Score should be positive when p_side={p_side_val:.3f} > breakeven={breakeven:.3f}: {scores[0]:.6f}"
 
@@ -218,13 +220,15 @@ class TestT001DirectionalPenalty:
         n = 50
         lam = 0.5
         breakeven = lam / (1.0 + lam)
-        p_side_val = breakeven - 0.1
+        p_side_val = breakeven - 0.1   # 0.233 — LONG side probability, below breakeven
         arrays = {
             'mu_R': np.full(n, 0.3),
             'mae': np.full(n, 0.2),
             'mfe': np.full(n, 0.5),
             'p_long': np.full(n, p_side_val),
-            'p_short': np.full(n, 1.0 - p_side_val),
+            # p_short must be LESS than p_long so the model picks LONG with p_side < breakeven.
+            # Setting p_short = 0.10 ensures LONG wins (0.233 > 0.10) and p_side = 0.233 < 0.333.
+            'p_short': np.full(n, 0.10),
         }
         scores, sides, _ = compute_v5_scores(
             None, _arrays=arrays, side_mode='action_head', score_lambda=lam)

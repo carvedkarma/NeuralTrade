@@ -131,7 +131,7 @@ class CorrBlocker:
         self.tracker = corr_tracker
         self.config = config
         self.overlap_ratio = overlap_ratio          # updated externally per fold
-        self.blocked_count = 0                     # legacy counter (no longer incremented)
+        self.blocked_count = 0                     # hard-block counter (should_block path)
         self.penalty_count = 0
         self.block_log: List[Dict] = []
 
@@ -140,7 +140,31 @@ class CorrBlocker:
 
     def should_block(self, symbol: str, side: int,
                      open_positions: Dict[str, int]) -> bool:
-        """Back-compat shim — always returns False; use compute_size_penalty() instead."""
+        """Hard-block gate: returns True when any open position is same-side (if
+        same_side_only=True) with |corr| >= threshold AND there are enough aligned days.
+
+        This is the classic binary block used in training-time sweep filtering.
+        For live/fold-level sizing, use compute_size_penalty() which applies a
+        proportional multiplier instead of a full block.
+        """
+        if not self.config.enabled:
+            return False
+        for other_sym, other_side in open_positions.items():
+            if other_sym == symbol:
+                continue
+            if self.config.same_side_only and side != other_side:
+                continue
+            corr = self.tracker.pairwise_corr(symbol, other_sym, self.config.window_days)
+            if corr is None:
+                # Insufficient aligned data — no block, not reliable enough
+                continue
+            if abs(corr) >= self.config.threshold:
+                self.blocked_count += 1
+                self.block_log.append({
+                    'symbol': symbol, 'other': other_sym,
+                    'corr': corr, 'side': side,
+                })
+                return True
         return False
 
     def compute_size_penalty(self, symbol: str, side: int,

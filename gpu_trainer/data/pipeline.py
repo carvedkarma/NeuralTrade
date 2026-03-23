@@ -803,10 +803,13 @@ class FeatureEngineer:
         "htf_merge_method": "merge_asof_backward",
     }
     
-    def __init__(self, wavelet: str = "db4", wavelet_level: int = 4):
+    def __init__(self, wavelet: str = "db4", wavelet_level: int = 4,
+                 symbols=None, timeframes=None, **kwargs):
         self.wavelet = wavelet
         self.wavelet_level = wavelet_level
         self.scalers = {}
+        self.symbols = symbols
+        self.timeframes = timeframes
         
     def compute_technical_features(self, df: pd.DataFrame) -> pd.DataFrame:
         features = pd.DataFrame(index=df.index)

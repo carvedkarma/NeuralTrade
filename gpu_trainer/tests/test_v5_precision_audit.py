@@ -53,7 +53,14 @@ class TestT001LookaheadBiasQualityGate:
     def test_ref_arrays_used_for_percentiles(self):
         test_arrays = _make_arrays(n=500, seed=1)
         test_arrays['mu_R'][:] = 0.5
-        test_arrays['mae'][:] = 0.01
+        # Heterogeneous mae: 450 bars at 0.01, 50 bars at 0.5.
+        # Without ref: adaptive_mae ≈ percentile([0.01]*450+[0.5]*50, 90) ≈ 0.059
+        #   → bars with mae=0.5 FAIL threshold → ~450 pass.
+        # With ref (mae=5.0): adaptive_mae = min(1.0, 5.0 * <cfg factor>) = 1.0
+        #   → all 500 bars pass.
+        # 450 ≠ 500 confirms ref_arrays change the gate.
+        test_arrays['mae'][:450] = 0.01
+        test_arrays['mae'][450:] = 0.5
         test_arrays['sigma'][:] = 0.01
         test_arrays['p_trade'][:] = 0.99
 

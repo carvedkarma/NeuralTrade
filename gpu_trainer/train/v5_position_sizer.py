@@ -93,6 +93,15 @@ class AdaptivePositionSizer:
 
         self._trade_count += 1
 
+        # Conservative guard: a negative expected return means the trade has negative
+        # expected value — no score percentile or Kelly quality modifier should amplify
+        # it above the minimum. Return min_size_mult immediately so the history and
+        # score buffer still reflect the call (trade_count already incremented above).
+        if mu_r < 0:
+            mult = self.config.min_size_mult
+            self.sizing_history.append(mult)
+            return mult
+
         p = max(min(p_win, 0.99), 0.01)
         q = 1.0 - p
 

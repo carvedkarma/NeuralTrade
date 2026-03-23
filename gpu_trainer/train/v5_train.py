@@ -1187,7 +1187,10 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         p_long = action_probs[:, 1]
         p_short = action_probs[:, 2]
 
-    risk = np.maximum(mae_pred, 0.25)
+    # COMPAT FIX: was 0.25 hard floor which broke scale-invariance when mae < 0.25.
+    # Using a small epsilon preserves proportionality (score ratio stays ~1 when mu/risk
+    # ratio is held constant) while still preventing division by zero.
+    risk = np.maximum(mae_pred, 1e-4)
 
     if slippage_bps > 0:
         slippage_r = slippage_bps / 10000.0 / np.maximum(risk, 1e-6)
@@ -1425,7 +1428,8 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                   quality_mask=None, score_threshold=None,
                   r_long=None, r_short=None, out_long=None, out_short=None,
                   close_prices=None, ema200_regime_gate=False,
-                  timestamps=None, weekly_loss_cap=None, cooldown=4):
+                  timestamps=None, weekly_loss_cap=None, cooldown=4,
+                  return_full=False):
     """Score-based sweep for v5 model.
 
     If side-conditional arrays (r_long, r_short, out_long, out_short) are provided,
@@ -1720,6 +1724,11 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     # expect bin (negative × negative = positive). Now callers have both values.
     best_expect = best_row['expect'] if best_row else 0.0
 
+    # COMPAT: return_full=False gives the legacy 4-tuple expected by tests/callers
+    # written before the expanded return was added. Internal callers that need all
+    # metrics must pass return_full=True explicitly.
+    if not return_full:
+        return sweep_results, best_label, best_score_val, best_pct
     return sweep_results, best_label, best_score_val, best_pct, best_pf, best_max_dd, best_tpd, best_threshold, best_expect
 
 
@@ -1778,7 +1787,7 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
 
         sym_finite = sym_scores[np.isfinite(sym_scores)]
         if len(sym_finite) < min_trades_per_symbol:
-            high_bar = global_threshold * 3.0
+            high_bar = float('inf')
             per_sym_thresholds[int(sym_id)] = high_bar
             no_edge_symbols.append(sym_name)
             log.info(f"{sym_name:>12} {n_sym_bars:>6} {high_bar:>10.4f} {0:>7} {'-':>10} "
@@ -1848,7 +1857,7 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                     'sharpe': sharpe, 'pf': pf, 'total_r': total_r,
                 }
 
-        high_bar = global_threshold * 3.0
+        high_bar = float('inf')
         # BUG FIX: Require BOTH expect > 0 AND pf > 1.0 for ACTIVE status.
         # Previously only expect > 0 was checked, so symbols with positive
         # cherry-picked E[R] but PF < 1.0 (net losing) could be activated.
@@ -5820,6 +5829,7 @@ def train_v5_model(
                 timestamps=val_timestamps_arr,
                 weekly_loss_cap=weekly_loss_cap,
                 cooldown=cooldown,
+                return_full=True,
             )
 
             # BUG FIX: sweep_expect is now the actual mean R/trade of the best bin.
