@@ -4389,6 +4389,9 @@ def run_v5_walk_forward(
             wf_threshold_override=blended_threshold if threshold_ema is not None and wf_threshold_ema else None,
             fold_id=fold['fold'],
             per_symbol_r_kill=per_symbol_r_kill,
+            kill_recovery_bars=kill_recovery_bars,
+            kill_recovery_r_threshold=kill_recovery_r_threshold,
+            kill_hysteresis_r=kill_hysteresis_r,
             per_symbol_threshold=per_symbol_threshold,
             short_oversample=short_oversample,
             short_min_fraction=short_min_fraction,
@@ -4722,6 +4725,9 @@ def train_v5_model(
     fold_id=0,
     feature_report=False,
     per_symbol_r_kill=None,
+    kill_recovery_bars=48,
+    kill_recovery_r_threshold=2.0,
+    kill_hysteresis_r=1.0,
     per_symbol_threshold=False,
     short_oversample=False,
     short_min_fraction=0.35,
@@ -6123,6 +6129,11 @@ def train_v5_model(
         log.info("=" * 60)
         log.info("  V5 FORWARD TEST (frozen decision layer)")
         log.info("=" * 60)
+        log.info(
+            "[V5_FWD] Effective kill-recovery config — "
+            "kill_recovery_bars=%d  kill_recovery_r_threshold=%.2f  kill_hysteresis_r=%.2f",
+            kill_recovery_bars, kill_recovery_r_threshold, kill_hysteresis_r,
+        )
 
         best_ckpt_path = checkpoint_dir / "best_v5_expectancy.pt"
         if not best_ckpt_path.exists():
