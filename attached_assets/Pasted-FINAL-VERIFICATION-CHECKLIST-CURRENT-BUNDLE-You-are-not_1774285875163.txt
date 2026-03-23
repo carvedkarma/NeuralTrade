@@ -1,0 +1,229 @@
+FINAL VERIFICATION CHECKLIST — CURRENT BUNDLE
+
+You are not implementing new features in this step. You are verifying that the current repo state is coherent, backward-compatible, and safer to validate. Work from the CURRENT uploaded code only.
+
+GOAL
+Produce a final verification report with evidence for each item below. Do not claim success without concrete proof from code, logs, or test output.
+
+==================================================
+A. TEST VERIFICATION
+==================================================
+
+Run this exact command from the repo root:
+
+pytest -q tests/test_v5_directional.py tests/test_v5_precision_audit.py tests/test_side_conditional.py tests/test_v5_features.py tests/test_correlation.py tests/test_drawdown_throttle.py tests/test_v5_position_sizer.py
+
+Deliver:
+- exact pass/fail/skip counts
+- raw terminal output
+- list of any remaining failing tests grouped by file
+- if failures remain, summarize root cause for each one in 1-3 lines
+
+==================================================
+B. SHARED CONFIG PARITY
+==================================================
+
+Verify that shared defaults now flow from:
+config/shared_v5_trade_config.py
+
+Check both:
+- train/v5_train.py
+- live_runner.py
+
+Need proof for:
+- score_threshold
+- score_lambda
+- cooldown
+- corr_thresh
+- min_size_mult
+- max_size_mult
+- any core side/sizing params now shared
+
+Deliver:
+- exact files/lines where each shared field is loaded
+- startup log or debug print from training path showing effective values
+- startup log or debug print from live path showing effective values
+- explicit statement whether train and live now use the same defaults when no overrides are provided
+
+==================================================
+C. OPTIONAL IMPORT SAFETY
+==================================================
+
+Verify:
+- data/pipeline.py does not crash if pywt is missing
+- models/__init__.py does not crash if transformers is missing
+
+Deliver:
+- exact code path / try-except location
+- result of a startup/import test with missing dependency simulated if practical
+- exact degraded-mode log message(s)
+- confirm whether downstream shape/feature behavior remains stable when wavelets are unavailable
+
+==================================================
+D. FEATURE / MODEL BACKWARD COMPATIBILITY
+==================================================
+
+Verify compatibility for:
+1. FeatureEngineer(symbols=[...], timeframes=[...])
+2. V5ForecasterConfig(n_features=...)
+
+Deliver:
+- exact constructor signatures / alias handling
+- quick proof snippet or test result showing old-style construction works
+- explicit note on whether contradictory alias values raise a clean error
+
+==================================================
+E. SCORE FUNCTION SANITY
+==================================================
+
+Inspect:
+train/v5_train.py -> compute_v5_scores
+
+Need verification for:
+- side_mode='action_head' picks side from p_long vs p_short
+- p_side is computed from chosen side
+- score uses risk-normalized edge consistently
+- score behavior around breakeven threshold implied by score_lambda
+- any denominator floor is now numerical epsilon / safe clamp instead of a large biasing floor
+
+Deliver:
+- exact formula as implemented now
+- exact lines implementing side selection and risk normalization
+- note whether tiny-mae cases can inflate score and whether a clamp still exists
+- whether tests covering these behaviors pass
+
+==================================================
+F. QUALITY GATE REF ARRAY BEHAVIOR
+==================================================
+
+Inspect:
+train/v5_train.py -> v5_quality_mask
+
+Verify:
+- when ref_arrays is provided, adaptive thresholds come from ref_arrays only
+- current arrays are used for pass/fail masking, not threshold estimation
+- no subtle fallback mixes current arrays into threshold calculation unintentionally
+
+Deliver:
+- exact lines proving threshold source behavior
+- any diagnostic field like threshold_source if present
+- whether the relevant precision-audit test passes
+
+==================================================
+G. PER-SYMBOL SWEEP / NO-EDGE HANDLING
+==================================================
+
+Inspect:
+train/v5_train.py -> _run_per_symbol_sweep
+
+Verify:
+- true no-edge symbols get inf or the canonical no-trade sentinel
+- they do NOT receive active finite thresholds by mistake
+- rejection criteria are explicit and sane
+- logging / diagnostics identify rejected symbols and reasons
+
+Deliver:
+- exact logic for no-edge assignment
+- exact conditions required for activation
+- evidence that the previously failing no-edge case is now handled correctly
+
+==================================================
+H. SWEEP RETURN CONTRACT
+==================================================
+
+Inspect:
+train/v5_train.py -> _run_v5_sweep
+
+Verify:
+- legacy 4-value return exists by default
+- expanded return exists only when explicitly requested (e.g. return_full=True)
+- internal callers that need expanded data use the new path explicitly
+
+Deliver:
+- exact function signature
+- exact return branches
+- example caller using legacy mode
+- example caller using full mode
+- whether side-conditional unpacking tests now pass
+
+==================================================
+I. CORRELATION CONTRACT
+==================================================
+
+Inspect:
+train/v5_correlation.py and all relevant callers
+
+Verify:
+- CorrBlocker.should_block() has real threshold logic again for compatibility
+- size-penalty path still exists where intended
+- behavior is not ambiguous between “hard block” and “soft penalty”
+- diagnostics expose reliability information if present
+
+Deliver:
+- exact should_block logic
+- exact size-penalty logic
+- where each is used
+- whether correlation tests now pass
+- note whether the system’s intended production mode is still block, penalty, or hybrid
+
+==================================================
+J. ADAPTIVE SIZING SANITY
+==================================================
+
+Inspect:
+train/v5_position_sizer.py and any summary/reporting path
+
+Verify:
+- weak / negative-edge cases behave conservatively
+- high-conviction cases can rise above the floor
+- final_size_mult is no longer structurally pinned to one value
+- any early return for mu_r < 0 is present and intentional
+
+Deliver:
+- exact formula/path to final_size_mult
+- conditions that force min_size_mult
+- conditions that allow > floor sizing
+- if easy, print or summarize:
+  min / mean / max / std of final_size_mult
+  % trades above floor
+- whether tests for position sizing now pass
+
+==================================================
+K. LIVE RUNNER HONESTY / SAFETY
+==================================================
+
+Inspect:
+live_runner.py
+
+Verify:
+- no log claims “placing_order” unless a real execution path is invoked
+- signal-only or simulated mode is labeled honestly
+- halt switches exist for:
+  - stale data
+  - repeated API errors
+  - daily loss / pre-trade blocking where implemented
+
+Deliver:
+- exact log strings
+- exact halt conditions and config names
+- startup warning if live mode lacks real execution wiring
+- explicit statement whether this repo is signal-only, paper-trading, or true order-routing capable today
+
+==================================================
+L. FINAL JUDGMENT
+==================================================
+
+At the end, provide a strict final summary with exactly these headings:
+
+1. What is now clearly fixed
+2. What is still uncertain
+3. What still blocks real-money crypto trading
+4. Whether this version is suitable for:
+   - backtesting
+   - walk-forward validation
+   - paper trading
+   - tiny canary live
+   - full live deployment
+
+Do not say “ready for live trading” unless the evidence truly supports it.
+Do not hide remaining failures or uncertainty.
