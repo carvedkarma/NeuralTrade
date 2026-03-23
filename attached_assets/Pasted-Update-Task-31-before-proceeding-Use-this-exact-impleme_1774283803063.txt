@@ -1,0 +1,60 @@
+Update Task #31 before proceeding.
+
+Use this exact implementation policy:
+
+1. ADD the per-symbol no-edge fix explicitly
+- Include the failing case where a bad-edge symbol gets threshold 0.3 instead of inf
+- Fix _run_per_symbol_sweep so true no-edge symbols are assigned inf (or the repo’s canonical no-trade sentinel)
+- Require:
+  - expect > 0
+  - pf > 1.0 or stricter if already intended by codebase
+  - total_r > 0
+  - enough trades
+- Add rejected symbol reason logging
+
+2. DO NOT EDIT TESTS IN THE FIRST PASS
+- Fix source code first
+- Restore backward compatibility first
+- Only edit tests if, after source fixes, a test still contradicts the documented intended formula
+- If a test is changed, include a short proof showing:
+  - scoring formula used
+  - chosen side
+  - p_side value
+  - breakeven threshold
+  - why the old assertion was wrong
+
+3. IMPLEMENT THESE SOURCE FIXES FIRST
+- compute_v5_scores:
+  - replace any large hard risk floor that breaks scale invariance with a small numerical epsilon
+  - preserve safety guards like min_mu_r_score and existing suppression logic
+  - do not allow denominator explosions without an explicit clamp/comment
+- _run_v5_sweep:
+  - restore legacy 4-value return by default
+  - add return_full=True for expanded metrics
+- v5_quality_mask:
+  - when ref_arrays is provided, compute thresholds from ref_arrays only
+- FeatureEngineer:
+  - accept legacy kwargs symbols=..., timeframes=... without breaking current constructor
+- V5ForecasterConfig:
+  - accept n_features as alias for input_dim
+- CorrBlocker.should_block():
+  - restore actual threshold/block behavior for compatibility where tests/callers expect it
+- AdaptivePositionSizer:
+  - if mu_r < 0, return min_size_mult early if that matches intended conservative behavior
+- _run_per_symbol_sweep:
+  - no-edge symbols must not get active finite thresholds
+
+4. VALIDATION REQUIREMENTS
+After source fixes:
+- run the exact targeted suite
+- report before/after counts
+- list exact files changed
+- only then decide whether any remaining test failures justify test edits
+
+5. IMPORTANT
+- prefer compatibility shims over breaking API changes
+- do not do broad refactors
+- do not invent new strategy logic
+- do not claim success without test output
+
+Proceed with source fixes first, not test edits.

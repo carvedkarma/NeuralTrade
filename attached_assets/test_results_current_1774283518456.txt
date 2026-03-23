@@ -1,0 +1,501 @@
+........FFF...................F......FFF................................ [ 24%]
+............FF...F.............FFFFFF.............FF.............FF..... [ 48%]
+....................................F................................... [ 72%]
+........................................................................ [ 97%]
+........                                                                 [100%]
+=================================== FAILURES ===================================
+_______ TestT001DirectionalPenalty.test_penalty_scales_with_mu_over_risk _______
+
+self = <test_v5_directional.TestT001DirectionalPenalty object at 0x7efaf5214050>
+
+    def test_penalty_scales_with_mu_over_risk(self):
+        from train.v5_train import compute_v5_scores
+        n = 50
+        arrays_big = {
+            'mu_R': np.full(n, 1.0),
+            'mae': np.full(n, 0.5),
+            'mfe': np.full(n, 1.0),
+            'p_long': np.full(n, 0.6),
+            'p_short': np.full(n, 0.4),
+        }
+        arrays_small = {
+            'mu_R': np.full(n, 0.1),
+            'mae': np.full(n, 0.05),
+            'mfe': np.full(n, 0.1),
+            'p_long': np.full(n, 0.6),
+            'p_short': np.full(n, 0.4),
+        }
+        scores_big, _, diag_big = compute_v5_scores(
+            None, _arrays=arrays_big, side_mode='action_head', score_lambda=0.5)
+        scores_small, _, diag_small = compute_v5_scores(
+            None, _arrays=arrays_small, side_mode='action_head', score_lambda=0.5)
+    
+        ratio = scores_big[0] / scores_small[0]
+>       assert abs(ratio - 1.0) < 0.01, \
+            f"Score ratio should be ~1.0 (same mu/risk ratio): {ratio:.4f}"
+E       AssertionError: Score ratio should be ~1.0 (same mu/risk ratio): 5.0000
+E       assert np.float64(4.0) < 0.01
+E        +  where np.float64(4.0) = abs((np.float64(5.0) - 1.0))
+
+tests/test_v5_directional.py:193: AssertionError
+__ TestT001DirectionalPenalty.test_score_positive_when_p_side_above_breakeven __
+
+self = <test_v5_directional.TestT001DirectionalPenalty object at 0x7efaf53ba570>
+
+    def test_score_positive_when_p_side_above_breakeven(self):
+        from train.v5_train import compute_v5_scores
+        n = 50
+        lam = 0.5
+        breakeven = lam / (1.0 + lam)
+        p_side_val = breakeven + 0.1
+        arrays = {
+            'mu_R': np.full(n, 0.3),
+            'mae': np.full(n, 0.2),
+            'mfe': np.full(n, 0.5),
+            'p_long': np.full(n, p_side_val),
+            'p_short': np.full(n, 1.0 - p_side_val),
+        }
+        scores, sides, _ = compute_v5_scores(
+            None, _arrays=arrays, side_mode='action_head', score_lambda=lam)
+    
+>       assert np.all(sides == 1)
+E       assert np.False_
+E        +  where np.False_ = <function all at 0x7efbb676be70>(array([-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,\n       -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,\n       -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]) == 1)
+E        +    where <function all at 0x7efbb676be70> = np.all
+
+tests/test_v5_directional.py:212: AssertionError
+__ TestT001DirectionalPenalty.test_score_negative_when_p_side_below_breakeven __
+
+self = <test_v5_directional.TestT001DirectionalPenalty object at 0x7efb1a3f3570>
+
+    def test_score_negative_when_p_side_below_breakeven(self):
+        from train.v5_train import compute_v5_scores
+        n = 50
+        lam = 0.5
+        breakeven = lam / (1.0 + lam)
+        p_side_val = breakeven - 0.1
+        arrays = {
+            'mu_R': np.full(n, 0.3),
+            'mae': np.full(n, 0.2),
+            'mfe': np.full(n, 0.5),
+            'p_long': np.full(n, p_side_val),
+            'p_short': np.full(n, 1.0 - p_side_val),
+        }
+        scores, sides, _ = compute_v5_scores(
+            None, _arrays=arrays, side_mode='action_head', score_lambda=lam)
+    
+>       assert np.all(scores < 0), \
+            f"Score should be negative when p_side={p_side_val:.3f} < breakeven={breakeven:.3f}: {scores[0]:.6f}"
+E       AssertionError: Score should be negative when p_side=0.233 < breakeven=0.333: 0.780000
+E       assert np.False_
+E        +  where np.False_ = <function all at 0x7efbb676be70>(array([0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78,\n       0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0....8,\n       0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78,\n       0.78, 0.78, 0.78, 0.78, 0.78, 0.78]) < 0)
+E        +    where <function all at 0x7efbb676be70> = np.all
+
+tests/test_v5_directional.py:232: AssertionError
+_______ TestT007PerSymbolThreshold.test_per_symbol_sweep_no_edge_symbol ________
+
+self = <test_v5_directional.TestT007PerSymbolThreshold object at 0x7efaf5218dd0>
+
+    @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
+    def test_per_symbol_sweep_no_edge_symbol(self):
+        from train.v5_train import _run_per_symbol_sweep
+        n = 200
+        scores = np.concatenate([
+            np.random.uniform(0.1, 0.3, 100),
+            np.random.uniform(0.1, 0.3, 100),
+        ])
+        sides = np.ones(n, dtype=int)
+        realized_r = np.concatenate([
+            np.full(100, 0.5),
+            np.full(100, -0.8),
+        ])
+        outcomes = np.full(n, "TP")
+        outcomes[100:] = "SL"
+        sym_ids = np.concatenate([np.zeros(100), np.ones(100)]).astype(int)
+        symbols = ["GOOD_SYM", "BAD_SYM"]
+    
+        per_sym_thr, no_edge = _run_per_symbol_sweep(
+            scores, sides, outcomes, realized_r,
+            n, sym_ids, symbols, 0.10,
+            min_trades_per_symbol=5,
+        )
+    
+        assert per_sym_thr[0] < float('inf')
+>       assert per_sym_thr[1] == float('inf')
+E       AssertionError: assert 0.30000000000000004 == inf
+E        +  where inf = float('inf')
+
+tests/test_v5_directional.py:527: AssertionError
+_____________ TestT010SymbolEmbedDim.test_model_creates_with_dim_8 _____________
+
+self = <test_v5_directional.TestT010SymbolEmbedDim object at 0x7efaf52149d0>
+
+    @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
+    def test_model_creates_with_dim_8(self):
+        from models.v5_forecaster import V5Forecaster, V5ForecasterConfig
+>       cfg = V5ForecasterConfig(
+            n_features=50, n_symbols=7, symbol_embed_dim=8,
+        )
+E       TypeError: V5ForecasterConfig.__init__() got an unexpected keyword argument 'n_features'
+
+tests/test_v5_directional.py:625: TypeError
+___________ TestT010SymbolEmbedDim.test_model_backward_compat_dim_4 ____________
+
+self = <test_v5_directional.TestT010SymbolEmbedDim object at 0x7efaf5214b00>
+
+    @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
+    def test_model_backward_compat_dim_4(self):
+        from models.v5_forecaster import V5Forecaster, V5ForecasterConfig
+>       cfg = V5ForecasterConfig(
+            n_features=50, n_symbols=7, symbol_embed_dim=4,
+        )
+E       TypeError: V5ForecasterConfig.__init__() got an unexpected keyword argument 'n_features'
+
+tests/test_v5_directional.py:635: TypeError
+____ TestT001LookaheadBiasQualityGate.test_ref_arrays_used_for_percentiles _____
+
+self = <test_v5_precision_audit.TestT001LookaheadBiasQualityGate object at 0x7efaf573b250>
+
+    def test_ref_arrays_used_for_percentiles(self):
+        test_arrays = _make_arrays(n=500, seed=1)
+        test_arrays['mu_R'][:] = 0.5
+        test_arrays['mae'][:] = 0.01
+        test_arrays['sigma'][:] = 0.01
+        test_arrays['p_trade'][:] = 0.99
+    
+        ref_arrays = _make_arrays(n=500, seed=2)
+        ref_arrays['mu_R'][:] = 0.01
+        ref_arrays['mae'][:] = 5.0
+        ref_arrays['sigma'][:] = 5.0
+        ref_arrays['p_trade'][:] = 0.1
+    
+        cfg = V5QualityGateConfig()
+    
+        mask_no_ref, _ = v5_quality_mask(test_arrays, cfg, epoch=999)
+        mask_with_ref, _ = v5_quality_mask(test_arrays, cfg, epoch=999, ref_arrays=ref_arrays)
+    
+        pass_no_ref = np.sum(mask_no_ref)
+        pass_with_ref = np.sum(mask_with_ref)
+>       assert pass_no_ref != pass_with_ref, \
+            "ref_arrays should change which bars pass the quality gate"
+E       AssertionError: ref_arrays should change which bars pass the quality gate
+E       assert np.int64(500) != np.int64(500)
+
+tests/test_v5_precision_audit.py:73: AssertionError
+____________ TestCapitalProtection.test_regime_gate_blocks_in_sweep ____________
+
+self = <test_side_conditional.TestCapitalProtection object at 0x7efaf529d810>
+
+    @pytest.mark.skipif(not _has_torch(), reason="torch not available")
+    def test_regime_gate_blocks_in_sweep(self):
+        """EMA200 gate in _run_v5_sweep should block counter-trend trades."""
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from train.v5_train import _run_v5_sweep
+    
+        n = 100
+        np.random.seed(42)
+        scores = np.random.rand(n) * 2
+        sides = np.ones(n, dtype=int)
+        sides[50:] = -1
+    
+        close_prices = np.linspace(100, 120, n)
+        ema200_value = 110.0
+        realized_r = np.random.randn(n) * 0.1
+        outcomes = np.ones(n, dtype=int)
+        r_long = realized_r.copy()
+        r_short = realized_r.copy()
+        out_long = outcomes.copy()
+        out_short = outcomes.copy()
+    
+>       res_no_gate, _, _, _ = _run_v5_sweep(
+        ^^^^^^^^^^^^^^^^^^^^
+            scores, sides, outcomes, realized_r,
+            n, 1, 2.0, 1.5,
+            r_long=r_long, r_short=r_short,
+            out_long=out_long, out_short=out_short,
+            close_prices=close_prices, ema200_regime_gate=False,
+        )
+E       ValueError: too many values to unpack (expected 4)
+
+tests/test_side_conditional.py:596: ValueError
+_____________ TestCapitalProtection.test_weekly_loss_cap_triggers ______________
+
+self = <test_side_conditional.TestCapitalProtection object at 0x7efaf529d950>
+
+    @pytest.mark.skipif(not _has_torch(), reason="torch not available")
+    def test_weekly_loss_cap_triggers(self):
+        """Weekly loss cap should stop trading when weekly R drops below threshold."""
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from train.v5_train import _run_v5_sweep
+    
+        n = 200
+        np.random.seed(99)
+        scores = np.ones(n) * 2.0
+        sides = np.ones(n, dtype=int)
+        realized_r = np.ones(n) * -0.5
+        outcomes = np.ones(n, dtype=int)
+        r_long = realized_r.copy()
+        r_short = realized_r.copy()
+        out_long = outcomes.copy()
+        out_short = outcomes.copy()
+    
+        base_ts = 1_700_000_000_000
+        timestamps = np.arange(n) * 900_000 + base_ts
+    
+>       res_no_cap, _, _, _ = _run_v5_sweep(
+        ^^^^^^^^^^^^^^^^^^^
+            scores, sides, outcomes, realized_r,
+            n, 1, 2.0, 1.5,
+            r_long=r_long, r_short=r_short,
+            out_long=out_long, out_short=out_short,
+            timestamps=timestamps, weekly_loss_cap=None,
+        )
+E       ValueError: too many values to unpack (expected 4)
+
+tests/test_side_conditional.py:638: ValueError
+__________ TestCapitalProtection.test_weekly_cap_resets_between_weeks __________
+
+self = <test_side_conditional.TestCapitalProtection object at 0x7efaf53a5590>
+
+    @pytest.mark.skipif(not _has_torch(), reason="torch not available")
+    def test_weekly_cap_resets_between_weeks(self):
+        """Kill-switch should reset at week boundaries."""
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from train.v5_train import _run_v5_sweep
+    
+        bars_per_week = 7 * 24 * 4
+        n = bars_per_week * 3
+        np.random.seed(123)
+        scores = np.ones(n) * 2.0
+        sides = np.ones(n, dtype=int)
+        realized_r = np.ones(n) * -0.3
+        realized_r[bars_per_week:bars_per_week + 50] = 0.5
+        outcomes = np.ones(n, dtype=int)
+        r_long = realized_r.copy()
+        r_short = realized_r.copy()
+        out_long = outcomes.copy()
+        out_short = outcomes.copy()
+    
+        base_ts = 1_700_000_000_000
+        timestamps = np.arange(n) * 900_000 + base_ts
+    
+>       res, _, _, _ = _run_v5_sweep(
+        ^^^^^^^^^^^^
+            scores, sides, outcomes, realized_r,
+            n, 1, 2.0, 1.5,
+            r_long=r_long, r_short=r_short,
+            out_long=out_long, out_short=out_short,
+            timestamps=timestamps, weekly_loss_cap=-2.0,
+        )
+E       ValueError: too many values to unpack (expected 4)
+
+tests/test_side_conditional.py:745: ValueError
+_________________ TestT003RegimeVector.test_regime_trend_range _________________
+
+self = <test_v5_features.TestT003RegimeVector object at 0x7efaf529e490>
+
+    def test_regime_trend_range(self):
+        df = _make_ohlcv(200)
+        from data.pipeline import FeatureEngineer
+>       fe = FeatureEngineer(symbols=['TEST'], timeframes=['15m'])
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+
+tests/test_v5_features.py:264: TypeError
+------------------------------ Captured log call -------------------------------
+WARNING  data.pipeline:pipeline.py:22 [PIPELINE] pywt (PyWavelets) is not installed — wavelet features will be zero-filled.  Install with: pip install PyWavelets
+______________ TestT003RegimeVector.test_regime_volatility_range _______________
+
+self = <test_v5_features.TestT003RegimeVector object at 0x7efaf529e5d0>
+
+    def test_regime_volatility_range(self):
+        df = _make_ohlcv(200)
+        from data.pipeline import FeatureEngineer
+>       fe = FeatureEngineer(symbols=['TEST'], timeframes=['15m'])
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+
+tests/test_v5_features.py:275: TypeError
+_______________ TestT003RegimeVector.test_regime_momentum_range ________________
+
+self = <test_v5_features.TestT003RegimeVector object at 0x7efaf5290510>
+
+    def test_regime_momentum_range(self):
+        df = _make_ohlcv(200)
+        from data.pipeline import FeatureEngineer
+>       fe = FeatureEngineer(symbols=['TEST'], timeframes=['15m'])
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+
+tests/test_v5_features.py:286: TypeError
+____________ TestT003RegimeVector.test_regime_session_sin_cos_range ____________
+
+self = <test_v5_features.TestT003RegimeVector object at 0x7efaf5290640>
+
+    def test_regime_session_sin_cos_range(self):
+        df = _make_ohlcv(200)
+        from data.pipeline import FeatureEngineer
+>       fe = FeatureEngineer(symbols=['TEST'], timeframes=['15m'])
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+
+tests/test_v5_features.py:297: TypeError
+_______________ TestT003RegimeVector.test_regime_features_count ________________
+
+self = <test_v5_features.TestT003RegimeVector object at 0x7efaf52943b0>
+
+    def test_regime_features_count(self):
+        df = _make_ohlcv(200)
+        from data.pipeline import FeatureEngineer
+>       fe = FeatureEngineer(symbols=['TEST'], timeframes=['15m'])
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+
+tests/test_v5_features.py:311: TypeError
+________ TestT003RegimeVector.test_regime_no_timestamp_defaults_session ________
+
+self = <test_v5_features.TestT003RegimeVector object at 0x7efaf53a6140>
+
+    def test_regime_no_timestamp_defaults_session(self):
+        df = _make_ohlcv(200)
+        df_no_ts = df.drop(columns=['timestamp'])
+        from data.pipeline import FeatureEngineer
+>       fe = FeatureEngineer(symbols=['TEST'], timeframes=['15m'])
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+
+tests/test_v5_features.py:323: TypeError
+_________ TestIntegrationWithTorch.test_full_pipeline_no_nan_explosion _________
+
+self = <test_v5_features.TestIntegrationWithTorch object at 0x7efaf529ec10>
+
+    def test_full_pipeline_no_nan_explosion(self):
+        df = _make_ohlcv(500)
+        from data.pipeline import FeatureEngineer
+>       fe = FeatureEngineer(symbols=['TEST'], timeframes=['15m'])
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+
+tests/test_v5_features.py:478: TypeError
+_____________ TestIntegrationWithTorch.test_enhanced_feature_count _____________
+
+self = <test_v5_features.TestIntegrationWithTorch object at 0x7efaf529ed50>
+
+    def test_enhanced_feature_count(self):
+        df = _make_ohlcv(200)
+        from data.pipeline import FeatureEngineer
+>       fe = FeatureEngineer(symbols=['TEST'], timeframes=['15m'])
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+
+tests/test_v5_features.py:498: TypeError
+___________ TestCorrBlocker.test_blocks_any_side_when_same_side_off ____________
+
+self = <test_correlation.TestCorrBlocker testMethod=test_blocks_any_side_when_same_side_off>
+
+    def test_blocks_any_side_when_same_side_off(self):
+        from train.v5_correlation import RollingDailyCorr, CorrBlocker, CorrConfig
+        tracker = RollingDailyCorr(['BTCUSDT', 'ETHUSDT'], window_days=30)
+        for i in range(15):
+            d = f"2024-01-{i+1:02d}"
+            tracker.record_trade('BTCUSDT', d, float(i))
+            tracker.record_trade('ETHUSDT', d, float(i) * 1.5)
+    
+        cfg = CorrConfig(enabled=True, threshold=0.60, same_side_only=False)
+        blocker = CorrBlocker(tracker, cfg)
+    
+        open_pos = {'BTCUSDT': 1}
+        result = blocker.should_block('ETHUSDT', -1, open_pos)
+>       self.assertTrue(result)
+E       AssertionError: False is not true
+
+tests/test_correlation.py:143: AssertionError
+_______________ TestCorrBlocker.test_blocks_high_corr_same_side ________________
+
+self = <test_correlation.TestCorrBlocker testMethod=test_blocks_high_corr_same_side>
+
+    def test_blocks_high_corr_same_side(self):
+        from train.v5_correlation import RollingDailyCorr, CorrBlocker, CorrConfig
+        tracker = RollingDailyCorr(['BTCUSDT', 'ETHUSDT'], window_days=30)
+        for i in range(15):
+            d = f"2024-01-{i+1:02d}"
+            tracker.record_trade('BTCUSDT', d, float(i))
+            tracker.record_trade('ETHUSDT', d, float(i) * 1.5)
+    
+        cfg = CorrConfig(enabled=True, threshold=0.60, same_side_only=True)
+        blocker = CorrBlocker(tracker, cfg)
+    
+        open_pos = {'BTCUSDT': 1}
+        result = blocker.should_block('ETHUSDT', 1, open_pos)
+>       self.assertTrue(result)
+E       AssertionError: False is not true
+
+tests/test_correlation.py:112: AssertionError
+____________ TestAdaptivePositionSizer.test_low_pwin_gives_min_mult ____________
+
+self = <test_v5_position_sizer.TestAdaptivePositionSizer object at 0x7efaf5291ba0>
+
+    def test_low_pwin_gives_min_mult(self):
+        cfg = AdaptiveSizingConfig(enabled=True, kelly_fraction=0.25, min_size_mult=0.25)
+        sizer = AdaptivePositionSizer(cfg)
+        mult = sizer.compute_size_multiplier(score=0.5, p_win=0.3, mu_r=-0.5, mfe=0.2, mae=1.0)
+>       assert mult == 0.25
+E       assert 0.9624999999999999 == 0.25
+
+tests/test_v5_position_sizer.py:35: AssertionError
+=============================== warnings summary ===============================
+tests/test_side_conditional.py: 2016 warnings
+  /mnt/data/gpu_trainer_current/gpu_trainer/tests/../train/v5_train.py:1509: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    trade_dates = np.array([datetime.utcfromtimestamp(ts / 1000) for ts in timestamps])
+
+tests/test_v5_position_sizer.py::TestADXStability::test_adx_no_nan_after_warmup
+tests/test_v5_position_sizer.py::TestADXStability::test_adx_no_nan_volatile_data
+  /mnt/data/gpu_trainer_current/gpu_trainer/tests/../train/v5_train.py:91: RuntimeWarning: invalid value encountered in divide
+    plus_di = np.where(atr > _EPS, 100 * plus_di_smooth / atr, 0)
+
+tests/test_v5_position_sizer.py::TestADXStability::test_adx_no_nan_after_warmup
+tests/test_v5_position_sizer.py::TestADXStability::test_adx_no_nan_volatile_data
+  /mnt/data/gpu_trainer_current/gpu_trainer/tests/../train/v5_train.py:92: RuntimeWarning: invalid value encountered in divide
+    minus_di = np.where(atr > _EPS, 100 * minus_di_smooth / atr, 0)
+
+tests/test_v5_position_sizer.py::TestADXStability::test_adx_no_nan_after_warmup
+tests/test_v5_position_sizer.py::TestADXStability::test_adx_no_nan_volatile_data
+  /mnt/data/gpu_trainer_current/gpu_trainer/tests/../train/v5_train.py:94: RuntimeWarning: invalid value encountered in divide
+    dx = np.where(di_sum > _EPS, 100 * np.abs(plus_di - minus_di) / di_sum, 0)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_v5_directional.py::TestT001DirectionalPenalty::test_penalty_scales_with_mu_over_risk - AssertionError: Score ratio should be ~1.0 (same mu/risk ratio): 5.0000
+assert np.float64(4.0) < 0.01
+ +  where np.float64(4.0) = abs((np.float64(5.0) - 1.0))
+FAILED tests/test_v5_directional.py::TestT001DirectionalPenalty::test_score_positive_when_p_side_above_breakeven - assert np.False_
+ +  where np.False_ = <function all at 0x7efbb676be70>(array([-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,\n       -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,\n       -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]) == 1)
+ +    where <function all at 0x7efbb676be70> = np.all
+FAILED tests/test_v5_directional.py::TestT001DirectionalPenalty::test_score_negative_when_p_side_below_breakeven - AssertionError: Score should be negative when p_side=0.233 < breakeven=0.333: 0.780000
+assert np.False_
+ +  where np.False_ = <function all at 0x7efbb676be70>(array([0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78,\n       0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0....8,\n       0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78, 0.78,\n       0.78, 0.78, 0.78, 0.78, 0.78, 0.78]) < 0)
+ +    where <function all at 0x7efbb676be70> = np.all
+FAILED tests/test_v5_directional.py::TestT007PerSymbolThreshold::test_per_symbol_sweep_no_edge_symbol - AssertionError: assert 0.30000000000000004 == inf
+ +  where inf = float('inf')
+FAILED tests/test_v5_directional.py::TestT010SymbolEmbedDim::test_model_creates_with_dim_8 - TypeError: V5ForecasterConfig.__init__() got an unexpected keyword argument 'n_features'
+FAILED tests/test_v5_directional.py::TestT010SymbolEmbedDim::test_model_backward_compat_dim_4 - TypeError: V5ForecasterConfig.__init__() got an unexpected keyword argument 'n_features'
+FAILED tests/test_v5_precision_audit.py::TestT001LookaheadBiasQualityGate::test_ref_arrays_used_for_percentiles - AssertionError: ref_arrays should change which bars pass the quality gate
+assert np.int64(500) != np.int64(500)
+FAILED tests/test_side_conditional.py::TestCapitalProtection::test_regime_gate_blocks_in_sweep - ValueError: too many values to unpack (expected 4)
+FAILED tests/test_side_conditional.py::TestCapitalProtection::test_weekly_loss_cap_triggers - ValueError: too many values to unpack (expected 4)
+FAILED tests/test_side_conditional.py::TestCapitalProtection::test_weekly_cap_resets_between_weeks - ValueError: too many values to unpack (expected 4)
+FAILED tests/test_v5_features.py::TestT003RegimeVector::test_regime_trend_range - TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+FAILED tests/test_v5_features.py::TestT003RegimeVector::test_regime_volatility_range - TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+FAILED tests/test_v5_features.py::TestT003RegimeVector::test_regime_momentum_range - TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+FAILED tests/test_v5_features.py::TestT003RegimeVector::test_regime_session_sin_cos_range - TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+FAILED tests/test_v5_features.py::TestT003RegimeVector::test_regime_features_count - TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+FAILED tests/test_v5_features.py::TestT003RegimeVector::test_regime_no_timestamp_defaults_session - TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+FAILED tests/test_v5_features.py::TestIntegrationWithTorch::test_full_pipeline_no_nan_explosion - TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+FAILED tests/test_v5_features.py::TestIntegrationWithTorch::test_enhanced_feature_count - TypeError: FeatureEngineer.__init__() got an unexpected keyword argument 'symbols'
+FAILED tests/test_correlation.py::TestCorrBlocker::test_blocks_any_side_when_same_side_off - AssertionError: False is not true
+FAILED tests/test_correlation.py::TestCorrBlocker::test_blocks_high_corr_same_side - AssertionError: False is not true
+FAILED tests/test_v5_position_sizer.py::TestAdaptivePositionSizer::test_low_pwin_gives_min_mult - assert 0.9624999999999999 == 0.25
+21 failed, 275 passed, 2022 warnings in 12.91s
