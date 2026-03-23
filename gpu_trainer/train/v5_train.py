@@ -914,7 +914,12 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999,
 
     Returns: boolean mask, diagnostics dict
     """
-    ref = ref_arrays if ref_arrays is not None else arrays
+    # When ref_arrays is supplied, ALL adaptive thresholds are computed exclusively from
+    # ref_arrays (no fallback to the current-window arrays). This prevents lookahead
+    # bias in forward-test mode where val-set statistics would inflate thresholds.
+    using_ref = ref_arrays is not None
+    ref = ref_arrays if using_ref else arrays
+    threshold_source = 'ref_arrays' if using_ref else 'current_arrays'
     n = len(arrays['mu_R'])
     min_pass_rate = 0.10
 
@@ -923,12 +928,14 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999,
         return np.ones(n, dtype=bool), {
             'total': n, 'final': n, 'warmup_bypass': True,
             'passed_sigma': n, 'passed_mae': n, 'passed_mu': n, 'passed_ptrade': n,
+            'threshold_source': threshold_source,
         }
 
     sigma_pass = np.ones(n, dtype=bool)
     adaptive_sigma = cfg.sigma_max
     if arrays['sigma'] is not None:
-        ref_sigma = ref['sigma'] if ref.get('sigma') is not None else arrays['sigma']
+        # Strictly use ref['sigma'] when ref_arrays provided, else fall back to current arrays.
+        ref_sigma = ref['sigma'] if (using_ref and ref.get('sigma') is not None) else arrays['sigma']
         finite_sigma = ref_sigma[np.isfinite(ref_sigma)]
         if len(finite_sigma) > 100:
             adaptive_sigma = min(cfg.sigma_max, float(np.percentile(finite_sigma, 90)))
@@ -1009,6 +1016,7 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999,
         'adaptive_mae': adaptive_mae,
         'adaptive_mu_min': adaptive_mu_min,
         'adaptive_ptrade': adaptive_ptrade,
+        'threshold_source': threshold_source,
     }
 
     log.info("[V5_QUAL_DIAG] total=%d passed_sigma=%d passed_mae=%d "
