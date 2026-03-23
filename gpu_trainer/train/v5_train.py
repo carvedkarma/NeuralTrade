@@ -934,11 +934,21 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999,
     sigma_pass = np.ones(n, dtype=bool)
     adaptive_sigma = cfg.sigma_max
     if arrays['sigma'] is not None:
-        # Strictly use ref['sigma'] when ref_arrays provided, else fall back to current arrays.
-        ref_sigma = ref['sigma'] if (using_ref and ref.get('sigma') is not None) else arrays['sigma']
-        finite_sigma = ref_sigma[np.isfinite(ref_sigma)]
-        if len(finite_sigma) > 100:
-            adaptive_sigma = min(cfg.sigma_max, float(np.percentile(finite_sigma, 90)))
+        if using_ref:
+            # Strict ref-only contract: when ref_arrays is supplied, the adaptive threshold
+            # MUST come from ref_arrays['sigma']. If ref_arrays has no 'sigma' field, do
+            # NOT fall back to current-window statistics — that would introduce lookahead
+            # bias. Instead leave adaptive_sigma at the cfg.sigma_max config default.
+            ref_sigma_data = ref.get('sigma')
+            if ref_sigma_data is not None:
+                finite_sigma = ref_sigma_data[np.isfinite(ref_sigma_data)]
+                if len(finite_sigma) > 100:
+                    adaptive_sigma = min(cfg.sigma_max, float(np.percentile(finite_sigma, 90)))
+            # else: ref provided but has no sigma → keep cfg.sigma_max (conservative default)
+        else:
+            finite_sigma = arrays['sigma'][np.isfinite(arrays['sigma'])]
+            if len(finite_sigma) > 100:
+                adaptive_sigma = min(cfg.sigma_max, float(np.percentile(finite_sigma, 90)))
         sigma_pass = np.isfinite(arrays['sigma']) & (arrays['sigma'] <= adaptive_sigma)
 
     ref_mae = ref['mae'] if ref is not None else arrays['mae']
