@@ -214,6 +214,9 @@ class V5ForwardTestConfig:
     mu_debias_alpha: float = 0.01
     min_trades: int = 20
     per_symbol_r_kill: Optional[float] = None
+    kill_recovery_bars: int = 48           # bars of cooldown before recovery check
+    kill_recovery_r_threshold: float = 2.0 # R improvement above kill floor to re-enable
+    kill_hysteresis_r: float = 1.0         # extra buffer above threshold to prevent rapid re-kill
     per_symbol_thresholds: Optional[dict] = None
     soft_gate_floor: bool = True
     weekly_cap_dynamic: bool = False
@@ -2088,6 +2091,19 @@ def run_v5_forward_test(
     """
     from data.common import generate_v5_sweep_outcomes
 
+    try:
+        from config.shared_v5_trade_config import load_shared_defaults as _load_shared
+        _shared = _load_shared()
+        log.info(
+            "[V5_FWD] Shared config loaded — "
+            "score_threshold=%s  min_p_side=%s  corr_thresh=%s  "
+            "kill_recovery_bars=%s  size_floor=%s",
+            _shared.score_threshold, _shared.min_p_side, _shared.corr_thresh,
+            _shared.kill_recovery_bars, _shared.size_floor,
+        )
+    except Exception as _cfg_err:
+        log.debug("[V5_FWD] Shared config not loaded: %s", _cfg_err)
+
     model.eval()
 
     if use_v6:
@@ -2604,6 +2620,7 @@ def run_v5_forward_test(
 
     sym_cumulative_r = defaultdict(float)
     killed_symbols = set()
+    symbol_kill_bar: dict = {}    # {sym: bar_index_when_killed}
     per_sym_kill_blocked = 0
 
     open_positions: dict = {}
@@ -2737,25 +2754,39 @@ def run_v5_forward_test(
         if config.per_symbol_r_kill is not None and test_sym_ids is not None:
             sym_name_kill = sym_id_to_name.get(int(test_sym_ids[idx]), None)
             if sym_name_kill and sym_name_kill in killed_symbols:
-                if config.per_symbol_soft_kill:
-                    cum_r = sym_cumulative_r[sym_name_kill]
-                    kill_floor = config.per_symbol_r_kill
-                    half_floor = kill_floor * 0.5
-                    if cum_r <= kill_floor:
-                        mult = 0.1
-                    elif cum_r <= half_floor:
-                        frac = (cum_r - kill_floor) / (half_floor - kill_floor)
-                        mult = 0.1 + frac * 0.65
+                cum_r = sym_cumulative_r[sym_name_kill]
+                kill_floor = config.per_symbol_r_kill
+                bars_since_kill = idx - symbol_kill_bar.get(sym_name_kill, idx)
+                recovery_r_needed = kill_floor + config.kill_recovery_r_threshold + config.kill_hysteresis_r
+                if (bars_since_kill >= config.kill_recovery_bars
+                        and cum_r >= recovery_r_needed):
+                    killed_symbols.discard(sym_name_kill)
+                    symbol_kill_bar.pop(sym_name_kill, None)
+                    log.info(
+                        "[V5_GATE] Symbol %s RE-ENABLED after %d bars cooldown "
+                        "cumR=%.2f >= recovery_threshold=%.2f (kill_floor=%.2f + "
+                        "recovery=%.2f + hysteresis=%.2f)",
+                        sym_name_kill, bars_since_kill, cum_r, recovery_r_needed,
+                        kill_floor, config.kill_recovery_r_threshold, config.kill_hysteresis_r,
+                    )
+                elif sym_name_kill in killed_symbols:
+                    if config.per_symbol_soft_kill:
+                        half_floor = kill_floor * 0.5
+                        if cum_r <= kill_floor:
+                            mult = 0.1
+                        elif cum_r <= half_floor:
+                            frac = (cum_r - kill_floor) / (half_floor - kill_floor)
+                            mult = 0.1 + frac * 0.65
+                        else:
+                            frac = min(1.0, (cum_r - half_floor) / abs(half_floor)) if half_floor != 0 else 1.0
+                            mult = 0.75 + frac * 0.25
+                        soft_gate_sizing[idx] = soft_gate_sizing.get(idx, 1.0) * mult
+                        gate_blocks["per_symbol_kill_soft"] += 1
                     else:
-                        frac = min(1.0, (cum_r - half_floor) / abs(half_floor)) if half_floor != 0 else 1.0
-                        mult = 0.75 + frac * 0.25
-                    soft_gate_sizing[idx] = soft_gate_sizing.get(idx, 1.0) * mult
-                    gate_blocks["per_symbol_kill_soft"] += 1
-                else:
-                    per_sym_kill_blocked += 1
-                    gate_blocks["per_symbol_kill"] += 1
-                    gate_blocked_r["per_symbol_kill"].append(_oracle_r(idx))
-                    continue
+                        per_sym_kill_blocked += 1
+                        gate_blocks["per_symbol_kill"] += 1
+                        gate_blocked_r["per_symbol_kill"].append(_oracle_r(idx))
+                        continue
 
         if adx_values is not None:
             adx_val = adx_values[idx]
@@ -2898,11 +2929,12 @@ def run_v5_forward_test(
             side_val = int(sides[idx])
             open_by_sym = {v['symbol']: v['side'] for k, v in open_positions.items()
                            if v['symbol'] != sym_name}
-            if sym_name and corr_blocker.should_block(sym_name, side_val, open_by_sym):
-                corr_blocked += 1
-                gate_blocks["correlation"] += 1
-                gate_blocked_r["correlation"].append(_oracle_r(idx))
-                continue
+            if sym_name:
+                corr_mult = corr_blocker.compute_size_penalty(sym_name, side_val, open_by_sym)
+                if corr_mult < 1.0:
+                    corr_blocked += 1
+                    gate_blocks["correlation"] += 1
+                    soft_gate_sizing[idx] = soft_gate_sizing.get(idx, 1.0) * corr_mult
 
         if daily_tracker is not None and test_timestamps is not None:
             date_str = datetime.utcfromtimestamp(
@@ -3154,8 +3186,17 @@ def run_v5_forward_test(
                 if kill_sym_name:
                     sym_cumulative_r[kill_sym_name] += post_trade_r
                     if sym_cumulative_r[kill_sym_name] <= config.per_symbol_r_kill:
-                        killed_symbols.add(kill_sym_name)
-                        log.warning(f"[V5_GATE] Symbol {kill_sym_name} killed at cumR={sym_cumulative_r[kill_sym_name]:.2f}R (floor={config.per_symbol_r_kill}R)")
+                        if kill_sym_name not in killed_symbols:
+                            killed_symbols.add(kill_sym_name)
+                            symbol_kill_bar[kill_sym_name] = idx
+                            log.warning(
+                                "[V5_GATE] Symbol %s KILLED at cumR=%.2f (floor=%.2f) "
+                                "bar=%d — recovery requires +%.1fR above floor after %d bars cooldown",
+                                kill_sym_name, sym_cumulative_r[kill_sym_name],
+                                config.per_symbol_r_kill, idx,
+                                config.kill_recovery_r_threshold + config.kill_hysteresis_r,
+                                config.kill_recovery_bars,
+                            )
 
             if config.quality_gate_enabled and post_r_valid:
                 side_val = int(sides[idx])
@@ -3581,6 +3622,8 @@ def run_v5_forward_test(
             log.info(f"[V5_SIZE] Sizing comparison: "
                      f"unsized={np.sum(t_r_unsized_valid):.2f}R → sized={np.sum(t_r_valid):.2f}R "
                      f"(impact: {np.sum(t_r_valid) - np.sum(t_r_unsized_valid):+.2f}R)")
+        if position_sizer is not None:
+            position_sizer.log_fold_summary()
         if daily_tracker:
             dt_diag = daily_tracker.get_diagnostics()
             log.info(f"[V5_GATE] Daily tracker: {dt_diag['days_killed']} days killed, "

@@ -19,7 +19,18 @@ from .cnn import ResNetPrice, InceptionNet, WaveNet
 from .vae import MarketVAE, BetaVAE, ConditionalVAE
 from .gnn import CrossAssetGNN, TemporalGNN
 from .rl_agent import PPOAgent, TradingEnvironment, ActorCritic
-from .sentiment import SentimentEncoder, MultiModalSentiment, SentimentPricePredictor
+try:
+    from .sentiment import SentimentEncoder, MultiModalSentiment, SentimentPricePredictor
+    _HAVE_SENTIMENT = True
+except ImportError:
+    _HAVE_SENTIMENT = False
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "[MODELS] sentiment sub-module unavailable (likely missing 'transformers' or "
+        "'torch' dependency).  SentimentEncoder / MultiModalSentiment / "
+        "SentimentPricePredictor will not be exported.  "
+        "Install with: pip install transformers"
+    )
 from .ensemble import MetaLearner, DeepEnsemble, MasterEnsemble, OnlineLearningEnsemble
 from .multihead import (
     MultiHeadOutput, MultiHeadTransformer, MultiScaleTransformer, MultiHeadTFT, MultiHeadLSTM, 
@@ -62,10 +73,9 @@ __all__ = [
     "TradingEnvironment",
     "ActorCritic",
     
-    # Sentiment
-    "SentimentEncoder",
-    "MultiModalSentiment",
-    "SentimentPricePredictor",
+    # Sentiment (conditional — only present when transformers is installed)
+    *( ["SentimentEncoder", "MultiModalSentiment", "SentimentPricePredictor"]
+       if _HAVE_SENTIMENT else [] ),
     
     # Ensemble
     "MetaLearner",

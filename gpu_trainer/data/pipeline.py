@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 import pandas as pd
 import torch
@@ -10,14 +11,23 @@ from datetime import datetime, timedelta
 import json
 import gzip
 from pathlib import Path
-import pywt
+
+logger = logging.getLogger(__name__)
+
+try:
+    import pywt
+    HAVE_PYWT = True
+except ImportError:
+    HAVE_PYWT = False
+    logger.warning(
+        "[PIPELINE] pywt (PyWavelets) is not installed — wavelet features will be "
+        "zero-filled.  Install with: pip install PyWavelets"
+    )
+
 from scipy import stats
 from sklearn.preprocessing import StandardScaler, RobustScaler
 import joblib
 from tqdm import tqdm
-import logging
-
-logger = logging.getLogger(__name__)
 
 class BinanceDataFetcher:
     BINANCE_VISION_URL = "https://data-api.binance.vision/api/v3"
@@ -1309,6 +1319,14 @@ class FeatureEngineer:
         return tr.rolling(period, min_periods=1).mean()
     
     def compute_wavelet_features(self, prices: np.ndarray) -> Dict[str, np.ndarray]:
+        if not HAVE_PYWT:
+            n = len(prices)
+            zeros = np.zeros(n)
+            features: Dict[str, np.ndarray] = {"trend": zeros.copy(), "noise": zeros.copy()}
+            for i in range(1, self.wavelet_level + 1):
+                features[f"cycle_{i}"] = zeros.copy()
+            return features
+
         coeffs = pywt.wavedec(prices, self.wavelet, level=self.wavelet_level)
         
         trend = pywt.waverec([coeffs[0]] + [np.zeros_like(c) for c in coeffs[1:]], self.wavelet)

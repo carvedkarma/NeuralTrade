@@ -1060,6 +1060,31 @@ class LiveRunner:
         from trade_manager import TradeManager
         self.trade_manager = TradeManager()
 
+        try:
+            from config.shared_v5_trade_config import load_shared_defaults
+            _shared = load_shared_defaults()
+        except Exception:
+            _shared = None
+
+        self.halt_on_data_staleness: bool = _shared.halt_on_data_staleness if _shared else True
+        self.max_data_staleness_seconds: float = _shared.max_data_staleness_seconds if _shared else 300.0
+        self.halt_on_api_errors: bool = _shared.halt_on_api_errors if _shared else True
+        self.max_consecutive_api_errors: int = _shared.max_consecutive_api_errors if _shared else 5
+        self.max_daily_loss_r: Optional[float] = _shared.max_daily_loss_r if _shared else None
+
+        self._consecutive_api_errors: int = 0
+        self._daily_closed_r: float = 0.0
+        self._daily_r_date: str = ""
+        self._last_candle_time: float = 0.0
+
+        if self.execution_mode == "live" and self.execution is None:
+            log.warning(
+                "[LIVE_RUNNER] WARNING: execution_mode='live' but NO real exchange adapter "
+                "is wired (self.execution is None).  No real orders will be placed.  "
+                "All 'LIVE_OPEN' log lines reflect signal-only mode — they are NOT real trades.  "
+                "Wire an execution adapter via execution_module= to place real orders."
+            )
+
     @staticmethod
     def _detect_gpu_self_url() -> Optional[str]:
         """Detect the GPU trainer's own public URL (e.g. ngrok tunnel)."""
@@ -1158,6 +1183,19 @@ class LiveRunner:
         cost_r = (cost_bps / 10000) * 2 / (original_risk_abs / pos.entry_price) if original_risk_abs > 0 else 0.0
         net_r = gross_r - cost_r
         sized_r = net_r * pos.size_mult
+
+        today_str = datetime.utcnow().strftime('%Y-%m-%d')
+        if today_str != self._daily_r_date:
+            self._daily_closed_r = 0.0
+            self._daily_r_date = today_str
+        self._daily_closed_r += net_r
+        if (self.max_daily_loss_r is not None
+                and self._daily_closed_r <= -abs(self.max_daily_loss_r)):
+            log.warning(
+                "[HALT] Daily loss limit reached: daily_r=%.2f <= -%.2f — "
+                "new entries will be BLOCKED until next UTC day",
+                self._daily_closed_r, abs(self.max_daily_loss_r),
+            )
 
         log.info(f"[R_CHECK] sym={pos.symbol} side={pos.side} entry={pos.entry_price:.2f} "
                  f"exit={exit_price:.2f} initial_sl={initial_sl:.2f} orig_risk_abs={original_risk_abs:.4f} "
@@ -1636,8 +1674,13 @@ class LiveRunner:
         highs = {}
         lows = {}
         candle_dfs = {}
+        _cycle_fetch_ok = False
         for symbol in self.symbols:
-            df = _fetch_candles_for_symbol(self.fetcher, symbol, self.interval, limit=self.limit_15m)
+            try:
+                df = _fetch_candles_for_symbol(self.fetcher, symbol, self.interval, limit=self.limit_15m)
+            except Exception as _fetch_err:
+                log.warning("[HALT_TRACK] fetch error for %s: %s", symbol, _fetch_err)
+                df = None
             if df is not None and len(df) > 0:
                 prices[symbol] = float(df.iloc[-1]['close'])
                 if 'high' in df.columns:
@@ -1645,6 +1688,24 @@ class LiveRunner:
                 if 'low' in df.columns:
                     lows[symbol] = float(df.iloc[-1]['low'])
                 candle_dfs[symbol] = df
+                _cycle_fetch_ok = True
+                if 'timestamp' in df.columns:
+                    try:
+                        last_ts = float(df.iloc[-1]['timestamp'])
+                        self._last_candle_time = (last_ts / 1000.0
+                                                   if last_ts > 1e10 else last_ts)
+                    except Exception:
+                        self._last_candle_time = time.time()
+                else:
+                    self._last_candle_time = time.time()
+            else:
+                log.warning("[HALT_TRACK] No candle data returned for %s", symbol)
+        if _cycle_fetch_ok:
+            self._consecutive_api_errors = 0
+        else:
+            self._consecutive_api_errors += 1
+            log.warning("[HALT_TRACK] consecutive_api_errors=%d (all symbols failed this cycle)",
+                        self._consecutive_api_errors)
         if self.execution_mode in ("paper", "live") and self.record_trades:
             self.portfolio.check_exits(prices, highs=highs, lows=lows)
             self._run_trade_manager(prices, highs, lows)
@@ -2109,6 +2170,39 @@ class LiveRunner:
             'features_df': features_df,
         }
 
+    def _check_halt_conditions(self, symbol: str) -> Optional[str]:
+        """Return a halt reason string if any pre-trade halt condition is active, else None.
+
+        Halt conditions:
+          1. Data staleness — last candle timestamp is older than max_data_staleness_seconds.
+          2. Consecutive API errors — too many consecutive failures fetching data.
+          3. Daily loss R limit — cumulative closed R for today exceeded max_daily_loss_r.
+
+        When halted, new entries are blocked but existing position management continues.
+        """
+        now_ts = time.time()
+        today_str = datetime.utcnow().strftime('%Y-%m-%d')
+        if today_str != self._daily_r_date:
+            self._daily_closed_r = 0.0
+            self._daily_r_date = today_str
+
+        if self.halt_on_data_staleness and self._last_candle_time > 0:
+            age = now_ts - self._last_candle_time
+            if age > self.max_data_staleness_seconds:
+                return (f"DATA_STALE last_candle_age={age:.0f}s > "
+                        f"max={self.max_data_staleness_seconds:.0f}s")
+
+        if self.halt_on_api_errors and self._consecutive_api_errors >= self.max_consecutive_api_errors:
+            return (f"API_ERRORS consecutive={self._consecutive_api_errors} >= "
+                    f"max={self.max_consecutive_api_errors}")
+
+        if (self.max_daily_loss_r is not None
+                and self._daily_closed_r <= -abs(self.max_daily_loss_r)):
+            return (f"DAILY_LOSS_LIMIT cumulative_r={self._daily_closed_r:.2f} <= "
+                    f"-{abs(self.max_daily_loss_r):.2f}")
+
+        return None
+
     def _execute_candidate(self, candidate: dict):
         """Execute a trade candidate using V5 composite scoring.
 
@@ -2118,6 +2212,15 @@ class LiveRunner:
         - live: create Position, POST trade, place exchange orders
         """
         from portfolio import Position
+
+        halt_reason = self._check_halt_conditions(candidate.get('symbol', ''))
+        if halt_reason:
+            log.warning(
+                "[HALT] New entry BLOCKED for %s — halt_reason=%s "
+                "(existing positions continue to be managed)",
+                candidate.get('symbol', '?'), halt_reason,
+            )
+            return
 
         symbol = candidate['symbol']
         side = candidate['side']
@@ -2243,8 +2346,13 @@ class LiveRunner:
             log.info(f"  [PAPER_OPEN] V5 {symbol} {side} @ {entry_price:.2f} "
                      f"| v5_score={v5_info.get('v5_score','?')}")
         elif self.execution_mode == "live":
-            log.info(f"  [LIVE_OPEN] placing_order V5 {symbol} {side} @ {entry_price:.2f} "
-                     f"| v5_score={v5_info.get('v5_score','?')}")
+            if self.execution is not None:
+                log.info(f"  [LIVE_OPEN] real_order_sent V5 {symbol} {side} @ {entry_price:.2f} "
+                         f"| v5_score={v5_info.get('v5_score','?')}")
+            else:
+                log.info(f"  [LIVE_SIGNAL_ONLY] no_adapter_wired V5 {symbol} {side} @ {entry_price:.2f} "
+                         f"| v5_score={v5_info.get('v5_score','?')} "
+                         f"[WARNING: execution_mode=live but no real exchange adapter — no order placed]")
         self._push_prediction(prediction)
 
     def _print_summary(self):

@@ -1,11 +1,22 @@
 """v5.0.8+ Adaptive Position Sizing & Dynamic Risk Scaling.
 
 Provides:
-  - AdaptivePositionSizer: Kelly-inspired sizing from model outputs (mu_R, p_trade, mfe/mae)
+  - AdaptivePositionSizer: Score-percentile-normalized sizing (Kelly used as quality modifier)
   - RegimeScaler:          ATR-ratio + EMA-trend + rolling-equity regime detection → risk multiplier
   - DailyLossTracker:      Per-day and per-symbol daily R budget enforcement
   - TrailingEquityStop:    Pauses trading when equity drops too far from peak
   - SizingDiagnostics:     Collects stats for fold-level reporting
+
+Fix (Task #30): The old fractional-Kelly formula was mathematically pinned to min_size_mult
+for all realistic WR/RR combinations (e.g. WR=30%, b=3 → kelly_f=0.067 → frac_kelly=0.017
+→ clamped to 0.25).  The new approach uses score-percentile-normalized sizing:
+  - Maintain a rolling buffer of observed scores (configurable window).
+  - Compute the current score's percentile within that buffer.
+  - Map percentile → [min_size_mult, max_size_mult] linearly.
+  - Apply Kelly as a quality modifier: positive Kelly → mild boost (capped at 1.5×);
+    negative Kelly → mild penalty (floored at 0.7×).
+  - Log per-trade diagnostics including p_win, raw_kelly_f, score_pct, pre_floor_mult,
+    and final_size_mult.
 """
 
 import logging
@@ -20,9 +31,10 @@ log = logging.getLogger(__name__)
 @dataclass
 class AdaptiveSizingConfig:
     enabled: bool = False
-    kelly_fraction: float = 0.25
+    kelly_fraction: float = 0.25       # kept for backward-compat; used only as quality hint
     max_size_mult: float = 2.5
     min_size_mult: float = 0.25
+    score_buffer_size: int = 200       # rolling window for score-percentile estimation
 
 
 @dataclass
@@ -46,26 +58,40 @@ class LossManagementConfig:
 
 
 class AdaptivePositionSizer:
-    """Kelly-inspired position sizing from model predictions.
+    """Score-percentile-normalized position sizing from model predictions.
 
-    Uses fractional Kelly criterion:
-      f* = kelly_fraction * (p * b - q) / b
-    where:
-      p = estimated win probability (from action head)
-      q = 1 - p
-      b = estimated reward/risk ratio (mfe/mae)
+    OLD FORMULA (broken — pinned to min_size_mult for all realistic WR values):
+      kelly_f = (p * b - q) / b
+      mult = kelly_fraction * kelly_f   →  ≈ 0.017 for WR=30%, b=3  →  clamped to 0.25
 
-    The result is clamped to [min_size_mult, max_size_mult].
+    NEW FORMULA (Task #30 fix):
+      1. Maintain a rolling score buffer of the last `score_buffer_size` trades.
+      2. Compute score_pct = percentile rank of the current score in that buffer.
+         (A high-conviction trade with a top-decile score gets score_pct ≈ 0.90.)
+      3. Map score_pct → raw size:
+             pct_mult = min_size_mult + score_pct * (max_size_mult - min_size_mult)
+      4. Compute raw Kelly for a quality modifier:
+             raw_kelly_f = (p * b - q) / b
+             kelly_quality = clip(1.0 + raw_kelly_f * 0.5, 0.70, 1.50)
+      5. pre_floor_mult = pct_mult * kelly_quality
+      6. Clamp to [min_size_mult, max_size_mult].
+
+    Per-trade diagnostics are logged at DEBUG level; a fold summary is emitted
+    by get_diagnostics() with min/mean/max/std of final_size_mult.
     """
 
     def __init__(self, config: AdaptiveSizingConfig):
         self.config = config
         self.sizing_history: List[float] = []
+        self._score_buffer: List[float] = []
+        self._trade_count: int = 0
 
     def compute_size_multiplier(self, score: float, p_win: float,
                                  mu_r: float, mfe: float, mae: float) -> float:
         if not self.config.enabled:
             return 1.0
+
+        self._trade_count += 1
 
         p = max(min(p_win, 0.99), 0.01)
         q = 1.0 - p
@@ -73,21 +99,54 @@ class AdaptivePositionSizer:
         safe_mae = max(mae, 0.01)
         b = max(mfe / safe_mae, 0.01)
 
-        kelly_f = (p * b - q) / b
+        raw_kelly_f = (p * b - q) / b
 
-        if kelly_f <= 0:
-            mult = self.config.min_size_mult
+        self._score_buffer.append(score)
+        if len(self._score_buffer) > self.config.score_buffer_size:
+            self._score_buffer.pop(0)
+
+        if len(self._score_buffer) >= 5:
+            score_pct = float(np.mean([s <= score for s in self._score_buffer]))
         else:
-            mult = self.config.kelly_fraction * kelly_f
+            score_pct = 0.5
 
-            confidence_boost = min(abs(score) / 2.0, 1.0)
-            mult *= (1.0 + 0.5 * confidence_boost)
+        pct_mult = (self.config.min_size_mult
+                    + score_pct * (self.config.max_size_mult - self.config.min_size_mult))
 
-        mult = max(self.config.min_size_mult,
-                   min(self.config.max_size_mult, mult))
+        kelly_quality = float(np.clip(1.0 + raw_kelly_f * 0.5, 0.70, 1.50))
+
+        pre_floor_mult = pct_mult * kelly_quality
+
+        mult = float(np.clip(pre_floor_mult,
+                             self.config.min_size_mult, self.config.max_size_mult))
 
         self.sizing_history.append(mult)
+
+        if self._trade_count % 10 == 1 or mult > self.config.min_size_mult * 1.5:
+            log.debug(
+                "[SIZE_DIAG] trade=%d p_win=%.3f raw_kelly_f=%.4f score=%.4f "
+                "score_pct=%.3f pct_mult=%.3f kelly_quality=%.3f "
+                "pre_floor_mult=%.3f final_size_mult=%.3f",
+                self._trade_count, p_win, raw_kelly_f, score,
+                score_pct, pct_mult, kelly_quality, pre_floor_mult, mult,
+            )
+
         return mult
+
+    def log_fold_summary(self):
+        """Emit a fold-level sizing summary to the INFO log."""
+        if not self.sizing_history:
+            log.info("[SIZE_FOLD] No sized trades this fold.")
+            return
+        arr = np.array(self.sizing_history)
+        log.info(
+            "[SIZE_FOLD] final_size_mult — trades=%d  min=%.3f  mean=%.3f  "
+            "max=%.3f  std=%.3f  p10=%.3f  p90=%.3f  pct_above_1x=%.1f%%",
+            len(arr), float(np.min(arr)), float(np.mean(arr)),
+            float(np.max(arr)), float(np.std(arr)),
+            float(np.percentile(arr, 10)), float(np.percentile(arr, 90)),
+            float(np.mean(arr > 1.0) * 100),
+        )
 
     def get_diagnostics(self) -> dict:
         if not self.sizing_history:
