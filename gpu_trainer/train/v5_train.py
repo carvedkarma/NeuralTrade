@@ -2930,6 +2930,8 @@ def run_v5_forward_test(
             open_by_sym = {v['symbol']: v['side'] for k, v in open_positions.items()
                            if v['symbol'] != sym_name}
             if sym_name:
+                n_syms = max(len(sym_id_to_name), 1)
+                corr_blocker.overlap_ratio = len(open_positions) / n_syms
                 corr_mult = corr_blocker.compute_size_penalty(sym_name, side_val, open_by_sym)
                 if corr_mult < 1.0:
                     corr_blocked += 1
@@ -4021,6 +4023,9 @@ def run_v5_walk_forward(
     v6_aux_weight=0.1,
     v6_confidence_weight=0.15,
     v6_moe_balance_weight=0.05,
+    kill_recovery_bars=None,
+    kill_recovery_r_threshold=None,
+    kill_hysteresis_r=None,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -4031,6 +4036,31 @@ def run_v5_walk_forward(
 
     from train.training_push import TrainingProgressPusher
     pusher = TrainingProgressPusher(replit_url=replit_url)
+
+    try:
+        from config.shared_v5_trade_config import load_shared_defaults as _load_wf_shared
+        _wf_shared = _load_wf_shared()
+        if kill_recovery_bars is None:
+            kill_recovery_bars = _wf_shared.kill_recovery_bars
+        if kill_recovery_r_threshold is None:
+            kill_recovery_r_threshold = _wf_shared.kill_recovery_r_threshold
+        if kill_hysteresis_r is None:
+            kill_hysteresis_r = _wf_shared.kill_hysteresis_r
+        log.info(
+            "[V5_WF] Shared config applied — kill_recovery_bars=%d "
+            "kill_recovery_r_threshold=%.2f kill_hysteresis_r=%.2f "
+            "min_size_mult=%.2f max_size_mult=%.2f size_floor=%.2f",
+            kill_recovery_bars, kill_recovery_r_threshold, kill_hysteresis_r,
+            _wf_shared.min_size_mult, _wf_shared.max_size_mult, _wf_shared.size_floor,
+        )
+    except Exception as _wf_cfg_err:
+        log.debug("[V5_WF] Shared config not loaded: %s", _wf_cfg_err)
+        if kill_recovery_bars is None:
+            kill_recovery_bars = 48
+        if kill_recovery_r_threshold is None:
+            kill_recovery_r_threshold = 2.0
+        if kill_hysteresis_r is None:
+            kill_hysteresis_r = 1.0
 
     first_ts = None
     last_ts = None
@@ -6162,6 +6192,9 @@ def train_v5_model(
                 mu_debias_alpha=mu_debias_alpha,
                 min_trades=min_trades,
                 per_symbol_r_kill=per_symbol_r_kill,
+                kill_recovery_bars=kill_recovery_bars,
+                kill_recovery_r_threshold=kill_recovery_r_threshold,
+                kill_hysteresis_r=kill_hysteresis_r,
                 per_symbol_thresholds=ckpt_per_sym_thr,
                 ema200_soft_mult=ema200_soft_mult,
                 per_side_threshold=per_side_threshold,

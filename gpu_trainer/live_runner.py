@@ -1030,17 +1030,50 @@ class LiveRunner:
         self._regime_history: Dict[str, list] = {}   # symbol -> last 3 regime readings
         self._regime_confirmed: Dict[str, str] = {}  # symbol -> 'BULL' | 'BEAR'
 
-        self.v5_score_lambda = V5_SCORE_LAMBDA
-        self.v5_score_threshold = v5_live_threshold if v5_live_threshold is not None else V5_SCORE_THRESHOLD
-        self.v5_min_mu_r = V5_MIN_MU_R
+        try:
+            from config.shared_v5_trade_config import load_shared_defaults
+            _shared = load_shared_defaults()
+        except Exception:
+            _shared = None
+
+        self.v5_score_lambda = V5_SCORE_LAMBDA if _shared is None else _shared.score_lambda
+        self.v5_score_threshold = (
+            v5_live_threshold if v5_live_threshold is not None
+            else (V5_SCORE_THRESHOLD if _shared is None else _shared.score_threshold)
+        )
+        self.v5_min_mu_r = V5_MIN_MU_R if _shared is None else _shared.min_mu_r_score
         self.v5_mae_floor = v5_mae_floor if v5_mae_floor is not None else V5_MAE_FLOOR
+        self.v5_min_p_side: float = 0.0 if _shared is None else _shared.min_p_side
+        self.v5_min_p_short: float = 0.0 if _shared is None else _shared.min_p_short
+        self.v5_slippage_bps: float = 0.0 if _shared is None else _shared.slippage_base_bps
+        self.cooldown_bars = (
+            _shared.cooldown_bars
+            if (_shared is not None and cooldown_bars == 8)
+            else cooldown_bars
+        )
         self.predictive_sltp = predictive_sltp
+
+        self.halt_on_data_staleness: bool = _shared.halt_on_data_staleness if _shared else True
+        self.max_data_staleness_seconds: float = _shared.max_data_staleness_seconds if _shared else 300.0
+        self.halt_on_api_errors: bool = _shared.halt_on_api_errors if _shared else True
+        self.max_consecutive_api_errors: int = _shared.max_consecutive_api_errors if _shared else 5
+        self.max_daily_loss_r: Optional[float] = _shared.max_daily_loss_r if _shared else None
 
         log.info(f"[INIT] LiveRunner {SYSTEM_VERSION} execution_mode={execution_mode} "
                  f"record_trades={record_trades} symbols={symbols}")
-        log.info(f"[CONFIG] V5 scoring: lambda={self.v5_score_lambda} "
-                 f"threshold={self.v5_score_threshold} min_mu_r={self.v5_min_mu_r} "
-                 f"mae_floor={self.v5_mae_floor}")
+        log.info(
+            "[CONFIG] V5 scoring (shared defaults applied): "
+            "lambda=%.3f threshold=%.3f min_mu_r=%.3f mae_floor=%.3f "
+            "min_p_side=%.3f min_p_short=%.3f slippage_bps=%.1f cooldown=%d",
+            self.v5_score_lambda, self.v5_score_threshold, self.v5_min_mu_r,
+            self.v5_mae_floor, self.v5_min_p_side, self.v5_min_p_short,
+            self.v5_slippage_bps, self.cooldown_bars,
+        )
+        log.info(
+            "[CONFIG] Halt switches: data_staleness=%s/%gs api_errors=%s/%d daily_loss_r=%s",
+            self.halt_on_data_staleness, self.max_data_staleness_seconds,
+            self.halt_on_api_errors, self.max_consecutive_api_errors, self.max_daily_loss_r,
+        )
 
         self.model = None
         self.engineer = None
@@ -1059,18 +1092,6 @@ class LiveRunner:
 
         from trade_manager import TradeManager
         self.trade_manager = TradeManager()
-
-        try:
-            from config.shared_v5_trade_config import load_shared_defaults
-            _shared = load_shared_defaults()
-        except Exception:
-            _shared = None
-
-        self.halt_on_data_staleness: bool = _shared.halt_on_data_staleness if _shared else True
-        self.max_data_staleness_seconds: float = _shared.max_data_staleness_seconds if _shared else 300.0
-        self.halt_on_api_errors: bool = _shared.halt_on_api_errors if _shared else True
-        self.max_consecutive_api_errors: int = _shared.max_consecutive_api_errors if _shared else 5
-        self.max_daily_loss_r: Optional[float] = _shared.max_daily_loss_r if _shared else None
 
         self._consecutive_api_errors: int = 0
         self._daily_closed_r: float = 0.0

@@ -156,9 +156,6 @@ class CorrBlocker:
             return 1.0
 
         worst_mult = 1.0
-        concurrent_positions = sum(
-            1 for s in open_positions if s != symbol
-        )
 
         for other_sym, other_side in open_positions.items():
             if other_sym == symbol:
@@ -169,8 +166,8 @@ class CorrBlocker:
             sa, sb = self.tracker.get_aligned_daily_series(symbol, other_sym,
                                                            self.config.window_days)
             aligned_days = len(sa)
-            dynamic_overlap = concurrent_positions >= 1
-            reliable = (aligned_days >= self.config.min_aligned_days and dynamic_overlap)
+            overlap_ok = self.overlap_ratio >= self.config.min_overlap_ratio
+            reliable = (aligned_days >= self.config.min_aligned_days and overlap_ok)
 
             corr = self.tracker.pairwise_corr(symbol, other_sym, self.config.window_days)
 
