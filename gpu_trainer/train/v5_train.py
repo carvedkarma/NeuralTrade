@@ -2095,6 +2095,12 @@ def run_v5_forward_test(
         from config.shared_v5_trade_config import load_shared_defaults as _load_shared
         _shared = _load_shared()
 
+        if config.score_threshold == 0.0 and _shared.score_threshold != 0.0:
+            config.score_threshold = _shared.score_threshold
+        if config.score_lambda == 0.5 and _shared.score_lambda != 0.5:
+            config.score_lambda = _shared.score_lambda
+        if config.cooldown == 4 and _shared.cooldown_bars != 4:
+            config.cooldown = _shared.cooldown_bars
         if config.min_p_side == 0.0 and _shared.min_p_side != 0.0:
             config.min_p_side = _shared.min_p_side
         if config.min_p_short == 0.0 and _shared.min_p_short != 0.0:
@@ -2105,6 +2111,10 @@ def run_v5_forward_test(
             config.corr_thresh = _shared.corr_thresh
         if config.size_floor == 0.0 and _shared.size_floor != 0.0:
             config.size_floor = _shared.size_floor
+        if config.min_size_mult == 0.25 and _shared.min_size_mult != 0.25:
+            config.min_size_mult = _shared.min_size_mult
+        if config.max_size_mult == 2.5 and _shared.max_size_mult != 2.5:
+            config.max_size_mult = _shared.max_size_mult
         if config.kill_recovery_bars == 48 and _shared.kill_recovery_bars != 48:
             config.kill_recovery_bars = _shared.kill_recovery_bars
         if config.kill_recovery_r_threshold == 2.0 and _shared.kill_recovery_r_threshold != 2.0:
@@ -2114,11 +2124,15 @@ def run_v5_forward_test(
 
         log.info(
             "[V5_FWD] Effective config (shared defaults + CLI overrides): "
-            "score_threshold=%.4f  score_lambda=%.3f  min_p_side=%.3f  min_p_short=%.3f  "
+            "score_threshold=%.4f  score_lambda=%.3f  cooldown=%d  "
+            "min_p_side=%.3f  min_p_short=%.3f  "
             "corr_thresh=%.2f  slippage_bps=%.1f  size_floor=%.3f  "
+            "min_size_mult=%.2f  max_size_mult=%.2f  "
             "kill_recovery_bars=%d  kill_recovery_r_threshold=%.2f  kill_hysteresis_r=%.2f",
-            config.score_threshold, config.score_lambda, config.min_p_side, config.min_p_short,
+            config.score_threshold, config.score_lambda, config.cooldown,
+            config.min_p_side, config.min_p_short,
             config.corr_thresh, config.slippage_base_bps, config.size_floor,
+            config.min_size_mult, config.max_size_mult,
             config.kill_recovery_bars, config.kill_recovery_r_threshold, config.kill_hysteresis_r,
         )
     except Exception as _cfg_err:
@@ -2641,6 +2655,7 @@ def run_v5_forward_test(
     sym_cumulative_r = defaultdict(float)
     killed_symbols = set()
     symbol_kill_bar: dict = {}    # {sym: bar_index_when_killed}
+    symbol_kill_oracle_r: dict = defaultdict(float)  # oracle R accumulated while hard-killed
     per_sym_kill_blocked = 0
 
     open_positions: dict = {}
@@ -2774,31 +2789,36 @@ def run_v5_forward_test(
         if config.per_symbol_r_kill is not None and test_sym_ids is not None:
             sym_name_kill = sym_id_to_name.get(int(test_sym_ids[idx]), None)
             if sym_name_kill and sym_name_kill in killed_symbols:
-                cum_r = sym_cumulative_r[sym_name_kill]
                 kill_floor = config.per_symbol_r_kill
                 bars_since_kill = idx - symbol_kill_bar.get(sym_name_kill, idx)
-                recovery_r_needed = kill_floor + config.kill_recovery_r_threshold + config.kill_hysteresis_r
+                oracle_r_since_kill = symbol_kill_oracle_r[sym_name_kill]
+                recovery_r_needed = config.kill_recovery_r_threshold + config.kill_hysteresis_r
                 if (bars_since_kill >= config.kill_recovery_bars
-                        and cum_r >= recovery_r_needed):
+                        and oracle_r_since_kill >= recovery_r_needed):
                     killed_symbols.discard(sym_name_kill)
                     symbol_kill_bar.pop(sym_name_kill, None)
+                    symbol_kill_oracle_r[sym_name_kill] = 0.0
                     log.info(
                         "[V5_GATE] Symbol %s RE-ENABLED after %d bars cooldown "
-                        "cumR=%.2f >= recovery_threshold=%.2f (kill_floor=%.2f + "
-                        "recovery=%.2f + hysteresis=%.2f)",
-                        sym_name_kill, bars_since_kill, cum_r, recovery_r_needed,
-                        kill_floor, config.kill_recovery_r_threshold, config.kill_hysteresis_r,
+                        "oracle_r_since_kill=%.2f >= recovery_needed=%.2f "
+                        "(recov=%.2f + hysteresis=%.2f)",
+                        sym_name_kill, bars_since_kill, oracle_r_since_kill, recovery_r_needed,
+                        config.kill_recovery_r_threshold, config.kill_hysteresis_r,
                     )
-                elif sym_name_kill in killed_symbols:
+                else:
+                    # Still killed: accumulate oracle-R for recovery tracking
+                    symbol_kill_oracle_r[sym_name_kill] += _oracle_r(idx)
                     if config.per_symbol_soft_kill:
+                        # Graduated size reduction: heavier penalty closer to kill floor
                         half_floor = kill_floor * 0.5
-                        if cum_r <= kill_floor:
+                        oracle_r_acc = symbol_kill_oracle_r[sym_name_kill]
+                        if oracle_r_acc <= kill_floor:
                             mult = 0.1
-                        elif cum_r <= half_floor:
-                            frac = (cum_r - kill_floor) / (half_floor - kill_floor)
+                        elif oracle_r_acc <= half_floor:
+                            frac = (oracle_r_acc - kill_floor) / (half_floor - kill_floor)
                             mult = 0.1 + frac * 0.65
                         else:
-                            frac = min(1.0, (cum_r - half_floor) / abs(half_floor)) if half_floor != 0 else 1.0
+                            frac = min(1.0, (oracle_r_acc - half_floor) / abs(half_floor)) if half_floor != 0 else 1.0
                             mult = 0.75 + frac * 0.25
                         soft_gate_sizing[idx] = soft_gate_sizing.get(idx, 1.0) * mult
                         gate_blocks["per_symbol_kill_soft"] += 1
