@@ -86,10 +86,30 @@ const MAX_TRADES_PER_DAY = 8;
 let _dailyTradeDate = "";          // "YYYY-MM-DD" of last trade
 let _dailyTradeCount = 0;          // trades opened so far today
 
-const ROLLING_ER_WINDOW = 20;      // trailing N trades per symbol
-const ROLLING_ER_MIN = -0.05;      // block symbol when trailing E[R] < this
-const _erDeques = new Map<string, number[]>();  // symbol → circular buffer of realized R
-const _erBlocked = new Set<string>();           // currently blocked symbols
+const ROLLING_ER_WINDOW = 20;           // trailing N closed trades per symbol
+const ROLLING_ER_MIN = -0.05;           // block symbol when trailing E[R] < this
+const ER_BLOCK_COOLDOWN_MS = 24 * 3600 * 1000;  // auto-unblock after 24h — guarantees recovery
+const _erDeques = new Map<string, number[]>();   // symbol → rolling window of realized R
+const _erBlocked = new Map<string, number>();    // symbol → timestamp when blocked
+
+/**
+ * Return true if a symbol is currently blocked by the rolling E[R] gate.
+ * A blocked symbol automatically recovers after ER_BLOCK_COOLDOWN_MS (24h),
+ * after which its deque is cleared so the next ROLLING_ER_WINDOW trades get
+ * a fresh evaluation. This guarantees the gate cannot permanently block a symbol.
+ */
+function _isErBlocked(symbol: string): boolean {
+  const blockedAt = _erBlocked.get(symbol);
+  if (blockedAt === undefined) return false;
+  if (Date.now() - blockedAt >= ER_BLOCK_COOLDOWN_MS) {
+    // 24-hour cooldown expired → auto-unblock with fresh deque
+    _erBlocked.delete(symbol);
+    _erDeques.delete(symbol);
+    console.log(`[Paper][ER_GATE_COOLDOWN_UNBLOCK] ${symbol} unblocked after 24h cooldown — deque reset`);
+    return false;
+  }
+  return true;
+}
 
 function _todayUtc(): string {
   return new Date().toISOString().slice(0, 10);  // "YYYY-MM-DD"
@@ -112,11 +132,12 @@ function _updateErDeque(symbol: string, realizedR: number): void {
     const trailingEr = dq.reduce((a, b) => a + b, 0) / dq.length;
     const wasBlocked = _erBlocked.has(symbol);
     if (!wasBlocked && trailingEr < ROLLING_ER_MIN) {
-      _erBlocked.add(symbol);
+      _erBlocked.set(symbol, Date.now());
       console.log(
-        `[Paper][ER_GATE_BLOCK] ${symbol} blocked — trailing ${ROLLING_ER_WINDOW}-trade E[R]=${trailingEr.toFixed(4)} < ${ROLLING_ER_MIN}`,
+        `[Paper][ER_GATE_BLOCK] ${symbol} blocked — trailing ${ROLLING_ER_WINDOW}-trade E[R]=${trailingEr.toFixed(4)} < ${ROLLING_ER_MIN} (auto-unblocks in 24h)`,
       );
     } else if (wasBlocked && trailingEr >= ROLLING_ER_MIN) {
+      // Organic recovery: E[R] improved after a trade was allowed through
       _erBlocked.delete(symbol);
       console.log(
         `[Paper][ER_GATE_UNBLOCK] ${symbol} unblocked — E[R] recovered to ${trailingEr.toFixed(4)}`,
@@ -1321,9 +1342,9 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
     }
 
     // ── Per-symbol rolling E[R] gate ─────────────────────────────────────────
-    if (_erBlocked.has(_ctxSymbol)) {
+    if (_isErBlocked(_ctxSymbol)) {
       console.log(
-        `[Paper][ER_GATE] Trade blocked — ${_ctxSymbol} has trailing E[R] below ${ROLLING_ER_MIN}`,
+        `[Paper][ER_GATE] Trade blocked — ${_ctxSymbol} has trailing E[R] below ${ROLLING_ER_MIN} (will auto-unblock after 24h cooldown)`,
       );
       return;
     }

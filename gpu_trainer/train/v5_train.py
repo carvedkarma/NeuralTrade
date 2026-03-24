@@ -2426,6 +2426,7 @@ def run_v5_forward_test(
     # Rolling E[R] gate state — per-symbol deque of last N realized R values.
     _er_deques: dict = {}        # symbol -> collections.deque
     _er_blocked: set = set()     # symbols currently blocked by rolling E[R] gate
+    _er_skip_counts: dict = {}   # symbol -> signals skipped since blocking (cooldown counter)
     _er_total_blocks: int = 0    # total block events
     _er_trades_skipped: int = 0  # total trades skipped due to gate
     _er_sym_block_counts: dict = {}  # symbol -> count of block events
@@ -3145,21 +3146,18 @@ def run_v5_forward_test(
                 _er_trades_skipped += 1
                 gate_blocks["rolling_er"] = gate_blocks.get("rolling_er", 0) + 1
                 gate_blocked_r.setdefault("rolling_er", []).append(_oracle_r(idx))
-                # Shadow-track oracle R for blocked symbol so the gate can recover
-                import collections as _col_blk
-                if _er_sym not in _er_deques:
-                    _er_deques[_er_sym] = _col_blk.deque(maxlen=config.rolling_er_window)
-                _er_deques[_er_sym].append(float(_oracle_r(idx)))
-                _dq_blk = _er_deques[_er_sym]
-                if len(_dq_blk) >= config.rolling_er_window:
-                    _blk_er = float(sum(_dq_blk) / len(_dq_blk))
-                    if _blk_er >= config.rolling_er_min:
-                        _er_blocked.discard(_er_sym)
-                        import numpy as _np_blk
-                        log.info(
-                            "[V5_FWD][ER_GATE_UNBLOCK] %s unblocked (shadow) — E[R] recovered to %.4f",
-                            _er_sym, _blk_er,
-                        )
+                # Cooldown counter: after rolling_er_window more skips, force-unblock
+                # and clear the deque so the symbol gets a fresh evaluation window.
+                # This avoids lookahead bias while ensuring recovery is always possible.
+                _er_skip_counts[_er_sym] = _er_skip_counts.get(_er_sym, 0) + 1
+                if _er_skip_counts[_er_sym] >= config.rolling_er_window:
+                    _er_blocked.discard(_er_sym)
+                    _er_deques.pop(_er_sym, None)
+                    _er_skip_counts[_er_sym] = 0
+                    log.info(
+                        "[V5_FWD][ER_GATE_COOLDOWN_UNBLOCK] %s unblocked after %d-signal cooldown — deque reset",
+                        _er_sym, config.rolling_er_window,
+                    )
                 continue
 
         if ddt is not None:
