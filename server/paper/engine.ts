@@ -90,8 +90,10 @@ let _dailyTradeCount = 0;          // trades opened so far today
 let _erGateEnabled = false;        // off by default — matches forward-test default (off)
 let _erGateWindow = 20;            // rolling_er_window: trailing N closed trades per symbol
 let _erGateMin = -0.05;            // rolling_er_min: block when trailing mean < this value
-const _erDeques = new Map<string, number[]>();   // symbol → rolling window of realized R
-const _erBlocked = new Set<string>();            // symbols currently blocked by rolling E[R] gate
+const _erDeques = new Map<string, number[]>();      // symbol → rolling window of realized R
+const _erBlocked = new Set<string>();               // symbols currently blocked by rolling E[R] gate
+const _erBlockedAt = new Map<string, number>();     // symbol → ms timestamp when blocked (for time recovery)
+const ER_GATE_COOLDOWN_MS = 24 * 60 * 60 * 1000;   // 24-hour auto-unblock if no R update arrives
 
 /** Call on server start or config update to align E[R] gate parameters with paper config. */
 export function configureErGate(enabled: boolean, window: number, min: number): void {
@@ -99,13 +101,28 @@ export function configureErGate(enabled: boolean, window: number, min: number): 
   _erGateWindow  = window;
   _erGateMin     = min;
   if (enabled) {
-    console.log(`[Paper][ER_GATE] Configured: enabled window=${window} min=${min}`);
+    console.log(`[Paper][ER_GATE] Configured: enabled window=${window} min=${min} cooldown=${ER_GATE_COOLDOWN_MS / 3600000}h`);
   }
 }
 
-/** Return true if this symbol is blocked by the rolling E[R] gate. */
+/**
+ * Return true if this symbol is currently blocked by the rolling E[R] gate.
+ * Also handles time-based auto-unblock: if no new realized-R has arrived within
+ * ER_GATE_COOLDOWN_MS since blocking (e.g., because no positions have closed),
+ * the symbol is automatically unblocked so the deque can accumulate fresh data.
+ */
 function _isErBlocked(symbol: string): boolean {
-  return _erGateEnabled && _erBlocked.has(symbol);
+  if (!_erGateEnabled || !_erBlocked.has(symbol)) return false;
+  const blockedAt = _erBlockedAt.get(symbol) ?? 0;
+  if (Date.now() - blockedAt >= ER_GATE_COOLDOWN_MS) {
+    // Time-based recovery: cooldown elapsed with no realized-R update.
+    // Unblock so fresh trades can accumulate and re-evaluate E[R].
+    _erBlocked.delete(symbol);
+    _erBlockedAt.delete(symbol);
+    console.log(`[Paper][ER_GATE_COOLDOWN_UNBLOCK] ${symbol} auto-unblocked after 24h cooldown — awaiting fresh E[R] data`);
+    return false;
+  }
+  return true;
 }
 
 function _todayUtc(): string {
@@ -136,11 +153,13 @@ function _updateErDeque(symbol: string, realizedR: number): void {
     const wasBlocked = _erBlocked.has(symbol);
     if (!wasBlocked && trailingEr < _erGateMin) {
       _erBlocked.add(symbol);
+      _erBlockedAt.set(symbol, Date.now());
       console.log(
-        `[Paper][ER_GATE_BLOCK] ${symbol} blocked — trailing ${_erGateWindow}-trade E[R]=${trailingEr.toFixed(4)} < ${_erGateMin}`,
+        `[Paper][ER_GATE_BLOCK] ${symbol} blocked — trailing ${_erGateWindow}-trade E[R]=${trailingEr.toFixed(4)} < ${_erGateMin}; 24h cooldown unblock if no new R arrives`,
       );
     } else if (wasBlocked && trailingEr >= _erGateMin) {
       _erBlocked.delete(symbol);
+      _erBlockedAt.delete(symbol);
       console.log(
         `[Paper][ER_GATE_UNBLOCK] ${symbol} unblocked — trailing E[R] recovered to ${trailingEr.toFixed(4)}`,
       );

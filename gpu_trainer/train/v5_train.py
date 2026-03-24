@@ -3143,22 +3143,19 @@ def run_v5_forward_test(
         if config.rolling_er_gate and test_sym_ids is not None:
             _er_sym = sym_id_to_name.get(int(test_sym_ids[idx]), None)
             if _er_sym and _er_sym in _er_blocked:
+                # Update deque with oracle R so the trailing mean can recover
+                # even while blocked — when mean rises back to rolling_er_min,
+                # _updateErDeque unblocks automatically.
                 _er_skip_counts[_er_sym] = _er_skip_counts.get(_er_sym, 0) + 1
-                if _er_skip_counts[_er_sym] >= config.rolling_er_window:
-                    # Cooldown elapsed: unblock and reset counter.
-                    # The next real trades will update the deque and re-block
-                    # if E[R] has not recovered.
-                    _er_blocked.discard(_er_sym)
-                    _er_skip_counts[_er_sym] = 0
-                    log.info(
-                        "[V5_FWD][ER_GATE_COOLDOWN_UNBLOCK] %s unblocked after %d-signal cooldown",
-                        _er_sym, config.rolling_er_window,
-                    )
-                else:
-                    _er_trades_skipped += 1
-                    gate_blocks["rolling_er"] = gate_blocks.get("rolling_er", 0) + 1
-                    gate_blocked_r.setdefault("rolling_er", []).append(_oracle_r(idx))
-                    continue
+                _updateErDeque(
+                    _er_sym, _oracle_r(idx),
+                    config.rolling_er_window, config.rolling_er_min,
+                    _er_deques, _er_blocked,
+                )
+                _er_trades_skipped += 1
+                gate_blocks["rolling_er"] = gate_blocks.get("rolling_er", 0) + 1
+                gate_blocked_r.setdefault("rolling_er", []).append(_oracle_r(idx))
+                continue
 
         if ddt is not None:
             ddt_thr = ddt.effective_threshold(effective_threshold)
