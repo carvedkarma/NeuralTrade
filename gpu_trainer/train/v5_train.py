@@ -2509,18 +2509,21 @@ def run_v5_forward_test(
                 "[V5_FWD][ALL_INF_BLOCKED] All %d symbols have HIGH_BAR (inf) threshold. "
                 "ZERO trades will be selected from this forward test window. "
                 "Root cause: per-symbol sweep found no edge at the promoted checkpoint epoch "
-                "or fine-tuning invalidated saved thresholds. "
-                "Fix: ensure a post-training final sweep runs (Task #34).",
+                "or fine-tuning invalidated saved thresholds.",
                 len(config.per_symbol_thresholds),
             )
             if config.per_sym_no_edge_fallback:
                 _inf_mask = np.isinf(per_bar_threshold) & (per_bar_threshold > 0)
                 per_bar_threshold[_inf_mask] = effective_threshold
+                _promoted_syms = [
+                    (symbols[int(k)] if symbols and int(k) < len(symbols) else f"sym_{k}")
+                    for k in (config.per_symbol_thresholds or {})
+                ]
                 log.warning(
                     "[V5_FWD][ALL_INF_FALLBACK] per_sym_no_edge_fallback=True — "
                     "reset %d inf-threshold bars to effective_threshold=%.4f. "
-                    "Trades will now be gated by global threshold only.",
-                    int(_inf_mask.sum()), effective_threshold,
+                    "Promoted symbols (will use global threshold): %s",
+                    int(_inf_mask.sum()), effective_threshold, _promoted_syms,
                 )
         elif n_inf_bars_total > 0:
             log.warning(
