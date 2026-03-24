@@ -88,17 +88,32 @@ let _dailyTradeCount = 0;          // trades opened so far today
 
 const ROLLING_ER_WINDOW = 20;           // trailing N closed trades per symbol
 const ROLLING_ER_MIN = -0.05;           // block symbol when trailing E[R] < this
+const ER_PROBE_COOLDOWN_MS = 24 * 3600 * 1000;  // allow probe trade after 24h block
 const _erDeques = new Map<string, number[]>();   // symbol → rolling window of realized R
-const _erBlocked = new Set<string>();            // symbols currently blocked by rolling E[R] gate
+const _erBlocked = new Map<string, number>();    // symbol → timestamp when blocked
 
 /**
- * Return true if a symbol is currently blocked by the rolling E[R] gate.
- * Unblocking happens ONLY when trailing E[R] recovers above ROLLING_ER_MIN via
- * actual realized-R from closed trades — no time-based or count-based auto-unblock.
- * In the forward test the state resets naturally at each fold boundary.
+ * Check if a symbol is currently blocked by the rolling E[R] gate.
+ *
+ * Recovery mechanism: after ER_PROBE_COOLDOWN_MS (24h) the block enters a
+ * "probe window" — the next entry is allowed through so its realized R can
+ * update the deque. If E[R] remains below ROLLING_ER_MIN after the probe,
+ * the symbol is re-blocked immediately (new 24h clock). If E[R] recovers,
+ * it stays unblocked. This ensures recovery is always based on actual
+ * realized-R while guaranteeing the gate cannot block a symbol indefinitely.
  */
 function _isErBlocked(symbol: string): boolean {
-  return _erBlocked.has(symbol);
+  const blockedAt = _erBlocked.get(symbol);
+  if (blockedAt === undefined) return false;
+  if (Date.now() - blockedAt >= ER_PROBE_COOLDOWN_MS) {
+    // Probe window: allow ONE entry to update the deque with real realized-R.
+    _erBlocked.delete(symbol);
+    console.log(
+      `[Paper][ER_GATE_PROBE] ${symbol}: 24h cooldown elapsed — allowing probe trade; E[R] re-evaluated on close`,
+    );
+    return false;
+  }
+  return true;
 }
 
 function _todayUtc(): string {
@@ -122,14 +137,21 @@ function _updateErDeque(symbol: string, realizedR: number): void {
     const trailingEr = dq.reduce((a, b) => a + b, 0) / dq.length;
     const wasBlocked = _erBlocked.has(symbol);
     if (!wasBlocked && trailingEr < ROLLING_ER_MIN) {
-      _erBlocked.add(symbol);
+      _erBlocked.set(symbol, Date.now());
       console.log(
-        `[Paper][ER_GATE_BLOCK] ${symbol} blocked — trailing ${ROLLING_ER_WINDOW}-trade E[R]=${trailingEr.toFixed(4)} < ${ROLLING_ER_MIN}`,
+        `[Paper][ER_GATE_BLOCK] ${symbol} blocked — trailing ${ROLLING_ER_WINDOW}-trade E[R]=${trailingEr.toFixed(4)} < ${ROLLING_ER_MIN} (probe trade allowed after 24h)`,
       );
     } else if (wasBlocked && trailingEr >= ROLLING_ER_MIN) {
+      // This path is reached after a probe trade whose realized R improved E[R]
       _erBlocked.delete(symbol);
       console.log(
         `[Paper][ER_GATE_UNBLOCK] ${symbol} unblocked — trailing E[R] recovered to ${trailingEr.toFixed(4)}`,
+      );
+    } else if (wasBlocked && trailingEr < ROLLING_ER_MIN) {
+      // Probe trade did not improve E[R] enough — re-block with fresh 24h clock
+      _erBlocked.set(symbol, Date.now());
+      console.log(
+        `[Paper][ER_GATE_REBLOCK] ${symbol} re-blocked — probe trade E[R] still ${trailingEr.toFixed(4)} < ${ROLLING_ER_MIN}`,
       );
     }
   }
