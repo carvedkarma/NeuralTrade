@@ -670,7 +670,11 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
     """Compute v5 composite loss with class-balanced action CE.
 
     Uses clamped Gaussian NLL to prevent log(sigma) term from dominating.
-    Three-stage schedule: epochs 0-5 action-heavy, 6-15 balanced, 16+ full.
+    The built-in hardcoded epoch schedule has been replaced by the configurable
+    warmup_epochs / warmup_ret_mult / warmup_action_mult params. Pass
+    warmup_epochs=0 (the default) to disable the warmup entirely.
+
+    sigma_spread_reg: penalty weight on sigma > 1.5 to prevent NLL collapse.
 
     If sample_weights is provided, computes per-sample losses and applies
     inverse-frequency weighting: loss = (per_sample_loss * weights).sum() / weights.sum()
@@ -695,6 +699,13 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
         L_ret = (nll * sw).sum() / sw.sum()
     else:
         L_ret = nll.mean()
+    # Sigma spread regularization: penalize overconfident uncertainty inflation.
+    # If sigma > 1.5 R-units the model is taking the easy shortcut of claiming
+    # high uncertainty rather than learning accurate mu_R predictions.
+    if sigma_spread_reg > 0.0:
+        L_sigma_reg = sigma_spread_reg * F.relu(sigma - 1.5).mean()
+    else:
+        L_sigma_reg = torch.tensor(0.0, device=sigma.device)
 
     mfe_pred = outputs['mfe'][valid].squeeze(-1)
     mfe_true = batch['mfe_R'][valid]
@@ -768,26 +779,25 @@ def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
         'L_mae': L_mae.item(),
         'L_action': L_action.item(),
         'L_side_balance': float(L_side_balance.item()) if torch.is_tensor(L_side_balance) else 0.0,
+        'L_sigma_reg': L_sigma_reg.item() if torch.is_tensor(L_sigma_reg) else 0.0,
         '_side_bal_diag': (n_bull, n_bear, n_chop),
     }
 
-    if epoch <= 5:
-        eff_w_ret = w_ret * 0.3
-        eff_w_mfe = w_mfe * 0.3
-        eff_w_mae = w_mae * 0.3
-        eff_w_action = w_action * 2.0
-    elif epoch <= 15:
-        eff_w_ret = w_ret * 0.7
-        eff_w_mfe = w_mfe * 0.7
-        eff_w_mae = w_mae * 0.7
-        eff_w_action = w_action * 1.0
+    # Configurable warmup schedule — disabled by default (warmup_epochs=0).
+    # When warmup_epochs > 0, regression heads ramp from warmup_ret_mult to 1.0
+    # and the action head ramps from warmup_action_mult to 1.0 over the warmup window.
+    if warmup_epochs > 0 and epoch < warmup_epochs:
+        eff_w_ret = w_ret * warmup_ret_mult
+        eff_w_mfe = w_mfe * warmup_ret_mult
+        eff_w_mae = w_mae * warmup_ret_mult
+        eff_w_action = w_action * warmup_action_mult
     else:
         eff_w_ret = w_ret
         eff_w_mfe = w_mfe
         eff_w_mae = w_mae
         eff_w_action = w_action
 
-    total = eff_w_ret * L_ret + eff_w_mfe * L_mfe + eff_w_mae * L_mae + eff_w_action * L_action
+    total = eff_w_ret * L_ret + eff_w_mfe * L_mfe + eff_w_mae * L_mae + eff_w_action * L_action + L_sigma_reg
 
     if 'barrier_logits' in outputs and barrier_mode != 'fixed':
         barrier_logits = outputs['barrier_logits'][valid]
@@ -4719,8 +4729,10 @@ def train_v5_model(
     checkpoint_interval=25, warmup_epochs=5, min_lr=None,
     tp_mult=2.0, sl_mult=1.5, horizon=16,
     symbols=None,
-    w_ret=1.0, w_mfe=0.25, w_mae=0.25, w_action=2.0,
+    w_ret=3.0, w_mfe=1.0, w_mae=1.0, w_action=0.5,
     w_barrier=0.25, w_regime=0.1,
+    loss_warmup_epochs=0, loss_warmup_ret_mult=1.0, loss_warmup_action_mult=1.0,
+    sigma_spread_reg=0.1,
     score_lambda=0.5, risk_proxy='mae',
     target_tpd=6.5, target_tpd_tol=1.5,
     hold_target=0.30, mfe_min=0.05,
@@ -4889,7 +4901,9 @@ def train_v5_model(
         log.info(f"{ctag} n_experts={v6_n_experts} expert_top_k={v6_expert_top_k}")
         log.info(f"{ctag} feature_mask_ratio={v6_feature_mask_ratio}")
         log.info(f"{ctag} loss weights: aux={v6_aux_weight} confidence={v6_confidence_weight} moe_balance={v6_moe_balance_weight}")
-    log.info(f"{ctag} w_ret={w_ret} w_mfe={w_mfe} w_mae={w_mae} w_action={w_action}")
+    log.info(f"{ctag} w_ret={w_ret} w_mfe={w_mfe} w_mae={w_mae} w_action={w_action} "
+             f"sigma_spread_reg={sigma_spread_reg} loss_warmup_epochs={loss_warmup_epochs} "
+             f"loss_warmup_ret_mult={loss_warmup_ret_mult} loss_warmup_action_mult={loss_warmup_action_mult}")
     log.info(f"{ctag} w_barrier={w_barrier} w_regime={w_regime}")
     log.info(f"{ctag} score_lambda={score_lambda} risk_proxy={risk_proxy}")
     log.info(f"{ctag} hold_target={hold_target} mfe_min={mfe_min}")
@@ -5727,6 +5741,10 @@ def train_v5_model(
                     epoch=epoch,
                     sample_weights=batch_sw,
                     mae_asym_weight=mae_asym_weight,
+                    warmup_epochs=loss_warmup_epochs,
+                    warmup_ret_mult=loss_warmup_ret_mult,
+                    warmup_action_mult=loss_warmup_action_mult,
+                    sigma_spread_reg=sigma_spread_reg,
                 )
 
             optimizer.zero_grad()
@@ -5790,6 +5808,7 @@ def train_v5_model(
                         action_weights=action_weights_tensor,
                         epoch=epoch,
                         mae_asym_weight=mae_asym_weight,
+                        sigma_spread_reg=sigma_spread_reg,
                     )
                 val_losses.append(vloss.item())
 
@@ -5815,6 +5834,15 @@ def train_v5_model(
         log.info(f"{tag} Epoch {epoch:03d}/{epochs} | train={avg_train_loss:.4f} val={avg_val_loss:.4f} "
                  f"lr={current_lr:.2e} act_acc={action_acc:.3f} "
                  f"pred[H/L/S]={pred_hold}/{pred_long}/{pred_short} | {lb_str}")
+        # Log sigma distribution from validation outputs to detect NLL collapse.
+        if not use_v6 and all_val_outputs.get('ret_log_sigma'):
+            _sigma_cat = torch.cat(all_val_outputs['ret_log_sigma'], dim=0).numpy().squeeze(-1)
+            _sigma_vals = np.exp(np.clip(_sigma_cat, -10, 2))
+            _sp10 = float(np.percentile(_sigma_vals, 10))
+            _sp50 = float(np.percentile(_sigma_vals, 50))
+            _sp90 = float(np.percentile(_sigma_vals, 90))
+            _vtag = "V6" if use_v6 else "V5"
+            log.info(f"[{_vtag}_SIGMA] epoch={epoch} sigma_p10={_sp10:.3f} p50={_sp50:.3f} p90={_sp90:.3f}")
 
         if use_v6 and hasattr(model, 'get_expert_usage'):
             expert_usage = model.get_expert_usage()
@@ -6164,6 +6192,7 @@ def train_v5_model(
                             action_weights=action_weights_tensor,
                             epoch=epochs + ft_ep,
                             mae_asym_weight=mae_asym_weight,
+                            sigma_spread_reg=sigma_spread_reg,
                         )
                         ft_optimizer.zero_grad()
                         loss.backward()

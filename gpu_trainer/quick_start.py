@@ -5178,18 +5178,26 @@ Examples:
 
     parser.add_argument("--train-v5", action="store_true", default=False,
                         help="v5.0: Train V5 Forecaster (continuous market predictions + decision layer)")
-    parser.add_argument("--v5-w-ret", type=float, default=1.0,
-                        help="v5 weight for ret_h NLL loss (default: 1.0)")
-    parser.add_argument("--v5-w-mfe", type=float, default=0.25,
-                        help="v5 weight for MFE Huber loss (default: 0.25)")
-    parser.add_argument("--v5-w-mae", type=float, default=0.25,
-                        help="v5 weight for MAE Huber loss (default: 0.25)")
-    parser.add_argument("--v5-w-action", type=float, default=2.0,
-                        help="v5 weight for action CE loss (default: 2.0)")
+    parser.add_argument("--v5-w-ret", type=float, default=3.0,
+                        help="v5 weight for ret_h NLL loss (default: 3.0)")
+    parser.add_argument("--v5-w-mfe", type=float, default=1.0,
+                        help="v5 weight for MFE Huber loss (default: 1.0)")
+    parser.add_argument("--v5-w-mae", type=float, default=1.0,
+                        help="v5 weight for MAE Huber loss (default: 1.0)")
+    parser.add_argument("--v5-w-action", type=float, default=0.5,
+                        help="v5 weight for action CE loss (default: 0.5)")
     parser.add_argument("--v5-w-barrier", type=float, default=0.25,
                         help="v5 weight for barrier CE loss (default: 0.25)")
     parser.add_argument("--v5-w-regime", type=float, default=0.1,
                         help="v5 weight for regime CE loss (default: 0.1)")
+    parser.add_argument("--v5-sigma-spread-reg", type=float, default=0.1,
+                        help="v5 penalty on sigma>1.5 to prevent NLL collapse (default: 0.1, set 0 to disable)")
+    parser.add_argument("--v5-loss-warmup-epochs", type=int, default=0,
+                        help="v5 loss warmup: number of epochs with scaled weights (default: 0=disabled)")
+    parser.add_argument("--v5-loss-warmup-ret-mult", type=float, default=1.0,
+                        help="v5 loss warmup: multiplier for w_ret/mfe/mae during warmup epochs (default: 1.0)")
+    parser.add_argument("--v5-loss-warmup-action-mult", type=float, default=1.0,
+                        help="v5 loss warmup: multiplier for w_action during warmup epochs (default: 1.0)")
     parser.add_argument("--v5-score-lambda", type=float, default=0.5,
                         help="v5 downside penalty lambda in score formula (default: 0.5)")
     parser.add_argument("--v5-risk-proxy", type=str, default="mae", choices=["mae", "sigma"],
@@ -6144,6 +6152,10 @@ Examples:
                     w_ret=args.v5_w_ret, w_mfe=args.v5_w_mfe,
                     w_mae=args.v5_w_mae, w_action=args.v5_w_action,
                     w_barrier=args.v5_w_barrier, w_regime=args.v5_w_regime,
+                    sigma_spread_reg=args.v5_sigma_spread_reg,
+                    loss_warmup_epochs=args.v5_loss_warmup_epochs,
+                    loss_warmup_ret_mult=args.v5_loss_warmup_ret_mult,
+                    loss_warmup_action_mult=args.v5_loss_warmup_action_mult,
                     warmup_epochs=args.warmup_epochs, min_lr=args.min_lr,
                     barrier_mode=args.v5_barrier_mode,
                     barrier_presets=v5_barrier_presets,
@@ -6329,6 +6341,10 @@ Examples:
                 w_action=args.v5_w_action,
                 w_barrier=args.v5_w_barrier,
                 w_regime=args.v5_w_regime,
+                sigma_spread_reg=args.v5_sigma_spread_reg,
+                loss_warmup_epochs=args.v5_loss_warmup_epochs,
+                loss_warmup_ret_mult=args.v5_loss_warmup_ret_mult,
+                loss_warmup_action_mult=args.v5_loss_warmup_action_mult,
                 score_lambda=args.v5_score_lambda,
                 risk_proxy=args.v5_risk_proxy,
                 target_tpd=v5_effective_tpd,
