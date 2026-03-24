@@ -2426,7 +2426,7 @@ def run_v5_forward_test(
     # Rolling E[R] gate state — per-symbol deque of last N realized R values.
     _er_deques: dict = {}        # symbol -> collections.deque
     _er_blocked: set = set()     # symbols currently blocked by rolling E[R] gate
-    _er_skip_counts: dict = {}   # symbol -> signals skipped since blocking (for cooldown unblock)
+    _er_blocked_at_bar: dict = {}  # symbol -> bar idx when blocked (for cooldown unblock)
     _er_total_blocks: int = 0    # total block events
     _er_trades_skipped: int = 0  # total trades skipped due to gate
     _er_sym_block_counts: dict = {}  # symbol -> count of block events
@@ -3143,29 +3143,22 @@ def run_v5_forward_test(
         if config.rolling_er_gate and test_sym_ids is not None:
             _er_sym = sym_id_to_name.get(int(test_sym_ids[idx]), None)
             if _er_sym and _er_sym in _er_blocked:
-                # Update deque with oracle R so the trailing mean can recover
-                # even while blocked. When mean rises back to rolling_er_min,
-                # the symbol is unblocked here (primary E[R]-recovery path).
-                _er_skip_counts[_er_sym] = _er_skip_counts.get(_er_sym, 0) + 1
-                _oracle_r_val = _oracle_r(idx)
-                import collections as _col
-                if _er_sym not in _er_deques:
-                    _er_deques[_er_sym] = _col.deque(maxlen=config.rolling_er_window)
-                _er_deques[_er_sym].append(_oracle_r_val)
-                _dq_blk = _er_deques[_er_sym]
-                if len(_dq_blk) >= config.rolling_er_window:
-                    _trailing_er_blk = float(np.mean(list(_dq_blk)))
-                    if _trailing_er_blk >= config.rolling_er_min:
-                        _er_blocked.discard(_er_sym)
-                        log.info(
-                            "[V5_FWD][ER_GATE_UNBLOCK] %s unblocked — E[R] recovered to %.4f"
-                            " (oracle update while blocked)",
-                            _er_sym, _trailing_er_blk,
-                        )
-                _er_trades_skipped += 1
-                gate_blocks["rolling_er"] = gate_blocks.get("rolling_er", 0) + 1
-                gate_blocked_r.setdefault("rolling_er", []).append(_oracle_r_val)
-                continue
+                # Time-based cooldown recovery: after rolling_er_window bars have
+                # elapsed since blocking, unblock so fresh trades can accumulate
+                # and re-evaluate E[R]. No oracle R is used to avoid lookahead.
+                bars_since_block = idx - _er_blocked_at_bar.get(_er_sym, idx)
+                if bars_since_block >= config.rolling_er_window:
+                    _er_blocked.discard(_er_sym)
+                    _er_blocked_at_bar.pop(_er_sym, None)
+                    log.info(
+                        "[V5_FWD][ER_GATE_COOLDOWN_UNBLOCK] %s unblocked after %d-bar" " cooldown — awaiting fresh E[R] data",
+                        _er_sym, config.rolling_er_window,
+                    )
+                else:
+                    _er_trades_skipped += 1
+                    gate_blocks["rolling_er"] = gate_blocks.get("rolling_er", 0) + 1
+                    gate_blocked_r.setdefault("rolling_er", []).append(_oracle_r(idx))
+                    continue
 
         if ddt is not None:
             ddt_thr = ddt.effective_threshold(effective_threshold)
@@ -3430,6 +3423,7 @@ def run_v5_forward_test(
                         _trailing_er = float(np.mean(list(_dq)))
                         if _er_sym not in _er_blocked and _trailing_er < config.rolling_er_min:
                             _er_blocked.add(_er_sym)
+                            _er_blocked_at_bar[_er_sym] = idx
                             _er_total_blocks += 1
                             _er_sym_block_counts[_er_sym] = _er_sym_block_counts.get(_er_sym, 0) + 1
                             log.warning(
@@ -3438,6 +3432,7 @@ def run_v5_forward_test(
                             )
                         elif _er_sym in _er_blocked and _trailing_er >= config.rolling_er_min:
                             _er_blocked.discard(_er_sym)
+                            _er_blocked_at_bar.pop(_er_sym, None)
                             log.info(
                                 "[V5_FWD][ER_GATE_UNBLOCK] %s unblocked — E[R] recovered to %.4f",
                                 _er_sym, _trailing_er,
