@@ -5318,6 +5318,9 @@ Examples:
                         help="v5.3.0: per-side threshold in forward test. Uses separate LONG and SHORT thresholds from per-symbol sweep. Requires --v5-per-symbol-threshold. Default: off")
     parser.add_argument("--v5-min-threshold", type=float, default=None,
                         help="v5.0.8+: minimum score threshold floor. Prevents calibrated threshold from dropping too low (e.g. 0.05). Default: None (disabled)")
+    parser.add_argument("--v5-per-sym-no-edge-fallback", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="v5.1+: when ALL per-symbol thresholds are inf (HIGH_BAR), fall back to global effective_threshold instead of producing 0 trades. Default: True")
     parser.add_argument("--v5-max-threshold", type=float, default=None,
                         help="v5.0.9+: maximum score threshold ceiling. Caps calibrated threshold from above to prevent sweep from setting it too high (e.g. 0.10). Default: None (disabled)")
     parser.add_argument("--v5-min-threshold-pct", type=float, default=None,
@@ -6266,6 +6269,7 @@ Examples:
                     short_min_fraction=args.v5_short_min_fraction,
                     ema200_soft_mult=args.v5_ema200_soft_mult,
                     per_side_threshold=args.v5_per_side_threshold,
+                    per_sym_no_edge_fallback=args.v5_per_sym_no_edge_fallback,
                     replit_url=getattr(args, 'url', None),
                     model_version='v6' if args.v6 else 'v5',
                     v6_seq_len=args.v6_seq_len,
@@ -6462,6 +6466,7 @@ Examples:
                 short_min_fraction=args.v5_short_min_fraction,
                 ema200_soft_mult=args.v5_ema200_soft_mult,
                 per_side_threshold=args.v5_per_side_threshold,
+                per_sym_no_edge_fallback=args.v5_per_sym_no_edge_fallback,
                 model_version='v6' if args.v6 else 'v5',
                 v6_seq_len=args.v6_seq_len,
                 v6_conv_channels=args.v6_conv_channels,

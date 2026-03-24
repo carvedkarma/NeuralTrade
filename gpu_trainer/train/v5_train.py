@@ -236,6 +236,7 @@ class V5ForwardTestConfig:
     kill_recovery_r_threshold: float = 2.0 # R improvement above kill floor to re-enable
     kill_hysteresis_r: float = 1.0         # extra buffer above threshold to prevent rapid re-kill
     per_symbol_thresholds: Optional[dict] = None
+    per_sym_no_edge_fallback: bool = True
     soft_gate_floor: bool = True
     weekly_cap_dynamic: bool = False
     weekly_cap_scale: float = 2.0
@@ -2491,6 +2492,43 @@ def run_v5_forward_test(
                      f"{len(config.per_symbol_thresholds)} symbols configured, "
                      f"{n_inf_thr} bars have inf threshold (NO EDGE symbols), "
                      f"floor={hard_floor:.4f} ceiling={config.max_threshold}")
+        # --- All-inf gate: warn loudly when every bar is HIGH_BAR-blocked ---------
+        n_inf_bars_total = int(np.sum(np.isinf(per_bar_threshold) & (per_bar_threshold > 0)))
+        n_total_bars_thr = len(per_bar_threshold)
+        _all_sym_inf = (
+            config.per_symbol_thresholds is not None
+            and all(
+                (not isinstance(_v, dict) and not np.isfinite(float(_v)))
+                or (isinstance(_v, dict) and not np.isfinite(_v.get('long', float('inf')))
+                    and not np.isfinite(_v.get('short', float('inf'))))
+                for _v in config.per_symbol_thresholds.values()
+            )
+        )
+        if _all_sym_inf:
+            log.error(
+                "[V5_FWD][ALL_INF_BLOCKED] All %d symbols have HIGH_BAR (inf) threshold. "
+                "ZERO trades will be selected from this forward test window. "
+                "Root cause: per-symbol sweep found no edge at the promoted checkpoint epoch "
+                "or fine-tuning invalidated saved thresholds. "
+                "Fix: ensure a post-training final sweep runs (Task #34).",
+                len(config.per_symbol_thresholds),
+            )
+            if config.per_sym_no_edge_fallback:
+                _inf_mask = np.isinf(per_bar_threshold) & (per_bar_threshold > 0)
+                per_bar_threshold[_inf_mask] = effective_threshold
+                log.warning(
+                    "[V5_FWD][ALL_INF_FALLBACK] per_sym_no_edge_fallback=True — "
+                    "reset %d inf-threshold bars to effective_threshold=%.4f. "
+                    "Trades will now be gated by global threshold only.",
+                    int(_inf_mask.sum()), effective_threshold,
+                )
+        elif n_inf_bars_total > 0:
+            log.warning(
+                "[V5_FWD] %d/%d bars have inf threshold (HIGH_BAR symbols fully blocked). "
+                "Those symbols will produce 0 trades.",
+                n_inf_bars_total, n_total_bars_thr,
+            )
+        # -------------------------------------------------------------------------
         selected = scores_work >= per_bar_threshold
     else:
         selected = scores_work >= ddt_base_threshold
@@ -4135,6 +4173,7 @@ def run_v5_walk_forward(
     kill_recovery_bars=None,
     kill_recovery_r_threshold=None,
     kill_hysteresis_r=None,
+    per_sym_no_edge_fallback=True,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -6138,6 +6177,116 @@ def train_v5_model(
         else:
             log.warning(f"[{vtag}_FINETUNE] No checkpoint found for fine-tuning — skipping")
 
+    # ---- Post-training final per-symbol sweep ----------------------------------------
+    # Runs after the training loop AND after fine-tuning (if enabled). Loads the best
+    # checkpoint (which already has fine-tuned weights if fine-tuning ran), re-runs
+    # val inference, recomputes per-symbol thresholds, and saves them to the checkpoint.
+    # This ensures saved thresholds always match the FINAL model weights.
+    if per_symbol_threshold and symbols and len(symbols) > 1 and not use_v6:
+        _final_sweep_path = checkpoint_dir / "best_v5_expectancy.pt"
+        if not _final_sweep_path.exists():
+            _final_sweep_path = checkpoint_dir / "best_v5_loss.pt"
+        if _final_sweep_path.exists():
+            log.info(f"[{vtag}_FINAL_SWEEP] Running post-training per-symbol sweep "
+                     f"with final model weights from {_final_sweep_path.name}")
+            _fs_ckpt = torch.load(_final_sweep_path, map_location=device, weights_only=False)
+            model.load_state_dict(_fs_ckpt['model_state_dict'])
+            model.eval()
+            _fs_val_outputs = {
+                'ret_mu': [], 'ret_log_sigma': [], 'ret_sigma': [],
+                'mae': [], 'mfe': [], 'action_logits': []
+            }
+            with torch.no_grad():
+                for _fs_batch in val_loader:
+                    _fs_feat = _fs_batch['features'].to(device)
+                    _fs_sym = _fs_batch.get('symbol_id')
+                    if _fs_sym is not None:
+                        _fs_sym = _fs_sym.to(device)
+                    _fs_out = model(_fs_feat, symbol_ids=_fs_sym)
+                    for _k in _fs_val_outputs:
+                        if _k in _fs_out:
+                            _fs_val_outputs[_k].append(_fs_out[_k].detach().cpu())
+            _fs_concat = {_k: torch.cat(_v, dim=0) for _k, _v in _fs_val_outputs.items() if _v}
+            _fs_arrays = _extract_v5_arrays(_fs_concat)
+            _fs_quality_mask, _ = v5_quality_mask(_fs_arrays, quality_gate_cfg, epoch=epochs)
+            _fs_scores, _fs_sides, _ = compute_v5_scores(
+                None, horizon_bars=horizon,
+                score_lambda=tpd_ctrl_cfg.score_lambda,
+                risk_proxy=risk_proxy,
+                mae_cap=tpd_ctrl_cfg.mae_cap,
+                _arrays=_fs_arrays,
+                side_mode=tpd_ctrl_cfg.side_mode,
+                rr_weight=tpd_ctrl_cfg.rr_weight,
+                sigma_discount=sigma_discount,
+                min_p_side=min_p_side,
+                min_p_short=min_p_short,
+                side_aware_scoring=side_aware_scoring,
+                slippage_bps=slippage_base_bps,
+            )
+            _sweep_cand = val_cand_mask if use_candidates_this_epoch else None
+            if per_side_threshold:
+                log.info(f"[{vtag}_FINAL_SWEEP] Running per-side variant (LONG + SHORT)...")
+                _long_m = _fs_sides == 1
+                _short_m = _fs_sides == -1
+                _sc_long = _fs_scores.copy(); _sc_long[~_long_m] = -np.inf
+                _sc_short = _fs_scores.copy(); _sc_short[~_short_m] = -np.inf
+                _ps_long, _ = _run_per_symbol_sweep(
+                    _sc_long, _fs_sides, val_outcomes, val_realized_r,
+                    val_bars, val_sym_ids, symbols, current_score_threshold,
+                    r_long=val_r_long_arr, r_short=val_r_short_arr,
+                    out_long=val_out_long_arr, out_short=val_out_short_arr,
+                    quality_mask=_fs_quality_mask, candidate_mask=_sweep_cand,
+                    min_trades_per_symbol=5, cooldown=cooldown,
+                )
+                _ps_short, _ = _run_per_symbol_sweep(
+                    _sc_short, _fs_sides, val_outcomes, val_realized_r,
+                    val_bars, val_sym_ids, symbols, current_score_threshold,
+                    r_long=val_r_long_arr, r_short=val_r_short_arr,
+                    out_long=val_out_long_arr, out_short=val_out_short_arr,
+                    quality_mask=_fs_quality_mask, candidate_mask=_sweep_cand,
+                    min_trades_per_symbol=5, cooldown=cooldown,
+                )
+                _all_sids = set(_ps_long.keys()) | set(_ps_short.keys())
+                _fs_new_thr = {
+                    _sid: {'long': _ps_long.get(_sid, current_score_threshold * 3.0),
+                           'short': _ps_short.get(_sid, current_score_threshold * 3.0)}
+                    for _sid in _all_sids
+                }
+            else:
+                _fs_new_thr, _ = _run_per_symbol_sweep(
+                    _fs_scores, _fs_sides, val_outcomes, val_realized_r,
+                    val_bars, val_sym_ids, symbols, current_score_threshold,
+                    r_long=val_r_long_arr, r_short=val_r_short_arr,
+                    out_long=val_out_long_arr, out_short=val_out_short_arr,
+                    quality_mask=_fs_quality_mask, candidate_mask=_sweep_cand,
+                    min_trades_per_symbol=max(5, min_trades // 2), cooldown=cooldown,
+                )
+            # Log delta vs. what was in the checkpoint
+            _old_thr = _fs_ckpt.get('per_symbol_thresholds') or {}
+            _n_changed = 0
+            for _sid, _new_v in _fs_new_thr.items():
+                _old_v = _old_thr.get(_sid)
+                _changed = (_old_v is None) or (_old_v != _new_v)
+                if _changed:
+                    _n_changed += 1
+                    _sym_nm = symbols[int(_sid)] if int(_sid) < len(symbols) else f"sym_{_sid}"
+                    if isinstance(_new_v, dict):
+                        _old_str = f"L={_old_v.get('long', '?'):.4f} S={_old_v.get('short', '?'):.4f}" if isinstance(_old_v, dict) else str(_old_v)
+                        log.info(f"[{vtag}_FINAL_SWEEP] {_sym_nm}: {_old_str} → "
+                                 f"L={_new_v['long']:.4f} S={_new_v['short']:.4f}")
+                    else:
+                        _old_s = f"{_old_v:.4f}" if isinstance(_old_v, (int, float)) and np.isfinite(float(_old_v)) else str(_old_v)
+                        _new_s = f"{_new_v:.4f}" if np.isfinite(float(_new_v)) else "inf (HIGH_BAR)"
+                        log.info(f"[{vtag}_FINAL_SWEEP] {_sym_nm}: {_old_s} → {_new_s}")
+            log.info(f"[{vtag}_FINAL_SWEEP] {_n_changed}/{len(_fs_new_thr)} symbol thresholds changed")
+            _fs_ckpt['per_symbol_thresholds'] = _fs_new_thr
+            torch.save(_fs_ckpt, _final_sweep_path)
+            log.info(f"[{vtag}_FINAL_SWEEP] Updated checkpoint {_final_sweep_path.name} "
+                     f"with fresh per-symbol thresholds")
+        else:
+            log.warning(f"[{vtag}_FINAL_SWEEP] No checkpoint found — skipping post-training per-symbol sweep")
+    # ---------------------------------------------------------------------------------
+
     fitted_temperature = 1.0
     if temp_scale:
         log.info(f"[{vtag}_TEMP_SCALE] Fitting temperature scaling on validation set...")
@@ -6220,8 +6369,6 @@ def train_v5_model(
             if per_symbol_threshold:
                 ckpt_per_sym_thr = ckpt.get('per_symbol_thresholds', None)
                 if ckpt_per_sym_thr:
-                    log.info(f"[V5_FWD] Per-symbol thresholds loaded from checkpoint: "
-                             f"{len(ckpt_per_sym_thr)} symbols")
                     _first_ckpt_val = next(iter(ckpt_per_sym_thr.values()), None)
                     _is_per_side = isinstance(_first_ckpt_val, dict)
                     for sym_id_k, sym_thr_v in sorted(ckpt_per_sym_thr.items(), key=lambda x: int(x[0])):
@@ -6233,6 +6380,36 @@ def train_v5_model(
                         else:
                             thr_str = f"{sym_thr_v:.4f}" if np.isfinite(sym_thr_v) else "inf (NO EDGE)"
                             log.info(f"  {sym_name_k}: threshold={thr_str}")
+                    # Summary diagnostics for loaded thresholds
+                    _all_vals_flat = []
+                    for _v in ckpt_per_sym_thr.values():
+                        if isinstance(_v, dict):
+                            _all_vals_flat.extend([_v.get('long', float('inf')), _v.get('short', float('inf'))])
+                        else:
+                            _all_vals_flat.append(float(_v))
+                    _n_active = sum(1 for _v in _all_vals_flat if np.isfinite(_v))
+                    _n_highbar = sum(1 for _v in _all_vals_flat if not np.isfinite(_v))
+                    _finite_vals = [_v for _v in _all_vals_flat if np.isfinite(_v)]
+                    if _finite_vals:
+                        _thr_summary = (f"min={min(_finite_vals):.4f} median={float(np.median(_finite_vals)):.4f} "
+                                        f"max={max(_finite_vals):.4f}")
+                    else:
+                        _thr_summary = "no finite thresholds"
+                    log.info(
+                        "[V5_FWD] Per-symbol thresholds: %d total entries, %d ACTIVE (finite), %d HIGH_BAR (inf) — %s",
+                        len(_all_vals_flat), _n_active, _n_highbar, _thr_summary,
+                    )
+                    if _n_highbar == len(_all_vals_flat):
+                        log.error(
+                            "[V5_FWD][ALL_HIGH_BAR] ALL %d threshold entries are inf. "
+                            "The forward test will likely produce ZERO trades. "
+                            "This happens when per-symbol sweep found no edge at the promoted epoch "
+                            "or after fine-tuning invalidated the calibrated thresholds. "
+                            "per_sym_no_edge_fallback=%s will %s this.",
+                            len(_all_vals_flat),
+                            per_sym_no_edge_fallback,
+                            "override" if per_sym_no_edge_fallback else "NOT override",
+                        )
                 else:
                     log.warning("[V5_FWD] Per-symbol threshold enabled but not found in checkpoint — using global threshold")
 
@@ -6349,6 +6526,7 @@ def train_v5_model(
                 kill_recovery_r_threshold=kill_recovery_r_threshold,
                 kill_hysteresis_r=kill_hysteresis_r,
                 per_symbol_thresholds=ckpt_per_sym_thr,
+                per_sym_no_edge_fallback=per_sym_no_edge_fallback,
                 ema200_soft_mult=ema200_soft_mult,
                 per_side_threshold=per_side_threshold,
             )
