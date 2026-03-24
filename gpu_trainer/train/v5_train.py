@@ -4905,6 +4905,7 @@ def train_v5_model(
     short_min_fraction=0.35,
     ema200_soft_mult=None,
     per_side_threshold=False,
+    per_sym_no_edge_fallback=True,
     rolling_er_gate=False,
     rolling_er_window=20,
     rolling_er_min=-0.05,
