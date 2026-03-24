@@ -237,6 +237,9 @@ class V5ForwardTestConfig:
     kill_hysteresis_r: float = 1.0         # extra buffer above threshold to prevent rapid re-kill
     per_symbol_thresholds: Optional[dict] = None
     per_sym_no_edge_fallback: bool = True
+    rolling_er_gate: bool = False
+    rolling_er_window: int = 20
+    rolling_er_min: float = -0.05
     soft_gate_floor: bool = True
     weekly_cap_dynamic: bool = False
     weekly_cap_scale: float = 2.0
@@ -2420,6 +2423,17 @@ def run_v5_forward_test(
         else:
             log.warning("[V5_FWD] Max trades/day cap set but test_timestamps is None — cap will be INACTIVE")
 
+    # Rolling E[R] gate state — per-symbol deque of last N realized R values.
+    _er_deques: dict = {}        # symbol -> collections.deque
+    _er_blocked: set = set()     # symbols currently blocked by rolling E[R] gate
+    _er_total_blocks: int = 0    # total block events
+    _er_trades_skipped: int = 0  # total trades skipped due to gate
+    _er_sym_block_counts: dict = {}  # symbol -> count of block events
+    if config.rolling_er_gate:
+        log.info(f"[V5_FWD][ER_GATE] Rolling E[R] gate ENABLED: "
+                 f"window={config.rolling_er_window} trades, "
+                 f"min_er={config.rolling_er_min:.4f}")
+
     valid_bool = test_valid.astype(bool) if not isinstance(test_valid, np.ndarray) else test_valid.astype(bool)
 
     scores_work = scores.copy()
@@ -3125,6 +3139,14 @@ def run_v5_forward_test(
                 gate_blocked_r["max_tpd"].append(_oracle_r(idx))
                 continue
 
+        if config.rolling_er_gate and test_sym_ids is not None:
+            _er_sym = sym_id_to_name.get(int(test_sym_ids[idx]), None)
+            if _er_sym and _er_sym in _er_blocked:
+                _er_trades_skipped += 1
+                gate_blocks["rolling_er"] = gate_blocks.get("rolling_er", 0) + 1
+                gate_blocked_r.setdefault("rolling_er", []).append(_oracle_r(idx))
+                continue
+
         if ddt is not None:
             ddt_thr = ddt.effective_threshold(effective_threshold)
             if scores_work[idx] < ddt_thr:
@@ -3305,7 +3327,8 @@ def run_v5_forward_test(
                         or ultra_sizer is not None
                         or ddt is not None
                         or config.per_symbol_r_kill is not None
-                        or config.quality_gate_enabled)
+                        or config.quality_gate_enabled
+                        or config.rolling_er_gate)
         if needs_post_r:
             if use_side_conditional_for_cap:
                 post_trade_r = float(r_long[idx]) if sides[idx] == 1 else float(r_short[idx])
@@ -3375,6 +3398,31 @@ def run_v5_forward_test(
                     quality_gate_recent_correct.pop(0)
                     quality_gate_recent_wins.pop(0)
 
+            if config.rolling_er_gate and post_r_valid and test_sym_ids is not None:
+                _er_sym = sym_id_to_name.get(int(test_sym_ids[idx]), None)
+                if _er_sym:
+                    import collections as _col
+                    if _er_sym not in _er_deques:
+                        _er_deques[_er_sym] = _col.deque(maxlen=config.rolling_er_window)
+                    _er_deques[_er_sym].append(post_trade_r)
+                    _dq = _er_deques[_er_sym]
+                    if len(_dq) >= config.rolling_er_window:
+                        _trailing_er = float(np.mean(list(_dq)))
+                        if _er_sym not in _er_blocked and _trailing_er < config.rolling_er_min:
+                            _er_blocked.add(_er_sym)
+                            _er_total_blocks += 1
+                            _er_sym_block_counts[_er_sym] = _er_sym_block_counts.get(_er_sym, 0) + 1
+                            log.warning(
+                                "[V5_FWD][ER_GATE_BLOCK] %s blocked — trailing %d-trade E[R]=%.4f < %.4f",
+                                _er_sym, config.rolling_er_window, _trailing_er, config.rolling_er_min,
+                            )
+                        elif _er_sym in _er_blocked and _trailing_er >= config.rolling_er_min:
+                            _er_blocked.discard(_er_sym)
+                            log.info(
+                                "[V5_FWD][ER_GATE_UNBLOCK] %s unblocked — E[R] recovered to %.4f",
+                                _er_sym, _trailing_er,
+                            )
+
     if ema200 is not None:
         log.info(f"[V5_GATE] EMA200 blocked {ema_blocked} trades")
     if warmup_blocked > 0:
@@ -3409,6 +3457,14 @@ def run_v5_forward_test(
                  f"base={config.weekly_loss_cap:.1f} weeks_tracked={len(weekly_r_history)}")
     if head_disagree_blocked > 0:
         log.info(f"[V5_GATE] Head disagreement blocked {head_disagree_blocked} trades")
+    if config.rolling_er_gate:
+        log.info(
+            "[V5_FWD][ER_GATE] Summary: total_block_events=%d trades_skipped=%d unique_symbols_blocked=%d",
+            _er_total_blocks, _er_trades_skipped, len(_er_sym_block_counts),
+        )
+        if _er_sym_block_counts:
+            for _s, _c in sorted(_er_sym_block_counts.items(), key=lambda x: -x[1]):
+                log.info("[V5_FWD][ER_GATE] %s: %d block event(s)", _s, _c)
     if per_sym_kill_blocked > 0:
         log.info(f"[V5_GATE] Per-symbol R kill blocked {per_sym_kill_blocked} trades "
                  f"(killed_symbols={sorted(killed_symbols)}, floor={config.per_symbol_r_kill}R)")
@@ -4190,6 +4246,9 @@ def run_v5_walk_forward(
     kill_recovery_r_threshold=None,
     kill_hysteresis_r=None,
     per_sym_no_edge_fallback=True,
+    rolling_er_gate=False,
+    rolling_er_window=20,
+    rolling_er_min=-0.05,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -4491,6 +4550,9 @@ def run_v5_walk_forward(
                 short_min_fraction=short_min_fraction,
                 ema200_soft_mult=ema200_soft_mult,
                 per_side_threshold=per_side_threshold,
+                rolling_er_gate=rolling_er_gate,
+                rolling_er_window=rolling_er_window,
+                rolling_er_min=rolling_er_min,
                 model_version=model_version,
                 v6_seq_len=v6_seq_len,
                 v6_conv_channels=v6_conv_channels,
@@ -4835,6 +4897,9 @@ def train_v5_model(
     short_min_fraction=0.35,
     ema200_soft_mult=None,
     per_side_threshold=False,
+    rolling_er_gate=False,
+    rolling_er_window=20,
+    rolling_er_min=-0.05,
     model_version='v5',
     v6_seq_len=16,
     v6_conv_channels=128,
@@ -6562,6 +6627,9 @@ def train_v5_model(
                 kill_hysteresis_r=kill_hysteresis_r,
                 per_symbol_thresholds=ckpt_per_sym_thr,
                 per_sym_no_edge_fallback=per_sym_no_edge_fallback,
+                rolling_er_gate=rolling_er_gate,
+                rolling_er_window=rolling_er_window,
+                rolling_er_min=rolling_er_min,
                 ema200_soft_mult=ema200_soft_mult,
                 per_side_threshold=per_side_threshold,
             )

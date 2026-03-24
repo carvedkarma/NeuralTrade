@@ -5333,7 +5333,7 @@ Examples:
                         help="v5.0.9+: maximum score threshold ceiling. Caps calibrated threshold from above to prevent sweep from setting it too high (e.g. 0.10). Default: None (disabled)")
     parser.add_argument("--v5-min-threshold-pct", type=float, default=None,
                         help="v5.0.8+: adaptive minimum threshold as percentile of test score distribution (e.g. 70 = use 70th percentile as floor). Adapts to each fold's score range. Default: None (disabled)")
-    parser.add_argument("--v5-max-trades-per-day", type=int, default=None,
+    parser.add_argument("--v5-max-trades-per-day", type=int, default=8,
                         help="v5.0.8+: maximum trades per day across all symbols. Blocks further entries once reached (e.g. 6). Default: None (disabled)")
 
     parser.add_argument("--v5-trailing-sl", action="store_true", default=False,
@@ -5494,6 +5494,12 @@ Examples:
                         help="v5.6: reduce sizing on dominant direction when balance exceeds threshold (default: off)")
     parser.add_argument("--v5-direction-balance-threshold", type=float, default=0.75,
                         help="v5.6: direction balance threshold for 0.5x sizing reduction (default: 0.75)")
+    parser.add_argument("--v5-rolling-er-gate", action="store_true", default=False,
+                        help="Rolling E[R] gate: block a symbol when trailing E[R] over last N trades falls below min_er (default: off)")
+    parser.add_argument("--v5-rolling-er-window", type=int, default=20,
+                        help="Rolling E[R] gate: number of recent trades per symbol for E[R] computation (default: 20)")
+    parser.add_argument("--v5-rolling-er-min", type=float, default=-0.05,
+                        help="Rolling E[R] gate: minimum acceptable trailing E[R]; symbol blocked when below this (default: -0.05)")
     parser.add_argument("--v5-live-threshold", type=float, default=None,
                         help="Live mode v5_score threshold override (default: V5_SCORE_THRESHOLD=0.5). "
                              "Signals with score below this are blocked. Range: 0.1–5.0")
@@ -6282,6 +6288,9 @@ Examples:
                     ema200_soft_mult=args.v5_ema200_soft_mult,
                     per_side_threshold=args.v5_per_side_threshold,
                     per_sym_no_edge_fallback=args.v5_per_sym_no_edge_fallback,
+                    rolling_er_gate=getattr(args, 'v5_rolling_er_gate', False),
+                    rolling_er_window=getattr(args, 'v5_rolling_er_window', 20),
+                    rolling_er_min=getattr(args, 'v5_rolling_er_min', -0.05),
                     replit_url=getattr(args, 'url', None),
                     model_version='v6' if args.v6 else 'v5',
                     v6_seq_len=args.v6_seq_len,
@@ -6483,6 +6492,9 @@ Examples:
                 ema200_soft_mult=args.v5_ema200_soft_mult,
                 per_side_threshold=args.v5_per_side_threshold,
                 per_sym_no_edge_fallback=args.v5_per_sym_no_edge_fallback,
+                rolling_er_gate=getattr(args, 'v5_rolling_er_gate', False),
+                rolling_er_window=getattr(args, 'v5_rolling_er_window', 20),
+                rolling_er_min=getattr(args, 'v5_rolling_er_min', -0.05),
                 model_version='v6' if args.v6 else 'v5',
                 v6_seq_len=args.v6_seq_len,
                 v6_conv_channels=args.v6_conv_channels,
