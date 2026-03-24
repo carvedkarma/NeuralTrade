@@ -105,8 +105,21 @@ export function configureErGate(enabled: boolean, window: number, min: number): 
 
 /** Return true if this symbol is blocked by the rolling E[R] gate. */
 function _isErBlocked(symbol: string): boolean {
-  return _erGateEnabled && _erBlocked.has(symbol);
+  if (!_erGateEnabled || !_erBlocked.has(symbol)) return false;
+  // Warn every 100th check so operators can detect long-duration blocks in logs.
+  const _warnCount = (_erBlockWarnCount.get(symbol) ?? 0) + 1;
+  _erBlockWarnCount.set(symbol, _warnCount);
+  if (_warnCount % 100 === 1) {
+    console.warn(
+      `[Paper][ER_GATE_WARN] ${symbol} remains blocked by rolling E[R] gate` +
+      ` — will unblock when trailing E[R] recovers above ${_erGateMin}` +
+      ` (needs ${_erGateWindow} closed trades to accumulate).`,
+    );
+  }
+  return true;
 }
+
+const _erBlockWarnCount = new Map<string, number>();
 
 function _todayUtc(): string {
   return new Date().toISOString().slice(0, 10);  // "YYYY-MM-DD"
