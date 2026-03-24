@@ -56,6 +56,12 @@ export interface PaperTradingConfig {
   leverageEnabled: boolean;
   leverageTiers: { minScore: number; leverage: number }[];
   maxLeverage: number;
+
+  // Trade-frequency controls
+  maxTradesPerDay: number;           // Hard cap on entries per UTC day (default 8)
+  rollingErGateEnabled: boolean;     // Enable per-symbol rolling E[R] circuit breaker
+  rollingErGateWindow: number;       // Trailing N closed trades per symbol (default 20)
+  rollingErGateMin: number;          // Block when trailing mean E[R] < this (default -0.05)
 }
 
 export const defaultConfig: PaperTradingConfig = {
@@ -130,6 +136,12 @@ export const defaultConfig: PaperTradingConfig = {
     { minScore: 0.02, leverage: 15 },
   ],
   maxLeverage: 50,
+
+  // Trade-frequency controls
+  maxTradesPerDay: 8,               // Cap at 8 entries per UTC day
+  rollingErGateEnabled: false,      // Off by default — enable via config update
+  rollingErGateWindow: 20,
+  rollingErGateMin: -0.05,
 };
 
 let currentConfig: PaperTradingConfig = { ...defaultConfig };
@@ -181,6 +193,20 @@ export function getConfig(): PaperTradingConfig {
 
 export function updateConfig(updates: Partial<PaperTradingConfig>): PaperTradingConfig {
   currentConfig = { ...currentConfig, ...updates };
+  // Sync trade-frequency controls into engine module whenever config changes
+  if (
+    updates.rollingErGateEnabled !== undefined ||
+    updates.rollingErGateWindow !== undefined ||
+    updates.rollingErGateMin !== undefined
+  ) {
+    import("./engine").then(({ configureErGate }) => {
+      configureErGate(
+        currentConfig.rollingErGateEnabled,
+        currentConfig.rollingErGateWindow,
+        currentConfig.rollingErGateMin,
+      );
+    }).catch(() => {});
+  }
   return { ...currentConfig };
 }
 

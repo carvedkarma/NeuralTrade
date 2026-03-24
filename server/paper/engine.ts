@@ -82,7 +82,6 @@ let recentLossStreak = 0;
 let lossStreakInitialized = false;
 
 // ── Trade-frequency controls (in-memory, resets on server restart) ──────────────
-const MAX_TRADES_PER_DAY = 8;
 let _dailyTradeDate = "";          // "YYYY-MM-DD" of last trade
 let _dailyTradeCount = 0;          // trades opened so far today
 
@@ -1117,7 +1116,7 @@ export async function openPosition(
   // Increment daily trade counter
   _resetDailyCounterIfNeeded();
   _dailyTradeCount++;
-  console.log(`[Paper][TPD] Daily trades: ${_dailyTradeCount}/${MAX_TRADES_PER_DAY}`);
+  console.log(`[Paper][TPD] Daily trades: ${_dailyTradeCount}/${config.maxTradesPerDay ?? 8}`);
 
   return position;
 }
@@ -1337,9 +1336,10 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
 
     // ── Max trades per day gate ──────────────────────────────────────────────
     _resetDailyCounterIfNeeded();
-    if (_dailyTradeCount >= MAX_TRADES_PER_DAY) {
+    const _maxTpd = config.maxTradesPerDay ?? 8;
+    if (_dailyTradeCount >= _maxTpd) {
       console.log(
-        `[Paper][TPD_GATE] Trade blocked — already opened ${_dailyTradeCount}/${MAX_TRADES_PER_DAY} trades today (${_dailyTradeDate})`,
+        `[Paper][TPD_GATE] Trade blocked — already opened ${_dailyTradeCount}/${_maxTpd} trades today (${_dailyTradeDate})`,
       );
       return;
     }
