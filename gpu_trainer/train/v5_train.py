@@ -663,10 +663,12 @@ class V6SequenceDataset(Dataset):
         return item
 
 
-def compute_v5_loss(outputs, batch, w_ret=1.0, w_mfe=0.25, w_mae=0.25,
-                    w_action=2.0, w_barrier=0.25, w_regime=0.1,
+def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
+                    w_action=0.5, w_barrier=0.25, w_regime=0.1,
                     barrier_mode='fixed', action_weights=None, epoch=0,
-                    sample_weights=None, mae_asym_weight=1.0):
+                    sample_weights=None, mae_asym_weight=1.0,
+                    warmup_epochs=0, warmup_ret_mult=1.0, warmup_action_mult=1.0,
+                    sigma_spread_reg=0.0):
     """Compute v5 composite loss with class-balanced action CE.
 
     Uses clamped Gaussian NLL to prevent log(sigma) term from dominating.
