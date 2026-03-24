@@ -3144,17 +3144,27 @@ def run_v5_forward_test(
             _er_sym = sym_id_to_name.get(int(test_sym_ids[idx]), None)
             if _er_sym and _er_sym in _er_blocked:
                 # Update deque with oracle R so the trailing mean can recover
-                # even while blocked — when mean rises back to rolling_er_min,
-                # _updateErDeque unblocks automatically.
+                # even while blocked. When mean rises back to rolling_er_min,
+                # the symbol is unblocked here (primary E[R]-recovery path).
                 _er_skip_counts[_er_sym] = _er_skip_counts.get(_er_sym, 0) + 1
-                _updateErDeque(
-                    _er_sym, _oracle_r(idx),
-                    config.rolling_er_window, config.rolling_er_min,
-                    _er_deques, _er_blocked,
-                )
+                _oracle_r_val = _oracle_r(idx)
+                import collections as _col
+                if _er_sym not in _er_deques:
+                    _er_deques[_er_sym] = _col.deque(maxlen=config.rolling_er_window)
+                _er_deques[_er_sym].append(_oracle_r_val)
+                _dq_blk = _er_deques[_er_sym]
+                if len(_dq_blk) >= config.rolling_er_window:
+                    _trailing_er_blk = float(np.mean(list(_dq_blk)))
+                    if _trailing_er_blk >= config.rolling_er_min:
+                        _er_blocked.discard(_er_sym)
+                        log.info(
+                            "[V5_FWD][ER_GATE_UNBLOCK] %s unblocked — E[R] recovered to %.4f"
+                            " (oracle update while blocked)",
+                            _er_sym, _trailing_er_blk,
+                        )
                 _er_trades_skipped += 1
                 gate_blocks["rolling_er"] = gate_blocks.get("rolling_er", 0) + 1
-                gate_blocked_r.setdefault("rolling_er", []).append(_oracle_r(idx))
+                gate_blocked_r.setdefault("rolling_er", []).append(_oracle_r_val)
                 continue
 
         if ddt is not None:

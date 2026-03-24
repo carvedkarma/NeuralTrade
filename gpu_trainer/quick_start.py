@@ -5334,7 +5334,7 @@ Examples:
     parser.add_argument("--v5-min-threshold-pct", type=float, default=None,
                         help="v5.0.8+: adaptive minimum threshold as percentile of test score distribution (e.g. 70 = use 70th percentile as floor). Adapts to each fold's score range. Default: None (disabled)")
     parser.add_argument("--v5-max-trades-per-day", type=int, default=8,
-                        help="v5.0.8+: maximum trades per day across all symbols. Blocks further entries once reached (e.g. 6). Default: None (disabled)")
+                        help="v5.0.8+: maximum trades per day across all symbols. Blocks further entries once reached (e.g. 6). Default: 8")
 
     parser.add_argument("--v5-trailing-sl", action="store_true", default=False,
                         help="v5.0.8+: enable trailing stop-loss. Moves SL to breakeven then trails behind best price. Default: disabled")
