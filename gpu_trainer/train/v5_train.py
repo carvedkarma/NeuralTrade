@@ -2426,7 +2426,6 @@ def run_v5_forward_test(
     # Rolling E[R] gate state — per-symbol deque of last N realized R values.
     _er_deques: dict = {}        # symbol -> collections.deque
     _er_blocked: set = set()     # symbols currently blocked by rolling E[R] gate
-    _er_skip_counts: dict = {}   # symbol -> signals skipped since blocking (cooldown counter)
     _er_total_blocks: int = 0    # total block events
     _er_trades_skipped: int = 0  # total trades skipped due to gate
     _er_sym_block_counts: dict = {}  # symbol -> count of block events
@@ -3146,18 +3145,8 @@ def run_v5_forward_test(
                 _er_trades_skipped += 1
                 gate_blocks["rolling_er"] = gate_blocks.get("rolling_er", 0) + 1
                 gate_blocked_r.setdefault("rolling_er", []).append(_oracle_r(idx))
-                # Cooldown counter: after rolling_er_window more skips, force-unblock
-                # and clear the deque so the symbol gets a fresh evaluation window.
-                # This avoids lookahead bias while ensuring recovery is always possible.
-                _er_skip_counts[_er_sym] = _er_skip_counts.get(_er_sym, 0) + 1
-                if _er_skip_counts[_er_sym] >= config.rolling_er_window:
-                    _er_blocked.discard(_er_sym)
-                    _er_deques.pop(_er_sym, None)
-                    _er_skip_counts[_er_sym] = 0
-                    log.info(
-                        "[V5_FWD][ER_GATE_COOLDOWN_UNBLOCK] %s unblocked after %d-signal cooldown — deque reset",
-                        _er_sym, config.rolling_er_window,
-                    )
+                # Symbol stays blocked until trailing E[R] recovers via actual realized R.
+                # Deque state is frozen; it resets naturally at the next fold boundary.
                 continue
 
         if ddt is not None:
