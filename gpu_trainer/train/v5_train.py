@@ -3145,6 +3145,21 @@ def run_v5_forward_test(
                 _er_trades_skipped += 1
                 gate_blocks["rolling_er"] = gate_blocks.get("rolling_er", 0) + 1
                 gate_blocked_r.setdefault("rolling_er", []).append(_oracle_r(idx))
+                # Shadow-track oracle R for blocked symbol so the gate can recover
+                import collections as _col_blk
+                if _er_sym not in _er_deques:
+                    _er_deques[_er_sym] = _col_blk.deque(maxlen=config.rolling_er_window)
+                _er_deques[_er_sym].append(float(_oracle_r(idx)))
+                _dq_blk = _er_deques[_er_sym]
+                if len(_dq_blk) >= config.rolling_er_window:
+                    _blk_er = float(sum(_dq_blk) / len(_dq_blk))
+                    if _blk_er >= config.rolling_er_min:
+                        _er_blocked.discard(_er_sym)
+                        import numpy as _np_blk
+                        log.info(
+                            "[V5_FWD][ER_GATE_UNBLOCK] %s unblocked (shadow) — E[R] recovered to %.4f",
+                            _er_sym, _blk_er,
+                        )
                 continue
 
         if ddt is not None:

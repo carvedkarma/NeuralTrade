@@ -81,6 +81,51 @@ const EDGE_MULTIPLE_MIN = 1.5;
 let recentLossStreak = 0;
 let lossStreakInitialized = false;
 
+// ── Trade-frequency controls (in-memory, resets on server restart) ──────────────
+const MAX_TRADES_PER_DAY = 8;
+let _dailyTradeDate = "";          // "YYYY-MM-DD" of last trade
+let _dailyTradeCount = 0;          // trades opened so far today
+
+const ROLLING_ER_WINDOW = 20;      // trailing N trades per symbol
+const ROLLING_ER_MIN = -0.05;      // block symbol when trailing E[R] < this
+const _erDeques = new Map<string, number[]>();  // symbol → circular buffer of realized R
+const _erBlocked = new Set<string>();           // currently blocked symbols
+
+function _todayUtc(): string {
+  return new Date().toISOString().slice(0, 10);  // "YYYY-MM-DD"
+}
+
+function _resetDailyCounterIfNeeded(): void {
+  const today = _todayUtc();
+  if (_dailyTradeDate !== today) {
+    _dailyTradeDate = today;
+    _dailyTradeCount = 0;
+  }
+}
+
+function _updateErDeque(symbol: string, realizedR: number): void {
+  if (!_erDeques.has(symbol)) _erDeques.set(symbol, []);
+  const dq = _erDeques.get(symbol)!;
+  dq.push(realizedR);
+  if (dq.length > ROLLING_ER_WINDOW) dq.shift();
+  if (dq.length >= ROLLING_ER_WINDOW) {
+    const trailingEr = dq.reduce((a, b) => a + b, 0) / dq.length;
+    const wasBlocked = _erBlocked.has(symbol);
+    if (!wasBlocked && trailingEr < ROLLING_ER_MIN) {
+      _erBlocked.add(symbol);
+      console.log(
+        `[Paper][ER_GATE_BLOCK] ${symbol} blocked — trailing ${ROLLING_ER_WINDOW}-trade E[R]=${trailingEr.toFixed(4)} < ${ROLLING_ER_MIN}`,
+      );
+    } else if (wasBlocked && trailingEr >= ROLLING_ER_MIN) {
+      _erBlocked.delete(symbol);
+      console.log(
+        `[Paper][ER_GATE_UNBLOCK] ${symbol} unblocked — E[R] recovered to ${trailingEr.toFixed(4)}`,
+      );
+    }
+  }
+}
+// ────────────────────────────────────────────────────────────────────────────────
+
 /**
  * Create HorizonPredictions from shot plan data
  * Uses edge as h15 mu, derives h60 and h240 from trend context
@@ -1044,7 +1089,12 @@ export async function openPosition(
   console.log(`  Stop: ${stopLoss.toFixed(2)} (${stopDistance.toFixed(2)} distance, R=1)`);
   console.log(`  Risk: $${riskUsdt.toFixed(2)} (${config.riskPerTradePct}% of equity)`);
   console.log(`  TP1: ${tp1.toFixed(2)}, TP2: ${tp2 ? tp2.toFixed(2) : "N/A"}`);
-  
+
+  // Increment daily trade counter
+  _resetDailyCounterIfNeeded();
+  _dailyTradeCount++;
+  console.log(`[Paper][TPD] Daily trades: ${_dailyTradeCount}/${MAX_TRADES_PER_DAY}`);
+
   return position;
 }
 
@@ -1155,7 +1205,12 @@ export async function closePosition(
     
     // INSTITUTION-GRADE: Track loss streak for NO-TRADE conditions
     recordTradeResult(totalRealizedPnl > 0);
-    
+
+    // Rolling E[R] gate: update per-symbol deque with realized R-multiple
+    const _riskUsdt_ = position.initialRiskUsdt ?? 1;
+    const _realizedR_ = _riskUsdt_ > 0 ? totalRealizedPnl / _riskUsdt_ : 0;
+    _updateErDeque(position.symbol, _realizedR_);
+
     // EDGE TRACKING: Record signal result for edge metrics
     edgeTracker.recordSignal(
       position.side as "LONG" | "SHORT",
@@ -1254,6 +1309,23 @@ export async function processCandle(ctx: TradeContext): Promise<void> {
       console.log(`[Paper] ORDER FLOW: ${_ofGateResult.reason}`);
     } catch (ofErr: any) {
       console.warn(`[Paper] Order flow fetch failed for ${_ctxSymbol}, allowing trade: ${ofErr.message}`);
+    }
+
+    // ── Max trades per day gate ──────────────────────────────────────────────
+    _resetDailyCounterIfNeeded();
+    if (_dailyTradeCount >= MAX_TRADES_PER_DAY) {
+      console.log(
+        `[Paper][TPD_GATE] Trade blocked — already opened ${_dailyTradeCount}/${MAX_TRADES_PER_DAY} trades today (${_dailyTradeDate})`,
+      );
+      return;
+    }
+
+    // ── Per-symbol rolling E[R] gate ─────────────────────────────────────────
+    if (_erBlocked.has(_ctxSymbol)) {
+      console.log(
+        `[Paper][ER_GATE] Trade blocked — ${_ctxSymbol} has trailing E[R] below ${ROLLING_ER_MIN}`,
+      );
+      return;
     }
 
     await openPosition(
