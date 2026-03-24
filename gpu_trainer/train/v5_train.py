@@ -786,8 +786,9 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
     }
 
     # Configurable warmup schedule — disabled by default (warmup_epochs=0).
-    # When warmup_epochs > 0, regression heads ramp from warmup_ret_mult to 1.0
-    # and the action head ramps from warmup_action_mult to 1.0 over the warmup window.
+    # When warmup_epochs > 0, regression heads use warmup_ret_mult and the action head
+    # uses warmup_action_mult as fixed multipliers for the first warmup_epochs epochs.
+    # After that, raw weights apply. No interpolation — it is a step change, not a ramp.
     if warmup_epochs > 0 and epoch < warmup_epochs:
         eff_w_ret = w_ret * warmup_ret_mult
         eff_w_mfe = w_mfe * warmup_ret_mult
