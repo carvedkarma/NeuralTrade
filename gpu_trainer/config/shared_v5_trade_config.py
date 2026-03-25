@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class V5TradeDefaults:
     # ── Scoring / signal gate ────────────────────────────────────────────────
-    score_threshold: float = 0.55          # Minimum composite V5 score to enter
+    score_threshold: float = 0.35          # Minimum composite V5 score to enter
     score_lambda: float = 0.5             # Lambda for composite score weighting
     min_mu_r_score: float = 0.0           # Minimum expected-return component
     min_p_side: float = 0.0               # Minimum directional probability

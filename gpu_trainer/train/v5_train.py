@@ -157,7 +157,7 @@ class V5ForwardTestConfig:
     min_threshold: Optional[float] = None
     max_threshold: Optional[float] = None
     min_threshold_pct: Optional[float] = None
-    max_trades_per_day: Optional[int] = None
+    max_trades_per_day: Optional[int] = 8
     trailing_sl: bool = False
     trail_activation: float = 1.5
     trail_distance: float = 1.0
@@ -229,7 +229,7 @@ class V5ForwardTestConfig:
     ood_sigma_mult: float = 1.5
     ood_size_reduction: float = 0.5
     mu_debias: bool = True
-    mu_debias_alpha: float = 0.01
+    mu_debias_alpha: float = 0.003
     min_trades: int = 20
     per_symbol_r_kill: Optional[float] = None
     kill_recovery_bars: int = 48           # bars of cooldown before recovery check
@@ -699,7 +699,11 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
     sigma = torch.exp(ret_log_sigma).clamp(min=0.01, max=5.0)
     squared_error = ((ret_true - ret_mu) / (sigma + 1e-8)) ** 2
     log_term = torch.log(sigma + 1e-8)
-    nll = log_term + 0.5 * squared_error
+    # Sigma floor penalty: prevent sigma from collapsing toward zero.
+    # A sigma near zero makes the model appear maximally confident but the
+    # predictions are actually degenerate — the NLL loss alone won't stop this.
+    sigma_floor_penalty = 3.0 * F.relu(0.10 - sigma)
+    nll = log_term + 0.5 * squared_error + sigma_floor_penalty
     if sw is not None:
         L_ret = (nll * sw).sum() / sw.sum()
     else:
@@ -736,12 +740,14 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
     action_true = batch['action_label'][valid]
     if sw is not None:
         action_per_sample = F.cross_entropy(action_logits, action_true,
-                                            weight=action_weights, reduction='none')
+                                            weight=action_weights, reduction='none',
+                                            label_smoothing=0.1)
         L_action = (action_per_sample * sw).sum() / sw.sum()
     elif action_weights is not None:
-        L_action = F.cross_entropy(action_logits, action_true, weight=action_weights)
+        L_action = F.cross_entropy(action_logits, action_true, weight=action_weights,
+                                   label_smoothing=0.1)
     else:
-        L_action = F.cross_entropy(action_logits, action_true)
+        L_action = F.cross_entropy(action_logits, action_true, label_smoothing=0.1)
 
     LONG_IDX, SHORT_IDX = 1, 2
     SIDE_BAL_W = 0.30
@@ -1008,7 +1014,7 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999,
         adaptive_ptrade = max(cfg.p_trade_min * 0.3, float(np.percentile(ref_pt, 40)))
     ptrade_pass = pt >= adaptive_ptrade
 
-    final_mask = sigma_pass & mae_pass & edge_pass & ptrade_pass
+    final_mask = sigma_pass & mae_pass & ptrade_pass
     n_passed = int(np.sum(final_mask))
 
     if n_passed < n * min_pass_rate and n > 100:
@@ -1183,7 +1189,7 @@ def fit_temperature_scaling(logits, labels, n_classes=3, lr=0.01, max_iter=200):
 def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
                       risk_proxy='mae', mae_cap=2.0, _arrays=None,
                       side_mode='action_head', rr_weight=0.0,
-                      min_mu_r_score=0.03, slippage_bps=0.0,
+                      min_mu_r_score=0.005, slippage_bps=0.0,
                       sigma_discount=False, min_p_side=0.0,
                       min_p_short=0.0, side_aware_scoring=False):
     """Compute execution-aware v5 scores -- all in R-units.
@@ -4226,7 +4232,7 @@ def run_v5_walk_forward(
     min_trades=20,
     wf_threshold_ema=True, wf_threshold_ema_alpha=0.5,
     wf_threshold_decay=0.5,
-    mu_debias=True, mu_debias_alpha=0.01,
+    mu_debias=True, mu_debias_alpha=0.003,
     per_symbol_r_kill=None,
     per_symbol_threshold=False,
     short_oversample=False,
@@ -4891,7 +4897,7 @@ def train_v5_model(
     side_aware_scoring=False, mae_asym_weight=1.0,
     per_symbol_cooldown=True,
     cooldown=4,
-    mu_debias=True, mu_debias_alpha=0.01,
+    mu_debias=True, mu_debias_alpha=0.003,
     min_trades=20,
     wf_threshold_override=None,
     fold_id=0,
@@ -5064,10 +5070,10 @@ def train_v5_model(
         fe = FeatureEngineer()
         sym_features_df = fe.compute_all_features(sym_df)
 
-        max_lookback = 50
+        max_lookback = 120
         warmup_mask = np.zeros(len(sym_features_df), dtype=bool)
         warmup_mask[:max_lookback] = True
-        sym_features_df = sym_features_df.ffill().bfill()
+        sym_features_df = sym_features_df.ffill()
         sym_features_df = sym_features_df.fillna(0)
 
         if features_df_columns is None:
@@ -5160,8 +5166,17 @@ def train_v5_model(
         mae_long = v5_targets['mae_R_long'][:n] if 'mae_R_long' in v5_targets else v5_targets['mae_R'][:n]
         mfe_short = v5_targets['mfe_R_short'][:n] if 'mfe_R_short' in v5_targets else v5_targets['mfe_R'][:n]
         mae_short = v5_targets['mae_R_short'][:n] if 'mae_R_short' in v5_targets else v5_targets['mae_R'][:n]
-        mfe_arr = np.where(act_arr == 2, mfe_short, mfe_long)
-        mae_arr = np.where(act_arr == 2, mae_short, mae_long)
+        # SHORT→mfe_short, LONG→mfe_long, HOLD→min(mfe_long, mfe_short)
+        # HOLD is neutral: use the conservative (worst-case) MFE direction.
+        mfe_arr = np.where(act_arr == 2, mfe_short,
+                  np.where(act_arr == 1, mfe_long,
+                  np.minimum(mfe_long, mfe_short)))
+        # SHORT→mae_short, LONG→mae_long, HOLD→max(mae_long, mae_short)
+        # HOLD gets the larger (more conservative) MAE so the model isn't
+        # rewarded for under-predicting risk on non-directional bars.
+        mae_arr = np.where(act_arr == 2, mae_short,
+                  np.where(act_arr == 1, mae_long,
+                  np.maximum(mae_long, mae_short)))
 
         train_features.append(feat_arr[train_idx])
         train_ret_R_list.append(ret_arr[train_idx])
