@@ -1,0 +1,190 @@
+IMPLEMENTATION 1: Activate temporal path in training (v5_train.py)
+In train_v5_model function (around line 5432), find this block:
+python    else:
+        train_ds = V5Dataset(
+            train_feat, train_ret_R, train_mfe_R,
+            train_mae_R, train_vol_h, train_action,
+            train_valid, train_sym_ids,
+            train_barrier_oracle, train_barrier_soft,
+            sample_weights=concat_sample_weights,
+        )
+        val_ds = V5Dataset(
+            val_feat, val_ret_R, val_mfe_R,
+            val_mae_R, val_vol_h, val_action_arr,
+            val_valid, val_sym_ids_arr,
+            val_barrier_oracle, val_barrier_soft,
+        )
+Replace it with:
+python    else:
+        # V5 Pro: use V6SequenceDataset to provide 3D windows (seq_len=16)
+        # so the temporal conv block can see past bars instead of just one.
+        # The model auto-detects 3D input and activates temporal processing.
+        v5_seq_len = 16
+        train_ds = V6SequenceDataset(
+            features_per_symbol=train_features,
+            ret_R_per_symbol=train_ret_R_list,
+            mfe_R_per_symbol=train_mfe_R_list,
+            mae_R_per_symbol=train_mae_R_list,
+            vol_h_per_symbol=train_vol_h_list,
+            action_per_symbol=train_action_list,
+            valid_per_symbol=train_valid_list,
+            symbol_ids_per_symbol=train_sym_ids_list,
+            barrier_oracle_per_symbol=train_barrier_oracle_list,
+            barrier_soft_per_symbol=train_barrier_soft_list,
+            seq_len=v5_seq_len,
+            sample_weights_per_symbol=per_symbol_sample_weights if per_symbol_sample_weights is not None else None,
+        )
+        val_ds = V6SequenceDataset(
+            features_per_symbol=val_features,
+            ret_R_per_symbol=val_ret_R_list,
+            mfe_R_per_symbol=val_mfe_R_list,
+            mae_R_per_symbol=val_mae_R_list,
+            vol_h_per_symbol=val_vol_h_list,
+            action_per_symbol=val_action_list,
+            valid_per_symbol=val_valid_list,
+            symbol_ids_per_symbol=val_sym_ids_list,
+            barrier_oracle_per_symbol=val_barrier_oracle_list,
+            barrier_soft_per_symbol=val_barrier_soft_list,
+            seq_len=v5_seq_len,
+        )
+        log.info(f"[V5_PRO] Using V6SequenceDataset with seq_len={v5_seq_len} for temporal processing")
+Also do the same for the forward test. In run_v5_forward_test (around line 2239), find:
+python    else:
+        test_ds = V5Dataset(
+            test_features,
+            ...
+        )
+Replace with:
+python    else:
+        v5_seq_len = 16
+        unique_syms = np.unique(test_sym_ids)
+        feat_per_sym = []
+        ret_per_sym = []
+        mfe_per_sym = []
+        mae_per_sym = []
+        vol_per_sym = []
+        act_per_sym = []
+        valid_per_sym = []
+        symid_per_sym = []
+        for s in unique_syms:
+            mask = test_sym_ids == s
+            n_s = int(mask.sum())
+            feat_per_sym.append(test_features[mask])
+            ret_per_sym.append(np.zeros(n_s, dtype=np.float32))
+            mfe_per_sym.append(np.zeros(n_s, dtype=np.float32))
+            mae_per_sym.append(np.zeros(n_s, dtype=np.float32))
+            vol_per_sym.append(np.zeros(n_s, dtype=np.float32))
+            act_per_sym.append(np.zeros(n_s, dtype=np.int64))
+            valid_per_sym.append(np.array(test_valid[mask], dtype=np.bool_))
+            symid_per_sym.append(test_sym_ids[mask])
+        test_ds = V6SequenceDataset(
+            features_per_symbol=feat_per_sym,
+            ret_R_per_symbol=ret_per_sym,
+            mfe_R_per_symbol=mfe_per_sym,
+            mae_R_per_symbol=mae_per_sym,
+            vol_h_per_symbol=vol_per_sym,
+            action_per_symbol=act_per_sym,
+            valid_per_symbol=valid_per_sym,
+            symbol_ids_per_symbol=symid_per_sym,
+            seq_len=v5_seq_len,
+        )
+        log.info(f"[V5_PRO] Forward test using V6SequenceDataset with seq_len={v5_seq_len}")
+
+IMPLEMENTATION 2: Add confidence loss to compute_v5_loss (v5_train.py)
+In compute_v5_loss function, right after the barrier head loss block (after the line losses['L_barrier'] = L_barrier.item()), and before the regime head block, add:
+python    # Confidence head loss: BCE against actual prediction correctness
+    if 'confidence' in outputs:
+        conf_valid = outputs['confidence'][valid].squeeze(-1)
+        if conf_valid.numel() > 0:
+            predicted_action = outputs['action_logits'][valid].argmax(dim=-1)
+            actual_correct = (predicted_action == batch['action_label'][valid]).float()
+            L_confidence = F.binary_cross_entropy(conf_valid, actual_correct.detach())
+            total = total + 0.15 * L_confidence
+            losses['L_confidence'] = L_confidence.item()
+
+IMPLEMENTATION 3: Fix shared_v5_trade_config.py
+Open config/shared_v5_trade_config.py and change line 26:
+From: score_threshold: float = 0.55
+To: score_threshold: float = 0.02
+Also change: min_mu_r_score: float = 0.0
+To: min_mu_r_score: float = 0.005
+This is the most critical fix. Without it, every forward test produces zero trades.
+
+IMPLEMENTATION 4: Fix v5_train.py quality gate (line ~1011)
+Find: final_mask = sigma_pass & mae_pass & edge_pass & ptrade_pass
+Replace with: final_mask = sigma_pass & mae_pass & ptrade_pass
+The edge_pass gate is redundant with min_mu_r_score in compute_v5_scores and causes cascading filter kills when combined with mu_debias.
+
+IMPLEMENTATION 5: Fix mu_debias_alpha in v5_train.py
+Find every instance of mu_debias_alpha=0.01 (there are 2-3 occurrences in function defaults) and change them all to mu_debias_alpha=0.003.
+Also find the dataclass default mu_debias_alpha: float = 0.01 in the V5ForwardTestConfig class and change it to mu_debias_alpha: float = 0.003.
+
+IMPLEMENTATION 6: Fix min_mu_r_score in compute_v5_scores (v5_train.py)
+Find the function signature: def compute_v5_scores(... min_mu_r_score=0.03 ...)
+Change min_mu_r_score=0.03 to min_mu_r_score=0.005.
+
+IMPLEMENTATION 7: Add sigma floor penalty to loss (v5_train.py)
+In compute_v5_loss, find these lines:
+python    nll = log_term + 0.5 * squared_error
+Replace with:
+python    sigma_floor_penalty = 3.0 * torch.relu(0.10 - sigma)
+    nll = log_term + 0.5 * squared_error + sigma_floor_penalty
+This prevents the model from cheating by collapsing sigma toward zero.
+
+IMPLEMENTATION 8: Add label smoothing to action head (v5_train.py)
+In compute_v5_loss, find all three calls to F.cross_entropy for the action head. Add label_smoothing=0.1 to each one. For example:
+From: L_action = F.cross_entropy(action_logits, action_true, weight=action_weights)
+To: L_action = F.cross_entropy(action_logits, action_true, weight=action_weights, label_smoothing=0.1)
+Do this for all three branches (the sample_weights branch, the action_weights branch, and the plain branch).
+
+IMPLEMENTATION 9: Fix bfill future leakage (v5_train.py)
+Find: sym_features_df = sym_features_df.ffill().bfill()
+Replace with: sym_features_df = sym_features_df.ffill()
+Also find: max_lookback = 50
+Replace with: max_lookback = 120
+
+IMPLEMENTATION 10: Fix MFE/MAE for HOLD labels (v5_train.py)
+Find:
+python        mfe_arr = np.where(act_arr == 2, mfe_short, mfe_long)
+        mae_arr = np.where(act_arr == 2, mae_short, mae_long)
+Replace with:
+python        mfe_arr = np.where(act_arr == 2, mfe_short,
+                  np.where(act_arr == 1, mfe_long,
+                  np.minimum(mfe_long, mfe_short)))
+        mae_arr = np.where(act_arr == 2, mae_short,
+                  np.where(act_arr == 1, mae_long,
+                  np.maximum(mae_long, mae_short)))
+```
+
+---
+
+**IMPLEMENTATION 11: Set max_trades_per_day default (v5_train.py)**
+
+In the `V5ForwardTestConfig` dataclass, find:
+`max_trades_per_day: Optional[int] = None`
+
+Change to:
+`max_trades_per_day: Optional[int] = 8`
+
+---
+
+**IMPLEMENTATION 12: Replace v5_forecaster.py model file**
+
+Replace the entire `models/v5_forecaster.py` with the V5 Pro version from the `gpu_trainer_v5pro.zip` file. This is the upgraded model with temporal convolutions, cross-timeframe attention, and confidence head. It is fully backward compatible — the existing V5 training pipeline will work without any other model changes because it auto-detects 2D vs 3D input.
+
+---
+
+**ORDER OF IMPLEMENTATION:**
+
+Do them in this order because some depend on others:
+
+1. Implementation 12 (replace model file) — the foundation
+2. Implementation 3 (score_threshold fix) — most critical bug
+3. Implementation 1 (activate temporal dataset) — powers the temporal model
+4. Implementation 2 (confidence loss) — trains the confidence head
+5. Implementations 4-11 (all the training pipeline fixes) — in any order
+
+**TESTING:** After all implementations, run:
+```
+python quick_start.py --train-v5 --v5-walk-forward --symbols BTCUSDT --epochs 30 --batch-size 128 --lr 8e-5 --horizon 32 --tp-mult 3.0 --sl-mult 1.5 --cooldown 4 --v5-max-trades-per-day 8 --v5-min-threshold 0.04 --v5-forward-test --v5-freeze-decision --url YOUR_URL
+Single symbol, 30 epochs, quick validation. If the forward test produces trades with positive E[R], all implementations are working. Then scale to full 8 symbols and 200 epochs.
