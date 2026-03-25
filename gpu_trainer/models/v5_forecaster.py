@@ -42,6 +42,38 @@ class ResidualBlock(nn.Module):
         return out + self.skip(x)
 
 
+class TemporalConvBlock(nn.Module):
+    """Lightweight Conv1D temporal encoder for V5Forecaster.
+
+    Takes (batch, seq_len, n_features) input, applies three Conv1d layers
+    with GELU + LayerNorm, then projects the last-timestep representation
+    back to n_features with a residual bypass.  Output shape: (batch, n_features).
+    This keeps trunk_input_dim unchanged so old checkpoints remain compatible.
+    """
+
+    def __init__(self, n_features: int):
+        super().__init__()
+        self.conv1 = nn.Conv1d(n_features, 64, kernel_size=3, padding=1)
+        self.ln1 = nn.LayerNorm(64)
+        self.conv2 = nn.Conv1d(64, 128, kernel_size=3, padding=1)
+        self.ln2 = nn.LayerNorm(128)
+        self.conv3 = nn.Conv1d(128, 64, kernel_size=3, padding=1)
+        self.ln3 = nn.LayerNorm(64)
+        self.out_proj = nn.Linear(64, n_features)
+        self.residual_proj = nn.Linear(n_features, n_features)
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = x.permute(0, 2, 1)
+        h = self.act(self.ln1(self.conv1(h).permute(0, 2, 1))).permute(0, 2, 1)
+        h = self.act(self.ln2(self.conv2(h).permute(0, 2, 1))).permute(0, 2, 1)
+        h = self.act(self.ln3(self.conv3(h).permute(0, 2, 1))).permute(0, 2, 1)
+        h_last = h[:, :, -1]
+        out = self.out_proj(h_last)
+        res = self.residual_proj(x[:, -1, :])
+        return out + res
+
+
 @dataclass
 class V5ForecasterConfig:
     input_dim: int = 63
@@ -54,6 +86,7 @@ class V5ForecasterConfig:
     n_symbols: int = 1
     symbol_embed_dim: int = 8
     n_features: int = None  # Alias for input_dim — accepted for back-compat with old configs
+    use_temporal: bool = True  # Enable Conv1D temporal block for sequence input
 
     def __post_init__(self):
         if self.hidden_dims is None:
@@ -84,6 +117,11 @@ class V5Forecaster(nn.Module):
         self.training_history = []
         self.best_val_loss = float('inf')
         self.epochs_trained = 0
+
+        if config.use_temporal:
+            self.temporal_block = TemporalConvBlock(config.input_dim)
+        else:
+            self.temporal_block = None
 
         if config.n_symbols > 1:
             self.symbol_embedding = nn.Embedding(config.n_symbols, config.symbol_embed_dim)
@@ -188,7 +226,10 @@ class V5Forecaster(nn.Module):
 
     def forward(self, x: torch.Tensor, symbol_ids: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         if x.dim() == 3:
-            x = x[:, -1, :]
+            if self.temporal_block is not None:
+                x = self.temporal_block(x)
+            else:
+                x = x[:, -1, :]
 
         if self.symbol_embedding is not None and symbol_ids is not None:
             sym_emb = self.symbol_embedding(symbol_ids)

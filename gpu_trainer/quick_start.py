@@ -2696,7 +2696,16 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
 
     features_df = features_df.reindex(columns=feature_columns, fill_value=0)
 
-    last_features = features_df.iloc[-1:].copy()
+    seq_len = 16
+    last_features = features_df.iloc[-seq_len:].copy()
+    if len(last_features) < seq_len:
+        pad_rows = seq_len - len(last_features)
+        pad_df = pd.DataFrame(
+            np.zeros((pad_rows, len(feature_columns)), dtype=np.float32),
+            columns=feature_columns,
+        )
+        last_features = pd.concat([pad_df, last_features], ignore_index=True)
+
     if hasattr(engineer, '_v5_global_scaler'):
         raw = last_features.values.astype(np.float32)
         last_scaled = engineer._v5_global_scaler.transform(raw).astype(np.float32)
@@ -2711,12 +2720,13 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
 
     model.eval()
     with torch.no_grad():
-        x = torch.FloatTensor(last_scaled).to(device)
         if is_v5:
+            x = torch.FloatTensor(last_scaled).unsqueeze(0).to(device)
             output = model(x)
             action_probs = torch.softmax(output['action_logits'], dim=-1).cpu().numpy().flatten()
             p_enter = 1.0 - float(action_probs[0])
         else:
+            x = torch.FloatTensor(last_scaled[-1:]).to(device)
             output = model.forward_multihead(x)
             p_enter = float(torch.sigmoid(output.enter_logits).cpu().item())
 

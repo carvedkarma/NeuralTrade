@@ -2259,18 +2259,38 @@ def run_v5_forward_test(
         )
         log.info(f"[V6_FWD] Using V6SequenceDataset for forward test: {len(test_ds)} samples, seq_len={v6_seq_len}")
     else:
-        test_ds = V5Dataset(
-            test_features,
-            np.zeros(len(test_features), dtype=np.float32),
-            np.zeros(len(test_features), dtype=np.float32),
-            np.zeros(len(test_features), dtype=np.float32),
-            np.zeros(len(test_features), dtype=np.float32),
-            np.zeros(len(test_features), dtype=np.int64),
-            test_valid,
-            test_sym_ids,
-            np.zeros(len(test_features), dtype=np.int64),
-            np.zeros((len(test_features), 1), dtype=np.float32),
+        unique_syms_t = np.unique(test_sym_ids)
+        feat_per_sym_t = []
+        ret_per_sym_t = []
+        mfe_per_sym_t = []
+        mae_per_sym_t = []
+        vol_per_sym_t = []
+        act_per_sym_t = []
+        valid_per_sym_t = []
+        symid_per_sym_t = []
+        for s in unique_syms_t:
+            mask_t = test_sym_ids == s
+            n_s_t = int(mask_t.sum())
+            feat_per_sym_t.append(test_features[mask_t])
+            ret_per_sym_t.append(np.zeros(n_s_t, dtype=np.float32))
+            mfe_per_sym_t.append(np.zeros(n_s_t, dtype=np.float32))
+            mae_per_sym_t.append(np.zeros(n_s_t, dtype=np.float32))
+            vol_per_sym_t.append(np.zeros(n_s_t, dtype=np.float32))
+            act_per_sym_t.append(np.zeros(n_s_t, dtype=np.int64))
+            valid_per_sym_t.append(np.array(test_valid[mask_t], dtype=np.bool_))
+            symid_per_sym_t.append(test_sym_ids[mask_t])
+        test_ds = V6SequenceDataset(
+            features_per_symbol=feat_per_sym_t,
+            ret_R_per_symbol=ret_per_sym_t,
+            mfe_R_per_symbol=mfe_per_sym_t,
+            mae_R_per_symbol=mae_per_sym_t,
+            vol_h_per_symbol=vol_per_sym_t,
+            action_per_symbol=act_per_sym_t,
+            valid_per_symbol=valid_per_sym_t,
+            symbol_ids_per_symbol=symid_per_sym_t,
+            seq_len=16,
         )
+        log.info(f"[V5_TEMPORAL_FWD] V6SequenceDataset for V5 forward test: {len(test_ds)} samples, seq_len=16")
     test_loader = DataLoader(test_ds, batch_size=512, shuffle=False)
 
     all_outputs = {
@@ -5578,19 +5598,36 @@ def train_v5_model(
         )
         log.info(f"[V6] V6SequenceDataset created: train={len(train_ds)} val={len(val_ds)} seq_len={v6_seq_len}")
     else:
-        train_ds = V5Dataset(
-            train_feat, train_ret_R, train_mfe_R,
-            train_mae_R, train_vol_h, train_action,
-            train_valid, train_sym_ids,
-            train_barrier_oracle, train_barrier_soft,
-            sample_weights=concat_sample_weights,
+        train_sw_per_sym = per_symbol_sample_weights if per_symbol_sample_weights is not None else None
+        train_ds = V6SequenceDataset(
+            features_per_symbol=train_features,
+            ret_R_per_symbol=train_ret_R_list,
+            mfe_R_per_symbol=train_mfe_R_list,
+            mae_R_per_symbol=train_mae_R_list,
+            vol_h_per_symbol=train_vol_h_list,
+            action_per_symbol=train_action_list,
+            valid_per_symbol=train_valid_list,
+            symbol_ids_per_symbol=train_sym_ids_list,
+            barrier_oracle_per_symbol=train_barrier_oracle_list,
+            barrier_soft_per_symbol=train_barrier_soft_list,
+            seq_len=16,
+            sample_weights_per_symbol=train_sw_per_sym,
         )
-        val_ds = V5Dataset(
-            val_feat, val_ret_R, val_mfe_R,
-            val_mae_R, val_vol_h, val_action_arr,
-            val_valid, val_sym_ids_arr,
-            val_barrier_oracle, val_barrier_soft,
+        val_ds = V6SequenceDataset(
+            features_per_symbol=val_features,
+            ret_R_per_symbol=val_ret_R_list,
+            mfe_R_per_symbol=val_mfe_R_list,
+            mae_R_per_symbol=val_mae_R_list,
+            vol_h_per_symbol=val_vol_h_list,
+            action_per_symbol=val_action_list,
+            valid_per_symbol=val_valid_list,
+            symbol_ids_per_symbol=val_sym_ids_list,
+            barrier_oracle_per_symbol=val_barrier_oracle_list,
+            barrier_soft_per_symbol=val_barrier_soft_list,
+            seq_len=16,
         )
+        log.info(f"[V5_TEMPORAL] V6SequenceDataset (seq_len=16) active for V5 temporal training: "
+                 f"train={len(train_ds)} val={len(val_ds)}")
 
     regime_sample_weights = None
     if train_regime_trend_raw is not None and not use_v6:
