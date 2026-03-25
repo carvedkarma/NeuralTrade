@@ -53,11 +53,11 @@ class TemporalConvBlock(nn.Module):
 
     def __init__(self, n_features: int):
         super().__init__()
-        self.conv1 = nn.Conv1d(n_features, 64, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv1d(n_features, 64, kernel_size=3, padding=0)
         self.ln1 = nn.LayerNorm(64)
-        self.conv2 = nn.Conv1d(64, 128, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(64, 128, kernel_size=3, padding=0)
         self.ln2 = nn.LayerNorm(128)
-        self.conv3 = nn.Conv1d(128, 64, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv1d(128, 64, kernel_size=3, padding=0)
         self.ln3 = nn.LayerNorm(64)
         self.out_proj = nn.Linear(64, n_features)
         self.residual_proj = nn.Linear(n_features, n_features)
@@ -65,9 +65,9 @@ class TemporalConvBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = x.permute(0, 2, 1)
-        h = self.act(self.ln1(self.conv1(h).permute(0, 2, 1))).permute(0, 2, 1)
-        h = self.act(self.ln2(self.conv2(h).permute(0, 2, 1))).permute(0, 2, 1)
-        h = self.act(self.ln3(self.conv3(h).permute(0, 2, 1))).permute(0, 2, 1)
+        h = self.act(self.ln1(self.conv1(F.pad(h, (2, 0))).permute(0, 2, 1))).permute(0, 2, 1)
+        h = self.act(self.ln2(self.conv2(F.pad(h, (2, 0))).permute(0, 2, 1))).permute(0, 2, 1)
+        h = self.act(self.ln3(self.conv3(F.pad(h, (2, 0))).permute(0, 2, 1))).permute(0, 2, 1)
         h_last = h[:, :, -1]
         out = self.out_proj(h_last)
         res = self.residual_proj(x[:, -1, :])
@@ -159,27 +159,27 @@ class V5Forecaster(nn.Module):
         )
 
         self.mfe_head = nn.Sequential(
-            nn.Linear(self.trunk_dim, 64),
+            nn.Linear(self.trunk_dim, 128),
+            nn.LayerNorm(128),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
             nn.LayerNorm(64),
             nn.GELU(),
             nn.Dropout(0.2),
-            nn.Linear(64, 32),
-            nn.LayerNorm(32),
-            nn.GELU(),
-            nn.Dropout(0.2),
-            nn.Linear(32, 1)
+            nn.Linear(64, 1)
         )
 
         self.mae_head = nn.Sequential(
-            nn.Linear(self.trunk_dim, 64),
+            nn.Linear(self.trunk_dim, 128),
+            nn.LayerNorm(128),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
             nn.LayerNorm(64),
             nn.GELU(),
             nn.Dropout(0.2),
-            nn.Linear(64, 32),
-            nn.LayerNorm(32),
-            nn.GELU(),
-            nn.Dropout(0.2),
-            nn.Linear(32, 1)
+            nn.Linear(64, 1)
         )
 
         self.action_head = nn.Sequential(
@@ -212,17 +212,34 @@ class V5Forecaster(nn.Module):
         else:
             self.regime_head = None
 
+        self.confidence_head = nn.Sequential(
+            nn.Linear(self.trunk_dim, 64),
+            nn.LayerNorm(64),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, 32),
+            nn.LayerNorm(32),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(32, 1)
+        )
+
         self._init_weights()
 
     def _init_weights(self):
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                nn.init.orthogonal_(module.weight, gain=0.5)
+                nn.init.kaiming_normal_(module.weight, nonlinearity='linear')
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, nn.LayerNorm):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
+        for head in [self.ret_dist_head, self.mfe_head, self.mae_head]:
+            final = list(head.children())[-1]
+            if isinstance(final, nn.Linear):
+                nn.init.normal_(final.weight, std=0.01)
+                nn.init.zeros_(final.bias)
 
     def forward(self, x: torch.Tensor, symbol_ids: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         if x.dim() == 3:
@@ -269,6 +286,8 @@ class V5Forecaster(nn.Module):
             regime_logits = self.regime_head(features)
             regime_logits = torch.clamp(regime_logits, -10.0, 10.0)
             result['regime_logits'] = regime_logits
+
+        result['confidence'] = torch.sigmoid(self.confidence_head(features))
 
         return result
 
