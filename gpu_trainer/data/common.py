@@ -194,6 +194,7 @@ def generate_v5_sweep_outcomes(
     median_window: int = 50,
     high_vol_threshold: float = 1.3,
     sl_boost: float = 1.15,
+    entry_lag_atr_fraction: float = 0.0,
 ) -> dict:
     """Generate side-conditional trade outcomes using v5-consistent barrier logic.
 
@@ -213,6 +214,12 @@ def generate_v5_sweep_outcomes(
         median_window: rolling window for median ATR
         high_vol_threshold: ATR ratio threshold for high-vol SL adjustment
         sl_boost: SL multiplier boost in high-vol
+        entry_lag_atr_fraction: additional entry cost as fraction of ATR, modelling
+            the gap between signal-bar close and next-bar open in live execution.
+            For LONG: entry price += lag * ATR (pays more).
+            For SHORT: entry price -= lag * ATR (sells for less).
+            Default 0.0 = backward-compatible (no lag adjustment).
+            Recommended: 0.25 for realistic live-entry modelling.
 
     Returns:
         dict with:
@@ -261,17 +268,20 @@ def generate_v5_sweep_outcomes(
         if atr[i] <= 0 or closes[i] <= 0:
             continue
 
-        entry = closes[i]
+        base_entry = closes[i]
+        lag = entry_lag_atr_fraction * atr[i]
+        long_entry = base_entry + lag   # LONG fills at a worse (higher) price
+        short_entry = base_entry - lag  # SHORT fills at a worse (lower) price
         tp_dist = atr[i] * tp_mult
         sl_dist = atr[i] * sl_i
 
         long_r_val, long_out_val = _simulate_trade(
             highs, lows, closes, i, h_i, n,
-            entry, tp_dist, sl_dist, tp_mult, sl_i, atr[i], side=1
+            long_entry, tp_dist, sl_dist, tp_mult, sl_i, atr[i], side=1
         )
         short_r_val, short_out_val = _simulate_trade(
             highs, lows, closes, i, h_i, n,
-            entry, tp_dist, sl_dist, tp_mult, sl_i, atr[i], side=-1
+            short_entry, tp_dist, sl_dist, tp_mult, sl_i, atr[i], side=-1
         )
 
         r_long[i] = long_r_val

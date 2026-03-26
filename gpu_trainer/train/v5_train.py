@@ -122,8 +122,26 @@ def _compute_adx(high, low, close, period=14):
 
 @dataclass
 class V5ForwardTestConfig:
-    """Config for frozen decision layer in forward test."""
-    score_threshold: float = 0.0
+    """Config for frozen decision layer in forward test.
+
+    Production-aligned defaults:
+      score_threshold=0.02  — matches shared_v5_trade_config live default
+      calibration_monitor=True  — ECE computed each fold, warns if >0.10
+
+    Experimental / disabled features (False by default):
+      trailing_sl, ultra_conviction, ddt_enable, multi_regime, edge_first,
+      adx_gate, conviction_sizing, allow_runner, corr_block, adaptive_sizing,
+      regime_scaling, calibration_monitor.
+
+    Position-sizer fields: kelly_fraction, adaptive_sizing, conviction_*.
+    Loss-cap fields: weekly_loss_cap, daily_loss_cap, trailing_equity_stop,
+                     per_symbol_daily_r_budget.
+    Regime fields: regime_*, multi_regime, regime_side_map.
+    Edge-first fields: edge_first, edge_min, edge_pct_floor, edge_topn_per_day.
+    DDT fields: ddt_*.
+    Ultra-conviction fields: ultra_*.
+    """
+    score_threshold: float = 0.02  # matches live shared_v5_trade_config default
     score_lambda: float = 0.5
     mae_cap: float = 2.0
     risk_proxy: str = 'mae'
@@ -213,7 +231,7 @@ class V5ForwardTestConfig:
     edge_topn_soft: bool = True
     edge_topn_decay: float = 0.7
     size_floor: float = 0.0
-    calibration_monitor: bool = False
+    calibration_monitor: bool = True   # ECE measured each fold; warns at warn_ece, blocks at block_ece
     calibration_warn_ece: float = 0.10
     calibration_block_ece: float = 0.15
     feature_psi: bool = False
@@ -223,7 +241,7 @@ class V5ForwardTestConfig:
     min_p_short: float = 0.0
     side_aware_scoring: bool = False
     per_symbol_cooldown: bool = True
-    slippage_base_bps: float = 0.0
+    slippage_base_bps: float = 6.0   # matches shared_v5_trade_config: Bitget taker 3 bps × 2 sides
     slippage_impact_mult: float = 0.0
     ood_gate: bool = False
     ood_sigma_mult: float = 1.5
@@ -1014,7 +1032,7 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999,
         adaptive_ptrade = max(cfg.p_trade_min * 0.3, float(np.percentile(ref_pt, 40)))
     ptrade_pass = pt >= adaptive_ptrade
 
-    final_mask = sigma_pass & mae_pass & ptrade_pass
+    final_mask = sigma_pass & mae_pass & ptrade_pass & edge_pass  # BUG FIX: edge_pass was computed but never applied
     n_passed = int(np.sum(final_mask))
 
     if n_passed < n * min_pass_rate and n > 100:
@@ -3732,6 +3750,19 @@ def run_v5_forward_test(
                 disagree_r = t_r_valid[short_mask_v][short_disagree]
                 side_quality['short_disagree_expect'] = float(np.mean(disagree_r))
 
+        score_decile_rows, score_monotonic = _compute_score_decile_table(t_scores_valid, t_r_valid)
+        report['score_decile_table'] = score_decile_rows
+        report['score_monotonic'] = score_monotonic
+        if score_decile_rows:
+            log.info("[V5_FWD] Score-decile monotonicity: %s", "PASS" if score_monotonic else "FAIL")
+            for row in score_decile_rows:
+                log.info("[V5_FWD]   D%02d score=[%.4f,%.4f) n=%d avg_R=%+.4f WR=%.1f%%",
+                         row['decile'], row['score_lo'], row['score_hi'],
+                         row['n_trades'], row['avg_r'], row['win_rate'] * 100)
+    else:
+        report['score_decile_table'] = []
+        report['score_monotonic'] = None
+
     report['side_quality'] = side_quality
 
     report['ddt_diagnostics'] = ddt.diagnostics() if ddt is not None else None
@@ -3932,6 +3963,49 @@ def _build_empty_report(test_start_date, test_end_date, config):
         'ddt_blocked': 0,
         'low_confidence': False,
     }
+
+
+def _compute_score_decile_table(t_scores, t_r, n_deciles=10):
+    """Compute realized-R by score decile to measure score-monotonicity.
+
+    Divides trades into n_deciles score buckets and reports avg realized R
+    per bucket.  A well-calibrated score should show weakly increasing
+    realized R from the lowest to the highest bucket.
+
+    Returns:
+        list of dicts: [{'decile': 1..n, 'score_lo': float, 'score_hi': float,
+                         'n_trades': int, 'avg_r': float, 'win_rate': float}]
+        monotonic: bool — True when consecutive bucket avg_r is weakly increasing
+    """
+    if len(t_scores) < n_deciles * 2:
+        return [], False
+
+    edges = np.percentile(t_scores, np.linspace(0, 100, n_deciles + 1))
+    rows = []
+    for d in range(n_deciles):
+        lo, hi = edges[d], edges[d + 1]
+        if d == n_deciles - 1:
+            mask = (t_scores >= lo)
+        else:
+            mask = (t_scores >= lo) & (t_scores < hi)
+        bucket_r = t_r[mask]
+        if len(bucket_r) == 0:
+            rows.append({'decile': d + 1, 'score_lo': float(lo), 'score_hi': float(hi),
+                         'n_trades': 0, 'avg_r': 0.0, 'win_rate': 0.0})
+        else:
+            rows.append({
+                'decile': d + 1,
+                'score_lo': float(lo),
+                'score_hi': float(hi),
+                'n_trades': int(len(bucket_r)),
+                'avg_r': float(np.mean(bucket_r)),
+                'win_rate': float(np.sum(bucket_r > 0) / len(bucket_r)),
+            })
+
+    avg_rs = [r['avg_r'] for r in rows if r['n_trades'] > 0]
+    monotonic = all(avg_rs[i] <= avg_rs[i + 1] + 0.02 for i in range(len(avg_rs) - 1))
+
+    return rows, monotonic
 
 
 def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_date, end_date,
@@ -4177,6 +4251,15 @@ def _print_forward_report(report):
             log.info(f"    SHORT head-disagree trades (mu_R>0): {sq['short_disagree_trades']} "
                      f"({sq.get('short_disagree_pct',0):.0f}%) → "
                      f"expect={sq.get('short_disagree_expect',0):+.4f} R")
+    decile_rows = report.get('score_decile_table', [])
+    if decile_rows:
+        log.info("-" * 80)
+        mono = report.get('score_monotonic')
+        log.info(f"  Score Decile Table (monotonic={'PASS' if mono else 'FAIL' if mono is not None else 'N/A'}):")
+        log.info(f"  {'D':>3} {'ScoreLo':>9} {'ScoreHi':>9} {'N':>5} {'AvgR':>8} {'WR':>7}")
+        for row in decile_rows:
+            log.info(f"  {row['decile']:>3} {row['score_lo']:>9.4f} {row['score_hi']:>9.4f} "
+                     f"{row['n_trades']:>5} {row['avg_r']:>+8.4f} {row['win_rate']:>6.1%}")
     log.info("-" * 80)
     if report.get('weekly_stats'):
         log.info("  Weekly Breakdown:")

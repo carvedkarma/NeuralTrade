@@ -320,9 +320,109 @@ class TestT006SlippageDeduction:
         cfg = V5ForwardTestConfig(slippage_base_bps=2.5)
         assert cfg.slippage_base_bps == 2.5
 
-    def test_default_slippage_zero(self):
+    def test_default_slippage_is_bitget_roundtrip(self):
         cfg = V5ForwardTestConfig()
-        assert cfg.slippage_base_bps == 0.0
+        assert cfg.slippage_base_bps == 6.0, (
+            "Default slippage must be 6 bps (Bitget 3 bps taker × 2 sides), "
+            f"got {cfg.slippage_base_bps}"
+        )
+
+
+class TestProductionReadinessAuditFixes:
+    """Regression tests for bugs found in the Mar-2026 production-readiness audit.
+
+    T_BUG1: edge_pass now applied in final_mask (quality gate mu_R filter live)
+    T_BUG2: score_threshold default is 0.02 (matches live shared config)
+    T_BUG3: slippage_base_bps default is 6.0 bps (tested in T006 class above)
+    T_BUG4: _compute_score_decile_table detects monotonicity
+    """
+
+    def test_bug1_edge_pass_filters_low_mu_r_bars(self):
+        """Bug 1: quality_mask must now filter bars with |mu_R| < p25 threshold."""
+        n = 500
+        rng = np.random.RandomState(0)
+        arrays = {
+            'mu_R':    rng.uniform(-0.001, 0.001, n).astype(np.float32),  # tiny mu_R, all near-zero
+            'mae':     np.full(n, 0.1, dtype=np.float32),
+            'sigma':   np.full(n, 0.1, dtype=np.float32),
+            'p_trade': np.full(n, 0.7, dtype=np.float32),
+        }
+        ref = {
+            'mu_R':    np.full(n, 0.5, dtype=np.float32),  # ref has large mu_R → p25 will be large
+            'mae':     np.full(n, 0.01, dtype=np.float32),
+            'sigma':   np.full(n, 0.01, dtype=np.float32),
+            'p_trade': np.full(n, 0.99, dtype=np.float32),
+        }
+        cfg = V5QualityGateConfig(mu_R_min=0.05)
+        mask, diag = v5_quality_mask(arrays, cfg, epoch=999, ref_arrays=ref)
+        n_passed = int(np.sum(mask))
+        assert n_passed < n * 0.25, (
+            f"edge_pass should filter most low-mu_R bars (only {n_passed}/{n} passed). "
+            "If this test fails, edge_pass is still not applied in final_mask."
+        )
+
+    def test_bug2_score_threshold_default_matches_live(self):
+        """Bug 2: V5ForwardTestConfig.score_threshold must match shared_v5_trade_config default."""
+        from config.shared_v5_trade_config import V5TradeDefaults
+        live_default = V5TradeDefaults().score_threshold
+        backtest_default = V5ForwardTestConfig().score_threshold
+        assert backtest_default == live_default, (
+            f"score_threshold mismatch: backtest default={backtest_default}, "
+            f"live default={live_default}. Backtest metrics will be optimistic."
+        )
+
+    def test_bug4_score_decile_table_monotonic(self):
+        """Bug 4: _compute_score_decile_table returns monotonic=True on perfectly sorted data."""
+        from train.v5_train import _compute_score_decile_table
+        n = 200
+        scores = np.linspace(0.0, 1.0, n)
+        realized_r = scores * 2.0 - 0.5  # perfectly correlated with scores
+        rows, monotonic = _compute_score_decile_table(scores, realized_r, n_deciles=5)
+        assert len(rows) == 5
+        assert monotonic is True, "Perfectly sorted scores should give monotonic=True"
+
+    def test_bug4_score_decile_table_non_monotonic(self):
+        """Bug 4: _compute_score_decile_table returns monotonic=False when top decile underperforms."""
+        from train.v5_train import _compute_score_decile_table
+        n = 200
+        scores = np.linspace(0.0, 1.0, n)
+        realized_r = np.full(n, 0.1)
+        realized_r[int(n * 0.9):] = -0.5  # top decile is a loser
+        rows, monotonic = _compute_score_decile_table(scores, realized_r, n_deciles=5)
+        assert monotonic is False, "Top-decile underperformance should give monotonic=False"
+
+    def test_bug4_score_decile_table_too_few_trades(self):
+        """Bug 4: _compute_score_decile_table returns empty list when too few trades."""
+        from train.v5_train import _compute_score_decile_table
+        scores = np.array([0.1, 0.5, 0.9])
+        r = np.array([0.1, 0.2, 0.3])
+        rows, monotonic = _compute_score_decile_table(scores, r, n_deciles=10)
+        assert rows == [] and monotonic is False
+
+    def test_finding5_entry_lag_reduces_r(self):
+        """Finding 5: entry_lag_atr_fraction > 0 should reduce avg realized R vs lag=0."""
+        from data.common import generate_v5_sweep_outcomes
+        import pandas as pd
+        rng = np.random.RandomState(42)
+        n = 500
+        close = np.cumprod(1 + rng.randn(n) * 0.01) * 100
+        df = pd.DataFrame({
+            'open':  close,
+            'high':  close * 1.01,
+            'low':   close * 0.99,
+            'close': close,
+            'volume': np.ones(n) * 1000,
+        })
+        res_no_lag = generate_v5_sweep_outcomes(df, entry_lag_atr_fraction=0.0)
+        res_with_lag = generate_v5_sweep_outcomes(df, entry_lag_atr_fraction=0.5)
+
+        finite_no_lag = res_no_lag['r_long'][np.isfinite(res_no_lag['r_long'])]
+        finite_with_lag = res_with_lag['r_long'][np.isfinite(res_with_lag['r_long'])]
+
+        assert np.mean(finite_with_lag) < np.mean(finite_no_lag), (
+            "entry_lag should reduce avg realized R for LONG trades "
+            f"(no_lag={np.mean(finite_no_lag):.4f}, with_lag={np.mean(finite_with_lag):.4f})"
+        )
 
 
 if __name__ == '__main__':

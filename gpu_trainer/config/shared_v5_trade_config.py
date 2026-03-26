@@ -30,7 +30,7 @@ class V5TradeDefaults:
     min_p_short: float = 0.0              # Separate floor for short p_short head
 
     # ── Costs / slippage ────────────────────────────────────────────────────
-    slippage_base_bps: float = 0.0        # Slippage estimate in basis points
+    slippage_base_bps: float = 6.0        # Bitget taker fee ~3 bps each side = 6 bps round-trip
     slippage_impact_mult: float = 0.0     # Impact multiplier on top of base
 
     # ── Correlation penalty ─────────────────────────────────────────────────

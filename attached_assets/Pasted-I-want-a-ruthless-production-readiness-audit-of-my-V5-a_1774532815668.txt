@@ -1,0 +1,89 @@
+I want a ruthless production-readiness audit of my V5 auto trading system. Do not give me optimistic summary comments. I want hard evidence from the code, tests, metrics, and forward-test outputs.
+
+Your job is to determine whether:
+1. the model truly has predictive edge,
+2. the predictions are calibrated,
+3. the filters improve expectancy instead of killing profit,
+4. the train/backtest/live logic are aligned,
+5. the system is ready for paper trading or live trading.
+
+Please inspect the actual code paths and report exact file names and functions.
+
+Audit these areas:
+
+A) Model edge
+- What exactly does the model predict?
+- How are labels generated?
+- Does higher score produce higher realized expectancy out of sample?
+- Show decile or quantile ranking evidence.
+- Are LONG and SHORT both predictive?
+- Is performance broad across symbols/folds or concentrated?
+
+B) Prediction calibration
+- Are action probabilities calibrated?
+- Are mu/edge predictions calibrated?
+- Is temperature scaling actually helping?
+- Is there overconfidence?
+- Are calibrated values used consistently across the code?
+
+C) Score construction
+- Show the exact score formula and all penalties/bonuses.
+- Check debiasing, slippage deductions, clipping, threshold floors.
+- Is the score distribution too compressed?
+- Is the threshold sensible relative to score distribution?
+
+D) Filter/gate audit
+For each filter/gate, report:
+- purpose
+- file/function location
+- % of trades blocked
+- impact on trade count
+- impact on expectancy
+- impact on total R
+- whether it helps or hurts out of sample
+
+Include threshold, quality mask, ADX gate, EMA/regime gate, multi-regime, cooldown, per-symbol kill, per-side threshold, edge-topN, correlation filter, daily cap, weekly cap, drawdown throttle, OOD gate.
+
+E) Quality-mask correctness
+- Verify every computed pass condition is actually used in the final mask.
+- Check for any logic bug where a pass variable is computed but not applied.
+- Check whether thresholds are inconsistent across quality gating, score suppression, and CLI defaults.
+
+F) Exit and realized-R audit
+- What is the effective max R per winning trade under current rules?
+- Are winners being capped too early?
+- Are exits suppressing large winners?
+- Is the system optimizing for smoothness instead of total R?
+
+G) Train/backtest/live alignment
+- Verify score computation, side logic, thresholding, filters, sizing, slippage, and caps are aligned across train/backtest/live.
+- Identify any duplicated logic that could drift.
+- Tell me if live decisions can differ from backtest decisions on the same candle.
+
+H) Numerical/code stability
+- Check for divide-by-zero, NaNs, infs, array-edge artifacts, timestamp/session issues, deprecated APIs, warning-heavy code.
+- Show exact risky spots and whether they are release blockers.
+
+I) Tests
+- List failing tests.
+- Explain why each fails.
+- Tell me whether the failures are cosmetic or dangerous.
+- Tell me which important behaviors are still untested.
+
+At the end, give the final verdict in exactly this format:
+1. Model edge: PASS / FAIL / NOT PROVEN
+2. Prediction calibration: PASS / FAIL / NOT PROVEN
+3. Filter alignment: PASS / FAIL / NOT PROVEN
+4. Train/live parity: PASS / FAIL / NOT PROVEN
+5. Risk layer correctness: PASS / FAIL / NOT PROVEN
+6. Realized R extraction: PASS / FAIL / NOT PROVEN
+7. Paper-trading readiness: YES / NO
+8. Live-trading readiness: YES / NO
+
+Then give:
+- top 5 blockers
+- top 5 fixes
+- top 3 reasons realized R is low
+- exact files/functions to edit first
+
+If anything is uncertain, say NOT PROVEN.
