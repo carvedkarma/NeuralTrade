@@ -1,0 +1,15 @@
+{
+  "mode": "compare",
+  "file_a": "validate_runs/unit_audit_20260326_152341.json",
+  "file_b": "validate_runs/unit_audit_20260326_152341.json",
+  "metrics_a": {
+    "mode": "unit_audit",
+    "exit_code": 0,
+    "status": "PASSED"
+  },
+  "metrics_b": {
+    "mode": "unit_audit",
+    "exit_code": 0,
+    "status": "PASSED"
+  }
+}

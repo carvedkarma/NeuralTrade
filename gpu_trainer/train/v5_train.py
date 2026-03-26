@@ -2170,6 +2170,7 @@ def run_v5_forward_test(
     train_ref_arrays=None,
     use_v6=False, v6_seq_len=16,
     symbols=None,
+    candidate_logger=None,
 ):
     """Run forward test with completely frozen decision layer.
 
@@ -2791,6 +2792,8 @@ def run_v5_forward_test(
 
     chronological_idx = sel_indices[np.argsort(sel_indices)]
     taken = []
+    _cand_reason: dict = {}        # idx → gate name that blocked it (empty str = taken)
+    _cand_corr_soft: set = set()   # indices where correlation soft-penalty was applied
     ema_blocked = 0
     warmup_blocked = 0
     weekly_blocked = 0
@@ -2947,6 +2950,7 @@ def run_v5_forward_test(
             warmup_blocked += 1
             gate_blocks["warmup"] += 1
             gate_blocked_r["warmup"].append(_oracle_r(idx))
+            _cand_reason[idx] = "warmup"
             continue
         if getattr(config, 'per_symbol_cooldown', True) and test_sym_ids is not None:
             bar_sym_id = int(test_sym_ids[idx])
@@ -2954,11 +2958,13 @@ def run_v5_forward_test(
                 cooldown_blocked += 1
                 gate_blocks["cooldown"] += 1
                 gate_blocked_r["cooldown"].append(_oracle_r(idx))
+                _cand_reason[idx] = "cooldown"
                 continue
         elif idx - last_bar < config.cooldown:
             cooldown_blocked += 1
             gate_blocks["cooldown"] += 1
             gate_blocked_r["cooldown"].append(_oracle_r(idx))
+            _cand_reason[idx] = "cooldown"
             continue
 
         if config.per_symbol_r_kill is not None and test_sym_ids is not None:
@@ -3001,6 +3007,7 @@ def run_v5_forward_test(
                         per_sym_kill_blocked += 1
                         gate_blocks["per_symbol_kill"] += 1
                         gate_blocked_r["per_symbol_kill"].append(_oracle_r(idx))
+                        _cand_reason[idx] = "per_symbol_kill"
                         continue
 
         if adx_values is not None:
@@ -3011,6 +3018,7 @@ def run_v5_forward_test(
                     adx_blocked += 1
                     gate_blocks["adx"] += 1
                     gate_blocked_r["adx"].append(_oracle_r(idx))
+                    _cand_reason[idx] = "adx"
                     continue
 
         expired = [k for k, v in open_positions.items() if v['expiry'] <= idx]
@@ -3048,6 +3056,7 @@ def run_v5_forward_test(
                     ema_blocked += 1
                     gate_blocks["ema200"] += 1
                     gate_blocked_r["ema200"].append(_oracle_r(idx))
+                    _cand_reason[idx] = "ema200"
                     continue
 
         post_ema200_indices.append(idx)
@@ -3086,6 +3095,7 @@ def run_v5_forward_test(
                         regime_side_blocked += 1
                         gate_blocks["multi_regime"] += 1
                         gate_blocked_r["multi_regime"].append(_oracle_r(idx))
+                        _cand_reason[idx] = "multi_regime"
                         continue
 
         post_regime_indices.append(idx)
@@ -3108,6 +3118,7 @@ def run_v5_forward_test(
                         edge_topn_blocked += 1
                         gate_blocks["edge_topn"] += 1
                         gate_blocked_r["edge_topn"].append(_oracle_r(idx))
+                        _cand_reason[idx] = "edge_topn"
                         continue
                     soft_gate_sizing[idx] = soft_gate_sizing.get(idx, 1.0) * decay
                     gate_blocks["edge_topn_soft"] += 1
@@ -3115,6 +3126,7 @@ def run_v5_forward_test(
                     edge_topn_blocked += 1
                     gate_blocks["edge_topn"] += 1
                     gate_blocked_r["edge_topn"].append(_oracle_r(idx))
+                    _cand_reason[idx] = "edge_topn"
                     continue
 
         if config.weekly_loss_cap is not None and week_boundaries is not None:
@@ -3137,6 +3149,7 @@ def run_v5_forward_test(
                 weekly_blocked += 1
                 gate_blocks["weekly_cap"] += 1
                 gate_blocked_r["weekly_cap"].append(_oracle_r(idx))
+                _cand_reason[idx] = "weekly_cap"
                 continue
 
         if corr_blocker is not None and test_sym_ids is not None:
@@ -3152,6 +3165,7 @@ def run_v5_forward_test(
                     corr_blocked += 1
                     gate_blocks["correlation"] += 1
                     soft_gate_sizing[idx] = soft_gate_sizing.get(idx, 1.0) * corr_mult
+                    _cand_corr_soft.add(idx)
 
         if daily_tracker is not None and test_timestamps is not None:
             date_str = datetime.utcfromtimestamp(
@@ -3164,12 +3178,14 @@ def run_v5_forward_test(
                 daily_blocked += 1
                 gate_blocks["daily_loss"] += 1
                 gate_blocked_r["daily_loss"].append(_oracle_r(idx))
+                _cand_reason[idx] = "daily_loss"
                 continue
 
         if equity_stop is not None and equity_stop.should_block():
             equity_blocked += 1
             gate_blocks["equity_stop"] += 1
             gate_blocked_r["equity_stop"].append(_oracle_r(idx))
+            _cand_reason[idx] = "equity_stop"
             continue
 
         if config.max_trades_per_day is not None and test_timestamps is not None:
@@ -3182,6 +3198,7 @@ def run_v5_forward_test(
                 tpd_blocked += 1
                 gate_blocks["max_tpd"] += 1
                 gate_blocked_r["max_tpd"].append(_oracle_r(idx))
+                _cand_reason[idx] = "max_tpd"
                 continue
 
         if config.rolling_er_gate and test_sym_ids is not None:
@@ -3192,6 +3209,7 @@ def run_v5_forward_test(
                 _er_trades_skipped += 1
                 gate_blocks["rolling_er"] = gate_blocks.get("rolling_er", 0) + 1
                 gate_blocked_r.setdefault("rolling_er", []).append(_oracle_r(idx))
+                _cand_reason[idx] = "rolling_er"
                 continue
 
         if ddt is not None:
@@ -3201,6 +3219,7 @@ def run_v5_forward_test(
                 gate_blocks["ddt"] += 1
                 gate_blocked_r["ddt"].append(_oracle_r(idx))
                 ddt.record_block()
+                _cand_reason[idx] = "ddt"
                 continue
 
         if config.head_disagreement_gate:
@@ -3223,6 +3242,7 @@ def run_v5_forward_test(
                 head_disagree_blocked += 1
                 gate_blocks["head_disagreement"] += 1
                 gate_blocked_r["head_disagreement"].append(_oracle_r(idx))
+                _cand_reason[idx] = "head_disagreement"
                 continue
 
         taken.append(idx)
@@ -3469,6 +3489,25 @@ def run_v5_forward_test(
                                 "[V5_FWD][ER_GATE_UNBLOCK] %s unblocked — E[R] recovered to %.4f",
                                 _er_sym, _trailing_er,
                             )
+
+    if candidate_logger is not None:
+        sym_name_map = sym_id_to_name if sym_id_to_name else {}
+        _taken_set = set(taken)
+        for _ci in chronological_idx:
+            _blocked_by = _cand_reason.get(_ci, "")
+            _rec = {
+                "idx": int(_ci),
+                "score": float(scores[_ci]) if scores is not None else float("nan"),
+                "score_work": float(scores_work[_ci]) if scores_work is not None else float("nan"),
+                "side": int(sides[_ci]) if sides is not None else 0,
+                "symbol": sym_name_map.get(int(test_sym_ids[_ci]), "") if test_sym_ids is not None else "",
+                "timestamp_ms": int(test_timestamps[_ci]) if test_timestamps is not None else 0,
+                "oracle_r": float(_oracle_r(_ci)),
+                "blocked_by": _blocked_by,
+                "taken": _ci in _taken_set,
+                "corr_soft": _ci in _cand_corr_soft,
+            }
+            candidate_logger(_rec)
 
     if ema200 is not None:
         log.info(f"[V5_GATE] EMA200 blocked {ema_blocked} trades")
@@ -4363,6 +4402,8 @@ def run_v5_walk_forward(
     rolling_er_gate=False,
     rolling_er_window=20,
     rolling_er_min=-0.05,
+    max_folds=None,
+    candidate_logger=None,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -4448,6 +4489,10 @@ def run_v5_walk_forward(
             'test_end': test_end.strftime('%Y-%m-%d'),
         })
         current_test_start = test_end
+
+    if max_folds is not None:
+        folds = folds[-max_folds:]
+        log.info(f"[V5_WF] max_folds={max_folds}: trimmed to {len(folds)} most recent folds")
 
     log.info(f"[V5_WF] Generated {len(folds)} folds (train={train_months}m, test={test_months}m)")
     for f in folds:
@@ -6811,6 +6856,7 @@ def train_v5_model(
                     train_ref_arrays=train_ref_arrays,
                     use_v6=use_v6, v6_seq_len=v6_seq_len,
                     symbols=symbols,
+                    candidate_logger=candidate_logger,
                 )
             except Exception as _fwd_err:
                 import traceback as _tb
