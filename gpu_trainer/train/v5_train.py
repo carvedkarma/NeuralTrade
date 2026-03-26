@@ -2799,10 +2799,7 @@ def run_v5_forward_test(
     _cand_reason: dict = {}        # idx → gate name that blocked it (empty str = taken)
     _cand_corr_soft: set = set()   # indices where correlation soft-penalty was applied
 
-    try:
-        _effective_thr_arr = per_bar_threshold if isinstance(per_bar_threshold, np.ndarray) else None
-    except NameError:
-        _effective_thr_arr = None
+    _effective_thr_arr = per_bar_threshold if isinstance(per_bar_threshold, np.ndarray) else None
     _effective_thr_scalar = ddt_base_threshold
 
     if candidate_logger is not None:

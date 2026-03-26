@@ -620,6 +620,7 @@ def mode_smoke_wf(args: argparse.Namespace) -> None:
     _print_gate_block_table(records)
     _print_score_decile_table(records)
     candidate_metrics = _compute_metrics(records)
+    _print_metrics_table("smoke_wf — compact summary (candidate log)", candidate_metrics)
     fold_summary_from_records = _fold_breakdown(records)
     payload = {
         "mode": "smoke_wf", "elapsed_s": round(elapsed, 1),
@@ -652,6 +653,7 @@ def mode_canary_wf(args: argparse.Namespace) -> None:
     _print_gate_block_table(records)
     _print_score_decile_table(records)
     candidate_metrics = _compute_metrics(records)
+    _print_metrics_table("canary_wf — compact summary (candidate log)", candidate_metrics)
     fold_summary_from_records = _fold_breakdown(records)
     payload = {
         "mode": "canary_wf", "elapsed_s": round(elapsed, 1),
