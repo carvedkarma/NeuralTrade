@@ -2171,6 +2171,7 @@ def run_v5_forward_test(
     use_v6=False, v6_seq_len=16,
     symbols=None,
     candidate_logger=None,
+    fold_idx=None,
 ):
     """Run forward test with completely frozen decision layer.
 
@@ -2609,6 +2610,8 @@ def run_v5_forward_test(
     else:
         selected = scores_work >= ddt_base_threshold
     sel_indices = np.where(selected)[0]
+    # Track bars that passed score threshold before edge_first pruning (for candidate_logger attribution).
+    _score_pass_set: set = set(sel_indices.tolist())
 
     edge_first_blocked = 0
     edge_bar_values = None
@@ -2809,6 +2812,9 @@ def run_v5_forward_test(
         for _ti in range(_n_total):
             if _ti in _sel_set:
                 continue
+            # Correctly attribute pre-loop block reason:
+            # _score_pass_set = bars that passed score threshold but were pruned by edge_first.
+            _pre_block = "edge_first" if _ti in _score_pass_set else "threshold"
             _adx_v = float(_adx_arr_pre[_ti]) if _adx_arr_pre is not None and _ti < len(_adx_arr_pre) and not np.isnan(_adx_arr_pre[_ti]) else float("nan")
             _thr = float(_effective_thr_arr[_ti]) if _effective_thr_arr is not None else _effective_thr_scalar
             candidate_logger({
@@ -2820,12 +2826,13 @@ def run_v5_forward_test(
                 "final_score": float(scores_work[_ti]) if scores_work is not None else float("nan"),
                 "threshold": _thr,
                 "taken": False,
-                "block_reason": "threshold",
+                "block_reason": _pre_block,
                 "mu_R": float(arrays['mu_R'][_ti]) if 'mu_R' in arrays else float("nan"),
                 "p_trade": float(arrays['p_trade'][_ti]) if 'p_trade' in arrays else float("nan"),
                 "adx_val": _adx_v,
                 "regime_label": "unknown",
                 "corr_blocked": False,
+                "fold_idx": fold_idx,
             })
     ema_blocked = 0
     warmup_blocked = 0
@@ -3548,6 +3555,7 @@ def run_v5_forward_test(
                 "regime_label": _regime_here,
                 "corr_blocked": _ci in _cand_corr_soft,
                 "oracle_r": float(_oracle_r(_ci)),
+                "fold_idx": fold_idx,
             })
 
     if ema200 is not None:
@@ -6900,6 +6908,7 @@ def train_v5_model(
                     use_v6=use_v6, v6_seq_len=v6_seq_len,
                     symbols=symbols,
                     candidate_logger=candidate_logger,
+                    fold_idx=fold_id,
                 )
             except Exception as _fwd_err:
                 import traceback as _tb

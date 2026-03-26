@@ -52,7 +52,7 @@ ALL_SYMBOLS = [
 ]
 
 CSV_COLUMNS = [
-    "bar_idx", "timestamp", "symbol", "side",
+    "fold_idx", "bar_idx", "timestamp", "symbol", "side",
     "raw_score", "final_score", "threshold",
     "taken", "block_reason",
     "mu_R", "p_trade", "adx_val", "regime_label", "corr_blocked",
@@ -251,11 +251,11 @@ def _load_csv(path: str) -> List[Dict]:
             rec: Dict[str, Any] = {}
             for col in CSV_COLUMNS:
                 v = row.get(col, "")
-                if col in ("bar_idx", "timestamp", "side"):
+                if col in ("fold_idx", "bar_idx", "timestamp", "side"):
                     try:
-                        rec[col] = int(v) if v not in ("", "nan") else 0
+                        rec[col] = int(v) if v not in ("", "nan", "None") else None
                     except ValueError:
-                        rec[col] = 0
+                        rec[col] = None
                 elif col in ("raw_score", "final_score", "threshold",
                              "mu_R", "p_trade", "adx_val", "oracle_r"):
                     try:
@@ -424,35 +424,27 @@ def mode_unit_audit(args: argparse.Namespace) -> None:
 # ─────────────────────────────────────────────
 
 def _fold_breakdown(records: List[Dict]) -> List[Dict]:
-    """Group taken-trade records by approximate fold (distinct timestamp ranges).
+    """Group taken-trade records by fold_idx field embedded in each record.
 
-    Since candidate_logger emits records for all folds sequentially, we detect
-    fold boundaries by looking for timestamp resets (fold start < previous fold end).
+    The candidate_logger emits 'fold_idx' on every record so we can group
+    accurately.  Falls back to a single fold when fold_idx is absent/None.
     """
     taken = [r for r in records if r.get("taken")]
     if not taken:
         return []
-    taken_sorted = sorted(taken, key=lambda r: r.get("timestamp", 0))
 
-    folds: List[List[Dict]] = []
-    current_fold: List[Dict] = [taken_sorted[0]]
-    for r in taken_sorted[1:]:
-        ts = r.get("timestamp", 0)
-        prev_ts = current_fold[-1].get("timestamp", 0)
-        if ts < prev_ts:
-            folds.append(current_fold)
-            current_fold = [r]
-        else:
-            current_fold.append(r)
-    if current_fold:
-        folds.append(current_fold)
+    fold_buckets: Dict[Any, List[Dict]] = defaultdict(list)
+    for r in taken:
+        fid = r.get("fold_idx")
+        fold_buckets[fid].append(r)
 
     fold_summaries = []
-    for i, fold_records in enumerate(folds):
+    for fid in sorted(fold_buckets.keys(), key=lambda x: (x is None, x)):
+        fold_records = fold_buckets[fid]
         rs = [_oracle_r(r) for r in fold_records]
         wins = [v for v in rs if v > 0]
         fold_summaries.append({
-            "fold": i + 1,
+            "fold": fid if fid is not None else "?",
             "trades": len(fold_records),
             "total_r": round(sum(rs), 3),
             "expectancy": round(sum(rs) / max(len(rs), 1), 4),
@@ -478,12 +470,12 @@ def _print_fold_table(fold_summaries: List[Dict]) -> None:
 # ─────────────────────────────────────────────
 
 def mode_smoke_wf(args: argparse.Namespace) -> None:
-    log.info("[validate] mode=smoke_wf  symbols=%s  epochs=15  folds=2  test_months=1",
+    log.info("[validate] mode=smoke_wf  symbols=%s  epochs=15  folds=2  train_months=3  test_months=0.75",
              SMOKE_SYMBOLS)
     t0 = time.time()
     records = _run_wf(
         symbols=SMOKE_SYMBOLS, epochs=15, batch_size=128, lr=3e-4,
-        train_months=3, test_months=1, max_folds=2, seed=42,
+        train_months=3, test_months=0.75, max_folds=2, seed=42,
     )
     elapsed = time.time() - t0
     metrics = _compute_metrics(records)
@@ -575,41 +567,42 @@ def _top20_decision_changes(base: List[Dict], new: List[Dict]) -> None:
 
 
 def mode_candidate_diff(args: argparse.Namespace) -> None:
-    folds     = getattr(args, "folds", 2)
-    run_path  = getattr(args, "run", None)
-    vs_path   = getattr(args, "vs", None)
-    csv_out   = getattr(args, "csv", None)
+    """Always runs walk-forward and dumps per-candidate CSV.
 
-    if run_path:
-        log.info("[validate] mode=candidate_diff  loading from CSV: %s", run_path)
-        records = _load_csv(run_path)
-    else:
-        log.info("[validate] mode=candidate_diff  symbols=ALL20  folds=%d", folds)
-        t0 = time.time()
-        records = _run_wf(
-            symbols=ALL_SYMBOLS, epochs=30, batch_size=128, lr=3e-4,
-            train_months=6, test_months=1, max_folds=folds, seed=42,
-        )
-        log.info("[validate] WF complete in %.1fs  total_records=%d",
-                 time.time() - t0, len(records))
+    Flags
+    -----
+    --folds N    : number of WF folds to run (default 2).
+    --csv PATH   : save output CSV to PATH (default: auto-named in validate_runs/).
+    --vs PATH    : after running, compare this run's CSV vs PATH (baseline CSV)
+                   and print top-20 decision changes.
+    """
+    folds   = getattr(args, "folds", 2)
+    vs_path = getattr(args, "vs", None)
+    csv_out = getattr(args, "csv", None)
 
-    if csv_out:
-        _save_csv(records, Path(csv_out))
-    elif not run_path:
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        auto_path = RUNS_DIR / f"candidate_diff_{ts}.csv"
-        _save_csv(records, auto_path)
-        print(f"CSV saved: {auto_path}")
+    log.info("[validate] mode=candidate_diff  symbols=ALL20  folds=%d", folds)
+    t0 = time.time()
+    records = _run_wf(
+        symbols=ALL_SYMBOLS, epochs=30, batch_size=128, lr=3e-4,
+        train_months=6, test_months=1, max_folds=folds, seed=42,
+    )
+    elapsed = time.time() - t0
+    log.info("[validate] WF complete in %.1fs  total_records=%d", elapsed, len(records))
 
-    taken  = [r for r in records if r.get("taken")]
+    ts_str = time.strftime("%Y%m%d_%H%M%S")
+    csv_path = Path(csv_out) if csv_out else (RUNS_DIR / f"candidate_diff_{ts_str}.csv")
+    _save_csv(records, csv_path)
+    print(f"CSV saved: {csv_path}")
+
+    taken   = [r for r in records if r.get("taken")]
     blocked = [r for r in records if not r.get("taken")]
-    all_r   = [_oracle_r(r) for r in records if "oracle_r" in r]
-    taken_r = [_oracle_r(r) for r in taken if "oracle_r" in r]
+    all_r   = [_oracle_r(r) for r in records]
+    taken_r = [_oracle_r(r) for r in taken]
 
-    oracle_total = sum(all_r)
-    taken_total  = sum(taken_r)
-    blocked_total = sum(_oracle_r(r) for r in blocked if "oracle_r" in r)
-    capture = taken_total / oracle_total if oracle_total != 0 else 0.0
+    oracle_total  = sum(all_r)
+    taken_total   = sum(taken_r)
+    blocked_total = sum(_oracle_r(r) for r in blocked)
+    capture       = taken_total / oracle_total if oracle_total != 0 else 0.0
 
     gate_oracle: Dict[str, float] = defaultdict(float)
     gate_count:  Dict[str, int]   = defaultdict(int)
@@ -636,13 +629,16 @@ def mode_candidate_diff(args: argparse.Namespace) -> None:
     _print_metrics_table("candidate_diff trade metrics", metrics)
 
     if vs_path:
-        new_records = _load_csv(vs_path)
-        _top20_decision_changes(records, new_records)
+        log.info("[validate] Comparing new run vs baseline: %s", vs_path)
+        baseline_records = _load_csv(vs_path)
+        _top20_decision_changes(baseline_records, records)
 
     payload = {
         "mode": "candidate_diff",
-        "symbols": "ALL20" if not run_path else f"from_csv:{run_path}",
+        "symbols": "ALL20",
         "max_folds": folds,
+        "elapsed_s": round(elapsed, 1),
+        "csv_path": str(csv_path),
         "metrics": metrics,
         "oracle_total_all": round(oracle_total, 3),
         "oracle_total_taken": round(taken_total, 3),
@@ -707,15 +703,13 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Number of folds (default: 3)")
 
     diff = sub.add_parser("candidate_diff",
-                          help="Per-candidate gate oracle R breakdown with optional CSV compare")
+                          help="Run WF, dump per-candidate CSV, show gate oracle R breakdown")
     diff.add_argument("--folds", type=int, default=2,
-                      help="Number of folds to run (default: 2)")
+                      help="Number of WF folds to run (default: 2)")
     diff.add_argument("--csv", metavar="PATH",
-                      help="Save all candidate records to this CSV path")
-    diff.add_argument("--run", metavar="BASELINE_CSV",
-                      help="Load a previously saved candidate CSV as baseline")
-    diff.add_argument("--vs", metavar="NEW_CSV",
-                      help="Load a second CSV and print top-20 decision changes vs --run")
+                      help="Save candidate CSV to PATH (default: auto-named in validate_runs/)")
+    diff.add_argument("--vs", metavar="BASELINE_CSV",
+                      help="Compare this run vs BASELINE_CSV and print top-20 decision changes")
 
     cmp = sub.add_parser("compare",
                          help="Diff two validate_runs JSON files (including gate block pct)")
