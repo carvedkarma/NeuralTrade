@@ -1253,7 +1253,7 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
 
     if slippage_bps > 0:
         slippage_r = slippage_bps / 10000.0 / np.maximum(risk, 1e-6)
-        mu_R_adj = mu_R - np.sign(mu_R) * slippage_r
+        mu_R_adj = np.sign(mu_R) * np.maximum(0.0, np.abs(mu_R) - slippage_r)
         log.debug(f"[V5_SLIP] Deducting {slippage_bps:.1f} bps slippage from mu_R "
                   f"(avg deduction: {float(np.mean(slippage_r)):.4f} R)")
     else:

@@ -130,6 +130,9 @@ class V5Forecaster(nn.Module):
             self.symbol_embedding = None
             trunk_input_dim = config.input_dim
 
+        self.symbol_embed = self.symbol_embedding
+        self.model = self
+
         trunk_layers = []
         prev_dim = trunk_input_dim
         for hidden_dim in config.hidden_dims:

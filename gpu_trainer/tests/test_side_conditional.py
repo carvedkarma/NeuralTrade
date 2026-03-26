@@ -626,7 +626,7 @@ class TestCapitalProtection:
         scores = np.ones(n) * 2.0
         sides = np.ones(n, dtype=int)
         realized_r = np.ones(n) * -0.5
-        outcomes = np.ones(n, dtype=int)
+        outcomes = np.array(["TP"] * n)
         r_long = realized_r.copy()
         r_short = realized_r.copy()
         out_long = outcomes.copy()
@@ -733,7 +733,7 @@ class TestCapitalProtection:
         sides = np.ones(n, dtype=int)
         realized_r = np.ones(n) * -0.3
         realized_r[bars_per_week:bars_per_week + 50] = 0.5
-        outcomes = np.ones(n, dtype=int)
+        outcomes = np.array(["TP"] * n)
         r_long = realized_r.copy()
         r_short = realized_r.copy()
         out_long = outcomes.copy()
