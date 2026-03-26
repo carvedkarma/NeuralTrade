@@ -5003,6 +5003,12 @@ def run_v5_walk_forward(
                 'per_symbol_summary': wf_per_symbol_report if wf_per_symbol else {},
             }, f, indent=2, default=str)
         log.info(f"[V5_WF] Walk-forward report saved to {agg_path}")
+        return {
+            'folds': all_reports,
+            'aggregate': agg_report,
+            'per_symbol_summary': wf_per_symbol_report if wf_per_symbol else {},
+        }
+    return None
 
 
 def train_v5_model(

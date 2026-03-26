@@ -304,10 +304,15 @@ def _run_wf(
     max_folds: Optional[int] = None,
     seed: int = 42,
     test_weeks: Optional[int] = None,
-) -> List[Dict]:
+) -> Tuple[List[Dict], Optional[Dict]]:
     """Run walk-forward and collect all candidate records via candidate_logger.
 
-    Pass test_weeks to use a weeks-based test window (overrides test_months).
+    Returns
+    -------
+    (records, wf_report)
+        records   : list of per-candidate dicts from candidate_logger
+        wf_report : full walk-forward report dict (folds + aggregate),
+                    or None if the WF produced no output
     """
     try:
         import torch
@@ -327,7 +332,7 @@ def _run_wf(
         records.append(rec)
 
     torch.manual_seed(seed)
-    run_v5_walk_forward(
+    wf_report = run_v5_walk_forward(
         data_dir=DATA_DIR,
         device=dev,
         symbols=symbols,
@@ -344,7 +349,7 @@ def _run_wf(
         balanced_sampling=True,
         calibration_monitor=True,
     )
-    return records
+    return records, wf_report
 
 
 # ─────────────────────────────────────────────
@@ -478,7 +483,7 @@ def mode_smoke_wf(args: argparse.Namespace) -> None:
     log.info("[validate] mode=smoke_wf  symbols=%s  epochs=15  folds=2  train_months=3  test_weeks=3",
              SMOKE_SYMBOLS)
     t0 = time.time()
-    records = _run_wf(
+    records, wf_report = _run_wf(
         symbols=SMOKE_SYMBOLS, epochs=15, batch_size=128, lr=3e-4,
         train_months=3, test_months=1, max_folds=2, seed=42, test_weeks=3,
     )
@@ -494,6 +499,7 @@ def mode_smoke_wf(args: argparse.Namespace) -> None:
         "metrics": metrics,
         "fold_summary": fold_summary,
         "n_candidate_records": len(records),
+        "wf_report": wf_report,
     }
     out = _save_run("smoke_wf", payload)
     print(f"Run saved: {out}")
@@ -507,7 +513,7 @@ def mode_canary_wf(args: argparse.Namespace) -> None:
     folds = getattr(args, "folds", 3)
     log.info("[validate] mode=canary_wf  symbols=%s  epochs=30  folds=%d", CANARY_SYMBOLS, folds)
     t0 = time.time()
-    records = _run_wf(
+    records, wf_report = _run_wf(
         symbols=CANARY_SYMBOLS, epochs=30, batch_size=128, lr=3e-4,
         train_months=6, test_months=1, max_folds=folds, seed=42,
     )
@@ -523,6 +529,7 @@ def mode_canary_wf(args: argparse.Namespace) -> None:
         "metrics": metrics,
         "fold_summary": fold_summary,
         "n_candidate_records": len(records),
+        "wf_report": wf_report,
     }
     out = _save_run("canary_wf", payload)
     print(f"Run saved: {out}")
@@ -588,6 +595,7 @@ def mode_candidate_diff(args: argparse.Namespace) -> None:
     run_path = getattr(args, "run", None)
     csv_out  = getattr(args, "csv", None)
 
+    wf_report = None
     if run_path:
         log.info("[validate] mode=candidate_diff  loading from CSV: %s", run_path)
         records = _load_csv(run_path)
@@ -596,7 +604,7 @@ def mode_candidate_diff(args: argparse.Namespace) -> None:
     else:
         log.info("[validate] mode=candidate_diff  symbols=ALL20  folds=%d", folds)
         t0 = time.time()
-        records = _run_wf(
+        records, wf_report = _run_wf(
             symbols=ALL_SYMBOLS, epochs=30, batch_size=128, lr=3e-4,
             train_months=6, test_months=1, max_folds=folds, seed=42,
         )
@@ -661,6 +669,7 @@ def mode_candidate_diff(args: argparse.Namespace) -> None:
         "n_candidates": len(records),
         "gate_oracle_r": {g: round(v, 3) for g, v in gate_oracle.items()},
         "gate_block_count": dict(gate_count),
+        "wf_report": wf_report,
     }
     out = _save_run("candidate_diff", payload)
     print(f"Run saved: {out}")
