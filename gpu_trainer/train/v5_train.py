@@ -2791,9 +2791,42 @@ def run_v5_forward_test(
                  f"window={config.corr_window_days}d same_side={config.corr_same_side_only}")
 
     chronological_idx = sel_indices[np.argsort(sel_indices)]
+    _sel_set = set(chronological_idx.tolist())
     taken = []
     _cand_reason: dict = {}        # idx → gate name that blocked it (empty str = taken)
     _cand_corr_soft: set = set()   # indices where correlation soft-penalty was applied
+
+    try:
+        _effective_thr_arr = per_bar_threshold if isinstance(per_bar_threshold, np.ndarray) else None
+    except NameError:
+        _effective_thr_arr = None
+    _effective_thr_scalar = ddt_base_threshold
+
+    if candidate_logger is not None:
+        _sym_name_map_pre = sym_id_to_name if sym_id_to_name else {}
+        _adx_arr_pre = adx_values if adx_values is not None else None
+        _n_total = len(scores) if scores is not None else 0
+        for _ti in range(_n_total):
+            if _ti in _sel_set:
+                continue
+            _adx_v = float(_adx_arr_pre[_ti]) if _adx_arr_pre is not None and _ti < len(_adx_arr_pre) and not np.isnan(_adx_arr_pre[_ti]) else float("nan")
+            _thr = float(_effective_thr_arr[_ti]) if _effective_thr_arr is not None else _effective_thr_scalar
+            candidate_logger({
+                "bar_idx": int(_ti),
+                "timestamp": int(test_timestamps[_ti]) if test_timestamps is not None else 0,
+                "symbol": _sym_name_map_pre.get(int(test_sym_ids[_ti]), "") if test_sym_ids is not None else "",
+                "side": int(sides[_ti]) if sides is not None else 0,
+                "raw_score": float(scores[_ti]) if scores is not None else float("nan"),
+                "final_score": float(scores_work[_ti]) if scores_work is not None else float("nan"),
+                "threshold": _thr,
+                "taken": False,
+                "block_reason": "threshold",
+                "mu_R": float(arrays['mu_R'][_ti]) if 'mu_R' in arrays else float("nan"),
+                "p_trade": float(arrays['p_trade'][_ti]) if 'p_trade' in arrays else float("nan"),
+                "adx_val": _adx_v,
+                "regime_label": "unknown",
+                "corr_blocked": False,
+            })
     ema_blocked = 0
     warmup_blocked = 0
     weekly_blocked = 0
@@ -3491,23 +3524,31 @@ def run_v5_forward_test(
                             )
 
     if candidate_logger is not None:
-        sym_name_map = sym_id_to_name if sym_id_to_name else {}
+        _log_sym_map = sym_id_to_name if sym_id_to_name else {}
         _taken_set = set(taken)
+        _adx_arr_post = adx_values if adx_values is not None else None
         for _ci in chronological_idx:
             _blocked_by = _cand_reason.get(_ci, "")
-            _rec = {
-                "idx": int(_ci),
-                "score": float(scores[_ci]) if scores is not None else float("nan"),
-                "score_work": float(scores_work[_ci]) if scores_work is not None else float("nan"),
+            _adx_here = float(_adx_arr_post[_ci]) if _adx_arr_post is not None and _ci < len(_adx_arr_post) and not np.isnan(_adx_arr_post[_ci]) else float("nan")
+            _thr_here = float(_effective_thr_arr[_ci]) if _effective_thr_arr is not None else _effective_thr_scalar
+            _regime_here = str(bar_regimes[_ci]) if bar_regimes is not None and _ci < len(bar_regimes) else "unknown"
+            candidate_logger({
+                "bar_idx": int(_ci),
+                "timestamp": int(test_timestamps[_ci]) if test_timestamps is not None else 0,
+                "symbol": _log_sym_map.get(int(test_sym_ids[_ci]), "") if test_sym_ids is not None else "",
                 "side": int(sides[_ci]) if sides is not None else 0,
-                "symbol": sym_name_map.get(int(test_sym_ids[_ci]), "") if test_sym_ids is not None else "",
-                "timestamp_ms": int(test_timestamps[_ci]) if test_timestamps is not None else 0,
-                "oracle_r": float(_oracle_r(_ci)),
-                "blocked_by": _blocked_by,
+                "raw_score": float(scores[_ci]) if scores is not None else float("nan"),
+                "final_score": float(scores_work[_ci]) if scores_work is not None else float("nan"),
+                "threshold": _thr_here,
                 "taken": _ci in _taken_set,
-                "corr_soft": _ci in _cand_corr_soft,
-            }
-            candidate_logger(_rec)
+                "block_reason": _blocked_by,
+                "mu_R": float(arrays['mu_R'][_ci]) if 'mu_R' in arrays else float("nan"),
+                "p_trade": float(arrays['p_trade'][_ci]) if 'p_trade' in arrays else float("nan"),
+                "adx_val": _adx_here,
+                "regime_label": _regime_here,
+                "corr_blocked": _ci in _cand_corr_soft,
+                "oracle_r": float(_oracle_r(_ci)),
+            })
 
     if ema200 is not None:
         log.info(f"[V5_GATE] EMA200 blocked {ema_blocked} trades")
@@ -4728,6 +4769,7 @@ def run_v5_walk_forward(
                 v6_aux_weight=v6_aux_weight,
                 v6_confidence_weight=v6_confidence_weight,
                 v6_moe_balance_weight=v6_moe_balance_weight,
+                candidate_logger=candidate_logger,
             )
         except Exception as _fold_err:
             import traceback as _tb
@@ -5076,6 +5118,7 @@ def train_v5_model(
     v6_aux_weight=0.1,
     v6_confidence_weight=0.15,
     v6_moe_balance_weight=0.05,
+    candidate_logger=None,
 ):
     """V5/V6 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config

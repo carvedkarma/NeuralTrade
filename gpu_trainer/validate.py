@@ -7,6 +7,8 @@ smoke_wf      : 2-symbol, 2-fold walk-forward smoke test (BTCUSDT + ETHUSDT).
 canary_wf     : 4-symbol, 3-fold walk-forward (BTC/ETH/SOL/BNB).
 candidate_diff: Full 20-symbol WF on last N folds, capturing per-candidate gate
                 breakdown to show oracle R available vs actually taken.
+                Use --csv to save all candidate records to CSV.
+                Use --run <path> to load a saved candidate CSV instead of re-running.
 compare       : Load two validate_runs JSON files and diff their metric tables.
 
 Usage
@@ -14,13 +16,14 @@ Usage
 python validate.py unit_audit
 python validate.py smoke_wf
 python validate.py canary_wf [--folds 3]
-python validate.py candidate_diff [--folds 2]
+python validate.py candidate_diff [--folds 2] [--csv] [--run path/to/candidates.csv]
 python validate.py compare runs/smoke_wf_A.json runs/smoke_wf_B.json
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import os
@@ -49,22 +52,36 @@ ALL_SYMBOLS = [
     "DOTUSDT", "MATICUSDT", "FILUSDT", "APTUSDT", "OPUSDT",
 ]
 
+CSV_COLUMNS = [
+    "bar_idx", "timestamp", "symbol", "side",
+    "raw_score", "final_score", "threshold",
+    "taken", "block_reason",
+    "mu_R", "p_trade", "adx_val", "regime_label", "corr_blocked",
+    "oracle_r",
+]
+
 
 # ─────────────────────────────────────────────
 # Metric computation
 # ─────────────────────────────────────────────
 
 def _compute_metrics(records: List[Dict]) -> Dict[str, Any]:
-    """Compute trade-level metrics from a list of taken-trade records.
+    """Compute trade-level metrics from a list of candidate records.
 
-    Each record must have at least: oracle_r (float), side (int 1/-1),
-    symbol (str), blocked_by (str), taken (bool).
+    Only records with taken=True contribute to trade metrics.
+    oracle_r is the actual realized return (from test data, used as proxy for expectancy).
     """
     taken = [r for r in records if r.get("taken")]
     blocked = [r for r in records if not r.get("taken")]
 
     n_trades = len(taken)
     if n_trades == 0:
+        gate_counts: Dict[str, int] = defaultdict(int)
+        for r in blocked:
+            gate = r.get("block_reason") or "unknown"
+            gate_counts[gate] += 1
+        n_blocked = len(blocked)
+        gate_pct = {g: round(c / max(n_blocked, 1) * 100, 1) for g, c in sorted(gate_counts.items(), key=lambda x: -x[1])}
         return {
             "trades": 0,
             "oracle_r_total": 0.0,
@@ -79,32 +96,32 @@ def _compute_metrics(records: List[Dict]) -> Dict[str, Any]:
             "top_decile_avg_r": 0.0,
             "bottom_decile_avg_r": 0.0,
             "monotonic_score_r": "N/A",
-            "gate_block_pct": {},
+            "gate_block_pct": gate_pct,
             "n_candidates": len(records),
-            "n_blocked": len(blocked),
+            "n_blocked": n_blocked,
         }
 
-    rs = [r["oracle_r"] for r in taken]
+    rs = [r.get("oracle_r", 0.0) for r in taken]
     wins = [r for r in rs if r > 0]
     losses = [r for r in rs if r <= 0]
 
     n_total_cands = len(records)
-    long_rs  = [r["oracle_r"] for r in taken if r.get("side") == 1]
-    short_rs = [r["oracle_r"] for r in taken if r.get("side") == -1]
+    long_rs  = [r.get("oracle_r", 0.0) for r in taken if r.get("side") == 1]
+    short_rs = [r.get("oracle_r", 0.0) for r in taken if r.get("side") == -1]
 
-    sorted_by_score = sorted(taken, key=lambda r: r.get("score_work", r.get("score", 0)), reverse=True)
+    sorted_by_score = sorted(taken, key=lambda r: r.get("final_score", r.get("raw_score", 0)), reverse=True)
     decile = max(1, n_trades // 10)
-    top_decile  = [r["oracle_r"] for r in sorted_by_score[:decile]]
-    bot_decile  = [r["oracle_r"] for r in sorted_by_score[-decile:]]
+    top_decile  = [r.get("oracle_r", 0.0) for r in sorted_by_score[:decile]]
+    bot_decile  = [r.get("oracle_r", 0.0) for r in sorted_by_score[-decile:]]
 
     monotonic = _check_monotonic_score_r(taken)
 
-    gate_counts: Dict[str, int] = defaultdict(int)
+    gate_counts2: Dict[str, int] = defaultdict(int)
     for r in blocked:
-        gate = r.get("blocked_by") or "unknown"
-        gate_counts[gate] += 1
+        gate = r.get("block_reason") or "unknown"
+        gate_counts2[gate] += 1
     n_blocked = len(blocked)
-    gate_pct = {g: round(c / max(n_blocked, 1) * 100, 1) for g, c in sorted(gate_counts.items(), key=lambda x: -x[1])}
+    gate_pct = {g: round(c / max(n_blocked, 1) * 100, 1) for g, c in sorted(gate_counts2.items(), key=lambda x: -x[1])}
 
     return {
         "trades": n_trades,
@@ -130,13 +147,13 @@ def _check_monotonic_score_r(taken: List[Dict], n_buckets: int = 5) -> bool:
     """Compute average oracle_r per score quintile and check monotonic direction."""
     if len(taken) < n_buckets * 2:
         return True
-    sorted_t = sorted(taken, key=lambda r: r.get("score_work", r.get("score", 0)))
+    sorted_t = sorted(taken, key=lambda r: r.get("final_score", r.get("raw_score", 0)))
     bucket_size = len(sorted_t) // n_buckets
     bucket_means = []
     for i in range(n_buckets):
         bucket = sorted_t[i * bucket_size:(i + 1) * bucket_size]
         if bucket:
-            bucket_means.append(sum(r["oracle_r"] for r in bucket) / len(bucket))
+            bucket_means.append(sum(r.get("oracle_r", 0.0) for r in bucket) / len(bucket))
     increasing = all(bucket_means[i] <= bucket_means[i + 1] for i in range(len(bucket_means) - 1))
     return increasing
 
@@ -174,7 +191,7 @@ def _print_table(title: str, metrics: Dict[str, Any]) -> None:
 
     gate_pct = metrics.get("gate_block_pct", {})
     if gate_pct:
-        print(f"\n  {'Gate block breakdown':}")
+        print(f"\n  Gate block breakdown:")
         for gate, pct in list(gate_pct.items())[:10]:
             print(f"    {gate:<24} {pct:>5.1f}%")
     print()
@@ -189,6 +206,8 @@ def _compare_tables(label_a: str, label_b: str,
         ("win_rate",            "Win rate"),
         ("avg_win_r",           "Avg win (R)"),
         ("avg_loss_r",          "Avg loss (R)"),
+        ("long_expectancy",     "Long E[R]"),
+        ("short_expectancy",    "Short E[R]"),
         ("top_decile_avg_r",    "Top-decile avg R"),
         ("bottom_decile_avg_r", "Bottom-decile avg R"),
     ]
@@ -200,12 +219,56 @@ def _compare_tables(label_a: str, label_b: str,
     for key, label in numeric_keys:
         va = m_a.get(key, 0) or 0
         vb = m_b.get(key, 0) or 0
-        delta = vb - va if isinstance(va, (int, float)) else "—"
-        arrow = ("↑" if delta > 0 else "↓") if isinstance(delta, float) else ""
-        print(f"  {label:<28} {str(va):>12} {str(vb):>12} {f'{delta:+.4f}{arrow}':>12}")
+        if isinstance(va, (int, float)) and isinstance(vb, (int, float)):
+            delta = vb - va
+            arrow = "↑" if delta > 0 else "↓" if delta < 0 else "="
+            print(f"  {label:<28} {str(va):>12} {str(vb):>12} {f'{delta:+.4f}{arrow}':>12}")
+        else:
+            print(f"  {label:<28} {str(va):>12} {str(vb):>12} {'—':>12}")
     print(f"\n  Monotonic A: {m_a.get('monotonic_score_r', '—')}  "
           f"Monotonic B: {m_b.get('monotonic_score_r', '—')}")
     print()
+
+
+# ─────────────────────────────────────────────
+# CSV helpers
+# ─────────────────────────────────────────────
+
+def _save_csv(records: List[Dict], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(records)
+    log.info("[validate] CSV saved → %s  (%d rows)", path, len(records))
+
+
+def _load_csv(path: str) -> List[Dict]:
+    records = []
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rec: Dict[str, Any] = {}
+            for col in CSV_COLUMNS:
+                v = row.get(col, "")
+                if col in ("bar_idx", "timestamp", "side"):
+                    try:
+                        rec[col] = int(v) if v not in ("", "nan") else 0
+                    except ValueError:
+                        rec[col] = 0
+                elif col in ("raw_score", "final_score", "threshold", "mu_R", "p_trade",
+                             "adx_val", "oracle_r"):
+                    try:
+                        rec[col] = float(v) if v not in ("", "nan") else float("nan")
+                    except ValueError:
+                        rec[col] = float("nan")
+                elif col in ("taken", "corr_blocked"):
+                    rec[col] = v.lower() in ("true", "1", "yes")
+                else:
+                    rec[col] = v
+            records.append(rec)
+    log.info("[validate] Loaded %d records from %s", len(records), path)
+    return records
 
 
 # ─────────────────────────────────────────────
@@ -240,20 +303,16 @@ def _run_wf(
     test_months: int,
     max_folds: Optional[int],
     seed: int = 42,
-    device: str = "cpu",
 ) -> List[Dict]:
     """Run walk-forward and collect all candidate records via candidate_logger."""
     try:
-        import torch  # noqa: F401
+        import torch
     except ImportError:
         log.error("[validate] torch not available — WF modes require GPU machine.")
         sys.exit(1)
 
-    try:
-        import torch
-        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    except Exception:
-        dev = "cpu"
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    log.info("[validate] Using device: %s", dev)
 
     sys.path.insert(0, str(Path(__file__).parent))
     from train.v5_train import run_v5_walk_forward
@@ -300,11 +359,16 @@ def mode_unit_audit(args: argparse.Namespace) -> None:
         [sys.executable, "-m", "pytest", str(tests_path), "-v", "--tb=short"],
         cwd=str(Path(__file__).parent),
     )
+    status = "PASSED" if result.returncode == 0 else "FAILED"
     if result.returncode != 0:
         log.error("[validate] unit_audit FAILED (exit=%d)", result.returncode)
+    else:
+        log.info("[validate] unit_audit PASSED")
+
+    payload = {"mode": "unit_audit", "exit_code": result.returncode, "status": status}
+    _save_run("unit_audit", payload)
+    if result.returncode != 0:
         sys.exit(result.returncode)
-    log.info("[validate] unit_audit PASSED")
-    _save_run("unit_audit", {"mode": "unit_audit", "exit_code": 0, "status": "PASSED"})
 
 
 # ─────────────────────────────────────────────
@@ -377,27 +441,42 @@ def mode_canary_wf(args: argparse.Namespace) -> None:
 
 def mode_candidate_diff(args: argparse.Namespace) -> None:
     folds = getattr(args, "folds", 2)
-    log.info("[validate] mode=candidate_diff  symbols=ALL20  folds=%d", folds)
-    t0 = time.time()
-    candidates = _run_wf(
-        symbols=ALL_SYMBOLS,
-        epochs=30,
-        batch_size=128,
-        lr=3e-4,
-        train_months=6,
-        test_months=1,
-        max_folds=folds,
-        seed=42,
-    )
-    elapsed = time.time() - t0
+    run_path = getattr(args, "run", None)
+    save_csv = getattr(args, "csv", False)
+
+    if run_path:
+        log.info("[validate] mode=candidate_diff  loading from CSV: %s", run_path)
+        candidates = _load_csv(run_path)
+    else:
+        log.info("[validate] mode=candidate_diff  symbols=ALL20  folds=%d", folds)
+        t0 = time.time()
+        candidates = _run_wf(
+            symbols=ALL_SYMBOLS,
+            epochs=30,
+            batch_size=128,
+            lr=3e-4,
+            train_months=6,
+            test_months=1,
+            max_folds=folds,
+            seed=42,
+        )
+        elapsed = time.time() - t0
+        log.info("[validate] WF completed in %.1fs  candidates=%d", elapsed, len(candidates))
+
+    if save_csv:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        csv_path = RUNS_DIR / f"candidate_diff_{ts}.csv"
+        _save_csv(candidates, csv_path)
+        print(f"CSV saved: {csv_path}")
 
     taken = [r for r in candidates if r.get("taken")]
     blocked = [r for r in candidates if not r.get("taken")]
-    all_r = [r["oracle_r"] for r in candidates]
-    taken_r = [r["oracle_r"] for r in taken]
+    all_r = [r.get("oracle_r", 0.0) for r in candidates if "oracle_r" in r]
+    taken_r = [r.get("oracle_r", 0.0) for r in taken if "oracle_r" in r]
 
     oracle_total = sum(all_r)
     taken_total = sum(taken_r)
+    blocked_total = sum(r.get("oracle_r", 0.0) for r in blocked if "oracle_r" in r)
     capture_rate = taken_total / oracle_total if oracle_total != 0 else 0.0
 
     metrics = _compute_metrics(candidates)
@@ -405,8 +484,8 @@ def mode_candidate_diff(args: argparse.Namespace) -> None:
     gate_oracle: Dict[str, float] = defaultdict(float)
     gate_count: Dict[str, int] = defaultdict(int)
     for r in blocked:
-        g = r.get("blocked_by") or "unknown"
-        gate_oracle[g] += r.get("oracle_r", 0)
+        g = r.get("block_reason") or "unknown"
+        gate_oracle[g] += r.get("oracle_r", 0.0)
         gate_count[g] += 1
 
     print(f"\n{'=' * 60}")
@@ -414,7 +493,7 @@ def mode_candidate_diff(args: argparse.Namespace) -> None:
     print('=' * 60)
     print(f"  All candidates : {len(candidates):5d}   oracle_R={oracle_total:.2f}")
     print(f"  Taken          : {len(taken):5d}   oracle_R={taken_total:.2f}")
-    print(f"  Blocked        : {len(blocked):5d}   oracle_R={sum(r['oracle_r'] for r in blocked):.2f}")
+    print(f"  Blocked        : {len(blocked):5d}   oracle_R={blocked_total:.2f}")
     print(f"  Capture rate   : {capture_rate:.1%}")
     print(f"\n  {'Gate':<24} {'Blocked':>8} {'Oracle R':>10} {'Avg R':>10}")
     print(f"  {'-'*24} {'-'*8} {'-'*10} {'-'*10}")
@@ -427,8 +506,7 @@ def mode_candidate_diff(args: argparse.Namespace) -> None:
 
     payload = {
         "mode": "candidate_diff",
-        "elapsed_s": round(elapsed, 1),
-        "symbols": "ALL20",
+        "symbols": "ALL20" if not run_path else f"from_csv:{run_path}",
         "max_folds": folds,
         "metrics": metrics,
         "oracle_total_all": round(oracle_total, 3),
@@ -489,6 +567,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     diff = sub.add_parser("candidate_diff", help="20-symbol WF gate oracle R breakdown")
     diff.add_argument("--folds", type=int, default=2, help="Number of folds (default: 2)")
+    diff.add_argument("--csv", action="store_true", help="Save all candidate records to CSV")
+    diff.add_argument("--run", metavar="CSV_PATH",
+                      help="Load previously saved candidate CSV instead of re-running WF")
 
     cmp = sub.add_parser("compare", help="Diff two validate_runs JSON files")
     cmp.add_argument("files", nargs=2, metavar="FILE", help="Two JSON run files to compare")
