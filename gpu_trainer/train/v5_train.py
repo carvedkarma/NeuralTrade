@@ -2807,7 +2807,7 @@ def run_v5_forward_test(
 
     if candidate_logger is not None:
         _sym_name_map_pre = sym_id_to_name if sym_id_to_name else {}
-        _adx_arr_pre = adx_values if adx_values is not None else None
+        _adx_arr_pre = None  # ADX not yet computed at pre-loop stage
         _n_total = len(scores) if scores is not None else 0
         for _ti in range(_n_total):
             if _ti in _sel_set:
