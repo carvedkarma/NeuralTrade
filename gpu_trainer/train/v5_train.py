@@ -2151,6 +2151,7 @@ def run_v5_forward_test(
     high_prices=None, low_prices=None,
     train_ref_arrays=None,
     use_v6=False, v6_seq_len=16,
+    symbols=None,
 ):
     """Run forward test with completely frozen decision layer.
 
@@ -6726,6 +6727,7 @@ def train_v5_model(
                     low_prices=val_low_arr,
                     train_ref_arrays=train_ref_arrays,
                     use_v6=use_v6, v6_seq_len=v6_seq_len,
+                    symbols=symbols,
                 )
             except Exception as _fwd_err:
                 import traceback as _tb
