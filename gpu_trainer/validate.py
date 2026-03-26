@@ -5,8 +5,9 @@ Modes
 unit_audit    : Pytest precision-audit suite + direct torch-free config checks.
 smoke_wf      : 2-symbol, 2-fold walk-forward smoke test (BTC + ETH).
 canary_wf     : 4-symbol, 3-fold walk-forward (BTC/ETH/SOL/BNB).
-candidate_diff: Run WF and dump per-candidate CSV.  Optionally compare two CSVs
-                to surface top-20 decision changes between runs.
+candidate_diff: Run WF on all 20 symbols, dump per-candidate CSV.
+                --run run_a.json saves the run JSON to that path.
+                --vs baseline.csv prints top-20 decision changes vs a prior CSV.
 compare       : Load two validate_runs JSON files and diff all metric tables
                 including gate block %.
 
@@ -15,8 +16,7 @@ Usage
 python validate.py unit_audit
 python validate.py smoke_wf
 python validate.py canary_wf [--folds 3]
-python validate.py candidate_diff [--folds 2] [--csv out.csv]
-python validate.py candidate_diff --run baseline.csv [--vs new.csv]
+python validate.py candidate_diff [--folds 2] [--run run_a.json] [--csv out.csv]
 python validate.py compare runs/smoke_wf_A.json runs/smoke_wf_B.json
 """
 
@@ -476,6 +476,132 @@ def _print_fold_table(fold_summaries: List[Dict]) -> None:
 
 
 # ─────────────────────────────────────────────
+# Canonical report display helpers
+# ─────────────────────────────────────────────
+
+def _print_fold_reports(mode: str, fold_reports: List[Dict]) -> None:
+    """Print canonical per-fold metrics from wf_report['folds'] dicts."""
+    if not fold_reports:
+        print("  (no canonical fold reports)")
+        return
+    print(f"\n{'=' * 80}")
+    print(f"  {mode.upper()} — Canonical fold metrics (from forward-test report dicts)")
+    print('=' * 80)
+    print(f"  {'Fold':<6} {'Trades':>8} {'Total R':>10} {'E[R]':>10} "
+          f"{'WR':>7} {'Long':>7} {'Short':>7} {'Threshold':>11}")
+    print(f"  {'-'*6} {'-'*8} {'-'*10} {'-'*10} {'-'*7} {'-'*7} {'-'*7} {'-'*11}")
+    for fd in fold_reports:
+        fold_id   = fd.get('fold', '?')
+        n         = fd.get('total_trades', 0)
+        total_r   = fd.get('total_r', 0.0)
+        expect    = fd.get('expectancy_r', 0.0)
+        wr        = fd.get('win_rate', 0.0)
+        n_long    = fd.get('n_long', fd.get('direction_stats', {}).get('long_trades', '—'))
+        n_short   = fd.get('n_short', fd.get('direction_stats', {}).get('short_trades', '—'))
+        thr       = fd.get('score_threshold', fd.get('threshold_ema', '—'))
+        thr_str   = f"{thr:.4f}" if isinstance(thr, float) else str(thr)
+        print(f"  {fold_id:<6} {n:>8} {total_r:>10.3f} {expect:>10.4f} "
+              f"{wr:>6.1%} {str(n_long):>7} {str(n_short):>7} {thr_str:>11}")
+    print()
+
+    all_n     = sum(fd.get('total_trades', 0) for fd in fold_reports)
+    all_r     = sum(fd.get('total_r', 0.0)     for fd in fold_reports)
+    exp_vals  = [fd.get('expectancy_r', 0.0)   for fd in fold_reports if fd.get('total_trades', 0) > 0]
+    wr_vals   = [fd.get('win_rate', 0.0)        for fd in fold_reports if fd.get('total_trades', 0) > 0]
+    avg_exp   = sum(exp_vals) / max(len(exp_vals), 1)
+    avg_wr    = sum(wr_vals)  / max(len(wr_vals),  1)
+    tot_long  = sum(fd.get('n_long',  fd.get('direction_stats', {}).get('long_trades',  0)) for fd in fold_reports)
+    tot_short = sum(fd.get('n_short', fd.get('direction_stats', {}).get('short_trades', 0)) for fd in fold_reports)
+
+    print(f"  {'TOTAL/AVG':<6} {all_n:>8} {all_r:>10.3f} {avg_exp:>10.4f} "
+          f"{avg_wr:>6.1%} {tot_long:>7} {tot_short:>7} {'':>11}")
+    print()
+
+
+def _print_direction_split(fold_reports: List[Dict]) -> None:
+    """Print long vs short expectancy from canonical direction_stats in fold reports."""
+    longs_r, shorts_r = [], []
+    for fd in fold_reports:
+        ds = fd.get('direction_stats', {})
+        n_l = ds.get('long_trades',  0)
+        n_s = ds.get('short_trades', 0)
+        if n_l > 0:
+            longs_r.extend([ds.get('long_expectancy_r',  0.0)] * n_l)
+        if n_s > 0:
+            shorts_r.extend([ds.get('short_expectancy_r', 0.0)] * n_s)
+    if not longs_r and not shorts_r:
+        return
+    avg_l = sum(longs_r)  / max(len(longs_r),  1)
+    avg_s = sum(shorts_r) / max(len(shorts_r), 1)
+    print(f"  Long  trades: {len(longs_r):5d}   avg E[R]={avg_l:+.4f}")
+    print(f"  Short trades: {len(shorts_r):5d}   avg E[R]={avg_s:+.4f}")
+    print()
+
+
+def _print_score_decile_table(records: List[Dict]) -> None:
+    """Print 10-bucket score-decile R table from candidate_logger records."""
+    taken = [r for r in records if r.get("taken")]
+    if len(taken) < 20:
+        print("  (insufficient trades for score-decile analysis)")
+        return
+    taken_sorted = sorted(taken, key=lambda r: r.get("final_score", r.get("raw_score", 0.0)))
+    n = len(taken_sorted)
+    n_buckets = 10
+    bsz = n // n_buckets
+    print(f"\n  Score decile table  (10 buckets, lowest → highest score)")
+    print(f"  {'Decile':>7} {'Score lo':>10} {'Score hi':>10} "
+          f"{'Trades':>8} {'Avg R':>10} {'WR':>8}")
+    print(f"  {'-'*7} {'-'*10} {'-'*10} {'-'*8} {'-'*10} {'-'*8}")
+    monotonic = True
+    prev_avg = None
+    for d in range(n_buckets):
+        s = d * bsz
+        e = (d + 1) * bsz if d < n_buckets - 1 else n
+        bucket = taken_sorted[s:e]
+        if not bucket:
+            continue
+        scores = [r.get("final_score", r.get("raw_score", 0.0)) for r in bucket]
+        rs = [_oracle_r(r) for r in bucket]
+        avg_r = sum(rs) / len(rs)
+        wr = sum(1 for v in rs if v > 0) / len(rs)
+        lo, hi = scores[0], scores[-1]
+        mono_ok = prev_avg is None or avg_r >= prev_avg - 0.02
+        if not mono_ok:
+            monotonic = False
+        mark = "" if mono_ok else "↓"
+        print(f"  {d+1:>7} {lo:>10.4f} {hi:>10.4f} "
+              f"{len(bucket):>8} {avg_r:>10.4f} {wr:>7.1%} {mark}")
+        prev_avg = avg_r
+    status = "PASS" if monotonic else "FAIL"
+    print(f"  Monotonic score→R: {status}")
+    print()
+
+
+def _print_gate_block_table(records: List[Dict]) -> None:
+    """Print gate block count and oracle_R table from candidate_logger records."""
+    blocked = [r for r in records if not r.get("taken")]
+    if not blocked:
+        print("  (no blocked candidates)")
+        return
+    gate_cnt: Dict[str, int]   = defaultdict(int)
+    gate_r:   Dict[str, float] = defaultdict(float)
+    for r in blocked:
+        g = r.get("block_reason") or "unknown"
+        gate_cnt[g] += 1
+        gate_r[g]   += _oracle_r(r)
+    total_blocked = len(blocked)
+    print(f"\n  Gate block breakdown  (n_blocked={total_blocked})")
+    print(f"  {'Gate':<28} {'Count':>8} {'% of blk':>10} {'Oracle R':>10} {'Avg R':>10}")
+    print(f"  {'-'*28} {'-'*8} {'-'*10} {'-'*10} {'-'*10}")
+    for gate, cnt in sorted(gate_cnt.items(), key=lambda x: -x[1]):
+        pct = cnt / total_blocked * 100
+        total_r = gate_r[gate]
+        avg_r   = total_r / cnt if cnt else 0.0
+        print(f"  {gate:<28} {cnt:>8} {pct:>9.1f}% {total_r:>10.3f} {avg_r:>10.4f}")
+    print()
+
+
+# ─────────────────────────────────────────────
 # Mode: smoke_wf
 # ─────────────────────────────────────────────
 
@@ -488,16 +614,18 @@ def mode_smoke_wf(args: argparse.Namespace) -> None:
         train_months=3, test_months=1, max_folds=2, seed=42, test_weeks=3,
     )
     elapsed = time.time() - t0
-    metrics = _compute_metrics(records)
-    fold_summary = _fold_breakdown(records)
-    _print_metrics_table("smoke_wf results", metrics)
-    print("  Fold-level breakdown:")
-    _print_fold_table(fold_summary)
+    fold_reports = (wf_report or {}).get("folds", [])
+    _print_fold_reports("smoke_wf", fold_reports)
+    _print_direction_split(fold_reports)
+    _print_gate_block_table(records)
+    _print_score_decile_table(records)
+    candidate_metrics = _compute_metrics(records)
+    fold_summary_from_records = _fold_breakdown(records)
     payload = {
         "mode": "smoke_wf", "elapsed_s": round(elapsed, 1),
         "symbols": SMOKE_SYMBOLS,
-        "metrics": metrics,
-        "fold_summary": fold_summary,
+        "metrics": candidate_metrics,
+        "fold_summary": fold_summary_from_records,
         "n_candidate_records": len(records),
         "wf_report": wf_report,
     }
@@ -518,16 +646,18 @@ def mode_canary_wf(args: argparse.Namespace) -> None:
         train_months=6, test_months=1, max_folds=folds, seed=42,
     )
     elapsed = time.time() - t0
-    metrics = _compute_metrics(records)
-    fold_summary = _fold_breakdown(records)
-    _print_metrics_table("canary_wf results", metrics)
-    print("  Fold-level breakdown:")
-    _print_fold_table(fold_summary)
+    fold_reports = (wf_report or {}).get("folds", [])
+    _print_fold_reports("canary_wf", fold_reports)
+    _print_direction_split(fold_reports)
+    _print_gate_block_table(records)
+    _print_score_decile_table(records)
+    candidate_metrics = _compute_metrics(records)
+    fold_summary_from_records = _fold_breakdown(records)
     payload = {
         "mode": "canary_wf", "elapsed_s": round(elapsed, 1),
         "symbols": CANARY_SYMBOLS, "max_folds": folds,
-        "metrics": metrics,
-        "fold_summary": fold_summary,
+        "metrics": candidate_metrics,
+        "fold_summary": fold_summary_from_records,
         "n_candidate_records": len(records),
         "wf_report": wf_report,
     }
@@ -579,42 +709,35 @@ def _top20_decision_changes(base: List[Dict], new: List[Dict]) -> None:
 
 
 def mode_candidate_diff(args: argparse.Namespace) -> None:
-    """Run WF and dump per-candidate CSV, or load an existing candidate CSV.
+    """Run WF, dump per-candidate CSV, and save run JSON.
 
     Flags
     -----
-    --folds N      : number of WF folds to run (default 2). Ignored if --run is given.
-    --csv PATH     : save new run's CSV to PATH (default: auto-named in validate_runs/).
-    --run CSV_PATH : load a previously saved candidate CSV instead of running WF.
-                     Useful for re-analyzing without re-training.
-    --vs CSV_PATH  : compare the current run (or --run CSV) vs this baseline CSV
-                     and print top-20 decision changes sorted by |oracle_R|.
+    --folds N        : number of WF folds to run (default 2).
+    --run JSON_PATH  : save the run JSON output to this path (default: auto-named
+                       in validate_runs/).  Pass this to 'compare' for A/B diffing.
+    --csv PATH       : save the candidate CSV to PATH (default: auto-named).
+    --vs CSV_PATH    : after running, load this baseline CSV and print top-20
+                       decision changes sorted by |oracle_R|.
     """
     folds    = getattr(args, "folds", 2)
     vs_path  = getattr(args, "vs", None)
-    run_path = getattr(args, "run", None)
+    run_out  = getattr(args, "run", None)
     csv_out  = getattr(args, "csv", None)
 
-    wf_report = None
-    if run_path:
-        log.info("[validate] mode=candidate_diff  loading from CSV: %s", run_path)
-        records = _load_csv(run_path)
-        elapsed = 0.0
-        csv_path = Path(run_path)
-    else:
-        log.info("[validate] mode=candidate_diff  symbols=ALL20  folds=%d", folds)
-        t0 = time.time()
-        records, wf_report = _run_wf(
-            symbols=ALL_SYMBOLS, epochs=30, batch_size=128, lr=3e-4,
-            train_months=6, test_months=1, max_folds=folds, seed=42,
-        )
-        elapsed = time.time() - t0
-        log.info("[validate] WF complete in %.1fs  total_records=%d", elapsed, len(records))
+    log.info("[validate] mode=candidate_diff  symbols=ALL20  folds=%d", folds)
+    t0 = time.time()
+    records, wf_report = _run_wf(
+        symbols=ALL_SYMBOLS, epochs=30, batch_size=128, lr=3e-4,
+        train_months=6, test_months=1, max_folds=folds, seed=42,
+    )
+    elapsed = time.time() - t0
+    log.info("[validate] WF complete in %.1fs  total_records=%d", elapsed, len(records))
 
-        ts_str = time.strftime("%Y%m%d_%H%M%S")
-        csv_path = Path(csv_out) if csv_out else (RUNS_DIR / f"candidate_diff_{ts_str}.csv")
-        _save_csv(records, csv_path)
-        print(f"CSV saved: {csv_path}")
+    ts_str = time.strftime("%Y%m%d_%H%M%S")
+    csv_path = Path(csv_out) if csv_out else (RUNS_DIR / f"candidate_diff_{ts_str}.csv")
+    _save_csv(records, csv_path)
+    print(f"CSV saved: {csv_path}")
 
     taken   = [r for r in records if r.get("taken")]
     blocked = [r for r in records if not r.get("taken")]
@@ -658,7 +781,7 @@ def mode_candidate_diff(args: argparse.Namespace) -> None:
     payload = {
         "mode": "candidate_diff",
         "symbols": "ALL20",
-        "source": f"from_csv:{run_path}" if run_path else "wf_run",
+        "source": "wf_run",
         "max_folds": folds,
         "elapsed_s": round(elapsed, 1),
         "csv_path": str(csv_path),
@@ -671,7 +794,15 @@ def mode_candidate_diff(args: argparse.Namespace) -> None:
         "gate_block_count": dict(gate_count),
         "wf_report": wf_report,
     }
-    out = _save_run("candidate_diff", payload)
+    if run_out:
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        out = Path(run_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "w") as f:
+            json.dump(payload, f, indent=2, default=str)
+        log.info("[validate] Results saved → %s", out)
+    else:
+        out = _save_run("candidate_diff", payload)
     print(f"Run saved: {out}")
 
 
@@ -727,15 +858,16 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Number of folds (default: 3)")
 
     diff = sub.add_parser("candidate_diff",
-                          help="Run WF + dump per-candidate CSV, or load existing CSV")
+                          help="Run WF + dump per-candidate CSV and save run JSON")
     diff.add_argument("--folds", type=int, default=2,
                       help="Number of WF folds to run (default: 2)")
+    diff.add_argument("--run", metavar="JSON_PATH",
+                      help="Save run JSON output to this path (default: auto-named in validate_runs/). "
+                           "Use this path with 'compare' for A/B diffing.")
     diff.add_argument("--csv", metavar="PATH",
-                      help="Save new candidate CSV to PATH (default: auto-named)")
-    diff.add_argument("--run", metavar="CSV_PATH",
-                      help="Load existing candidate CSV instead of running WF")
+                      help="Save candidate CSV to PATH (default: auto-named in validate_runs/)")
     diff.add_argument("--vs", metavar="CSV_PATH",
-                      help="Compare current run vs this baseline CSV (top-20 decision changes)")
+                      help="Load this baseline candidate CSV and print top-20 decision changes")
 
     cmp = sub.add_parser("compare",
                          help="Diff two validate_runs JSON files (including gate block pct)")
