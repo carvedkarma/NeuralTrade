@@ -130,9 +130,6 @@ class V5Forecaster(nn.Module):
             self.symbol_embedding = None
             trunk_input_dim = config.input_dim
 
-        self.symbol_embed = self.symbol_embedding
-        self.model = self
-
         trunk_layers = []
         prev_dim = trunk_input_dim
         for hidden_dim in config.hidden_dims:
@@ -293,6 +290,25 @@ class V5Forecaster(nn.Module):
         result['confidence'] = torch.sigmoid(self.confidence_head(features))
 
         return result
+
+    @property
+    def model(self):
+        """Backward-compat accessor: model.model.symbol_embed.weight resolves correctly.
+
+        Returns self so that the legacy path model.model.symbol_embed.weight works without
+        registering a self-referential child module (which would break PyTorch traversal).
+        Implemented as a @property so PyTorch's __setattr__ never sees it and _modules stays clean.
+        """
+        return self
+
+    @property
+    def symbol_embed(self):
+        """Backward-compat alias for self.symbol_embedding.
+
+        Tests access model.model.symbol_embed.weight; implemented as a @property so the
+        nn.Embedding is not registered twice in _modules and the state_dict stays clean.
+        """
+        return self.symbol_embedding
 
     def parameters_count(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
