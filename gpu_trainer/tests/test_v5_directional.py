@@ -642,3 +642,24 @@ class TestT010SymbolEmbedDim:
         model = V5Forecaster(cfg)
         embed_weight = model.model.symbol_embed.weight
         assert embed_weight.shape == (7, 4)
+
+    @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
+    def test_backward_compat_aliases_are_properties_not_submodules(self):
+        """model.model and model.symbol_embed must be @property aliases, not registered
+        child modules, so they don't pollute _modules or the state_dict."""
+        from models.v5_forecaster import V5Forecaster, V5ForecasterConfig
+        cfg = V5ForecasterConfig(n_features=50, n_symbols=5, symbol_embed_dim=8)
+        model = V5Forecaster(cfg)
+
+        assert model.model is model, "model.model should be a self-referential @property"
+        assert model.symbol_embed is model.symbol_embedding, \
+            "model.symbol_embed should alias model.symbol_embedding"
+
+        assert "model" not in dict(model.named_modules()), \
+            "model.model must NOT register 'model' as a PyTorch submodule"
+        assert "symbol_embed" not in dict(model.named_modules()), \
+            "model.symbol_embed must NOT register 'symbol_embed' as a second submodule"
+
+        sd = model.state_dict()
+        assert not any(k.startswith("symbol_embed.") for k in sd), \
+            "state_dict must not contain duplicate 'symbol_embed.*' keys"
