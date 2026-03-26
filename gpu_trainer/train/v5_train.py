@@ -4366,7 +4366,7 @@ def _print_forward_report(report):
 
 def run_v5_walk_forward(
     data_dir, device, symbols, epochs, batch_size, lr,
-    train_months=12, test_months=1,
+    train_months=12, test_months=1, test_weeks=None,
     horizon=16, tp_mult=2.0, sl_mult=1.5,
     score_lambda=0.5, risk_proxy='mae',
     quality_gate_cfg=None, tpd_ctrl_cfg=None,
@@ -4522,7 +4522,10 @@ def run_v5_walk_forward(
     while current_test_start < data_end:
         fold_num += 1
         train_end = current_test_start
-        test_end = current_test_start + relativedelta(months=test_months)
+        if test_weeks is not None:
+            test_end = current_test_start + relativedelta(weeks=int(test_weeks))
+        else:
+            test_end = current_test_start + relativedelta(months=int(test_months))
         if test_end > data_end:
             test_end = data_end
 

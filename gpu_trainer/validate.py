@@ -300,11 +300,15 @@ def _run_wf(
     batch_size: int,
     lr: float,
     train_months: int,
-    test_months: int,
-    max_folds: Optional[int],
+    test_months: int = 1,
+    max_folds: Optional[int] = None,
     seed: int = 42,
+    test_weeks: Optional[int] = None,
 ) -> List[Dict]:
-    """Run walk-forward and collect all candidate records via candidate_logger."""
+    """Run walk-forward and collect all candidate records via candidate_logger.
+
+    Pass test_weeks to use a weeks-based test window (overrides test_months).
+    """
     try:
         import torch
     except ImportError:
@@ -332,6 +336,7 @@ def _run_wf(
         lr=lr,
         train_months=train_months,
         test_months=test_months,
+        test_weeks=test_weeks,
         max_folds=max_folds,
         candidate_logger=_logger,
         slippage_base_bps=6.0,
@@ -470,12 +475,12 @@ def _print_fold_table(fold_summaries: List[Dict]) -> None:
 # ─────────────────────────────────────────────
 
 def mode_smoke_wf(args: argparse.Namespace) -> None:
-    log.info("[validate] mode=smoke_wf  symbols=%s  epochs=15  folds=2  train_months=3  test_months=0.75",
+    log.info("[validate] mode=smoke_wf  symbols=%s  epochs=15  folds=2  train_months=3  test_weeks=3",
              SMOKE_SYMBOLS)
     t0 = time.time()
     records = _run_wf(
         symbols=SMOKE_SYMBOLS, epochs=15, batch_size=128, lr=3e-4,
-        train_months=3, test_months=0.75, max_folds=2, seed=42,
+        train_months=3, test_months=1, max_folds=2, seed=42, test_weeks=3,
     )
     elapsed = time.time() - t0
     metrics = _compute_metrics(records)
@@ -567,32 +572,41 @@ def _top20_decision_changes(base: List[Dict], new: List[Dict]) -> None:
 
 
 def mode_candidate_diff(args: argparse.Namespace) -> None:
-    """Always runs walk-forward and dumps per-candidate CSV.
+    """Run WF and dump per-candidate CSV, or load an existing candidate CSV.
 
     Flags
     -----
-    --folds N    : number of WF folds to run (default 2).
-    --csv PATH   : save output CSV to PATH (default: auto-named in validate_runs/).
-    --vs PATH    : after running, compare this run's CSV vs PATH (baseline CSV)
-                   and print top-20 decision changes.
+    --folds N      : number of WF folds to run (default 2). Ignored if --run is given.
+    --csv PATH     : save new run's CSV to PATH (default: auto-named in validate_runs/).
+    --run CSV_PATH : load a previously saved candidate CSV instead of running WF.
+                     Useful for re-analyzing without re-training.
+    --vs CSV_PATH  : compare the current run (or --run CSV) vs this baseline CSV
+                     and print top-20 decision changes sorted by |oracle_R|.
     """
-    folds   = getattr(args, "folds", 2)
-    vs_path = getattr(args, "vs", None)
-    csv_out = getattr(args, "csv", None)
+    folds    = getattr(args, "folds", 2)
+    vs_path  = getattr(args, "vs", None)
+    run_path = getattr(args, "run", None)
+    csv_out  = getattr(args, "csv", None)
 
-    log.info("[validate] mode=candidate_diff  symbols=ALL20  folds=%d", folds)
-    t0 = time.time()
-    records = _run_wf(
-        symbols=ALL_SYMBOLS, epochs=30, batch_size=128, lr=3e-4,
-        train_months=6, test_months=1, max_folds=folds, seed=42,
-    )
-    elapsed = time.time() - t0
-    log.info("[validate] WF complete in %.1fs  total_records=%d", elapsed, len(records))
+    if run_path:
+        log.info("[validate] mode=candidate_diff  loading from CSV: %s", run_path)
+        records = _load_csv(run_path)
+        elapsed = 0.0
+        csv_path = Path(run_path)
+    else:
+        log.info("[validate] mode=candidate_diff  symbols=ALL20  folds=%d", folds)
+        t0 = time.time()
+        records = _run_wf(
+            symbols=ALL_SYMBOLS, epochs=30, batch_size=128, lr=3e-4,
+            train_months=6, test_months=1, max_folds=folds, seed=42,
+        )
+        elapsed = time.time() - t0
+        log.info("[validate] WF complete in %.1fs  total_records=%d", elapsed, len(records))
 
-    ts_str = time.strftime("%Y%m%d_%H%M%S")
-    csv_path = Path(csv_out) if csv_out else (RUNS_DIR / f"candidate_diff_{ts_str}.csv")
-    _save_csv(records, csv_path)
-    print(f"CSV saved: {csv_path}")
+        ts_str = time.strftime("%Y%m%d_%H%M%S")
+        csv_path = Path(csv_out) if csv_out else (RUNS_DIR / f"candidate_diff_{ts_str}.csv")
+        _save_csv(records, csv_path)
+        print(f"CSV saved: {csv_path}")
 
     taken   = [r for r in records if r.get("taken")]
     blocked = [r for r in records if not r.get("taken")]
@@ -636,6 +650,7 @@ def mode_candidate_diff(args: argparse.Namespace) -> None:
     payload = {
         "mode": "candidate_diff",
         "symbols": "ALL20",
+        "source": f"from_csv:{run_path}" if run_path else "wf_run",
         "max_folds": folds,
         "elapsed_s": round(elapsed, 1),
         "csv_path": str(csv_path),
@@ -703,13 +718,15 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Number of folds (default: 3)")
 
     diff = sub.add_parser("candidate_diff",
-                          help="Run WF, dump per-candidate CSV, show gate oracle R breakdown")
+                          help="Run WF + dump per-candidate CSV, or load existing CSV")
     diff.add_argument("--folds", type=int, default=2,
                       help="Number of WF folds to run (default: 2)")
     diff.add_argument("--csv", metavar="PATH",
-                      help="Save candidate CSV to PATH (default: auto-named in validate_runs/)")
-    diff.add_argument("--vs", metavar="BASELINE_CSV",
-                      help="Compare this run vs BASELINE_CSV and print top-20 decision changes")
+                      help="Save new candidate CSV to PATH (default: auto-named)")
+    diff.add_argument("--run", metavar="CSV_PATH",
+                      help="Load existing candidate CSV instead of running WF")
+    diff.add_argument("--vs", metavar="CSV_PATH",
+                      help="Compare current run vs this baseline CSV (top-20 decision changes)")
 
     cmp = sub.add_parser("compare",
                          help="Diff two validate_runs JSON files (including gate block pct)")
