@@ -2068,6 +2068,7 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
         min_p_side=config.min_p_side,
         min_p_short=config.min_p_short,
         side_aware_scoring=config.side_aware_scoring,
+        min_mu_r_score=0.0,
     )
     ref_arrays['_train_scores'] = train_scores
 
@@ -2392,6 +2393,7 @@ def run_v5_forward_test(
         min_p_side=config.min_p_side,
         min_p_short=config.min_p_short,
         side_aware_scoring=config.side_aware_scoring,
+        min_mu_r_score=0.0,
     )
 
     if 'edge_L' in score_diag:
@@ -2588,16 +2590,31 @@ def run_v5_forward_test(
             )
             if config.per_sym_no_edge_fallback:
                 _inf_mask = np.isinf(per_bar_threshold) & (per_bar_threshold > 0)
-                per_bar_threshold[_inf_mask] = effective_threshold
+                # Auto-calibrate fallback threshold from actual score distribution
+                # so we don't use a hard-coded value that may be 100x above model output range.
+                _fallback_thr = effective_threshold
+                _finite_sw = scores_work[np.isfinite(scores_work)]
+                if len(_finite_sw) > 50:
+                    _score_p80 = float(np.percentile(_finite_sw, 80))
+                    if _score_p80 > 0 and _score_p80 < _fallback_thr:
+                        _hard_floor = config.min_threshold if config.min_threshold is not None else 0.001
+                        _fallback_thr = max(_score_p80, _hard_floor)
+                        log.warning(
+                            "[V5_FWD][ALL_INF_FALLBACK] effective_threshold=%.4f >> score_p80=%.6f "
+                            "— auto-calibrating fallback to %.6f to avoid blocking all trades.",
+                            effective_threshold, _score_p80, _fallback_thr,
+                        )
+                per_bar_threshold[_inf_mask] = _fallback_thr
                 _promoted_syms = [
                     (symbols[int(k)] if symbols and int(k) < len(symbols) else f"sym_{k}")
                     for k in (config.per_symbol_thresholds or {})
                 ]
                 log.warning(
                     "[V5_FWD][ALL_INF_FALLBACK] per_sym_no_edge_fallback=True — "
-                    "reset %d inf-threshold bars to effective_threshold=%.4f. "
+                    "reset %d inf-threshold bars to fallback_threshold=%.6f "
+                    "(original effective_threshold=%.4f). "
                     "Promoted symbols (will use global threshold): %s",
-                    int(_inf_mask.sum()), effective_threshold, _promoted_syms,
+                    int(_inf_mask.sum()), _fallback_thr, effective_threshold, _promoted_syms,
                 )
         elif n_inf_bars_total > 0:
             log.warning(
@@ -6234,6 +6251,7 @@ def train_v5_model(
                 min_p_short=min_p_short,
                 side_aware_scoring=side_aware_scoring,
                 slippage_bps=slippage_base_bps,
+                min_mu_r_score=0.0,
             )
 
             log.info(f"[{vtag}_SCORE_DIAG] mu_R: mean={score_diag['mu_R_mean']:.4f} std={score_diag['mu_R_std']:.4f} | "
@@ -6569,6 +6587,7 @@ def train_v5_model(
                 min_p_short=min_p_short,
                 side_aware_scoring=side_aware_scoring,
                 slippage_bps=slippage_base_bps,
+                min_mu_r_score=0.0,
             )
             _sweep_cand = val_cand_mask if use_candidates_this_epoch else None
             if per_side_threshold:
