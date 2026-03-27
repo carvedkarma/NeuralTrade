@@ -311,14 +311,10 @@ def run_single_config(
             side_aware_scoring=False,
             # BUG FIX: regime_side_map REMOVED — caused 100% SHORT in bear folds
             regime_side_map=None,
-            # Recency weight & warmup
+            # Recency weight (matches recommended command)
             recency_weight=True,
-            warm_start=True,
-            # Sizing
-            adaptive_sizing=True,
-            kelly_fraction=0.25,
-            conviction_sizing=True,
-            # Standard settings
+            # Standard settings — adaptive_sizing/conviction_sizing/warm_start intentionally
+            # omitted (use defaults=False) to match the known-working training command exactly.
             mu_debias=True,
             per_symbol_cooldown=True,
             cooldown=4,
@@ -338,10 +334,12 @@ def run_single_config(
                  result.win_rate * 100, result.expectancy, result.total_r)
         return result
     except Exception as exc:
+        import traceback
         elapsed = time.time() - t0
-        log.error("[SWEEP] %s FAILED after %.1f min: %s", cfg.label, elapsed / 60, exc, exc_info=True)
+        log.error("[SWEEP] %s FAILED after %.1f min:", cfg.label, elapsed / 60)
+        log.error("[SWEEP] Full traceback:\n%s", traceback.format_exc())
         result = SweepResult(label=cfg.label, config=cfg, elapsed_sec=elapsed)
-        result.error = str(exc)
+        result.error = f"{type(exc).__name__}: {exc}"
         return result
 
 
@@ -444,22 +442,44 @@ def main():
                         help="Run only specific config labels from the grid")
     args = parser.parse_args()
 
-    # Validate data directory
-    data_dir = Path(args.data_dir)
-    if not data_dir.exists():
-        # Try relative to this script's location
-        script_dir = Path(__file__).parent
-        data_dir = script_dir / args.data_dir
-    if not data_dir.exists():
-        log.error("Data directory not found: %s", data_dir)
-        log.error("Run from gpu_trainer/ or pass --data-dir /path/to/data_cache")
+    # Validate data directory — try several candidate paths
+    _candidates = [
+        Path(args.data_dir),                          # as given (absolute or relative to CWD)
+        Path(__file__).parent / args.data_dir,        # relative to this script
+        Path(__file__).parent / "data_cache",         # script sibling data_cache
+        Path(args.data_dir).expanduser().resolve(),   # fully resolved
+    ]
+    data_dir = None
+    for _c in _candidates:
+        if _c.exists() and list(_c.glob("*.parquet")):
+            data_dir = _c
+            break
+
+    if data_dir is None:
+        log.error("Could not find data directory with .parquet files.")
+        log.error("Tried:")
+        for _c in _candidates:
+            log.error("  %s  (exists=%s)", _c.resolve(), _c.exists())
+        log.error("Fix: pass --data-dir with the full path, e.g.:")
+        log.error('  python param_sweep.py --data-dir "C:/Users/you/Downloads/gpu_trainer/data_cache"')
         sys.exit(1)
 
     parquet_files = list(data_dir.glob("*.parquet"))
-    if not parquet_files:
-        log.error("No .parquet files found in %s", data_dir)
-        sys.exit(1)
-    log.info("Found %d parquet files in %s", len(parquet_files), data_dir)
+    log.info("[DATA] Using data directory: %s", data_dir.resolve())
+    log.info("[DATA] Found %d parquet files", len(parquet_files))
+
+    # Verify each requested symbol has a matching file (SYMBOL_15m.parquet)
+    missing_syms = [s for s in args.symbols if not (data_dir / f"{s}_15m.parquet").exists()]
+    if missing_syms:
+        log.warning("[DATA] Missing _15m.parquet files for: %s", missing_syms)
+        log.warning("[DATA] Available files: %s", sorted(f.name for f in parquet_files))
+        args.symbols = [s for s in args.symbols if s not in missing_syms]
+        if not args.symbols:
+            log.error("[DATA] No symbols have matching data files. Exiting.")
+            sys.exit(1)
+        log.info("[DATA] Continuing with: %s", args.symbols)
+    else:
+        log.info("[DATA] All %d requested symbols have data files", len(args.symbols))
 
     # Device detection
     try:
