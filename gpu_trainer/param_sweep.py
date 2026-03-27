@@ -53,7 +53,7 @@ class SweepConfig:
     adx_min: float = 18.0
     adx_gate: bool = True
     ema200_soft_mult: Optional[float] = 1.0
-    min_threshold: float = 0.02
+    min_threshold: Optional[float] = None  # None = let per-symbol thresholds control (post NaN-fix, scores are 0.001-0.002)
     corr_thresh: float = 0.90
     short_oversample: bool = True
     short_min_fraction: float = 0.35
@@ -87,8 +87,8 @@ def build_sweep_configs(fast: bool = False) -> list:
         tp_mult=3.0, sl_mult=1.0,
         adx_min=18.0, adx_gate=True,
         ema200_soft_mult=1.0,
-        min_threshold=0.02,
-        description="Bug-fixed baseline: no side_aware_scoring, no regime_side_map, min_thr=0.02",
+        min_threshold=None,
+        description="Bug-fixed baseline: no side_aware_scoring, no regime_side_map, min_thr=None (per-symbol thresholds control)",
     )
 
     if fast:
@@ -130,7 +130,7 @@ def build_sweep_configs(fast: bool = False) -> list:
                     tp_mult=tp, sl_mult=sl,
                     adx_min=adx, adx_gate=True,
                     ema200_soft_mult=ema,
-                    min_threshold=0.02,
+                    min_threshold=None,
                     description=f"TP={tp}x SL={sl}x ADX≥{adx} EMA_soft={ema}x",
                 ))
 

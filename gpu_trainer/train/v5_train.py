@@ -125,7 +125,7 @@ class V5ForwardTestConfig:
     """Config for frozen decision layer in forward test.
 
     Production-aligned defaults:
-      score_threshold=0.02  — matches shared_v5_trade_config live default
+      score_threshold=0.001  — post NaN-fix: actual model scores are 0.001-0.002 range
       calibration_monitor=True  — ECE computed each fold, warns if >0.10
 
     Experimental / disabled features (False by default):
@@ -141,7 +141,7 @@ class V5ForwardTestConfig:
     DDT fields: ddt_*.
     Ultra-conviction fields: ultra_*.
     """
-    score_threshold: float = 0.02  # matches live shared_v5_trade_config default
+    score_threshold: float = 0.001  # post NaN-fix: actual model scores are 0.001-0.002 range
     score_lambda: float = 0.5
     mae_cap: float = 2.0
     risk_proxy: str = 'mae'
@@ -533,7 +533,7 @@ class V5TPDControllerConfig:
     mae_cap: float = 2.0
     side_mode: str = 'action_head'
     rr_weight: float = 0.0
-    min_threshold_floor: float = 0.02
+    min_threshold_floor: float = 0.001  # post NaN-fix: actual model scores are 0.001-0.002 range
 
 
 class V5Dataset(Dataset):
@@ -2432,9 +2432,9 @@ def run_v5_forward_test(
              f"(if >95%% one-sided, this is MODEL BIAS not a bug)")
     log.info(f"[V5_FWD] Quality gate: {qual_diag.get('passed_pct', 0):.1f}% pass "
              f"({qual_diag.get('final', 0)}/{qual_diag.get('total', 0)})")
-    hard_floor = config.min_threshold if config.min_threshold is not None else 0.02
+    hard_floor = config.min_threshold if config.min_threshold is not None else 0.0
     effective_threshold = max(hard_floor, config.score_threshold)
-    if config.score_threshold < hard_floor:
+    if hard_floor > 0.0 and config.score_threshold < hard_floor:
         log.info(f"[V5_FWD] Hard floor engaged: threshold {config.score_threshold:.4f} < floor {hard_floor:.4f} → clamped to {effective_threshold:.4f}")
     if config.max_threshold is not None and effective_threshold > config.max_threshold:
         log.info(f"[V5_FWD] Ceiling cap engaged: threshold {effective_threshold:.4f} > cap {config.max_threshold:.4f} → clamped to {config.max_threshold:.4f}")
@@ -2536,7 +2536,7 @@ def run_v5_forward_test(
                  f"(DDT will dynamically adjust in loop)")
 
     if config.per_symbol_thresholds and test_sym_ids is not None:
-        hard_floor = config.min_threshold if config.min_threshold is not None else 0.02
+        hard_floor = config.min_threshold if config.min_threshold is not None else 0.0
         per_bar_threshold = np.full(len(scores_work), ddt_base_threshold, dtype=np.float64)
         _first_val = next(iter(config.per_symbol_thresholds.values()), None)
         _is_per_side_format = isinstance(_first_val, dict)
@@ -6619,7 +6619,7 @@ def train_v5_model(
                 _all_sids = set(_ps_long.keys()) | set(_ps_short.keys())
                 # Guard: current_score_threshold can be None if every epoch SKIPped
                 # (< 50 finite scores in the fold). Fall back to a safe default.
-                _fallback_thr = current_score_threshold if current_score_threshold is not None else 0.02
+                _fallback_thr = current_score_threshold if current_score_threshold is not None else 0.001
                 _fs_new_thr = {
                     _sid: {'long': _ps_long.get(_sid, _fallback_thr * 3.0),
                            'short': _ps_short.get(_sid, _fallback_thr * 3.0)}
@@ -6724,8 +6724,8 @@ def train_v5_model(
                 if 'current_threshold' in tpd_c and tpd_c['current_threshold'] is not None:
                     ckpt_threshold = tpd_c['current_threshold']
             if ckpt_threshold is None:
-                ckpt_threshold = 0.02
-            ckpt_floor = min_threshold if min_threshold is not None else 0.02
+                ckpt_threshold = 0.001  # post NaN-fix: scores are 0.001-0.002 range
+            ckpt_floor = min_threshold if min_threshold is not None else 0.0
             if ckpt_threshold < ckpt_floor:
                 log.info(f"[V5_FWD] Clamping calibrated threshold {ckpt_threshold:.4f} → floor {ckpt_floor:.4f}")
                 ckpt_threshold = ckpt_floor
