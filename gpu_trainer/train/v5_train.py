@@ -1430,6 +1430,10 @@ def _tpd_controller_step(scores, quality_mask, candidate_mask,
             combined_mask = np.isfinite(scores)
         else:
             log.warning("[V5_TPD_CTRL] SKIP: only %d total finite scores", len(all_finite))
+            if current_threshold is None:
+                current_threshold = tpd_cfg.min_threshold_floor
+                log.warning("[V5_TPD_CTRL] Threshold was None on SKIP — initialized to floor=%.4f",
+                            current_threshold)
             return current_threshold, 0, 0.0, "SKIP"
 
     score_std = float(np.std(eligible_finite))
@@ -6613,9 +6617,12 @@ def train_v5_model(
                     min_trades_per_symbol=5, cooldown=cooldown,
                 )
                 _all_sids = set(_ps_long.keys()) | set(_ps_short.keys())
+                # Guard: current_score_threshold can be None if every epoch SKIPped
+                # (< 50 finite scores in the fold). Fall back to a safe default.
+                _fallback_thr = current_score_threshold if current_score_threshold is not None else 0.02
                 _fs_new_thr = {
-                    _sid: {'long': _ps_long.get(_sid, current_score_threshold * 3.0),
-                           'short': _ps_short.get(_sid, current_score_threshold * 3.0)}
+                    _sid: {'long': _ps_long.get(_sid, _fallback_thr * 3.0),
+                           'short': _ps_short.get(_sid, _fallback_thr * 3.0)}
                     for _sid in _all_sids
                 }
             else:
