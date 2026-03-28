@@ -14,9 +14,11 @@ class TrainingProgressPusher:
         self.session_id = None
         self.enabled = replit_url is not None
         self._last_epoch_push = 0
-        self._epoch_push_interval = 2
+        self._epoch_push_interval = 1  # push every epoch for live monitor accuracy
         self._fold_start_times = {}
         self._session_start_time = None
+        self._push_timeout = 30         # seconds — Replit can be slow under load
+        self._push_max_retries = 2      # retry once before giving up
 
     def _push_event(self, event_type: str, payload: dict) -> dict:
         if not self.enabled or not self.replit_url:
@@ -28,29 +30,39 @@ class TrainingProgressPusher:
             "payload": payload,
             "ts": int(time.time() * 1000),
         }
-        try:
-            data = json.dumps(event).encode('utf-8')
-            req = urllib.request.Request(url, data=data, headers={
-                'Content-Type': 'application/json',
-                'User-Agent': 'GPUTrainer/1.0',
-            })
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                result = json.loads(resp.read().decode())
-                return result
-        except urllib.error.HTTPError as e:
+        data = json.dumps(event).encode('utf-8')
+        last_err = None
+        for attempt in range(self._push_max_retries + 1):
+            if attempt > 0:
+                time.sleep(2 ** attempt)  # 2s, 4s back-off
+                # Refresh event_id so the server treats it as a new event on retry
+                event["event_id"] = f"train_{uuid.uuid4().hex[:12]}_r{attempt}"
+                data = json.dumps(event).encode('utf-8')
+                log.info(f"[TrainingPush] Retry {attempt}/{self._push_max_retries} for {event_type}")
             try:
-                body = json.loads(e.read().decode())
-                if body.get("status") == "blocked":
-                    log.warning(f"[TrainingPush] BLOCKED: {body.get('reason', 'unknown')}")
-                    return body
-                log.warning(f"[TrainingPush] HTTP {e.code} for {event_type}: {body}")
-                return body
-            except Exception:
-                log.warning(f"[TrainingPush] HTTP {e.code} for {event_type}")
-                return {}
-        except Exception as e:
-            log.warning(f"[TrainingPush] Failed to push {event_type}: {e}")
-            return {}
+                req = urllib.request.Request(url, data=data, headers={
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'GPUTrainer/1.0',
+                })
+                with urllib.request.urlopen(req, timeout=self._push_timeout) as resp:
+                    result = json.loads(resp.read().decode())
+                    return result
+            except urllib.error.HTTPError as e:
+                try:
+                    body = json.loads(e.read().decode())
+                    if body.get("status") == "blocked":
+                        log.warning(f"[TrainingPush] BLOCKED: {body.get('reason', 'unknown')}")
+                        return body
+                    log.warning(f"[TrainingPush] HTTP {e.code} for {event_type}: {body}")
+                    return body  # don't retry HTTP errors (4xx/5xx)
+                except Exception:
+                    log.warning(f"[TrainingPush] HTTP {e.code} for {event_type}")
+                    return {}
+            except Exception as e:
+                last_err = e
+                log.warning(f"[TrainingPush] Attempt {attempt + 1} failed for {event_type}: {e}")
+        log.warning(f"[TrainingPush] All retries exhausted for {event_type}: {last_err}")
+        return {}
 
     def session_start(self, session_type: str, total_folds: int, total_epochs: int,
                       symbols: list, config: dict, gpu_name: str = None,

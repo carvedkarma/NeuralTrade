@@ -129,7 +129,7 @@ interface ReadyResponse {
 function useActiveTraining() {
   return useQuery<ActiveResponse>({
     queryKey: ["/api/training/active"],
-    refetchInterval: 10000,
+    refetchInterval: 3000,
   });
 }
 
@@ -157,7 +157,7 @@ function useSessionEpochs(id: number | null, fold?: number) {
       return res.json();
     },
     enabled: !!id,
-    refetchInterval: 10000,
+    refetchInterval: 3000,
   });
 }
 
