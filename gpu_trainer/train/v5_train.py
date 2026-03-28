@@ -1813,6 +1813,124 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     return sweep_results, best_label, best_score_val, best_pct, best_pf, best_max_dd, best_tpd, best_threshold, best_expect
 
 
+def _run_slice_audit(scores, sides, safe_r, safe_outcomes, val_bars,
+                     thresholds=None, cooldown=4, label="SLICE_AUDIT"):
+    """Per-threshold, per-side trade quality audit table.
+
+    For each threshold (and for each side LONG/SHORT separately), reports:
+    n_trades, E[R], WR, PF, avg_score, avg_|mu_R| (where available).
+
+    Args:
+        scores: array of V5 scores (same length as bars)
+        sides: array of side values (1=LONG, -1=SHORT)
+        safe_r: realized R array (same length, 0-filled where no outcome)
+        safe_outcomes: outcome strings array (same length)
+        val_bars: number of validation bars (for TPD calculation)
+        thresholds: list of (label, threshold) tuples to audit.
+                    If None, auto-generates top 5%/10%/20% thresholds.
+        cooldown: bars between consecutive trades
+        label: log prefix
+
+    Returns:
+        list of audit row dicts
+    """
+    _VALID_OUTCOMES = ["TP", "SL", "EXP_WIN", "EXP_LOSS", "TRAIL_WIN", "TRAIL_BE"]
+    COOLDOWN = cooldown
+    val_days = val_bars / 96.0
+
+    if thresholds is None:
+        finite_scores = scores[np.isfinite(scores)]
+        if len(finite_scores) == 0:
+            log.warning(f"[{label}] No finite scores — skipping slice audit.")
+            return []
+        thresholds = [
+            ("top5%", float(np.percentile(finite_scores, 95))),
+            ("top10%", float(np.percentile(finite_scores, 90))),
+            ("top20%", float(np.percentile(finite_scores, 80))),
+            ("top30%", float(np.percentile(finite_scores, 70))),
+        ]
+
+    all_rows = []
+
+    log.info("=" * 130)
+    log.info(f"  [{label}] PER-THRESHOLD / PER-SIDE SLICE AUDIT")
+    log.info("=" * 130)
+    log.info(f"  {'Slice':<12} {'Side':<7} {'N':>6} {'E[R]':>8} {'WR%':>7} {'PF':>6} "
+             f"{'AvgScore':>10} {'TPD':>6}")
+    log.info("-" * 130)
+
+    for thr_label, thr in thresholds:
+        taken_mask = scores >= thr
+        taken_idx = np.where(taken_mask)[0]
+        if len(taken_idx) == 0:
+            continue
+
+        chron_idx = taken_idx[np.argsort(taken_idx)]
+        selected = []
+        last_bar = -COOLDOWN - 1
+        for idx in chron_idx:
+            if idx - last_bar >= COOLDOWN:
+                selected.append(idx)
+                last_bar = idx
+
+        if len(selected) < 5:
+            continue
+        selected = np.array(selected)
+
+        for side_label, side_val in [("ALL", None), ("LONG", 1), ("SHORT", -1)]:
+            if side_val is not None:
+                mask = sides[selected] == side_val
+                sel = selected[mask]
+            else:
+                sel = selected
+
+            if len(sel) < 3:
+                continue
+
+            t_out = safe_outcomes[sel]
+            t_r = safe_r[sel]
+            valid = np.isin(t_out, _VALID_OUTCOMES)
+            t_r_v = t_r[valid]
+            n = len(t_r_v)
+            if n == 0:
+                continue
+
+            wins = t_r_v[t_r_v > 0]
+            losses = t_r_v[t_r_v <= 0]
+            expect = float(np.mean(t_r_v))
+            winrate = float(len(wins) / n)
+            total_win = float(np.sum(wins))
+            total_loss = float(abs(np.sum(losses)))
+            pf = min(total_win / max(total_loss, 1e-6), 999.99)
+            avg_score = float(np.nanmean(scores[sel][valid]))
+            tpd = n / max(val_days, 1e-6)
+
+            row = {
+                'threshold_label': thr_label,
+                'threshold': thr,
+                'side': side_label,
+                'n_trades': n,
+                'expectancy': expect,
+                'win_rate': winrate,
+                'pf': pf,
+                'avg_score': avg_score,
+                'tpd': tpd,
+            }
+            all_rows.append(row)
+
+            status = ""
+            if expect > 0 and pf > 1.0:
+                status = " [EDGE]"
+            elif expect <= 0:
+                status = " [NEG_EXPECT]"
+
+            log.info(f"  {thr_label:<12} {side_label:<7} {n:>6} {expect:>+8.4f} {winrate*100:>6.1f}% "
+                     f"{pf:>6.2f} {avg_score:>10.5f} {tpd:>6.1f}{status}")
+
+    log.info("=" * 130)
+    return all_rows
+
+
 def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                           val_bars, symbol_ids, symbols_list, global_threshold,
                           r_long=None, r_short=None, out_long=None, out_short=None,
@@ -1850,12 +1968,12 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     per_sym_thresholds = {}
     no_edge_symbols = []
 
-    log.info("=" * 100)
+    log.info("=" * 120)
     log.info("  PER-SYMBOL THRESHOLD SWEEP")
-    log.info("=" * 100)
+    log.info("=" * 120)
     log.info(f"{'Symbol':>12} {'Bars':>6} {'BestThr':>10} {'Trades':>7} {'E[R]':>10} "
-             f"{'WR':>7} {'PF':>7} {'TotalR':>10} {'Status':>10}")
-    log.info("-" * 100)
+             f"{'WR':>7} {'PF':>7} {'TotalR':>10} {'L%':>6} {'S%':>6} {'Status':>10}")
+    log.info("-" * 120)
 
     for sym_id in unique_sym_ids:
         sym_mask = symbol_ids == sym_id
@@ -1945,12 +2063,43 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
         sym_is_active = (best_sym_metrics is not None
                          and best_sym_metrics['expect'] > 0.0
                          and best_sym_metrics['pf'] > 1.0)
+
+        # Compute side balance for the best threshold (or all bars if inactive)
+        if sym_is_active:
+            sel_mask = sym_scores >= best_sym_threshold
+            best_taken_idx = np.where(sel_mask)[0]
+            _last_b = -COOLDOWN - 1
+            _taken_sides = []
+            for _bi in best_taken_idx:
+                if _bi - _last_b >= COOLDOWN:
+                    _taken_sides.append(sym_sides[_bi])
+                    _last_b = _bi
+            sym_long_n = sum(1 for s in _taken_sides if s == 1)
+            sym_short_n = sum(1 for s in _taken_sides if s == -1)
+            sym_ls_total = max(sym_long_n + sym_short_n, 1)
+            sym_long_pct = 100.0 * sym_long_n / sym_ls_total
+            sym_short_pct = 100.0 * sym_short_n / sym_ls_total
+        else:
+            sym_finite_sides = sym_sides[np.isfinite(sym_scores)]
+            sym_long_pct = 100.0 * float(np.sum(sym_finite_sides == 1)) / max(len(sym_finite_sides), 1)
+            sym_short_pct = 100.0 * float(np.sum(sym_finite_sides == -1)) / max(len(sym_finite_sides), 1)
+
+        side_bias_tag = ""
+        if sym_long_pct > 85.0:
+            side_bias_tag = " [SIDE_BIAS:LONG]"
+            log.warning(f"[SIDE_BIAS] {sym_name}: LONG={sym_long_pct:.0f}% — heavy long bias in candidate pool. "
+                        f"Increase short_min_fraction or short_oversample strength.")
+        elif sym_short_pct > 85.0:
+            side_bias_tag = " [SIDE_BIAS:SHORT]"
+            log.warning(f"[SIDE_BIAS] {sym_name}: SHORT={sym_short_pct:.0f}% — heavy short bias in candidate pool.")
+
         if sym_is_active:
             per_sym_thresholds[int(sym_id)] = best_sym_threshold
             m = best_sym_metrics
             log.info(f"{sym_name:>12} {n_sym_bars:>6} {best_sym_threshold:>10.4f} {m['trades']:>7} "
                      f"{m['expect']:>+10.4f} {m['winrate']:>6.1%} {m['pf']:>7.2f} "
-                     f"{m['total_r']:>+10.4f} {'ACTIVE':>10}")
+                     f"{m['total_r']:>+10.4f} {sym_long_pct:>5.0f}% {sym_short_pct:>5.0f}% "
+                     f"{'ACTIVE':>10}{side_bias_tag}")
         else:
             per_sym_thresholds[int(sym_id)] = high_bar
             no_edge_symbols.append(sym_name)
@@ -1962,16 +2111,18 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                 reason = "expect<=0" if best_sym_metrics['expect'] <= 0 else "PF<=1.0"
                 log.info(f"{sym_name:>12} {n_sym_bars:>6} {best_sym_threshold:>10.4f} {m['trades']:>7} "
                          f"{m['expect']:>+10.4f} {m['winrate']:>6.1%} {m['pf']:>7.2f} "
-                         f"{m['total_r']:>+10.4f} {'HIGH_BAR':>10} [{reason}] → thr={high_bar:.4f}")
+                         f"{m['total_r']:>+10.4f} {sym_long_pct:>5.0f}% {sym_short_pct:>5.0f}% "
+                         f"{'HIGH_BAR':>10} [{reason}]{side_bias_tag}")
             else:
                 log.info(f"{sym_name:>12} {n_sym_bars:>6} {high_bar:>10.4f} {0:>7} {'-':>10} "
-                         f"{'-':>7} {'-':>7} {'-':>10} {'HIGH_BAR':>10}")
+                         f"{'-':>7} {'-':>7} {'-':>10} {sym_long_pct:>5.0f}% {sym_short_pct:>5.0f}% "
+                         f"{'HIGH_BAR':>10}")
 
-    log.info("-" * 100)
+    log.info("-" * 120)
     active = [s for s in symbols_list if s not in no_edge_symbols] if symbols_list else []
     log.info(f"  Active symbols: {len(active)}/{len(unique_sym_ids)} | "
              f"NO EDGE: {no_edge_symbols if no_edge_symbols else 'none'}")
-    log.info("=" * 100)
+    log.info("=" * 120)
 
     return per_sym_thresholds, no_edge_symbols
 
@@ -2058,6 +2209,37 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
             concat_outputs[k] = torch.cat(all_outputs[k], dim=0)
 
     ref_arrays = _extract_v5_arrays(concat_outputs, temperature=config.temperature)
+
+    # FIX: Apply the same mu_debias transform to training ref_arrays so the quality
+    # gate threshold (p25 of |mu_R|) is calibrated in debiased space.  Without this,
+    # the gate compares p25(|mu_R_raw_train|) ≈ 0.01-0.03 against post-debias val
+    # mu_R ≈ 0.0002, rejecting ~90% of validation bars and starving the sweep.
+    if config.mu_debias and train_sym_ids is not None:
+        mu_R_raw_ref = ref_arrays['mu_R'].copy()
+        alpha_ref = config.mu_debias_alpha
+        unique_syms_ref = np.unique(train_sym_ids)
+        ema_by_sym_ref = {int(s): 0.0 for s in unique_syms_ref}
+        for i in range(len(mu_R_raw_ref)):
+            sym_id_ref = int(train_sym_ids[i])
+            mu_val_ref = float(mu_R_raw_ref[i])
+            if not np.isnan(mu_val_ref):
+                ema_by_sym_ref[sym_id_ref] = (1.0 - alpha_ref) * ema_by_sym_ref[sym_id_ref] + alpha_ref * mu_val_ref
+            ref_arrays['mu_R'][i] = mu_R_raw_ref[i] - ema_by_sym_ref[sym_id_ref]
+        log.info(f"[V5_REF] Applied mu_debias to training ref_arrays (multi-sym, alpha={alpha_ref}): "
+                 f"raw_mean={float(np.nanmean(mu_R_raw_ref)):+.6f} "
+                 f"debiased_mean={float(np.nanmean(ref_arrays['mu_R'])):+.6f}")
+    elif config.mu_debias:
+        mu_R_raw_ref = ref_arrays['mu_R'].copy()
+        alpha_ref = config.mu_debias_alpha
+        ema_ref = 0.0
+        for i in range(len(mu_R_raw_ref)):
+            mu_val_ref = float(mu_R_raw_ref[i])
+            if not np.isnan(mu_val_ref):
+                ema_ref = (1.0 - alpha_ref) * ema_ref + alpha_ref * mu_val_ref
+            ref_arrays['mu_R'][i] = mu_R_raw_ref[i] - ema_ref
+        log.info(f"[V5_REF] Applied mu_debias to training ref_arrays (single-sym, alpha={alpha_ref}): "
+                 f"raw_mean={float(np.nanmean(mu_R_raw_ref)):+.6f} "
+                 f"debiased_mean={float(np.nanmean(ref_arrays['mu_R'])):+.6f}")
 
     train_scores, _, _ = compute_v5_scores(
         None, horizon_bars=config.horizon,
@@ -2379,6 +2561,21 @@ def run_v5_forward_test(
         log.info(f"[V5_MU_DEBIAS] Single-symbol mode: final_ema={ema_val:+.6f} "
                  f"raw_mean={float(np.nanmean(mu_R_raw)):+.6f} "
                  f"debiased_mean={float(np.nanmean(arrays['mu_R'])):+.6f}")
+
+    if config.mu_debias:
+        _mu_deb = arrays['mu_R'][np.isfinite(arrays['mu_R'])]
+        if len(_mu_deb) > 10:
+            _deb_p1 = float(np.percentile(_mu_deb, 1))
+            _deb_p99 = float(np.percentile(_mu_deb, 99))
+            _deb_spread = _deb_p99 - _deb_p1
+            log.info(f"[V5_DEBIAS_SPREAD] post-debias mu_R: p1={_deb_p1:+.6f} p99={_deb_p99:+.6f} "
+                     f"spread={_deb_spread:.6f}")
+            if _deb_spread < 1e-4:
+                log.warning(
+                    f"[DEBIAS_COLLAPSED] post-debias mu_R spread={_deb_spread:.8f} is near-zero. "
+                    f"Score discrimination will be negligible — all bars score the same. "
+                    f"ACTION: reduce mu_debias_alpha (current={config.mu_debias_alpha}) toward 0.0003, "
+                    f"or disable mu_debias entirely for this fold.")
 
     qg_cfg = config.quality_gate_cfg or V5QualityGateConfig()
     quality_mask, qual_diag = v5_quality_mask(arrays, qg_cfg, epoch=999,
@@ -4071,44 +4268,64 @@ def _build_empty_report(test_start_date, test_end_date, config):
     }
 
 
-def _compute_score_decile_table(t_scores, t_r, n_deciles=10):
+def _compute_score_decile_table(t_scores, t_r, n_deciles=10, t_sides=None):
     """Compute realized-R by score decile to measure score-monotonicity.
 
     Divides trades into n_deciles score buckets and reports avg realized R
     per bucket.  A well-calibrated score should show weakly increasing
     realized R from the lowest to the highest bucket.
 
+    Args:
+        t_scores: array of scores for each selected trade
+        t_r: array of realized R for each selected trade
+        n_deciles: number of score buckets
+        t_sides: optional array of side values (1=LONG, -1=SHORT).
+                 When provided, LONG and SHORT rows are reported separately.
+
     Returns:
-        list of dicts: [{'decile': 1..n, 'score_lo': float, 'score_hi': float,
-                         'n_trades': int, 'avg_r': float, 'win_rate': float}]
+        rows: list of dicts — combined (or side-split when t_sides provided)
         monotonic: bool — True when consecutive bucket avg_r is weakly increasing
     """
     if len(t_scores) < n_deciles * 2:
         return [], False
 
-    edges = np.percentile(t_scores, np.linspace(0, 100, n_deciles + 1))
-    rows = []
-    for d in range(n_deciles):
-        lo, hi = edges[d], edges[d + 1]
-        if d == n_deciles - 1:
-            mask = (t_scores >= lo)
-        else:
-            mask = (t_scores >= lo) & (t_scores < hi)
-        bucket_r = t_r[mask]
-        if len(bucket_r) == 0:
-            rows.append({'decile': d + 1, 'score_lo': float(lo), 'score_hi': float(hi),
-                         'n_trades': 0, 'avg_r': 0.0, 'win_rate': 0.0})
-        else:
-            rows.append({
-                'decile': d + 1,
-                'score_lo': float(lo),
-                'score_hi': float(hi),
-                'n_trades': int(len(bucket_r)),
-                'avg_r': float(np.mean(bucket_r)),
-                'win_rate': float(np.sum(bucket_r > 0) / len(bucket_r)),
-            })
+    def _bucket_rows(scores, r_arr, label_prefix=""):
+        edges = np.percentile(scores, np.linspace(0, 100, n_deciles + 1))
+        brows = []
+        for d in range(n_deciles):
+            lo, hi = edges[d], edges[d + 1]
+            mask = (scores >= lo) if d == n_deciles - 1 else (scores >= lo) & (scores < hi)
+            bucket_r = r_arr[mask]
+            bucket_label = f"{label_prefix}D{d+1}"
+            if len(bucket_r) == 0:
+                brows.append({'decile': d + 1, 'label': bucket_label,
+                              'score_lo': float(lo), 'score_hi': float(hi),
+                              'n_trades': 0, 'avg_r': 0.0, 'win_rate': 0.0})
+            else:
+                brows.append({
+                    'decile': d + 1, 'label': bucket_label,
+                    'score_lo': float(lo), 'score_hi': float(hi),
+                    'n_trades': int(len(bucket_r)),
+                    'avg_r': float(np.mean(bucket_r)),
+                    'win_rate': float(np.sum(bucket_r > 0) / len(bucket_r)),
+                })
+        return brows
 
-    avg_rs = [r['avg_r'] for r in rows if r['n_trades'] > 0]
+    if t_sides is not None:
+        long_mask = t_sides == 1
+        short_mask = t_sides == -1
+        rows = []
+        all_rows_combined = _bucket_rows(t_scores, t_r, label_prefix="")
+        rows.extend(all_rows_combined)
+        if long_mask.sum() >= n_deciles * 2:
+            rows.extend(_bucket_rows(t_scores[long_mask], t_r[long_mask], label_prefix="L_"))
+        if short_mask.sum() >= n_deciles * 2:
+            rows.extend(_bucket_rows(t_scores[short_mask], t_r[short_mask], label_prefix="S_"))
+        avg_rs = [r['avg_r'] for r in all_rows_combined if r['n_trades'] > 0]
+    else:
+        rows = _bucket_rows(t_scores, t_r, label_prefix="")
+        avg_rs = [r['avg_r'] for r in rows if r['n_trades'] > 0]
+
     monotonic = all(avg_rs[i] <= avg_rs[i + 1] + 0.02 for i in range(len(avg_rs) - 1))
 
     return rows, monotonic
@@ -5034,7 +5251,7 @@ def train_v5_model(
     checkpoint_interval=25, warmup_epochs=5, min_lr=None,
     tp_mult=2.0, sl_mult=1.5, horizon=16,
     symbols=None,
-    w_ret=3.0, w_mfe=1.0, w_mae=1.0, w_action=0.5,
+    w_ret=3.0, w_mfe=1.0, w_mae=1.0, w_action=2.5,
     w_barrier=0.25, w_regime=0.1,
     loss_warmup_epochs=0, loss_warmup_ret_mult=1.0, loss_warmup_action_mult=1.0,
     sigma_spread_reg=0.1,

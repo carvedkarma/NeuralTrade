@@ -2719,12 +2719,19 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
     last_scaled = np.where(np.isnan(last_scaled), 0, last_scaled)
 
     model.eval()
+    p_long_v5 = None
+    p_short_v5 = None
+    p_hold_v5 = None
     with torch.no_grad():
         if is_v5:
             x = torch.FloatTensor(last_scaled).unsqueeze(0).to(device)
             output = model(x)
             action_probs = torch.softmax(output['action_logits'], dim=-1).cpu().numpy().flatten()
-            p_enter = 1.0 - float(action_probs[0])
+            # V5 action head: index 0=HOLD, 1=LONG, 2=SHORT (from v5_forecaster.py)
+            p_hold_v5 = float(action_probs[0])
+            p_long_v5 = float(action_probs[1])
+            p_short_v5 = float(action_probs[2])
+            p_enter = 1.0 - p_hold_v5   # prob of non-HOLD (backward compat metric)
         else:
             x = torch.FloatTensor(last_scaled[-1:]).to(device)
             output = model.forward_multihead(x)
@@ -2736,20 +2743,34 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
     h1_slope = last_row.get('h1_sma20_slope', 0)
     h1_range_pos = last_row.get('h1_range_pos', 0.5)
 
-    trend_aligned = (h1_trend == h4_trend) and (h1_trend != 0)
-    slope_ok = abs(h1_slope) > 0.05
-    range_ok = True
-    if h1_trend > 0 and h1_range_pos < 0.2:
-        range_ok = False
-    if h1_trend < 0 and h1_range_pos > 0.8:
-        range_ok = False
-
-    if h1_trend > 0:
-        side = "LONG"
-    elif h1_trend < 0:
-        side = "SHORT"
+    if is_v5 and p_long_v5 is not None and p_short_v5 is not None:
+        # V5: direction comes from action head directly (not HTF trend)
+        # p_long and p_short are the model's own directional convictions
+        if p_long_v5 >= p_short_v5:
+            side = "LONG"
+        else:
+            side = "SHORT"
+        # HTF gates still apply as secondary confirmation
+        trend_aligned = True   # V5 action head supersedes HTF direction
+        slope_ok = True        # V5 uses internal features — slope gate redundant
+        range_ok = True        # V5 uses internal features — range gate redundant
+        log.info(f"V5 directional probabilities: p_hold={p_hold_v5:.4f} p_long={p_long_v5:.4f} "
+                 f"p_short={p_short_v5:.4f} → V5 side={side}")
     else:
-        side = "NEUTRAL"
+        # Legacy enter-quality model: use HTF trend for direction
+        trend_aligned = (h1_trend == h4_trend) and (h1_trend != 0)
+        slope_ok = abs(h1_slope) > 0.05
+        range_ok = True
+        if h1_trend > 0 and h1_range_pos < 0.2:
+            range_ok = False
+        if h1_trend < 0 and h1_range_pos > 0.8:
+            range_ok = False
+        if h1_trend > 0:
+            side = "LONG"
+        elif h1_trend < 0:
+            side = "SHORT"
+        else:
+            side = "NEUTRAL"
 
     current_price = float(df.iloc[-1]['close'])
 
@@ -2773,11 +2794,15 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
     log.info("=" * 70)
     log.info(f"Current price: {current_price:.2f} | ATR(14): {atr:.2f} ({100*atr/current_price:.2f}% of price)")
     log.info(f"p_enter: {p_enter:.4f}")
-    log.info(f"HTF gates:")
-    log.info(f"  h1_trend_sign={h1_trend:+.0f}  h4_trend_sign={h4_trend:+.0f}  aligned={'YES' if trend_aligned else 'NO'}")
-    log.info(f"  h1_sma20_slope={h1_slope:.4f}  |slope|>0.05={'YES' if slope_ok else 'NO'}")
-    log.info(f"  h1_range_pos={h1_range_pos:.3f}  range_ok={'YES' if range_ok else 'NO'}")
-    log.info(f"  HTF direction: {side}")
+    if is_v5 and p_long_v5 is not None:
+        log.info(f"V5 action head: p_hold={p_hold_v5:.4f}  p_long={p_long_v5:.4f}  p_short={p_short_v5:.4f}")
+        log.info(f"V5 direction (from action head): {side}")
+    else:
+        log.info(f"HTF gates:")
+        log.info(f"  h1_trend_sign={h1_trend:+.0f}  h4_trend_sign={h4_trend:+.0f}  aligned={'YES' if trend_aligned else 'NO'}")
+        log.info(f"  h1_sma20_slope={h1_slope:.4f}  |slope|>0.05={'YES' if slope_ok else 'NO'}")
+        log.info(f"  h1_range_pos={h1_range_pos:.3f}  range_ok={'YES' if range_ok else 'NO'}")
+        log.info(f"  HTF direction: {side}")
     
     feature_diagnostics = {}
     for col in ['rsi_14', 'rsi_7', 'macd', 'adx_14', 'bb_position', 'volume_ratio',
@@ -2793,8 +2818,15 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
     log.info(f"Scaled feature coverage: {len(feature_columns)} features | NaN/Inf={nan_count} | zeros={zero_count}")
     log.info("=" * 70)
 
-    enter_threshold = 0.55
-    should_trade = p_enter >= enter_threshold and trend_aligned and slope_ok and range_ok
+    if is_v5 and p_long_v5 is not None and p_short_v5 is not None:
+        # V5 gate: signal fires when p_side > p_hold AND non-HOLD class wins
+        p_side_v5 = p_long_v5 if side == "LONG" else p_short_v5
+        # Minimum conviction: p_side must beat HOLD (>0.333 for balanced 3-class)
+        v5_threshold = 0.40   # slightly above random (0.333) to avoid noise signals
+        should_trade = p_side_v5 >= v5_threshold and p_enter >= 0.40
+    else:
+        enter_threshold = 0.55
+        should_trade = p_enter >= enter_threshold and trend_aligned and slope_ok and range_ok
 
     if should_trade:
         action = side
@@ -2826,20 +2858,28 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
         position_size *= 0.5
     position_size = min(max(position_size, 0.5), 5.0)
 
-    confidence = p_enter
-    edge = p_enter - 0.5
+    if is_v5 and p_long_v5 is not None:
+        confidence = max(p_long_v5, p_short_v5)   # highest directional conviction
+        edge = confidence - 1.0 / 3.0              # above uniform 3-class baseline
+        dir_probs = {"SHORT": round(p_short_v5, 4),
+                     "HOLD": round(p_hold_v5, 4),
+                     "LONG": round(p_long_v5, 4)}
+    else:
+        confidence = p_enter
+        edge = p_enter - 0.5
+        dir_probs = {"SHORT": round(1.0 if side == "SHORT" else 0.0, 4),
+                     "HOLD": round(1.0 if action == "HOLD" else 0.0, 4),
+                     "LONG": round(1.0 if side == "LONG" else 0.0, 4)}
 
     prediction = {
         "action": action,
         "confidence": round(confidence, 4),
-        "direction_probs": {"SHORT": round(1.0 if side == "SHORT" else 0.0, 4),
-                            "HOLD": round(1.0 if action == "HOLD" else 0.0, 4),
-                            "LONG": round(1.0 if side == "LONG" else 0.0, 4)},
+        "direction_probs": dir_probs,
         "quantiles": {},
         "vol_state": "neutral",
         "vol_state_probs": {"contraction": 0.33, "neutral": 0.34, "expansion": 0.33},
         "expected_return": round(edge, 6),
-        "uncertainty": round(1.0 - p_enter, 6),
+        "uncertainty": round(1.0 - confidence, 6),
         "edge": round(edge, 4),
         "entry_price": round(current_price, 2),
         "stop_loss_price": round(sl_price, 2),
