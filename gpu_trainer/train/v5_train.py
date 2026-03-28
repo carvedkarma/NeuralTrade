@@ -2640,13 +2640,16 @@ def run_v5_forward_test(
             _deb_p1 = float(np.percentile(_mu_deb, 1))
             _deb_p99 = float(np.percentile(_mu_deb, 99))
             _deb_spread = _deb_p99 - _deb_p1
-            # Ratio on abs(mu_R): p99 of |mu_R| / p1 of |mu_R|.
-            # A healthy model has some bars with large |mu_R| (high conviction)
-            # and others near 0 (HOLD) — so p99 >> p1, ratio >> 5.
-            # A collapsed model has all bars at ~0 after debias — p99 ≈ p1 ≈ 0,
-            # ratio ≈ 1 (or large due to tiny denominator but spread near 0 too).
-            # We use p10 as the denominator floor to avoid near-0 p1 inflating ratio:
-            # ratio = p99(|mu_R|) / max(p10(|mu_R|), 1e-8)
+            # Ratio on abs(mu_R): p99(|mu_R|) / p10(|mu_R|).
+            # Using absolute values avoids the signed-distribution false-positive:
+            # for a healthy debiased distribution centered near 0, p99/|p1| ≈ 1
+            # regardless of spread, because p1 ≈ -p99 → ratio ≈ 1 always.
+            # Instead we compare the 99th vs. 10th percentile of |mu_R|:
+            #   - Healthy model: high-conviction bars have large |mu_R| (p99 large),
+            #     while most bars are near-HOLD (p10 small) → ratio >> 5.
+            #   - Collapsed model: debias reduced all bars to ≈0, so p99 ≈ p10 ≈ 0
+            #     → ratio ≈ 1. We use p10 instead of p1 so near-zero noise in
+            #     the bottom 1% doesn't make the denominator artificially tiny.
             _abs_mu_deb = np.abs(_mu_deb)
             _abs_p10 = float(np.percentile(_abs_mu_deb, 10))
             _abs_p99 = float(np.percentile(_abs_mu_deb, 99))
@@ -4367,16 +4370,19 @@ def run_v5_forward_test(
                 for sid, thr in config.per_symbol_thresholds.items()
             }
 
-        if test_sym_ids is not None and sym_id_to_name:
+        if test_sym_ids is not None and sym_id_to_name and len(taken) > 0:
+            _taken_sym_ids = test_sym_ids[taken]
             _side_bias_map = {}
             for _sid, _sname in sym_id_to_name.items():
-                _smask = test_sym_ids == _sid
-                _ssides = sides[_smask] if np.sum(_smask) > 0 else np.array([])
-                _total = max(int(np.sum(_smask)), 1)
+                _smask = _taken_sym_ids == _sid
+                _n_taken = int(np.sum(_smask))
+                if _n_taken == 0:
+                    continue
+                _ssides = t_sides[_smask]
                 _long_n = int(np.sum(_ssides == 1))
                 _short_n = int(np.sum(_ssides == -1))
-                _long_pct = round(100.0 * _long_n / _total, 1)
-                _short_pct = round(100.0 * _short_n / _total, 1)
+                _long_pct = round(100.0 * _long_n / _n_taken, 1)
+                _short_pct = round(100.0 * _short_n / _n_taken, 1)
                 _bias_dir = None
                 if _long_pct > 85.0:
                     _bias_dir = "LONG"
@@ -4385,6 +4391,7 @@ def run_v5_forward_test(
                 _side_bias_map[_sname] = {
                     "long_pct": _long_pct,
                     "short_pct": _short_pct,
+                    "n_taken": _n_taken,
                     "biased": _bias_dir is not None,
                     "bias_dir": _bias_dir,
                 }

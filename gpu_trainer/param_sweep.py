@@ -173,6 +173,8 @@ class SweepResult:
             "max_dd": round(self.max_dd, 4),
             "elapsed_sec": round(self.elapsed_sec, 1),
             "error": self.error,
+            "avg_debias_spread_ratio": self.avg_debias_spread_ratio,
+            "n_collapsed_debias": self.n_collapsed_debias,
         }
 
 
