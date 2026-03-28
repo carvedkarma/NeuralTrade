@@ -96,6 +96,36 @@ def _try_load_saved_report(model_path_str):
     return None
 
 
+def _print_per_sym_side_bias(folds):
+    """Print per-symbol side-bias diagnostics from the latest fold that has the data."""
+    side_bias = {}
+    for f in folds:
+        if not isinstance(f, dict):
+            continue
+        sb = f.get("per_sym_side_bias", {})
+        if sb:
+            side_bias = sb
+    if not side_bias:
+        return
+    biased = {s: v for s, v in side_bias.items() if v.get("biased")}
+    if not biased:
+        return
+    log.info("=" * 80)
+    log.info("PER-SYMBOL SIDE BIAS (>85%% single-side dominance)")
+    log.info("=" * 80)
+    for sym in sorted(biased):
+        v = biased[sym]
+        log.warning(
+            "  %-14s  LONG=%.0f%%  SHORT=%.0f%%  [SIDE_BIAS: %s]",
+            sym, v["long_pct"], v["short_pct"], v["bias_dir"],
+        )
+    log.warning(
+        "  ACTION: increase short_min_fraction or short_oversample strength "
+        "for biased symbols."
+    )
+    log.info("")
+
+
 def _print_per_symbol_thresholds(folds):
     """Print best threshold per symbol collected across folds."""
     sym_thresholds = {}
@@ -227,6 +257,7 @@ def _display_report(result):
     log.info("")
 
     _print_per_symbol_thresholds(folds)
+    _print_per_sym_side_bias(folds)
 
     active_symbols = []
     no_edge_symbols = []

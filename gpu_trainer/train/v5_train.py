@@ -2008,6 +2008,7 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
 
     unique_sym_ids = np.unique(symbol_ids)
     per_sym_thresholds = {}
+    per_sym_side_bias = {}
     no_edge_symbols = []
 
     log.info("=" * 120)
@@ -2127,13 +2128,22 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
             sym_short_pct = 100.0 * float(np.sum(sym_finite_sides == -1)) / max(len(sym_finite_sides), 1)
 
         side_bias_tag = ""
+        _bias_dir = None
         if sym_long_pct > 85.0:
+            _bias_dir = "LONG"
             side_bias_tag = f" [SIDE_BIAS: {sym_long_pct:.0f}% LONG]"
             log.warning(f"[SIDE_BIAS] {sym_name}: LONG={sym_long_pct:.0f}% — heavy long bias in candidate pool. "
                         f"Increase short_min_fraction or short_oversample strength.")
         elif sym_short_pct > 85.0:
+            _bias_dir = "SHORT"
             side_bias_tag = f" [SIDE_BIAS: {sym_short_pct:.0f}% SHORT]"
             log.warning(f"[SIDE_BIAS] {sym_name}: SHORT={sym_short_pct:.0f}% — heavy short bias in candidate pool.")
+        per_sym_side_bias[sym_name] = {
+            "long_pct": round(sym_long_pct, 1),
+            "short_pct": round(sym_short_pct, 1),
+            "biased": _bias_dir is not None,
+            "bias_dir": _bias_dir,
+        }
 
         if sym_is_active:
             per_sym_thresholds[int(sym_id)] = best_sym_threshold
@@ -2185,7 +2195,7 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                 label=f"PSYM_{_sym_name}",
             )
 
-    return per_sym_thresholds, no_edge_symbols
+    return per_sym_thresholds, no_edge_symbols, per_sym_side_bias
 
 
 def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
@@ -2630,14 +2640,23 @@ def run_v5_forward_test(
             _deb_p1 = float(np.percentile(_mu_deb, 1))
             _deb_p99 = float(np.percentile(_mu_deb, 99))
             _deb_spread = _deb_p99 - _deb_p1
-            # Ratio: p99 / |p1| — captures relative spread; >5 means meaningful discrimination
-            _abs_p1 = max(abs(_deb_p1), 1e-8)
-            debias_spread_ratio = round(_deb_p99 / _abs_p1, 2)
+            # Ratio on abs(mu_R): p99 of |mu_R| / p1 of |mu_R|.
+            # A healthy model has some bars with large |mu_R| (high conviction)
+            # and others near 0 (HOLD) — so p99 >> p1, ratio >> 5.
+            # A collapsed model has all bars at ~0 after debias — p99 ≈ p1 ≈ 0,
+            # ratio ≈ 1 (or large due to tiny denominator but spread near 0 too).
+            # We use p10 as the denominator floor to avoid near-0 p1 inflating ratio:
+            # ratio = p99(|mu_R|) / max(p10(|mu_R|), 1e-8)
+            _abs_mu_deb = np.abs(_mu_deb)
+            _abs_p10 = float(np.percentile(_abs_mu_deb, 10))
+            _abs_p99 = float(np.percentile(_abs_mu_deb, 99))
+            debias_spread_ratio = round(_abs_p99 / max(_abs_p10, 1e-8), 2)
             log.info(f"[V5_DEBIAS_SPREAD] post-debias mu_R: p1={_deb_p1:+.6f} p99={_deb_p99:+.6f} "
-                     f"spread={_deb_spread:.6f} ratio={debias_spread_ratio:.1f}x")
+                     f"spread={_deb_spread:.6f} |mu_R| p10={_abs_p10:.6f} p99={_abs_p99:.6f} "
+                     f"ratio={debias_spread_ratio:.1f}x")
             if debias_spread_ratio < 5.0:
                 log.warning(
-                    f"[DEBIAS_COLLAPSED] post-debias mu_R p99/|p1| ratio={debias_spread_ratio:.2f}x < 5x. "
+                    f"[DEBIAS_COLLAPSED] post-debias |mu_R| p99/p10 ratio={debias_spread_ratio:.2f}x < 5x. "
                     f"Score discrimination is severely degraded — all bars score nearly the same. "
                     f"ACTION: reduce mu_debias_alpha (current={config.mu_debias_alpha}) toward 0.0003, "
                     f"or disable mu_debias entirely for this fold.")
@@ -4334,18 +4353,43 @@ def run_v5_forward_test(
 
     report['debias_spread_ratio'] = debias_spread_ratio
 
-    if config.per_symbol_thresholds:
+    if config.per_symbol_thresholds or sym_id_to_name:
         sym_name_map = {}
         if config.symbols_list:
             sym_name_map = {i: s for i, s in enumerate(config.symbols_list)}
         elif sym_id_to_name:
             sym_name_map = sym_id_to_name
-        report['per_symbol_thresholds'] = {
-            sym_name_map.get(int(sid), f"sym_{sid}"): (
-                round(float(thr), 6) if np.isfinite(thr) else None
-            )
-            for sid, thr in config.per_symbol_thresholds.items()
-        }
+        if config.per_symbol_thresholds:
+            report['per_symbol_thresholds'] = {
+                sym_name_map.get(int(sid), f"sym_{sid}"): (
+                    round(float(thr), 6) if np.isfinite(thr) else None
+                )
+                for sid, thr in config.per_symbol_thresholds.items()
+            }
+
+        if test_sym_ids is not None and sym_id_to_name:
+            _side_bias_map = {}
+            for _sid, _sname in sym_id_to_name.items():
+                _smask = test_sym_ids == _sid
+                _ssides = sides[_smask] if np.sum(_smask) > 0 else np.array([])
+                _total = max(int(np.sum(_smask)), 1)
+                _long_n = int(np.sum(_ssides == 1))
+                _short_n = int(np.sum(_ssides == -1))
+                _long_pct = round(100.0 * _long_n / _total, 1)
+                _short_pct = round(100.0 * _short_n / _total, 1)
+                _bias_dir = None
+                if _long_pct > 85.0:
+                    _bias_dir = "LONG"
+                elif _short_pct > 85.0:
+                    _bias_dir = "SHORT"
+                _side_bias_map[_sname] = {
+                    "long_pct": _long_pct,
+                    "short_pct": _short_pct,
+                    "biased": _bias_dir is not None,
+                    "bias_dir": _bias_dir,
+                }
+            if _side_bias_map:
+                report['per_sym_side_bias'] = _side_bias_map
 
     _print_forward_report(report)
     return report
@@ -6673,7 +6717,7 @@ def train_v5_model(
                     scores_short_only[~short_mask_sweep] = -np.inf
                     _MIN_SIDE_TRADES = 5
                     log.info("[V5_PER_SIDE_THR] === LONG threshold sweep ===")
-                    per_sym_long, _ = _run_per_symbol_sweep(
+                    per_sym_long, _, _sb_long = _run_per_symbol_sweep(
                         scores_long_only, sides, val_outcomes, val_realized_r,
                         val_bars, val_sym_ids, symbols, sweep_threshold,
                         r_long=val_r_long_arr, r_short=val_r_short_arr,
@@ -6683,7 +6727,7 @@ def train_v5_model(
                         cooldown=cooldown,
                     )
                     log.info("[V5_PER_SIDE_THR] === SHORT threshold sweep ===")
-                    per_sym_short, _ = _run_per_symbol_sweep(
+                    per_sym_short, _, _sb_short = _run_per_symbol_sweep(
                         scores_short_only, sides, val_outcomes, val_realized_r,
                         val_bars, val_sym_ids, symbols, sweep_threshold,
                         r_long=val_r_long_arr, r_short=val_r_short_arr,
@@ -6707,7 +6751,7 @@ def train_v5_model(
                         _st = best_per_sym_thresholds[_sid]['short']
                         log.info(f"  {_sym:>12}: LONG={_lt:.4f} SHORT={_st:.4f}")
                 else:
-                    best_per_sym_thresholds, no_edge_syms = _run_per_symbol_sweep(
+                    best_per_sym_thresholds, no_edge_syms, _ps_side_bias = _run_per_symbol_sweep(
                         scores, sides, val_outcomes, val_realized_r,
                         val_bars, val_sym_ids, symbols, sweep_threshold,
                         r_long=val_r_long_arr, r_short=val_r_short_arr,
@@ -6928,7 +6972,7 @@ def train_v5_model(
                 _short_m = _fs_sides == -1
                 _sc_long = _fs_scores.copy(); _sc_long[~_long_m] = -np.inf
                 _sc_short = _fs_scores.copy(); _sc_short[~_short_m] = -np.inf
-                _ps_long, _ = _run_per_symbol_sweep(
+                _ps_long, _, _sb_fsl = _run_per_symbol_sweep(
                     _sc_long, _fs_sides, val_outcomes, val_realized_r,
                     val_bars, val_sym_ids, symbols, current_score_threshold,
                     r_long=val_r_long_arr, r_short=val_r_short_arr,
@@ -6936,7 +6980,7 @@ def train_v5_model(
                     quality_mask=_fs_quality_mask, candidate_mask=_sweep_cand,
                     min_trades_per_symbol=5, cooldown=cooldown,
                 )
-                _ps_short, _ = _run_per_symbol_sweep(
+                _ps_short, _, _sb_fss = _run_per_symbol_sweep(
                     _sc_short, _fs_sides, val_outcomes, val_realized_r,
                     val_bars, val_sym_ids, symbols, current_score_threshold,
                     r_long=val_r_long_arr, r_short=val_r_short_arr,
@@ -6954,7 +6998,7 @@ def train_v5_model(
                     for _sid in _all_sids
                 }
             else:
-                _fs_new_thr, _ = _run_per_symbol_sweep(
+                _fs_new_thr, _, _sb_fs = _run_per_symbol_sweep(
                     _fs_scores, _fs_sides, val_outcomes, val_realized_r,
                     val_bars, val_sym_ids, symbols, current_score_threshold,
                     r_long=val_r_long_arr, r_short=val_r_short_arr,
