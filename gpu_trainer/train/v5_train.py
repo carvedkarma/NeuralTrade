@@ -2178,7 +2178,7 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
 
     if per_sym_thresholds:
         for _sid, _thr in per_sym_thresholds.items():
-            if isinstance(_thr, dict) or _thr is None or not math.isfinite(float(_thr)):
+            if not (isinstance(_thr, (int, float, np.floating, np.integer)) and math.isfinite(float(_thr))):
                 continue
             _sym_name = symbols_list[_sid] if symbols_list and _sid < len(symbols_list) else f"sym_{_sid}"
             _sym_mask = symbol_ids == _sid
@@ -4363,13 +4363,14 @@ def run_v5_forward_test(
         elif sym_id_to_name:
             sym_name_map = sym_id_to_name
         if config.per_symbol_thresholds:
+            _numeric_types = (int, float, np.floating, np.integer)
             def _serialize_thr(thr):
                 if isinstance(thr, dict):
                     return {
-                        k: (round(float(v), 6) if isinstance(v, (int, float)) and math.isfinite(float(v)) else None)
+                        k: (round(float(v), 6) if isinstance(v, _numeric_types) and math.isfinite(float(v)) else None)
                         for k, v in thr.items()
                     }
-                if thr is None or not isinstance(thr, (int, float)):
+                if not isinstance(thr, _numeric_types):
                     return None
                 return round(float(thr), 6) if math.isfinite(float(thr)) else None
             report['per_symbol_thresholds'] = {
