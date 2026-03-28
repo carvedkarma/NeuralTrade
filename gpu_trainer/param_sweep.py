@@ -278,6 +278,7 @@ def run_single_config(
     max_folds: int,
     max_trades_per_day: Optional[int] = None,
     target_tpd: float = 6.5,
+    replit_url: Optional[str] = None,
 ) -> SweepResult:
     """Run one config through real V5 walk-forward and return metrics."""
     from train.v5_train import run_v5_walk_forward, V5TPDControllerConfig
@@ -354,6 +355,8 @@ def run_single_config(
             max_trades_per_day=max_trades_per_day,
             # Custom tpd target (builds V5TPDControllerConfig with the requested target)
             tpd_ctrl_cfg=tpd_cfg,
+            # Live training monitor push (optional)
+            replit_url=replit_url,
         )
         elapsed = time.time() - t0
         result = _extract_results(wf_result, cfg.label, cfg)
@@ -487,6 +490,10 @@ def main():
                         help="Skip configs already in output JSON (resume interrupted sweep)")
     parser.add_argument("--configs", nargs="+",
                         help="Run only specific config labels from the grid")
+    parser.add_argument("--replit-url", default=None,
+                        help="Replit app URL for live training monitor push "
+                             "(e.g. https://your-app.replit.app). Enables real-time "
+                             "epoch-by-epoch updates on the Training Monitor page.")
     args = parser.parse_args()
 
     # Validate data directory — try several candidate paths
@@ -594,6 +601,7 @@ def main():
             max_folds=args.folds,
             max_trades_per_day=args.max_tpd,
             target_tpd=args.target_tpd,
+            replit_url=args.replit_url,
         )
         all_results.append(result)
 

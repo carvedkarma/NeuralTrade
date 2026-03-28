@@ -1367,7 +1367,24 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         s_mean = s_std = s_p50 = s_p90 = 0.0
         s_pct_pos = 0.0
 
-    return scores, sides, {
+    # Head agreement: fraction of LONG/SHORT candidates where the return head
+    # (mu_R sign) agrees with the action head direction.  Healthy training
+    # should show 40-60% for both directions.  Values < 20% after epoch 50
+    # indicate the heads are working against each other.
+    _long_samples = sides == 1
+    _short_samples = sides == -1
+    _head_agree_long = float(
+        100 * np.sum(_long_samples & (mu_R > 0)) / max(int(np.sum(_long_samples)), 1)
+    )
+    _head_agree_short = float(
+        100 * np.sum(_short_samples & (mu_R < 0)) / max(int(np.sum(_short_samples)), 1)
+    )
+
+    # Sigma mean (uncertainty) — only available when _arrays contains sigma
+    _sigma_arr = _arrays.get('sigma') if _arrays is not None else None
+    _sigma_mean = float(np.nanmean(_sigma_arr)) if _sigma_arr is not None and len(_sigma_arr) > 0 else None
+
+    _diag: dict = {
         'mu_R_mean': float(np.nanmean(mu_R)),
         'mu_R_std': float(np.nanstd(mu_R)),
         'mae_R_mean': float(np.nanmean(mae_pred)),
@@ -1397,7 +1414,12 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         'n_long_all': n_long_sides,
         'n_short_all': n_short_sides,
         'long_pct_all': float(100 * n_long_sides / max(n_long_sides + n_short_sides, 1)),
+        'head_agree_long_pct': _head_agree_long,
+        'head_agree_short_pct': _head_agree_short,
     }
+    if _sigma_mean is not None:
+        _diag['sigma_mean'] = _sigma_mean
+    return scores, sides, _diag
 
 
 def _tpd_controller_step(scores, quality_mask, candidate_mask,

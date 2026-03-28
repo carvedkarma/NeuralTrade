@@ -541,6 +541,375 @@ function ModelKnowledge({ epochs, session }: { epochs: TrainingEpoch[]; session:
   );
 }
 
+// ─── Model Health Panel ──────────────────────────────────────────────────────
+// Reads scoreDiag from recent epochs and surfaches early-stop signals:
+// direction bias, head agreement, expectancy trend, and a CONTINUE/MONITOR/ABORT verdict.
+
+type HealthVerdict = "CONTINUE" | "MONITOR" | "ABORT";
+
+function computeVerdict(
+  epochs: TrainingEpoch[],
+): { verdict: HealthVerdict; reason: string; details: string } {
+  if (!epochs.length) return { verdict: "CONTINUE", reason: "Waiting for epoch data", details: "" };
+
+  const latestEpoch = epochs[epochs.length - 1];
+  const currentEpochNum = latestEpoch?.epoch ?? 0;
+
+  // -- Expectancy: sustained negative after epoch 50 (15+ consecutive)
+  const lateEpochs = epochs.filter((e) => e.epoch >= 50 && e.expectancy !== null);
+  const sustainedNegative =
+    lateEpochs.length >= 15 &&
+    lateEpochs.slice(-15).every((e) => (e.expectancy ?? 0) < -0.10);
+
+  // -- Loss divergence: val_loss > train_loss * 1.8 for the last 10 epochs
+  const lossEpochs = epochs.filter((e) => e.trainLoss !== null && e.valLoss !== null);
+  const lossDiverged =
+    lossEpochs.length >= 10 &&
+    lossEpochs.slice(-10).every((e) => (e.valLoss ?? 0) > (e.trainLoss ?? 1) * 1.8);
+
+  // -- Direction bias from latest scoreDiag
+  const diagEpochs = epochs.filter((e) => e.scoreDiag !== null);
+  const latestDiag = diagEpochs.length ? diagEpochs[diagEpochs.length - 1].scoreDiag! : null;
+  const longPct = latestDiag?.long_pct_all ?? 50;
+  const shortPct = 100 - longPct;
+  const biasDir = longPct > shortPct ? "LONG" : "SHORT";
+  const biasMax = Math.max(longPct, shortPct);
+
+  // -- Head agreement (from scoreDiag)
+  const headAgreeLong = latestDiag?.head_agree_long_pct ?? null;
+  const headAgreeShort = latestDiag?.head_agree_short_pct ?? null;
+
+  // -- Latest expectancy
+  const recentExpectEpochs = epochs.filter((e) => e.expectancy !== null);
+  const latestExpect = recentExpectEpochs.length
+    ? recentExpectEpochs[recentExpectEpochs.length - 1].expectancy!
+    : null;
+
+  // --- ABORT conditions ---
+  if (sustainedNegative) {
+    return {
+      verdict: "ABORT",
+      reason: `E[R] sustained negative (${latestExpect !== null ? latestExpect.toFixed(4) : "?"} after epoch ${currentEpochNum})`,
+      details: "15+ late epochs with E[R] < −0.10. Edge has not formed — stop and review config.",
+    };
+  }
+  if (currentEpochNum >= 70 && biasMax > 97) {
+    return {
+      verdict: "ABORT",
+      reason: `Extreme direction bias: ${longPct.toFixed(0)}% ${biasDir}`,
+      details: "Model is predicting one direction for >97% of candidates. Likely a collapsed head.",
+    };
+  }
+  if (lossDiverged) {
+    return {
+      verdict: "ABORT",
+      reason: "Val loss diverging (>1.8× train loss for 10+ epochs)",
+      details: "Model is overfitting. Consider reducing model capacity or adding regularization.",
+    };
+  }
+
+  // --- MONITOR conditions ---
+  if (biasMax > 80) {
+    return {
+      verdict: "MONITOR",
+      reason: `Direction bias: ${longPct.toFixed(0)}% LONG / ${shortPct.toFixed(0)}% SHORT`,
+      details: `Healthy range is 40–60%. Watch closely — may normalise, or escalate to ABORT.`,
+    };
+  }
+  if (headAgreeLong !== null && headAgreeLong < 20 && currentEpochNum >= 50) {
+    return {
+      verdict: "MONITOR",
+      reason: `LONG head agreement low: ${headAgreeLong.toFixed(0)}%`,
+      details: "Action head selects LONG but return head disagrees (mu_R < 0). Signals unreliable.",
+    };
+  }
+  if (headAgreeShort !== null && headAgreeShort < 20 && currentEpochNum >= 50) {
+    return {
+      verdict: "MONITOR",
+      reason: `SHORT head agreement low: ${headAgreeShort.toFixed(0)}%`,
+      details: "Action head selects SHORT but return head disagrees (mu_R > 0). Signals unreliable.",
+    };
+  }
+
+  // --- CONTINUE ---
+  if (latestExpect !== null && latestExpect > 0) {
+    return {
+      verdict: "CONTINUE",
+      reason: `Edge forming: E[R] ${latestExpect >= 0 ? "+" : ""}${latestExpect.toFixed(4)}`,
+      details: "All health indicators are within normal range.",
+    };
+  }
+  return {
+    verdict: "CONTINUE",
+    reason: currentEpochNum > 0 ? `Training epoch ${currentEpochNum} — health OK` : "Waiting for epoch data",
+    details: "No early-stop signals detected.",
+  };
+}
+
+function HeadAgreementGauge({
+  label,
+  value,
+  color,
+}: {
+  label: string;
+  value: number | null;
+  color: string;
+}) {
+  const pct = value ?? 0;
+  const gaugeColor =
+    pct >= 40 ? "text-emerald-400" : pct >= 20 ? "text-amber-400" : "text-red-400";
+  const barColor =
+    pct >= 40 ? "bg-emerald-500" : pct >= 20 ? "bg-amber-500" : "bg-red-500";
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex justify-between items-center">
+        <span className="text-[10px] text-muted-foreground uppercase tracking-wider">{label}</span>
+        <span className={cn("text-xs font-bold number-mono", gaugeColor)}>
+          {value !== null ? `${pct.toFixed(0)}%` : "—"}
+        </span>
+      </div>
+      <div className="h-1.5 bg-muted/20 rounded-full overflow-hidden">
+        <div
+          className={cn("h-full rounded-full transition-all duration-500", barColor)}
+          style={{ width: `${Math.min(100, pct)}%` }}
+        />
+      </div>
+      <div className="flex justify-between text-[9px] text-muted-foreground">
+        <span>0%</span>
+        <span className="text-amber-400/60">20%</span>
+        <span className="text-emerald-400/60">40%+</span>
+      </div>
+    </div>
+  );
+}
+
+function ModelHealthPanel({
+  epochs,
+  session,
+}: {
+  epochs: TrainingEpoch[];
+  session: TrainingSession;
+}) {
+  if (!epochs.length) return null;
+
+  const { verdict, reason, details } = computeVerdict(epochs);
+
+  const diagEpochs = epochs.filter((e) => e.scoreDiag !== null);
+  const latestDiag = diagEpochs.length ? diagEpochs[diagEpochs.length - 1].scoreDiag! : null;
+
+  const longPct = latestDiag?.long_pct_all ?? 50;
+  const shortPct = 100 - longPct;
+  const headAgreeLong = latestDiag?.head_agree_long_pct ?? null;
+  const headAgreeShort = latestDiag?.head_agree_short_pct ?? null;
+  const sigmaMean = latestDiag?.sigma_mean ?? null;
+
+  // Last 20 epochs with expectancy for sparkline
+  const sparkData = epochs
+    .filter((e) => e.expectancy !== null)
+    .slice(-20)
+    .map((e) => ({ epoch: e.epoch, e: e.expectancy! }));
+
+  const latestExpect = sparkData.length ? sparkData[sparkData.length - 1].e : null;
+  const expectTrend =
+    sparkData.length >= 5
+      ? sparkData[sparkData.length - 1].e - sparkData[sparkData.length - 5].e
+      : 0;
+
+  const verdictConfig = {
+    CONTINUE: {
+      color: "border-emerald-500/50 bg-emerald-500/5",
+      badgeClass: "bg-emerald-500/20 text-emerald-400 border-emerald-500/40",
+      icon: <CheckCircle2 className="w-5 h-5 text-emerald-400" />,
+    },
+    MONITOR: {
+      color: "border-amber-500/50 bg-amber-500/5",
+      badgeClass: "bg-amber-500/20 text-amber-400 border-amber-500/40",
+      icon: <AlertTriangle className="w-5 h-5 text-amber-400" />,
+    },
+    ABORT: {
+      color: "border-red-500/60 bg-red-500/5",
+      badgeClass: "bg-red-500/20 text-red-400 border-red-500/40",
+      icon: <XCircle className="w-5 h-5 text-red-400" />,
+    },
+  };
+  const vc = verdictConfig[verdict];
+
+  return (
+    <Card className={cn("glass-card mb-6 border", vc.color)} data-testid="model-health-panel">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Gauge className="w-4 h-4 text-cyan-400" />
+          Model Health
+          <Badge className={cn("ml-auto text-xs px-3 py-0.5 border", vc.badgeClass)} data-testid="badge-health-verdict">
+            {vc.icon}
+            <span className="ml-1.5 font-bold tracking-wide">{verdict}</span>
+          </Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {/* Verdict reason */}
+        <div className={cn(
+          "rounded-lg px-4 py-3 mb-4 text-sm border",
+          verdict === "CONTINUE" ? "bg-emerald-500/10 border-emerald-500/20" :
+          verdict === "MONITOR" ? "bg-amber-500/10 border-amber-500/20" :
+          "bg-red-500/10 border-red-500/20"
+        )} data-testid="text-health-reason">
+          <p className={cn("font-medium",
+            verdict === "CONTINUE" ? "text-emerald-300" :
+            verdict === "MONITOR" ? "text-amber-300" : "text-red-300"
+          )}>{reason}</p>
+          {details && <p className="text-xs text-muted-foreground mt-1">{details}</p>}
+        </div>
+
+        {/* 4-column grid */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+
+          {/* Column 1: Direction Bias */}
+          <div className="space-y-2" data-testid="panel-direction-bias">
+            <div className="flex items-center gap-1.5 mb-1">
+              <Activity className="w-3.5 h-3.5 text-muted-foreground" />
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Direction Bias</span>
+              {Math.max(longPct, shortPct) > 85 && (
+                <AlertTriangle className="w-3 h-3 text-amber-400 ml-auto" />
+              )}
+            </div>
+            <div className="text-xs text-center mb-1 number-mono">
+              <span className="text-cyan-400 font-bold">{longPct.toFixed(0)}% LONG</span>
+              <span className="text-muted-foreground mx-1">/</span>
+              <span className="text-violet-400 font-bold">{shortPct.toFixed(0)}% SHORT</span>
+            </div>
+            <div className="h-5 bg-muted/20 rounded-full overflow-hidden relative" data-testid="bar-direction-bias">
+              <div
+                className="h-full bg-cyan-500 rounded-l-full transition-all duration-700"
+                style={{ width: `${longPct}%` }}
+              />
+              <div
+                className="absolute top-0 right-0 h-full bg-violet-500 rounded-r-full"
+                style={{ width: `${shortPct}%`, left: `${longPct}%` }}
+              />
+            </div>
+            {/* Target zone markers */}
+            <div className="relative h-2">
+              <div className="absolute h-3 w-px bg-emerald-500/60 top-0" style={{ left: "40%" }} title="40% target" />
+              <div className="absolute h-3 w-px bg-emerald-500/60 top-0" style={{ left: "60%" }} title="60% target" />
+              <div className="absolute text-[8px] text-emerald-500/60 -translate-x-1/2" style={{ left: "40%" }}>40%</div>
+              <div className="absolute text-[8px] text-emerald-500/60 -translate-x-1/2" style={{ left: "60%" }}>60%</div>
+            </div>
+            {Math.max(longPct, shortPct) > 85 && (
+              <p className="text-[10px] text-amber-400">⚠ Bias {Math.max(longPct, shortPct).toFixed(0)}% — watch closely</p>
+            )}
+          </div>
+
+          {/* Column 2: Head Agreement */}
+          <div className="space-y-3" data-testid="panel-head-agreement">
+            <div className="flex items-center gap-1.5 mb-1">
+              <Zap className="w-3.5 h-3.5 text-muted-foreground" />
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Head Agreement</span>
+            </div>
+            <HeadAgreementGauge label="LONG agree" value={headAgreeLong} color="cyan" />
+            <HeadAgreementGauge label="SHORT agree" value={headAgreeShort} color="violet" />
+            <p className="text-[9px] text-muted-foreground leading-relaxed">
+              % of candidates where action head and return head (mu_R sign) agree.
+              Healthy: 40–60%. Below 20% after epoch 50 = heads diverging.
+            </p>
+          </div>
+
+          {/* Column 3: Expectancy Trend */}
+          <div className="space-y-2" data-testid="panel-expectancy-trend">
+            <div className="flex items-center gap-1.5 mb-1">
+              <TrendingUp className="w-3.5 h-3.5 text-muted-foreground" />
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Expectancy Trend</span>
+            </div>
+            <div className="flex items-baseline gap-2">
+              <span className={cn("text-xl font-bold number-mono",
+                latestExpect === null ? "text-muted-foreground" :
+                latestExpect >= 0 ? "text-emerald-400" : "text-red-400"
+              )} data-testid="text-expectancy-latest">
+                {latestExpect !== null ? `${latestExpect >= 0 ? "+" : ""}${latestExpect.toFixed(4)}` : "—"}
+              </span>
+              {expectTrend !== 0 && (
+                <span className={cn("text-xs", expectTrend > 0 ? "text-emerald-400" : "text-red-400")}>
+                  {expectTrend > 0 ? <ArrowUpRight className="inline w-3 h-3" /> : <ArrowDownRight className="inline w-3 h-3" />}
+                  {Math.abs(expectTrend).toFixed(4)}
+                </span>
+              )}
+            </div>
+            {sparkData.length > 1 ? (
+              <ResponsiveContainer width="100%" height={60}>
+                <LineChart data={sparkData}>
+                  <ReferenceLine y={0} stroke="hsl(var(--border))" strokeDasharray="3 3" />
+                  <Line
+                    type="monotone"
+                    dataKey="e"
+                    stroke={latestExpect !== null && latestExpect >= 0 ? "#10b981" : "#ef4444"}
+                    strokeWidth={2}
+                    dot={false}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-[60px] flex items-center justify-center">
+                <p className="text-[10px] text-muted-foreground">Accumulating data...</p>
+              </div>
+            )}
+            <p className="text-[9px] text-muted-foreground">Last {sparkData.length} checkpoint epochs</p>
+          </div>
+
+          {/* Column 4: Signal Quality */}
+          <div className="space-y-3" data-testid="panel-signal-quality">
+            <div className="flex items-center gap-1.5 mb-1">
+              <Target className="w-3.5 h-3.5 text-muted-foreground" />
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Signal Quality</span>
+            </div>
+            <div className="space-y-2">
+              <div className="flex justify-between items-center p-2 rounded bg-muted/10">
+                <span className="text-[10px] text-muted-foreground">Score % Positive</span>
+                <span className={cn("text-xs font-bold number-mono",
+                  (latestDiag?.score_pct_positive ?? 0) > 40 ? "text-emerald-400" :
+                  (latestDiag?.score_pct_positive ?? 0) > 20 ? "text-amber-400" : "text-red-400"
+                )} data-testid="text-score-pct-positive">
+                  {latestDiag?.score_pct_positive !== undefined
+                    ? `${latestDiag.score_pct_positive.toFixed(1)}%`
+                    : "—"}
+                </span>
+              </div>
+              <div className="flex justify-between items-center p-2 rounded bg-muted/10">
+                <span className="text-[10px] text-muted-foreground">mu_R Mean</span>
+                <span className={cn("text-xs font-bold number-mono",
+                  (latestDiag?.mu_R_mean ?? 0) > 0 ? "text-emerald-400" : "text-red-400"
+                )} data-testid="text-mu-r-mean">
+                  {latestDiag?.mu_R_mean !== undefined
+                    ? `${latestDiag.mu_R_mean >= 0 ? "+" : ""}${latestDiag.mu_R_mean.toFixed(4)}`
+                    : "—"}
+                </span>
+              </div>
+              {sigmaMean !== null && (
+                <div className="flex justify-between items-center p-2 rounded bg-muted/10">
+                  <span className="text-[10px] text-muted-foreground">Sigma (uncertainty)</span>
+                  <span className={cn("text-xs font-bold number-mono",
+                    sigmaMean < 0.5 ? "text-emerald-400" : sigmaMean < 1.0 ? "text-amber-400" : "text-red-400"
+                  )} data-testid="text-sigma-mean">
+                    {sigmaMean.toFixed(3)}
+                  </span>
+                </div>
+              )}
+              <div className="flex justify-between items-center p-2 rounded bg-muted/10">
+                <span className="text-[10px] text-muted-foreground">Penalty Mean</span>
+                <span className="text-xs font-bold number-mono text-muted-foreground" data-testid="text-penalty-mean">
+                  {latestDiag?.penalty_mean !== undefined
+                    ? latestDiag.penalty_mean.toFixed(4)
+                    : "—"}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function LossCurves({ epochs, folds }: { epochs: TrainingEpoch[]; folds: TrainingFold[] }) {
   const [showComponents, setShowComponents] = useState(false);
 
@@ -1657,6 +2026,7 @@ export default function TrainingMonitor() {
           {viewingSession && (
             <>
               <OverviewCards session={viewingSession} />
+              <ModelHealthPanel epochs={allEpochs} session={viewingSession} />
               <ModelKnowledge epochs={allEpochs} session={viewingSession} />
               <LossCurves epochs={allEpochs} folds={viewingFolds} />
 
