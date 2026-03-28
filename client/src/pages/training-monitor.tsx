@@ -711,10 +711,15 @@ function ModelHealthPanel({
     .map((e) => ({ epoch: e.epoch, e: e.expectancy! }));
 
   const latestExpect = sparkData.length ? sparkData[sparkData.length - 1].e : null;
+  // Trend = slope over last 5 data points (positive = improving, negative = declining)
   const expectTrend =
     sparkData.length >= 5
       ? sparkData[sparkData.length - 1].e - sparkData[sparkData.length - 5].e
+      : sparkData.length >= 2
+      ? sparkData[sparkData.length - 1].e - sparkData[0].e
       : 0;
+  // Sparkline color follows trend direction, not just latest value sign
+  const sparklineColor = expectTrend > 0 ? "#10b981" : expectTrend < 0 ? "#ef4444" : "#6b7280";
 
   const verdictConfig = {
     CONTINUE: {
@@ -842,7 +847,7 @@ function ModelHealthPanel({
                   <Line
                     type="monotone"
                     dataKey="e"
-                    stroke={latestExpect !== null && latestExpect >= 0 ? "#10b981" : "#ef4444"}
+                    stroke={sparklineColor}
                     strokeWidth={2}
                     dot={false}
                   />
@@ -922,14 +927,22 @@ function LossCurves({ epochs, folds }: { epochs: TrainingEpoch[]; folds: Trainin
     );
   }
 
-  const chartData = epochs.map((e) => ({
-    label: `F${e.foldNum}E${e.epoch}`,
-    epoch: e.epoch,
-    fold: e.foldNum,
-    trainLoss: e.trainLoss,
-    valLoss: e.valLoss,
-    ...(e.lossBreakdown ?? {}),
-  }));
+  const chartData = epochs.map((e) => {
+    const isDiverged =
+      e.trainLoss !== null && e.valLoss !== null && e.valLoss > e.trainLoss * 1.5;
+    return {
+      label: `F${e.foldNum}E${e.epoch}`,
+      epoch: e.epoch,
+      fold: e.foldNum,
+      trainLoss: e.trainLoss,
+      valLoss: e.valLoss,
+      // valLoss_diverged is only set when val > train * 1.5 (renders as red overlay line)
+      valLoss_diverged: isDiverged ? e.valLoss : null,
+      ...(e.lossBreakdown ?? {}),
+    };
+  });
+
+  const divergeCount = chartData.filter((d) => d.valLoss_diverged !== null).length;
 
   const foldBoundaries = folds
     .filter((f) => f.status === "completed" || f.status === "running")
@@ -943,6 +956,11 @@ function LossCurves({ epochs, folds }: { epochs: TrainingEpoch[]; folds: Trainin
             <BarChart3 className="w-4 h-4 text-cyan-400" />
             Loss Curves
             <Badge variant="outline" className="ml-2 text-[10px]">{epochs.length} epochs</Badge>
+            {divergeCount > 0 && (
+              <Badge className="ml-1 text-[10px] bg-red-500/20 text-red-400 border-red-500/40 border" data-testid="badge-loss-diverged">
+                ⚠ Diverged {divergeCount}ep
+              </Badge>
+            )}
           </CardTitle>
           <Button variant="ghost" size="sm" onClick={() => setShowComponents(!showComponents)} data-testid="button-toggle-components">
             {showComponents ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
@@ -959,6 +977,17 @@ function LossCurves({ epochs, folds }: { epochs: TrainingEpoch[]; folds: Trainin
             <RechartsTooltip contentStyle={{ backgroundColor: "hsl(225 40% 8%)", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 11 }} />
             <Line type="monotone" dataKey="trainLoss" stroke="#06b6d4" strokeWidth={2} dot={false} name="Train Loss" />
             <Line type="monotone" dataKey="valLoss" stroke="#f59e0b" strokeWidth={2} dot={false} name="Val Loss" />
+            {/* Divergence overlay: red line segment where val > train * 1.5 */}
+            <Line
+              type="monotone"
+              dataKey="valLoss_diverged"
+              stroke="#ef4444"
+              strokeWidth={3}
+              dot={false}
+              name="Val (diverged)"
+              strokeDasharray="0"
+              connectNulls={false}
+            />
             {showComponents && (
               <>
                 <Line type="monotone" dataKey="L_ret" stroke="#8b5cf6" strokeWidth={1} dot={false} name="L_ret" strokeDasharray="4 2" />
