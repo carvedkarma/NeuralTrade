@@ -1814,11 +1814,13 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
 
 
 def _run_slice_audit(scores, sides, safe_r, safe_outcomes, val_bars,
-                     thresholds=None, cooldown=4, label="SLICE_AUDIT"):
+                     thresholds=None, cooldown=4, label="SLICE_AUDIT",
+                     mu_R_arr=None, p_side_arr=None):
     """Per-threshold, per-side trade quality audit table.
 
     For each threshold (and for each side LONG/SHORT separately), reports:
-    n_trades, E[R], WR, PF, avg_score, avg_|mu_R| (where available).
+    n_trades, E[R], WR, PF, avg_score, avg_mu_R (if mu_R_arr provided),
+    avg_p_side (if p_side_arr provided).
 
     Args:
         scores: array of V5 scores (same length as bars)
@@ -1830,6 +1832,10 @@ def _run_slice_audit(scores, sides, safe_r, safe_outcomes, val_bars,
                     If None, auto-generates top 5%/10%/20% thresholds.
         cooldown: bars between consecutive trades
         label: log prefix
+        mu_R_arr: optional array of predicted mu_R values (same length as bars).
+                  When provided, avg_mu_R column is reported per slice.
+        p_side_arr: optional array of per-side confidence values (p_long for LONG,
+                    p_short for SHORT). Same length as bars. avg_p_side reported.
 
     Returns:
         list of audit row dicts
@@ -1852,12 +1858,20 @@ def _run_slice_audit(scores, sides, safe_r, safe_outcomes, val_bars,
 
     all_rows = []
 
-    log.info("=" * 130)
+    has_mu_r = mu_R_arr is not None
+    has_p_side = p_side_arr is not None
+    hdr_extra = ""
+    if has_mu_r:
+        hdr_extra += f" {'AvgMuR':>8}"
+    if has_p_side:
+        hdr_extra += f" {'AvgPSide':>9}"
+
+    log.info("=" * 140)
     log.info(f"  [{label}] PER-THRESHOLD / PER-SIDE SLICE AUDIT")
-    log.info("=" * 130)
+    log.info("=" * 140)
     log.info(f"  {'Slice':<12} {'Side':<7} {'N':>6} {'E[R]':>8} {'WR%':>7} {'PF':>6} "
-             f"{'AvgScore':>10} {'TPD':>6}")
-    log.info("-" * 130)
+             f"{'AvgScore':>10} {'TPD':>6}{hdr_extra}")
+    log.info("-" * 140)
 
     for thr_label, thr in thresholds:
         taken_mask = scores >= thr
@@ -1916,6 +1930,17 @@ def _run_slice_audit(scores, sides, safe_r, safe_outcomes, val_bars,
                 'avg_score': avg_score,
                 'tpd': tpd,
             }
+
+            extra_log = ""
+            if has_mu_r:
+                avg_mu_r = float(np.nanmean(mu_R_arr[sel][valid]))
+                row['avg_mu_R'] = round(avg_mu_r, 4)
+                extra_log += f" {avg_mu_r:>+8.4f}"
+            if has_p_side:
+                avg_p_s = float(np.nanmean(p_side_arr[sel][valid]))
+                row['avg_p_side'] = round(avg_p_s, 4)
+                extra_log += f" {avg_p_s:>9.4f}"
+
             all_rows.append(row)
 
             status = ""
@@ -1925,9 +1950,9 @@ def _run_slice_audit(scores, sides, safe_r, safe_outcomes, val_bars,
                 status = " [NEG_EXPECT]"
 
             log.info(f"  {thr_label:<12} {side_label:<7} {n:>6} {expect:>+8.4f} {winrate*100:>6.1f}% "
-                     f"{pf:>6.2f} {avg_score:>10.5f} {tpd:>6.1f}{status}")
+                     f"{pf:>6.2f} {avg_score:>10.5f} {tpd:>6.1f}{extra_log}{status}")
 
-    log.info("=" * 130)
+    log.info("=" * 140)
     return all_rows
 
 
@@ -2086,11 +2111,11 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
 
         side_bias_tag = ""
         if sym_long_pct > 85.0:
-            side_bias_tag = " [SIDE_BIAS:LONG]"
+            side_bias_tag = f" [SIDE_BIAS: {sym_long_pct:.0f}% LONG]"
             log.warning(f"[SIDE_BIAS] {sym_name}: LONG={sym_long_pct:.0f}% — heavy long bias in candidate pool. "
                         f"Increase short_min_fraction or short_oversample strength.")
         elif sym_short_pct > 85.0:
-            side_bias_tag = " [SIDE_BIAS:SHORT]"
+            side_bias_tag = f" [SIDE_BIAS: {sym_short_pct:.0f}% SHORT]"
             log.warning(f"[SIDE_BIAS] {sym_name}: SHORT={sym_short_pct:.0f}% — heavy short bias in candidate pool.")
 
         if sym_is_active:
@@ -2562,18 +2587,22 @@ def run_v5_forward_test(
                  f"raw_mean={float(np.nanmean(mu_R_raw)):+.6f} "
                  f"debiased_mean={float(np.nanmean(arrays['mu_R'])):+.6f}")
 
+    debias_spread_ratio = None
     if config.mu_debias:
         _mu_deb = arrays['mu_R'][np.isfinite(arrays['mu_R'])]
         if len(_mu_deb) > 10:
             _deb_p1 = float(np.percentile(_mu_deb, 1))
             _deb_p99 = float(np.percentile(_mu_deb, 99))
             _deb_spread = _deb_p99 - _deb_p1
+            # Ratio: p99 / |p1| — captures relative spread; >5 means meaningful discrimination
+            _abs_p1 = max(abs(_deb_p1), 1e-8)
+            debias_spread_ratio = round(_deb_p99 / _abs_p1, 2)
             log.info(f"[V5_DEBIAS_SPREAD] post-debias mu_R: p1={_deb_p1:+.6f} p99={_deb_p99:+.6f} "
-                     f"spread={_deb_spread:.6f}")
-            if _deb_spread < 1e-4:
+                     f"spread={_deb_spread:.6f} ratio={debias_spread_ratio:.1f}x")
+            if debias_spread_ratio < 5.0:
                 log.warning(
-                    f"[DEBIAS_COLLAPSED] post-debias mu_R spread={_deb_spread:.8f} is near-zero. "
-                    f"Score discrimination will be negligible — all bars score the same. "
+                    f"[DEBIAS_COLLAPSED] post-debias mu_R p99/|p1| ratio={debias_spread_ratio:.2f}x < 5x. "
+                    f"Score discrimination is severely degraded — all bars score nearly the same. "
                     f"ACTION: reduce mu_debias_alpha (current={config.mu_debias_alpha}) toward 0.0003, "
                     f"or disable mu_debias entirely for this fold.")
 
@@ -4053,20 +4082,40 @@ def run_v5_forward_test(
                 disagree_r = t_r_valid[short_mask_v][short_disagree]
                 side_quality['short_disagree_expect'] = float(np.mean(disagree_r))
 
-        score_decile_rows, score_monotonic = _compute_score_decile_table(t_scores_valid, t_r_valid)
+        score_decile_rows, score_monotonic = _compute_score_decile_table(
+            t_scores_valid, t_r_valid, t_sides=t_sides_valid)
         report['score_decile_table'] = score_decile_rows
         report['score_monotonic'] = score_monotonic
         if score_decile_rows:
             log.info("[V5_FWD] Score-decile monotonicity: %s", "PASS" if score_monotonic else "FAIL")
             for row in score_decile_rows:
-                log.info("[V5_FWD]   D%02d score=[%.4f,%.4f) n=%d avg_R=%+.4f WR=%.1f%%",
-                         row['decile'], row['score_lo'], row['score_hi'],
+                label = row.get('label', f"D{row['decile']:02d}")
+                log.info("[V5_FWD]   %s score=[%.4f,%.4f) n=%d avg_R=%+.4f WR=%.1f%%",
+                         label, row['score_lo'], row['score_hi'],
                          row['n_trades'], row['avg_r'], row['win_rate'] * 100)
     else:
         report['score_decile_table'] = []
         report['score_monotonic'] = None
 
     report['side_quality'] = side_quality
+
+    if len(taken_valid) > 0 and arrays is not None:
+        _mu_r_full = arrays['mu_R']
+        _p_long_full = arrays['p_long']
+        _p_short_full = arrays['p_short']
+        _p_side_full = np.where(sides == 1, _p_long_full, _p_short_full)
+        _slice_audit_rows = _run_slice_audit(
+            scores=scores,
+            sides=sides,
+            safe_r=safe_r,
+            safe_outcomes=safe_outcomes,
+            val_bars=test_bars,
+            cooldown=config.cooldown if hasattr(config, 'cooldown') else 4,
+            label="FWD_SLICE_AUDIT",
+            mu_R_arr=_mu_r_full,
+            p_side_arr=_p_side_full,
+        )
+        report['slice_audit'] = _slice_audit_rows
 
     report['ddt_diagnostics'] = ddt.diagnostics() if ddt is not None else None
     report['ddt_blocked'] = ddt_blocked if ddt is not None else 0
@@ -4235,6 +4284,8 @@ def run_v5_forward_test(
         'stage_distributions': {k: dict(v) for k, v in stage_distributions.items()},
         'gate_blocks': dict(gate_blocks),
     }
+
+    report['debias_spread_ratio'] = debias_spread_ratio
 
     _print_forward_report(report)
     return report
@@ -4607,7 +4658,7 @@ def run_v5_walk_forward(
     quality_gate_cfg=None, tpd_ctrl_cfg=None,
     candidate_config=None, risk_controls=None,
     hold_target=0.30, mfe_min=0.05,
-    w_ret=1.0, w_mfe=0.25, w_mae=0.25, w_action=2.0,
+    w_ret=1.0, w_mfe=0.25, w_mae=0.25, w_action=2.5,
     w_barrier=0.25, w_regime=0.1,
     sigma_spread_reg=0.0,
     loss_warmup_epochs=0, loss_warmup_ret_mult=3.0, loss_warmup_action_mult=0.5,

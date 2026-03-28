@@ -320,6 +320,8 @@ def run_single_config(
             recency_weight=True,
             # Standard settings — adaptive_sizing/conviction_sizing/warm_start intentionally
             # omitted (use defaults=False) to match the known-working training command exactly.
+            # CRITICAL FIX: w_action=2.5 (was 2.0 default, matched train_v5_model default bug fix)
+            w_action=2.5,
             mu_debias=True,
             per_symbol_cooldown=True,
             cooldown=4,
