@@ -1805,6 +1805,23 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     # expect bin (negative × negative = positive). Now callers have both values.
     best_expect = best_row['expect'] if best_row else 0.0
 
+    if best_row is not None and best_threshold > 0.0:
+        _slice_thresholds = [(best_label, best_threshold)]
+        for _alt_label, _alt_thr_pct in [("top5%", 95), ("top10%", 90), ("top20%", 80)]:
+            _fs = scores_work[np.isfinite(scores_work)]
+            if len(_fs) > 0:
+                _slice_thresholds.append((_alt_label, float(np.percentile(_fs, _alt_thr_pct))))
+        _run_slice_audit(
+            scores=np.array(scores),
+            sides=sides,
+            safe_r=safe_r,
+            safe_outcomes=safe_outcomes,
+            val_bars=val_bars,
+            thresholds=_slice_thresholds,
+            cooldown=COOLDOWN,
+            label=f"SWEEP_BEST_{best_label.upper().replace('%','PCT')}",
+        )
+
     # COMPAT: return_full=False gives the legacy 4-tuple expected by tests/callers
     # written before the expanded return was added. Internal callers that need all
     # metrics must pass return_full=True explicitly.
@@ -2148,6 +2165,24 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     log.info(f"  Active symbols: {len(active)}/{len(unique_sym_ids)} | "
              f"NO EDGE: {no_edge_symbols if no_edge_symbols else 'none'}")
     log.info("=" * 120)
+
+    if per_sym_thresholds:
+        _sym_audit_thresholds = []
+        for _sid, _thr in per_sym_thresholds.items():
+            if np.isfinite(_thr):
+                _sym_name = symbols_list[_sid] if symbols_list and _sid < len(symbols_list) else f"sym_{_sid}"
+                _sym_audit_thresholds.append((f"{_sym_name}_best", _thr))
+        if _sym_audit_thresholds:
+            _run_slice_audit(
+                scores=scores_work,
+                sides=sides,
+                safe_r=safe_r,
+                safe_outcomes=safe_outcomes,
+                val_bars=val_bars,
+                thresholds=_sym_audit_thresholds,
+                cooldown=COOLDOWN,
+                label="PER_SYM_BEST_THR_AUDIT",
+            )
 
     return per_sym_thresholds, no_edge_symbols
 
@@ -4000,6 +4035,7 @@ def run_v5_forward_test(
             'stage_distributions': {k: dict(v) for k, v in stage_distributions_empty.items()},
             'gate_blocks': dict(gate_blocks),
         }
+        report['debias_spread_ratio'] = debias_spread_ratio
         _print_forward_report(report)
         return report
 
@@ -4116,6 +4152,16 @@ def run_v5_forward_test(
             p_side_arr=_p_side_full,
         )
         report['slice_audit'] = _slice_audit_rows
+
+        _sc_finite = scores[np.isfinite(scores)]
+        if len(_sc_finite) > 5:
+            report['score_spread'] = {
+                'p1':  round(float(np.percentile(_sc_finite, 1)), 6),
+                'p25': round(float(np.percentile(_sc_finite, 25)), 6),
+                'p50': round(float(np.percentile(_sc_finite, 50)), 6),
+                'p75': round(float(np.percentile(_sc_finite, 75)), 6),
+                'p99': round(float(np.percentile(_sc_finite, 99)), 6),
+            }
 
     report['ddt_diagnostics'] = ddt.diagnostics() if ddt is not None else None
     report['ddt_blocked'] = ddt_blocked if ddt is not None else 0
