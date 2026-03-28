@@ -2178,7 +2178,7 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
 
     if per_sym_thresholds:
         for _sid, _thr in per_sym_thresholds.items():
-            if not np.isfinite(_thr):
+            if isinstance(_thr, dict) or _thr is None or not math.isfinite(float(_thr)):
                 continue
             _sym_name = symbols_list[_sid] if symbols_list and _sid < len(symbols_list) else f"sym_{_sid}"
             _sym_mask = symbol_ids == _sid
@@ -4363,10 +4363,17 @@ def run_v5_forward_test(
         elif sym_id_to_name:
             sym_name_map = sym_id_to_name
         if config.per_symbol_thresholds:
+            def _serialize_thr(thr):
+                if isinstance(thr, dict):
+                    return {
+                        k: (round(float(v), 6) if isinstance(v, (int, float)) and math.isfinite(float(v)) else None)
+                        for k, v in thr.items()
+                    }
+                if thr is None or not isinstance(thr, (int, float)):
+                    return None
+                return round(float(thr), 6) if math.isfinite(float(thr)) else None
             report['per_symbol_thresholds'] = {
-                sym_name_map.get(int(sid), f"sym_{sid}"): (
-                    round(float(thr), 6) if np.isfinite(thr) else None
-                )
+                sym_name_map.get(int(sid), f"sym_{sid}"): _serialize_thr(thr)
                 for sid, thr in config.per_symbol_thresholds.items()
             }
 
@@ -7130,7 +7137,7 @@ def train_v5_model(
                             st = sym_thr_v.get('short', float('inf'))
                             log.info(f"  {sym_name_k}: LONG={lt:.4f} SHORT={st:.4f}")
                         else:
-                            thr_str = f"{sym_thr_v:.4f}" if np.isfinite(sym_thr_v) else "inf (NO EDGE)"
+                            thr_str = (f"{sym_thr_v:.4f}" if isinstance(sym_thr_v, (int, float)) and math.isfinite(float(sym_thr_v)) else "inf (NO EDGE)")
                             log.info(f"  {sym_name_k}: threshold={thr_str}")
                     # Summary diagnostics for loaded thresholds
                     _all_vals_flat = []
