@@ -258,9 +258,11 @@ def run_single_config(
     epochs: int,
     batch_size: int,
     max_folds: int,
+    max_trades_per_day: Optional[int] = None,
+    target_tpd: float = 6.5,
 ) -> SweepResult:
     """Run one config through real V5 walk-forward and return metrics."""
-    from train.v5_train import run_v5_walk_forward
+    from train.v5_train import run_v5_walk_forward, V5TPDControllerConfig
 
     log.info("=" * 70)
     log.info("[SWEEP] Running: %s", cfg.label)
@@ -270,10 +272,13 @@ def run_single_config(
              cfg.min_threshold)
     log.info("[SWEEP]   short_oversample=%s  per_sym_thr=%s  per_side_thr=%s  trailing_sl=%s",
              cfg.short_oversample, cfg.per_symbol_threshold, cfg.per_side_threshold, cfg.trailing_sl)
+    log.info("[SWEEP]   target_tpd=%.1f/sym/day  max_trades_per_day=%s",
+             target_tpd, str(max_trades_per_day) if max_trades_per_day else "uncapped")
     log.info("=" * 70)
 
     t0 = time.time()
     try:
+        tpd_cfg = V5TPDControllerConfig(target_tpd=target_tpd)
         wf_result = run_v5_walk_forward(
             data_dir=data_dir,
             device=device,
@@ -325,6 +330,10 @@ def run_single_config(
             # Limit folds for speed
             max_folds=max_folds,
             model_version="v5",
+            # Live-trading constraints — apply same cap as live system so results are representative
+            max_trades_per_day=max_trades_per_day,
+            # Custom tpd target (builds V5TPDControllerConfig with the requested target)
+            tpd_ctrl_cfg=tpd_cfg,
         )
         elapsed = time.time() - t0
         result = _extract_results(wf_result, cfg.label, cfg)
@@ -424,12 +433,18 @@ def main():
     parser.add_argument("--symbols", nargs="+",
                         default=["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSDT"],
                         help="Symbols to use (fewer = faster)")
-    parser.add_argument("--epochs", type=int, default=60,
-                        help="Epochs per fold (default: 60)")
+    parser.add_argument("--epochs", type=int, default=100,
+                        help="Epochs per fold (default: 100 — minimum needed for action head to escape mean-prediction plateau)")
     parser.add_argument("--batch-size", type=int, default=512,
                         help="Batch size (default: 512)")
     parser.add_argument("--folds", type=int, default=3,
                         help="Max folds per config (default: 3, use 2 for faster sweeps)")
+    parser.add_argument("--max-tpd", type=int, default=None,
+                        help="Max trades per day cap (default: None = uncapped). "
+                             "Set to 8 to match live trading constraints so sweep results are representative.")
+    parser.add_argument("--target-tpd", type=float, default=6.5,
+                        help="Target trades per symbol per day for threshold calibration (default: 6.5). "
+                             "To target N total trades/day across S symbols, pass N/S here.")
     parser.add_argument("--fast", action="store_true",
                         help="Fast mode: only 5 configs instead of full 16-config grid")
     parser.add_argument("--baseline-only", action="store_true",
@@ -545,6 +560,8 @@ def main():
             epochs=args.epochs,
             batch_size=args.batch_size,
             max_folds=args.folds,
+            max_trades_per_day=args.max_tpd,
+            target_tpd=args.target_tpd,
         )
         all_results.append(result)
 
@@ -557,6 +574,8 @@ def main():
             "symbols": args.symbols,
             "epochs": args.epochs,
             "folds": args.folds,
+            "max_tpd": args.max_tpd,
+            "target_tpd": args.target_tpd,
             "results": [r.to_dict() for r in all_results],
         }
         try:
@@ -580,6 +599,8 @@ def main():
         "symbols": args.symbols,
         "epochs": args.epochs,
         "folds": args.folds,
+        "max_tpd": args.max_tpd,
+        "target_tpd": args.target_tpd,
         "results": [r.to_dict() for r in all_results],
     }
     with open(output_path, "w") as f:

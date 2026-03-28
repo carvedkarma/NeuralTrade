@@ -685,7 +685,7 @@ class V6SequenceDataset(Dataset):
 
 
 def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
-                    w_action=0.5, w_barrier=0.25, w_regime=0.1,
+                    w_action=2.5, w_barrier=0.25, w_regime=0.1,
                     barrier_mode='fixed', action_weights=None, epoch=0,
                     sample_weights=None, mae_asym_weight=1.0,
                     warmup_epochs=0, warmup_ret_mult=1.0, warmup_action_mult=1.0,

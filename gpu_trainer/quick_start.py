@@ -5194,8 +5194,8 @@ Examples:
                         help="v5 weight for MFE Huber loss (default: 1.0)")
     parser.add_argument("--v5-w-mae", type=float, default=1.0,
                         help="v5 weight for MAE Huber loss (default: 1.0)")
-    parser.add_argument("--v5-w-action", type=float, default=0.5,
-                        help="v5 weight for action CE loss (default: 0.5)")
+    parser.add_argument("--v5-w-action", type=float, default=2.5,
+                        help="v5 weight for action CE loss (default: 2.5 — raised from 0.5 to properly train direction head)")
     parser.add_argument("--v5-w-barrier", type=float, default=0.25,
                         help="v5 weight for barrier CE loss (default: 0.25)")
     parser.add_argument("--v5-w-regime", type=float, default=0.1,
