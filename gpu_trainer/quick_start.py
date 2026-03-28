@@ -2818,6 +2818,7 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
     log.info(f"Scaled feature coverage: {len(feature_columns)} features | NaN/Inf={nan_count} | zeros={zero_count}")
     log.info("=" * 70)
 
+    enter_threshold = 0.55
     if is_v5 and p_long_v5 is not None and p_short_v5 is not None:
         # V5 gate: signal fires when p_side > p_hold AND non-HOLD class wins
         p_side_v5 = p_long_v5 if side == "LONG" else p_short_v5
@@ -2825,7 +2826,6 @@ def make_enter_prediction(model, engineer, feature_columns, data_path, device):
         v5_threshold = 0.40   # slightly above random (0.333) to avoid noise signals
         should_trade = p_side_v5 >= v5_threshold and p_enter >= 0.40
     else:
-        enter_threshold = 0.55
         should_trade = p_enter >= enter_threshold and trend_aligned and slope_ok and range_ok
 
     if should_trade:

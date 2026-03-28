@@ -2167,21 +2167,22 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
     log.info("=" * 120)
 
     if per_sym_thresholds:
-        _sym_audit_thresholds = []
         for _sid, _thr in per_sym_thresholds.items():
-            if np.isfinite(_thr):
-                _sym_name = symbols_list[_sid] if symbols_list and _sid < len(symbols_list) else f"sym_{_sid}"
-                _sym_audit_thresholds.append((f"{_sym_name}_best", _thr))
-        if _sym_audit_thresholds:
+            if not np.isfinite(_thr):
+                continue
+            _sym_name = symbols_list[_sid] if symbols_list and _sid < len(symbols_list) else f"sym_{_sid}"
+            _sym_mask = symbol_ids == _sid
+            if int(np.sum(_sym_mask)) < 5:
+                continue
             _run_slice_audit(
-                scores=scores_work,
-                sides=sides,
-                safe_r=safe_r,
-                safe_outcomes=safe_outcomes,
-                val_bars=val_bars,
-                thresholds=_sym_audit_thresholds,
+                scores=scores_work[_sym_mask],
+                sides=sides[_sym_mask],
+                safe_r=safe_r[_sym_mask],
+                safe_outcomes=safe_outcomes[_sym_mask],
+                val_bars=max(int(np.sum(_sym_mask)), 1),
+                thresholds=[("best", _thr)],
                 cooldown=COOLDOWN,
-                label="PER_SYM_BEST_THR_AUDIT",
+                label=f"PSYM_{_sym_name}",
             )
 
     return per_sym_thresholds, no_edge_symbols
@@ -4332,6 +4333,19 @@ def run_v5_forward_test(
     }
 
     report['debias_spread_ratio'] = debias_spread_ratio
+
+    if config.per_symbol_thresholds:
+        sym_name_map = {}
+        if config.symbols_list:
+            sym_name_map = {i: s for i, s in enumerate(config.symbols_list)}
+        elif sym_id_to_name:
+            sym_name_map = sym_id_to_name
+        report['per_symbol_thresholds'] = {
+            sym_name_map.get(int(sid), f"sym_{sid}"): (
+                round(float(thr), 6) if np.isfinite(thr) else None
+            )
+            for sid, thr in config.per_symbol_thresholds.items()
+        }
 
     _print_forward_report(report)
     return report

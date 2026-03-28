@@ -156,6 +156,8 @@ class SweepResult:
     elapsed_sec: float = 0.0
     error: Optional[str] = None
     fold_details: list = field(default_factory=list)
+    avg_debias_spread_ratio: Optional[float] = None
+    n_collapsed_debias: int = 0
 
     def to_dict(self):
         return {
@@ -238,10 +240,24 @@ def _extract_results(wf_result, label: str, cfg: SweepConfig) -> SweepResult:
             "win_rate": round(float(f.get("win_rate", 0.0)), 4),
             "expectancy_r": round(float(f.get("expectancy_r", 0.0)), 4),
             "sharpe": round(float(f.get("sharpe", 0.0)), 4),
+            "debias_spread_ratio": f.get("debias_spread_ratio"),
+            "score_monotonic": f.get("score_monotonic"),
         }
         for i, f in enumerate(folds)
         if isinstance(f, dict)
     ]
+
+    debias_ratios = [
+        f["debias_spread_ratio"]
+        for f in result.fold_details
+        if f.get("debias_spread_ratio") is not None
+    ]
+    result.avg_debias_spread_ratio = round(
+        sum(debias_ratios) / len(debias_ratios), 2
+    ) if debias_ratios else None
+    result.n_collapsed_debias = sum(
+        1 for r in debias_ratios if r < 5.0
+    )
 
     return result
 
@@ -365,16 +381,21 @@ def print_results_table(results: list, highlight_top: int = 3):
 
     valid.sort(key=lambda r: r.expectancy, reverse=True)
 
-    bar = "=" * 110
+    bar = "=" * 130
     print(f"\n{bar}")
     print("V5 PARAMETER SWEEP RESULTS — Ranked by E[R]/trade")
     print(bar)
-    header = f"{'Rank':<5} {'Label':<40} {'E[R]/trade':>10} {'WR%':>7} {'TotalR':>8} {'Trades':>7} {'Sharpe':>7} {'Folds':>6} {'Time':>8}"
+    header = (
+        f"{'Rank':<5} {'Label':<40} {'E[R]/trade':>10} {'WR%':>7} {'TotalR':>8} "
+        f"{'Trades':>7} {'Sharpe':>7} {'Folds':>6} {'DebiasRatio':>12} {'Collapsed':>10} {'Time':>8}"
+    )
     print(header)
-    print("-" * 110)
+    print("-" * 130)
 
     for rank, r in enumerate(valid, 1):
         prefix = ">>>" if rank <= highlight_top else "   "
+        debias_str = f"{r.avg_debias_spread_ratio:.1f}x" if r.avg_debias_spread_ratio is not None else "N/A"
+        collapsed_str = f"{r.n_collapsed_debias} folds" if r.n_collapsed_debias > 0 else "none"
         row = (
             f"{prefix}{rank:<3} "
             f"{r.label:<40} "
@@ -384,6 +405,8 @@ def print_results_table(results: list, highlight_top: int = 3):
             f"{r.n_trades:>7} "
             f"{r.sharpe:>7.2f} "
             f"{r.n_live_folds}/{r.n_folds:>2} "
+            f"{debias_str:>12} "
+            f"{collapsed_str:>10} "
             f"{r.elapsed_sec / 60:>7.1f}m"
         )
         print(row)
