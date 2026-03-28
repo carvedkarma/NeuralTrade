@@ -284,10 +284,10 @@ def run_single_config(
 
     log.info("=" * 70)
     log.info("[SWEEP] Running: %s", cfg.label)
-    log.info("[SWEEP]   tp=%.2f  sl=%.2f  adx_min=%.1f  ema_soft=%s  min_thr=%.3f",
+    log.info("[SWEEP]   tp=%.2f  sl=%.2f  adx_min=%.1f  ema_soft=%s  min_thr=%s",
              cfg.tp_mult, cfg.sl_mult, cfg.adx_min,
              f"{cfg.ema200_soft_mult:.2f}" if cfg.ema200_soft_mult is not None else "OFF",
-             cfg.min_threshold)
+             f"{cfg.min_threshold:.3f}" if cfg.min_threshold is not None else "None(per-sym)")
     log.info("[SWEEP]   short_oversample=%s  per_sym_thr=%s  per_side_thr=%s  trailing_sl=%s",
              cfg.short_oversample, cfg.per_symbol_threshold, cfg.per_side_threshold, cfg.trailing_sl)
     log.info("[SWEEP]   target_tpd=%.1f/sym/day  max_trades_per_day=%s",
@@ -434,12 +434,17 @@ def print_results_table(results: list, highlight_top: int = 3):
             if best.config.ema200_soft_mult is not None
             else ""
         )
+        min_thr_arg = (
+            f"--v5-min-threshold {best.config.min_threshold}"
+            if best.config.min_threshold is not None
+            else ""
+        )
         print(f"""
 python quick_start.py --train-v5 --v5-walk-forward \\
     --tp-mult {best.config.tp_mult} --sl-mult {best.config.sl_mult} \\
     --v5-adx-gate --v5-adx-min {best.config.adx_min} \\
     {ema_arg} \\
-    --v5-min-threshold {best.config.min_threshold} \\
+    {min_thr_arg} \\
     --v5-trailing-sl --v5-trail-activation {best.config.trail_activation} --v5-trail-distance {best.config.trail_distance} \\
     --v5-corr-thresh {best.config.corr_thresh} \\
     --v5-short-oversample --v5-short-min-fraction {best.config.short_min_fraction} \\
