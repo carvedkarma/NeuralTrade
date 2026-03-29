@@ -5228,12 +5228,15 @@ Examples:
 
     parser.add_argument("--train-v5", action="store_true", default=False,
                         help="v5.0: Train V5 Forecaster (continuous market predictions + decision layer)")
-    parser.add_argument("--v5-w-ret", type=float, default=3.0,
-                        help="v5 weight for ret_h NLL loss (default: 3.0)")
-    parser.add_argument("--v5-w-mfe", type=float, default=1.0,
-                        help="v5 weight for MFE Huber loss (default: 1.0)")
-    parser.add_argument("--v5-w-mae", type=float, default=1.0,
-                        help="v5 weight for MAE Huber loss (default: 1.0)")
+    parser.add_argument("--v5-w-ret", type=float, default=6.0,
+                        help="v5 weight for ret_h NLL loss (default: 6.0 — doubled from 3.0 to push return "
+                             "signal from 2.4%% to ~67%% of gradient budget; Task #58)")
+    parser.add_argument("--v5-w-mfe", type=float, default=0.15,
+                        help="v5 weight for MFE Huber loss (default: 0.15 — reduced from 1.0 so MFE "
+                             "is auxiliary; Task #58)")
+    parser.add_argument("--v5-w-mae", type=float, default=0.15,
+                        help="v5 weight for MAE Huber loss (default: 0.15 — reduced from 1.0 so MAE "
+                             "is auxiliary; Task #58)")
     parser.add_argument("--v5-w-action", type=float, default=2.5,
                         help="v5 weight for action CE loss (default: 2.5 — raised from 0.5 to properly train direction head)")
     parser.add_argument("--v5-w-barrier", type=float, default=0.25,
@@ -5241,7 +5244,22 @@ Examples:
     parser.add_argument("--v5-w-regime", type=float, default=0.1,
                         help="v5 weight for regime CE loss (default: 0.1)")
     parser.add_argument("--v5-sigma-spread-reg", type=float, default=0.1,
-                        help="v5 penalty on sigma>1.5 to prevent NLL collapse (default: 0.1, set 0 to disable)")
+                        help="v5 penalty on sigma>threshold to prevent NLL collapse (default: 0.1, set 0 to disable)")
+    parser.add_argument("--v5-sigma-reg-threshold", type=float, default=0.40,
+                        help="v5 sigma threshold above which penalty fires (default: 0.40; old hardcoded 1.5 "
+                             "never fired at typical sigma=0.607 — Task #58)")
+    parser.add_argument("--v5-phase1-epochs", type=int, default=50,
+                        help="v5 two-phase curriculum: epochs in Phase 1 (return-only, no MFE/MAE/action "
+                             "gradient); default: 50. Set 0 to disable Phase 1. Task #58")
+    parser.add_argument("--v5-atr-normalize-risk-heads", action="store_true", default=True,
+                        help="v5 normalize MFE/MAE targets by ATR14 before loss (default: True). "
+                             "Activates when atr14 is present in training batches. Task #58")
+    parser.add_argument("--v5-no-atr-normalize-risk-heads", dest="v5_atr_normalize_risk_heads",
+                        action="store_false",
+                        help="Disable ATR normalization for MFE/MAE heads. Task #58")
+    parser.add_argument("--v5-dynamic-action-labels", action="store_true", default=False,
+                        help="v5 use mu_R>threshold to dynamically flip HOLD→LONG/SHORT action labels; "
+                             "default: False (use dataset labels as-is). Task #58")
     parser.add_argument("--v5-loss-warmup-epochs", type=int, default=0,
                         help="v5 loss warmup: number of epochs with scaled weights (default: 0=disabled)")
     parser.add_argument("--v5-loss-warmup-ret-mult", type=float, default=1.0,
@@ -6225,6 +6243,10 @@ Examples:
                     w_mae=args.v5_w_mae, w_action=args.v5_w_action,
                     w_barrier=args.v5_w_barrier, w_regime=args.v5_w_regime,
                     sigma_spread_reg=args.v5_sigma_spread_reg,
+                    sigma_reg_threshold=args.v5_sigma_reg_threshold,
+                    phase1_epochs=args.v5_phase1_epochs,
+                    atr_normalize_risk_heads=args.v5_atr_normalize_risk_heads,
+                    dynamic_action_labels=args.v5_dynamic_action_labels,
                     loss_warmup_epochs=args.v5_loss_warmup_epochs,
                     loss_warmup_ret_mult=args.v5_loss_warmup_ret_mult,
                     loss_warmup_action_mult=args.v5_loss_warmup_action_mult,
@@ -6420,6 +6442,10 @@ Examples:
                 w_barrier=args.v5_w_barrier,
                 w_regime=args.v5_w_regime,
                 sigma_spread_reg=args.v5_sigma_spread_reg,
+                sigma_reg_threshold=args.v5_sigma_reg_threshold,
+                phase1_epochs=args.v5_phase1_epochs,
+                atr_normalize_risk_heads=args.v5_atr_normalize_risk_heads,
+                dynamic_action_labels=args.v5_dynamic_action_labels,
                 loss_warmup_epochs=args.v5_loss_warmup_epochs,
                 loss_warmup_ret_mult=args.v5_loss_warmup_ret_mult,
                 loss_warmup_action_mult=args.v5_loss_warmup_action_mult,

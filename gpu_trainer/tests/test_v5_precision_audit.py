@@ -518,5 +518,159 @@ class TestProductionReadinessAuditFixes:
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Task #58 tests: loss rebalance + sigma threshold + two-phase curriculum
+# ─────────────────────────────────────────────────────────────────────────────
+
+if HAS_TORCH:
+    from train.v5_train import compute_v5_loss
+
+
+def _make_dummy_v5_batch(n=32, seed=7, device='cpu'):
+    """Create a minimal batch dict that compute_v5_loss accepts."""
+    import torch
+    rng = torch.Generator()
+    rng.manual_seed(seed)
+    feat_n = 95
+    batch = {
+        'features': torch.randn(n, feat_n, generator=rng),
+        'ret_h': torch.randn(n, generator=rng) * 0.02,
+        'mfe': torch.abs(torch.randn(n, generator=rng)) * 0.01,
+        'mae': torch.abs(torch.randn(n, generator=rng)) * 0.01,
+        'action': torch.randint(0, 3, (n,), generator=rng),
+        'valid': torch.ones(n, dtype=torch.bool),
+    }
+    return batch
+
+
+def _make_dummy_v5_outputs(n=32, sigma_val=0.607, seed=7, device='cpu'):
+    """Create model output dict with a fixed sigma value."""
+    import torch
+    rng = torch.Generator()
+    rng.manual_seed(seed)
+    outputs = {
+        'ret_mu': torch.randn(n, 1, generator=rng) * 0.01,
+        'ret_log_sigma': torch.full((n, 1), float(torch.tensor(sigma_val).log())),
+        'ret_sigma': torch.full((n, 1), sigma_val),
+        'mfe': torch.abs(torch.randn(n, 1, generator=rng)) * 0.01,
+        'mae': torch.abs(torch.randn(n, 1, generator=rng)) * 0.01,
+        'action_logits': torch.randn(n, 3, generator=rng),
+    }
+    return outputs
+
+
+@pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
+def test_sigma_penalty_fires_at_0_607():
+    """Task #58 T1: sigma=0.607 should trigger penalty when sigma_reg_threshold=0.40.
+
+    At the old threshold of 1.5, sigma=0.607 never triggered the penalty,
+    meaning the model was free to use high uncertainty to collapse mu_R gradients.
+    With threshold=0.40, penalty must be positive (> 1e-6).
+    """
+    import torch
+    batch = _make_dummy_v5_batch()
+    outputs = _make_dummy_v5_outputs(sigma_val=0.607)
+
+    # threshold=0.40 — should fire
+    loss_strict, ld_strict = compute_v5_loss(
+        outputs, batch,
+        w_ret=6.0, w_mfe=0.15, w_mae=0.15, w_action=2.5,
+        sigma_spread_reg=0.1, sigma_reg_threshold=0.40,
+        phase1_mode=False,
+    )
+    # threshold=1.5 (old default) — should NOT fire for sigma=0.607
+    loss_old, ld_old = compute_v5_loss(
+        outputs, batch,
+        w_ret=6.0, w_mfe=0.15, w_mae=0.15, w_action=2.5,
+        sigma_spread_reg=0.1, sigma_reg_threshold=1.5,
+        phase1_mode=False,
+    )
+    sigma_pen_strict = ld_strict.get('L_sigma_reg', 0.0)
+    sigma_pen_old = ld_old.get('L_sigma_reg', 0.0)
+
+    assert sigma_pen_strict > 1e-6, (
+        f"sigma penalty must fire at threshold=0.40 with sigma=0.607 "
+        f"(got L_sigma_reg={sigma_pen_strict:.6f})"
+    )
+    assert sigma_pen_old < 1e-6, (
+        f"sigma penalty must NOT fire at threshold=1.5 with sigma=0.607 "
+        f"(got L_sigma_reg={sigma_pen_old:.6f})"
+    )
+
+
+@pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
+def test_loss_budget_L_ret_pct_above_50_percent():
+    """Task #58 T2: With w_ret=6.0 / w_mfe=0.15 / w_mae=0.15, L_ret must be >50% of gradient.
+
+    Previous weights (w_ret=3, w_mfe=1, w_mae=1) drove L_ret at ~2.4%.
+    New weights must drive L_ret to ≥50% so the trunk learns return signal.
+    """
+    import torch
+    batch = _make_dummy_v5_batch()
+    outputs = _make_dummy_v5_outputs(sigma_val=0.40)
+
+    _, ld = compute_v5_loss(
+        outputs, batch,
+        w_ret=6.0, w_mfe=0.15, w_mae=0.15, w_action=2.5,
+        sigma_spread_reg=0.0, sigma_reg_threshold=0.40,
+        phase1_mode=False,
+    )
+    # Reconstruct gradient budget from loss components
+    L_ret = ld.get('L_ret', 0.0) * 6.0
+    L_mfe = ld.get('L_mfe', 0.0) * 0.15
+    L_mae = ld.get('L_mae', 0.0) * 0.15
+    L_act = ld.get('L_action', 0.0) * 2.5
+    total = L_ret + L_mfe + L_mae + L_act + 1e-9
+    ret_pct = L_ret / total
+
+    assert ret_pct > 0.50, (
+        f"L_ret must comprise >50% of gradient budget with new weights "
+        f"(got {ret_pct*100:.1f}% | L_ret={L_ret:.4f} L_mfe={L_mfe:.4f} "
+        f"L_mae={L_mae:.4f} L_act={L_act:.4f})"
+    )
+
+
+@pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
+def test_phase1_mode_skips_mfe_mae_action():
+    """Task #58 T3: phase1_mode=True should zero out MFE, MAE, and action losses.
+
+    Phase 1 is a curriculum phase where only the return head is trained.
+    Gradient from MFE/MAE/action during Phase 1 pushes the trunk toward
+    risk-head local minima before mu_R has a meaningful gradient signal.
+    Verified by comparing ld['L_mfe'], ld['L_mae'], ld['L_action'] to zero.
+    """
+    import torch
+    batch = _make_dummy_v5_batch()
+    outputs = _make_dummy_v5_outputs(sigma_val=0.40)
+
+    _, ld_p1 = compute_v5_loss(
+        outputs, batch,
+        w_ret=6.0, w_mfe=0.15, w_mae=0.15, w_action=2.5,
+        sigma_spread_reg=0.0, sigma_reg_threshold=0.40,
+        phase1_mode=True,
+    )
+    _, ld_p2 = compute_v5_loss(
+        outputs, batch,
+        w_ret=6.0, w_mfe=0.15, w_mae=0.15, w_action=2.5,
+        sigma_spread_reg=0.0, sigma_reg_threshold=0.40,
+        phase1_mode=False,
+    )
+
+    # Phase 1: MFE, MAE, action must be absent or zero
+    for key in ('L_mfe', 'L_mae', 'L_action'):
+        p1_val = ld_p1.get(key, 0.0)
+        p2_val = ld_p2.get(key, 0.0)
+        assert abs(p1_val) < 1e-8, (
+            f"phase1_mode=True must zero out {key} "
+            f"(got {p1_val:.6f}; Phase2 has {p2_val:.4f})"
+        )
+
+    # Phase 2: at least action and return must be non-trivial
+    assert ld_p2.get('L_ret', 0.0) > 1e-6 or ld_p2.get('L_action', 0.0) > 1e-6, (
+        "Phase 2 must have non-zero L_ret or L_action "
+        f"(L_ret={ld_p2.get('L_ret'):.4f} L_action={ld_p2.get('L_action'):.4f})"
+    )
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

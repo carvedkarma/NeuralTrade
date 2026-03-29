@@ -686,13 +686,16 @@ class V6SequenceDataset(Dataset):
         return item
 
 
-def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
+def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
                     w_action=2.5, w_barrier=0.25, w_regime=0.1,
                     barrier_mode='fixed', action_weights=None, epoch=0,
                     sample_weights=None, mae_asym_weight=1.0,
                     warmup_epochs=0, warmup_ret_mult=1.0, warmup_action_mult=1.0,
                     sigma_spread_reg=0.0, side_bal_weight=0.05,
-                    action_entropy_weight=0.0):
+                    action_entropy_weight=0.0,
+                    sigma_reg_threshold=0.40,
+                    phase1_mode=False,
+                    atr_normalize_risk_heads=True):
     """Compute v5 composite loss with class-balanced action CE.
 
     Uses clamped Gaussian NLL to prevent log(sigma) term from dominating.
@@ -700,7 +703,16 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
     warmup_epochs / warmup_ret_mult / warmup_action_mult params. Pass
     warmup_epochs=0 (the default) to disable the warmup entirely.
 
-    sigma_spread_reg: penalty weight on sigma > 1.5 to prevent NLL collapse.
+    sigma_spread_reg: penalty weight on sigma > sigma_reg_threshold to prevent NLL collapse.
+    sigma_reg_threshold: threshold above which sigma is penalized (default 0.40, was 1.5).
+        At sigma=0.607 (the NLL-collapse attractor), the old threshold 1.5 never fired.
+        The new threshold 0.40 forces sigma below 0.40, compelling the model to learn mu_R.
+    phase1_mode: when True, only compute L_ret + L_sigma_reg (return pretraining phase).
+        Skip MFE, MAE, and action heads entirely. Forces trunk to learn return-predictive features
+        before action head noise can corrupt the representation.
+    atr_normalize_risk_heads: when True and 'atr14' is in batch, normalize mfe_R and mae_R
+        by the per-bar ATR14 value so L_mfe/L_mae scale to 0.2-0.5 instead of 2-3.
+        Falls back gracefully (no-op) when 'atr14' is not in the batch.
 
     If sample_weights is provided, computes per-sample losses and applies
     inverse-frequency weighting: loss = (per_sample_loss * weights).sum() / weights.sum()
@@ -730,15 +742,27 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
     else:
         L_ret = nll.mean()
     # Sigma spread regularization: penalize overconfident uncertainty inflation.
-    # If sigma > 1.5 R-units the model is taking the easy shortcut of claiming
-    # high uncertainty rather than learning accurate mu_R predictions.
+    # sigma_reg_threshold default changed 1.5 → 0.40 (Task #58 Layer 3).
+    # At the old threshold 1.5, the NLL-escape attractor sigma=0.607 never fired.
+    # At 0.40, sigma is pushed to 0.30-0.40 range → model must learn mu_R to minimize NLL.
     if sigma_spread_reg > 0.0:
-        L_sigma_reg = sigma_spread_reg * F.relu(sigma - 1.5).mean()
+        L_sigma_reg = sigma_spread_reg * F.relu(sigma - sigma_reg_threshold).mean()
     else:
         L_sigma_reg = torch.tensor(0.0, device=sigma.device)
 
+    # ATR normalization of risk heads (Task #58 Layer 1).
+    # When 'atr14' is in the batch, normalize mfe_R and mae_R by the per-bar ATR so
+    # that raw excursions (typically 4-6R) are converted to ATR-relative units (0.3-1.5),
+    # reducing L_mfe and L_mae by ~10x without changing the weight parameters.
+    # Falls back gracefully when 'atr14' is absent (no-op: uses raw R-values as before).
+    _atr_scaler = None
+    if atr_normalize_risk_heads and 'atr14' in batch:
+        _atr_scaler = batch['atr14'][valid].squeeze(-1).clamp(min=0.001)
+
     mfe_pred = outputs['mfe'][valid].squeeze(-1)
     mfe_true = batch['mfe_R'][valid].squeeze(-1)  # T3: squeeze [M,1] → [M] to match mfe_pred shape
+    if _atr_scaler is not None:
+        mfe_true = mfe_true / _atr_scaler
     if sw is not None:
         mfe_err = F.smooth_l1_loss(mfe_pred, mfe_true, reduction='none')
         L_mfe = (mfe_err * sw).sum() / sw.sum()
@@ -747,6 +771,8 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
 
     mae_pred = outputs['mae'][valid].squeeze(-1)
     mae_true = batch['mae_R'][valid].squeeze(-1)  # T3: squeeze [M,1] → [M] to match mae_pred shape
+    if _atr_scaler is not None:
+        mae_true = mae_true / _atr_scaler
     mae_err = F.smooth_l1_loss(mae_pred, mae_true, reduction='none')
     if mae_asym_weight > 1.0:
         underest_mask = (mae_pred < mae_true).float()
@@ -862,7 +888,43 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
         eff_w_mae = w_mae
         eff_w_action = w_action
 
-    total = eff_w_ret * L_ret + eff_w_mfe * L_mfe + eff_w_mae * L_mae + eff_w_action * L_action + L_sigma_reg
+    # Phase 1 (return pretraining) vs Phase 2 (full training) — Task #58 Layer 4.
+    # Phase 1: train ONLY return regression. Trunk learns to be input-sensitive before
+    # MFE/MAE/action noise is introduced. phase1_mode=True is set by train_v5_model
+    # for the first `phase1_epochs` epochs.
+    if phase1_mode:
+        total = eff_w_ret * L_ret + L_sigma_reg
+        losses['phase'] = 1
+        # Zero out the non-trained heads in the breakdown so log analysis is accurate.
+        losses['L_mfe'] = 0.0
+        losses['L_mae'] = 0.0
+        losses['L_action'] = 0.0
+    else:
+        total = eff_w_ret * L_ret + eff_w_mfe * L_mfe + eff_w_mae * L_mae + eff_w_action * L_action + L_sigma_reg
+        losses['phase'] = 2
+
+    # [V5_LOSS_BUDGET] structured log — emitted once per call so callers can aggregate.
+    # Use losses dict directly (avoids re-calling .item() on tensors already consumed).
+    _l_ret_val    = losses['L_ret']
+    _l_mfe_val    = losses['L_mfe']
+    _l_mae_val    = losses['L_mae']
+    _l_action_val = losses['L_action']
+    _l_sig_val    = losses.get('L_sigma_reg', 0.0)
+    if not phase1_mode:
+        _total_budget = (eff_w_ret * _l_ret_val + eff_w_mfe * _l_mfe_val +
+                         eff_w_mae * _l_mae_val + eff_w_action * _l_action_val + _l_sig_val)
+        _pct = lambda x: f"{100.0 * x / _total_budget:.1f}%" if _total_budget > 0 else "n/a"
+        losses['_loss_budget'] = (
+            f"L_ret={eff_w_ret * _l_ret_val:.4f}({_pct(eff_w_ret * _l_ret_val)}) "
+            f"L_mfe={eff_w_mfe * _l_mfe_val:.4f}({_pct(eff_w_mfe * _l_mfe_val)}) "
+            f"L_mae={eff_w_mae * _l_mae_val:.4f}({_pct(eff_w_mae * _l_mae_val)}) "
+            f"L_action={eff_w_action * _l_action_val:.4f}({_pct(eff_w_action * _l_action_val)}) "
+            f"L_sig={_l_sig_val:.4f} total={_total_budget:.4f}"
+        )
+        losses['_L_ret_pct'] = (eff_w_ret * _l_ret_val) / _total_budget if _total_budget > 0 else 0.0
+    else:
+        losses['_loss_budget'] = f"[PHASE1] L_ret={eff_w_ret * _l_ret_val:.4f} L_sig={_l_sig_val:.4f}"
+        losses['_L_ret_pct'] = 1.0  # Phase 1: 100% return signal
 
     if 'barrier_logits' in outputs and barrier_mode != 'fixed':
         barrier_logits = outputs['barrier_logits'][valid]
@@ -4938,9 +5000,13 @@ def run_v5_walk_forward(
     quality_gate_cfg=None, tpd_ctrl_cfg=None,
     candidate_config=None, risk_controls=None,
     hold_target=0.30, mfe_min=0.05,
-    w_ret=1.0, w_mfe=0.25, w_mae=0.25, w_action=2.5,
+    w_ret=6.0, w_mfe=0.15, w_mae=0.15, w_action=2.5,
     w_barrier=0.25, w_regime=0.1,
     sigma_spread_reg=0.0,
+    sigma_reg_threshold=0.40,
+    phase1_epochs=50,
+    atr_normalize_risk_heads=True,
+    dynamic_action_labels=False,
     loss_warmup_epochs=0, loss_warmup_ret_mult=3.0, loss_warmup_action_mult=0.5,
     warmup_epochs=5, min_lr=None,
     barrier_mode='fixed', barrier_presets=None,
@@ -5211,6 +5277,10 @@ def run_v5_walk_forward(
                 w_ret=w_ret, w_mfe=w_mfe, w_mae=w_mae, w_action=w_action,
                 w_barrier=w_barrier, w_regime=w_regime,
                 sigma_spread_reg=sigma_spread_reg,
+                sigma_reg_threshold=sigma_reg_threshold,
+                phase1_epochs=phase1_epochs,
+                atr_normalize_risk_heads=atr_normalize_risk_heads,
+                dynamic_action_labels=dynamic_action_labels,
                 loss_warmup_epochs=loss_warmup_epochs,
                 loss_warmup_ret_mult=loss_warmup_ret_mult,
                 loss_warmup_action_mult=loss_warmup_action_mult,
@@ -6027,10 +6097,14 @@ def train_v5_model(
     checkpoint_interval=25, warmup_epochs=5, min_lr=None,
     tp_mult=2.0, sl_mult=1.5, horizon=16,
     symbols=None,
-    w_ret=3.0, w_mfe=1.0, w_mae=1.0, w_action=2.5,
+    w_ret=6.0, w_mfe=0.15, w_mae=0.15, w_action=2.5,
     w_barrier=0.25, w_regime=0.1,
     loss_warmup_epochs=0, loss_warmup_ret_mult=1.0, loss_warmup_action_mult=1.0,
     sigma_spread_reg=0.1,
+    sigma_reg_threshold=0.40,
+    phase1_epochs=50,
+    atr_normalize_risk_heads=True,
+    dynamic_action_labels=False,
     score_lambda=0.5, risk_proxy='mae',
     target_tpd=6.5, target_tpd_tol=1.5,
     hold_target=0.30, mfe_min=0.05,
@@ -6208,8 +6282,17 @@ def train_v5_model(
         log.info(f"{ctag} feature_mask_ratio={v6_feature_mask_ratio}")
         log.info(f"{ctag} loss weights: aux={v6_aux_weight} confidence={v6_confidence_weight} moe_balance={v6_moe_balance_weight}")
     log.info(f"{ctag} w_ret={w_ret} w_mfe={w_mfe} w_mae={w_mae} w_action={w_action} "
-             f"sigma_spread_reg={sigma_spread_reg} loss_warmup_epochs={loss_warmup_epochs} "
+             f"sigma_spread_reg={sigma_spread_reg} sigma_reg_threshold={sigma_reg_threshold} "
+             f"loss_warmup_epochs={loss_warmup_epochs} "
              f"loss_warmup_ret_mult={loss_warmup_ret_mult} loss_warmup_action_mult={loss_warmup_action_mult}")
+    log.info(f"{ctag} phase1_epochs={phase1_epochs} dynamic_action_labels={dynamic_action_labels} "
+             f"atr_normalize_risk_heads={atr_normalize_risk_heads}")
+    if phase1_epochs > 0:
+        log.info(
+            f"[V5_PHASE1] Two-phase curriculum enabled: epochs 1-{phase1_epochs} = return-only pretraining "
+            f"(L_ret + L_sigma_reg only). Epochs {phase1_epochs+1}+ = full training. "
+            f"Purpose: force trunk to learn return-predictive features before action/MFE/MAE noise."
+        )
     log.info(f"{ctag} w_barrier={w_barrier} w_regime={w_regime}")
     log.info(f"{ctag} score_lambda={score_lambda} risk_proxy={risk_proxy}")
     log.info(f"{ctag} hold_target={hold_target} mfe_min={mfe_min}")
@@ -7043,6 +7126,21 @@ def train_v5_model(
             log.info(f"[{vtag}_STAGED] Phase B starts: normal weights restored "
                      f"w_action={w_action:.2f} w_regime={w_regime:.2f} w_ret={w_ret:.2f}")
 
+        # Task #58 Layer 4 — Two-phase curriculum.
+        # Phase 1 (return pretraining): skip MFE/MAE/action losses so trunk cannot
+        # minimize total loss by predicting a constant excursion for every bar.
+        # Phase 2 (full training): all heads active, trunk already input-sensitive.
+        phase1_active = (phase1_epochs > 0 and epoch <= phase1_epochs)
+        if phase1_epochs > 0 and epoch == 1:
+            log.info(f"[V5_PHASE1] Epoch {epoch}: Phase 1 ACTIVE (return-only pretraining, "
+                     f"{phase1_epochs} epochs). MFE/MAE/action heads suppressed.")
+        if phase1_epochs > 0 and epoch == phase1_epochs + 1:
+            log.info(
+                f"[V5_PHASE1_DONE] Epoch {epoch}: Phase 1 complete. Switching to FULL TRAINING. "
+                f"Trunk has had {phase1_epochs} epochs to learn return-predictive features. "
+                f"All heads now active: w_ret={w_ret} w_mfe={w_mfe} w_mae={w_mae} w_action={w_action}."
+            )
+
         model.train()
         train_losses = []
         loss_breakdown = {}
@@ -7088,6 +7186,9 @@ def train_v5_model(
                     warmup_ret_mult=loss_warmup_ret_mult,
                     warmup_action_mult=loss_warmup_action_mult,
                     sigma_spread_reg=sigma_spread_reg,
+                    sigma_reg_threshold=sigma_reg_threshold,
+                    phase1_mode=phase1_active,
+                    atr_normalize_risk_heads=atr_normalize_risk_heads,
                     side_bal_weight=side_bal_weight,
                     action_entropy_weight=action_entropy_weight,
                 )
@@ -7188,6 +7289,9 @@ def train_v5_model(
                         epoch=epoch,
                         mae_asym_weight=mae_asym_weight,
                         sigma_spread_reg=sigma_spread_reg,
+                        sigma_reg_threshold=sigma_reg_threshold,
+                        phase1_mode=phase1_active,
+                        atr_normalize_risk_heads=atr_normalize_risk_heads,
                         side_bal_weight=side_bal_weight,
                         action_entropy_weight=action_entropy_weight,
                     )
@@ -7199,7 +7303,13 @@ def train_v5_model(
 
         avg_val_loss = np.mean(val_losses)
 
-        lb_str = " | ".join(f"{k}={np.mean(v):.4f}" for k, v in loss_breakdown.items() if v)
+        # Exclude non-numeric and private entries from the general breakdown string.
+        _SKIP_LB_KEYS = {'_side_bal_diag', '_loss_budget', '_L_ret_pct', 'phase'}
+        lb_str = " | ".join(
+            f"{k}={np.mean(v):.4f}"
+            for k, v in loss_breakdown.items()
+            if v and k not in _SKIP_LB_KEYS and isinstance(v, list)
+        )
         current_lr = optimizer.param_groups[0]['lr']
 
         action_logits_cat = torch.cat(all_val_outputs['action_logits'], dim=0).numpy()
@@ -7212,9 +7322,22 @@ def train_v5_model(
         pred_short = np.sum(action_preds[:n_pred] == 2)
 
         tag = "[V6]" if use_v6 else "[V5]"
-        log.info(f"{tag} Epoch {epoch:03d}/{epochs} | train={avg_train_loss:.4f} val={avg_val_loss:.4f} "
+        _phase_tag = "[PHASE1]" if phase1_active else "[PHASE2]"
+        log.info(f"{tag} Epoch {epoch:03d}/{epochs} {_phase_tag} | train={avg_train_loss:.4f} val={avg_val_loss:.4f} "
                  f"lr={current_lr:.2e} act_acc={action_acc:.3f} "
                  f"pred[H/L/S]={pred_hold}/{pred_long}/{pred_short} | {lb_str}")
+
+        # [V5_LOSS_BUDGET] — once per epoch, emit the gradient budget breakdown.
+        # Use the last batch's budget string (representative; budget is roughly constant).
+        # Only emit in Phase 2 (Phase 1 is trivially 100% L_ret).
+        if not use_v6 and not phase1_active:
+            _budget_str = loss_breakdown.get('_loss_budget', [''])[0] if isinstance(
+                loss_breakdown.get('_loss_budget'), list) else loss_breakdown.get('_loss_budget', '')
+            _ret_pct_vals = loss_breakdown.get('_L_ret_pct', [0.0])
+            _avg_ret_pct = float(np.mean(_ret_pct_vals)) if isinstance(_ret_pct_vals, list) else float(_ret_pct_vals)
+            log.info(
+                f"[V5_LOSS_BUDGET] Epoch {epoch:03d} avg_L_ret_pct={_avg_ret_pct*100:.1f}%  {_budget_str}"
+            )
 
         # [V5_DIR_COLLAPSE] warning: flag when >90% of validation predictions are one direction.
         # This makes direction collapse immediately visible without needing the Training Monitor UI.
@@ -7693,6 +7816,8 @@ def train_v5_model(
                             epoch=epochs + ft_ep,
                             mae_asym_weight=mae_asym_weight,
                             sigma_spread_reg=sigma_spread_reg,
+                            sigma_reg_threshold=sigma_reg_threshold,
+                            atr_normalize_risk_heads=atr_normalize_risk_heads,
                             side_bal_weight=side_bal_weight,
                             action_entropy_weight=action_entropy_weight,
                         )
