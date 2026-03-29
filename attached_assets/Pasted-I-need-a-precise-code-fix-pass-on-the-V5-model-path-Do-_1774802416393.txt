@@ -1,0 +1,154 @@
+I need a precise code fix pass on the V5 model path. Do not give general comments. Inspect the current code and patch these exact issues in gpu_trainer/train/v5_train.py and related tests.
+
+GOAL
+The model is still not fixed. We still have:
+1. quality gate edge filtering bypassed by relax/fallback
+2. side-balance / direction-collapse fix crashing
+3. MFE/MAE loss shape mismatch warnings
+4. raw-vs-debiased mu_R gate inconsistency
+5. side_bal_weight still too high in actual defaults
+
+TASKS
+
+T1 — Fix v5_quality_mask so edge_pass cannot be nullified
+File: gpu_trainer/train/v5_train.py
+Function: v5_quality_mask()
+
+Problem:
+- edge_pass is in final_mask, but relax loop + finiteness-only fallback lets all low-mu_R bars pass
+- current regression test still fails because 500/500 bars pass in low-edge case
+
+Required fix:
+- preserve a real mu_R / edge floor during relaxation
+- do NOT allow finiteness-only fallback to bypass edge filtering in strict audit mode
+- if fallback is kept for production, add cfg flag:
+  - quality_gate_strict_audit: bool = False
+  - when True, disable finiteness-only fallback entirely
+- make sure low-edge bars remain filtered in the regression case
+
+Acceptance:
+- pytest -q tests/test_v5_precision_audit.py::test_bug1_edge_pass_filters_low_mu_r_bars
+  must pass for the correct reason, not by weakening the test
+
+T2 — Fix side-balance KL / entropy direction-collapse block crash
+File: gpu_trainer/train/v5_train.py
+Function: compute_v5_loss()
+
+Problem:
+- current side-balance block crashes with:
+  IndexError: too many indices for tensor of dimension 2
+- mask indexing around action_probs[mask, HOLD_IDX] is wrong for current mask shape
+
+Required fix:
+- inspect tensor shapes in the side-balance branch
+- make mask indexing shape-safe
+- ensure action_probs indexing works for 2D [N, 3] tensors with 1D boolean masks
+- if masks are expanded or unsqueezed anywhere, normalize them before indexing
+- keep the 3-class logic intact (H/L/S), do not remove the fix
+
+Acceptance:
+- pytest -q tests/test_task54_direction_collapse_fix.py
+  must pass cleanly
+
+T3 — Fix MFE/MAE target shape mismatch in loss
+File: gpu_trainer/train/v5_train.py
+Function: compute_v5_loss()
+
+Problem:
+- smooth_l1_loss warnings show broadcasting:
+  mfe_true shape [N,1] vs mfe_pred [N]
+  mae_true shape [N,1] vs mae_pred [N]
+
+Required fix:
+- normalize shapes before loss:
+  - squeeze or reshape true tensors to match pred tensors exactly
+- do not rely on broadcasting
+- apply the same cleanup to any related ret/sigma auxiliary heads if needed
+
+Acceptance:
+- remove broadcasting warnings from targeted loss-path tests
+- verify loss values still compute correctly
+
+T4 — Fix raw-vs-debiased mu_R inconsistency in quality gate
+Files:
+- gpu_trainer/train/v5_train.py
+- any place building ref arrays for forward test
+
+Problem:
+- v5_quality_mask still uses ref['mu_R'] and forward arrays['mu_R']
+- even though _raw_mu_R_ref exists, the gate is still effectively mixing scales
+- if mu_debias is enabled, gate floor and evaluated mu_R must be on matching scales
+
+Required fix:
+- make mu_R floor source explicit:
+  - use raw reference mu_R when comparing against raw forward mu_R
+  - use debiased reference mu_R when comparing against debiased forward mu_R
+- do not mix raw training reference magnitude with debiased forward mu_R
+- add explicit comments documenting the chosen rule
+- if needed, pass both raw and debiased refs into the gate and choose based on cfg.mu_debias
+
+Acceptance:
+- add/update a regression test that proves the gate uses consistent scale under mu_debias on/off
+- print exact logic path in debug logs
+
+T5 — Reduce side_bal_weight to intended repaired default
+Files:
+- gpu_trainer/train/v5_train.py
+- any config/default entry points invoking training/walk-forward
+
+Problem:
+- actual code still uses side_bal_weight=0.15
+- intended repaired value is 0.05
+
+Required fix:
+- set default side_bal_weight to 0.05 everywhere real training can enter
+- search for all stale 0.15 defaults and remove drift
+- do not just change one function signature; fix actual source-of-truth defaults
+
+Acceptance:
+- grep proof for side_bal_weight defaults
+- show exact files changed
+
+T6 — Add strict proof logging for model health during training
+File: gpu_trainer/train/v5_train.py
+
+Required additions:
+Log these every validation epoch:
+- pred[H/L/S]
+- mu_r_corr_val
+- score_p50 / p90 / p99
+- disc(p90/p50), disc(p99/p50)
+- p_long mean
+- p_short mean
+- raw mu_R mean/std
+- mae_R mean/std
+
+Goal:
+- catch all-HOLD collapse early
+- catch flat mu_R plateau early
+- catch denominator explosion early
+
+T7 — Run targeted proof after patch
+After patching, run and report:
+1. pytest -q tests/test_v5_precision_audit.py -q
+2. pytest -q tests/test_task54_direction_collapse_fix.py -q
+3. one short proof training run and show:
+   - pred[H/L/S] no longer all HOLD
+   - mu_r_corr_val not pinned near zero/negative every epoch
+   - score_p90 / score_p50 > 5 if possible
+   - no EMPTY score percentiles
+   - no finiteness-only fallback in strict audit mode
+
+OUTPUT FORMAT
+For each task, show:
+- exact file path
+- exact old line(s)
+- exact new line(s)
+- why the fix was needed
+- test proof
+- if anything remains uncertain, say NOT PROVEN
+
+Important:
+Do not simplify by removing features.
+Do not hide failures with weaker fallbacks.
+Fix the logic properly and prove it with tests.
