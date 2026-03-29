@@ -334,6 +334,10 @@ def build_v5_targets(
     assert np.all(np.isfinite(mae_R[valid_mask])), "mae_R contains NaN/Inf in valid region"
     assert np.all(np.isfinite(vol_h[valid_mask])), "vol_h contains NaN/Inf in valid region"
 
+    # UNIT INVARIANT: all *_R arrays (ret_R, mfe_R, mae_R, etc.) are in R-units,
+    # meaning each value = price_delta / atr[i]. Dividing by 'atr' a second time
+    # (e.g. in the loss function) would produce price_delta / atr^2 — a unit error.
+    # Consumers (compute_v5_loss, etc.) MUST treat *_R arrays as already ATR-normalized.
     return {
         'ret_R': ret_R.astype(np.float32),
         'mfe_R': mfe_R.astype(np.float32),

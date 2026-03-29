@@ -5252,11 +5252,12 @@ Examples:
                         help="v5 two-phase curriculum: epochs in Phase 1 (return-only, no MFE/MAE/action "
                              "gradient); default: 50. Set 0 to disable Phase 1. Task #58")
     parser.add_argument("--v5-atr-normalize-risk-heads", action="store_true", default=True,
-                        help="v5 normalize MFE/MAE targets by ATR14 before loss (default: True). "
-                             "Activates when atr14 is present in training batches. Task #58")
+                        help="[API stub — no-op] mfe_R and mae_R are already R-units from build_v5_targets "
+                             "(price_delta/ATR14). Dividing by ATR again would be price_delta/ATR^2 (unit error). "
+                             "This flag is preserved for API compatibility and future use. Task #58")
     parser.add_argument("--v5-no-atr-normalize-risk-heads", dest="v5_atr_normalize_risk_heads",
                         action="store_false",
-                        help="Disable ATR normalization for MFE/MAE heads. Task #58")
+                        help="[API stub — no-op] See --v5-atr-normalize-risk-heads. Task #58")
     parser.add_argument("--v5-dynamic-action-labels", action="store_true", default=False,
                         help="v5 use mu_R>threshold to dynamically flip HOLD→LONG/SHORT action labels; "
                              "default: False (use dataset labels as-is). Task #58")
