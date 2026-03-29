@@ -244,6 +244,41 @@ def build_v5_targets(
                     action_label[i] = 0
                     n_barrier_hold += 1
         logger.info(f"[V5_TARGETS] BARRIER-BASED labels: LONG={n_barrier_long} SHORT={n_barrier_short} HOLD={n_barrier_hold}")
+
+        # Align mu_R regression target (ret_R) with barrier action labels.
+        # Without this alignment, ret_R = close-to-close at horizon end, which often
+        # disagrees with the barrier outcome label (TP/SL simulation).  Contradictory
+        # gradients on the same bar corrupt the NLL loss head and cause:
+        #   1. mu_r_correlation → -0.11 (opposite to true signal)
+        #   2. sigma collapse → 0.001-0.002 score range
+        #   3. Side-aware scoring gate fires even on good signals.
+        # Fix: LONG label  → ret_R = +r_long  (positive — price went up)
+        #      SHORT label → ret_R = -r_short  (negative — price went down)
+        #      HOLD label  → ret_R =  0.0
+        n_aligned_long = 0
+        n_aligned_short = 0
+        n_aligned_hold = 0
+        for i in range(n):
+            if not valid_mask[i]:
+                continue
+            lbl = action_label[i]
+            if lbl == 1:  # LONG
+                rl_val = b_r_long[i] if np.isfinite(b_r_long[i]) else 0.0
+                ret_R[i] = float(rl_val)
+                n_aligned_long += 1
+            elif lbl == 2:  # SHORT
+                rs_val = b_r_short[i] if np.isfinite(b_r_short[i]) else 0.0
+                ret_R[i] = -float(rs_val)
+                n_aligned_short += 1
+            else:  # HOLD
+                ret_R[i] = 0.0
+                n_aligned_hold += 1
+        _valid_ret = ret_R[valid_mask]
+        logger.info(
+            f"[V5_TARGETS] barrier_aligned_ret_R: LONG={n_aligned_long} SHORT={n_aligned_short} HOLD={n_aligned_hold} "
+            f"ret_R_mean={np.nanmean(_valid_ret):.4f} ret_R_std={np.nanstd(_valid_ret):.4f} "
+            f"(LONG→+r_long, SHORT→-r_short, HOLD→0.0)"
+        )
     else:
         for i in range(n):
             if not valid_mask[i]:

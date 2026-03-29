@@ -246,7 +246,7 @@ class V5ForwardTestConfig:
     ood_gate: bool = False
     ood_sigma_mult: float = 1.5
     ood_size_reduction: float = 0.5
-    mu_debias: bool = True
+    mu_debias: bool = False
     mu_debias_alpha: float = 0.003
     min_trades: int = 20
     per_symbol_r_kill: Optional[float] = None
@@ -768,7 +768,7 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
         L_action = F.cross_entropy(action_logits, action_true, label_smoothing=0.1)
 
     LONG_IDX, SHORT_IDX = 1, 2
-    SIDE_BAL_W = 0.30
+    SIDE_BAL_W = 0.05
     action_probs = F.softmax(action_logits, dim=-1)
     eps = 1e-8
 
@@ -4875,7 +4875,7 @@ def run_v5_walk_forward(
     min_trades=20,
     wf_threshold_ema=True, wf_threshold_ema_alpha=0.5,
     wf_threshold_decay=0.5,
-    mu_debias=True, mu_debias_alpha=0.003,
+    mu_debias=False, mu_debias_alpha=0.003,
     per_symbol_r_kill=None,
     per_symbol_threshold=False,
     short_oversample=False,
@@ -5072,6 +5072,10 @@ def run_v5_walk_forward(
         log.info(
             "[V5_WF][FOLD_START] symbols=%s  run_forward_test=True  device=%s",
             symbols, device,
+        )
+        log.info(
+            "[V5_WF][FOLD_START] mu_debias=%s  SIDE_BAL_W=0.05  barrier_aligned_ret_R=True",
+            "ENABLED" if mu_debias else "DISABLED",
         )
         _log_cuda_mem("[V5_WF][FOLD_START]")
         # -------------------------------------------------------------------------
@@ -5503,14 +5507,130 @@ def run_v5_walk_forward(
         )
 
         agg_path = Path("checkpoints") / "v5_walkforward_report.json"
-        import json
+        import json as _json_mod
         with open(agg_path, 'w') as f:
-            json.dump({
+            _json_mod.dump({
                 'folds': all_reports,
                 'aggregate': agg_report,
                 'per_symbol_summary': wf_per_symbol_report if wf_per_symbol else {},
             }, f, indent=2, default=str)
         log.info(f"[V5_WF] Walk-forward report saved to {agg_path}")
+
+        # ---- [V5_BASELINE_CMP] save & compare --------------------------------
+        _active_rpts = [r for r in all_reports if r.get('total_trades', 0) > 0]
+        _mu_r_corrs = [
+            r['prediction_quality']['mu_r_correlation']
+            for r in _active_rpts
+            if r.get('prediction_quality') and r['prediction_quality'].get('mu_r_correlation') is not None
+        ]
+        _act_accs = [
+            r['prediction_quality']['action_accuracy']
+            for r in _active_rpts
+            if r.get('prediction_quality') and 'action_accuracy' in r['prediction_quality']
+        ]
+        _wrs = [r['win_rate'] for r in _active_rpts if r.get('win_rate') is not None]
+        _run_metrics = {
+            'total_r':              round(total_r, 4),
+            'avg_expectancy_r':     round(avg_expect, 4),
+            'total_trades':         int(total_trades),
+            'total_long':           int(total_long),
+            'total_short':          int(total_short),
+            'long_pct':             round(100.0 * total_long / max(total_long + total_short, 1), 2),
+            'active_folds':         int(active_folds),
+            'mean_mu_r_correlation': round(float(np.mean(_mu_r_corrs)), 4) if _mu_r_corrs else None,
+            'mean_action_accuracy':  round(float(np.mean(_act_accs)), 4)  if _act_accs  else None,
+            'mean_win_rate':         round(float(np.mean(_wrs)), 4)        if _wrs       else None,
+        }
+        _metrics_path   = Path("checkpoints") / "v5_run_metrics.json"
+        _baseline_path  = Path("checkpoints") / "v5_baseline_metrics.json"
+        try:
+            with open(_metrics_path, 'w') as _mf:
+                _json_mod.dump(_run_metrics, _mf, indent=2)
+            log.info(
+                f"[V5_RUN_METRICS] Saved to {_metrics_path}  "
+                f"(copy to v5_baseline_metrics.json to set as baseline for future [V5_BASELINE_CMP])"
+            )
+        except Exception as _me:
+            log.warning(f"[V5_RUN_METRICS] Could not save: {_me}")
+
+        if _baseline_path.exists():
+            try:
+                with open(_baseline_path) as _bf:
+                    _baseline = _json_mod.load(_bf)
+
+                def _fmt_cmp(name, bv, nv, threshold=None, higher_is_better=True, fmt='.4f'):
+                    if bv is None or nv is None:
+                        return f"  {name:<50}: baseline=N/A  new=N/A  [SKIP]"
+                    diff = nv - bv
+                    if threshold is not None:
+                        passed = nv >= threshold
+                    else:
+                        passed = (nv > bv) if higher_is_better else (nv < bv)
+                    status = "PASS" if passed else "FAIL"
+                    return (
+                        f"  {name:<50}: baseline={bv:{fmt}}  "
+                        f"new={nv:{fmt}}  diff={diff:+{fmt}}  [{status}]"
+                    )
+
+                log.info("\n" + "=" * 100)
+                log.info("  [V5_BASELINE_CMP] COMPARISON AGAINST BASELINE")
+                log.info("=" * 100)
+                log.info(_fmt_cmp(
+                    "mu_r_correlation (target > 0.0)",
+                    _baseline.get('mean_mu_r_correlation'),
+                    _run_metrics.get('mean_mu_r_correlation'),
+                    threshold=0.0,
+                ))
+                log.info(_fmt_cmp(
+                    "action_accuracy  (target > 0.50)",
+                    _baseline.get('mean_action_accuracy'),
+                    _run_metrics.get('mean_action_accuracy'),
+                    threshold=0.50,
+                ))
+                log.info(_fmt_cmp(
+                    "mean_win_rate    (higher = better)",
+                    _baseline.get('mean_win_rate'),
+                    _run_metrics.get('mean_win_rate'),
+                    higher_is_better=True,
+                ))
+                log.info(_fmt_cmp(
+                    "avg_expectancy_r (higher = better, must >= baseline)",
+                    _baseline.get('avg_expectancy_r'),
+                    _run_metrics.get('avg_expectancy_r'),
+                    higher_is_better=True,
+                ))
+                log.info(_fmt_cmp(
+                    "total_r          (higher = better, must >= baseline)",
+                    _baseline.get('total_r'),
+                    _run_metrics.get('total_r'),
+                    higher_is_better=True,
+                ))
+                log.info(_fmt_cmp(
+                    "long_pct         (lower = more balanced, target < 80%)",
+                    _baseline.get('long_pct'),
+                    _run_metrics.get('long_pct'),
+                    threshold=None, higher_is_better=False, fmt='.1f',
+                ))
+                log.info(_fmt_cmp(
+                    "active_folds     (higher = fewer dead folds)",
+                    _baseline.get('active_folds'),
+                    _run_metrics.get('active_folds'),
+                    higher_is_better=True, fmt='d',
+                ))
+                log.info("=" * 100)
+                log.info(
+                    "[V5_BASELINE_CMP] To promote this run as new baseline:  "
+                    f"copy {_metrics_path} {_baseline_path}"
+                )
+            except Exception as _be:
+                log.warning(f"[V5_BASELINE_CMP] Could not load/compare baseline: {_be}")
+        else:
+            log.info(
+                f"[V5_BASELINE_CMP] No baseline found at {_baseline_path}. "
+                f"To set this run as baseline:  copy {_metrics_path} {_baseline_path}"
+            )
+        # ---- end [V5_BASELINE_CMP] -------------------------------------------
+
         return {
             'folds': all_reports,
             'aggregate': agg_report,
@@ -5613,7 +5733,7 @@ def train_v5_model(
     side_aware_scoring=False, mae_asym_weight=1.0,
     per_symbol_cooldown=True,
     cooldown=4,
-    mu_debias=True, mu_debias_alpha=0.003,
+    mu_debias=False, mu_debias_alpha=0.003,
     min_trades=20,
     wf_threshold_override=None,
     fold_id=0,
@@ -6669,6 +6789,45 @@ def train_v5_model(
             _sp90 = float(np.percentile(_sigma_vals, 90))
             _vtag = "V6" if use_v6 else "V5"
             log.info(f"[{_vtag}_SIGMA] epoch={epoch} sigma_p10={_sp10:.3f} p50={_sp50:.3f} p90={_sp90:.3f}")
+
+        # Per-epoch mu_R correlation quality tracking (V5 only).
+        # Measures whether predicted mu_R correlates with the aligned barrier ret_R labels.
+        # A healthy model should show mu_r_corr_val > 0.0 by epoch 10.
+        if not use_v6 and all_val_outputs.get('ret_mu') and all_val_outputs.get('action_logits'):
+            try:
+                _mu_cat = torch.cat(all_val_outputs['ret_mu'], dim=0).numpy().squeeze(-1)
+                _n_pred = min(len(_mu_cat), len(val_ret_R))
+                _vv = val_valid[:_n_pred]
+                if np.any(_vv):
+                    _pred_mu = _mu_cat[:_n_pred][_vv]
+                    _tgt_r   = val_ret_R[:_n_pred][_vv]
+                    _finite  = np.isfinite(_pred_mu) & np.isfinite(_tgt_r)
+                    if np.sum(_finite) > 10:
+                        _mu_corr_val = float(np.corrcoef(_pred_mu[_finite], _tgt_r[_finite])[0, 1])
+                        _abs_mu = np.abs(_pred_mu[_finite])
+                        _sp10 = float(np.percentile(_abs_mu, 10))
+                        _sp50 = float(np.percentile(_abs_mu, 50))
+                        _sp90 = float(np.percentile(_abs_mu, 90))
+                        _al_cat = torch.cat(all_val_outputs['action_logits'], dim=0).numpy()[:_n_pred][_vv]
+                        _al_preds = np.argmax(_al_cat, axis=1)
+                        _n_hold = int(np.sum(_al_preds == 0))
+                        _n_long = int(np.sum(_al_preds == 1))
+                        _n_short = int(np.sum(_al_preds == 2))
+                        log.info(
+                            f"[V5_TRAIN_QUALITY] epoch={epoch} "
+                            f"mu_r_corr_val={_mu_corr_val:+.4f} "
+                            f"|mu_R|_p10={_sp10:.4f} p50={_sp50:.4f} p90={_sp90:.4f} "
+                            f"pred_valid[H/L/S]={_n_hold}/{_n_long}/{_n_short}"
+                        )
+                        if epoch >= 20 and _mu_corr_val < -0.05:
+                            log.warning(
+                                f"[V5_TRAIN_WARN] epoch={epoch} mu_r_corr_val={_mu_corr_val:+.4f} < -0.05 "
+                                f"after 20 epochs. Signals diverging from barrier labels — "
+                                f"check barrier_outcomes alignment in v5_target_generator.py. "
+                                f"Target: mu_r_corr_val > 0.0 for a healthy model."
+                            )
+            except Exception as _eq:
+                log.debug(f"[V5_TRAIN_QUALITY] skipped epoch={epoch}: {_eq}")
 
         if use_v6 and hasattr(model, 'get_expert_usage'):
             expert_usage = model.get_expert_usage()
