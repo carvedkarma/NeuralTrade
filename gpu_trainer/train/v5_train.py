@@ -5634,12 +5634,17 @@ def run_v5_walk_forward(
             log.warning(f"[V5_RUN_METRICS] Could not save: {_me}")
 
         def _fmt_cmp(name, bv, nv, threshold=None, higher_is_better=True, fmt='.4f',
-                     upper_threshold=None):
+                     upper_threshold=None, strict_lower=False):
             """
             Args:
                 threshold:       if set, absolute lower gate (PASS if new >= threshold).
                 upper_threshold: if set, absolute upper gate (PASS if new <= upper_threshold).
                 higher_is_better: when neither threshold is set, relative baseline comparison.
+                                  True  -> PASS if new >= baseline (equality OK)
+                                  False -> PASS if new <= baseline (equality OK),
+                                           unless strict_lower=True then new < baseline
+                strict_lower:    when higher_is_better=False, use strict < instead of <=
+                                 (equality = FAIL). Required for count/std metrics per task spec.
             """
             if nv is None:
                 return f"  {name:<50}: baseline=N/A  new=N/A  [SKIP]"
@@ -5650,7 +5655,12 @@ def run_v5_walk_forward(
             elif threshold is not None:
                 passed = nv >= threshold
             elif bv is not None:
-                passed = (nv >= bv) if higher_is_better else (nv <= bv)
+                if higher_is_better:
+                    passed = nv >= bv
+                elif strict_lower:
+                    passed = nv < bv
+                else:
+                    passed = nv <= bv
             else:
                 passed = None
             status = "PASS" if passed else ("FAIL" if passed is not None else "N/A")
@@ -5855,16 +5865,16 @@ def run_v5_walk_forward(
                     higher_is_better=True,
                 ))
                 _gcmp_lines.append(_fmt_cmp(
-                    "relax_loop_total        (New <= Baseline, fewer relax triggers)",
+                    "relax_loop_total        (New < Baseline, fewer relax triggers)",
                     _gate_baseline.get('relax_loop_total'),
                     _gate_run_metrics.get('relax_loop_total'),
-                    higher_is_better=False, fmt='.0f',
+                    higher_is_better=False, strict_lower=True, fmt='.0f',
                 ))
                 _gcmp_lines.append(_fmt_cmp(
-                    "gate_pass_rate_std      (New <= Baseline, more stable filtering)",
+                    "gate_pass_rate_std      (New < Baseline, more stable filtering)",
                     _gate_baseline.get('gate_pass_rate_std'),
                     _gate_run_metrics.get('gate_pass_rate_std'),
-                    higher_is_better=False,
+                    higher_is_better=False, strict_lower=True,
                 ))
                 for _gcl in _gcmp_lines:
                     log.info(_gcl)
@@ -5873,25 +5883,32 @@ def run_v5_walk_forward(
                 _gcmp_passes = [('[PASS]' in ln) for ln in _gcmp_lines if '[SKIP]' not in ln]
                 _gcmp_all_pass = all(_gcmp_passes) and len(_gcmp_passes) > 0
 
+                # NOTE: percentile_top15 mode is always experimental/diagnostic within this run.
+                # "PROMOTED" means: this percentile run outperformed the ref-magnitude baseline
+                # on all 6 metrics → safe to adopt as the new production gate.
+                # "NOT promoted" means: one or more metrics regressed → keep running ref_magnitude
+                # for production; do NOT copy these gate metrics as the new baseline.
                 log.info("=" * 110)
                 if _gate_mode_used != 'ref_magnitude' and _gcmp_all_pass:
                     log.info(
-                        "[V5_GATE] Percentile gate PROMOTED — all 6 gate comparison metrics PASSED. "
-                        f"New gate_mode='{_gate_mode_used}' is now active for trade selection."
+                        "[V5_GATE] Percentile gate PROMOTED — all 6 gate comparison metrics PASSED "
+                        f"(gate_mode='{_gate_mode_used}'). Safe to adopt as production gate: "
+                        f"re-run with --v5-gate-mode {_gate_mode_used} and copy metrics as new baseline."
                     )
                 elif _gate_mode_used != 'ref_magnitude':
                     _n_fail = sum(1 for p in _gcmp_passes if not p)
                     log.info(
                         f"[V5_GATE] Percentile gate NOT promoted — stayed in audit-only mode "
-                        f"({_n_fail} metric(s) failed; ref_magnitude gate remains active for trade selection)."
+                        f"({_n_fail} metric(s) failed to improve over baseline; "
+                        f"continue using --v5-gate-mode ref_magnitude for production runs)."
                     )
                 else:
                     log.info(
-                        "[V5_GATE] Running in ref_magnitude mode. "
-                        "Use --v5-gate-mode percentile_top15 to compare against this baseline."
+                        "[V5_GATE] Running in ref_magnitude mode (production gate). "
+                        "To evaluate percentile gate: re-run with --v5-gate-mode percentile_top15."
                     )
                 log.info(
-                    "[V5_GATE_BASELINE_CMP] To promote this run as new gate baseline:  "
+                    "[V5_GATE_BASELINE_CMP] To set this run as new gate baseline (only if PROMOTED):  "
                     f"copy {_gate_metrics_path} {_gate_baseline_path}"
                 )
             except Exception as _gbe:

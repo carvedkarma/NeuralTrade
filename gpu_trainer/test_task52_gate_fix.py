@@ -644,11 +644,11 @@ class TestRunV5WalkForwardSignature(unittest.TestCase):
 
 
 class TestFmtCmpBehaviorGateCmp(unittest.TestCase):
-    """_fmt_cmp helper: >= / <= semantics (equality is PASS), threshold, skip, higher/lower."""
+    """_fmt_cmp helper: >= semantics for higher_is_better, strict < for strict_lower metrics."""
 
     def _fmt_cmp(self, name, bv, nv, threshold=None, higher_is_better=True, fmt='.4f',
-                 upper_threshold=None):
-        """Reproduce _fmt_cmp from v5_train.py (>= / <= semantics)."""
+                 upper_threshold=None, strict_lower=False):
+        """Reproduce _fmt_cmp from v5_train.py."""
         if nv is None:
             return f"  {name:<50}: baseline=N/A  new=N/A  [SKIP]"
         bv_str = f"{bv:{fmt}}" if bv is not None else "N/A"
@@ -658,7 +658,12 @@ class TestFmtCmpBehaviorGateCmp(unittest.TestCase):
         elif threshold is not None:
             passed = nv >= threshold
         elif bv is not None:
-            passed = (nv >= bv) if higher_is_better else (nv <= bv)
+            if higher_is_better:
+                passed = nv >= bv
+            elif strict_lower:
+                passed = nv < bv
+            else:
+                passed = nv <= bv
         else:
             passed = None
         status = "PASS" if passed else ("FAIL" if passed is not None else "N/A")
@@ -667,12 +672,12 @@ class TestFmtCmpBehaviorGateCmp(unittest.TestCase):
             f"new={nv:{fmt}}  diff={diff_str}  [{status}]"
         )
 
+    # --- higher_is_better (New >= Baseline) ---
     def test_higher_is_better_strict_improvement(self):
         line = self._fmt_cmp("mean_per_fold_total_r", 1.0, 1.5, higher_is_better=True)
         self.assertIn('[PASS]', line)
 
     def test_higher_is_better_equality_is_pass(self):
-        # New >= Baseline means equality should PASS
         line = self._fmt_cmp("mean_per_fold_total_r", 1.0, 1.0, higher_is_better=True)
         self.assertIn('[PASS]', line)
 
@@ -680,29 +685,55 @@ class TestFmtCmpBehaviorGateCmp(unittest.TestCase):
         line = self._fmt_cmp("mean_per_fold_expectancy_r", 0.05, 0.03, higher_is_better=True)
         self.assertIn('[FAIL]', line)
 
-    def test_lower_is_better_strict_improvement(self):
-        line = self._fmt_cmp("gate_pass_rate_std", 10.0, 8.0, higher_is_better=False)
-        self.assertIn('[PASS]', line)
-
-    def test_lower_is_better_equality_is_pass(self):
-        # New <= Baseline means equality should PASS
-        line = self._fmt_cmp("relax_loop_total", 5.0, 5.0, higher_is_better=False, fmt='.0f')
-        self.assertIn('[PASS]', line)
-
-    def test_lower_is_better_regression_is_fail(self):
-        line = self._fmt_cmp("gate_pass_rate_std", 5.0, 15.0, higher_is_better=False)
-        self.assertIn('[FAIL]', line)
-
-    def test_monotonic_fold_count_pass_when_equal_or_higher(self):
+    def test_monotonic_fold_count_equality_is_pass(self):
         line = self._fmt_cmp("monotonic_fold_count", 3.0, 3.0, higher_is_better=True, fmt='.0f')
         self.assertIn('[PASS]', line)
 
+    # --- strict_lower (New < Baseline, equality = FAIL) ---
+    def test_strict_lower_improves_from_10_to_8(self):
+        line = self._fmt_cmp("relax_loop_total", 10.0, 8.0,
+                             higher_is_better=False, strict_lower=True, fmt='.0f')
+        self.assertIn('[PASS]', line)
+
+    def test_strict_lower_equality_is_fail(self):
+        # equality must FAIL under strict_lower (New < Baseline required)
+        line = self._fmt_cmp("relax_loop_total", 5.0, 5.0,
+                             higher_is_better=False, strict_lower=True, fmt='.0f')
+        self.assertIn('[FAIL]', line)
+
+    def test_strict_lower_regression_is_fail(self):
+        line = self._fmt_cmp("gate_pass_rate_std", 5.0, 15.0,
+                             higher_is_better=False, strict_lower=True)
+        self.assertIn('[FAIL]', line)
+
+    def test_strict_lower_used_for_relax_loop_total_in_source(self):
+        src_path = os.path.join(os.path.dirname(__file__), 'train', 'v5_train.py')
+        with open(src_path) as f:
+            src = f.read()
+        idx = src.find('relax_loop_total')
+        cmp_idx = src.find('[V5_GATE_BASELINE_CMP]')
+        # find the _fmt_cmp call for relax_loop_total after the gate cmp section starts
+        segment = src[cmp_idx:]
+        self.assertIn('strict_lower=True', segment,
+                      "relax_loop_total and gate_pass_rate_std must use strict_lower=True")
+
+    def test_strict_lower_used_for_gate_pass_rate_std_in_source(self):
+        src_path = os.path.join(os.path.dirname(__file__), 'train', 'v5_train.py')
+        with open(src_path) as f:
+            src = f.read()
+        cmp_idx = src.find('[V5_GATE_BASELINE_CMP]')
+        segment = src[cmp_idx:]
+        count = segment.count('strict_lower=True')
+        self.assertGreaterEqual(count, 2,
+                                "Both relax_loop_total and gate_pass_rate_std must use strict_lower=True")
+
+    # --- skip ---
     def test_skip_when_new_value_is_none(self):
         line = self._fmt_cmp("mean_score_disc_p90p50", 2.0, None)
         self.assertIn('[SKIP]', line)
 
+    # --- threshold ---
     def test_threshold_gate_pass_at_boundary(self):
-        # threshold=50 → PASS when nv >= 50
         line = self._fmt_cmp("monotonic_pct", 40.0, 50.0, threshold=50.0, fmt='.1f')
         self.assertIn('[PASS]', line)
 
