@@ -7122,6 +7122,7 @@ def train_v5_model(
                         mae_asym_weight=mae_asym_weight,
                         sigma_spread_reg=sigma_spread_reg,
                         side_bal_weight=side_bal_weight,
+                        action_entropy_weight=action_entropy_weight,
                     )
                 val_losses.append(vloss.item())
 

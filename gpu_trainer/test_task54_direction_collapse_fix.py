@@ -64,8 +64,15 @@ def quick_start_src():
 # ---------------------------------------------------------------------------
 
 def _dummy_batch(n=64):
+    """Minimal batch matching compute_v5_loss contract.
+
+    Required keys (from v5_train.py ~line 707-882):
+      valid, ret_R, mfe_R, mae_R, action_label, regime_label
+      barrier_label and barrier_soft only needed in oracle/learnable modes.
+    """
     import torch as _torch
     return {
+        "valid": _torch.ones(n, dtype=_torch.bool),   # all samples valid
         "ret_R": _torch.randn(n, 1),
         "mfe_R": _torch.rand(n, 1).abs(),
         "mae_R": _torch.rand(n, 1).abs(),
@@ -76,17 +83,22 @@ def _dummy_batch(n=64):
 
 
 def _dummy_outputs(n=64):
+    """Model outputs matching compute_v5_loss contract.
+
+    Required keys (from v5_train.py ~line 715-881):
+      ret_mu, ret_log_sigma, mfe, mae, action_logits, regime_logits
+      barrier_logits only used in oracle/learnable barrier modes.
+    """
     import torch as _torch
     return {
         "ret_mu": _torch.randn(n, 1),
         "ret_log_sigma": _torch.zeros(n, 1),
-        "mfe_mu": _torch.rand(n, 1).abs(),
+        "mfe": _torch.rand(n, 1).abs(),       # correct key: 'mfe' not 'mfe_mu'
         "mfe_log_sigma": _torch.zeros(n, 1),
-        "mae_mu": _torch.rand(n, 1).abs(),
+        "mae": _torch.rand(n, 1).abs(),       # correct key: 'mae' not 'mae_mu'
         "mae_log_sigma": _torch.zeros(n, 1),
-        "barrier_logit": _torch.randn(n, 2),
-        "action_logit": _torch.randn(n, 3),
-        "regime_logit": _torch.randn(n, 3),
+        "action_logits": _torch.randn(n, 3),  # correct key: 'action_logits'
+        "regime_logits": _torch.randn(n, 3),  # correct key: 'regime_logits'
     }
 
 
@@ -227,12 +239,46 @@ class TestEntropyRegularisation:
         torch.manual_seed(3)
         n = 128
         outputs = _dummy_outputs(n)
-        outputs["action_logit"] = torch.zeros(n, 3)
+        outputs["action_logits"] = torch.zeros(n, 3)  # correct key
         batch = _dummy_batch(n)
         _, ld = compute_v5_loss(outputs, batch, action_entropy_weight=0.10)
         expected = -math.log(3)
         assert abs(ld["L_entropy"] - expected) < 0.05, (
             f"Expected L_entropy ≈ {expected:.4f}, got {ld['L_entropy']:.4f}"
+        )
+
+    @pytest.mark.skipif(not HAS_TORCH, reason="torch not available in this environment")
+    def test_entropy_gradient_pushes_toward_uniform(self):
+        """Gradient of entropy loss w.r.t. collapsed logits should push
+        the dominant class DOWN and minority classes UP (toward uniform).
+
+        This verifies the gradient direction is correct, not just sign of loss.
+        A logit of +10 for LONG → softmax ≈ [ε, 1, ε].
+        Gradient of L_entropy = Σ p*log(p) w.r.t. logits should be negative
+        for the dominant class (LONG, index 1) so that updating logits with
+        -lr * grad DECREASES the LONG logit (pushes toward uniform).
+        """
+        from train.v5_train import compute_v5_loss
+        torch.manual_seed(77)
+        n = 32
+        outputs = _dummy_outputs(n)
+        logits = torch.full((n, 3), -10.0, requires_grad=True)
+        # Manually set dominant logit via a separate leaf
+        _base = torch.full((n, 3), -10.0)
+        _base[:, 1] = 10.0  # LONG collapsed
+        logits_leaf = _base.clone().detach().requires_grad_(True)
+        outputs["action_logits"] = logits_leaf
+        batch = _dummy_batch(n)
+
+        loss, ld = compute_v5_loss(outputs, batch, action_entropy_weight=1.0)
+        loss.backward()
+
+        # Gradient for LONG class (index 1) should be negative:
+        # updating with -lr * grad → logit decreases → less collapsed
+        grad_long = logits_leaf.grad[:, 1].mean().item()
+        assert grad_long < 0, (
+            f"Entropy gradient for dominant LONG class should be negative "
+            f"(push toward uniform), got {grad_long:.4f}"
         )
 
 
