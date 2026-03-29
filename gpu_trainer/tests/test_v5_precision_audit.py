@@ -831,38 +831,46 @@ def test_ret_mag_ce_weight_changes_action_loss():
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
-def test_score_lambda_0_30_lowers_break_even():
-    """Task #56 A1: score_lambda=0.30 lowers break-even p_side from 0.333 to 0.231.
+def test_score_lambda_0_30_via_compute_v5_scores():
+    """Task #56 A1: compute_v5_scores with score_lambda=0.30 vs 0.50.
 
-    compute_v5_scores uses: score = p_side * mu_R - lambda * (1 - p_side) * mu_R_over_risk
-    Break-even: p_side = lambda / (1 + lambda).
-    At lambda=0.30: break-even = 0.30/1.30 = 0.231.
-    At lambda=0.50: break-even = 0.50/1.50 = 0.333.
-
-    Verify score_lambda=0.30 produces a HIGHER score than lambda=0.50 for a bar
-    with p_side=0.31 (below the 0.333 threshold but above the 0.231 threshold).
+    At p_side=0.31 (above break-even 0.231 for lambda=0.30, below 0.333 for lambda=0.50):
+    - score_lambda=0.30 should produce a POSITIVE score
+    - score_lambda=0.50 should produce a LOWER (or negative) score
+    Uses _arrays interface to call compute_v5_scores directly without torch model outputs.
     """
     import numpy as np
-    # Construct a minimal arrays dict mimicking compute_v5_scores input.
-    # At p_side=0.31: should pass at lambda=0.30 (positive score) but fail at lambda=0.50 (negative).
-    n = 10
-    # We test the break-even formula directly:
-    # score = p_side * edge - lambda * (1-p_side) * edge   (simplified, risk=1.0)
-    # = edge * (p_side - lambda * (1-p_side))
-    # = edge * (p_side * (1+lambda) - lambda)
-    p_side = 0.31
-    edge = 1.0  # positive mu_R
+    from train.v5_train import compute_v5_scores
 
-    score_at_030 = edge * (p_side * 1.30 - 0.30)  # should be positive
-    score_at_050 = edge * (p_side * 1.50 - 0.50)  # should be negative
+    n = 50
+    # p_long=0.31, p_short=0.04, p_hold=0.65 — long signal with low p_long
+    arrays = {
+        'mu_R':  np.full(n, 0.50, dtype=np.float32),  # positive expected return
+        'mae':   np.full(n, 0.50, dtype=np.float32),  # risk = mae (capped)
+        'mfe':   np.full(n, 1.00, dtype=np.float32),
+        'p_long':  np.full(n, 0.31, dtype=np.float32),
+        'p_short': np.full(n, 0.04, dtype=np.float32),
+    }
 
-    assert score_at_030 > 0, (
-        f"At lambda=0.30, p_side=0.31 should give positive score (break-even=0.231). "
-        f"Got score={score_at_030:.4f}"
+    # Call with lower lambda
+    result_030 = compute_v5_scores(
+        None, score_lambda=0.30, _arrays=arrays, min_mu_r_score=0.0
     )
-    assert score_at_050 < 0, (
-        f"At lambda=0.50, p_side=0.31 should give negative score (break-even=0.333). "
-        f"Got score={score_at_050:.4f}"
+    # Call with higher lambda
+    result_050 = compute_v5_scores(
+        None, score_lambda=0.50, _arrays=arrays, min_mu_r_score=0.0
+    )
+
+    score_030 = float(np.mean(result_030['score_long']))
+    score_050 = float(np.mean(result_050['score_long']))
+
+    assert score_030 > score_050, (
+        f"score_lambda=0.30 must give HIGHER score than 0.50 at p_side=0.31. "
+        f"score_030={score_030:.5f} score_050={score_050:.5f}"
+    )
+    assert score_030 > 0, (
+        f"score_lambda=0.30 must give POSITIVE score at p_long=0.31 "
+        f"(break-even=0.231). Got {score_030:.5f}"
     )
 
 

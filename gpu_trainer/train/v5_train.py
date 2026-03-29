@@ -5041,7 +5041,7 @@ def _print_forward_report(report):
 
 def run_v5_walk_forward(
     data_dir, device, symbols, epochs, batch_size, lr,
-    train_months=12, test_months=1, test_weeks=None,
+    train_months=9, test_months=1, test_weeks=None,  # Task #56 C2: 12→9
     horizon=16, tp_mult=2.0, sl_mult=1.5,
     score_lambda=0.30, risk_proxy='mae',  # Task #56 A1: 0.5→0.30
     quality_gate_cfg=None, tpd_ctrl_cfg=None,
@@ -5092,7 +5092,7 @@ def run_v5_walk_forward(
     weekly_cap_dynamic=False, weekly_cap_scale=2.0,
     quality_gate_enabled=False, quality_gate_window=50,
     direction_balance_cap=False, direction_balance_threshold=0.75,
-    recency_weight=False, recency_half_life=90,
+    recency_weight=False, recency_half_life=60,  # Task #56 C1: 90→60
     finetune_months=0, finetune_epochs=5, finetune_lr_mult=0.1,
     warm_start=False, warm_start_lr_mult=0.3,
     head_disagreement_gate=False, slippage_base_bps=0.0,
@@ -5107,7 +5107,7 @@ def run_v5_walk_forward(
     per_symbol_r_kill=None,
     per_symbol_threshold=False,
     short_oversample=False,
-    short_min_fraction=0.35,
+    short_min_fraction=0.40,  # Task #56 B3: 0.35→0.40
     ema200_soft_mult=None,
     per_side_threshold=False,
     replit_url=None,
@@ -6365,7 +6365,7 @@ def train_v5_model(
     kill_hysteresis_r=1.0,
     per_symbol_threshold=False,
     short_oversample=False,
-    short_min_fraction=0.35,
+    short_min_fraction=0.40,  # Task #56 B3: 0.35→0.40
     ema200_soft_mult=None,
     per_side_threshold=False,
     per_sym_no_edge_fallback=True,
