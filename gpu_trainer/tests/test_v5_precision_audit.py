@@ -527,18 +527,23 @@ if HAS_TORCH:
 
 
 def _make_dummy_v5_batch(n=32, seed=7, device='cpu'):
-    """Create a minimal batch dict that compute_v5_loss accepts."""
+    """Create a minimal batch dict that compute_v5_loss accepts.
+
+    Key names match V5Dataset.__getitem__ output:
+      ret_R, mfe_R, mae_R (R-unit targets), action_label (long int), valid (bool).
+    """
     import torch
     rng = torch.Generator()
     rng.manual_seed(seed)
     feat_n = 95
     batch = {
         'features': torch.randn(n, feat_n, generator=rng),
-        'ret_h': torch.randn(n, generator=rng) * 0.02,
-        'mfe': torch.abs(torch.randn(n, generator=rng)) * 0.01,
-        'mae': torch.abs(torch.randn(n, generator=rng)) * 0.01,
-        'action': torch.randint(0, 3, (n,), generator=rng),
+        'ret_R': torch.randn(n, generator=rng) * 0.02,          # R-unit realized return
+        'mfe_R': torch.abs(torch.randn(n, generator=rng)) * 0.01,  # R-unit MFE
+        'mae_R': torch.abs(torch.randn(n, generator=rng)) * 0.01,  # R-unit MAE
+        'action_label': torch.randint(0, 3, (n,), generator=rng),  # 0=HOLD,1=LONG,2=SHORT
         'valid': torch.ones(n, dtype=torch.bool),
+        'vol_h': torch.ones(n) * 0.02,  # not used by loss but often in batch
     }
     return batch
 

@@ -7159,6 +7159,30 @@ def train_v5_model(
 
             batch_sw = batch_gpu.get('sample_weight')
 
+            # Dynamic action label rewrite — Task #58 Layer 7.
+            # When dynamic_action_labels=True (opt-in, default=False) and we are in Phase 2,
+            # flip HOLD action labels to LONG/SHORT for samples where both mu_R magnitude
+            # and the raw dataset label agree on direction (mu_R > +threshold → LONG,
+            # mu_R < -threshold → SHORT). This leverages the return head's growing ability
+            # to predict direction without introducing full oracle leakage.
+            # Threshold=0.005R (half the score gate) so only moderate-conviction flips occur.
+            if dynamic_action_labels and not phase1_active and not use_v6:
+                with torch.no_grad():
+                    _mu_R_det = outputs['ret_mu'].detach().squeeze(-1)  # [B]
+                    _act_cur = batch_gpu['action_label'].clone()        # [B]
+                    _valid_cur = batch_gpu['valid']                     # [B] bool
+                    _ret_R_cur = batch_gpu['ret_R'].squeeze(-1) if batch_gpu['ret_R'].dim() > 1 else batch_gpu['ret_R']
+                    _DYN_THRESH = 0.005  # 0.5% R — conservative to avoid label corruption
+                    _HOLD = 0; _LONG = 1; _SHORT = 2
+                    # Only flip rows that are: (a) valid, (b) currently HOLD, (c) mu_R & ret_R agree on direction
+                    _is_hold = (_act_cur == _HOLD) & _valid_cur
+                    _flip_long = _is_hold & (_mu_R_det > _DYN_THRESH) & (_ret_R_cur > 0)
+                    _flip_short = _is_hold & (_mu_R_det < -_DYN_THRESH) & (_ret_R_cur < 0)
+                    _act_cur[_flip_long] = _LONG
+                    _act_cur[_flip_short] = _SHORT
+                    batch_gpu = dict(batch_gpu)  # shallow copy to avoid mutating DataLoader tensor
+                    batch_gpu['action_label'] = _act_cur
+
             if use_v6:
                 loss, ld = compute_v6_loss(
                     outputs, batch_gpu,
