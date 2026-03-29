@@ -722,9 +722,11 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
     phase1_mode: when True, only compute L_ret + L_sigma_reg (return pretraining phase).
         Skip MFE, MAE, and action heads entirely. Forces trunk to learn return-predictive features
         before action head noise can corrupt the representation.
-    atr_normalize_risk_heads: when True and 'atr14' is in batch, normalize mfe_R and mae_R
-        by the per-bar ATR14 value so L_mfe/L_mae scale to 0.2-0.5 instead of 2-3.
-        Falls back gracefully (no-op) when 'atr14' is not in the batch.
+    atr_normalize_risk_heads: API stub preserved for backwards compatibility.
+        mfe_R and mae_R in the batch are ALREADY R-units (divided by ATR14 in build_v5_targets).
+        Dividing again would produce price_delta/ATR^2 — a unit error. This flag is therefore
+        a no-op in this function. The atr14 tensor IS stored in V5Dataset/V6SequenceDataset
+        (emitted in __getitem__) for future diagnostics or auxiliary head use.
 
     If sample_weights is provided, computes per-sample losses and applies
     inverse-frequency weighting: loss = (per_sample_loss * weights).sum() / weights.sum()
@@ -762,19 +764,18 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
     else:
         L_sigma_reg = torch.tensor(0.0, device=sigma.device)
 
-    # ATR normalization of risk heads (Task #58 Layer 1).
-    # When 'atr14' is in the batch, normalize mfe_R and mae_R by the per-bar ATR so
-    # that raw excursions (typically 4-6R) are converted to ATR-relative units (0.3-1.5),
-    # reducing L_mfe and L_mae by ~10x without changing the weight parameters.
-    # Falls back gracefully when 'atr14' is absent (no-op: uses raw R-values as before).
-    _atr_scaler = None
-    if atr_normalize_risk_heads and 'atr14' in batch:
-        _atr_scaler = batch['atr14'][valid].squeeze(-1).clamp(min=0.001)
+    # ATR normalization note (Task #58 Layer 5):
+    # mfe_R and mae_R in the batch are ALREADY in R-units (price_delta / ATR14 from
+    # build_v5_targets). Dividing by ATR14 again would produce price_delta / ATR^2 —
+    # a unit error. The atr_normalize_risk_heads flag is therefore a no-op in the loss
+    # function; it is preserved as a parameter stub so future callers can pass it without
+    # breaking the API. The actual normalization happens at dataset construction time in
+    # build_v5_targets. The atr14 tensor IS stored in V5Dataset/V6SequenceDataset and
+    # emitted in __getitem__ for any future per-bar ATR diagnostics or auxiliary heads.
+    # Loss budget is corrected by weight rebalancing (w_mfe=0.15, w_mae=0.15), not re-scaling.
 
     mfe_pred = outputs['mfe'][valid].squeeze(-1)
     mfe_true = batch['mfe_R'][valid].squeeze(-1)  # T3: squeeze [M,1] → [M] to match mfe_pred shape
-    if _atr_scaler is not None:
-        mfe_true = mfe_true / _atr_scaler
     if sw is not None:
         mfe_err = F.smooth_l1_loss(mfe_pred, mfe_true, reduction='none')
         L_mfe = (mfe_err * sw).sum() / sw.sum()
@@ -783,8 +784,6 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
 
     mae_pred = outputs['mae'][valid].squeeze(-1)
     mae_true = batch['mae_R'][valid].squeeze(-1)  # T3: squeeze [M,1] → [M] to match mae_pred shape
-    if _atr_scaler is not None:
-        mae_true = mae_true / _atr_scaler
     mae_err = F.smooth_l1_loss(mae_pred, mae_true, reduction='none')
     if mae_asym_weight > 1.0:
         underest_mask = (mae_pred < mae_true).float()

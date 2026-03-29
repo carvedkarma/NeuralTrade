@@ -636,19 +636,25 @@ def test_loss_budget_L_ret_pct_above_50_percent():
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
-def test_atr_normalization_activates_with_atr14_in_batch():
-    """Task #58 T4: when atr14 is in the batch, L_mfe/L_mae must differ from the no-atr case.
+def test_atr14_in_dataset_and_no_double_normalization():
+    """Task #58 T4: mfe_R/mae_R are ALREADY R-units; atr14 must NOT divide targets again.
 
-    This test verifies that ATR normalization is fully wired: V5Dataset now stores atr14,
-    __getitem__ emits it, and compute_v5_loss divides mfe_R/mae_R by ATR before computing
-    Huber loss. When atr14 != 1.0, the normalized targets differ from raw targets, changing
-    L_mfe and L_mae.
+    Semantic invariant:
+      - build_v5_targets returns mfe_R = price_delta / ATR (R-units already normalized).
+      - compute_v5_loss must NOT divide by ATR again (would give price_delta / ATR^2).
+      - The atr_normalize_risk_heads flag is preserved as an API stub but is a no-op
+        in the loss function; the flag does not change L_mfe or L_mae.
+
+    This test verifies:
+      1. With atr14 in the batch, L_mfe is IDENTICAL to without atr14 (no double division).
+      2. V5Dataset stores atr14 when provided (data plumbing test).
     """
     import torch
+
+    # Loss should be identical whether or not atr14 is in the batch.
     batch_no_atr = _make_dummy_v5_batch()
     batch_with_atr = dict(batch_no_atr)
-    # ATR=2.0 means targets get halved → L_mfe/L_mae should change vs no-atr
-    batch_with_atr['atr14'] = torch.full((32,), 2.0)
+    batch_with_atr['atr14'] = torch.full((32,), 2.0)  # if double-dividing, targets halved → loss differs
 
     outputs = _make_dummy_v5_outputs(sigma_val=0.40)
 
@@ -665,26 +671,33 @@ def test_atr_normalization_activates_with_atr14_in_batch():
         phase1_mode=False, atr_normalize_risk_heads=True,
     )
 
-    # L_mfe and L_mae should differ when atr14=2.0 (targets halved)
     l_mfe_no_atr = ld_no_atr.get('L_mfe', 0.0)
     l_mfe_with_atr = ld_with_atr.get('L_mfe', 0.0)
-    assert abs(l_mfe_no_atr - l_mfe_with_atr) > 1e-6, (
-        f"ATR normalization must change L_mfe when atr14=2.0 "
+    assert abs(l_mfe_no_atr - l_mfe_with_atr) < 1e-6, (
+        f"ATR in batch must NOT change L_mfe (mfe_R is already R-units; no double division). "
+        f"If they differ, ATR normalization is incorrectly applied a second time. "
         f"(no_atr={l_mfe_no_atr:.6f}, with_atr={l_mfe_with_atr:.6f})"
     )
 
-    # Verify flag=False bypasses normalization (with_atr ≈ no_atr)
-    _, ld_disabled = compute_v5_loss(
-        outputs, batch_with_atr,
-        w_ret=6.0, w_mfe=0.15, w_mae=0.15, w_action=2.5,
-        sigma_spread_reg=0.0, sigma_reg_threshold=0.40,
-        phase1_mode=False, atr_normalize_risk_heads=False,
-    )
-    l_mfe_disabled = ld_disabled.get('L_mfe', 0.0)
-    assert abs(l_mfe_no_atr - l_mfe_disabled) < 1e-6, (
-        f"atr_normalize_risk_heads=False must give same L_mfe as no-atr batch "
-        f"(no_atr={l_mfe_no_atr:.6f}, disabled={l_mfe_disabled:.6f})"
-    )
+    # V5Dataset data plumbing: atr14 stored and emitted when provided.
+    import numpy as np
+    n = 16
+    rng = np.random.RandomState(42)
+    dummy_feat = rng.randn(n, 95).astype(np.float32)
+    dummy_arr = rng.randn(n).astype(np.float32)
+    dummy_act = np.zeros(n, dtype=np.int64)
+    dummy_valid = np.ones(n, dtype=bool)
+    dummy_atr14 = np.full(n, 1.5, dtype=np.float32)
+
+    if HAS_TORCH:
+        from train.v5_train import V5Dataset
+        ds_with = V5Dataset(dummy_feat, dummy_arr, abs(dummy_arr), abs(dummy_arr),
+                            abs(dummy_arr), dummy_act, dummy_valid, atr14=dummy_atr14)
+        ds_without = V5Dataset(dummy_feat, dummy_arr, abs(dummy_arr), abs(dummy_arr),
+                               abs(dummy_arr), dummy_act, dummy_valid)
+        assert 'atr14' in ds_with[0], "V5Dataset must emit 'atr14' key when atr14 is provided"
+        assert 'atr14' not in ds_without[0], "V5Dataset must NOT emit 'atr14' key when atr14 is None"
+        assert abs(ds_with[0]['atr14'].item() - 1.5) < 1e-6, "V5Dataset atr14 value must match input"
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
