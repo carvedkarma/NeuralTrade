@@ -4228,6 +4228,7 @@ def run_v5_forward_test(
                 'p25': round(float(np.percentile(_sc_finite, 25)), 6),
                 'p50': round(float(np.percentile(_sc_finite, 50)), 6),
                 'p75': round(float(np.percentile(_sc_finite, 75)), 6),
+                'p90': round(float(np.percentile(_sc_finite, 90)), 6),
                 'p99': round(float(np.percentile(_sc_finite, 99)), 6),
             }
 
@@ -5312,24 +5313,41 @@ def run_v5_walk_forward(
             _proof_monotonic  = fold_report.get('score_monotonic', None)
             _proof_sc_spread  = fold_report.get('score_spread', {})
             _proof_sc_p50 = _proof_sc_spread.get('p50', None)
-            _proof_sc_p99 = _proof_sc_spread.get('p99', None)
-            if _proof_sc_p50 is not None and _proof_sc_p99 is not None and _proof_sc_p50 > 1e-8:
-                _proof_disc = round(_proof_sc_p99 / _proof_sc_p50, 2)
+            _proof_sc_p90 = _proof_sc_spread.get('p90', None)
+            _proof_warns = []
+            if _proof_sc_p50 is not None and _proof_sc_p90 is not None and _proof_sc_p50 > 1e-8:
+                _proof_disc = round(_proof_sc_p90 / _proof_sc_p50, 2)
+                if _proof_disc < 3.0:
+                    _proof_warns.append("LOW_DISC")
                 _proof_disc_str = f"{_proof_disc}x" + (" [LOW_DISC]" if _proof_disc < 3.0 else "")
             else:
                 _proof_disc_str = "n/a"
-            _proof_bias_flag = " [LONG_BIAS]" if _proof_long_pct > 75.0 else ""
+            _proof_bias_flag = ""
+            if _proof_long_pct > 75.0:
+                _proof_bias_flag = " [LONG_BIAS]"
+                _proof_warns.append("LONG_BIAS")
             if _proof_debias_sr is not None:
-                _proof_dsr_str = f"{_proof_debias_sr:.1f}x" + (" [COLLAPSED]" if _proof_debias_sr < 5.0 else "")
+                _proof_dsr_str = f"{_proof_debias_sr:.1f}x"
+                if _proof_debias_sr < 5.0:
+                    _proof_dsr_str += " [COLLAPSED]"
+                    _proof_warns.append("COLLAPSED")
             else:
                 _proof_dsr_str = "n/a"
-            _proof_mono_str = ("True" if _proof_monotonic else "False") if _proof_monotonic is not None else "n/a"
+            if _proof_monotonic is not None:
+                _proof_mono_str = "True" if _proof_monotonic else "False"
+                if not _proof_monotonic:
+                    _proof_warns.append("NOT_MONO")
+            else:
+                _proof_mono_str = "n/a"
+            _proof_health = "WARN" if _proof_warns else "OK"
             log.info(
                 f"[WF_FOLD_PROOF] fold={fold['fold']} "
-                f"score_disc(p99/p50)={_proof_disc_str} "
+                f"score_disc(p90/p50)={_proof_disc_str} "
                 f"long_pct={_proof_long_pct:.1f}%{_proof_bias_flag} "
                 f"debias_spread={_proof_dsr_str} "
-                f"monotonic={_proof_mono_str}"
+                f"monotonic={_proof_mono_str} "
+                f"signal_health={_proof_health}"
+                + (f" flags={_proof_warns}" if _proof_warns else "")
             )
 
             pusher.fold_end(
@@ -5350,6 +5368,14 @@ def run_v5_walk_forward(
                 log.info(f"[V5_WF_THR] Fold {fold['fold']}: NO REPORT FILE — "
                          f"decaying threshold_ema {old_ema:.4f} × {wf_threshold_decay} → {threshold_ema:.4f} "
                          f"(floor={_wf_thr_floor})")
+            log.info(
+                f"[WF_FOLD_PROOF] fold={fold['fold']} "
+                f"score_disc(p90/p50)=n/a "
+                f"long_pct=n/a "
+                f"debias_spread=n/a "
+                f"monotonic=n/a "
+                f"signal_health=WARN flags=['NO_REPORT']"
+            )
             pusher.fold_end(
                 fold_num=fold['fold'],
                 completed_folds=len(all_reports),

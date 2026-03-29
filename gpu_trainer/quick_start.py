@@ -5308,6 +5308,8 @@ Examples:
                         help="v5: per-symbol mu_R EMA debiasing in forward test. Removes persistent positive/negative drift from mu_R predictions (default: True)")
     parser.add_argument("--v5-no-mu-debias", dest="v5_mu_debias", action="store_false",
                         help="v5: disable mu_R debiasing")
+    parser.add_argument("--no-mu-debias", dest="v5_mu_debias", action="store_false",
+                        help="alias for --v5-no-mu-debias: disable mu_R debiasing")
     parser.add_argument("--v5-mu-debias-alpha", type=float, default=0.01,
                         help="v5.3.1+: EMA alpha for mu_R debiasing (default: 0.01)")
     parser.add_argument("--v5-ema200-regime-gate", action="store_true", default=False,
