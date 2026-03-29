@@ -418,9 +418,9 @@ class TestGateBaselineCmpInfrastructure(unittest.TestCase):
 
     def test_fmt_cmp_defined_before_gate_cmp_section(self):
         fmt_cmp_idx = self.src.find('def _fmt_cmp(')
-        gate_cmp_idx = self.src.find('[V5_GATE_BASELINE_CMP]')
+        gate_cmp_idx = self.src.find("[V5_GATE_BASELINE_CMP] GATE METRICS COMPARISON")
         self.assertGreater(fmt_cmp_idx, 0, "_fmt_cmp not found")
-        self.assertGreater(gate_cmp_idx, 0, "[V5_GATE_BASELINE_CMP] not found")
+        self.assertGreater(gate_cmp_idx, 0, "[V5_GATE_BASELINE_CMP] GATE METRICS COMPARISON not found")
         self.assertLess(fmt_cmp_idx, gate_cmp_idx,
                         "_fmt_cmp must be defined before [V5_GATE_BASELINE_CMP] section")
 
@@ -742,38 +742,117 @@ class TestFmtCmpBehaviorGateCmp(unittest.TestCase):
         self.assertIn('[FAIL]', line)
 
 
-class TestQualGatePassRateTracking(unittest.TestCase):
-    """gate_pass_rate is stored in fold report (from qual_diag final/total)."""
+class TestGateSelectRateTracking(unittest.TestCase):
+    """gate_select_rate: post-threshold selection rate (n_taken / n_total_bars * 100)."""
 
-    def test_gate_pass_rate_computation(self):
-        """Reproduce: _qual_gate_pass_rate = 100 * final / total."""
-        qual_diag = {'final': 700, 'total': 1000}
-        rate = 100.0 * qual_diag.get('final', 0) / max(qual_diag.get('total', 1), 1)
-        self.assertAlmostEqual(rate, 70.0, places=1)
+    def setUp(self):
+        src_path = os.path.join(os.path.dirname(__file__), 'train', 'v5_train.py')
+        with open(src_path) as f:
+            self.src = f.read()
 
-    def test_gate_pass_rate_handles_zero_total(self):
-        qual_diag = {'final': 0, 'total': 0}
-        rate = 100.0 * qual_diag.get('final', 0) / max(qual_diag.get('total', 1), 1)
+    def test_gate_select_rate_key_in_report(self):
+        self.assertIn("report['gate_select_rate']", self.src,
+                      "gate_select_rate must be stored in fold report")
+
+    def test_gate_select_rate_uses_n_taken(self):
+        self.assertIn('n_taken', self.src)
+        # Verify gate_select_rate uses n_taken (post-threshold bars)
+        idx = self.src.find("report['gate_select_rate']")
+        context = self.src[max(0, idx - 50):idx + 200]
+        self.assertIn('n_taken', context,
+                      "gate_select_rate must be computed from n_taken (threshold-selected bars)")
+
+    def test_gate_select_rate_uses_n_total_bars(self):
+        idx = self.src.find("report['gate_select_rate']")
+        context = self.src[max(0, idx - 100):idx + 300]
+        self.assertIn('n_total_bars', context,
+                      "gate_select_rate must use n_total_bars as denominator")
+
+    def test_gate_select_rate_computation(self):
+        """gate_select_rate = 100 * n_taken / n_total_bars."""
+        n_taken = 150
+        n_total_bars = 1000
+        rate = round(100.0 * n_taken / max(n_total_bars, 1), 2)
+        self.assertAlmostEqual(rate, 15.0, places=1)
+
+    def test_gate_select_rate_zero_when_no_bars(self):
+        n_taken = 0
+        n_total_bars = 0
+        rate = 100.0 * n_taken / max(n_total_bars, 1) if n_total_bars > 0 else 0.0
         self.assertAlmostEqual(rate, 0.0, places=1)
 
-    def test_gate_pass_rate_source_in_v5_train(self):
-        src_path = os.path.join(os.path.dirname(__file__), 'train', 'v5_train.py')
-        with open(src_path) as f:
-            src = f.read()
-        self.assertIn('_qual_gate_pass_rate', src)
-        self.assertIn("report['gate_pass_rate']", src)
+    def test_gate_pass_rate_std_uses_gate_select_rate_in_wf_section(self):
+        idx = self.src.find('[V5_GATE_BASELINE_CMP]')
+        self.assertGreater(idx, 0)
+        gate_cmp_section = self.src[idx - 3000:idx + 3000]
+        self.assertIn('gate_select_rate', gate_cmp_section,
+                      "gate_pass_rate_std in [V5_GATE_BASELINE_CMP] must use gate_select_rate, not gate_pass_rate")
+
+    def test_gate_pass_rate_preserved_for_backward_compat(self):
+        self.assertIn('_qual_gate_pass_rate', self.src)
+        self.assertIn("report['gate_pass_rate']", self.src)
 
     def test_gate_cutoff_source_in_v5_train(self):
-        src_path = os.path.join(os.path.dirname(__file__), 'train', 'v5_train.py')
-        with open(src_path) as f:
-            src = f.read()
-        self.assertIn("report['gate_cutoff']", src)
+        self.assertIn("report['gate_cutoff']", self.src)
 
     def test_gate_mode_source_in_v5_train(self):
+        self.assertIn("report['gate_mode']", self.src)
+
+
+class TestPromotionStrictRequirements(unittest.TestCase):
+    """Promotion requires exactly 6 PASS lines and 0 SKIP lines."""
+
+    def setUp(self):
         src_path = os.path.join(os.path.dirname(__file__), 'train', 'v5_train.py')
         with open(src_path) as f:
-            src = f.read()
-        self.assertIn("report['gate_mode']", src)
+            self.src = f.read()
+
+    def test_gcmp_skips_tracked(self):
+        self.assertIn('_gcmp_skips', self.src)
+
+    def test_promotion_requires_6_or_more_passes(self):
+        self.assertIn('len(_gcmp_passes) >= 6', self.src,
+                      "Promotion must require at least 6 non-SKIP PASS lines")
+
+    def test_promotion_requires_zero_skips(self):
+        self.assertIn('len(_gcmp_skips) == 0', self.src,
+                      "Promotion must require 0 SKIP lines (all 6 metrics present)")
+
+    def test_not_promoted_message_includes_skip_count(self):
+        idx = self.src.find('[V5_GATE] Percentile gate NOT promoted')
+        self.assertGreater(idx, 0)
+        context = self.src[idx:idx + 300]
+        self.assertIn('SKIP', context,
+                      "NOT promoted message should mention SKIP metric count")
+
+    def _simulate_promotion(self, lines):
+        """Simulate go/no-go promotion decision logic from v5_train.py."""
+        passes = [('[PASS]' in ln) for ln in lines if '[SKIP]' not in ln]
+        skips  = [ln for ln in lines if '[SKIP]' in ln]
+        all_pass = all(passes) and len(passes) >= 6 and len(skips) == 0
+        return all_pass, passes, skips
+
+    def test_all_6_pass_no_skip_promotes(self):
+        lines = [f"  metric_{i}          : baseline=1.0  new=2.0  diff=+1.0  [PASS]" for i in range(6)]
+        all_pass, passes, skips = self._simulate_promotion(lines)
+        self.assertTrue(all_pass)
+
+    def test_5_pass_1_fail_does_not_promote(self):
+        lines = [f"  metric_{i}          : baseline=1.0  new=2.0  diff=+1.0  [PASS]" for i in range(5)]
+        lines.append("  metric_5          : baseline=2.0  new=0.5  diff=-1.5  [FAIL]")
+        all_pass, passes, skips = self._simulate_promotion(lines)
+        self.assertFalse(all_pass)
+
+    def test_any_skip_blocks_promotion(self):
+        lines = [f"  metric_{i}          : baseline=1.0  new=2.0  diff=+1.0  [PASS]" for i in range(5)]
+        lines.append("  metric_5          : baseline=N/A  new=N/A  [SKIP]")
+        all_pass, passes, skips = self._simulate_promotion(lines)
+        self.assertFalse(all_pass)
+
+    def test_fewer_than_6_non_skip_lines_blocks_promotion(self):
+        lines = [f"  metric_{i}          : baseline=1.0  new=2.0  diff=+1.0  [PASS]" for i in range(4)]
+        all_pass, passes, skips = self._simulate_promotion(lines)
+        self.assertFalse(all_pass)
 
 
 if __name__ == '__main__':

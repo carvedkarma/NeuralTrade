@@ -4178,6 +4178,15 @@ def run_v5_forward_test(
     report['low_confidence'] = low_confidence
     report['gate_mode'] = getattr(config, 'gate_mode', 'ref_magnitude')
     report['gate_cutoff'] = float(effective_threshold)
+    # gate_select_rate: fraction of total test bars that passed the threshold gate
+    # (post-threshold selection rate, used for gate_pass_rate_std in [V5_GATE_BASELINE_CMP])
+    # n_taken and n_total_bars are both defined above (lines ~3992-3993 region)
+    _n_total_bars_for_rate = n_total_bars  # already computed above report block
+    report['gate_select_rate'] = (
+        round(100.0 * n_taken / max(_n_total_bars_for_rate, 1), 2)
+        if _n_total_bars_for_rate > 0 else 0.0
+    )
+    # gate_pass_rate: quality-mask pass rate (preserved for backward compatibility)
     report['gate_pass_rate'] = _qual_gate_pass_rate
 
     side_quality = {}
@@ -5794,7 +5803,7 @@ def run_v5_walk_forward(
         _gate_mono_vals       = [r.get('score_monotonic') for r in _active_rpts if r.get('score_monotonic') is not None]
         _gate_disc90_vals     = [r.get('score_disc_p90p50') for r in _active_rpts if r.get('score_disc_p90p50') is not None]
         _gate_relax_vals      = [r.get('relax_loop_triggers', 0) for r in _active_rpts]
-        _gate_pass_rate_vals  = [r.get('gate_pass_rate') for r in _active_rpts if r.get('gate_pass_rate') is not None]
+        _gate_pass_rate_vals  = [r.get('gate_select_rate') for r in _active_rpts if r.get('gate_select_rate') is not None]
         # score_p10/p50/p90 mean: preserved for audit completeness
         _gate_p10_vals  = [r.get('score_spread', {}).get('p10')  for r in _active_rpts if r.get('score_spread', {}).get('p10')  is not None]
         _gate_p50_vals  = [r.get('score_spread', {}).get('p50')  for r in _active_rpts if r.get('score_spread', {}).get('p50')  is not None]
@@ -5880,8 +5889,11 @@ def run_v5_walk_forward(
                     log.info(_gcl)
 
                 # --- Go / No-Go promotion decision ---
+                # Require exactly 6 non-SKIP lines, all must have [PASS].
+                # If any metric is SKIP/None, promotion is blocked.
                 _gcmp_passes = [('[PASS]' in ln) for ln in _gcmp_lines if '[SKIP]' not in ln]
-                _gcmp_all_pass = all(_gcmp_passes) and len(_gcmp_passes) > 0
+                _gcmp_skips  = [ln for ln in _gcmp_lines if '[SKIP]' in ln]
+                _gcmp_all_pass = all(_gcmp_passes) and len(_gcmp_passes) >= 6 and len(_gcmp_skips) == 0
 
                 # NOTE: percentile_top15 mode is always experimental/diagnostic within this run.
                 # "PROMOTED" means: this percentile run outperformed the ref-magnitude baseline
@@ -5897,9 +5909,10 @@ def run_v5_walk_forward(
                     )
                 elif _gate_mode_used != 'ref_magnitude':
                     _n_fail = sum(1 for p in _gcmp_passes if not p)
+                    _n_skip = len(_gcmp_skips)
                     log.info(
                         f"[V5_GATE] Percentile gate NOT promoted — stayed in audit-only mode "
-                        f"({_n_fail} metric(s) failed to improve over baseline; "
+                        f"({_n_fail} metric(s) failed, {_n_skip} metric(s) SKIP/None; "
                         f"continue using --v5-gate-mode ref_magnitude for production runs)."
                     )
                 else:
