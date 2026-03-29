@@ -285,9 +285,12 @@ def build_v5_targets(
                 ret_R[i] = 0.0
                 n_aligned_hold += 1
         _valid_ret = ret_R[valid_mask]
+        _ret_mean = float(np.nanmean(_valid_ret)) if len(_valid_ret) > 0 else 0.0
+        _ret_std  = float(np.nanstd(_valid_ret))  if len(_valid_ret) > 0 else 0.0
         logger.info(
-            f"[V5_TARGETS] barrier_aligned_ret_R: LONG={n_aligned_long} SHORT={n_aligned_short} HOLD={n_aligned_hold} "
-            f"ret_R_mean={np.nanmean(_valid_ret):.4f} ret_R_std={np.nanstd(_valid_ret):.4f} "
+            f"[V5_TARGETS] barrier_aligned=True  "
+            f"LONG={n_aligned_long} SHORT={n_aligned_short} HOLD={n_aligned_hold} "
+            f"ret_R_mean={_ret_mean:.4f} ret_R_std={_ret_std:.4f} "
             f"(LONG→+r_long, SHORT→-r_short, HOLD→0.0)"
         )
     else:

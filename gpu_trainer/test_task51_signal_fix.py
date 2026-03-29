@@ -346,6 +346,9 @@ class TestCLIDefaults:
 
 class TestScoreSpreadTelemetry:
     def test_score_percentiles_in_quality_log(self, v5_train_src):
+        assert "score_p10" in v5_train_src, (
+            "[V5_TRAIN_QUALITY] must log score_p10 for spread observability"
+        )
         assert "score_p50" in v5_train_src, (
             "[V5_TRAIN_QUALITY] must log score_p50 (not just |mu_R| percentiles)"
         )
@@ -389,8 +392,8 @@ class TestSignConventionDocumentation:
 
 class TestTargetGeneratorAlignment:
     def test_barrier_aligned_ret_r_code_present(self, v5_tgt_src):
-        assert "barrier_aligned_ret_R" in v5_tgt_src, (
-            "v5_target_generator.py must have barrier_aligned_ret_R alignment block"
+        assert "barrier_aligned_ret_R" in v5_tgt_src or "barrier_aligned=True" in v5_tgt_src, (
+            "v5_target_generator.py must have barrier_aligned ret_R alignment block"
         )
 
     def test_short_bars_negated(self, v5_tgt_src):
@@ -412,8 +415,16 @@ class TestTargetGeneratorAlignment:
         )
 
     def test_alignment_log_emitted(self, v5_tgt_src):
-        assert "barrier_aligned_ret_R:" in v5_tgt_src, (
-            "Must log barrier_aligned_ret_R counts and stats for observability"
+        assert "barrier_aligned=True" in v5_tgt_src, (
+            "Must log '[V5_TARGETS] barrier_aligned=True' with count/mean/std for observability"
+        )
+
+    def test_alignment_log_includes_mean_std(self, v5_tgt_src):
+        assert "ret_R_mean=" in v5_tgt_src, (
+            "[V5_TARGETS] barrier_aligned log must include ret_R_mean"
+        )
+        assert "ret_R_std=" in v5_tgt_src, (
+            "[V5_TARGETS] barrier_aligned log must include ret_R_std"
         )
 
 

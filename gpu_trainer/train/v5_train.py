@@ -6919,13 +6919,14 @@ def train_v5_model(
                         _raw_score_f = _abs_mu_f / _risk_f * (1.5 * _p_side_f - 0.5)
                         _nonneg_scores = _raw_score_f[_raw_score_f > 0]
                         if len(_nonneg_scores) >= 10:
+                            _sc_p10  = float(np.percentile(_nonneg_scores, 10))
                             _sc_p50  = float(np.percentile(_nonneg_scores, 50))
                             _sc_p90  = float(np.percentile(_nonneg_scores, 90))
                             _sc_p99  = float(np.percentile(_nonneg_scores, 99))
                             _disc_90 = _sc_p90 / max(_sc_p50, 1e-9)
                             _disc_99 = _sc_p99 / max(_sc_p50, 1e-9)
                         else:
-                            _sc_p50 = _sc_p90 = _sc_p99 = 0.0
+                            _sc_p10 = _sc_p50 = _sc_p90 = _sc_p99 = 0.0
                             _disc_90 = _disc_99 = 0.0
                         _al_preds = np.argmax(_al_cat[:_n_pred][_vv], axis=1)
                         _n_hold  = int(np.sum(_al_preds == 0))
@@ -6934,7 +6935,7 @@ def train_v5_model(
                         log.info(
                             f"[V5_TRAIN_QUALITY] epoch={epoch} "
                             f"mu_r_corr_val={_mu_corr_val:+.4f} "
-                            f"score_p50={_sc_p50:.4f} p90={_sc_p90:.4f} p99={_sc_p99:.4f} "
+                            f"score_p10={_sc_p10:.4f} p50={_sc_p50:.4f} p90={_sc_p90:.4f} p99={_sc_p99:.4f} "
                             f"disc(p90/p50)={_disc_90:.1f}x disc(p99/p50)={_disc_99:.1f}x "
                             f"pred_valid[H/L/S]={_n_hold}/{_n_long}/{_n_short}"
                         )
