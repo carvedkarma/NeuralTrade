@@ -308,8 +308,8 @@ class TestSideBalLogFix:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestDirCollapseWarning:
-    """Feature D: [V5_DIR_COLLAPSE] warning fires when >90% of val preds
-    are one direction."""
+    """Feature D: [V5_DIR_COLLAPSE] warning fires at BOTH batch and epoch level
+    when >90% of predictions are one direction."""
 
     def test_warning_tag_in_source(self, v5_train_src):
         """[V5_DIR_COLLAPSE] warning must be present in v5_train.py."""
@@ -317,10 +317,10 @@ class TestDirCollapseWarning:
             "[V5_DIR_COLLAPSE] warning tag not found in v5_train.py"
         )
 
-    def test_collapse_threshold_90_pct(self, v5_train_src):
-        """Collapse threshold must be 0.90 (90%)."""
+    def test_epoch_level_collapse_threshold_90_pct(self, v5_train_src):
+        """Epoch-level collapse threshold must be 0.90 (90%)."""
         assert "_collapse_threshold = 0.90" in v5_train_src, (
-            "Collapse threshold should be 0.90 (90%)"
+            "Epoch-level collapse threshold should be 0.90 (90%)"
         )
 
     def test_all_three_directions_covered(self, v5_train_src):
@@ -328,6 +328,24 @@ class TestDirCollapseWarning:
         assert "collapsed to LONG" in v5_train_src, "LONG collapse branch missing"
         assert "collapsed to SHORT" in v5_train_src, "SHORT collapse branch missing"
         assert "collapsed to HOLD" in v5_train_src, "HOLD collapse branch missing"
+
+    def test_batch_level_detection_present(self, v5_train_src):
+        """Batch-level [V5_DIR_COLLAPSE] detection must exist in training loop."""
+        assert "_batch_collapse_warned" in v5_train_src, (
+            "_batch_collapse_warned flag missing — batch-level detection not implemented"
+        )
+
+    def test_batch_collapse_warned_reset_each_epoch(self, v5_train_src):
+        """_batch_collapse_warned must be reset to False at start of each epoch."""
+        assert "_batch_collapse_warned = False" in v5_train_src, (
+            "_batch_collapse_warned = False reset not found; must be reset per epoch"
+        )
+
+    def test_batch_detection_checks_valid_rows(self, v5_train_src):
+        """Batch-level detection must filter on valid rows (not all rows)."""
+        assert "_batch_valid" in v5_train_src, (
+            "Batch detection must use batch_gpu.get('valid') to check valid rows only"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

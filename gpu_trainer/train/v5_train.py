@@ -7014,6 +7014,7 @@ def train_v5_model(
         model.train()
         train_losses = []
         loss_breakdown = {}
+        _batch_collapse_warned = False  # reset each epoch; at-most-one-warning-per-epoch
 
         for batch in train_loader:
             feat = batch['features'].to(device)
@@ -7063,6 +7064,40 @@ def train_v5_model(
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+
+            # Batch-level [V5_DIR_COLLAPSE] detection (Task #54).
+            # Check on valid rows only; emit at most once per epoch to avoid log spam.
+            if not use_v6 and not _batch_collapse_warned:
+                _batch_valid = batch_gpu.get('valid')
+                if _batch_valid is not None and _batch_valid.sum() > 0:
+                    _bl_action_logits = outputs.get('action_logits')
+                    if _bl_action_logits is not None:
+                        with torch.no_grad():
+                            _bl_preds = _bl_action_logits[_batch_valid].argmax(dim=-1)
+                        _bl_n = _bl_preds.numel()
+                        if _bl_n > 0:
+                            _bl_long_pct = (_bl_preds == 1).float().mean().item()
+                            _bl_short_pct = (_bl_preds == 2).float().mean().item()
+                            _bl_hold_pct = (_bl_preds == 0).float().mean().item()
+                            _bat_thresh = 0.90
+                            if _bl_long_pct > _bat_thresh:
+                                log.warning(
+                                    f"[V5_DIR_COLLAPSE] Epoch {epoch:03d} batch: "
+                                    f"{_bl_long_pct*100:.1f}% LONG (>{_bat_thresh*100:.0f}%% — "
+                                    f"training batch collapsed to LONG)")
+                                _batch_collapse_warned = True
+                            elif _bl_short_pct > _bat_thresh:
+                                log.warning(
+                                    f"[V5_DIR_COLLAPSE] Epoch {epoch:03d} batch: "
+                                    f"{_bl_short_pct*100:.1f}% SHORT (>{_bat_thresh*100:.0f}%% — "
+                                    f"training batch collapsed to SHORT)")
+                                _batch_collapse_warned = True
+                            elif _bl_hold_pct > _bat_thresh:
+                                log.warning(
+                                    f"[V5_DIR_COLLAPSE] Epoch {epoch:03d} batch: "
+                                    f"{_bl_hold_pct*100:.1f}% HOLD (>{_bat_thresh*100:.0f}%% — "
+                                    f"training batch collapsed to HOLD)")
+                                _batch_collapse_warned = True
 
             train_losses.append(loss.item())
             for k, v in ld.items():
