@@ -209,13 +209,20 @@ class TestPerEpochQualityLogging:
     def test_quality_block_guarded_by_not_use_v6(self, v5_train_src):
         idx = v5_train_src.find("[V5_TRAIN_QUALITY]")
         assert idx >= 0
-        surrounding = v5_train_src[max(0, idx-2000):idx]
+        # Find the enclosing 'if not use_v6' guard — may be up to 5000 chars before
+        # the actual log string because the compute block is sizeable.
+        surrounding = v5_train_src[max(0, idx-5000):idx]
         assert "not use_v6" in surrounding, (
             "[V5_TRAIN_QUALITY] block must be guarded by 'not use_v6'"
         )
 
 
 class TestBaselineComparison:
+    def _cmp_segment(self, v5_train_src):
+        idx = v5_train_src.find("[V5_BASELINE_CMP]")
+        assert idx >= 0, "[V5_BASELINE_CMP] block not found"
+        return v5_train_src[idx:idx + 8000]
+
     def test_baseline_cmp_block_present(self, v5_train_src):
         assert "[V5_BASELINE_CMP]" in v5_train_src, (
             "Must have [V5_BASELINE_CMP] block in walk-forward summary"
@@ -232,22 +239,68 @@ class TestBaselineComparison:
         )
 
     def test_comparison_includes_mu_r_correlation(self, v5_train_src):
-        assert "mu_r_correlation" in v5_train_src, (
+        seg = self._cmp_segment(v5_train_src)
+        assert "mu_r_correlation" in seg, (
             "Baseline comparison must include mu_r_correlation metric"
         )
 
     def test_comparison_includes_action_accuracy(self, v5_train_src):
-        idx = v5_train_src.find("[V5_BASELINE_CMP]")
-        segment = v5_train_src[idx:idx + 5000]
-        assert "action_accuracy" in segment, (
+        seg = self._cmp_segment(v5_train_src)
+        assert "action_accuracy" in seg, (
             "Baseline comparison must include action_accuracy metric"
         )
 
     def test_comparison_includes_total_r(self, v5_train_src):
-        idx = v5_train_src.find("[V5_BASELINE_CMP]")
-        segment = v5_train_src[idx:idx + 5000]
-        assert "total_r" in segment, (
+        seg = self._cmp_segment(v5_train_src)
+        assert "total_r" in seg, (
             "Baseline comparison must include total_r metric"
+        )
+
+    def test_comparison_includes_p_side_winners(self, v5_train_src):
+        seg = self._cmp_segment(v5_train_src)
+        assert "p_side_winners" in seg or "mean_p_side_winners" in seg, (
+            "Baseline comparison must include p_side_winners metric"
+        )
+
+    def test_comparison_includes_p_side_losers(self, v5_train_src):
+        seg = self._cmp_segment(v5_train_src)
+        assert "p_side_losers" in seg or "mean_p_side_losers" in seg, (
+            "Baseline comparison must include p_side_losers metric"
+        )
+
+    def test_comparison_includes_winner_loser_margin(self, v5_train_src):
+        seg = self._cmp_segment(v5_train_src)
+        assert "winners-losers" in seg or "winners - losers" in seg or "p_side_winners" in seg, (
+            "Baseline comparison must include winners > losers margin check"
+        )
+
+    def test_comparison_includes_score_discriminability(self, v5_train_src):
+        seg = self._cmp_segment(v5_train_src)
+        assert "score_disc_p90" in seg or "disc(p90" in seg or "p90/p50" in seg, (
+            "Baseline comparison must include score discriminability (p90/p50)"
+        )
+        assert "score_disc_p99" in seg or "disc(p99" in seg or "p99/p50" in seg, (
+            "Baseline comparison must include score discriminability (p99/p50)"
+        )
+
+    def test_comparison_includes_relax_loop(self, v5_train_src):
+        seg = self._cmp_segment(v5_train_src)
+        assert "relax_loop" in seg or "relax" in seg.lower(), (
+            "Baseline comparison must include relax-loop trigger rate"
+        )
+
+    def test_run_metrics_has_p_side_fields(self, v5_train_src):
+        assert "mean_p_side_winners" in v5_train_src, (
+            "v5_run_metrics must include mean_p_side_winners"
+        )
+        assert "mean_p_side_losers" in v5_train_src, (
+            "v5_run_metrics must include mean_p_side_losers"
+        )
+        assert "mean_score_disc_p90p50" in v5_train_src, (
+            "v5_run_metrics must include mean_score_disc_p90p50"
+        )
+        assert "mean_score_disc_p99p50" in v5_train_src, (
+            "v5_run_metrics must include mean_score_disc_p99p50"
         )
 
 
@@ -262,6 +315,75 @@ class TestFoldStartLog:
         idx = v5_train_src.find("barrier_aligned_ret_R=True")
         assert idx >= 0, (
             "Fold-start log must mention barrier_aligned_ret_R=True"
+        )
+
+
+class TestCLIDefaults:
+    def test_quick_start_mu_debias_default_false(self):
+        from pathlib import Path
+        qs_path = Path(__file__).parent / "quick_start.py"
+        if not qs_path.exists():
+            pytest.skip("quick_start.py not found")
+        qs_src = qs_path.read_text()
+        assert 'default=False' in qs_src, (
+            "quick_start.py --v5-mu-debias must have default=False (opt-in)"
+        )
+        idx = qs_src.find("--v5-mu-debias")
+        assert idx >= 0
+        snippet = qs_src[idx:idx+300]
+        assert "default=False" in snippet, (
+            "--v5-mu-debias argparse entry must have default=False"
+        )
+
+    def test_side_bal_w_log_is_005(self, v5_train_src):
+        assert 'SIDE_BAL_W=0.05' in v5_train_src, (
+            "[V5_SIDE_BAL] log must say SIDE_BAL_W=0.05 (not 0.30)"
+        )
+        assert 'SIDE_BAL_W=0.30' not in v5_train_src, (
+            "All occurrences of SIDE_BAL_W=0.30 in logs must be removed"
+        )
+
+
+class TestScoreSpreadTelemetry:
+    def test_score_percentiles_in_quality_log(self, v5_train_src):
+        assert "score_p50" in v5_train_src, (
+            "[V5_TRAIN_QUALITY] must log score_p50 (not just |mu_R| percentiles)"
+        )
+        assert "score_p90" in v5_train_src, (
+            "[V5_TRAIN_QUALITY] must log score_p90"
+        )
+        assert "score_p99" in v5_train_src, (
+            "[V5_TRAIN_QUALITY] must log score_p99"
+        )
+
+    def test_discriminability_ratios_logged(self, v5_train_src):
+        assert "disc(p90/p50)" in v5_train_src or "p90/p50" in v5_train_src, (
+            "[V5_TRAIN_QUALITY] must log p90/p50 discriminability ratio"
+        )
+        assert "disc(p99/p50)" in v5_train_src or "p99/p50" in v5_train_src, (
+            "[V5_TRAIN_QUALITY] must log p99/p50 discriminability ratio"
+        )
+
+    def test_score_approx_uses_mae_and_p_side(self, v5_train_src):
+        idx = v5_train_src.find("[V5_TRAIN_QUALITY]")
+        segment = v5_train_src[max(0, idx-2000):idx+2000]
+        assert "_risk_f" in segment or "_mae_cat" in segment, (
+            "Score approximation must use MAE as risk denominator"
+        )
+        assert "_p_side_f" in segment, (
+            "Score approximation must use p_side (max of p_long, p_short)"
+        )
+
+
+class TestSignConventionDocumentation:
+    def test_short_sign_convention_explained(self, v5_tgt_src):
+        assert "-r_short" in v5_tgt_src or "negation" in v5_tgt_src or "negative" in v5_tgt_src.lower(), (
+            "Must document why SHORT uses -r_short (sign convention for mu_R bearish)"
+        )
+
+    def test_short_convention_reconciled_with_spec(self, v5_tgt_src):
+        assert "reconciled" in v5_tgt_src.lower() or "sign convention" in v5_tgt_src.lower(), (
+            "Comment must explicitly reconcile -r_short sign with task-51 spec"
         )
 
 

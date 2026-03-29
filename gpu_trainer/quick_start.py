@@ -5304,8 +5304,8 @@ Examples:
                         help="v5: run leakage/overfitting diagnostics after training")
     parser.add_argument("--v5-feature-report", action="store_true", default=False,
                         help="v5: generate feature importance ranking (permutation) and correlation cleanup report after training. Outputs to checkpoints/v5_feature_report.json")
-    parser.add_argument("--v5-mu-debias", action="store_true", default=True,
-                        help="v5: per-symbol mu_R EMA debiasing in forward test. Removes persistent positive/negative drift from mu_R predictions (default: True)")
+    parser.add_argument("--v5-mu-debias", action="store_true", default=False,
+                        help="v5: per-symbol mu_R EMA debiasing in forward test (opt-in, default: False). Enable with --v5-mu-debias when the model shows persistent directional drift.")
     parser.add_argument("--v5-no-mu-debias", dest="v5_mu_debias", action="store_false",
                         help="v5: disable mu_R debiasing")
     parser.add_argument("--no-mu-debias", dest="v5_mu_debias", action="store_false",

@@ -5529,17 +5529,46 @@ def run_v5_walk_forward(
             if r.get('prediction_quality') and 'action_accuracy' in r['prediction_quality']
         ]
         _wrs = [r['win_rate'] for r in _active_rpts if r.get('win_rate') is not None]
+        _ps_winners = [
+            r['prediction_quality']['mean_p_side_winners']
+            for r in _active_rpts
+            if r.get('prediction_quality') and r['prediction_quality'].get('mean_p_side_winners') is not None
+        ]
+        _ps_losers = [
+            r['prediction_quality']['mean_p_side_losers']
+            for r in _active_rpts
+            if r.get('prediction_quality') and r['prediction_quality'].get('mean_p_side_losers') is not None
+        ]
+        _relax_counts = [
+            r.get('relax_loop_triggers', 0)
+            for r in _active_rpts
+        ]
+        _score_disc_90 = [
+            r.get('score_disc_p90p50')
+            for r in _active_rpts
+            if r.get('score_disc_p90p50') is not None
+        ]
+        _score_disc_99 = [
+            r.get('score_disc_p99p50')
+            for r in _active_rpts
+            if r.get('score_disc_p99p50') is not None
+        ]
         _run_metrics = {
-            'total_r':              round(total_r, 4),
-            'avg_expectancy_r':     round(avg_expect, 4),
-            'total_trades':         int(total_trades),
-            'total_long':           int(total_long),
-            'total_short':          int(total_short),
-            'long_pct':             round(100.0 * total_long / max(total_long + total_short, 1), 2),
-            'active_folds':         int(active_folds),
-            'mean_mu_r_correlation': round(float(np.mean(_mu_r_corrs)), 4) if _mu_r_corrs else None,
-            'mean_action_accuracy':  round(float(np.mean(_act_accs)), 4)  if _act_accs  else None,
-            'mean_win_rate':         round(float(np.mean(_wrs)), 4)        if _wrs       else None,
+            'total_r':                round(total_r, 4),
+            'avg_expectancy_r':       round(avg_expect, 4),
+            'total_trades':           int(total_trades),
+            'total_long':             int(total_long),
+            'total_short':            int(total_short),
+            'long_pct':               round(100.0 * total_long / max(total_long + total_short, 1), 2),
+            'active_folds':           int(active_folds),
+            'mean_mu_r_correlation':  round(float(np.mean(_mu_r_corrs)), 4) if _mu_r_corrs  else None,
+            'mean_action_accuracy':   round(float(np.mean(_act_accs)),   4) if _act_accs    else None,
+            'mean_win_rate':          round(float(np.mean(_wrs)),         4) if _wrs         else None,
+            'mean_p_side_winners':    round(float(np.mean(_ps_winners)),  4) if _ps_winners  else None,
+            'mean_p_side_losers':     round(float(np.mean(_ps_losers)),   4) if _ps_losers   else None,
+            'relax_loop_pct_folds':   round(100.0 * sum(1 for x in _relax_counts if x > 0) / max(len(_relax_counts), 1), 1),
+            'mean_score_disc_p90p50': round(float(np.mean(_score_disc_90)), 2) if _score_disc_90 else None,
+            'mean_score_disc_p99p50': round(float(np.mean(_score_disc_99)), 2) if _score_disc_99 else None,
         }
         _metrics_path   = Path("checkpoints") / "v5_run_metrics.json"
         _baseline_path  = Path("checkpoints") / "v5_baseline_metrics.json"
@@ -5572,52 +5601,94 @@ def run_v5_walk_forward(
                         f"new={nv:{fmt}}  diff={diff:+{fmt}}  [{status}]"
                     )
 
-                log.info("\n" + "=" * 100)
+                log.info("\n" + "=" * 110)
                 log.info("  [V5_BASELINE_CMP] COMPARISON AGAINST BASELINE")
-                log.info("=" * 100)
+                log.info("=" * 110)
                 log.info(_fmt_cmp(
-                    "mu_r_correlation (target > 0.0)",
+                    "mu_r_correlation        (target > 0.0)",
                     _baseline.get('mean_mu_r_correlation'),
                     _run_metrics.get('mean_mu_r_correlation'),
                     threshold=0.0,
                 ))
                 log.info(_fmt_cmp(
-                    "action_accuracy  (target > 0.50)",
+                    "action_accuracy         (target > 0.50)",
                     _baseline.get('mean_action_accuracy'),
                     _run_metrics.get('mean_action_accuracy'),
                     threshold=0.50,
                 ))
                 log.info(_fmt_cmp(
-                    "mean_win_rate    (higher = better)",
-                    _baseline.get('mean_win_rate'),
-                    _run_metrics.get('mean_win_rate'),
+                    "p_side_winners          (higher = confident on winners)",
+                    _baseline.get('mean_p_side_winners'),
+                    _run_metrics.get('mean_p_side_winners'),
                     higher_is_better=True,
                 ))
                 log.info(_fmt_cmp(
-                    "avg_expectancy_r (higher = better, must >= baseline)",
+                    "p_side_losers           (lower = uncertain on losers)",
+                    _baseline.get('mean_p_side_losers'),
+                    _run_metrics.get('mean_p_side_losers'),
+                    higher_is_better=False,
+                ))
+                # Winner > loser margin — must be positive
+                _bw = _baseline.get('mean_p_side_winners')
+                _nw = _run_metrics.get('mean_p_side_winners')
+                _bl = _baseline.get('mean_p_side_losers')
+                _nl = _run_metrics.get('mean_p_side_losers')
+                if _nw is not None and _nl is not None:
+                    _margin_new  = _nw - _nl
+                    _margin_base = (_bw - _bl) if (_bw is not None and _bl is not None) else None
+                    _mpass = "PASS" if _margin_new > 0 else "FAIL"
+                    _bstr  = f"{_margin_base:+.4f}" if _margin_base is not None else "N/A"
+                    log.info(f"  {'p_side(winners-losers) margin   (must > 0)':<50}: "
+                             f"baseline={_bstr:<14}new={_margin_new:+.4f}  [{_mpass}]")
+                log.info(_fmt_cmp(
+                    "score_disc_p90/p50      (target > 5x, higher=better)",
+                    _baseline.get('mean_score_disc_p90p50'),
+                    _run_metrics.get('mean_score_disc_p90p50'),
+                    threshold=5.0, fmt='.2f',
+                ))
+                log.info(_fmt_cmp(
+                    "score_disc_p99/p50      (target > 10x, higher=better)",
+                    _baseline.get('mean_score_disc_p99p50'),
+                    _run_metrics.get('mean_score_disc_p99p50'),
+                    threshold=10.0, fmt='.2f',
+                ))
+                log.info(_fmt_cmp(
+                    "avg_expectancy_r        (must >= baseline)",
                     _baseline.get('avg_expectancy_r'),
                     _run_metrics.get('avg_expectancy_r'),
                     higher_is_better=True,
                 ))
                 log.info(_fmt_cmp(
-                    "total_r          (higher = better, must >= baseline)",
+                    "total_r                 (must >= baseline)",
                     _baseline.get('total_r'),
                     _run_metrics.get('total_r'),
                     higher_is_better=True,
                 ))
                 log.info(_fmt_cmp(
-                    "long_pct         (lower = more balanced, target < 80%)",
+                    "mean_win_rate           (higher = better)",
+                    _baseline.get('mean_win_rate'),
+                    _run_metrics.get('mean_win_rate'),
+                    higher_is_better=True,
+                ))
+                log.info(_fmt_cmp(
+                    "long_pct                (balanced: < 80%, lower=better)",
                     _baseline.get('long_pct'),
                     _run_metrics.get('long_pct'),
                     threshold=None, higher_is_better=False, fmt='.1f',
                 ))
                 log.info(_fmt_cmp(
-                    "active_folds     (higher = fewer dead folds)",
+                    "relax_loop_pct_folds    (lower = fewer forced re-samples)",
+                    _baseline.get('relax_loop_pct_folds'),
+                    _run_metrics.get('relax_loop_pct_folds'),
+                    higher_is_better=False, fmt='.1f',
+                ))
+                log.info(_fmt_cmp(
+                    "active_folds            (higher = fewer dead folds)",
                     _baseline.get('active_folds'),
                     _run_metrics.get('active_folds'),
                     higher_is_better=True, fmt='d',
                 ))
-                log.info("=" * 100)
+                log.info("=" * 110)
                 log.info(
                     "[V5_BASELINE_CMP] To promote this run as new baseline:  "
                     f"copy {_metrics_path} {_baseline_path}"
@@ -6711,7 +6782,7 @@ def train_v5_model(
             n_bear_ep = sum(t[1] for t in diag_tuples)
             n_chop_ep = sum(t[2] for t in diag_tuples)
             avg_side_bal = float(np.mean(loss_breakdown.get('L_side_balance', [0.0])))
-            log.info(f"[V5_SIDE_BAL] Epoch {epoch:03d}: regime_conditional=True SIDE_BAL_W=0.30 "
+            log.info(f"[V5_SIDE_BAL] Epoch {epoch:03d}: regime_conditional=True SIDE_BAL_W=0.05 "
                      f"bull={n_bull_ep} bear={n_bear_ep} chop={n_chop_ep} "
                      f"avg_L_side_bal={avg_side_bal:.4f}")
 
@@ -6790,39 +6861,65 @@ def train_v5_model(
             _vtag = "V6" if use_v6 else "V5"
             log.info(f"[{_vtag}_SIGMA] epoch={epoch} sigma_p10={_sp10:.3f} p50={_sp50:.3f} p90={_sp90:.3f}")
 
-        # Per-epoch mu_R correlation quality tracking (V5 only).
-        # Measures whether predicted mu_R correlates with the aligned barrier ret_R labels.
-        # A healthy model should show mu_r_corr_val > 0.0 by epoch 10.
+        # Per-epoch mu_R correlation + score-spread quality tracking (V5 only).
+        # Measures whether predicted mu_R correlates with aligned barrier ret_R labels
+        # and whether score distribution has meaningful spread (p90/p50 >> 1).
+        # Healthy model targets: mu_r_corr_val > 0.0, score_p90/p50 > 5×, score_p99/p50 > 10×.
         if not use_v6 and all_val_outputs.get('ret_mu') and all_val_outputs.get('action_logits'):
             try:
-                _mu_cat = torch.cat(all_val_outputs['ret_mu'], dim=0).numpy().squeeze(-1)
-                _n_pred = min(len(_mu_cat), len(val_ret_R))
-                _vv = val_valid[:_n_pred]
+                _mu_cat  = torch.cat(all_val_outputs['ret_mu'],  dim=0).numpy().squeeze(-1)
+                _mae_cat = torch.cat(all_val_outputs['mae'],     dim=0).numpy().squeeze(-1) if all_val_outputs.get('mae') else None
+                _al_cat  = torch.cat(all_val_outputs['action_logits'], dim=0).numpy()
+                _n_pred  = min(len(_mu_cat), len(val_ret_R))
+                _vv      = val_valid[:_n_pred]
                 if np.any(_vv):
                     _pred_mu = _mu_cat[:_n_pred][_vv]
                     _tgt_r   = val_ret_R[:_n_pred][_vv]
                     _finite  = np.isfinite(_pred_mu) & np.isfinite(_tgt_r)
                     if np.sum(_finite) > 10:
-                        _mu_corr_val = float(np.corrcoef(_pred_mu[_finite], _tgt_r[_finite])[0, 1])
-                        _abs_mu = np.abs(_pred_mu[_finite])
-                        _sp10 = float(np.percentile(_abs_mu, 10))
-                        _sp50 = float(np.percentile(_abs_mu, 50))
-                        _sp90 = float(np.percentile(_abs_mu, 90))
-                        _al_cat = torch.cat(all_val_outputs['action_logits'], dim=0).numpy()[:_n_pred][_vv]
-                        _al_preds = np.argmax(_al_cat, axis=1)
-                        _n_hold = int(np.sum(_al_preds == 0))
-                        _n_long = int(np.sum(_al_preds == 1))
+                        _pred_mu_f = _pred_mu[_finite]
+                        _tgt_r_f   = _tgt_r[_finite]
+                        _mu_corr_val = float(np.corrcoef(_pred_mu_f, _tgt_r_f)[0, 1])
+                        # Approximate V5 score (action_head mode, score_lambda=0.5):
+                        #   score = p_side * |mu_R| / risk - 0.5 * (1-p_side) * |mu_R| / risk
+                        #         = |mu_R| / risk * (1.5 * p_side - 0.5)
+                        _abs_mu_f = np.abs(_pred_mu_f)
+                        _probs_f  = _al_cat[:_n_pred][_vv][_finite]
+                        _probs_f  = np.exp(_probs_f - _probs_f.max(axis=1, keepdims=True))
+                        _probs_f /= _probs_f.sum(axis=1, keepdims=True)
+                        _p_long_f  = _probs_f[:, 1]
+                        _p_short_f = _probs_f[:, 2]
+                        _p_side_f  = np.maximum(_p_long_f, _p_short_f)
+                        if _mae_cat is not None:
+                            _risk_f = np.clip(np.abs(_mae_cat[:_n_pred][_vv][_finite]), 0.01, 10.0)
+                        else:
+                            _risk_f = np.ones(len(_abs_mu_f))
+                        _raw_score_f = _abs_mu_f / _risk_f * (1.5 * _p_side_f - 0.5)
+                        _nonneg_scores = _raw_score_f[_raw_score_f > 0]
+                        if len(_nonneg_scores) >= 10:
+                            _sc_p50  = float(np.percentile(_nonneg_scores, 50))
+                            _sc_p90  = float(np.percentile(_nonneg_scores, 90))
+                            _sc_p99  = float(np.percentile(_nonneg_scores, 99))
+                            _disc_90 = _sc_p90 / max(_sc_p50, 1e-9)
+                            _disc_99 = _sc_p99 / max(_sc_p50, 1e-9)
+                        else:
+                            _sc_p50 = _sc_p90 = _sc_p99 = 0.0
+                            _disc_90 = _disc_99 = 0.0
+                        _al_preds = np.argmax(_al_cat[:_n_pred][_vv], axis=1)
+                        _n_hold  = int(np.sum(_al_preds == 0))
+                        _n_long  = int(np.sum(_al_preds == 1))
                         _n_short = int(np.sum(_al_preds == 2))
                         log.info(
                             f"[V5_TRAIN_QUALITY] epoch={epoch} "
                             f"mu_r_corr_val={_mu_corr_val:+.4f} "
-                            f"|mu_R|_p10={_sp10:.4f} p50={_sp50:.4f} p90={_sp90:.4f} "
+                            f"score_p50={_sc_p50:.4f} p90={_sc_p90:.4f} p99={_sc_p99:.4f} "
+                            f"disc(p90/p50)={_disc_90:.1f}x disc(p99/p50)={_disc_99:.1f}x "
                             f"pred_valid[H/L/S]={_n_hold}/{_n_long}/{_n_short}"
                         )
                         if epoch >= 20 and _mu_corr_val < -0.05:
                             log.warning(
                                 f"[V5_TRAIN_WARN] epoch={epoch} mu_r_corr_val={_mu_corr_val:+.4f} < -0.05 "
-                                f"after 20 epochs. Signals diverging from barrier labels — "
+                                f"after 20 epochs. NLL targets diverging from barrier labels — "
                                 f"check barrier_outcomes alignment in v5_target_generator.py. "
                                 f"Target: mu_r_corr_val > 0.0 for a healthy model."
                             )

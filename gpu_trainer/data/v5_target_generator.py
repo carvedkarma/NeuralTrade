@@ -252,9 +252,20 @@ def build_v5_targets(
         #   1. mu_r_correlation → -0.11 (opposite to true signal)
         #   2. sigma collapse → 0.001-0.002 score range
         #   3. Side-aware scoring gate fires even on good signals.
-        # Fix: LONG label  → ret_R = +r_long  (positive — price went up)
-        #      SHORT label → ret_R = -r_short  (negative — price went down)
-        #      HOLD label  → ret_R =  0.0
+        #
+        # Sign convention (reconciled with task-51 spec):
+        #   LONG  → ret_R = +r_long   (positive: price went UP, long won)
+        #   SHORT → ret_R = -r_short  (negative: price went DOWN, short won)
+        #
+        # The negation for SHORT is required because r_short is defined as the
+        # *profit* of a short trade (positive = short win = price fell), while
+        # mu_R must be negative to signal a bearish prediction.  Using +r_short
+        # would make mu_R positive for short wins, conflicting with the action
+        # head's CE label=2 and with side_aware_scoring (which requires mu_R<0
+        # for shorts).  -r_short produces consistent gradients: CE loss pushes
+        # p_short↑, NLL loss pushes mu_R→negative — no contradiction.
+        #
+        # HOLD  → ret_R = 0.0
         n_aligned_long = 0
         n_aligned_short = 0
         n_aligned_hold = 0
