@@ -5289,6 +5289,10 @@ Examples:
                         help="v5 TPD controller: initial score threshold (default: auto p90)")
     parser.add_argument("--v5-mae-cap", type=float, default=2.0,
                         help="v5 score penalty: clamp MAE to this cap (default: 2.0)")
+    parser.add_argument("--v5-side-bal-weight", type=float, default=0.15,
+                        help="3-class side-balance KL loss weight added to L_action (default: 0.15; "
+                             "bug-fix from 0.05 — 3-class targets now include HOLD so all-HOLD "
+                             "collapse is penalised)")
 
     parser.add_argument("--v5-train-end-date", type=str, default=None,
                         help="v5 time-based split: train on data before this date (YYYY-MM-DD)")
@@ -6362,6 +6366,7 @@ Examples:
                     v6_aux_weight=args.v6_aux_weight,
                     v6_confidence_weight=args.v6_confidence_weight,
                     v6_moe_balance_weight=args.v6_moe_balance_weight,
+                    side_bal_weight=args.v5_side_bal_weight,
                 )
                 return
 
@@ -6566,6 +6571,7 @@ Examples:
                 v6_aux_weight=args.v6_aux_weight,
                 v6_confidence_weight=args.v6_confidence_weight,
                 v6_moe_balance_weight=args.v6_moe_balance_weight,
+                side_bal_weight=args.v5_side_bal_weight,
             )
 
               if _single_pusher is not None:

@@ -70,10 +70,13 @@ class TestMuDebiasDefault:
 
 
 class TestSideBalanceWeight:
-    def test_side_bal_w_is_005(self, v5_train_src):
-        assert "SIDE_BAL_W = 0.05" in v5_train_src, (
-            "SIDE_BAL_W must be 0.05 (reduced from 0.30) to prevent KL loss "
-            "from overriding per-bar action labels"
+    def test_side_bal_w_is_configurable(self, v5_train_src):
+        # Task #53 replaced the hardcoded SIDE_BAL_W = 0.05 with a configurable
+        # side_bal_weight parameter (default 0.15) for 3-class KL.
+        # The assignment must be: SIDE_BAL_W = side_bal_weight
+        assert "SIDE_BAL_W = side_bal_weight" in v5_train_src, (
+            "SIDE_BAL_W must be assigned from configurable side_bal_weight "
+            "parameter (Task #53 changed hardcoded 0.05 to configurable default 0.15)"
         )
 
     def test_old_side_bal_w_030_removed(self, v5_train_src):
@@ -335,12 +338,14 @@ class TestCLIDefaults:
             "--v5-mu-debias argparse entry must have default=False"
         )
 
-    def test_side_bal_w_log_is_005(self, v5_train_src):
-        assert 'SIDE_BAL_W=0.05' in v5_train_src, (
-            "[V5_SIDE_BAL] log must say SIDE_BAL_W=0.05 (not 0.30)"
-        )
+    def test_side_bal_w_log_not_030(self, v5_train_src):
+        # Task #53 made SIDE_BAL_W configurable (default 0.15); the old 0.30 must
+        # not appear in any log line.  The fold-start log now uses %.2f format.
         assert 'SIDE_BAL_W=0.30' not in v5_train_src, (
             "All occurrences of SIDE_BAL_W=0.30 in logs must be removed"
+        )
+        assert 'SIDE_BAL_W=%.2f' in v5_train_src or 'SIDE_BAL_W=' in v5_train_src, (
+            "Fold-start log must still emit a SIDE_BAL_W value"
         )
 
 

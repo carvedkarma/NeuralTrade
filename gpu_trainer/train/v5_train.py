@@ -690,7 +690,7 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
                     barrier_mode='fixed', action_weights=None, epoch=0,
                     sample_weights=None, mae_asym_weight=1.0,
                     warmup_epochs=0, warmup_ret_mult=1.0, warmup_action_mult=1.0,
-                    sigma_spread_reg=0.0):
+                    sigma_spread_reg=0.0, side_bal_weight=0.15):
     """Compute v5 composite loss with class-balanced action CE.
 
     Uses clamped Gaussian NLL to prevent log(sigma) term from dominating.
@@ -768,8 +768,15 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
     else:
         L_action = F.cross_entropy(action_logits, action_true, label_smoothing=0.1)
 
-    LONG_IDX, SHORT_IDX = 1, 2
-    SIDE_BAL_W = 0.05
+    HOLD_IDX, LONG_IDX, SHORT_IDX = 0, 1, 2
+    # BUG FIX (Task #53): old 2-class KL normalised [p_long, p_short] to a ratio
+    # (p_long / (p_long + p_short)), so when the model predicts all-HOLD both
+    # p_long≈0 and p_short≈0, after normalisation pred_g ≈ [0.5, 0.5] — the KL vs
+    # target [0.6, 0.4] is only ~0.02, giving L_side_balance ≈ 0.001 and zero
+    # gradient pressure away from all-HOLD.  Fix: use the full 3-class softmax
+    # distribution [p_hold, p_long, p_short] with per-regime 3-class targets so
+    # HOLD collapse (pred ≈ [1.0, 0, 0]) produces a large KL vs the target.
+    SIDE_BAL_W = side_bal_weight  # configurable (default 0.15, was hardcoded 0.05)
     action_probs = F.softmax(action_logits, dim=-1)
     eps = 1e-8
 
@@ -782,17 +789,26 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
     n_bear = int(bear_mask.sum().item())
     n_chop = int(chop_mask.sum().item())
 
+    # 3-class targets [hold, long, short] per regime.
+    # Bull: bias LONG (55%), penalise HOLD if >30%.
+    # Bear: bias SHORT (55%), penalise HOLD if >30%.
+    # Chop: balanced L/S (30% each), allow more HOLD (40%).
+    _3CLS_TARGETS = {
+        'bull': [0.30, 0.55, 0.15],
+        'bear': [0.30, 0.15, 0.55],
+        'chop': [0.40, 0.30, 0.30],
+    }
+
     group_kl_list = []
-    for mask, p_long_target in [(bull_mask, 0.60), (bear_mask, 0.40), (chop_mask, 0.50)]:
+    for mask, regime_key in [(bull_mask, 'bull'), (bear_mask, 'bear'), (chop_mask, 'chop')]:
         if mask.sum() < 2:
             continue
-        p_long_g = action_probs[mask, LONG_IDX].mean()
-        p_short_g = action_probs[mask, SHORT_IDX].mean()
-        pred_g = torch.stack([p_long_g, p_short_g])
-        pred_g = pred_g / (pred_g.sum() + eps)
-        p_short_target = 1.0 - p_long_target
-        target_g = torch.tensor([p_long_target, p_short_target],
-                                 dtype=pred_g.dtype, device=pred_g.device)
+        pred_h = action_probs[mask, HOLD_IDX].mean()
+        pred_l = action_probs[mask, LONG_IDX].mean()
+        pred_s = action_probs[mask, SHORT_IDX].mean()
+        pred_g = torch.stack([pred_h, pred_l, pred_s])  # already sums to ~1 (softmax)
+        target_vals = _3CLS_TARGETS[regime_key]
+        target_g = torch.tensor(target_vals, dtype=pred_g.dtype, device=pred_g.device)
         kl_g = F.kl_div((pred_g + eps).log(), target_g.detach(), reduction="batchmean")
         group_kl_list.append(kl_g)
 
@@ -1264,6 +1280,13 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
         action_probs = action_probs / (action_probs.sum(axis=1, keepdims=True) + 1e-8)
         p_long = action_probs[:, 1]
         p_short = action_probs[:, 2]
+
+    # BUG FIX (Task #53): mae_cap parameter was defined but never applied.
+    # mae_R targets are uncapped full-path MAE (mean ≈4.8R in production), which made
+    # risk ≈ 4.8R and caused the confidence multiplier (p_side - lambda*(1-p_side)) to
+    # go negative for any p_side < lambda/(1+lambda) = 0.333, producing -inf scores for
+    # every bar.  Applying the existing mae_cap=2.0 restores sane score magnitudes.
+    mae_pred = np.minimum(mae_pred, mae_cap)
 
     # COMPAT FIX: was 0.25 hard floor which broke scale-invariance when mae < 0.25.
     # Using a small epsilon preserves proportionality (score ratio stays ~1 when mu/risk
@@ -4947,6 +4970,7 @@ def run_v5_walk_forward(
     gate_mode='ref_magnitude',
     max_folds=None,
     candidate_logger=None,
+    side_bal_weight=0.15,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -5117,7 +5141,11 @@ def run_v5_walk_forward(
             symbols, device,
         )
         log.info(
-            "[V5_WF][FOLD_START] mu_debias=%s  SIDE_BAL_W=0.05  barrier_aligned_ret_R=True",
+            "[V5_WF][FOLD_START] SIDE_BAL_W=%.2f  barrier_aligned_ret_R=True",
+            side_bal_weight,
+        )
+        log.info(
+            "[V5_DEBIAS] mu_debias=%s (default=DISABLED; enable with --v5-mu-debias)",
             "ENABLED" if mu_debias else "DISABLED",
         )
         _log_cuda_mem("[V5_WF][FOLD_START]")
@@ -5285,6 +5313,7 @@ def run_v5_walk_forward(
                 v6_confidence_weight=v6_confidence_weight,
                 v6_moe_balance_weight=v6_moe_balance_weight,
                 candidate_logger=candidate_logger,
+                side_bal_weight=side_bal_weight,
             )
         except Exception as _fold_err:
             import traceback as _tb
@@ -6067,6 +6096,7 @@ def train_v5_model(
     v6_confidence_weight=0.15,
     v6_moe_balance_weight=0.05,
     candidate_logger=None,
+    side_bal_weight=0.15,
 ):
     """V5/V6 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -6994,6 +7024,7 @@ def train_v5_model(
                     warmup_ret_mult=loss_warmup_ret_mult,
                     warmup_action_mult=loss_warmup_action_mult,
                     sigma_spread_reg=sigma_spread_reg,
+                    side_bal_weight=side_bal_weight,
                 )
 
             optimizer.zero_grad()
@@ -7058,6 +7089,7 @@ def train_v5_model(
                         epoch=epoch,
                         mae_asym_weight=mae_asym_weight,
                         sigma_spread_reg=sigma_spread_reg,
+                        side_bal_weight=side_bal_weight,
                     )
                 val_losses.append(vloss.item())
 
@@ -7517,6 +7549,7 @@ def train_v5_model(
                             epoch=epochs + ft_ep,
                             mae_asym_weight=mae_asym_weight,
                             sigma_spread_reg=sigma_spread_reg,
+                            side_bal_weight=side_bal_weight,
                         )
                         ft_optimizer.zero_grad()
                         loss.backward()
