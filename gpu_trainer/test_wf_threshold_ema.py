@@ -13,8 +13,6 @@ Run with:
 or:
     python gpu_trainer/test_wf_threshold_ema.py
 """
-import ast
-import sys
 import os
 import re
 
