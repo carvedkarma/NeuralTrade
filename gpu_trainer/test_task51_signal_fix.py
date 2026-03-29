@@ -415,3 +415,96 @@ class TestTargetGeneratorAlignment:
         assert "barrier_aligned_ret_R:" in v5_tgt_src, (
             "Must log barrier_aligned_ret_R counts and stats for observability"
         )
+
+
+class TestFmtCmpBehavior:
+    """Behavioral unit tests for the _fmt_cmp comparison logic.
+
+    These run the actual comparison logic without importing v5_train to avoid
+    heavy GPU dependencies.  They mirror the exact logic added to v5_train.py.
+    """
+
+    @staticmethod
+    def _fmt_cmp(name, bv, nv, threshold=None, higher_is_better=True, fmt='.4f',
+                 upper_threshold=None):
+        """Mirror of the _fmt_cmp helper inside run_v5_walk_forward."""
+        if nv is None:
+            return f"  {name:<50}: baseline=N/A  new=N/A  [SKIP]"
+        bv_str = f"{bv:{fmt}}" if bv is not None else "N/A"
+        diff_str = f"{nv - bv:+{fmt}}" if bv is not None else "N/A"
+        if upper_threshold is not None:
+            passed = nv <= upper_threshold
+        elif threshold is not None:
+            passed = nv >= threshold
+        elif bv is not None:
+            passed = (nv > bv) if higher_is_better else (nv < bv)
+        else:
+            passed = None
+        status = "PASS" if passed else ("FAIL" if passed is not None else "N/A")
+        return (
+            f"  {name:<50}: baseline={bv_str:<12}  "
+            f"new={nv:{fmt}}  diff={diff_str}  [{status}]"
+        )
+
+    def test_long_pct_79_passes_absolute_gate(self):
+        result = self._fmt_cmp("long_pct", 85.0, 79.0, upper_threshold=80.0, fmt='.1f')
+        assert "[PASS]" in result, f"long_pct=79 must PASS absolute gate <=80, got: {result}"
+
+    def test_long_pct_81_fails_absolute_gate(self):
+        result = self._fmt_cmp("long_pct", 50.0, 81.0, upper_threshold=80.0, fmt='.1f')
+        assert "[FAIL]" in result, f"long_pct=81 must FAIL absolute gate <=80, got: {result}"
+
+    def test_long_pct_absolute_gate_ignores_baseline(self):
+        """Gate must be absolute (<=80), not relative to baseline."""
+        # new=81 > baseline=85 (new is "better" relatively) but still FAIL absolute
+        result = self._fmt_cmp("long_pct", 85.0, 81.0, upper_threshold=80.0, fmt='.1f')
+        assert "[FAIL]" in result, "long_pct absolute gate must fail when >80 even if better than baseline"
+
+    def test_relax_loop_49_passes_absolute_gate(self):
+        result = self._fmt_cmp("relax_loop", 60.0, 49.0, upper_threshold=50.0, fmt='.1f')
+        assert "[PASS]" in result, f"relax_loop=49 must PASS absolute gate <=50, got: {result}"
+
+    def test_relax_loop_51_fails_absolute_gate(self):
+        result = self._fmt_cmp("relax_loop", 30.0, 51.0, upper_threshold=50.0, fmt='.1f')
+        assert "[FAIL]" in result, f"relax_loop=51 must FAIL absolute gate <=50, got: {result}"
+
+    def test_mu_r_corr_above_threshold_passes(self):
+        result = self._fmt_cmp("mu_r_corr", 0.0, 0.05, threshold=0.0)
+        assert "[PASS]" in result
+
+    def test_mu_r_corr_below_threshold_fails(self):
+        result = self._fmt_cmp("mu_r_corr", 0.1, -0.01, threshold=0.0)
+        assert "[FAIL]" in result
+
+    def test_score_disc_p90p50_above_5x_passes(self):
+        result = self._fmt_cmp("score_disc_p90/p50", 3.0, 6.0, threshold=5.0, fmt='.2f')
+        assert "[PASS]" in result
+
+    def test_score_disc_p99p50_below_10x_fails(self):
+        result = self._fmt_cmp("score_disc_p99/p50", 12.0, 9.9, threshold=10.0, fmt='.2f')
+        assert "[FAIL]" in result
+
+    def test_nv_none_emits_skip(self):
+        result = self._fmt_cmp("metric", 1.0, None)
+        assert "[SKIP]" in result
+
+    def test_baseline_none_no_relative_comparison(self):
+        result = self._fmt_cmp("metric", None, 0.5, threshold=0.0)
+        assert "[PASS]" in result
+
+
+class TestMeanPerFoldTotalR:
+    def test_mean_per_fold_total_r_key_in_metrics(self, v5_train_src):
+        assert "mean_per_fold_total_r" in v5_train_src, (
+            "v5_run_metrics.json must include 'mean_per_fold_total_r' (per-fold average)"
+        )
+
+    def test_mean_per_fold_total_r_computed_from_active_reports(self, v5_train_src):
+        assert "_per_fold_total_r_vals" in v5_train_src, (
+            "mean_per_fold_total_r must be computed from _active_rpts, not from aggregate total_r"
+        )
+
+    def test_mean_per_fold_total_r_in_comparison_block(self, v5_train_src):
+        assert "mean_per_fold_total_r   (must >= baseline" in v5_train_src, (
+            "[V5_BASELINE_CMP] must include mean_per_fold_total_r comparison row"
+        )

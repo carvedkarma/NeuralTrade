@@ -5553,8 +5553,12 @@ def run_v5_walk_forward(
             for r in _active_rpts
             if r.get('score_disc_p99p50') is not None
         ]
+        # mean per-fold total_R (aggregate / active_folds) as required by task spec
+        _per_fold_total_r_vals = [r.get('total_r', 0.0) for r in _active_rpts]
+        _mean_per_fold_total_r = round(float(np.mean(_per_fold_total_r_vals)), 4) if _per_fold_total_r_vals else None
         _run_metrics = {
             'total_r':                round(total_r, 4),
+            'mean_per_fold_total_r':  _mean_per_fold_total_r,
             'avg_expectancy_r':       round(avg_expect, 4),
             'total_trades':           int(total_trades),
             'total_long':             int(total_long),
@@ -5587,18 +5591,30 @@ def run_v5_walk_forward(
                 with open(_baseline_path) as _bf:
                     _baseline = _json_mod.load(_bf)
 
-                def _fmt_cmp(name, bv, nv, threshold=None, higher_is_better=True, fmt='.4f'):
-                    if bv is None or nv is None:
+                def _fmt_cmp(name, bv, nv, threshold=None, higher_is_better=True, fmt='.4f',
+                             upper_threshold=None):
+                    """
+                    Args:
+                        threshold:       if set, absolute lower gate (PASS if new >= threshold).
+                        upper_threshold: if set, absolute upper gate (PASS if new <= upper_threshold).
+                        higher_is_better: when neither threshold is set, relative baseline comparison.
+                    """
+                    if nv is None:
                         return f"  {name:<50}: baseline=N/A  new=N/A  [SKIP]"
-                    diff = nv - bv
-                    if threshold is not None:
+                    bv_str = f"{bv:{fmt}}" if bv is not None else "N/A"
+                    diff_str = f"{nv - bv:+{fmt}}" if bv is not None else "N/A"
+                    if upper_threshold is not None:
+                        passed = nv <= upper_threshold
+                    elif threshold is not None:
                         passed = nv >= threshold
-                    else:
+                    elif bv is not None:
                         passed = (nv > bv) if higher_is_better else (nv < bv)
-                    status = "PASS" if passed else "FAIL"
+                    else:
+                        passed = None
+                    status = "PASS" if passed else ("FAIL" if passed is not None else "N/A")
                     return (
-                        f"  {name:<50}: baseline={bv:{fmt}}  "
-                        f"new={nv:{fmt}}  diff={diff:+{fmt}}  [{status}]"
+                        f"  {name:<50}: baseline={bv_str:<12}  "
+                        f"new={nv:{fmt}}  diff={diff_str}  [{status}]"
                     )
 
                 log.info("\n" + "=" * 110)
@@ -5671,16 +5687,22 @@ def run_v5_walk_forward(
                     higher_is_better=True,
                 ))
                 log.info(_fmt_cmp(
-                    "long_pct                (balanced: < 80%, lower=better)",
+                    "long_pct                (must < 80%, absolute gate)",
                     _baseline.get('long_pct'),
                     _run_metrics.get('long_pct'),
-                    threshold=None, higher_is_better=False, fmt='.1f',
+                    upper_threshold=80.0, fmt='.1f',
                 ))
                 log.info(_fmt_cmp(
-                    "relax_loop_pct_folds    (lower = fewer forced re-samples)",
+                    "relax_loop_pct_folds    (must < 50%, absolute gate)",
                     _baseline.get('relax_loop_pct_folds'),
                     _run_metrics.get('relax_loop_pct_folds'),
-                    higher_is_better=False, fmt='.1f',
+                    upper_threshold=50.0, fmt='.1f',
+                ))
+                log.info(_fmt_cmp(
+                    "mean_per_fold_total_r   (must >= baseline, per-fold avg)",
+                    _baseline.get('mean_per_fold_total_r'),
+                    _run_metrics.get('mean_per_fold_total_r'),
+                    higher_is_better=True,
                 ))
                 log.info(_fmt_cmp(
                     "active_folds            (higher = fewer dead folds)",
