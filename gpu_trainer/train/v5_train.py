@@ -541,7 +541,7 @@ class V5TPDControllerConfig:
 class V5Dataset(Dataset):
     def __init__(self, features, ret_R, mfe_R, mae_R, vol_h, action_labels,
                  valid_mask, symbol_ids=None, barrier_labels=None, barrier_soft=None,
-                 sample_weights=None):
+                 sample_weights=None, atr14=None):
         self.features = torch.tensor(features, dtype=torch.float32)
         self.ret_R = torch.tensor(ret_R, dtype=torch.float32)
         self.mfe_R = torch.tensor(mfe_R, dtype=torch.float32)
@@ -553,6 +553,9 @@ class V5Dataset(Dataset):
         self.barrier_labels = torch.tensor(barrier_labels, dtype=torch.long) if barrier_labels is not None else None
         self.barrier_soft = torch.tensor(barrier_soft, dtype=torch.float32) if barrier_soft is not None else None
         self.sample_weights = torch.tensor(sample_weights, dtype=torch.float32) if sample_weights is not None else None
+        # atr14: per-bar ATR14 value used by compute_v5_loss to normalize MFE/MAE targets.
+        # Supplied from build_v5_targets['atr'] (Task #58 Layer 5 — ATR normalization).
+        self.atr14 = torch.tensor(atr14, dtype=torch.float32) if atr14 is not None else None
 
     def __len__(self):
         return len(self.features)
@@ -575,6 +578,8 @@ class V5Dataset(Dataset):
             item['barrier_soft'] = self.barrier_soft[idx]
         if self.sample_weights is not None:
             item['sample_weight'] = self.sample_weights[idx]
+        if self.atr14 is not None:
+            item['atr14'] = self.atr14[idx]
         return item
 
 
@@ -589,7 +594,7 @@ class V6SequenceDataset(Dataset):
                  mae_R_per_symbol, vol_h_per_symbol, action_per_symbol,
                  valid_per_symbol, symbol_ids_per_symbol,
                  barrier_oracle_per_symbol=None, barrier_soft_per_symbol=None,
-                 seq_len=16, sample_weights_per_symbol=None):
+                 seq_len=16, sample_weights_per_symbol=None, atr14_per_symbol=None):
         self.seq_len = seq_len
         self.index_map = []
         self.features_list = []
@@ -603,6 +608,7 @@ class V6SequenceDataset(Dataset):
         self.barrier_oracle_list = []
         self.barrier_soft_list = []
         self.sample_weights = []
+        self.atr14_list = []
 
         n_features = features_per_symbol[0].shape[1] if len(features_per_symbol) > 0 and len(features_per_symbol[0]) > 0 else 85
 
@@ -618,6 +624,9 @@ class V6SequenceDataset(Dataset):
             self.action_list.append(torch.tensor(action_per_symbol[si], dtype=torch.long))
             self.valid_list.append(torch.tensor(valid_per_symbol[si], dtype=torch.bool))
             self.sym_id_list.append(torch.tensor(symbol_ids_per_symbol[si], dtype=torch.long))
+
+            if atr14_per_symbol is not None and si < len(atr14_per_symbol):
+                self.atr14_list.append(torch.tensor(atr14_per_symbol[si], dtype=torch.float32))
 
             if barrier_oracle_per_symbol is not None:
                 self.barrier_oracle_list.append(torch.tensor(barrier_oracle_per_symbol[si], dtype=torch.long))
@@ -641,6 +650,7 @@ class V6SequenceDataset(Dataset):
         self.has_weights = len(self.sample_weights) > 0
         if self.has_weights:
             self.sample_weights = torch.tensor(self.sample_weights, dtype=torch.float32)
+        self.has_atr14 = len(self.atr14_list) > 0
 
     def __len__(self):
         return len(self.index_map)
@@ -682,6 +692,8 @@ class V6SequenceDataset(Dataset):
             item['barrier_soft'] = self.barrier_soft_list[sym_idx][bar_idx]
         if self.has_weights:
             item['sample_weight'] = self.sample_weights[idx]
+        if self.has_atr14 and sym_idx < len(self.atr14_list):
+            item['atr14'] = self.atr14_list[sym_idx][bar_idx]
 
         return item
 
@@ -6337,6 +6349,7 @@ def train_v5_model(
     train_action_list = []
     train_valid_list = []
     train_sym_ids_list = []
+    train_atr14_list = []
     train_cand_mask_list = []
     train_outcomes_list = []
     train_realized_r_list = []
@@ -6352,6 +6365,7 @@ def train_v5_model(
     val_action_list = []
     val_valid_list = []
     val_sym_ids_list = []
+    val_atr14_list = []
     val_cand_mask_list = []
     val_outcomes_list = []
     val_realized_r_list = []
@@ -6494,6 +6508,10 @@ def train_v5_model(
                   np.where(act_arr == 1, mae_long,
                   np.maximum(mae_long, mae_short)))
 
+        # Extract ATR14 per bar for MFE/MAE normalization in compute_v5_loss (Task #58 Layer 5).
+        # build_v5_targets always returns 'atr' — same array used to convert prices to R-units.
+        atr14_arr = v5_targets['atr'][:n]
+
         train_features.append(feat_arr[train_idx])
         train_ret_R_list.append(ret_arr[train_idx])
         train_mfe_R_list.append(mfe_arr[train_idx])
@@ -6502,6 +6520,7 @@ def train_v5_model(
         train_action_list.append(act_arr[train_idx])
         train_valid_list.append(val_arr[train_idx])
         train_sym_ids_list.append(sym_id_arr[train_idx])
+        train_atr14_list.append(atr14_arr[train_idx])
         train_cand_mask_list.append(cand_arr[train_idx])
         train_outcomes_list.append(sym_outcomes[train_idx])
         train_realized_r_list.append(sym_realized_r[train_idx])
@@ -6517,6 +6536,7 @@ def train_v5_model(
         val_action_list.append(act_arr[test_idx])
         val_valid_list.append(val_arr[test_idx])
         val_sym_ids_list.append(sym_id_arr[test_idx])
+        val_atr14_list.append(atr14_arr[test_idx])
         val_cand_mask_list.append(cand_arr[test_idx])
         val_outcomes_list.append(sym_outcomes[test_idx])
         val_realized_r_list.append(sym_realized_r[test_idx])
@@ -6674,6 +6694,7 @@ def train_v5_model(
     train_action = _concat_lists(train_action_list)
     train_valid = _concat_lists(train_valid_list)
     train_sym_ids = _concat_lists(train_sym_ids_list)
+    train_atr14 = _concat_lists(train_atr14_list) if train_atr14_list else None
     train_cand_mask = _concat_lists(train_cand_mask_list)
     train_outcomes = _concat_lists(train_outcomes_list)
     train_realized_r = _concat_lists(train_realized_r_list)
@@ -6878,6 +6899,7 @@ def train_v5_model(
             barrier_soft_per_symbol=train_barrier_soft_list,
             seq_len=v6_seq_len,
             sample_weights_per_symbol=train_sw_per_sym,
+            atr14_per_symbol=train_atr14_list,
         )
         val_ds = V6SequenceDataset(
             features_per_symbol=val_features,
@@ -6891,6 +6913,7 @@ def train_v5_model(
             barrier_oracle_per_symbol=val_barrier_oracle_list,
             barrier_soft_per_symbol=val_barrier_soft_list,
             seq_len=v6_seq_len,
+            atr14_per_symbol=val_atr14_list,
         )
         log.info(f"[V6] V6SequenceDataset created: train={len(train_ds)} val={len(val_ds)} seq_len={v6_seq_len}")
     else:
@@ -6908,6 +6931,7 @@ def train_v5_model(
             barrier_soft_per_symbol=train_barrier_soft_list,
             seq_len=16,
             sample_weights_per_symbol=train_sw_per_sym,
+            atr14_per_symbol=train_atr14_list,
         )
         val_ds = V6SequenceDataset(
             features_per_symbol=val_features,
@@ -6921,6 +6945,7 @@ def train_v5_model(
             barrier_oracle_per_symbol=val_barrier_oracle_list,
             barrier_soft_per_symbol=val_barrier_soft_list,
             seq_len=16,
+            atr14_per_symbol=val_atr14_list,
         )
         log.info(f"[V5_TEMPORAL] V6SequenceDataset (seq_len=16) active for V5 temporal training: "
                  f"train={len(train_ds)} val={len(val_ds)}")
@@ -7817,6 +7842,7 @@ def train_v5_model(
                     train_mae_R[ft_mask], train_vol_h[ft_mask], train_action[ft_mask],
                     train_valid[ft_mask], train_sym_ids[ft_mask],
                     train_barrier_oracle[ft_mask], train_barrier_soft[ft_mask],
+                    atr14=train_atr14[ft_mask] if train_atr14 is not None else None,
                 )
                 ft_loader = DataLoader(ft_ds, batch_size=batch_size, shuffle=True, drop_last=False)
                 ft_optimizer = torch.optim.AdamW(model.parameters(), lr=ft_lr, weight_decay=1e-4)

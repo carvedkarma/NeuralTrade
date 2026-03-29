@@ -636,6 +636,58 @@ def test_loss_budget_L_ret_pct_above_50_percent():
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
+def test_atr_normalization_activates_with_atr14_in_batch():
+    """Task #58 T4: when atr14 is in the batch, L_mfe/L_mae must differ from the no-atr case.
+
+    This test verifies that ATR normalization is fully wired: V5Dataset now stores atr14,
+    __getitem__ emits it, and compute_v5_loss divides mfe_R/mae_R by ATR before computing
+    Huber loss. When atr14 != 1.0, the normalized targets differ from raw targets, changing
+    L_mfe and L_mae.
+    """
+    import torch
+    batch_no_atr = _make_dummy_v5_batch()
+    batch_with_atr = dict(batch_no_atr)
+    # ATR=2.0 means targets get halved → L_mfe/L_mae should change vs no-atr
+    batch_with_atr['atr14'] = torch.full((32,), 2.0)
+
+    outputs = _make_dummy_v5_outputs(sigma_val=0.40)
+
+    _, ld_no_atr = compute_v5_loss(
+        outputs, batch_no_atr,
+        w_ret=6.0, w_mfe=0.15, w_mae=0.15, w_action=2.5,
+        sigma_spread_reg=0.0, sigma_reg_threshold=0.40,
+        phase1_mode=False, atr_normalize_risk_heads=True,
+    )
+    _, ld_with_atr = compute_v5_loss(
+        outputs, batch_with_atr,
+        w_ret=6.0, w_mfe=0.15, w_mae=0.15, w_action=2.5,
+        sigma_spread_reg=0.0, sigma_reg_threshold=0.40,
+        phase1_mode=False, atr_normalize_risk_heads=True,
+    )
+
+    # L_mfe and L_mae should differ when atr14=2.0 (targets halved)
+    l_mfe_no_atr = ld_no_atr.get('L_mfe', 0.0)
+    l_mfe_with_atr = ld_with_atr.get('L_mfe', 0.0)
+    assert abs(l_mfe_no_atr - l_mfe_with_atr) > 1e-6, (
+        f"ATR normalization must change L_mfe when atr14=2.0 "
+        f"(no_atr={l_mfe_no_atr:.6f}, with_atr={l_mfe_with_atr:.6f})"
+    )
+
+    # Verify flag=False bypasses normalization (with_atr ≈ no_atr)
+    _, ld_disabled = compute_v5_loss(
+        outputs, batch_with_atr,
+        w_ret=6.0, w_mfe=0.15, w_mae=0.15, w_action=2.5,
+        sigma_spread_reg=0.0, sigma_reg_threshold=0.40,
+        phase1_mode=False, atr_normalize_risk_heads=False,
+    )
+    l_mfe_disabled = ld_disabled.get('L_mfe', 0.0)
+    assert abs(l_mfe_no_atr - l_mfe_disabled) < 1e-6, (
+        f"atr_normalize_risk_heads=False must give same L_mfe as no-atr batch "
+        f"(no_atr={l_mfe_no_atr:.6f}, disabled={l_mfe_disabled:.6f})"
+    )
+
+
+@pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
 def test_phase1_mode_skips_mfe_mae_action():
     """Task #58 T3: phase1_mode=True should zero out MFE, MAE, and action losses.
 
