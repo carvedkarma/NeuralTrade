@@ -5552,6 +5552,11 @@ Examples:
                         help="Rolling E[R] gate: number of recent trades per symbol for E[R] computation (default: 20)")
     parser.add_argument("--v5-rolling-er-min", type=float, default=-0.05,
                         help="Rolling E[R] gate: minimum acceptable trailing E[R]; symbol blocked when below this (default: -0.05)")
+    parser.add_argument("--v5-gate-mode", type=str, default="ref_magnitude",
+                        choices=["ref_magnitude", "percentile_top15"],
+                        help="v5.7: forward-test trade-selection gate strategy. "
+                             "ref_magnitude (default): current adaptive ref-magnitude gate with relax loop. "
+                             "percentile_top15: selects top-15%% of quality-masked scores each fold (diagnostic/experimental).")
     parser.add_argument("--v5-live-threshold", type=float, default=None,
                         help="Live mode v5_score threshold override (default: V5_SCORE_THRESHOLD=0.5). "
                              "Signals with score below this are blocked. Range: 0.1–5.0")
@@ -6343,6 +6348,7 @@ Examples:
                     rolling_er_gate=getattr(args, 'v5_rolling_er_gate', False),
                     rolling_er_window=getattr(args, 'v5_rolling_er_window', 20),
                     rolling_er_min=getattr(args, 'v5_rolling_er_min', -0.05),
+                    gate_mode=getattr(args, 'v5_gate_mode', 'ref_magnitude'),
                     replit_url=getattr(args, 'url', None),
                     model_version='v6' if args.v6 else 'v5',
                     v6_seq_len=args.v6_seq_len,
@@ -6547,6 +6553,7 @@ Examples:
                 rolling_er_gate=getattr(args, 'v5_rolling_er_gate', False),
                 rolling_er_window=getattr(args, 'v5_rolling_er_window', 20),
                 rolling_er_min=getattr(args, 'v5_rolling_er_min', -0.05),
+                gate_mode=getattr(args, 'v5_gate_mode', 'ref_magnitude'),
                 model_version='v6' if args.v6 else 'v5',
                 v6_seq_len=args.v6_seq_len,
                 v6_conv_channels=args.v6_conv_channels,

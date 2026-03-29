@@ -271,6 +271,7 @@ class V5ForwardTestConfig:
     direction_balance_severe: float = 0.85
     ema200_soft_mult: Optional[float] = None
     per_side_threshold: bool = False
+    gate_mode: str = "ref_magnitude"   # choices: ref_magnitude | percentile_top15
 
 
 def compute_feature_importance_report(
@@ -2712,6 +2713,7 @@ def run_v5_forward_test(
         _gate_ref = train_ref_arrays
     quality_mask, qual_diag = v5_quality_mask(arrays, qg_cfg, epoch=999,
                                                ref_arrays=_gate_ref)
+    _qual_gate_pass_rate = 100.0 * qual_diag.get('final', 0) / max(qual_diag.get('total', 1), 1)
 
     scores, sides, score_diag = compute_v5_scores(
         None, horizon_bars=config.horizon,
@@ -2835,6 +2837,27 @@ def run_v5_forward_test(
                  f"max={float(np.max(finite_work)):.4f})")
     else:
         log.warning("[V5_FWD] No finite scores after quality/validity masking")
+
+    # [V5_GATE_AUDIT] — compare ref-magnitude gate vs top-15% percentile gate selection
+    if len(finite_work) >= 10:
+        _pct_cutoff_85 = float(np.percentile(finite_work, 85))   # top-15% percentile cut
+        _taken_ref = int(np.sum(finite_work >= effective_threshold))
+        _taken_pct = int(np.sum(finite_work >= _pct_cutoff_85))
+        _overlap = int(np.sum((finite_work >= effective_threshold) & (finite_work >= _pct_cutoff_85)))
+        _overlap_pct = 100.0 * _overlap / max(_taken_ref, 1)
+        _gate_pass_rate_pct = 100.0 * len(finite_work) / max(len(scores), 1)
+        log.info(
+            f"[V5_GATE_AUDIT] percentile_cutoff(p85)={_pct_cutoff_85:.4f} "
+            f"taken_by_ref_gate={_taken_ref} taken_by_pct_gate={_taken_pct} "
+            f"overlap={_overlap_pct:.0f}% "
+            f"gate_pass_rate={_gate_pass_rate_pct:.1f}%"
+        )
+        if getattr(config, 'gate_mode', 'ref_magnitude') == "percentile_top15":
+            log.info(
+                f"[V5_GATE_AUDIT] PERCENTILE_TOP15 mode active: "
+                f"overriding effective_threshold {effective_threshold:.4f} → {_pct_cutoff_85:.4f}"
+            )
+            effective_threshold = _pct_cutoff_85
 
     ddt = None
     ddt_base_threshold = effective_threshold
@@ -4153,6 +4176,9 @@ def run_v5_forward_test(
         trade_timestamps=t_timestamps,
     )
     report['low_confidence'] = low_confidence
+    report['gate_mode'] = getattr(config, 'gate_mode', 'ref_magnitude')
+    report['gate_cutoff'] = float(effective_threshold)
+    report['gate_pass_rate'] = _qual_gate_pass_rate
 
     side_quality = {}
     if len(taken_valid) > 0 and arrays is not None:
@@ -4223,14 +4249,21 @@ def run_v5_forward_test(
 
         _sc_finite = scores[np.isfinite(scores)]
         if len(_sc_finite) > 5:
+            _sc_p50 = float(np.percentile(_sc_finite, 50))
+            _sc_p90 = float(np.percentile(_sc_finite, 90))
+            _sc_p99 = float(np.percentile(_sc_finite, 99))
             report['score_spread'] = {
                 'p1':  round(float(np.percentile(_sc_finite, 1)), 6),
+                'p10': round(float(np.percentile(_sc_finite, 10)), 6),
                 'p25': round(float(np.percentile(_sc_finite, 25)), 6),
-                'p50': round(float(np.percentile(_sc_finite, 50)), 6),
+                'p50': round(_sc_p50, 6),
                 'p75': round(float(np.percentile(_sc_finite, 75)), 6),
-                'p90': round(float(np.percentile(_sc_finite, 90)), 6),
-                'p99': round(float(np.percentile(_sc_finite, 99)), 6),
+                'p90': round(_sc_p90, 6),
+                'p99': round(_sc_p99, 6),
             }
+            if abs(_sc_p50) > 1e-8:
+                report['score_disc_p90p50'] = round(_sc_p90 / _sc_p50, 2)
+                report['score_disc_p99p50'] = round(_sc_p99 / _sc_p50, 2)
 
     report['ddt_diagnostics'] = ddt.diagnostics() if ddt is not None else None
     report['ddt_blocked'] = ddt_blocked if ddt is not None else 0
@@ -4902,6 +4935,7 @@ def run_v5_walk_forward(
     rolling_er_gate=False,
     rolling_er_window=20,
     rolling_er_min=-0.05,
+    gate_mode='ref_magnitude',
     max_folds=None,
     candidate_logger=None,
 ):
@@ -5228,6 +5262,7 @@ def run_v5_walk_forward(
                 rolling_er_gate=rolling_er_gate,
                 rolling_er_window=rolling_er_window,
                 rolling_er_min=rolling_er_min,
+                gate_mode=gate_mode,
                 model_version=model_version,
                 v6_seq_len=v6_seq_len,
                 v6_conv_channels=v6_conv_channels,
@@ -5320,8 +5355,11 @@ def run_v5_walk_forward(
             _proof_debias_sr  = fold_report.get('debias_spread_ratio', None)
             _proof_monotonic  = fold_report.get('score_monotonic', None)
             _proof_sc_spread  = fold_report.get('score_spread', {})
+            _proof_sc_p10 = _proof_sc_spread.get('p10', None)
             _proof_sc_p50 = _proof_sc_spread.get('p50', None)
             _proof_sc_p90 = _proof_sc_spread.get('p90', None)
+            _proof_gate_mode   = fold_report.get('gate_mode', 'ref_magnitude')
+            _proof_gate_cutoff = fold_report.get('gate_cutoff', None)
             _proof_warns = []
             if _proof_sc_p50 is not None and _proof_sc_p90 is not None and _proof_sc_p50 > 1e-8:
                 _proof_disc = round(_proof_sc_p90 / _proof_sc_p50, 2)
@@ -5347,6 +5385,10 @@ def run_v5_walk_forward(
                     _proof_warns.append("NOT_MONO")
             else:
                 _proof_mono_str = "n/a"
+            _proof_gc_str = "n/a" if _proof_gate_cutoff is None else f"{_proof_gate_cutoff:.4f}"
+            _proof_p10_str = "n/a" if _proof_sc_p10 is None else f"{_proof_sc_p10:.4f}"
+            _proof_p50_str = "n/a" if _proof_sc_p50 is None else f"{_proof_sc_p50:.4f}"
+            _proof_p90_str = "n/a" if _proof_sc_p90 is None else f"{_proof_sc_p90:.4f}"
             _proof_health = "WARN" if _proof_warns else "OK"
             log.info(
                 f"[WF_FOLD_PROOF] fold={fold['fold']} "
@@ -5354,6 +5396,11 @@ def run_v5_walk_forward(
                 f"long_pct={_proof_long_pct:.1f}%{_proof_bias_flag} "
                 f"debias_spread={_proof_dsr_str} "
                 f"monotonic={_proof_mono_str} "
+                f"gate_mode={_proof_gate_mode} "
+                f"gate_cutoff={_proof_gc_str} "
+                f"score_p10={_proof_p10_str} "
+                f"score_p50={_proof_p50_str} "
+                f"score_p90={_proof_p90_str} "
                 f"signal_health={_proof_health}"
                 + (f" flags={_proof_warns}" if _proof_warns else "")
             )
@@ -5586,36 +5633,36 @@ def run_v5_walk_forward(
         except Exception as _me:
             log.warning(f"[V5_RUN_METRICS] Could not save: {_me}")
 
+        def _fmt_cmp(name, bv, nv, threshold=None, higher_is_better=True, fmt='.4f',
+                     upper_threshold=None):
+            """
+            Args:
+                threshold:       if set, absolute lower gate (PASS if new >= threshold).
+                upper_threshold: if set, absolute upper gate (PASS if new <= upper_threshold).
+                higher_is_better: when neither threshold is set, relative baseline comparison.
+            """
+            if nv is None:
+                return f"  {name:<50}: baseline=N/A  new=N/A  [SKIP]"
+            bv_str = f"{bv:{fmt}}" if bv is not None else "N/A"
+            diff_str = f"{nv - bv:+{fmt}}" if bv is not None else "N/A"
+            if upper_threshold is not None:
+                passed = nv <= upper_threshold
+            elif threshold is not None:
+                passed = nv >= threshold
+            elif bv is not None:
+                passed = (nv > bv) if higher_is_better else (nv < bv)
+            else:
+                passed = None
+            status = "PASS" if passed else ("FAIL" if passed is not None else "N/A")
+            return (
+                f"  {name:<50}: baseline={bv_str:<12}  "
+                f"new={nv:{fmt}}  diff={diff_str}  [{status}]"
+            )
+
         if _baseline_path.exists():
             try:
                 with open(_baseline_path) as _bf:
                     _baseline = _json_mod.load(_bf)
-
-                def _fmt_cmp(name, bv, nv, threshold=None, higher_is_better=True, fmt='.4f',
-                             upper_threshold=None):
-                    """
-                    Args:
-                        threshold:       if set, absolute lower gate (PASS if new >= threshold).
-                        upper_threshold: if set, absolute upper gate (PASS if new <= upper_threshold).
-                        higher_is_better: when neither threshold is set, relative baseline comparison.
-                    """
-                    if nv is None:
-                        return f"  {name:<50}: baseline=N/A  new=N/A  [SKIP]"
-                    bv_str = f"{bv:{fmt}}" if bv is not None else "N/A"
-                    diff_str = f"{nv - bv:+{fmt}}" if bv is not None else "N/A"
-                    if upper_threshold is not None:
-                        passed = nv <= upper_threshold
-                    elif threshold is not None:
-                        passed = nv >= threshold
-                    elif bv is not None:
-                        passed = (nv > bv) if higher_is_better else (nv < bv)
-                    else:
-                        passed = None
-                    status = "PASS" if passed else ("FAIL" if passed is not None else "N/A")
-                    return (
-                        f"  {name:<50}: baseline={bv_str:<12}  "
-                        f"new={nv:{fmt}}  diff={diff_str}  [{status}]"
-                    )
 
                 log.info("\n" + "=" * 110)
                 log.info("  [V5_BASELINE_CMP] COMPARISON AGAINST BASELINE")
@@ -5723,6 +5770,93 @@ def run_v5_walk_forward(
                 f"To set this run as baseline:  copy {_metrics_path} {_baseline_path}"
             )
         # ---- end [V5_BASELINE_CMP] -------------------------------------------
+
+        # ---- [V5_GATE_BASELINE_CMP] save & compare gate-specific metrics -----
+        _gate_p10_vals  = [r.get('score_spread', {}).get('p10')  for r in _active_rpts if r.get('score_spread', {}).get('p10')  is not None]
+        _gate_p50_vals  = [r.get('score_spread', {}).get('p50')  for r in _active_rpts if r.get('score_spread', {}).get('p50')  is not None]
+        _gate_p90_vals  = [r.get('score_spread', {}).get('p90')  for r in _active_rpts if r.get('score_spread', {}).get('p90')  is not None]
+        _gate_mono_vals = [r.get('score_monotonic') for r in _active_rpts if r.get('score_monotonic') is not None]
+        _gate_cutoff_vals   = [r.get('gate_cutoff') for r in _active_rpts if r.get('gate_cutoff') is not None]
+        _gate_pass_rate_vals = [r.get('gate_pass_rate') for r in _active_rpts if r.get('gate_pass_rate') is not None]
+        _gate_mode_used = _active_rpts[0].get('gate_mode', 'ref_magnitude') if _active_rpts else 'ref_magnitude'
+        _gate_run_metrics = {
+            'gate_mode_used':       _gate_mode_used,
+            'score_p10_mean':       round(float(np.mean(_gate_p10_vals)), 6)  if _gate_p10_vals  else None,
+            'score_p50_mean':       round(float(np.mean(_gate_p50_vals)), 6)  if _gate_p50_vals  else None,
+            'score_p90_mean':       round(float(np.mean(_gate_p90_vals)), 6)  if _gate_p90_vals  else None,
+            'monotonic_pct':        round(100.0 * sum(1 for v in _gate_mono_vals if v) / max(len(_gate_mono_vals), 1), 1) if _gate_mono_vals else None,
+            'mean_gate_cutoff':     round(float(np.mean(_gate_cutoff_vals)), 6) if _gate_cutoff_vals else None,
+            'gate_pass_rate_std':   round(float(np.std(_gate_pass_rate_vals)), 2)  if len(_gate_pass_rate_vals) >= 2 else None,
+        }
+        _gate_metrics_path  = Path("checkpoints") / "v5_gate_run_metrics.json"
+        _gate_baseline_path = Path("checkpoints") / "v5_gate_baseline_metrics.json"
+        try:
+            with open(_gate_metrics_path, 'w') as _gmf:
+                _json_mod.dump(_gate_run_metrics, _gmf, indent=2)
+            log.info(
+                f"[V5_GATE_RUN_METRICS] Saved to {_gate_metrics_path}  "
+                f"(copy to v5_gate_baseline_metrics.json to set as baseline for [V5_GATE_BASELINE_CMP])"
+            )
+        except Exception as _gme:
+            log.warning(f"[V5_GATE_RUN_METRICS] Could not save: {_gme}")
+
+        if _gate_baseline_path.exists():
+            try:
+                with open(_gate_baseline_path) as _gbf:
+                    _gate_baseline = _json_mod.load(_gbf)
+
+                log.info("\n" + "=" * 110)
+                log.info("  [V5_GATE_BASELINE_CMP] GATE METRICS COMPARISON AGAINST BASELINE")
+                log.info("=" * 110)
+                log.info(_fmt_cmp(
+                    "score_p10_mean          (higher = better discrimination floor)",
+                    _gate_baseline.get('score_p10_mean'),
+                    _gate_run_metrics.get('score_p10_mean'),
+                    higher_is_better=True,
+                ))
+                log.info(_fmt_cmp(
+                    "score_p50_mean          (higher = better median signal quality)",
+                    _gate_baseline.get('score_p50_mean'),
+                    _gate_run_metrics.get('score_p50_mean'),
+                    higher_is_better=True,
+                ))
+                log.info(_fmt_cmp(
+                    "score_p90_mean          (higher = better top-decile conviction)",
+                    _gate_baseline.get('score_p90_mean'),
+                    _gate_run_metrics.get('score_p90_mean'),
+                    higher_is_better=True,
+                ))
+                log.info(_fmt_cmp(
+                    "monotonic_pct           (target >= 50%, more folds monotonic)",
+                    _gate_baseline.get('monotonic_pct'),
+                    _gate_run_metrics.get('monotonic_pct'),
+                    threshold=50.0, fmt='.1f',
+                ))
+                log.info(_fmt_cmp(
+                    "mean_gate_cutoff        (informational, effective threshold avg)",
+                    _gate_baseline.get('mean_gate_cutoff'),
+                    _gate_run_metrics.get('mean_gate_cutoff'),
+                    higher_is_better=True,
+                ))
+                log.info(_fmt_cmp(
+                    "gate_pass_rate_std      (lower = more consistent gate filtering)",
+                    _gate_baseline.get('gate_pass_rate_std'),
+                    _gate_run_metrics.get('gate_pass_rate_std'),
+                    higher_is_better=False,
+                ))
+                log.info("=" * 110)
+                log.info(
+                    "[V5_GATE_BASELINE_CMP] To promote this run as new gate baseline:  "
+                    f"copy {_gate_metrics_path} {_gate_baseline_path}"
+                )
+            except Exception as _gbe:
+                log.warning(f"[V5_GATE_BASELINE_CMP] Could not load/compare gate baseline: {_gbe}")
+        else:
+            log.info(
+                f"[V5_GATE_BASELINE_CMP] No gate baseline found at {_gate_baseline_path}. "
+                f"To set this run as gate baseline:  copy {_gate_metrics_path} {_gate_baseline_path}"
+            )
+        # ---- end [V5_GATE_BASELINE_CMP] --------------------------------------
 
         return {
             'folds': all_reports,
@@ -5844,6 +5978,7 @@ def train_v5_model(
     rolling_er_gate=False,
     rolling_er_window=20,
     rolling_er_min=-0.05,
+    gate_mode='ref_magnitude',
     model_version='v5',
     v6_seq_len=16,
     v6_conv_channels=128,
@@ -7682,6 +7817,7 @@ def train_v5_model(
                 rolling_er_min=rolling_er_min,
                 ema200_soft_mult=ema200_soft_mult,
                 per_side_threshold=per_side_threshold,
+                gate_mode=gate_mode,
             )
 
             train_ref_arrays = _build_train_ref_arrays(
