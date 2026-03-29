@@ -5032,6 +5032,11 @@ def run_v5_walk_forward(
     blended_threshold = None
     wf_threshold_decay = max(0.01, min(1.0, wf_threshold_decay))
     prev_fold_state_dict = None
+    # Single source of truth for the EMA decay floor used by both dead-fold and no-report paths.
+    # V5 scores are in the 0.001-0.002 range (post NaN-fix); the old hardcoded 0.01 was 5-10x too high.
+    _wf_threshold_floor = tpd_ctrl_cfg.min_threshold_floor if tpd_ctrl_cfg is not None else 0.001
+    log.info(f"[V5_WF_THR] threshold_ema decay floor = {_wf_threshold_floor} "
+             f"(from tpd_ctrl_cfg.min_threshold_floor={tpd_ctrl_cfg.min_threshold_floor if tpd_ctrl_cfg is not None else 'n/a'})")
 
     for fold in folds:
         log.info(f"\n{'='*80}")
@@ -5279,12 +5284,11 @@ def run_v5_walk_forward(
                                  f"— skipping warm-start, next fold uses random init")
 
             if fold_total_trades == 0 and threshold_ema is not None:
-                _wf_thr_floor = tpd_ctrl_cfg.min_threshold_floor if tpd_ctrl_cfg is not None else 0.001
                 old_ema = threshold_ema
-                threshold_ema = max(_wf_thr_floor, threshold_ema * wf_threshold_decay)
+                threshold_ema = max(_wf_threshold_floor, threshold_ema * wf_threshold_decay)
                 log.info(f"[V5_WF_THR] Fold {fold['fold']}: DEAD FOLD (0 trades) — "
                          f"decaying threshold_ema {old_ema:.4f} × {wf_threshold_decay} → {threshold_ema:.4f} "
-                         f"(floor={_wf_thr_floor})")
+                         f"(floor={_wf_threshold_floor})")
                 fold_report['threshold_ema'] = threshold_ema
             elif fold_low_conf:
                 log.info(f"[V5_WF_THR] Fold {fold['fold']}: LOW_CONF ({fold_total_trades} trades) — "
@@ -5362,12 +5366,11 @@ def run_v5_walk_forward(
                 prev_fold_state_dict = None
                 log.info(f"[V5_WF] Fold {fold['fold']}: NO REPORT — skipping warm-start, next fold uses random init")
             if threshold_ema is not None:
-                _wf_thr_floor = tpd_ctrl_cfg.min_threshold_floor if tpd_ctrl_cfg is not None else 0.001
                 old_ema = threshold_ema
-                threshold_ema = max(_wf_thr_floor, threshold_ema * wf_threshold_decay)
+                threshold_ema = max(_wf_threshold_floor, threshold_ema * wf_threshold_decay)
                 log.info(f"[V5_WF_THR] Fold {fold['fold']}: NO REPORT FILE — "
                          f"decaying threshold_ema {old_ema:.4f} × {wf_threshold_decay} → {threshold_ema:.4f} "
-                         f"(floor={_wf_thr_floor})")
+                         f"(floor={_wf_threshold_floor})")
             log.info(
                 f"[WF_FOLD_PROOF] fold={fold['fold']} "
                 f"score_disc(p90/p50)=n/a "
