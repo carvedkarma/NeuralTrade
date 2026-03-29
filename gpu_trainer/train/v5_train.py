@@ -1379,7 +1379,7 @@ def fit_temperature_scaling(logits, labels, n_classes=3, lr=0.01, max_iter=200):
     return temp_val, ece_before, ece_after
 
 
-def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.5,
+def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # Task #56 A1
                       risk_proxy='mae', mae_cap=2.0, _arrays=None,
                       side_mode='action_head', rr_weight=0.0,
                       min_mu_r_score=0.005, slippage_bps=0.0,
@@ -5043,7 +5043,7 @@ def run_v5_walk_forward(
     data_dir, device, symbols, epochs, batch_size, lr,
     train_months=12, test_months=1, test_weeks=None,
     horizon=16, tp_mult=2.0, sl_mult=1.5,
-    score_lambda=0.5, risk_proxy='mae',
+    score_lambda=0.30, risk_proxy='mae',  # Task #56 A1: 0.5→0.30
     quality_gate_cfg=None, tpd_ctrl_cfg=None,
     candidate_config=None, risk_controls=None,
     hold_target=0.30, mfe_min=0.05,
@@ -5629,7 +5629,19 @@ def run_v5_walk_forward(
             _fh_wr         = fold_report.get('win_rate', float('nan'))
             _fh_avg_win    = fold_report.get('avg_win_r', float('nan'))
             _fh_avg_loss   = fold_report.get('avg_loss_r', float('nan'))
-            _fh_above_thr  = fold_report.get('total_trades', 0)
+            # above_threshold: use score_spread count if available; else fall back to total_trades
+            _fh_above_thr_raw = _fh_sc_spread.get('n_above_threshold', None)
+            if _fh_above_thr_raw is None:
+                # Derive from score_spread p50/threshold comparison if possible, else use total_trades as proxy
+                _fh_score_thr = float(_fh_thr) if _fh_thr else 0.0
+                _fh_p50_safe = float(_fh_sc_spread.get('p50', 0.0) or 0.0)
+                if _fh_score_thr > 0 and _fh_p50_safe > 0:
+                    # If p50 > threshold, more than half of signals are above; estimate from distribution
+                    _fh_above_thr = int(_fh_signal_count * 0.5) if _fh_p50_safe >= _fh_score_thr else int(_fh_signal_count * 0.25)
+                else:
+                    _fh_above_thr = _fh_signal_count  # all trades already passed threshold filter
+            else:
+                _fh_above_thr = int(_fh_above_thr_raw)
             _fh_pct_above  = (100.0 * _fh_above_thr / max(_fh_signal_count, 1)) if _fh_signal_count > 0 else 0.0
             _pq = fold_report.get('prediction_quality') or {}
             _fh_mu_corr_train = _pq.get('mu_r_correlation_train', float('nan'))
@@ -5639,7 +5651,8 @@ def run_v5_walk_forward(
             _fh_p_short = _pq.get('p_short_mean', float('nan'))
             # Expected daily R: estimate from trades per test period vs test_months
             _fh_total_r = fold_report.get('total_r', 0.0)
-            _fh_test_months = getattr(fold_report, '_test_months', 1)
+            # fold_report is a dict — use .get() not getattr()
+            _fh_test_months = fold_report.get('test_months', fold.get('test_months', 1)) or 1
             _fh_exp_daily_r = _fh_total_r / max(_fh_test_months * 22.0, 1.0)  # ~22 trading days/month
             # VERDICT
             _fh_p_hold_safe = _fh_p_hold if np.isfinite(_fh_p_hold) else 1.0
@@ -5840,10 +5853,10 @@ def run_v5_walk_forward(
             _tg_rec = _tg_p50 * 0.9  # slightly below median for $1k/day target
             log.info(
                 f"\n[V5_THRESHOLD_GUIDE] Based on fold score distribution:\n"
-                f"  p25_score={_fmt_thr(_tg_p25)} → use --v5-score-threshold {_fmt_thr(_tg_p25)} (conservative)\n"
-                f"  p50_score={_fmt_thr(_tg_p50)} → use --v5-score-threshold {_fmt_thr(_tg_p50)} (balanced)\n"
-                f"  p75_score={_fmt_thr(_tg_p75)} → use --v5-score-threshold {_fmt_thr(_tg_p75)} (selective)\n"
-                f"  Recommended for $15k capital target $1k/day: --v5-score-threshold {_fmt_thr(_tg_rec)}"
+                f"  p25_score={_fmt_thr(_tg_p25)} → use --v5-min-threshold {_fmt_thr(_tg_p25)} (conservative)\n"
+                f"  p50_score={_fmt_thr(_tg_p50)} → use --v5-min-threshold {_fmt_thr(_tg_p50)} (balanced)\n"
+                f"  p75_score={_fmt_thr(_tg_p75)} → use --v5-min-threshold {_fmt_thr(_tg_p75)} (selective)\n"
+                f"  Recommended for $15k capital target $1k/day: --v5-min-threshold {_fmt_thr(_tg_rec)}"
             )
         else:
             log.info("[V5_THRESHOLD_GUIDE] No fold score distribution data available — run with more active folds")
@@ -6256,7 +6269,7 @@ def train_v5_model(
     phase1_epochs=50,
     atr_normalize_risk_heads=True,
     dynamic_action_labels=False,
-    score_lambda=0.5, risk_proxy='mae',
+    score_lambda=0.30, risk_proxy='mae',  # Task #56 A1: 0.5→0.30
     target_tpd=6.5, target_tpd_tol=1.5,
     hold_target=0.30, mfe_min=0.05,
     barrier_mode='fixed',
