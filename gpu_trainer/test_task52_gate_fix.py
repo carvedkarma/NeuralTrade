@@ -317,7 +317,7 @@ class TestGateAuditLogMarker(unittest.TestCase):
 
 
 class TestGateBaselineCmpInfrastructure(unittest.TestCase):
-    """[V5_GATE_BASELINE_CMP] infrastructure: save + compare gate run metrics."""
+    """[V5_GATE_BASELINE_CMP] infrastructure: 6 required metrics, promotion logic, go/no-go."""
 
     def setUp(self):
         src_path = os.path.join(os.path.dirname(__file__), 'train', 'v5_train.py')
@@ -330,41 +330,91 @@ class TestGateBaselineCmpInfrastructure(unittest.TestCase):
     def test_gate_baseline_metrics_path_defined(self):
         self.assertIn('v5_gate_baseline_metrics.json', self.src)
 
-    def test_gate_run_metrics_dict_has_score_p10_mean(self):
-        self.assertIn("'score_p10_mean'", self.src)
+    # --- 6 required comparison metric keys ---
+    def test_gate_run_metrics_has_mean_per_fold_total_r(self):
+        self.assertIn("'mean_per_fold_total_r'", self.src)
 
-    def test_gate_run_metrics_dict_has_score_p50_mean(self):
-        self.assertIn("'score_p50_mean'", self.src)
+    def test_gate_run_metrics_has_mean_per_fold_expectancy_r(self):
+        self.assertIn("'mean_per_fold_expectancy_r'", self.src)
 
-    def test_gate_run_metrics_dict_has_score_p90_mean(self):
-        self.assertIn("'score_p90_mean'", self.src)
+    def test_gate_run_metrics_has_monotonic_fold_count(self):
+        self.assertIn("'monotonic_fold_count'", self.src)
 
-    def test_gate_run_metrics_dict_has_monotonic_pct(self):
-        self.assertIn("'monotonic_pct'", self.src)
+    def test_gate_run_metrics_has_mean_score_disc_p90p50(self):
+        self.assertIn("'mean_score_disc_p90p50'", self.src)
 
-    def test_gate_run_metrics_dict_has_mean_gate_cutoff(self):
-        self.assertIn("'mean_gate_cutoff'", self.src)
+    def test_gate_run_metrics_has_relax_loop_total(self):
+        self.assertIn("'relax_loop_total'", self.src)
 
-    def test_gate_run_metrics_dict_has_gate_pass_rate_std(self):
+    def test_gate_run_metrics_has_gate_pass_rate_std(self):
         self.assertIn("'gate_pass_rate_std'", self.src)
 
+    # --- audit extras still present ---
+    def test_gate_run_metrics_has_score_p10_mean(self):
+        self.assertIn("'score_p10_mean'", self.src)
+
+    def test_gate_run_metrics_has_mean_gate_cutoff(self):
+        self.assertIn("'mean_gate_cutoff'", self.src)
+
+    # --- markers ---
     def test_gate_baseline_cmp_marker_present(self):
         self.assertIn('[V5_GATE_BASELINE_CMP]', self.src)
 
     def test_gate_run_metrics_marker_present(self):
         self.assertIn('[V5_GATE_RUN_METRICS]', self.src)
 
-    def test_gate_cmp_compares_score_p10_mean(self):
-        self.assertIn('score_p10_mean', self.src)
+    # --- 6 required metrics appear in the CMP section ---
+    def test_gate_cmp_compares_mean_per_fold_total_r(self):
         idx = self.src.find('[V5_GATE_BASELINE_CMP]')
         self.assertGreater(idx, 0)
         gate_cmp_section = self.src[idx:]
-        self.assertIn('score_p10_mean', gate_cmp_section)
+        self.assertIn('mean_per_fold_total_r', gate_cmp_section)
 
-    def test_gate_cmp_compares_monotonic_pct(self):
+    def test_gate_cmp_compares_mean_per_fold_expectancy_r(self):
         idx = self.src.find('[V5_GATE_BASELINE_CMP]')
         gate_cmp_section = self.src[idx:]
-        self.assertIn('monotonic_pct', gate_cmp_section)
+        self.assertIn('mean_per_fold_expectancy_r', gate_cmp_section)
+
+    def test_gate_cmp_compares_monotonic_fold_count(self):
+        idx = self.src.find('[V5_GATE_BASELINE_CMP]')
+        gate_cmp_section = self.src[idx:]
+        self.assertIn('monotonic_fold_count', gate_cmp_section)
+
+    def test_gate_cmp_compares_mean_score_disc_p90p50(self):
+        idx = self.src.find('[V5_GATE_BASELINE_CMP]')
+        gate_cmp_section = self.src[idx:]
+        self.assertIn('mean_score_disc_p90p50', gate_cmp_section)
+
+    def test_gate_cmp_compares_relax_loop_total(self):
+        idx = self.src.find('[V5_GATE_BASELINE_CMP]')
+        gate_cmp_section = self.src[idx:]
+        self.assertIn('relax_loop_total', gate_cmp_section)
+
+    def test_gate_cmp_compares_gate_pass_rate_std(self):
+        idx = self.src.find('[V5_GATE_BASELINE_CMP]')
+        gate_cmp_section = self.src[idx:]
+        self.assertIn('gate_pass_rate_std', gate_cmp_section)
+
+    # --- promotion log messages ---
+    def test_gate_promoted_log_present(self):
+        self.assertIn('[V5_GATE] Percentile gate PROMOTED', self.src,
+                      "Missing promoted log line required by task spec")
+
+    def test_gate_not_promoted_log_present(self):
+        self.assertIn('[V5_GATE] Percentile gate NOT promoted', self.src,
+                      "Missing not-promoted log line required by task spec")
+
+    def test_promotion_requires_all_pass(self):
+        # Promotion log must be preceded by an all-pass check
+        self.assertIn('_gcmp_all_pass', self.src)
+
+    def test_promotion_only_for_non_ref_magnitude_mode(self):
+        # Promotion only fires when gate_mode != 'ref_magnitude'
+        idx = self.src.find('[V5_GATE] Percentile gate PROMOTED')
+        self.assertGreater(idx, 0)
+        context_before = self.src[max(0, idx - 300):idx]
+        self.assertIn("ref_magnitude", context_before,
+                      "Promotion must be guarded by gate_mode check")
 
     def test_fmt_cmp_defined_before_gate_cmp_section(self):
         fmt_cmp_idx = self.src.find('def _fmt_cmp(')
@@ -376,33 +426,44 @@ class TestGateBaselineCmpInfrastructure(unittest.TestCase):
 
 
 class TestGateRunMetricsComputation(unittest.TestCase):
-    """Test the gate run metrics computation logic (mirrors v5_train.py ~line 5775-5790)."""
+    """Test the gate run metrics computation logic: the 6 required comparison metrics."""
 
     def _compute_gate_run_metrics(self, active_rpts):
-        gate_p10_vals  = [r.get('score_spread', {}).get('p10')  for r in active_rpts if r.get('score_spread', {}).get('p10')  is not None]
-        gate_p50_vals  = [r.get('score_spread', {}).get('p50')  for r in active_rpts if r.get('score_spread', {}).get('p50')  is not None]
-        gate_p90_vals  = [r.get('score_spread', {}).get('p90')  for r in active_rpts if r.get('score_spread', {}).get('p90')  is not None]
-        gate_mono_vals = [r.get('score_monotonic') for r in active_rpts if r.get('score_monotonic') is not None]
-        gate_cutoff_vals   = [r.get('gate_cutoff') for r in active_rpts if r.get('gate_cutoff') is not None]
+        """Reproduce _gate_run_metrics computation from v5_train.py."""
+        gate_total_r_vals   = [r.get('total_r', 0.0) for r in active_rpts]
+        gate_expect_vals    = [r.get('expectancy_r', 0.0) for r in active_rpts]
+        gate_mono_vals      = [r.get('score_monotonic') for r in active_rpts if r.get('score_monotonic') is not None]
+        gate_disc90_vals    = [r.get('score_disc_p90p50') for r in active_rpts if r.get('score_disc_p90p50') is not None]
+        gate_relax_vals     = [r.get('relax_loop_triggers', 0) for r in active_rpts]
         gate_pass_rate_vals = [r.get('gate_pass_rate') for r in active_rpts if r.get('gate_pass_rate') is not None]
+        gate_p10_vals  = [r.get('score_spread', {}).get('p10') for r in active_rpts if r.get('score_spread', {}).get('p10') is not None]
+        gate_cutoff_vals = [r.get('gate_cutoff') for r in active_rpts if r.get('gate_cutoff') is not None]
         gate_mode_used = active_rpts[0].get('gate_mode', 'ref_magnitude') if active_rpts else 'ref_magnitude'
         return {
-            'gate_mode_used':       gate_mode_used,
-            'score_p10_mean':       round(float(np.mean(gate_p10_vals)), 6)  if gate_p10_vals  else None,
-            'score_p50_mean':       round(float(np.mean(gate_p50_vals)), 6)  if gate_p50_vals  else None,
-            'score_p90_mean':       round(float(np.mean(gate_p90_vals)), 6)  if gate_p90_vals  else None,
-            'monotonic_pct':        round(100.0 * sum(1 for v in gate_mono_vals if v) / max(len(gate_mono_vals), 1), 1) if gate_mono_vals else None,
-            'mean_gate_cutoff':     round(float(np.mean(gate_cutoff_vals)), 6) if gate_cutoff_vals else None,
-            'gate_pass_rate_std':   round(float(np.std(gate_pass_rate_vals)), 2) if len(gate_pass_rate_vals) >= 2 else None,
+            'gate_mode_used':            gate_mode_used,
+            'mean_per_fold_total_r':     round(float(np.mean(gate_total_r_vals)), 4) if gate_total_r_vals else None,
+            'mean_per_fold_expectancy_r':round(float(np.mean(gate_expect_vals)), 4)  if gate_expect_vals  else None,
+            'monotonic_fold_count':      int(sum(1 for v in gate_mono_vals if v)),
+            'mean_score_disc_p90p50':    round(float(np.mean(gate_disc90_vals)), 4)  if gate_disc90_vals  else None,
+            'relax_loop_total':          int(sum(gate_relax_vals)),
+            'gate_pass_rate_std':        round(float(np.std(gate_pass_rate_vals)), 2) if len(gate_pass_rate_vals) >= 2 else None,
+            'score_p10_mean':            round(float(np.mean(gate_p10_vals)), 6)      if gate_p10_vals     else None,
+            'mean_gate_cutoff':          round(float(np.mean(gate_cutoff_vals)), 6)   if gate_cutoff_vals  else None,
+            'monotonic_pct':             round(100.0 * sum(1 for v in gate_mono_vals if v) / max(len(gate_mono_vals), 1), 1) if gate_mono_vals else None,
         }
 
     def _make_fold_report(self, gate_mode='ref_magnitude', gate_cutoff=0.15,
                           gate_pass_rate=65.0, score_monotonic=True,
-                          score_spread=None):
+                          total_r=0.5, expectancy_r=0.03, score_disc_p90p50=1.8,
+                          relax_loop_triggers=1, score_spread=None):
         if score_spread is None:
             score_spread = {'p10': 0.01, 'p50': 0.05, 'p90': 0.20, 'p99': 0.50}
         return {
             'total_trades': 10,
+            'total_r': total_r,
+            'expectancy_r': expectancy_r,
+            'score_disc_p90p50': score_disc_p90p50,
+            'relax_loop_triggers': relax_loop_triggers,
             'gate_mode': gate_mode,
             'gate_cutoff': gate_cutoff,
             'gate_pass_rate': gate_pass_rate,
@@ -410,23 +471,52 @@ class TestGateRunMetricsComputation(unittest.TestCase):
             'score_spread': score_spread,
         }
 
-    def test_score_p10_mean_computed_from_active_folds(self):
+    def test_mean_per_fold_total_r_computed(self):
         folds = [
-            self._make_fold_report(score_spread={'p10': 0.02, 'p50': 0.06, 'p90': 0.25, 'p99': 0.6}),
-            self._make_fold_report(score_spread={'p10': 0.04, 'p50': 0.08, 'p90': 0.30, 'p99': 0.7}),
+            self._make_fold_report(total_r=1.0),
+            self._make_fold_report(total_r=3.0),
         ]
         m = self._compute_gate_run_metrics(folds)
-        self.assertAlmostEqual(m['score_p10_mean'], round((0.02 + 0.04) / 2, 6), places=5)
+        self.assertAlmostEqual(m['mean_per_fold_total_r'], 2.0, places=3)
 
-    def test_monotonic_pct_100_when_all_monotonic(self):
-        folds = [self._make_fold_report(score_monotonic=True) for _ in range(5)]
+    def test_mean_per_fold_expectancy_r_computed(self):
+        folds = [
+            self._make_fold_report(expectancy_r=0.02),
+            self._make_fold_report(expectancy_r=0.04),
+        ]
         m = self._compute_gate_run_metrics(folds)
-        self.assertAlmostEqual(m['monotonic_pct'], 100.0, places=1)
+        self.assertAlmostEqual(m['mean_per_fold_expectancy_r'], 0.03, places=3)
 
-    def test_monotonic_pct_0_when_none_monotonic(self):
+    def test_monotonic_fold_count_is_integer_count(self):
+        folds = [
+            self._make_fold_report(score_monotonic=True),
+            self._make_fold_report(score_monotonic=False),
+            self._make_fold_report(score_monotonic=True),
+        ]
+        m = self._compute_gate_run_metrics(folds)
+        self.assertEqual(m['monotonic_fold_count'], 2)
+
+    def test_monotonic_fold_count_zero_when_none_monotonic(self):
         folds = [self._make_fold_report(score_monotonic=False) for _ in range(4)]
         m = self._compute_gate_run_metrics(folds)
-        self.assertAlmostEqual(m['monotonic_pct'], 0.0, places=1)
+        self.assertEqual(m['monotonic_fold_count'], 0)
+
+    def test_mean_score_disc_p90p50_computed(self):
+        folds = [
+            self._make_fold_report(score_disc_p90p50=2.0),
+            self._make_fold_report(score_disc_p90p50=3.0),
+        ]
+        m = self._compute_gate_run_metrics(folds)
+        self.assertAlmostEqual(m['mean_score_disc_p90p50'], 2.5, places=3)
+
+    def test_relax_loop_total_is_sum_across_folds(self):
+        folds = [
+            self._make_fold_report(relax_loop_triggers=2),
+            self._make_fold_report(relax_loop_triggers=5),
+            self._make_fold_report(relax_loop_triggers=0),
+        ]
+        m = self._compute_gate_run_metrics(folds)
+        self.assertEqual(m['relax_loop_total'], 7)
 
     def test_gate_pass_rate_std_computed_across_folds(self):
         folds = [
@@ -435,8 +525,7 @@ class TestGateRunMetricsComputation(unittest.TestCase):
             self._make_fold_report(gate_pass_rate=70.0),
         ]
         m = self._compute_gate_run_metrics(folds)
-        rates = [60.0, 80.0, 70.0]
-        expected_std = round(float(np.std(rates)), 2)
+        expected_std = round(float(np.std([60.0, 80.0, 70.0])), 2)
         self.assertAlmostEqual(m['gate_pass_rate_std'], expected_std, places=1)
 
     def test_gate_pass_rate_std_none_when_only_one_fold(self):
@@ -452,11 +541,13 @@ class TestGateRunMetricsComputation(unittest.TestCase):
         m = self._compute_gate_run_metrics(folds)
         self.assertEqual(m['gate_mode_used'], 'percentile_top15')
 
-    def test_empty_active_folds_returns_none_metrics(self):
+    def test_empty_active_folds_returns_defaults(self):
         m = self._compute_gate_run_metrics([])
         self.assertEqual(m['gate_mode_used'], 'ref_magnitude')
+        self.assertEqual(m['relax_loop_total'], 0)
+        self.assertEqual(m['monotonic_fold_count'], 0)
+        self.assertIsNone(m['gate_pass_rate_std'])
         self.assertIsNone(m['score_p10_mean'])
-        self.assertIsNone(m['monotonic_pct'])
 
 
 class TestGateBaselineCmpFmtCmpAvailability(unittest.TestCase):
@@ -553,11 +644,11 @@ class TestRunV5WalkForwardSignature(unittest.TestCase):
 
 
 class TestFmtCmpBehaviorGateCmp(unittest.TestCase):
-    """_fmt_cmp helper function behavior for gate comparison metrics."""
+    """_fmt_cmp helper: >= / <= semantics (equality is PASS), threshold, skip, higher/lower."""
 
     def _fmt_cmp(self, name, bv, nv, threshold=None, higher_is_better=True, fmt='.4f',
                  upper_threshold=None):
-        """Reproduce _fmt_cmp from v5_train.py."""
+        """Reproduce _fmt_cmp from v5_train.py (>= / <= semantics)."""
         if nv is None:
             return f"  {name:<50}: baseline=N/A  new=N/A  [SKIP]"
         bv_str = f"{bv:{fmt}}" if bv is not None else "N/A"
@@ -567,7 +658,7 @@ class TestFmtCmpBehaviorGateCmp(unittest.TestCase):
         elif threshold is not None:
             passed = nv >= threshold
         elif bv is not None:
-            passed = (nv > bv) if higher_is_better else (nv < bv)
+            passed = (nv >= bv) if higher_is_better else (nv <= bv)
         else:
             passed = None
         status = "PASS" if passed else ("FAIL" if passed is not None else "N/A")
@@ -576,29 +667,48 @@ class TestFmtCmpBehaviorGateCmp(unittest.TestCase):
             f"new={nv:{fmt}}  diff={diff_str}  [{status}]"
         )
 
-    def test_monotonic_pct_pass_when_above_50(self):
-        line = self._fmt_cmp("monotonic_pct", 40.0, 60.0, threshold=50.0, fmt='.1f')
+    def test_higher_is_better_strict_improvement(self):
+        line = self._fmt_cmp("mean_per_fold_total_r", 1.0, 1.5, higher_is_better=True)
         self.assertIn('[PASS]', line)
 
-    def test_monotonic_pct_fail_when_below_50(self):
-        line = self._fmt_cmp("monotonic_pct", 70.0, 30.0, threshold=50.0, fmt='.1f')
+    def test_higher_is_better_equality_is_pass(self):
+        # New >= Baseline means equality should PASS
+        line = self._fmt_cmp("mean_per_fold_total_r", 1.0, 1.0, higher_is_better=True)
+        self.assertIn('[PASS]', line)
+
+    def test_higher_is_better_regression_is_fail(self):
+        line = self._fmt_cmp("mean_per_fold_expectancy_r", 0.05, 0.03, higher_is_better=True)
         self.assertIn('[FAIL]', line)
 
-    def test_score_p10_mean_higher_is_better(self):
-        line = self._fmt_cmp("score_p10_mean", 0.01, 0.02, higher_is_better=True)
-        self.assertIn('[PASS]', line)
-
-    def test_gate_pass_rate_std_lower_is_better(self):
+    def test_lower_is_better_strict_improvement(self):
         line = self._fmt_cmp("gate_pass_rate_std", 10.0, 8.0, higher_is_better=False)
         self.assertIn('[PASS]', line)
 
-    def test_gate_pass_rate_std_fails_when_higher(self):
+    def test_lower_is_better_equality_is_pass(self):
+        # New <= Baseline means equality should PASS
+        line = self._fmt_cmp("relax_loop_total", 5.0, 5.0, higher_is_better=False, fmt='.0f')
+        self.assertIn('[PASS]', line)
+
+    def test_lower_is_better_regression_is_fail(self):
         line = self._fmt_cmp("gate_pass_rate_std", 5.0, 15.0, higher_is_better=False)
         self.assertIn('[FAIL]', line)
 
+    def test_monotonic_fold_count_pass_when_equal_or_higher(self):
+        line = self._fmt_cmp("monotonic_fold_count", 3.0, 3.0, higher_is_better=True, fmt='.0f')
+        self.assertIn('[PASS]', line)
+
     def test_skip_when_new_value_is_none(self):
-        line = self._fmt_cmp("score_p50_mean", 0.05, None)
+        line = self._fmt_cmp("mean_score_disc_p90p50", 2.0, None)
         self.assertIn('[SKIP]', line)
+
+    def test_threshold_gate_pass_at_boundary(self):
+        # threshold=50 → PASS when nv >= 50
+        line = self._fmt_cmp("monotonic_pct", 40.0, 50.0, threshold=50.0, fmt='.1f')
+        self.assertIn('[PASS]', line)
+
+    def test_threshold_gate_fail_below_boundary(self):
+        line = self._fmt_cmp("monotonic_pct", 70.0, 49.9, threshold=50.0, fmt='.1f')
+        self.assertIn('[FAIL]', line)
 
 
 class TestQualGatePassRateTracking(unittest.TestCase):

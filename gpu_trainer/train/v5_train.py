@@ -5650,7 +5650,7 @@ def run_v5_walk_forward(
             elif threshold is not None:
                 passed = nv >= threshold
             elif bv is not None:
-                passed = (nv > bv) if higher_is_better else (nv < bv)
+                passed = (nv >= bv) if higher_is_better else (nv <= bv)
             else:
                 passed = None
             status = "PASS" if passed else ("FAIL" if passed is not None else "N/A")
@@ -5772,21 +5772,40 @@ def run_v5_walk_forward(
         # ---- end [V5_BASELINE_CMP] -------------------------------------------
 
         # ---- [V5_GATE_BASELINE_CMP] save & compare gate-specific metrics -----
+        # Collect the 6 required comparison metrics (per task spec):
+        #   1. mean per-fold total_R          (New >= Baseline)
+        #   2. mean per-fold expectancy_R     (New >= Baseline)
+        #   3. monotonic fold count           (New >= Baseline)
+        #   4. mean score_p90/score_p50 ratio (New >= Baseline)
+        #   5. relax-loop trigger count       (New <= Baseline)
+        #   6. gate pass rate std             (New <= Baseline)
+        _gate_total_r_vals    = [r.get('total_r', 0.0) for r in _active_rpts]
+        _gate_expect_vals     = [r.get('expectancy_r', 0.0) for r in _active_rpts]
+        _gate_mono_vals       = [r.get('score_monotonic') for r in _active_rpts if r.get('score_monotonic') is not None]
+        _gate_disc90_vals     = [r.get('score_disc_p90p50') for r in _active_rpts if r.get('score_disc_p90p50') is not None]
+        _gate_relax_vals      = [r.get('relax_loop_triggers', 0) for r in _active_rpts]
+        _gate_pass_rate_vals  = [r.get('gate_pass_rate') for r in _active_rpts if r.get('gate_pass_rate') is not None]
+        # score_p10/p50/p90 mean: preserved for audit completeness
         _gate_p10_vals  = [r.get('score_spread', {}).get('p10')  for r in _active_rpts if r.get('score_spread', {}).get('p10')  is not None]
         _gate_p50_vals  = [r.get('score_spread', {}).get('p50')  for r in _active_rpts if r.get('score_spread', {}).get('p50')  is not None]
         _gate_p90_vals  = [r.get('score_spread', {}).get('p90')  for r in _active_rpts if r.get('score_spread', {}).get('p90')  is not None]
-        _gate_mono_vals = [r.get('score_monotonic') for r in _active_rpts if r.get('score_monotonic') is not None]
-        _gate_cutoff_vals   = [r.get('gate_cutoff') for r in _active_rpts if r.get('gate_cutoff') is not None]
-        _gate_pass_rate_vals = [r.get('gate_pass_rate') for r in _active_rpts if r.get('gate_pass_rate') is not None]
+        _gate_cutoff_vals = [r.get('gate_cutoff') for r in _active_rpts if r.get('gate_cutoff') is not None]
         _gate_mode_used = _active_rpts[0].get('gate_mode', 'ref_magnitude') if _active_rpts else 'ref_magnitude'
         _gate_run_metrics = {
-            'gate_mode_used':       _gate_mode_used,
-            'score_p10_mean':       round(float(np.mean(_gate_p10_vals)), 6)  if _gate_p10_vals  else None,
-            'score_p50_mean':       round(float(np.mean(_gate_p50_vals)), 6)  if _gate_p50_vals  else None,
-            'score_p90_mean':       round(float(np.mean(_gate_p90_vals)), 6)  if _gate_p90_vals  else None,
-            'monotonic_pct':        round(100.0 * sum(1 for v in _gate_mono_vals if v) / max(len(_gate_mono_vals), 1), 1) if _gate_mono_vals else None,
-            'mean_gate_cutoff':     round(float(np.mean(_gate_cutoff_vals)), 6) if _gate_cutoff_vals else None,
-            'gate_pass_rate_std':   round(float(np.std(_gate_pass_rate_vals)), 2)  if len(_gate_pass_rate_vals) >= 2 else None,
+            'gate_mode_used':            _gate_mode_used,
+            # --- 6 required comparison metrics ---
+            'mean_per_fold_total_r':     round(float(np.mean(_gate_total_r_vals)), 4)  if _gate_total_r_vals else None,
+            'mean_per_fold_expectancy_r':round(float(np.mean(_gate_expect_vals)), 4)   if _gate_expect_vals  else None,
+            'monotonic_fold_count':      int(sum(1 for v in _gate_mono_vals if v)),
+            'mean_score_disc_p90p50':    round(float(np.mean(_gate_disc90_vals)), 4)   if _gate_disc90_vals  else None,
+            'relax_loop_total':          int(sum(_gate_relax_vals)),
+            'gate_pass_rate_std':        round(float(np.std(_gate_pass_rate_vals)), 2) if len(_gate_pass_rate_vals) >= 2 else None,
+            # --- audit extras ---
+            'score_p10_mean':            round(float(np.mean(_gate_p10_vals)), 6)  if _gate_p10_vals  else None,
+            'score_p50_mean':            round(float(np.mean(_gate_p50_vals)), 6)  if _gate_p50_vals  else None,
+            'score_p90_mean':            round(float(np.mean(_gate_p90_vals)), 6)  if _gate_p90_vals  else None,
+            'mean_gate_cutoff':          round(float(np.mean(_gate_cutoff_vals)), 6) if _gate_cutoff_vals else None,
+            'monotonic_pct':             round(100.0 * sum(1 for v in _gate_mono_vals if v) / max(len(_gate_mono_vals), 1), 1) if _gate_mono_vals else None,
         }
         _gate_metrics_path  = Path("checkpoints") / "v5_gate_run_metrics.json"
         _gate_baseline_path = Path("checkpoints") / "v5_gate_baseline_metrics.json"
@@ -5807,44 +5826,70 @@ def run_v5_walk_forward(
 
                 log.info("\n" + "=" * 110)
                 log.info("  [V5_GATE_BASELINE_CMP] GATE METRICS COMPARISON AGAINST BASELINE")
+                log.info(f"  baseline gate_mode={_gate_baseline.get('gate_mode_used','?')}  "
+                         f"new gate_mode={_gate_mode_used}")
                 log.info("=" * 110)
-                log.info(_fmt_cmp(
-                    "score_p10_mean          (higher = better discrimination floor)",
-                    _gate_baseline.get('score_p10_mean'),
-                    _gate_run_metrics.get('score_p10_mean'),
+                _gcmp_lines = []
+                _gcmp_lines.append(_fmt_cmp(
+                    "mean_per_fold_total_r   (New >= Baseline)",
+                    _gate_baseline.get('mean_per_fold_total_r'),
+                    _gate_run_metrics.get('mean_per_fold_total_r'),
                     higher_is_better=True,
                 ))
-                log.info(_fmt_cmp(
-                    "score_p50_mean          (higher = better median signal quality)",
-                    _gate_baseline.get('score_p50_mean'),
-                    _gate_run_metrics.get('score_p50_mean'),
+                _gcmp_lines.append(_fmt_cmp(
+                    "mean_per_fold_expectancy_r  (New >= Baseline)",
+                    _gate_baseline.get('mean_per_fold_expectancy_r'),
+                    _gate_run_metrics.get('mean_per_fold_expectancy_r'),
                     higher_is_better=True,
                 ))
-                log.info(_fmt_cmp(
-                    "score_p90_mean          (higher = better top-decile conviction)",
-                    _gate_baseline.get('score_p90_mean'),
-                    _gate_run_metrics.get('score_p90_mean'),
+                _gcmp_lines.append(_fmt_cmp(
+                    "monotonic_fold_count    (New >= Baseline)",
+                    _gate_baseline.get('monotonic_fold_count'),
+                    _gate_run_metrics.get('monotonic_fold_count'),
+                    higher_is_better=True, fmt='.0f',
+                ))
+                _gcmp_lines.append(_fmt_cmp(
+                    "mean_score_disc_p90p50  (New >= Baseline, score spread)",
+                    _gate_baseline.get('mean_score_disc_p90p50'),
+                    _gate_run_metrics.get('mean_score_disc_p90p50'),
                     higher_is_better=True,
                 ))
-                log.info(_fmt_cmp(
-                    "monotonic_pct           (target >= 50%, more folds monotonic)",
-                    _gate_baseline.get('monotonic_pct'),
-                    _gate_run_metrics.get('monotonic_pct'),
-                    threshold=50.0, fmt='.1f',
+                _gcmp_lines.append(_fmt_cmp(
+                    "relax_loop_total        (New <= Baseline, fewer relax triggers)",
+                    _gate_baseline.get('relax_loop_total'),
+                    _gate_run_metrics.get('relax_loop_total'),
+                    higher_is_better=False, fmt='.0f',
                 ))
-                log.info(_fmt_cmp(
-                    "mean_gate_cutoff        (informational, effective threshold avg)",
-                    _gate_baseline.get('mean_gate_cutoff'),
-                    _gate_run_metrics.get('mean_gate_cutoff'),
-                    higher_is_better=True,
-                ))
-                log.info(_fmt_cmp(
-                    "gate_pass_rate_std      (lower = more consistent gate filtering)",
+                _gcmp_lines.append(_fmt_cmp(
+                    "gate_pass_rate_std      (New <= Baseline, more stable filtering)",
                     _gate_baseline.get('gate_pass_rate_std'),
                     _gate_run_metrics.get('gate_pass_rate_std'),
                     higher_is_better=False,
                 ))
+                for _gcl in _gcmp_lines:
+                    log.info(_gcl)
+
+                # --- Go / No-Go promotion decision ---
+                _gcmp_passes = [('[PASS]' in ln) for ln in _gcmp_lines if '[SKIP]' not in ln]
+                _gcmp_all_pass = all(_gcmp_passes) and len(_gcmp_passes) > 0
+
                 log.info("=" * 110)
+                if _gate_mode_used != 'ref_magnitude' and _gcmp_all_pass:
+                    log.info(
+                        "[V5_GATE] Percentile gate PROMOTED — all 6 gate comparison metrics PASSED. "
+                        f"New gate_mode='{_gate_mode_used}' is now active for trade selection."
+                    )
+                elif _gate_mode_used != 'ref_magnitude':
+                    _n_fail = sum(1 for p in _gcmp_passes if not p)
+                    log.info(
+                        f"[V5_GATE] Percentile gate NOT promoted — stayed in audit-only mode "
+                        f"({_n_fail} metric(s) failed; ref_magnitude gate remains active for trade selection)."
+                    )
+                else:
+                    log.info(
+                        "[V5_GATE] Running in ref_magnitude mode. "
+                        "Use --v5-gate-mode percentile_top15 to compare against this baseline."
+                    )
                 log.info(
                     "[V5_GATE_BASELINE_CMP] To promote this run as new gate baseline:  "
                     f"copy {_gate_metrics_path} {_gate_baseline_path}"
