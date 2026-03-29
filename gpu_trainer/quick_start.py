@@ -5293,6 +5293,11 @@ Examples:
                         help="3-class side-balance KL loss weight added to L_action (default: 0.15; "
                              "bug-fix from 0.05 — 3-class targets now include HOLD so all-HOLD "
                              "collapse is penalised)")
+    parser.add_argument("--v5-action-entropy-weight", type=float, default=0.10,
+                        help="v5 action head entropy regularisation weight (default: 0.10). "
+                             "Maximises entropy of the mean batch action distribution, preventing "
+                             "direction collapse (100%% LONG or 100%% SHORT). Set 0.0 to disable. "
+                             "Values 0.05-0.20 are typical. Task #54.")
 
     parser.add_argument("--v5-train-end-date", type=str, default=None,
                         help="v5 time-based split: train on data before this date (YYYY-MM-DD)")
@@ -6367,6 +6372,7 @@ Examples:
                     v6_confidence_weight=args.v6_confidence_weight,
                     v6_moe_balance_weight=args.v6_moe_balance_weight,
                     side_bal_weight=args.v5_side_bal_weight,
+                    action_entropy_weight=args.v5_action_entropy_weight,
                 )
                 return
 
@@ -6572,6 +6578,7 @@ Examples:
                 v6_confidence_weight=args.v6_confidence_weight,
                 v6_moe_balance_weight=args.v6_moe_balance_weight,
                 side_bal_weight=args.v5_side_bal_weight,
+                action_entropy_weight=args.v5_action_entropy_weight,
             )
 
               if _single_pusher is not None:

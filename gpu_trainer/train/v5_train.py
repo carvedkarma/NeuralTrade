@@ -690,7 +690,8 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
                     barrier_mode='fixed', action_weights=None, epoch=0,
                     sample_weights=None, mae_asym_weight=1.0,
                     warmup_epochs=0, warmup_ret_mult=1.0, warmup_action_mult=1.0,
-                    sigma_spread_reg=0.0, side_bal_weight=0.15):
+                    sigma_spread_reg=0.0, side_bal_weight=0.15,
+                    action_entropy_weight=0.0):
     """Compute v5 composite loss with class-balanced action CE.
 
     Uses clamped Gaussian NLL to prevent log(sigma) term from dominating.
@@ -790,13 +791,17 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
     n_chop = int(chop_mask.sum().item())
 
     # 3-class targets [hold, long, short] per regime.
-    # Bull: bias LONG (55%), penalise HOLD if >30%.
-    # Bear: bias SHORT (55%), penalise HOLD if >30%.
-    # Chop: balanced L/S (30% each), allow more HOLD (40%).
+    # Task #54: Targets made more symmetric to reduce LONG:SHORT bias in bull/bear regimes.
+    # Old targets gave 3.7:1 LONG:SHORT ratio in bull (0.55:0.15), causing 100% LONG collapse
+    # when bull_mask dominated the batch.  New targets cap ratio at 2:1 so even bull-heavy
+    # folds retain meaningful SHORT representation.
+    # Bull: LONG bias (50%), SHORT floor (25%), cap HOLD at 25%.
+    # Bear: SHORT bias (50%), LONG floor (25%), cap HOLD at 25%.
+    # Chop: near-symmetric L/S (32.5% each), HOLD at 35%.
     _3CLS_TARGETS = {
-        'bull': [0.30, 0.55, 0.15],
-        'bear': [0.30, 0.15, 0.55],
-        'chop': [0.40, 0.30, 0.30],
+        'bull': [0.25, 0.50, 0.25],
+        'bear': [0.25, 0.25, 0.50],
+        'chop': [0.35, 0.325, 0.325],
     }
 
     group_kl_list = []
@@ -819,12 +824,24 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
 
     L_action = L_action + SIDE_BAL_W * L_side_balance
 
+    # Mean-batch entropy regularisation (Task #54): prevents action head direction collapse.
+    # Computes the entropy of the AVERAGE action distribution over the batch.
+    # Minimising L_entropy (which is negative entropy) maximises H(mean_probs), pushing
+    # the average prediction toward a uniform distribution and preventing any single class
+    # from dominating all predictions.  Weight 0.0 disables (backward compat default).
+    L_entropy = torch.tensor(0.0, device=action_logits.device)
+    if action_entropy_weight > 0.0:
+        _mean_probs = action_probs.mean(dim=0)  # shape (3,) — average over batch
+        L_entropy = (_mean_probs * (_mean_probs + eps).log()).sum()  # = -H(mean_probs)
+        L_action = L_action + action_entropy_weight * L_entropy
+
     losses = {
         'L_ret': L_ret.item(),
         'L_mfe': L_mfe.item(),
         'L_mae': L_mae.item(),
         'L_action': L_action.item(),
         'L_side_balance': float(L_side_balance.item()) if torch.is_tensor(L_side_balance) else 0.0,
+        'L_entropy': float(L_entropy.item()),
         'L_sigma_reg': L_sigma_reg.item() if torch.is_tensor(L_sigma_reg) else 0.0,
         '_side_bal_diag': (n_bull, n_bear, n_chop),
     }
@@ -2910,6 +2927,7 @@ def run_v5_forward_test(
         log.info(f"[V5_DDT] Using relaxed pre-filter threshold={ddt_base_threshold:.4f} "
                  f"(DDT will dynamically adjust in loop)")
 
+    per_bar_threshold = None  # default: fall back to scalar ddt_base_threshold at line ~3198
     if config.per_symbol_thresholds and test_sym_ids is not None:
         hard_floor = config.min_threshold if config.min_threshold is not None else 0.0
         per_bar_threshold = np.full(len(scores_work), ddt_base_threshold, dtype=np.float64)
@@ -4971,6 +4989,7 @@ def run_v5_walk_forward(
     max_folds=None,
     candidate_logger=None,
     side_bal_weight=0.15,
+    action_entropy_weight=0.10,
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -5314,6 +5333,7 @@ def run_v5_walk_forward(
                 v6_moe_balance_weight=v6_moe_balance_weight,
                 candidate_logger=candidate_logger,
                 side_bal_weight=side_bal_weight,
+                action_entropy_weight=action_entropy_weight,
             )
         except Exception as _fold_err:
             import traceback as _tb
@@ -6097,6 +6117,7 @@ def train_v5_model(
     v6_moe_balance_weight=0.05,
     candidate_logger=None,
     side_bal_weight=0.15,
+    action_entropy_weight=0.10,
 ):
     """V5/V6 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -6162,8 +6183,10 @@ def train_v5_model(
     log.info(f"{ctag} hold_target={hold_target} mfe_min={mfe_min}")
     log.info(f"{ctag} barrier_mode={barrier_mode} presets={[p.get('label','?') for p in presets]}")
     log.info(
-        "[V5_DEBIAS] mu_debias=%s (default=DISABLED; enable with --v5-mu-debias)",
+        "[V5_DEBIAS] mu_debias=%s (default=DISABLED; enable with --v5-mu-debias)  "
+        "action_entropy_weight=%.2f",
         "ENABLED" if mu_debias else "DISABLED",
+        action_entropy_weight,
     )
     log.info(
         "[%s_CONFIG] SIDE_BAL_W=%.2f  mae_cap=%.2f  barrier_aligned_ret_R=True",
@@ -7033,6 +7056,7 @@ def train_v5_model(
                     warmup_action_mult=loss_warmup_action_mult,
                     sigma_spread_reg=sigma_spread_reg,
                     side_bal_weight=side_bal_weight,
+                    action_entropy_weight=action_entropy_weight,
                 )
 
             optimizer.zero_grad()
@@ -7053,7 +7077,7 @@ def train_v5_model(
             n_bear_ep = sum(t[1] for t in diag_tuples)
             n_chop_ep = sum(t[2] for t in diag_tuples)
             avg_side_bal = float(np.mean(loss_breakdown.get('L_side_balance', [0.0])))
-            log.info(f"[V5_SIDE_BAL] Epoch {epoch:03d}: regime_conditional=True SIDE_BAL_W=0.05 "
+            log.info(f"[V5_SIDE_BAL] Epoch {epoch:03d}: regime_conditional=True SIDE_BAL_W={side_bal_weight:.2f} "
                      f"bull={n_bull_ep} bear={n_bear_ep} chop={n_chop_ep} "
                      f"avg_L_side_bal={avg_side_bal:.4f}")
 
@@ -7123,6 +7147,24 @@ def train_v5_model(
         log.info(f"{tag} Epoch {epoch:03d}/{epochs} | train={avg_train_loss:.4f} val={avg_val_loss:.4f} "
                  f"lr={current_lr:.2e} act_acc={action_acc:.3f} "
                  f"pred[H/L/S]={pred_hold}/{pred_long}/{pred_short} | {lb_str}")
+
+        # [V5_DIR_COLLAPSE] warning: flag when >90% of validation predictions are one direction.
+        # This makes direction collapse immediately visible without needing the Training Monitor UI.
+        if not use_v6 and n_pred > 0:
+            _dir_pct_long = pred_long / n_pred
+            _dir_pct_short = pred_short / n_pred
+            _dir_pct_hold = pred_hold / n_pred
+            _collapse_threshold = 0.90
+            if _dir_pct_long > _collapse_threshold:
+                log.warning(f"[V5_DIR_COLLAPSE] Epoch {epoch:03d}: {_dir_pct_long*100:.1f}% LONG "
+                            f"(>{_collapse_threshold*100:.0f}% one-sided — action head collapsed to LONG)")
+            elif _dir_pct_short > _collapse_threshold:
+                log.warning(f"[V5_DIR_COLLAPSE] Epoch {epoch:03d}: {_dir_pct_short*100:.1f}% SHORT "
+                            f"(>{_collapse_threshold*100:.0f}% one-sided — action head collapsed to SHORT)")
+            elif _dir_pct_hold > _collapse_threshold:
+                log.warning(f"[V5_DIR_COLLAPSE] Epoch {epoch:03d}: {_dir_pct_hold*100:.1f}% HOLD "
+                            f"(>{_collapse_threshold*100:.0f}% one-sided — action head collapsed to HOLD)")
+
         # Log sigma distribution from validation outputs to detect NLL collapse.
         if not use_v6 and all_val_outputs.get('ret_log_sigma'):
             _sigma_cat = torch.cat(all_val_outputs['ret_log_sigma'], dim=0).numpy().squeeze(-1)
@@ -7558,6 +7600,7 @@ def train_v5_model(
                             mae_asym_weight=mae_asym_weight,
                             sigma_spread_reg=sigma_spread_reg,
                             side_bal_weight=side_bal_weight,
+                            action_entropy_weight=action_entropy_weight,
                         )
                         ft_optimizer.zero_grad()
                         loss.backward()
