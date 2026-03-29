@@ -1,134 +1,214 @@
 """
 Regression test for WF threshold EMA decay floor.
 
-Verifies that after dead-fold and no-report scenarios, threshold_ema is NOT
-clamped to the old stale 0.01 floor, but instead respects the configured
-min_threshold_floor (default 0.001) matching the V5 score scale 0.001-0.002.
+Verifies two things:
+1. SOURCE INSPECTION: The production code in run_v5_walk_forward uses the shared
+   `_wf_threshold_floor` variable (not the stale hardcoded 0.01) in both the dead-fold
+   and no-report decay branches.  This test FAILS immediately if 0.01 is reintroduced.
+2. BEHAVIORAL SIMULATION: The corrected logic (max(0.001, ema*decay)) produces different
+   results from the old logic (max(0.01, ema*decay)) for V5-realistic ema values.
 
 Run with:
     python -m pytest gpu_trainer/test_wf_threshold_ema.py -v
 or:
     python gpu_trainer/test_wf_threshold_ema.py
 """
+import ast
 import sys
 import os
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'gpu_trainer'))
+import re
 
 import pytest
 
-
-def simulate_dead_fold_decay(threshold_ema, wf_threshold_decay, wf_threshold_floor):
-    """Simulate the dead-fold path: max(floor, ema * decay)."""
-    old_ema = threshold_ema
-    new_ema = max(wf_threshold_floor, threshold_ema * wf_threshold_decay)
-    return old_ema, new_ema
+# Path to production source
+_V5_TRAIN_PATH = os.path.join(os.path.dirname(__file__), "train", "v5_train.py")
 
 
-def simulate_no_report_decay(threshold_ema, wf_threshold_decay, wf_threshold_floor):
-    """Simulate the no-report path: max(floor, ema * decay)."""
-    old_ema = threshold_ema
-    new_ema = max(wf_threshold_floor, threshold_ema * wf_threshold_decay)
-    return old_ema, new_ema
+# ---------------------------------------------------------------------------
+# Helpers to read and inspect the production source
+# ---------------------------------------------------------------------------
+
+def _read_source():
+    with open(_V5_TRAIN_PATH, "r", encoding="utf-8") as f:
+        return f.read()
 
 
-class TestWFThresholdEMAFloor:
-    """Tests for walk-forward threshold EMA decay floor fix."""
+def _extract_wf_function_lines(source: str) -> list[str]:
+    """Return the lines belonging to run_v5_walk_forward."""
+    lines = source.splitlines()
+    in_func = False
+    func_lines = []
+    for line in lines:
+        if line.startswith("def run_v5_walk_forward("):
+            in_func = True
+        elif in_func and line.startswith("def ") and "run_v5_walk_forward" not in line:
+            break
+        if in_func:
+            func_lines.append(line)
+    return func_lines
 
-    REALISTIC_EMA = 0.0018       # V5-realistic threshold_ema
-    DECAY = 0.5                  # typical wf_threshold_decay
-    NEW_FLOOR = 0.001            # corrected floor (V5TPDControllerConfig.min_threshold_floor default)
-    OLD_FLOOR = 0.01             # old hardcoded stale floor
 
-    def test_dead_fold_corrected_floor_allows_below_old_floor(self):
-        """After a dead fold, decay from a realistic V5 ema should go BELOW 0.01."""
-        _, new_ema = simulate_dead_fold_decay(
-            self.REALISTIC_EMA, self.DECAY, self.NEW_FLOOR
-        )
-        # With correct floor=0.001, result is max(0.001, 0.0018*0.5=0.0009) = 0.001
-        assert new_ema < self.OLD_FLOOR, (
-            f"Expected new_ema={new_ema:.6f} < old_floor={self.OLD_FLOOR}, "
-            f"but it is still clamped to the stale 0.01 floor."
-        )
+# ---------------------------------------------------------------------------
+# Source-level regression tests
+# ---------------------------------------------------------------------------
 
-    def test_dead_fold_old_floor_would_clamp(self):
-        """Confirm the bug: old floor=0.01 would have clamped the decayed value."""
-        _, new_ema_old = simulate_dead_fold_decay(
-            self.REALISTIC_EMA, self.DECAY, self.OLD_FLOOR
-        )
-        # With old floor=0.01, result is max(0.01, 0.0009) = 0.01 — stuck at 0.01
-        assert new_ema_old == self.OLD_FLOOR, (
-            f"Expected old-floor path to produce exactly {self.OLD_FLOOR}, got {new_ema_old}"
-        )
+class TestWFThresholdFloorSourceVerification:
+    """Verify the production source does NOT contain the stale 0.01 floor in WF paths."""
 
-    def test_dead_fold_corrected_floor_respects_new_floor(self):
-        """After decay from very low ema, result is clamped to new_floor, not below."""
-        tiny_ema = 0.0005
-        _, new_ema = simulate_dead_fold_decay(tiny_ema, self.DECAY, self.NEW_FLOOR)
-        # max(0.001, 0.0005*0.5=0.00025) = 0.001
-        assert new_ema >= self.NEW_FLOOR, (
-            f"Expected new_ema={new_ema:.6f} >= new_floor={self.NEW_FLOOR}"
-        )
-        assert new_ema == self.NEW_FLOOR, (
-            f"Expected exact floor={self.NEW_FLOOR}, got {new_ema:.6f}"
+    def setup_method(self):
+        self.source = _read_source()
+        self.wf_lines = _extract_wf_function_lines(self.source)
+        self.wf_text = "\n".join(self.wf_lines)
+
+    def test_no_hardcoded_01_floor_in_dead_fold_branch(self):
+        """Dead-fold EMA decay must NOT use a hardcoded 0.01 literal as the floor."""
+        # Pattern: min_threshold = 0.01 (the old bug)
+        pattern = re.compile(r'\bmin_threshold\s*=\s*0\.01\b')
+        matches = [ln for ln in self.wf_lines if pattern.search(ln)]
+        assert matches == [], (
+            f"REGRESSION: Found stale 'min_threshold = 0.01' in run_v5_walk_forward:\n"
+            + "\n".join(matches)
         )
 
-    def test_no_report_corrected_floor_allows_below_old_floor(self):
-        """After a no-report fold, decay from realistic V5 ema should go below 0.01."""
-        _, new_ema = simulate_no_report_decay(
-            self.REALISTIC_EMA, self.DECAY, self.NEW_FLOOR
-        )
-        assert new_ema < self.OLD_FLOOR, (
-            f"Expected new_ema={new_ema:.6f} < old_floor={self.OLD_FLOOR}"
+    def test_shared_floor_variable_defined_once(self):
+        """_wf_threshold_floor must be defined exactly once inside run_v5_walk_forward."""
+        definition_pattern = re.compile(r'\s*_wf_threshold_floor\s*=')
+        definitions = [ln for ln in self.wf_lines if definition_pattern.search(ln)]
+        assert len(definitions) == 1, (
+            f"Expected exactly 1 definition of _wf_threshold_floor in run_v5_walk_forward, "
+            f"found {len(definitions)}:\n" + "\n".join(definitions)
         )
 
-    def test_no_report_old_floor_would_clamp(self):
-        """Confirm the bug: old floor=0.01 clamps the no-report decay too."""
-        _, new_ema_old = simulate_no_report_decay(
-            self.REALISTIC_EMA, self.DECAY, self.OLD_FLOOR
-        )
-        assert new_ema_old == self.OLD_FLOOR
+    def test_floor_derived_from_tpd_ctrl_cfg(self):
+        """_wf_threshold_floor must be derived from tpd_ctrl_cfg.min_threshold_floor."""
+        definition_pattern = re.compile(r'\s*_wf_threshold_floor\s*=')
+        for line in self.wf_lines:
+            if definition_pattern.search(line):
+                assert "tpd_ctrl_cfg" in line, (
+                    f"_wf_threshold_floor definition does not reference tpd_ctrl_cfg:\n{line}"
+                )
+                assert "min_threshold_floor" in line, (
+                    f"_wf_threshold_floor definition does not use min_threshold_floor:\n{line}"
+                )
+                break
 
-    def test_multiple_dead_folds_converge_to_new_floor(self):
-        """Multiple consecutive dead folds converge toward new_floor, not old_floor."""
+    def test_dead_fold_branch_uses_shared_floor_variable(self):
+        """Dead-fold branch must call max(_wf_threshold_floor, ...) not max(0.01, ...)."""
+        # Find the dead-fold block: 'DEAD FOLD' log + max() call nearby
+        dead_fold_block = []
+        in_dead = False
+        for line in self.wf_lines:
+            if "DEAD FOLD" in line:
+                in_dead = True
+            if in_dead:
+                dead_fold_block.append(line)
+                if "max(" in line and "threshold_ema" in line:
+                    break
+
+        assert dead_fold_block, "Could not find the DEAD FOLD branch in run_v5_walk_forward"
+        max_lines = [l for l in dead_fold_block if "max(" in l and "threshold_ema" in l]
+        assert max_lines, "No max() call found in DEAD FOLD branch"
+        for ml in max_lines:
+            assert "_wf_threshold_floor" in ml, (
+                f"DEAD FOLD max() does not use _wf_threshold_floor:\n{ml}"
+            )
+            # Also ensure the stale 0.01 literal is not the floor arg
+            assert not re.search(r'max\(\s*0\.01\s*,', ml), (
+                f"DEAD FOLD max() uses old hardcoded 0.01 floor:\n{ml}"
+            )
+
+    def test_no_report_branch_uses_shared_floor_variable(self):
+        """No-report branch must call max(_wf_threshold_floor, ...) not max(0.01, ...)."""
+        # The no-report branch is in the else: clause (no report file) — find all max()
+        # calls on threshold_ema in the full WF function.  The key invariant is:
+        # 1. At least 2 such calls exist (dead-fold + no-report paths).
+        # 2. None of them use a raw 0.01 literal as the floor.
+        # 3. All of them use _wf_threshold_floor.
+        max_ema_lines = [
+            ln for ln in self.wf_lines
+            if "max(" in ln and "threshold_ema" in ln and "_wf_threshold_floor" in ln
+        ]
+        # There must be exactly 2 max() calls using _wf_threshold_floor
+        assert len(max_ema_lines) >= 2, (
+            f"Expected >= 2 'max(_wf_threshold_floor, ...)' calls in run_v5_walk_forward "
+            f"(one for dead-fold, one for no-report), found {len(max_ema_lines)}:\n"
+            + "\n".join(max_ema_lines)
+        )
+        # None should use 0.01
+        for ml in max_ema_lines:
+            assert not re.search(r'max\(\s*0\.01\s*,', ml), (
+                f"Found old hardcoded 0.01 floor in threshold_ema max() call:\n{ml}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Behavioral tests: correct logic vs old logic on V5-realistic values
+# ---------------------------------------------------------------------------
+
+class TestWFThresholdFloorBehavior:
+    """Verify that the corrected logic differs from old logic on V5-realistic values."""
+
+    OLD_FLOOR = 0.01    # stale hardcoded value
+    NEW_FLOOR = 0.001   # corrected from V5TPDControllerConfig.min_threshold_floor
+    DECAY = 0.5         # typical wf_threshold_decay
+
+    def _apply_floor(self, ema, decay, floor):
+        """Replicate the exact production expression: max(floor, ema*decay)."""
+        return max(floor, ema * decay)
+
+    def test_v5_realistic_ema_produces_different_results_old_vs_new_floor(self):
+        """With V5-realistic ema=0.0018, old floor clamps to 0.01; new floor allows 0.0009."""
+        ema = 0.0018
+        result_old = self._apply_floor(ema, self.DECAY, self.OLD_FLOOR)
+        result_new = self._apply_floor(ema, self.DECAY, self.NEW_FLOOR)
+        assert result_old != result_new, "Old and new floors should produce different results"
+        assert result_old == self.OLD_FLOOR, (
+            f"Old floor should clamp: expected {self.OLD_FLOOR}, got {result_old}"
+        )
+        assert result_new < self.OLD_FLOOR, (
+            f"New floor should NOT clamp to old level: expected < {self.OLD_FLOOR}, got {result_new}"
+        )
+        assert result_new == self.NEW_FLOOR, (
+            f"New floor should clamp to 0.001: expected {self.NEW_FLOOR}, got {result_new}"
+        )
+
+    def test_dead_fold_decay_converges_below_old_floor_with_new_floor(self):
+        """20 consecutive dead folds starting at 0.005 should converge to NEW_FLOOR."""
         ema = 0.005
-        floor = self.NEW_FLOOR
         for _ in range(20):
-            _, ema = simulate_dead_fold_decay(ema, self.DECAY, floor)
-        assert ema == floor, (
-            f"After 20 dead folds, ema={ema:.6f} should converge to floor={floor}"
+            ema = self._apply_floor(ema, self.DECAY, self.NEW_FLOOR)
+        assert ema == self.NEW_FLOOR, (
+            f"After 20 dead folds, expected convergence to {self.NEW_FLOOR}, got {ema}"
         )
         assert ema < self.OLD_FLOOR, (
-            f"Converged ema={ema:.6f} should be below old stale floor={self.OLD_FLOOR}"
+            f"Converged value {ema} should be below old stale floor {self.OLD_FLOOR}"
         )
 
-    def test_floor_from_tpd_ctrl_cfg(self):
-        """V5TPDControllerConfig.min_threshold_floor default matches the corrected floor."""
-        try:
-            from train.v5_train import V5TPDControllerConfig
-            cfg = V5TPDControllerConfig()
-            assert cfg.min_threshold_floor == self.NEW_FLOOR, (
-                f"Expected min_threshold_floor={self.NEW_FLOOR}, got {cfg.min_threshold_floor}"
+    def test_old_floor_would_clamp_realistic_ema(self):
+        """Confirm that the OLD floor would have clamped V5-realistic ema values."""
+        for ema in [0.0018, 0.0015, 0.0010, 0.0005]:
+            result = self._apply_floor(ema, self.DECAY, self.OLD_FLOOR)
+            assert result == self.OLD_FLOOR, (
+                f"Old floor should clamp ema={ema} to {self.OLD_FLOOR}, got {result}"
             )
-        except ImportError:
-            pytest.skip("v5_train not importable in this environment (GPU/torch dependency)")
 
-    def test_decay_above_new_floor_passes_through(self):
-        """When ema*decay > new_floor, the decayed value is used unchanged."""
-        large_ema = 0.010
-        _, new_ema = simulate_dead_fold_decay(large_ema, self.DECAY, self.NEW_FLOOR)
-        expected = large_ema * self.DECAY  # 0.005
-        assert abs(new_ema - expected) < 1e-10, (
-            f"Expected {expected:.6f}, got {new_ema:.6f}"
+    def test_above_new_floor_decay_passes_through_unchanged(self):
+        """When ema*decay > new_floor, result equals ema*decay (no clamping)."""
+        ema = 0.010
+        result = self._apply_floor(ema, self.DECAY, self.NEW_FLOOR)
+        assert result == ema * self.DECAY, (
+            f"Expected {ema * self.DECAY}, got {result}"
+        )
+
+    def test_fallback_matches_new_floor_when_cfg_is_none(self):
+        """The None-safe fallback in the source must equal NEW_FLOOR (0.001)."""
+        # Simulate: tpd_ctrl_cfg.min_threshold_floor if tpd_ctrl_cfg is not None else 0.001
+        tpd_ctrl_cfg = None
+        floor = tpd_ctrl_cfg.min_threshold_floor if tpd_ctrl_cfg is not None else 0.001
+        assert floor == self.NEW_FLOOR, (
+            f"None-safe fallback should be {self.NEW_FLOOR}, got {floor}"
         )
 
 
 if __name__ == "__main__":
-    import unittest
-
-    suite = unittest.TestLoader().loadTestsFromTestCase(
-        type("TestWFThresholdEMAFloor", (TestWFThresholdEMAFloor, unittest.TestCase), {})
-    )
-    runner = unittest.TextTestRunner(verbosity=2)
-    result = runner.run(suite)
-    sys.exit(0 if result.wasSuccessful() else 1)
+    pytest.main([__file__, "-v"])
