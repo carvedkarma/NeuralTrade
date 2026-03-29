@@ -338,7 +338,14 @@ class TestProductionReadinessAuditFixes:
     """
 
     def test_bug1_edge_pass_filters_low_mu_r_bars(self):
-        """Bug 1: quality_mask must now filter bars with |mu_R| < p25 threshold."""
+        """T1: quality_mask with strict_audit=True must filter bars with |mu_R| < p25 threshold.
+
+        Setup: 500 bars with tiny mu_R (uniform[-0.001, 0.001]) but ref has large mu_R (0.5).
+        adaptive_mu_min = p25(ref) = 0.5.  All bars fail edge_pass → pass_rate < 10%.
+        Relax loop runs 5 steps but relaxed_mu=0.25 still >> 0.001 → still 0 bars.
+        strict_audit=True: keeps the last relaxed_mask (0 bars) without finiteness bypass.
+        Expected: n_passed == 0  (well below the 25% threshold).
+        """
         n = 500
         rng = np.random.RandomState(0)
         arrays = {
@@ -353,12 +360,98 @@ class TestProductionReadinessAuditFixes:
             'sigma':   np.full(n, 0.01, dtype=np.float32),
             'p_trade': np.full(n, 0.99, dtype=np.float32),
         }
-        cfg = V5QualityGateConfig(mu_R_min=0.05)
+        # T1 Fix: use strict_audit=True so the finiteness bypass cannot drop edge_pass.
+        cfg = V5QualityGateConfig(mu_R_min=0.05, quality_gate_strict_audit=True)
+        mask, diag = v5_quality_mask(arrays, cfg, epoch=999, ref_arrays=ref)
+        n_passed = int(np.sum(mask))
+        assert n_passed == 0, (
+            f"strict_audit=True: edge_pass must filter ALL low-mu_R bars (got {n_passed}/{n} passed). "
+            "If this test fails, the finiteness fallback is bypassing edge_pass under strict_audit."
+        )
+
+    def test_bug1_edge_pass_preserved_in_default_fallback(self):
+        """T1 fallback fix: default (strict_audit=False) must also preserve edge floor in fallback.
+
+        Even without strict_audit, the finiteness fallback now includes the last_relaxed_mu floor.
+        With ref mu_R=0.5, last_relaxed_mu after 5 steps = 0.5/2.0 = 0.25.
+        Arrays mu_R is uniform(-0.001, 0.001) — all below 0.25 → still filtered.
+        Expected: n_passed < 5 (effectively 0 since all below last_relaxed_mu=0.25).
+        """
+        n = 500
+        rng = np.random.RandomState(0)
+        arrays = {
+            'mu_R':    rng.uniform(-0.001, 0.001, n).astype(np.float32),
+            'mae':     np.full(n, 0.1, dtype=np.float32),
+            'sigma':   np.full(n, 0.1, dtype=np.float32),
+            'p_trade': np.full(n, 0.7, dtype=np.float32),
+        }
+        ref = {
+            'mu_R':    np.full(n, 0.5, dtype=np.float32),
+            'mae':     np.full(n, 0.01, dtype=np.float32),
+            'sigma':   np.full(n, 0.01, dtype=np.float32),
+            'p_trade': np.full(n, 0.99, dtype=np.float32),
+        }
+        cfg = V5QualityGateConfig(mu_R_min=0.05, quality_gate_strict_audit=False)
         mask, diag = v5_quality_mask(arrays, cfg, epoch=999, ref_arrays=ref)
         n_passed = int(np.sum(mask))
         assert n_passed < n * 0.25, (
-            f"edge_pass should filter most low-mu_R bars (only {n_passed}/{n} passed). "
-            "If this test fails, edge_pass is still not applied in final_mask."
+            f"default fallback must preserve edge floor (got {n_passed}/{n} passed). "
+            "If this fails, the T1 fix (last_relaxed_mu preserved in fallback) is broken."
+        )
+
+    def test_bug1_t4_raw_mu_r_used_for_gate_when_available(self):
+        """T4: quality_mask uses '_raw_mu_R_ref' for gate percentile when mu_debias is active.
+
+        Scenario: ref['mu_R'] is debiased (near-zero), but ref['_raw_mu_R_ref'] is the
+        original large-magnitude values.  The gate must use raw values to set adaptive_mu_min
+        to a meaningful threshold (not ~0 from the debiased values).
+
+        Arrays have mu_R=0.10.  Raw ref=0.50 → adaptive_mu_min=0.50.  After 5 relax steps
+        the minimum relaxed_mu = 0.50/2.0 = 0.25, still > 0.10, so all bars fail every step.
+        With strict_audit=True the finiteness bypass is skipped → n_passed = 0.
+
+        Debiased ref=0.001 → adaptive_mu_min≈0.001, bars immediately pass → n≈500.
+
+        The function must behave like the raw case (n_raw < n_debiased).
+        """
+        n = 500
+        arrays = {
+            'mu_R':    np.full(n, 0.10, dtype=np.float32),  # 0.10 < 0.50/2.0=0.25: fails all relax steps
+            'mae':     np.full(n, 0.1, dtype=np.float32),
+            'sigma':   np.full(n, 0.1, dtype=np.float32),
+            'p_trade': np.full(n, 0.7, dtype=np.float32),
+        }
+        ref_debiased = {
+            'mu_R':          np.full(n, 0.001, dtype=np.float32),  # debiased → near zero
+            '_raw_mu_R_ref': np.full(n, 0.50,  dtype=np.float32),  # raw → large
+            'mae':     np.full(n, 0.01, dtype=np.float32),
+            'sigma':   np.full(n, 0.01, dtype=np.float32),
+            'p_trade': np.full(n, 0.99, dtype=np.float32),
+        }
+        # strict_audit=True: no finiteness bypass → only bars that pass the edge floor survive
+        cfg = V5QualityGateConfig(mu_R_min=0.05, quality_gate_strict_audit=True)
+        mask_with_raw, _ = v5_quality_mask(arrays, cfg, epoch=999, ref_arrays=ref_debiased)
+
+        ref_no_raw = {k: v for k, v in ref_debiased.items() if k != '_raw_mu_R_ref'}
+        ref_no_raw['mu_R'] = np.full(n, 0.001, dtype=np.float32)  # debiased only, no raw
+        mask_debiased_only, _ = v5_quality_mask(arrays, cfg, epoch=999, ref_arrays=ref_no_raw)
+
+        n_raw      = int(np.sum(mask_with_raw))
+        n_debiased = int(np.sum(mask_debiased_only))
+
+        # Raw ref (0.5): adaptive_mu_min=0.5, bars[mu_R=0.10] fail all 5 relax steps → n=0
+        # Debiased ref (0.001): adaptive_mu_min≈0.001, bars[mu_R=0.10] all pass → n≈500
+        assert n_raw < n_debiased, (
+            f"T4: '_raw_mu_R_ref' must tighten the gate vs debiased ref. "
+            f"raw={n_raw} debiased={n_debiased}. If equal, '_raw_mu_R_ref' is not being used."
+        )
+        assert n_raw < n * 0.25, (
+            f"T4: when raw ref is 0.5 and arrays mu_R=0.10 (below all relaxed floors), "
+            f"strict_audit=True must keep n_passed near 0. Got {n_raw}/{n}."
+        )
+        assert n_debiased > n * 0.75, (
+            f"T4: debiased ref (mu_min≈0.001) should pass most bars with mu_R=0.10. "
+            f"Got only {n_debiased}/{n}."
         )
 
     def test_bug2_score_threshold_default_matches_live(self):

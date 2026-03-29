@@ -521,6 +521,7 @@ class V5QualityGateConfig:
     mu_R_min: float = 0.05
     p_trade_min: float = 0.40
     enable_calib: bool = False
+    quality_gate_strict_audit: bool = False  # T1: when True, skip finiteness fallback entirely
 
 
 @dataclass
@@ -690,7 +691,7 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
                     barrier_mode='fixed', action_weights=None, epoch=0,
                     sample_weights=None, mae_asym_weight=1.0,
                     warmup_epochs=0, warmup_ret_mult=1.0, warmup_action_mult=1.0,
-                    sigma_spread_reg=0.0, side_bal_weight=0.15,
+                    sigma_spread_reg=0.0, side_bal_weight=0.05,
                     action_entropy_weight=0.0):
     """Compute v5 composite loss with class-balanced action CE.
 
@@ -737,7 +738,7 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
         L_sigma_reg = torch.tensor(0.0, device=sigma.device)
 
     mfe_pred = outputs['mfe'][valid].squeeze(-1)
-    mfe_true = batch['mfe_R'][valid]
+    mfe_true = batch['mfe_R'][valid].squeeze(-1)  # T3: squeeze [M,1] → [M] to match mfe_pred shape
     if sw is not None:
         mfe_err = F.smooth_l1_loss(mfe_pred, mfe_true, reduction='none')
         L_mfe = (mfe_err * sw).sum() / sw.sum()
@@ -745,7 +746,7 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
         L_mfe = F.smooth_l1_loss(mfe_pred, mfe_true)
 
     mae_pred = outputs['mae'][valid].squeeze(-1)
-    mae_true = batch['mae_R'][valid]
+    mae_true = batch['mae_R'][valid].squeeze(-1)  # T3: squeeze [M,1] → [M] to match mae_pred shape
     mae_err = F.smooth_l1_loss(mae_pred, mae_true, reduction='none')
     if mae_asym_weight > 1.0:
         underest_mask = (mae_pred < mae_true).float()
@@ -777,11 +778,11 @@ def compute_v5_loss(outputs, batch, w_ret=3.0, w_mfe=1.0, w_mae=1.0,
     # gradient pressure away from all-HOLD.  Fix: use the full 3-class softmax
     # distribution [p_hold, p_long, p_short] with per-regime 3-class targets so
     # HOLD collapse (pred ≈ [1.0, 0, 0]) produces a large KL vs the target.
-    SIDE_BAL_W = side_bal_weight  # configurable (default 0.15, was hardcoded 0.05)
+    SIDE_BAL_W = side_bal_weight  # T5: default 0.05 (was 0.15; lowered to reduce HOLD-bias pressure)
     action_probs = F.softmax(action_logits, dim=-1)
     eps = 1e-8
 
-    ret_true_valid = batch['ret_R'][valid]
+    ret_true_valid = batch['ret_R'][valid].squeeze(-1)  # T2: squeeze [M,1]→[M]; prevents 2D bull/bear masks that crash action_probs[mask, IDX]
     bull_mask = ret_true_valid > 0.20
     bear_mask = ret_true_valid < -0.20
     chop_mask = ~bull_mask & ~bear_mask
@@ -1052,8 +1053,22 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999,
     mae_pass = np.isfinite(arrays['mae']) & (arrays['mae'] <= adaptive_mae)
 
     mu_R = arrays['mu_R']
-    ref_mu = ref['mu_R'] if ref is not None else mu_R
-    abs_mu_ref = np.abs(ref_mu[np.isfinite(ref_mu)])
+    # T4 Fix: when mu_debias is active, ref['mu_R'] is near-zero (debiased) which collapses
+    # adaptive_mu_min to ~0 and lets all near-zero bars pass the edge gate.  Use raw pre-debias
+    # mu_R (stored as '_raw_mu_R_ref' at the call site) for the percentile computation instead.
+    if ref is not None and '_raw_mu_R_ref' in ref:
+        ref_mu_for_gate = ref['_raw_mu_R_ref']
+        log.info("[V5_QUAL_DIAG] T4: using '_raw_mu_R_ref' for adaptive_mu_min percentile "
+                 "(mu_debias active — raw magnitudes preserved for edge gate calibration)")
+    elif ref is not None:
+        ref_mu_for_gate = ref['mu_R']
+        log.info("[V5_QUAL_DIAG] T4: using ref['mu_R'] for adaptive_mu_min percentile "
+                 "(no '_raw_mu_R_ref' key — mu_debias not active or ref not provided)")
+    else:
+        ref_mu_for_gate = mu_R
+        log.info("[V5_QUAL_DIAG] T4: using current arrays['mu_R'] for adaptive_mu_min percentile "
+                 "(no ref_arrays provided)")
+    abs_mu_ref = np.abs(ref_mu_for_gate[np.isfinite(ref_mu_for_gate)])
     adaptive_mu_min = cfg.mu_R_min
     if len(abs_mu_ref) > 100:
         adaptive_mu_min = max(cfg.mu_R_min * 0.01, float(np.percentile(abs_mu_ref, 25)))
@@ -1072,6 +1087,9 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999,
     if n_passed < n * min_pass_rate and n > 100:
         log.info("[V5_QUAL_DIAG] pass_rate=%.1f%% < %.0f%%, relaxing gates...",
                  100.0 * n_passed / n, 100.0 * min_pass_rate)
+        # T1: track the last relaxed mu floor so the finiteness fallback can
+        # preserve the edge floor rather than dropping edge_pass entirely.
+        last_relaxed_mu = adaptive_mu_min
         for relax_step in range(5):
             relax_factor = 1.0 + 0.2 * (relax_step + 1)
             relaxed_sigma = adaptive_sigma * relax_factor
@@ -1088,6 +1106,7 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999,
 
             relaxed_mask = r_sigma & r_mae & r_edge & r_ptrade
             n_relaxed = int(np.sum(relaxed_mask))
+            last_relaxed_mu = relaxed_mu  # T1: keep track of loosest mu tried
 
             if n_relaxed >= n * min_pass_rate:
                 final_mask = relaxed_mask
@@ -1102,10 +1121,23 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999,
                          adaptive_sigma, adaptive_mae, adaptive_mu_min, adaptive_ptrade)
                 break
         else:
-            log.info("[V5_QUAL_DIAG] max relaxation reached, using finiteness-only gate")
-            final_mask = np.isfinite(mu_R) & np.isfinite(arrays['mae'])
-            if arrays['sigma'] is not None:
-                final_mask &= np.isfinite(arrays['sigma'])
+            # T1 Fix: strict_audit=True → keep last relaxed mask (no finiteness bypass).
+            # strict_audit=False (default) → finiteness fallback but preserve edge floor
+            # so |mu_R| < last_relaxed_mu bars are still excluded.
+            if cfg.quality_gate_strict_audit:
+                log.info("[V5_QUAL_DIAG] max relaxation reached, strict_audit=True: "
+                         "keeping last relaxed mask (no finiteness bypass), last_relaxed_mu=%.4f",
+                         last_relaxed_mu)
+                # final_mask already holds the last computed relaxed_mask from the loop body
+            else:
+                log.info("[V5_QUAL_DIAG] max relaxation reached, using finiteness+edge gate "
+                         "(strict_audit=False). last_relaxed_mu=%.4f preserved as edge floor.",
+                         last_relaxed_mu)
+                # T1 Fix: preserve edge floor — bars with |mu_R| < last_relaxed_mu still excluded
+                final_mask = (np.isfinite(mu_R) & (np.abs(mu_R) >= last_relaxed_mu)
+                              & np.isfinite(arrays['mae']))
+                if arrays['sigma'] is not None:
+                    final_mask &= np.isfinite(arrays['sigma'])
             n_passed = int(np.sum(final_mask))
 
     diag = {
@@ -4988,7 +5020,7 @@ def run_v5_walk_forward(
     gate_mode='ref_magnitude',
     max_folds=None,
     candidate_logger=None,
-    side_bal_weight=0.15,
+    side_bal_weight=0.05,  # T5: was 0.15
     action_entropy_weight=0.10,
 ):
     """Walk-forward analysis: rolling train/test windows."""
@@ -6116,7 +6148,7 @@ def train_v5_model(
     v6_confidence_weight=0.15,
     v6_moe_balance_weight=0.05,
     candidate_logger=None,
-    side_bal_weight=0.15,
+    side_bal_weight=0.05,  # T5: was 0.15
     action_entropy_weight=0.10,
 ):
     """V5/V6 Forecaster training pipeline with quality gating + TPD controller."""
@@ -7284,6 +7316,32 @@ def train_v5_model(
                                 f"check barrier_outcomes alignment in v5_target_generator.py. "
                                 f"Target: mu_r_corr_val > 0.0 for a healthy model."
                             )
+
+                        # T6: [V5_HEALTH] — structured per-epoch proof log
+                        # Emits all key quality metrics in one scannable line for monitoring.
+                        # p_long_mean / p_short_mean from the valid-bar softmax probabilities.
+                        _p_long_mean  = float(np.mean(_p_long_f))  if len(_p_long_f)  > 0 else 0.0
+                        _p_short_mean = float(np.mean(_p_short_f)) if len(_p_short_f) > 0 else 0.0
+                        # raw_muR stats (before absolute value)
+                        _raw_mu_mean = float(np.mean(_pred_mu_f))
+                        _raw_mu_std  = float(np.std(_pred_mu_f))
+                        # mae_R stats from mae head (if available)
+                        if _mae_cat is not None:
+                            _mae_vals = _mae_cat[:_n_pred][_vv][_finite]
+                            _mae_mean = float(np.mean(_mae_vals))
+                            _mae_std  = float(np.std(_mae_vals))
+                        else:
+                            _mae_mean = _mae_std = float('nan')
+                        log.info(
+                            f"[V5_HEALTH] epoch={epoch} "
+                            f"mu_r_corr_val={_mu_corr_val:+.4f} "
+                            f"score_p50={_sc_p50:.5f} score_p90={_sc_p90:.5f} score_p99={_sc_p99:.5f} "
+                            f"disc(p90/p50)={_disc_90:.1f}x disc(p99/p50)={_disc_99:.1f}x "
+                            f"pred[H/L/S]={_n_hold}/{_n_long}/{_n_short} "
+                            f"p_long_mean={_p_long_mean:.3f} p_short_mean={_p_short_mean:.3f} "
+                            f"raw_muR_mean={_raw_mu_mean:+.5f} raw_muR_std={_raw_mu_std:.5f} "
+                            f"mae_R_mean={_mae_mean:.4f} mae_R_std={_mae_std:.4f}"
+                        )
 
         if use_v6 and hasattr(model, 'get_expert_usage'):
             expert_usage = model.get_expert_usage()
