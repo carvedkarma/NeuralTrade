@@ -2307,10 +2307,12 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
 
     ref_arrays = _extract_v5_arrays(concat_outputs, temperature=config.temperature)
 
-    # FIX: Apply the same mu_debias transform to training ref_arrays so the quality
-    # gate threshold (p25 of |mu_R|) is calibrated in debiased space.  Without this,
-    # the gate compares p25(|mu_R_raw_train|) ≈ 0.01-0.03 against post-debias val
-    # mu_R ≈ 0.0002, rejecting ~90% of validation bars and starving the sweep.
+    # Save raw mu_R BEFORE any debiasing for quality gate calibration (see call site).
+    # Debiased mu_R collapses near zero (p25|μ| ≈ 0.002) → adaptive_mu_min ≈ 0.002 → gate
+    # passes ~75% of validation bars (near-zero filtering).  Raw mu_R has real magnitude
+    # (p25|μ| ≈ 0.05-0.15) → gate provides the designed 0.05-0.15 filter at the call site.
+    _mu_R_raw_for_gate = ref_arrays['mu_R'].copy()
+
     if config.mu_debias and train_sym_ids is not None:
         mu_R_raw_ref = ref_arrays['mu_R'].copy()
         alpha_ref = config.mu_debias_alpha
@@ -2337,6 +2339,9 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
         log.info(f"[V5_REF] Applied mu_debias to training ref_arrays (single-sym, alpha={alpha_ref}): "
                  f"raw_mean={float(np.nanmean(mu_R_raw_ref)):+.6f} "
                  f"debiased_mean={float(np.nanmean(ref_arrays['mu_R'])):+.6f}")
+
+    # Attach raw mu_R (pre-debias) so the quality gate call site can use real magnitudes.
+    ref_arrays['_raw_mu_R_ref'] = _mu_R_raw_for_gate
 
     train_scores, _, _ = compute_v5_scores(
         None, horizon_bars=config.horizon,
@@ -2691,8 +2696,22 @@ def run_v5_forward_test(
                     f"or disable mu_debias entirely for this fold.")
 
     qg_cfg = config.quality_gate_cfg or V5QualityGateConfig()
+    # Use raw (pre-debias) mu_R for quality gate calibration so adaptive_mu_min reflects
+    # real model prediction magnitudes.  Debiased ref gives p25(|μ|) ≈ 0.002 → gate is
+    # nearly a no-op passing ~75% of bars; raw ref gives p25(|μ|) ≈ 0.05-0.15 → designed filter.
+    if train_ref_arrays is not None and '_raw_mu_R_ref' in train_ref_arrays:
+        _gate_ref = dict(train_ref_arrays)
+        _gate_ref['mu_R'] = train_ref_arrays['_raw_mu_R_ref']
+        _raw_finite = train_ref_arrays['_raw_mu_R_ref'][np.isfinite(train_ref_arrays['_raw_mu_R_ref'])]
+        _deb_finite = train_ref_arrays['mu_R'][np.isfinite(train_ref_arrays['mu_R'])]
+        _raw_p25 = float(np.percentile(np.abs(_raw_finite), 25)) if len(_raw_finite) > 0 else 0.0
+        _deb_p25 = float(np.percentile(np.abs(_deb_finite), 25)) if len(_deb_finite) > 0 else 0.0
+        log.info(f"[V5_QUAL_GATE] raw p25(|mu_R|)={_raw_p25:.4f} "
+                 f"vs debiased p25(|mu_R|)={_deb_p25:.4f} — using raw for gate calibration")
+    else:
+        _gate_ref = train_ref_arrays
     quality_mask, qual_diag = v5_quality_mask(arrays, qg_cfg, epoch=999,
-                                               ref_arrays=train_ref_arrays)
+                                               ref_arrays=_gate_ref)
 
     scores, sides, score_diag = compute_v5_scores(
         None, horizon_bars=config.horizon,
@@ -5259,11 +5278,12 @@ def run_v5_walk_forward(
                                  f"— skipping warm-start, next fold uses random init")
 
             if fold_total_trades == 0 and threshold_ema is not None:
-                min_threshold = 0.01
+                _wf_thr_floor = tpd_ctrl_cfg.min_threshold_floor if tpd_ctrl_cfg is not None else 0.001
                 old_ema = threshold_ema
-                threshold_ema = max(min_threshold, threshold_ema * wf_threshold_decay)
+                threshold_ema = max(_wf_thr_floor, threshold_ema * wf_threshold_decay)
                 log.info(f"[V5_WF_THR] Fold {fold['fold']}: DEAD FOLD (0 trades) — "
-                         f"decaying threshold_ema {old_ema:.4f} × {wf_threshold_decay} → {threshold_ema:.4f}")
+                         f"decaying threshold_ema {old_ema:.4f} × {wf_threshold_decay} → {threshold_ema:.4f} "
+                         f"(floor={_wf_thr_floor})")
                 fold_report['threshold_ema'] = threshold_ema
             elif fold_low_conf:
                 log.info(f"[V5_WF_THR] Fold {fold['fold']}: LOW_CONF ({fold_total_trades} trades) — "
@@ -5285,6 +5305,33 @@ def run_v5_walk_forward(
                     log.info(f"[V5_WF_THR] Fold {fold['fold']}: initial threshold={fold_threshold:.4f} (no prior EMA)")
                 fold_report['threshold_ema'] = threshold_ema
 
+            _proof_n_long  = fold_report.get('n_long', 0)
+            _proof_n_short = fold_report.get('n_short', 0)
+            _proof_long_pct = 100.0 * _proof_n_long / max(_proof_n_long + _proof_n_short, 1)
+            _proof_debias_sr  = fold_report.get('debias_spread_ratio', None)
+            _proof_monotonic  = fold_report.get('score_monotonic', None)
+            _proof_sc_spread  = fold_report.get('score_spread', {})
+            _proof_sc_p50 = _proof_sc_spread.get('p50', None)
+            _proof_sc_p99 = _proof_sc_spread.get('p99', None)
+            if _proof_sc_p50 is not None and _proof_sc_p99 is not None and _proof_sc_p50 > 1e-8:
+                _proof_disc = round(_proof_sc_p99 / _proof_sc_p50, 2)
+                _proof_disc_str = f"{_proof_disc}x" + (" [LOW_DISC]" if _proof_disc < 3.0 else "")
+            else:
+                _proof_disc_str = "n/a"
+            _proof_bias_flag = " [LONG_BIAS]" if _proof_long_pct > 75.0 else ""
+            if _proof_debias_sr is not None:
+                _proof_dsr_str = f"{_proof_debias_sr:.1f}x" + (" [COLLAPSED]" if _proof_debias_sr < 5.0 else "")
+            else:
+                _proof_dsr_str = "n/a"
+            _proof_mono_str = ("True" if _proof_monotonic else "False") if _proof_monotonic is not None else "n/a"
+            log.info(
+                f"[WF_FOLD_PROOF] fold={fold['fold']} "
+                f"score_disc(p99/p50)={_proof_disc_str} "
+                f"long_pct={_proof_long_pct:.1f}%{_proof_bias_flag} "
+                f"debias_spread={_proof_dsr_str} "
+                f"monotonic={_proof_mono_str}"
+            )
+
             pusher.fold_end(
                 fold_num=fold['fold'],
                 completed_folds=len(all_reports),
@@ -5297,11 +5344,12 @@ def run_v5_walk_forward(
                 prev_fold_state_dict = None
                 log.info(f"[V5_WF] Fold {fold['fold']}: NO REPORT — skipping warm-start, next fold uses random init")
             if threshold_ema is not None:
-                min_threshold = 0.01
+                _wf_thr_floor = tpd_ctrl_cfg.min_threshold_floor if tpd_ctrl_cfg is not None else 0.001
                 old_ema = threshold_ema
-                threshold_ema = max(min_threshold, threshold_ema * wf_threshold_decay)
+                threshold_ema = max(_wf_thr_floor, threshold_ema * wf_threshold_decay)
                 log.info(f"[V5_WF_THR] Fold {fold['fold']}: NO REPORT FILE — "
-                         f"decaying threshold_ema {old_ema:.4f} × {wf_threshold_decay} → {threshold_ema:.4f}")
+                         f"decaying threshold_ema {old_ema:.4f} × {wf_threshold_decay} → {threshold_ema:.4f} "
+                         f"(floor={_wf_thr_floor})")
             pusher.fold_end(
                 fold_num=fold['fold'],
                 completed_folds=len(all_reports),
