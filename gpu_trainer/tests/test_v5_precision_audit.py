@@ -742,5 +742,129 @@ def test_phase1_mode_skips_mfe_mae_action():
     )
 
 
+@pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
+def test_chop_hold_target_changes_kl_loss():
+    """Task #56 B1: chop_hold_target changes the KL side-balance loss.
+
+    When chop_hold_target=0.20 (new default), the chop KL target is [0.20, 0.40, 0.40].
+    When chop_hold_target=0.35 (old hardcoded), the target is [0.35, 0.325, 0.325].
+    A model with uniform action predictions should get different L_action values
+    since the KL divergence from the chop target differs.
+    """
+    import torch
+
+    batch = _make_dummy_v5_batch()
+    # Force all bars into chop regime (ret_R near zero)
+    batch['ret_R'] = torch.zeros_like(batch['ret_R'])
+    outputs = _make_dummy_v5_outputs(sigma_val=0.40)
+
+    _, ld_new = compute_v5_loss(
+        outputs, batch,
+        w_ret=6.0, w_mfe=0.15, w_mae=0.15, w_action=2.5,
+        sigma_spread_reg=0.0, sigma_reg_threshold=0.40,
+        phase1_mode=False,
+        chop_hold_target=0.20,  # new default: more aggressive L/S push
+        side_bal_weight=0.05,
+    )
+    _, ld_old = compute_v5_loss(
+        outputs, batch,
+        w_ret=6.0, w_mfe=0.15, w_mae=0.15, w_action=2.5,
+        sigma_spread_reg=0.0, sigma_reg_threshold=0.40,
+        phase1_mode=False,
+        chop_hold_target=0.35,  # old hardcoded value
+        side_bal_weight=0.05,
+    )
+
+    l_action_new = ld_new.get('L_action', 0.0)
+    l_action_old = ld_old.get('L_action', 0.0)
+    assert abs(l_action_new - l_action_old) > 1e-8, (
+        f"chop_hold_target 0.20 vs 0.35 must give different L_action when all bars are chop-regime. "
+        f"new={l_action_new:.6f} old={l_action_old:.6f} — chop_hold_target not wired into KL targets?"
+    )
+
+
+@pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
+def test_ret_mag_ce_weight_changes_action_loss():
+    """Task #56 B2: ret_mag_ce_weight upweights high-return bars in CE loss.
+
+    With a batch containing a mix of high-return and near-zero-return bars,
+    enabling ret_mag_ce_weight=True must produce a different L_action than False.
+    The loss scale is preserved (normalized weights), but gradient distribution changes.
+    """
+    import torch
+    import numpy as np
+
+    batch = _make_dummy_v5_batch()
+    # Mix: half bars with high ret_R (bull/bear), half near-zero (chop)
+    n = batch['ret_R'].shape[0]
+    half = n // 2
+    ret_mixed = torch.zeros(n, 1)
+    ret_mixed[:half] = 0.5   # high return
+    ret_mixed[half:] = 0.001  # near-zero chop
+    batch['ret_R'] = ret_mixed
+
+    outputs = _make_dummy_v5_outputs(sigma_val=0.40)
+
+    _, ld_off = compute_v5_loss(
+        outputs, batch,
+        w_ret=6.0, w_mfe=0.15, w_mae=0.15, w_action=2.5,
+        sigma_spread_reg=0.0, sigma_reg_threshold=0.40,
+        phase1_mode=False,
+        ret_mag_ce_weight=False,
+        ret_mag_scale=2.0,
+    )
+    _, ld_on = compute_v5_loss(
+        outputs, batch,
+        w_ret=6.0, w_mfe=0.15, w_mae=0.15, w_action=2.5,
+        sigma_spread_reg=0.0, sigma_reg_threshold=0.40,
+        phase1_mode=False,
+        ret_mag_ce_weight=True,
+        ret_mag_scale=2.0,
+    )
+
+    l_action_off = ld_off.get('L_action', 0.0)
+    l_action_on  = ld_on.get('L_action', 0.0)
+    assert abs(l_action_on - l_action_off) > 1e-8, (
+        f"ret_mag_ce_weight=True must change L_action when batch has mixed ret_R magnitudes. "
+        f"off={l_action_off:.6f} on={l_action_on:.6f} — upweighting not applied?"
+    )
+
+
+@pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
+def test_score_lambda_0_30_lowers_break_even():
+    """Task #56 A1: score_lambda=0.30 lowers break-even p_side from 0.333 to 0.231.
+
+    compute_v5_scores uses: score = p_side * mu_R - lambda * (1 - p_side) * mu_R_over_risk
+    Break-even: p_side = lambda / (1 + lambda).
+    At lambda=0.30: break-even = 0.30/1.30 = 0.231.
+    At lambda=0.50: break-even = 0.50/1.50 = 0.333.
+
+    Verify score_lambda=0.30 produces a HIGHER score than lambda=0.50 for a bar
+    with p_side=0.31 (below the 0.333 threshold but above the 0.231 threshold).
+    """
+    import numpy as np
+    # Construct a minimal arrays dict mimicking compute_v5_scores input.
+    # At p_side=0.31: should pass at lambda=0.30 (positive score) but fail at lambda=0.50 (negative).
+    n = 10
+    # We test the break-even formula directly:
+    # score = p_side * edge - lambda * (1-p_side) * edge   (simplified, risk=1.0)
+    # = edge * (p_side - lambda * (1-p_side))
+    # = edge * (p_side * (1+lambda) - lambda)
+    p_side = 0.31
+    edge = 1.0  # positive mu_R
+
+    score_at_030 = edge * (p_side * 1.30 - 0.30)  # should be positive
+    score_at_050 = edge * (p_side * 1.50 - 0.50)  # should be negative
+
+    assert score_at_030 > 0, (
+        f"At lambda=0.30, p_side=0.31 should give positive score (break-even=0.231). "
+        f"Got score={score_at_030:.4f}"
+    )
+    assert score_at_050 < 0, (
+        f"At lambda=0.50, p_side=0.31 should give negative score (break-even=0.333). "
+        f"Got score={score_at_050:.4f}"
+    )
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

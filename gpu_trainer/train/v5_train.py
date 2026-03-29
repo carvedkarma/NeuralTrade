@@ -142,7 +142,7 @@ class V5ForwardTestConfig:
     Ultra-conviction fields: ultra_*.
     """
     score_threshold: float = 0.001  # post NaN-fix: actual model scores are 0.001-0.002 range
-    score_lambda: float = 0.5
+    score_lambda: float = 0.30  # Task #56 A1: lowered 0.50→0.30; break-even p_side 0.333→0.231
     mae_cap: float = 2.0
     risk_proxy: str = 'mae'
     tp_mult: float = 2.0
@@ -531,7 +531,7 @@ class V5TPDControllerConfig:
     thr_warmup_epochs: int = 3
     thr_step_mult: float = 0.10
     score_threshold: Optional[float] = None
-    score_lambda: float = 0.5
+    score_lambda: float = 0.30  # Task #56 A1: lowered 0.50→0.30
     mae_cap: float = 2.0
     side_mode: str = 'action_head'
     rr_weight: float = 0.0
@@ -707,7 +707,10 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
                     action_entropy_weight=0.0,
                     sigma_reg_threshold=0.40,
                     phase1_mode=False,
-                    atr_normalize_risk_heads=True):
+                    atr_normalize_risk_heads=True,
+                    chop_hold_target=0.20,
+                    ret_mag_ce_weight=False,
+                    ret_mag_scale=1.0):
     """Compute v5 composite loss with class-balanced action CE.
 
     Uses clamped Gaussian NLL to prevent log(sigma) term from dominating.
@@ -727,6 +730,17 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
         Dividing again would produce price_delta/ATR^2 — a unit error. This flag is therefore
         a no-op in this function. The atr14 tensor IS stored in V5Dataset/V6SequenceDataset
         (emitted in __getitem__) for future diagnostics or auxiliary head use.
+    chop_hold_target: HOLD fraction in the KL target for chop-regime bars (default 0.20).
+        Old hardcoded value was 0.35. With 87.7% of bars in chop, the 0.35 HOLD weight
+        biased the model toward HOLD collapse. 0.20 acknowledges chop means lower conviction
+        while giving 0.40/0.40 LONG/SHORT to teach the model chop bars can go either direction.
+        Task #56 B1.
+    ret_mag_ce_weight: when True, multiply per-sample CE loss by (1 + clip(|ret_R|/median_ret,0,4)
+        * ret_mag_scale). High-return bars (bull/bear) get up to (1+4*ret_mag_scale)× more
+        gradient; low-return chop bars ≈1×. Counteracts the chop-bar CE dominance that drowns
+        bull/bear signal. Default: False (opt-in). Task #56 B2.
+    ret_mag_scale: scaling factor for ret_mag_ce_weight upweighting (default 1.0, optimal 2.0).
+        CE weight = 1 + clip(|ret_R|/median_ret, 0, 4) * ret_mag_scale. Task #56 B2.
 
     If sample_weights is provided, computes per-sample losses and applies
     inverse-frequency weighting: loss = (per_sample_loss * weights).sum() / weights.sum()
@@ -796,11 +810,28 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
 
     action_logits = outputs['action_logits'][valid]
     action_true = batch['action_label'][valid]
-    if sw is not None:
+
+    # B2: Return-magnitude CE upweighting (Task #56).
+    # High-return bars (bull/bear) dominate less than 13% of data but carry the direction signal.
+    # With 87.7% chop bars at near-zero ret_R, plain CE is dominated by chop noise.
+    # Upweighting by (1 + clip(|ret_R|/median, 0, 4) * ret_mag_scale) gives bull/bear bars
+    # up to (1+4*ret_mag_scale)× more CE gradient. Default off (ret_mag_ce_weight=False).
+    _ret_mag_w = None
+    if ret_mag_ce_weight:
+        _ret_abs = batch['ret_R'][valid].squeeze(-1).abs()
+        _ret_median = _ret_abs.median().clamp(min=1e-6)
+        _ret_ratio = (_ret_abs / _ret_median).clamp(0.0, 4.0)
+        _ret_mag_w = 1.0 + _ret_ratio * float(ret_mag_scale)
+        _ret_mag_w = _ret_mag_w / _ret_mag_w.mean().clamp(min=1e-6)  # normalize to mean=1 to preserve loss scale
+
+    if sw is not None or _ret_mag_w is not None:
         action_per_sample = F.cross_entropy(action_logits, action_true,
                                             weight=action_weights, reduction='none',
                                             label_smoothing=0.1)
-        L_action = (action_per_sample * sw).sum() / sw.sum()
+        _combined_w = sw if sw is not None else torch.ones(action_per_sample.shape[0], device=action_per_sample.device)
+        if _ret_mag_w is not None:
+            _combined_w = _combined_w * _ret_mag_w
+        L_action = (action_per_sample * _combined_w).sum() / _combined_w.sum().clamp(min=1e-6)
     elif action_weights is not None:
         L_action = F.cross_entropy(action_logits, action_true, weight=action_weights,
                                    label_smoothing=0.1)
@@ -835,11 +866,16 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
     # folds retain meaningful SHORT representation.
     # Bull: LONG bias (50%), SHORT floor (25%), cap HOLD at 25%.
     # Bear: SHORT bias (50%), LONG floor (25%), cap HOLD at 25%.
-    # Chop: near-symmetric L/S (32.5% each), HOLD at 35%.
+    # Chop: configurable via chop_hold_target (default 0.20, old hardcoded value was 0.35).
+    #   With 87.7% of bars in chop, HOLD=0.35 biased model toward HOLD collapse.
+    #   HOLD=0.20 acknowledges lower conviction while 0.40/0.40 L/S teaches directionality.
+    #   Task #56 B1: chop_hold_target=0.20 (was hardcoded 0.35).
+    _chop_h = float(max(0.0, min(1.0, chop_hold_target)))
+    _chop_side = (1.0 - _chop_h) / 2.0
     _3CLS_TARGETS = {
         'bull': [0.25, 0.50, 0.25],
         'bear': [0.25, 0.25, 0.50],
-        'chop': [0.35, 0.325, 0.325],
+        'chop': [_chop_h, _chop_side, _chop_side],
     }
 
     group_kl_list = []
@@ -5098,7 +5134,10 @@ def run_v5_walk_forward(
     max_folds=None,
     candidate_logger=None,
     side_bal_weight=0.05,  # T5: was 0.15
-    action_entropy_weight=0.10,
+    action_entropy_weight=0.12,  # Task #56 A3: raised 0.10→0.12
+    chop_hold_target=0.20,  # Task #56 B1: chop KL HOLD fraction (was hardcoded 0.35)
+    ret_mag_ce_weight=False,  # Task #56 B2: return-magnitude CE upweighting; opt-in
+    ret_mag_scale=1.0,  # Task #56 B2: multiplier for ret_mag_ce_weight (optimal: 2.0)
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -5447,6 +5486,9 @@ def run_v5_walk_forward(
                 candidate_logger=candidate_logger,
                 side_bal_weight=side_bal_weight,
                 action_entropy_weight=action_entropy_weight,
+                chop_hold_target=chop_hold_target,
+                ret_mag_ce_weight=ret_mag_ce_weight,
+                ret_mag_scale=ret_mag_scale,
             )
         except Exception as _fold_err:
             import traceback as _tb
@@ -5574,6 +5616,65 @@ def run_v5_walk_forward(
                 f"score_p90={_proof_p90_str} "
                 f"signal_health={_proof_health}"
                 + (f" flags={_proof_warns}" if _proof_warns else "")
+            )
+
+            # D1: [V5_FOLD_HEALTH] structured per-fold diagnostic block (Task #56).
+            # Provides a quick at-a-glance readout on this fold's model health.
+            _fh_signal_count = fold_report.get('total_trades', 0)
+            _fh_thr = fold_report.get('threshold_ema', fold_report.get('score_threshold', 0.0)) or 0.0
+            _fh_sc_spread = fold_report.get('score_spread', {})
+            _fh_mean_score = _fh_sc_spread.get('mean', float('nan'))
+            _fh_p50_score  = _fh_sc_spread.get('p50',  float('nan'))
+            _fh_p90_score  = _fh_sc_spread.get('p90',  float('nan'))
+            _fh_wr         = fold_report.get('win_rate', float('nan'))
+            _fh_avg_win    = fold_report.get('avg_win_r', float('nan'))
+            _fh_avg_loss   = fold_report.get('avg_loss_r', float('nan'))
+            _fh_above_thr  = fold_report.get('total_trades', 0)
+            _fh_pct_above  = (100.0 * _fh_above_thr / max(_fh_signal_count, 1)) if _fh_signal_count > 0 else 0.0
+            _pq = fold_report.get('prediction_quality') or {}
+            _fh_mu_corr_train = _pq.get('mu_r_correlation_train', float('nan'))
+            _fh_mu_corr_val   = _pq.get('mu_r_correlation', float('nan'))
+            _fh_p_long  = _pq.get('p_long_mean',  float('nan'))
+            _fh_p_hold  = _pq.get('p_hold_mean',  float('nan'))
+            _fh_p_short = _pq.get('p_short_mean', float('nan'))
+            # Expected daily R: estimate from trades per test period vs test_months
+            _fh_total_r = fold_report.get('total_r', 0.0)
+            _fh_test_months = getattr(fold_report, '_test_months', 1)
+            _fh_exp_daily_r = _fh_total_r / max(_fh_test_months * 22.0, 1.0)  # ~22 trading days/month
+            # VERDICT
+            _fh_p_hold_safe = _fh_p_hold if np.isfinite(_fh_p_hold) else 1.0
+            _fh_mu_safe = _fh_mu_corr_val if np.isfinite(_fh_mu_corr_val) else 0.0
+            _fh_wr_safe = _fh_wr if np.isfinite(_fh_wr) else 0.0
+            _fh_mean_safe = _fh_mean_score if np.isfinite(_fh_mean_score) else 0.0
+            _fh_signals_per_day = _fh_signal_count / max(_fh_test_months * 22.0, 1.0)
+            if _fh_p_hold_safe > 0.80 or _fh_signals_per_day < 2:
+                _fh_verdict = "COLLAPSED"
+            elif _fh_signals_per_day > 30 and _fh_wr_safe > 0.52 and _fh_mean_safe > 0.001:
+                _fh_verdict = "LIVE_READY"
+            elif _fh_signals_per_day > 5 and _fh_mu_safe > 0.10:
+                _fh_verdict = "LOW_SIGNAL"
+            elif _fh_mu_safe > 0.05:
+                _fh_verdict = "DEVELOPING"
+            else:
+                _fh_verdict = "COLLAPSED"
+
+            def _fmt(v, fmt='.5f'):
+                return f"{v:{fmt}}" if np.isfinite(v) else "n/a"
+
+            log.info(
+                f"[V5_FOLD_HEALTH] fold={fold['fold']}\n"
+                f"  signal_count={_fh_signal_count} above_threshold={_fh_above_thr} "
+                f"pct_above={_fh_pct_above:.0f}%\n"
+                f"  mean_score={_fmt(_fh_mean_score)} p50_score={_fmt(_fh_p50_score)} "
+                f"p90_score={_fmt(_fh_p90_score)}\n"
+                f"  p_long_mean={_fmt(_fh_p_long, '.3f')} p_short_mean={_fmt(_fh_p_short, '.3f')} "
+                f"p_hold_mean={_fmt(_fh_p_hold, '.3f')}\n"
+                f"  mu_r_corr_train={_fmt(_fh_mu_corr_train, '.3f')} "
+                f"mu_r_corr_val={_fmt(_fh_mu_corr_val, '.3f')}\n"
+                f"  win_rate_backtest={_fh_wr_safe*100:.1f}% "
+                f"avg_win={_fmt(_fh_avg_win, '.2f')}R avg_loss={_fmt(_fh_avg_loss, '.2f')}R\n"
+                f"  expected_daily_R={_fh_exp_daily_r:+.3f}R (at current signal rate)\n"
+                f"  VERDICT: {_fh_verdict}"
             )
 
             pusher.fold_end(
@@ -5707,6 +5808,45 @@ def run_v5_walk_forward(
             log.info(f"  Edge symbols ({len(edge_syms)}): {edge_syms}")
             log.info(f"  No-edge symbols ({len(no_edge_syms)}): {no_edge_syms}")
             log.info("=" * 100)
+
+        # D2: [V5_THRESHOLD_GUIDE] — Recommended thresholds based on fold score distribution.
+        # Aggregates score spread across all active folds and recommends threshold tiers.
+        # Task #56.
+        _tg_all_means = []
+        _tg_all_p50s  = []
+        _tg_all_p25s  = []
+        _tg_all_p75s  = []
+        for _r in all_reports:
+            _r_spread = _r.get('score_spread', {})
+            if _r_spread:
+                if 'mean' in _r_spread:
+                    _tg_all_means.append(_r_spread['mean'])
+                if 'p50' in _r_spread:
+                    _tg_all_p50s.append(_r_spread['p50'])
+                if 'p25' in _r_spread:
+                    _tg_all_p25s.append(_r_spread['p25'])
+                elif 'p10' in _r_spread:
+                    _tg_all_p25s.append(_r_spread['p10'])
+                if 'p75' in _r_spread:
+                    _tg_all_p75s.append(_r_spread['p75'])
+                elif 'p90' in _r_spread:
+                    _tg_all_p75s.append(_r_spread['p90'])
+        if _tg_all_p50s:
+            _tg_p25 = float(np.median(_tg_all_p25s)) if _tg_all_p25s else float('nan')
+            _tg_p50 = float(np.median(_tg_all_p50s))
+            _tg_p75 = float(np.median(_tg_all_p75s)) if _tg_all_p75s else float('nan')
+            _fmt_thr = lambda v: f"{v:.5f}" if np.isfinite(v) else "n/a"
+            # Recommended: p50 of score_p50 (balanced). Conservative: p25. Selective: p75.
+            _tg_rec = _tg_p50 * 0.9  # slightly below median for $1k/day target
+            log.info(
+                f"\n[V5_THRESHOLD_GUIDE] Based on fold score distribution:\n"
+                f"  p25_score={_fmt_thr(_tg_p25)} → use --v5-score-threshold {_fmt_thr(_tg_p25)} (conservative)\n"
+                f"  p50_score={_fmt_thr(_tg_p50)} → use --v5-score-threshold {_fmt_thr(_tg_p50)} (balanced)\n"
+                f"  p75_score={_fmt_thr(_tg_p75)} → use --v5-score-threshold {_fmt_thr(_tg_p75)} (selective)\n"
+                f"  Recommended for $15k capital target $1k/day: --v5-score-threshold {_fmt_thr(_tg_rec)}"
+            )
+        else:
+            log.info("[V5_THRESHOLD_GUIDE] No fold score distribution data available — run with more active folds")
 
         agg_report = {
             'total_trades': total_trades,
@@ -6234,7 +6374,10 @@ def train_v5_model(
     v6_moe_balance_weight=0.05,
     candidate_logger=None,
     side_bal_weight=0.05,  # T5: was 0.15
-    action_entropy_weight=0.10,
+    action_entropy_weight=0.12,  # Task #56 A3: raised 0.10→0.12 for slightly stronger entropy push
+    chop_hold_target=0.20,  # Task #56 B1: chop KL target HOLD fraction (was hardcoded 0.35)
+    ret_mag_ce_weight=False,  # Task #56 B2: upweight CE by return magnitude; opt-in
+    ret_mag_scale=1.0,  # Task #56 B2: multiplier for return-magnitude CE upweighting (optimal: 2.0)
 ):
     """V5/V6 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -6313,6 +6456,10 @@ def train_v5_model(
         "action_entropy_weight=%.2f",
         "ENABLED" if mu_debias else "DISABLED",
         action_entropy_weight,
+    )
+    log.info(
+        f"{ctag} chop_hold_target={chop_hold_target:.2f} "
+        f"ret_mag_ce_weight={ret_mag_ce_weight} ret_mag_scale={ret_mag_scale:.2f}"
     )
     log.info(
         "[%s_CONFIG] SIDE_BAL_W=%.2f  mae_cap=%.2f  barrier_aligned_ret_R=True",
@@ -7239,6 +7386,9 @@ def train_v5_model(
                     atr_normalize_risk_heads=atr_normalize_risk_heads,
                     side_bal_weight=side_bal_weight,
                     action_entropy_weight=action_entropy_weight,
+                    chop_hold_target=chop_hold_target,
+                    ret_mag_ce_weight=ret_mag_ce_weight,
+                    ret_mag_scale=ret_mag_scale,
                 )
 
             optimizer.zero_grad()
@@ -7342,6 +7492,9 @@ def train_v5_model(
                         atr_normalize_risk_heads=atr_normalize_risk_heads,
                         side_bal_weight=side_bal_weight,
                         action_entropy_weight=action_entropy_weight,
+                        chop_hold_target=chop_hold_target,
+                        ret_mag_ce_weight=ret_mag_ce_weight,
+                        ret_mag_scale=ret_mag_scale,
                     )
                 val_losses.append(vloss.item())
 

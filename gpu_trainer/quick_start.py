@@ -5267,8 +5267,10 @@ Examples:
                         help="v5 loss warmup: multiplier for w_ret/mfe/mae during warmup epochs (default: 1.0)")
     parser.add_argument("--v5-loss-warmup-action-mult", type=float, default=1.0,
                         help="v5 loss warmup: multiplier for w_action during warmup epochs (default: 1.0)")
-    parser.add_argument("--v5-score-lambda", type=float, default=0.5,
-                        help="v5 downside penalty lambda in score formula (default: 0.5)")
+    parser.add_argument("--v5-score-lambda", type=float, default=0.30,
+                        help="v5 downside penalty lambda in score formula (default: 0.30). "
+                             "Task #56 A1: lowered 0.50→0.30. Break-even p_side drops from 0.333 to 0.231, "
+                             "allowing ~88%% of bars to pass vs ~57%% at 0.50.")
     parser.add_argument("--v5-risk-proxy", type=str, default="mae", choices=["mae", "sigma"],
                         help="v5 risk denominator in score: 'mae' or 'sigma' (default: mae)")
     parser.add_argument("--v5-hold-target", type=float, default=0.30,
@@ -5312,11 +5314,25 @@ Examples:
                         help="3-class side-balance KL loss weight added to L_action. "
                              "T5 fix: default 0.05 (was 0.15). 3-class targets include HOLD so "
                              "all-HOLD collapse is penalised. Lower weight reduces HOLD-bias pressure.")
-    parser.add_argument("--v5-action-entropy-weight", type=float, default=0.10,
-                        help="v5 action head entropy regularisation weight (default: 0.10). "
+    parser.add_argument("--v5-action-entropy-weight", type=float, default=0.12,
+                        help="v5 action head entropy regularisation weight (default: 0.12). "
+                             "Task #56 A3: raised 0.10→0.12 for slightly stronger diversity push. "
                              "Maximises entropy of the mean batch action distribution, preventing "
                              "direction collapse (100%% LONG or 100%% SHORT). Set 0.0 to disable. "
                              "Values 0.05-0.20 are typical. Task #54.")
+    parser.add_argument("--v5-chop-hold-target", type=float, default=0.20,
+                        help="v5 KL target HOLD fraction for chop-regime bars (default: 0.20). "
+                             "Task #56 B1: old hardcoded value was 0.35. With 87.7%% bars in chop, "
+                             "HOLD=0.35 biased model toward HOLD collapse. "
+                             "HOLD=0.20 with 0.40/0.40 L/S teaches directionality. Task #56 B1.")
+    parser.add_argument("--v5-ret-mag-ce-weight", action="store_true", default=False,
+                        help="v5 upweight CE loss by return magnitude: "
+                             "weight = 1 + clip(|ret_R|/median_ret, 0, 4) * --v5-ret-mag-scale. "
+                             "Gives bull/bear bars up to 9× more CE gradient vs chop bars. "
+                             "Default: off (opt-in). Task #56 B2.")
+    parser.add_argument("--v5-ret-mag-scale", type=float, default=1.0,
+                        help="v5 return-magnitude CE weight scaling factor (default: 1.0, optimal: 2.0). "
+                             "Active only when --v5-ret-mag-ce-weight is set. Task #56 B2.")
 
     parser.add_argument("--v5-train-end-date", type=str, default=None,
                         help="v5 time-based split: train on data before this date (YYYY-MM-DD)")
@@ -5398,8 +5414,9 @@ Examples:
                         help="Enable per-symbol threshold sweep. Finds optimal threshold per symbol during training; symbols with no edge get threshold=inf (never traded). Default: off")
     parser.add_argument("--v5-short-oversample", action="store_true", default=False,
                         help="v5.3.0: oversample SHORT labels to reach min fraction of LONG+SHORT. Fixes persistent LONG bias in training data. Default: off")
-    parser.add_argument("--v5-short-min-fraction", type=float, default=0.35,
-                        help="v5.3.0: minimum SHORT fraction of LONG+SHORT after oversampling (default: 0.35 = 35%%)")
+    parser.add_argument("--v5-short-min-fraction", type=float, default=0.40,
+                        help="v5.3.0: minimum SHORT fraction of LONG+SHORT after oversampling (default: 0.40 = 40%%). "
+                             "Task #56 B3: raised 0.35→0.40 so the model develops a stronger p_short signal.")
     parser.add_argument("--v5-ema200-soft-mult", type=float, default=None,
                         help="v5.3.0: EMA200 soft gate multiplier. When set, replaces hard EMA200 block with size reduction (e.g. 0.50 = half size). Default: None (hard block)")
     parser.add_argument("--v5-per-side-threshold", action="store_true", default=False,
@@ -5609,8 +5626,11 @@ Examples:
 
     parser.add_argument("--v5-walk-forward", action="store_true", default=False,
                         help="v5: run walk-forward analysis with rolling train/test windows")
-    parser.add_argument("--v5-wf-train-months", type=int, default=12,
-                        help="v5 walk-forward: training window in months (default: 12)")
+    parser.add_argument("--v5-wf-train-months", type=int, default=9,
+                        help="v5 walk-forward: training window in months (default: 9). "
+                             "Task #56 C2: lowered 12→9. 9mo gives 29 folds vs 23 over 3yr history, "
+                             "more fold samples for better threshold calibration. "
+                             "9mo still covers 2+ full crypto market cycles.")
     parser.add_argument("--v5-wf-test-months", type=int, default=1,
                         help="v5 walk-forward: test window in months (default: 1)")
     parser.add_argument("--v5-wf-threshold-ema", action="store_true", default=True,
@@ -5626,8 +5646,9 @@ Examples:
 
     parser.add_argument("--v5-recency-weight", action="store_true", default=False,
                         help="v5.7+: exponential recency weighting — recent samples get higher loss weight (default: False)")
-    parser.add_argument("--v5-recency-half-life", type=float, default=90,
-                        help="v5.7+: half-life in days for recency decay. Data this many days old gets 50%% weight (default: 90)")
+    parser.add_argument("--v5-recency-half-life", type=float, default=60,
+                        help="v5.7+: half-life in days for recency decay. Data this many days old gets 50%% weight (default: 60). "
+                             "Task #56 C1: lowered 90→60. Crypto regimes shift fast; 60-day half-life weights recent 2 months 2× more.")
     parser.add_argument("--v5-finetune-months", type=int, default=0,
                         help="v5.7+: fine-tune on last N months after main training (0=disabled, default: 0)")
     parser.add_argument("--v5-finetune-epochs", type=int, default=5,
@@ -6396,6 +6417,9 @@ Examples:
                     v6_moe_balance_weight=args.v6_moe_balance_weight,
                     side_bal_weight=args.v5_side_bal_weight,
                     action_entropy_weight=args.v5_action_entropy_weight,
+                    chop_hold_target=args.v5_chop_hold_target,
+                    ret_mag_ce_weight=args.v5_ret_mag_ce_weight,
+                    ret_mag_scale=args.v5_ret_mag_scale,
                 )
                 return
 
@@ -6606,6 +6630,9 @@ Examples:
                 v6_moe_balance_weight=args.v6_moe_balance_weight,
                 side_bal_weight=args.v5_side_bal_weight,
                 action_entropy_weight=args.v5_action_entropy_weight,
+                chop_hold_target=args.v5_chop_hold_target,
+                ret_mag_ce_weight=args.v5_ret_mag_ce_weight,
+                ret_mag_scale=args.v5_ret_mag_scale,
             )
 
               if _single_pusher is not None:

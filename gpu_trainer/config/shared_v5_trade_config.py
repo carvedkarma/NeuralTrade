@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 class V5TradeDefaults:
     # ── Scoring / signal gate ────────────────────────────────────────────────
     score_threshold: float = 0.001         # Minimum composite V5 score to enter (post NaN-fix: scores are 0.001-0.002)
-    score_lambda: float = 0.5             # Lambda for composite score weighting
+    score_lambda: float = 0.30            # Task #56 A1: Lambda lowered 0.50→0.30; break-even p_side 0.333→0.231
     min_mu_r_score: float = 0.0           # Minimum expected-return component (0.0 = disabled; 0.005 caused NaN cascade after mu_debias EMA converged)
     min_p_side: float = 0.0               # Minimum directional probability
     min_p_short: float = 0.0              # Separate floor for short p_short head
