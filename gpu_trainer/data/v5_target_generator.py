@@ -253,24 +253,15 @@ def build_v5_targets(
         #   2. sigma collapse → 0.001-0.002 score range
         #   3. Side-aware scoring gate fires even on good signals.
         #
-        # Sign convention — intentional deviation from task-51 initial spec.
-        #
-        # Task-51 spec said: SHORT → ret_R = barrier_outcomes['r_short'][i]
-        # (i.e. +r_short). That specification was corrected in the session
-        # scratchpad after realising that r_short is already profit-signed
-        # (positive = short won = price fell), so using +r_short makes mu_R
-        # positive for both LONG wins and SHORT wins, destroying directional
-        # semantics and breaking side_aware_scoring (which requires mu_R<0 for
-        # shorts).  The corrected convention is:
-        #
-        #   LONG  → ret_R = +r_long   (positive: price went UP, long won)
-        #   SHORT → ret_R = -r_short  (negative: price went DOWN, short won)
+        # Sign convention for barrier-aligned ret_R:
+        #   LONG  → ret_R = +r_long   (positive: price rose, long TP hit)
+        #   SHORT → ret_R = -r_short  (negative: price fell, short TP hit)
         #   HOLD  → ret_R = 0.0
         #
-        # -r_short produces consistent gradients: CE loss pushes p_short↑ and
-        # NLL loss pushes mu_R → negative on the same bar — no contradiction.
-        # The scratchpad entry "SHORT ret_R = -r_short (not +r_short)" is the
-        # authoritative spec for this implementation.
+        # Why -r_short not +r_short: r_short is the profit of the short trade
+        # (positive when short wins). Negating it makes mu_R negative for
+        # bearish signals, consistent with side_aware_scoring (mu_R<0 required
+        # for shorts) and producing aligned gradients from both CE and NLL.
         n_aligned_long = 0
         n_aligned_short = 0
         n_aligned_hold = 0
