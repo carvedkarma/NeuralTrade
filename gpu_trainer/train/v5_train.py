@@ -6888,10 +6888,20 @@ def train_v5_model(
         # and whether score distribution has meaningful spread (p90/p50 >> 1).
         # Healthy model targets: mu_r_corr_val > 0.0, score_p90/p50 > 5×, score_p99/p50 > 10×.
         if not use_v6 and all_val_outputs.get('ret_mu') and all_val_outputs.get('action_logits'):
+            # Assemble tensors — if this fails, log at WARNING so it is visible.
             try:
                 _mu_cat  = torch.cat(all_val_outputs['ret_mu'],  dim=0).numpy().squeeze(-1)
-                _mae_cat = torch.cat(all_val_outputs['mae'],     dim=0).numpy().squeeze(-1) if all_val_outputs.get('mae') else None
                 _al_cat  = torch.cat(all_val_outputs['action_logits'], dim=0).numpy()
+            except Exception as _eq_cat:
+                log.warning(f"[V5_TRAIN_QUALITY] tensor concat failed epoch={epoch}: {_eq_cat}")
+                _mu_cat = _al_cat = None
+            if _mu_cat is not None:
+                _mae_cat = None
+                try:
+                    if all_val_outputs.get('mae'):
+                        _mae_cat = torch.cat(all_val_outputs['mae'], dim=0).numpy().squeeze(-1)
+                except Exception:
+                    pass  # MAE head optional; fall back to risk=1.0
                 _n_pred  = min(len(_mu_cat), len(val_ret_R))
                 _vv      = val_valid[:_n_pred]
                 if np.any(_vv):
@@ -6946,8 +6956,6 @@ def train_v5_model(
                                 f"check barrier_outcomes alignment in v5_target_generator.py. "
                                 f"Target: mu_r_corr_val > 0.0 for a healthy model."
                             )
-            except Exception as _eq:
-                log.debug(f"[V5_TRAIN_QUALITY] skipped epoch={epoch}: {_eq}")
 
         if use_v6 and hasattr(model, 'get_expert_usage'):
             expert_usage = model.get_expert_usage()
