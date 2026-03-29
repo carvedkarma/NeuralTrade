@@ -6161,6 +6161,14 @@ def train_v5_model(
     log.info(f"{ctag} score_lambda={score_lambda} risk_proxy={risk_proxy}")
     log.info(f"{ctag} hold_target={hold_target} mfe_min={mfe_min}")
     log.info(f"{ctag} barrier_mode={barrier_mode} presets={[p.get('label','?') for p in presets]}")
+    log.info(
+        "[V5_DEBIAS] mu_debias=%s (default=DISABLED; enable with --v5-mu-debias)",
+        "ENABLED" if mu_debias else "DISABLED",
+    )
+    log.info(
+        "[%s_CONFIG] SIDE_BAL_W=%.2f  mae_cap=%.2f  barrier_aligned_ret_R=True",
+        vtag, side_bal_weight, tpd_ctrl_cfg.mae_cap if tpd_ctrl_cfg is not None else 2.0,
+    )
     log.info(f"{ctag} target_tpd={target_tpd} tpd_tol={target_tpd_tol}")
     log.info(f"{ctag} candidates={candidate_config.enabled} regime_head={use_regime_head}")
     log.info(f"{ctag} cand_warmup_epochs={cand_warmup_epochs}")
