@@ -5644,13 +5644,19 @@ def run_v5_walk_forward(
                 _fh_above_thr = int(_fh_above_thr_raw)
             _fh_pct_above  = (100.0 * _fh_above_thr / max(_fh_signal_count, 1)) if _fh_signal_count > 0 else 0.0
             _pq = fold_report.get('prediction_quality') or {}
-            _fh_mu_corr_train = _pq.get('mu_r_correlation_train', float('nan'))
-            _fh_mu_corr_val   = _pq.get('mu_r_correlation', float('nan'))
-            _fh_p_long  = _pq.get('p_long_mean',  float('nan'))
-            _fh_p_hold  = _pq.get('p_hold_mean',  float('nan'))
-            _fh_p_short = _pq.get('p_short_mean', float('nan'))
+            def _to_float_safe(v, default=float('nan')):
+                try:
+                    return float(v) if v is not None else default
+                except (TypeError, ValueError):
+                    return default
+
+            _fh_mu_corr_train = _to_float_safe(_pq.get('mu_r_correlation_train'))
+            _fh_mu_corr_val   = _to_float_safe(_pq.get('mu_r_correlation'))
+            _fh_p_long  = _to_float_safe(_pq.get('p_long_mean'))
+            _fh_p_hold  = _to_float_safe(_pq.get('p_hold_mean'))
+            _fh_p_short = _to_float_safe(_pq.get('p_short_mean'))
             # Expected daily R: estimate from trades per test period vs test_months
-            _fh_total_r = fold_report.get('total_r', 0.0)
+            _fh_total_r = _to_float_safe(fold_report.get('total_r'), default=0.0)
             # fold_report is a dict — use .get() not getattr()
             _fh_test_months = fold_report.get('test_months', fold.get('test_months', 1)) or 1
             _fh_exp_daily_r = _fh_total_r / max(_fh_test_months * 22.0, 1.0)  # ~22 trading days/month
