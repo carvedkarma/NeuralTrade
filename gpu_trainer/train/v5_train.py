@@ -7816,7 +7816,8 @@ def train_v5_model(
                      f"T/day={sweep_tpd:.1f} thr={sweep_threshold:.4f} best_at={sweep_label}")
 
             if _active_pusher:
-                lb_dict = {k: float(np.mean(v)) for k, v in loss_breakdown.items() if v}
+                lb_dict = {k: float(np.mean(v)) for k, v in loss_breakdown.items()
+                           if v and not k.startswith('_') and not isinstance(v, str)}
                 _active_pusher.epoch_update(
                     fold_num=_active_fold_num, epoch=epoch, total_epochs=epochs,
                     train_loss=float(avg_train_loss), val_loss=float(avg_val_loss),
