@@ -6782,6 +6782,8 @@ def train_v5_model(
                     train_barrier_soft_list[i] = train_barrier_soft_list[i][:min_train]
                     if i < len(train_timestamps_list):
                         train_timestamps_list[i] = train_timestamps_list[i][:min_train]
+                    if i < len(train_atr14_list) and train_atr14_list[i] is not None:
+                        train_atr14_list[i] = train_atr14_list[i][:min_train]
             balanced_counts = [len(arr) for arr in train_features]
             log.info(f"[V5_BALANCE] After balancing: {dict(zip(symbols, balanced_counts))}")
         else:
