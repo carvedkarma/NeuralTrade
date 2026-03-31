@@ -4835,7 +4835,7 @@ export async function registerRoutes(
   app.post("/api/live/trade", async (req, res) => {
     // Early diagnostic log — fires before any processing so we can confirm the request arrived
     const _bodyKeys = Object.keys(req.body || {});
-    const _isV5Signal = req.body && req.body.v5_score !== undefined;
+    const _isV5Signal = req.body && (req.body.v5_score !== undefined || req.body.source === "v5_gpu");
     console.log(`[Live Trade] Incoming POST | v5=${_isV5Signal} | keys=${_bodyKeys.join(",") || "(empty)"}`);
     try {
       const t = req.body;
@@ -4916,7 +4916,8 @@ export async function registerRoutes(
         // V5 GPU signals bypass H4/Chop/OrderFlow gates — the V5 model applies its own
         // strict gates internally (ADX ≥18, EMA200 soft mult, edge filter, correlation
         // block, per-symbol cooldowns). Re-filtering defeats the model's calibration.
-        const isV5GpuSignal = t.v5_score !== undefined;
+        // Bypass when either v5_score is present OR source is explicitly "v5_gpu".
+        const isV5GpuSignal = t.v5_score !== undefined || t.source === "v5_gpu";
         let _chopLeverageMult = 1.0;
         let _isChopThrottled = false;
 
@@ -5079,7 +5080,10 @@ export async function registerRoutes(
                 autoTradeResult = { opened: false, reason: "max_positions_reached" };
                 console.log(`[Auto-Trade] SKIP ${t.symbol} — max ${maxPositions} positions reached`);
               } else {
-                // V5 GPU signals: use 1.5% risk (matches V5 training) with no leverage tier multiplier.
+                // V5 GPU signals: use 1.5% risk with no leverage tier multiplier (v5Direct=true).
+                // This is dynamic (1.5% of current equity), not a fixed $225 — intentional.
+                // At $15k equity: $225/trade. As equity grows, sizing scales with Kelly fraction.
+                // V5 was trained with Kelly 0.25 at 1.5% risk, so this matches training semantics exactly.
                 // Non-V5 signals: use configured riskPerTradePct with chop leverage adjustment.
                 const _riskPct = isV5GpuSignal ? 1.5 : paperConfig.riskPerTradePct;
                 const position = await manualOpenPosition({
