@@ -2031,8 +2031,9 @@ export async function manualOpenPosition(params: {
   signalConfidence?: number;
   v5Score?: number;
   chopLeverageMult?: number;
+  v5Direct?: boolean;
 }): Promise<PaperPosition> {
-  const { symbol, side, entryPrice, stopLoss, takeProfit, riskPercent, source = "manual", signalConfidence = null, v5Score, chopLeverageMult } = params;
+  const { symbol, side, entryPrice, stopLoss, takeProfit, riskPercent, source = "manual", signalConfidence = null, v5Score, chopLeverageMult, v5Direct = false } = params;
   const portfolio = await storage.getOrCreatePortfolio();
   const config = getConfig();
 
@@ -2041,8 +2042,11 @@ export async function manualOpenPosition(params: {
   if (side === "LONG" && takeProfit <= entryPrice) throw new Error("LONG TP must be above entry");
   if (side === "SHORT" && takeProfit >= entryPrice) throw new Error("SHORT TP must be below entry");
 
-  let riskMultiplier = source === "v5_signal" ? computeSignalLeverage(v5Score) : 1;
-  if (chopLeverageMult != null && chopLeverageMult < 1) {
+  // V5 direct signals: riskMultiplier=1 — risk is already captured in riskPercent (1.5%).
+  // The qty is purely ATR-derived: qty = riskUsd / stopDistance.
+  // Non-V5 signals: use score-based leverage tiers for position sizing.
+  let riskMultiplier = (v5Direct || source !== "v5_signal") ? 1 : computeSignalLeverage(v5Score);
+  if (!v5Direct && chopLeverageMult != null && chopLeverageMult < 1) {
     riskMultiplier = Math.max(1, Math.round(riskMultiplier * chopLeverageMult));
   }
   const stopDistance = Math.abs(entryPrice - stopLoss);
@@ -2051,9 +2055,8 @@ export async function manualOpenPosition(params: {
   const qty = baseQty * riskMultiplier;
   const notional = qty * entryPrice;
   const entryFee = calculateFee(notional, config.takerFeePct);
-  // initialRiskUsdt must match the actual capital at risk (qty × stopDistance).
-  // Storing riskUsd × riskMultiplier keeps R-math correct:
-  //   net_R = realizedPnl / initialRiskUsdt → always ≈ ±1R at SL/TP.
+  // initialRiskUsdt = actual USD at risk (qty × stopDistance).
+  // For v5Direct: riskMultiplier=1 so initialRiskUsdt = riskUsd (1.5% of equity).
   const initialRiskUsdt = riskUsd * riskMultiplier;
 
   const position = await storage.createPosition({
@@ -2102,8 +2105,9 @@ export async function manualOpenPosition(params: {
     source,
   });
 
-  const label = source === "v5_signal" ? "Auto-Trade" : "Paper";
-  console.log(`[${label}] ${side} ${symbol} @ ${entryPrice} | SL: ${stopLoss} | TP: ${takeProfit} | Risk: $${riskUsd.toFixed(2)}`);
+  const label = source === "v5_signal" ? (v5Direct ? "V5-Direct" : "Auto-Trade") : "Paper";
+  const impliedLeverage = (notional / portfolio.currentEquityUsdt).toFixed(1);
+  console.log(`[${label}] ${side} ${symbol} @ ${entryPrice} | SL: ${stopLoss} | TP: ${takeProfit} | Risk: $${riskUsd.toFixed(2)} (${riskPercent}%) | Qty: ${qty.toFixed(6)} | Notional: $${notional.toFixed(2)} | ~${impliedLeverage}x`);
   return position;
 }
 

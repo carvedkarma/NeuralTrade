@@ -4833,9 +4833,14 @@ export async function registerRoutes(
   // ============================================================================
 
   app.post("/api/live/trade", async (req, res) => {
+    // Early diagnostic log — fires before any processing so we can confirm the request arrived
+    const _bodyKeys = Object.keys(req.body || {});
+    const _isV5Signal = req.body && req.body.v5_score !== undefined;
+    console.log(`[Live Trade] Incoming POST | v5=${_isV5Signal} | keys=${_bodyKeys.join(",") || "(empty)"}`);
     try {
       const t = req.body;
       if (!t || !t.symbol || !t.side || !t.entry_price) {
+        console.log(`[Live Trade] 400 — missing required fields: symbol=${t?.symbol} side=${t?.side} entry_price=${t?.entry_price}`);
         return res.status(400).json({ error: "symbol, side, and entry_price are required" });
       }
       const record = await storage.recordLiveTradeRecord({
@@ -4897,9 +4902,9 @@ export async function registerRoutes(
         console.log(`[Auto-Trade] SKIP ${t.symbol} — invalid SL/TP from GPU trainer (sl=${t.stop_loss}, tp=${t.take_profit}, side=${side}, entry=${entryPrice})`);
         autoTradeResult = { opened: false, reason: "invalid_sl_tp" };
       } else {
-        // ── Node.js safety gates (defense-in-depth — GPU trainer also gates) ──
+        // ── Node.js safety gates (defense-in-depth) ──
 
-        // Gate 1: Session circuit breaker (-5% intra-day drawdown = no new trades)
+        // Gate 1: Session circuit breaker — always applied regardless of signal source
         const _cbCheck = await _checkSessionCircuitBreaker();
         if (_cbCheck.tripped) {
           console.log(`[Auto-Trade] CIRCUIT BREAKER — blocked: ${_cbCheck.reason}`);
@@ -4908,97 +4913,101 @@ export async function registerRoutes(
           return;
         }
 
-        // Gate 2: H4 direction hard gate — H4 trend must agree with trade side
-        const _htfH4 = t.htf_h4_trend ? Number(t.htf_h4_trend) : 0;
-        const _sideSign = side === 'LONG' ? 1 : -1;
-        if (_htfH4 === 0) {
-          // htf_h4_trend missing or zero — gate silently passes but warn so it's visible
-          console.warn(`[Auto-Trade] H4 GATE: htf_h4_trend missing/zero — passing ${side} ${t.symbol} without H4 filter`);
-        } else if (_htfH4 !== _sideSign) {
-          const _h4Reason = `H4_DIR_GATE: H4_trend=${_htfH4 > 0 ? '+1' : '-1'} opposes side=${side}`;
-          console.log(`[Auto-Trade] H4 GATE — blocked: ${_h4Reason}`);
-          autoTradeResult = { opened: false, reason: _h4Reason };
-          res.json({ success: true, id: record.id, autoTrade: autoTradeResult });
-          return;
-        }
-        // Gate 3: Chop Protection — ADX-based market regime filter
-        const _regimeState = await getSymbolRegimeState(t.symbol);
-        const _chopGate = getChopGateDecision(_regimeState.tier, side as "LONG" | "SHORT", t.v5_score ?? 0);
-        if (_chopGate.blocked) {
-          console.log(`[Auto-Trade] CHOP GATE — blocked: ${_chopGate.reason} (ADX=${_regimeState.adx.toFixed(1)})`);
-          autoTradeResult = { opened: false, reason: _chopGate.reason };
-          res.json({ success: true, id: record.id, autoTrade: autoTradeResult });
-          return;
-        }
-        const _isChopThrottled = _regimeState.tier === "SOFT_CHOP";
-        if (_isChopThrottled) {
-          console.log(`[Auto-Trade] CHOP THROTTLE: ${_chopGate.reason} | leverage mult=${_chopGate.adjustedLeverageMult}`);
-        }
+        // V5 GPU signals bypass H4/Chop/OrderFlow gates — the V5 model applies its own
+        // strict gates internally (ADX ≥18, EMA200 soft mult, edge filter, correlation
+        // block, per-symbol cooldowns). Re-filtering defeats the model's calibration.
+        const isV5GpuSignal = t.v5_score !== undefined;
+        let _chopLeverageMult = 1.0;
+        let _isChopThrottled = false;
 
-        // Gate 4: Order Flow — OB imbalance + aggressor ratio + CVD direction
-        // NOTE: Data is sourced from Bybit public API (api.bybit.com). When live trading
-        // on Bitget, this data may not perfectly reflect Bitget's order book. In that case
-        // the entire gate runs in advisory mode: it logs but does NOT hard-block anything
-        // (neither the Bitget live order nor the paper position). When Bitget live is OFF,
-        // the gate hard-blocks the trade and returns early.
-        const _isBitgetLive = isBitgetLiveTradingEnabled();
-        let _ofGateResult: { passed: boolean; reason: string } = { passed: true, reason: "OF_GATE: skipped (fetch error)" };
-        let _ofSnapshotData: { obImbalance: number; aggressorRatio: number; cvd: number; liqProximityUp: number; liqProximityDown: number } | null = null;
-        try {
-          const _ofSnapshot = await fetchOrderFlowSnapshot(t.symbol);
-          _ofSnapshotData = { obImbalance: _ofSnapshot.obImbalance, aggressorRatio: _ofSnapshot.aggressorRatio, cvd: _ofSnapshot.cvd, liqProximityUp: _ofSnapshot.liqProximityUp, liqProximityDown: _ofSnapshot.liqProximityDown };
-          _ofGateResult = evaluateOrderFlowGate(_ofSnapshot, side);
-          if (!_ofGateResult.passed) {
-            if (_isBitgetLive) {
-              // Advisory mode for Bitget: log but do not block the live order
-              console.log(`[Auto-Trade] ORDER FLOW GATE (ADVISORY/BYBIT-SRC) — would block but Bitget live active: ${_ofGateResult.reason}`);
-            } else {
-              console.log(`[Auto-Trade] ORDER FLOW GATE — blocked: ${_ofGateResult.reason}`);
-              autoTradeResult = { opened: false, reason: _ofGateResult.reason };
-              try {
-                const recentWindow = Date.now() - 5 * 60_000;
-                const latestSig = await db.select({ id: v5Signals.id }).from(v5Signals)
-                  .where(and(eq(v5Signals.symbol, t.symbol), gte(v5Signals.signalTs, recentWindow)))
-                  .orderBy(desc(v5Signals.signalTs)).limit(1);
-                if (latestSig.length > 0) {
-                  await db.update(v5Signals).set({
-                    obImbalance: _ofSnapshot.obImbalance,
-                    aggressorRatio: _ofSnapshot.aggressorRatio,
-                    cvdAtSignal: _ofSnapshot.cvd,
-                    liqProximity: _ofSnapshot.liqProximityUp,
-                    ofGatePassed: false,
-                    ofGateReason: _ofGateResult.reason,
-                  }).where(eq(v5Signals.id, latestSig[0].id));
-                }
-              } catch (e: any) {
-                console.warn(`[Auto-Trade] Failed to persist OF data to v5_signals: ${e.message}`);
-              }
-              res.json({ success: true, id: record.id, autoTrade: autoTradeResult, orderFlow: _ofSnapshotData });
-              return;
-            }
-          } else {
-            console.log(`[Auto-Trade] ORDER FLOW${_isBitgetLive ? " (BYBIT-SRC advisory)" : ""}: ${_ofGateResult.reason}`);
+        if (isV5GpuSignal) {
+          console.log(`[Auto-Trade] V5 GPU signal — H4/Chop/OrderFlow gates bypassed for ${side} ${t.symbol} (V5 internal gates already applied)`);
+        } else {
+          // Gate 2: H4 direction hard gate — H4 trend must agree with trade side
+          const _htfH4 = t.htf_h4_trend ? Number(t.htf_h4_trend) : 0;
+          const _sideSign = side === 'LONG' ? 1 : -1;
+          if (_htfH4 === 0) {
+            console.warn(`[Auto-Trade] H4 GATE: htf_h4_trend missing/zero — passing ${side} ${t.symbol} without H4 filter`);
+          } else if (_htfH4 !== _sideSign) {
+            const _h4Reason = `H4_DIR_GATE: H4_trend=${_htfH4 > 0 ? '+1' : '-1'} opposes side=${side}`;
+            console.log(`[Auto-Trade] H4 GATE — blocked: ${_h4Reason}`);
+            autoTradeResult = { opened: false, reason: _h4Reason };
+            res.json({ success: true, id: record.id, autoTrade: autoTradeResult });
+            return;
           }
+          // Gate 3: Chop Protection — ADX-based market regime filter
+          const _regimeState = await getSymbolRegimeState(t.symbol);
+          const _chopGate = getChopGateDecision(_regimeState.tier, side as "LONG" | "SHORT", t.v5_score ?? 0);
+          if (_chopGate.blocked) {
+            console.log(`[Auto-Trade] CHOP GATE — blocked: ${_chopGate.reason} (ADX=${_regimeState.adx.toFixed(1)})`);
+            autoTradeResult = { opened: false, reason: _chopGate.reason };
+            res.json({ success: true, id: record.id, autoTrade: autoTradeResult });
+            return;
+          }
+          _chopLeverageMult = _chopGate.adjustedLeverageMult ?? 1.0;
+          _isChopThrottled = _regimeState.tier === "SOFT_CHOP";
+          if (_isChopThrottled) {
+            console.log(`[Auto-Trade] CHOP THROTTLE: ${_chopGate.reason} | leverage mult=${_chopLeverageMult}`);
+          }
+          // Gate 4: Order Flow — OB imbalance + aggressor ratio + CVD direction
+          const _isBitgetLive = isBitgetLiveTradingEnabled();
+          let _ofGateResult: { passed: boolean; reason: string } = { passed: true, reason: "OF_GATE: skipped (fetch error)" };
+          let _ofSnapshotData: { obImbalance: number; aggressorRatio: number; cvd: number; liqProximityUp: number; liqProximityDown: number } | null = null;
           try {
-            const recentWindow = Date.now() - 5 * 60_000;
-            const latestSig = await db.select({ id: v5Signals.id }).from(v5Signals)
-              .where(and(eq(v5Signals.symbol, t.symbol), gte(v5Signals.signalTs, recentWindow)))
-              .orderBy(desc(v5Signals.signalTs)).limit(1);
-            if (latestSig.length > 0) {
-              await db.update(v5Signals).set({
-                obImbalance: _ofSnapshot.obImbalance,
-                aggressorRatio: _ofSnapshot.aggressorRatio,
-                cvdAtSignal: _ofSnapshot.cvd,
-                liqProximity: _ofSnapshot.liqProximityUp,
-                ofGatePassed: _ofGateResult.passed,
-                ofGateReason: _ofGateResult.reason,
-              }).where(eq(v5Signals.id, latestSig[0].id));
+            const _ofSnapshot = await fetchOrderFlowSnapshot(t.symbol);
+            _ofSnapshotData = { obImbalance: _ofSnapshot.obImbalance, aggressorRatio: _ofSnapshot.aggressorRatio, cvd: _ofSnapshot.cvd, liqProximityUp: _ofSnapshot.liqProximityUp, liqProximityDown: _ofSnapshot.liqProximityDown };
+            _ofGateResult = evaluateOrderFlowGate(_ofSnapshot, side);
+            if (!_ofGateResult.passed) {
+              if (_isBitgetLive) {
+                console.log(`[Auto-Trade] ORDER FLOW GATE (ADVISORY/BYBIT-SRC) — would block but Bitget live active: ${_ofGateResult.reason}`);
+              } else {
+                console.log(`[Auto-Trade] ORDER FLOW GATE — blocked: ${_ofGateResult.reason}`);
+                autoTradeResult = { opened: false, reason: _ofGateResult.reason };
+                try {
+                  const recentWindow = Date.now() - 5 * 60_000;
+                  const latestSig = await db.select({ id: v5Signals.id }).from(v5Signals)
+                    .where(and(eq(v5Signals.symbol, t.symbol), gte(v5Signals.signalTs, recentWindow)))
+                    .orderBy(desc(v5Signals.signalTs)).limit(1);
+                  if (latestSig.length > 0) {
+                    await db.update(v5Signals).set({
+                      obImbalance: _ofSnapshot.obImbalance,
+                      aggressorRatio: _ofSnapshot.aggressorRatio,
+                      cvdAtSignal: _ofSnapshot.cvd,
+                      liqProximity: _ofSnapshot.liqProximityUp,
+                      ofGatePassed: false,
+                      ofGateReason: _ofGateResult.reason,
+                    }).where(eq(v5Signals.id, latestSig[0].id));
+                  }
+                } catch (e: any) {
+                  console.warn(`[Auto-Trade] Failed to persist OF data to v5_signals: ${e.message}`);
+                }
+                res.json({ success: true, id: record.id, autoTrade: autoTradeResult, orderFlow: _ofSnapshotData });
+                return;
+              }
+            } else {
+              console.log(`[Auto-Trade] ORDER FLOW${_isBitgetLive ? " (BYBIT-SRC advisory)" : ""}: ${_ofGateResult.reason}`);
             }
-          } catch (e: any) {
-            console.warn(`[Auto-Trade] Failed to persist OF data to v5_signals: ${e.message}`);
+            try {
+              const recentWindow = Date.now() - 5 * 60_000;
+              const latestSig = await db.select({ id: v5Signals.id }).from(v5Signals)
+                .where(and(eq(v5Signals.symbol, t.symbol), gte(v5Signals.signalTs, recentWindow)))
+                .orderBy(desc(v5Signals.signalTs)).limit(1);
+              if (latestSig.length > 0) {
+                await db.update(v5Signals).set({
+                  obImbalance: _ofSnapshot.obImbalance,
+                  aggressorRatio: _ofSnapshot.aggressorRatio,
+                  cvdAtSignal: _ofSnapshot.cvd,
+                  liqProximity: _ofSnapshot.liqProximityUp,
+                  ofGatePassed: _ofGateResult.passed,
+                  ofGateReason: _ofGateResult.reason,
+                }).where(eq(v5Signals.id, latestSig[0].id));
+              }
+            } catch (e: any) {
+              console.warn(`[Auto-Trade] Failed to persist OF data to v5_signals: ${e.message}`);
+            }
+          } catch (ofErr: any) {
+            console.warn(`[Auto-Trade] Order flow fetch failed for ${t.symbol}, allowing trade: ${ofErr.message}`);
           }
-        } catch (ofErr: any) {
-          console.warn(`[Auto-Trade] Order flow fetch failed for ${t.symbol}, allowing trade: ${ofErr.message}`);
         }
         // ── End safety gates ─────────────────────────────────────────────────
 
@@ -5012,12 +5021,11 @@ export async function registerRoutes(
               takeProfit: tpPrice,
               v5Score: t.v5_score ?? 0,
               signalConfidence: t.p_enter ?? undefined,
-              chopLeverageMult: _chopGate.adjustedLeverageMult,
+              chopLeverageMult: _chopLeverageMult,
             });
 
             if (liveResult.success) {
               autoTradeResult = { opened: true, reason: "live_bitget", liveOrderId: liveResult.orderId, chopThrottled: _isChopThrottled, fillType: liveResult.fillType };
-              // Persist fillType to the trade record
               if (liveResult.fillType) {
                 await storage.updateLiveTradeRecord(record.id, { fillType: liveResult.fillType });
               }
@@ -5040,7 +5048,7 @@ export async function registerRoutes(
               takeProfit: tpPrice,
               v5Score: t.v5_score ?? 0,
               signalConfidence: t.p_enter ?? undefined,
-              chopLeverageMult: _chopGate.adjustedLeverageMult,
+              chopLeverageMult: _chopLeverageMult,
             });
 
             if (liveResult.success) {
@@ -5071,17 +5079,21 @@ export async function registerRoutes(
                 autoTradeResult = { opened: false, reason: "max_positions_reached" };
                 console.log(`[Auto-Trade] SKIP ${t.symbol} — max ${maxPositions} positions reached`);
               } else {
+                // V5 GPU signals: use 1.5% risk (matches V5 training) with no leverage tier multiplier.
+                // Non-V5 signals: use configured riskPerTradePct with chop leverage adjustment.
+                const _riskPct = isV5GpuSignal ? 1.5 : paperConfig.riskPerTradePct;
                 const position = await manualOpenPosition({
                   symbol: t.symbol,
                   side,
                   entryPrice,
                   stopLoss: Number(slPrice.toFixed(6)),
                   takeProfit: Number(tpPrice.toFixed(6)),
-                  riskPercent: paperConfig.riskPerTradePct,
+                  riskPercent: _riskPct,
                   source: "v5_signal",
                   signalConfidence: t.p_enter ?? null,
                   v5Score: t.v5_score ?? undefined,
-                  chopLeverageMult: _chopGate.adjustedLeverageMult,
+                  chopLeverageMult: _chopLeverageMult,
+                  v5Direct: isV5GpuSignal,
                 });
 
                 autoTradeResult = { opened: true, positionId: position.id, chopThrottled: _isChopThrottled };
@@ -5094,7 +5106,7 @@ export async function registerRoutes(
                   stopLoss: slPrice,
                   takeProfit: tpPrice,
                 });
-                console.log(`[Auto-Trade] Opened ${side} ${t.symbol} @ $${entryPrice} | ${position.leverage}x leverage | SL: $${slPrice.toFixed(4)} | TP: $${tpPrice.toFixed(4)} (from /api/live/trade)`);
+                console.log(`[Auto-Trade] Opened ${isV5GpuSignal ? "V5-DIRECT" : ""} ${side} ${t.symbol} @ $${entryPrice} | risk=${_riskPct}% | SL: $${slPrice.toFixed(4)} | TP: $${tpPrice.toFixed(4)}`);
               }
             }
           } catch (err: any) {

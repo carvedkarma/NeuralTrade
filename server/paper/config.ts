@@ -65,8 +65,8 @@ export interface PaperTradingConfig {
 }
 
 export const defaultConfig: PaperTradingConfig = {
-  paperTradingEnabled: false,
-  isAutoTrading: false,
+  paperTradingEnabled: true,
+  isAutoTrading: true,
   
   riskPerTradePct: 0.3,             // Base margin pct per trade — multiplied by exchange leverage (e.g. 25x × 0.3% = 7.5% effective risk)
   maxRiskPerTradePct: 0.6,          // Max base risk pct (50x × 0.6% = 30% max per trade)
@@ -86,7 +86,7 @@ export const defaultConfig: PaperTradingConfig = {
   flipConfidenceThreshold: 0.75,
   flipEdgeMultiplier: 3,
   
-  startingEquity: 10000,
+  startingEquity: 15000,
   trailBufferAtrMultiplier: 0.2,
   minPnlForTimeStop: 0.15,      // 0.15x ATR_pct minimum profit after time stop bars
   
