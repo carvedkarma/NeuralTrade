@@ -165,6 +165,11 @@ export interface TradeCloseRecord {
   barsHeld: number;
   exitReason: string;
   maxFavorableR: number;
+  maxAdverseR?: number | null;
+  initialSl?: number | null;
+  takeProfit?: number | null;
+  v5Score?: number | null;
+  trailActive?: number | null;
   regime: string | null;
   signalConfidence: number | null;
   signalEdge: number | null;
@@ -188,6 +193,11 @@ export async function recordTradeClose(record: TradeCloseRecord): Promise<void> 
       barsHeld: record.barsHeld,
       exitReason: record.exitReason,
       maxFavorableR: record.maxFavorableR,
+      maxAdverseR: record.maxAdverseR ?? null,
+      initialSl: record.initialSl ?? null,
+      takeProfit: record.takeProfit ?? null,
+      v5Score: record.v5Score ?? null,
+      trailActive: record.trailActive ?? 0,
       regime: record.regime,
       signalConfidence: record.signalConfidence,
       signalEdge: record.signalEdge,

@@ -1198,6 +1198,14 @@ export async function closePosition(
       feesPaidUsdt: totalFees,
     });
 
+    // Compute initial SL from entry price ± initial stop distance (so we preserve original SL even after trail moves)
+    const _initDist = position.initialStopDistance;
+    const _initialSl = _initDist != null
+      ? (position.side === "LONG"
+        ? position.entryPrice - _initDist
+        : position.entryPrice + _initDist)
+      : position.stopLoss ?? null;
+
     await storage.recordTradeClose({
       positionId: position.id,
       symbol: position.symbol,
@@ -1214,6 +1222,10 @@ export async function closePosition(
       barsHeld: position.barsOpen ?? 0,
       exitReason: reason,
       maxFavorableR: Math.round(maxFavorableR * 10000) / 10000,
+      initialSl: _initialSl != null ? Math.round(_initialSl * 10000) / 10000 : null,
+      takeProfit: position.tp1 != null ? Math.round(position.tp1 * 10000) / 10000 : null,
+      v5Score: position.v5Score ?? null,
+      trailActive: position.trailActive ?? 0,
       regime: position.regime ?? null,
       signalConfidence: position.signalConfidence ?? null,
       signalEdge: position.signalEdge ?? null,
