@@ -5498,6 +5498,34 @@ Provide your analysis in this JSON format:
     }
   });
 
+  // ── ATR HELPER — used by cycle-log auto-trade ───────────────────────────────
+  async function _computeAtrForSymbol(symbol: string): Promise<number | null> {
+    try {
+      const rows = await db
+        .select({ high: candles.high, low: candles.low, close: candles.close })
+        .from(candles)
+        .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, "15m")))
+        .orderBy(desc(candles.timestamp))
+        .limit(20);
+      if (rows.length < 2) return null;
+      // Reverse to chronological order (oldest first)
+      rows.reverse();
+      const trs: number[] = [];
+      for (let i = 1; i < rows.length; i++) {
+        const h = Number(rows[i].high);
+        const l = Number(rows[i].low);
+        const pc = Number(rows[i - 1].close);
+        const tr = Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
+        trs.push(tr);
+      }
+      // Average last 14 true ranges
+      const window = trs.slice(-14);
+      return window.reduce((a, b) => a + b, 0) / window.length;
+    } catch {
+      return null;
+    }
+  }
+
   app.post("/api/live/cycle-log", async (req, res) => {
     try {
       const c = req.body;
@@ -5566,8 +5594,9 @@ Provide your analysis in this JSON format:
       };
       updateCachedSignal(c.symbol, cachedNeuralSignal);
 
-      let autoTradeResult: { opened: boolean; positionId?: number; reason?: string; liveOrderId?: string } = { opened: false, reason: "auto_trade_via_live_trade_endpoint" };
+      let autoTradeResult: { opened: boolean; positionId?: number; reason?: string; liveOrderId?: string } = { opened: false, reason: "no_enter_decision" };
 
+      // ── Neural position management for any open position on this symbol ──────
       try {
         const existingPositions = await getPositionsBySymbol(c.symbol, "OPEN", 1);
         if (existingPositions.length > 0) {
@@ -5582,6 +5611,92 @@ Provide your analysis in this JSON format:
         }
       } catch (neuralErr: any) {
         console.error(`[Neural PM] Error checking positions for ${c.symbol}:`, neuralErr.message);
+      }
+
+      // ── Auto-trade on ENTER decision ─────────────────────────────────────────
+      if (c.decision === "ENTER" && c.direction && c.price) {
+        const paperConfig = getConfig();
+
+        // Gate: paper trading must be enabled
+        if (!paperConfig.paperTradingEnabled) {
+          autoTradeResult = { opened: false, reason: "paper_trading_disabled" };
+        } else {
+          // Gate: session circuit breaker
+          const _cbCheck = await _checkSessionCircuitBreaker();
+          if (_cbCheck.tripped) {
+            console.log(`[Auto-Trade][CycleLog] CIRCUIT BREAKER — blocked ${c.symbol}: ${_cbCheck.reason}`);
+            autoTradeResult = { opened: false, reason: _cbCheck.reason };
+          } else {
+            try {
+              // Gate: no duplicate open position for this symbol
+              const existingOpen = await getPositionsBySymbol(c.symbol, "OPEN", 1);
+              if (existingOpen.length > 0) {
+                autoTradeResult = { opened: false, reason: "position_already_open" };
+              } else {
+                // Gate: max concurrent positions
+                const allOpen = await db.select().from(paperPositions).where(eq(paperPositions.status, "OPEN"));
+                const maxPositions = 6;
+                if (allOpen.length >= maxPositions) {
+                  autoTradeResult = { opened: false, reason: "max_positions_reached" };
+                  console.log(`[Auto-Trade][CycleLog] SKIP ${c.symbol} — max ${maxPositions} positions reached`);
+                } else {
+                  // Compute ATR14 from last 20 15m candles
+                  const atr = await _computeAtrForSymbol(c.symbol);
+                  const entryPrice = Number(c.price);
+                  const side: "LONG" | "SHORT" = String(c.direction).toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+
+                  let slPrice: number;
+                  let tpPrice: number;
+
+                  if (atr && atr > 0) {
+                    // stop = max(1.5 × ATR14, price × 0.15%)
+                    const stopDist = Math.max(1.5 * atr, entryPrice * 0.0015);
+                    slPrice = side === "LONG" ? entryPrice - stopDist : entryPrice + stopDist;
+                    // TP at 2.5 × stop distance (R:R of 2.5)
+                    const tpDist = stopDist * 2.5;
+                    tpPrice = side === "LONG" ? entryPrice + tpDist : entryPrice - tpDist;
+                    console.log(`[Auto-Trade] ENTER from cycle-log: ${c.symbol} ${side} | ATR: ${atr.toFixed(4)} | SL: ${slPrice.toFixed(4)} | TP: ${tpPrice.toFixed(4)}`);
+                  } else {
+                    // Fallback: use 0.3% stop, 0.75% TP
+                    const stopDist = entryPrice * 0.003;
+                    slPrice = side === "LONG" ? entryPrice - stopDist : entryPrice + stopDist;
+                    tpPrice = side === "LONG" ? entryPrice + stopDist * 2.5 : entryPrice - stopDist * 2.5;
+                    console.log(`[Auto-Trade] ENTER from cycle-log (ATR fallback): ${c.symbol} ${side} | SL: ${slPrice.toFixed(4)} | TP: ${tpPrice.toFixed(4)}`);
+                  }
+
+                  // Open paper position — V5 signals always use 1.5% risk, v5Direct=true bypasses internal gates
+                  const position = await manualOpenPosition({
+                    symbol: c.symbol,
+                    side,
+                    entryPrice,
+                    stopLoss: Number(slPrice.toFixed(6)),
+                    takeProfit: Number(tpPrice.toFixed(6)),
+                    riskPercent: 1.5,
+                    source: "v5_signal",
+                    signalConfidence: c.p_enter ?? null,
+                    v5Score: c.v5_score ?? undefined,
+                    v5Direct: true,
+                  });
+
+                  autoTradeResult = { opened: true, positionId: position.id };
+                  broadcast("TRADE_OPENED", {
+                    symbol: c.symbol,
+                    side,
+                    positionId: position.id,
+                    entryPrice,
+                    leverage: position.leverage,
+                    stopLoss: slPrice,
+                    takeProfit: tpPrice,
+                  });
+                  console.log(`[Auto-Trade] Opened V5-DIRECT ${side} ${c.symbol} @ $${entryPrice} | risk=1.5% | posId=${position.id}`);
+                }
+              }
+            } catch (err: any) {
+              autoTradeResult = { opened: false, reason: err.message };
+              console.error(`[Auto-Trade][CycleLog] Failed to open ${c.symbol}:`, err.message);
+            }
+          }
+        }
       }
 
       broadcast("CYCLE_UPDATE", {
