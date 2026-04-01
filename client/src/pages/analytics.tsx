@@ -935,6 +935,9 @@ interface GateStats {
   shortEntered: number;
   hourlyBuckets: Array<{ hour: number; v5Score: number; regime: number; obGate: number; entered: number; other: number }>;
   regimeGrid: Array<{ symbol: string; regime: string; adx: number }>;
+  trendingCount: number;
+  softChopCount: number;
+  hardChopCount: number;
   circuitBreakerActive: boolean;
 }
 
@@ -982,9 +985,12 @@ function GateIntelligenceSection() {
             <div className="bg-background/30 rounded p-3" data-testid="gate-kpi-bias">
               <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Dominant Side</p>
               {gs && gs.entered > 0 ? (
-                <p className={`text-xl font-bold number-mono ${gs.longBias >= 50 ? "text-emerald-400" : "text-red-400"}`}>
-                  {gs.longBias >= 50 ? "LONG" : "SHORT"} {Math.max(gs.longBias, gs.shortBias)}%
-                </p>
+                <>
+                  <p className={`text-xl font-bold number-mono ${gs.longBias >= 50 ? "text-emerald-400" : "text-red-400"}`}>
+                    {gs.longBias >= 50 ? "LONG" : "SHORT"} {Math.max(gs.longBias, gs.shortBias)}%
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">{gs.trendingCount}/20 trending</p>
+                </>
               ) : (
                 <p className="text-xl font-bold number-mono text-muted-foreground">—</p>
               )}

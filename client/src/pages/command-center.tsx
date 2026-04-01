@@ -186,6 +186,9 @@ interface GateStats {
   shortEntered: number;
   hourlyBuckets: Array<{ hour: number; v5Score: number; regime: number; obGate: number; entered: number; other: number }>;
   regimeGrid: Array<{ symbol: string; regime: string; adx: number }>;
+  trendingCount: number;
+  softChopCount: number;
+  hardChopCount: number;
   circuitBreakerActive: boolean;
   windowStart: number;
   windowEnd: number;
@@ -466,12 +469,12 @@ export default function CommandCenter() {
                 </div>
                 {gateStats.longBias >= 80 && (
                   <p className="text-[10px] text-amber-400/80 mt-1" data-testid="text-bias-warning">
-                    Bull regime — mostly longs. Shorts being blocked.
+                    Bullish tilt — {gateStats.trendingCount}/{gateStats.regimeGrid.length} symbols trending. Regime gate mostly blocking shorts.
                   </p>
                 )}
                 {gateStats.shortBias >= 80 && (
                   <p className="text-[10px] text-amber-400/80 mt-1" data-testid="text-bias-warning">
-                    Bear regime — mostly shorts. Longs being blocked.
+                    Bearish tilt — {gateStats.hardChopCount + gateStats.softChopCount}/{gateStats.regimeGrid.length} symbols in chop/bear. Regime gate mostly blocking longs.
                   </p>
                 )}
               </div>

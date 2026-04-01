@@ -915,6 +915,11 @@ export async function registerRoutes(
         adx: s.adx,
       }));
 
+      // Regime breadth counts
+      const trendingCount = regimeGrid.filter(s => s.regime === "TRENDING").length;
+      const softChopCount = regimeGrid.filter(s => s.regime === "SOFT_CHOP").length;
+      const hardChopCount = regimeGrid.filter(s => s.regime === "HARD_CHOP").length;
+
       // Circuit breaker state
       const cbState = await _checkSessionCircuitBreaker();
 
@@ -932,6 +937,9 @@ export async function registerRoutes(
         shortEntered,
         hourlyBuckets: hourBuckets,
         regimeGrid,
+        trendingCount,
+        softChopCount,
+        hardChopCount,
         circuitBreakerActive: cbState.tripped,
         windowStart: since,
         windowEnd: now,
