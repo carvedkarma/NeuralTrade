@@ -929,7 +929,7 @@ function LeverageIntelligenceSection({
   maxConfigLeverage,
 }: {
   leverageStats: {
-    avgLeverage: number; bestTier: string | null; closedCount: number;
+    avgLeverage: number; maxLeverageUsed?: number; bestTier: string | null; closedCount: number;
     configTiers?: Array<{ minScore: number; leverage: number }>;
   } | null;
   tiers: LeverageTier[];
@@ -977,11 +977,11 @@ function LeverageIntelligenceSection({
               </p>
             </div>
             <div className="bg-background/30 rounded p-3">
-              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Max Config Lev</p>
-              <p className="number-mono text-base font-bold text-muted-foreground" data-testid="text-analytics-max-lev">
-                {maxConfigLeverage}x
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Peak Leverage Used</p>
+              <p className={`number-mono text-base font-bold ${(leverageStats?.maxLeverageUsed ?? 0) >= 25 ? "text-amber-400" : "text-emerald-400"}`} data-testid="text-analytics-max-lev">
+                {leverageStats?.maxLeverageUsed != null && leverageStats.maxLeverageUsed > 0 ? `${leverageStats.maxLeverageUsed}x` : "—"}
               </p>
-              <p className="text-[10px] text-muted-foreground/50">{tiers.length} tier{tiers.length !== 1 ? "s" : ""} active</p>
+              <p className="text-[10px] text-muted-foreground/50">max config: {maxConfigLeverage}x</p>
             </div>
           </div>
 
@@ -1093,6 +1093,7 @@ export default function Analytics() {
   const { data: leverageStats } = useQuery<{
     byTier: Array<{ tier: string; leverageNum: number; trades: number; wins: number; winRate: number; totalR: number; avgR: number; totalPnlUsdt: number }>;
     avgLeverage: number;
+    maxLeverageUsed: number;
     bestTier: string | null;
     currentOpenAvgLeverage: number;
     currentOpenMaxLeverage: number;

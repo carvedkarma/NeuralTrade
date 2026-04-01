@@ -1305,6 +1305,7 @@ export default function PaperTrading() {
   const { data: leverageStats } = useQuery<{
     byTier: Array<{ tier: string; leverageNum: number; trades: number; wins: number; winRate: number; totalR: number; avgR: number; totalPnlUsdt: number }>;
     avgLeverage: number;
+    maxLeverageUsed: number;
     bestTier: string | null;
     currentOpenAvgLeverage: number;
     currentOpenMaxLeverage: number;
@@ -1650,12 +1651,12 @@ export default function PaperTrading() {
         </div>
 
         <div className="glass-card rounded-md px-4 py-3" data-testid="kpi-max-leverage">
-          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Best Tier (Avg R)</p>
-          <p className="number-mono text-lg font-bold mt-0.5 text-amber-400" data-testid="text-max-leverage">
-            {leverageStats?.bestTier ?? "—"}
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Peak Leverage</p>
+          <p className={`number-mono text-lg font-bold mt-0.5 ${(leverageStats?.maxLeverageUsed ?? 0) >= 25 ? "text-amber-400" : (leverageStats?.maxLeverageUsed ?? 0) > 1 ? "text-emerald-400" : "text-muted-foreground"}`} data-testid="text-max-leverage">
+            {leverageStats && leverageStats.maxLeverageUsed > 0 ? `${leverageStats.maxLeverageUsed}x` : "—"}
           </p>
           <p className="text-[10px] text-muted-foreground/50 mt-0.5">
-            max config: {leverageStats ? `${leverageStats.maxConfigLeverage}x` : "—"}
+            best tier: {leverageStats?.bestTier ?? "—"}
           </p>
         </div>
 

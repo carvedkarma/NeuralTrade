@@ -275,7 +275,7 @@ router.get("/performance", async (req, res) => {
 
     const leverageMap: Record<string, { trades: number; wins: number; totalR: number; totalPnlUsdt: number; leverageNum: number }> = {};
     for (const t of trades) {
-      const leverageNum = (t as any).leverage ?? 1;
+      const leverageNum = t.leverage ?? 1;
       const lev = `${leverageNum}x`;
       const key = lev;
       if (!leverageMap[key]) leverageMap[key] = { trades: 0, wins: 0, totalR: 0, totalPnlUsdt: 0, leverageNum };
@@ -436,6 +436,7 @@ router.get("/leverage-stats", async (req, res) => {
 
     const avgLeverage = closedLeverages.length > 0
       ? Math.round((closedLeverages.reduce((s, v) => s + v, 0) / closedLeverages.length) * 100) / 100 : 0;
+    const maxLeverageUsed = closedLeverages.length > 0 ? Math.max(...closedLeverages) : 0;
 
     const byTier = Object.entries(leverageMap)
       .sort((a, b) => Number(a[0]) - Number(b[0]))
@@ -459,6 +460,7 @@ router.get("/leverage-stats", async (req, res) => {
     res.json({
       byTier,
       avgLeverage,
+      maxLeverageUsed,
       bestTier,
       currentOpenAvgLeverage,
       currentOpenMaxLeverage,
