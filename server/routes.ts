@@ -836,6 +836,112 @@ export async function registerRoutes(
     }
   });
 
+  // ── GATE STATS — today's signal funnel ────────────────────────────────────
+  app.get("/api/live/gate-stats", async (req, res) => {
+    try {
+      // Today window: midnight UTC → now
+      const now = Date.now();
+      const todayStart = new Date();
+      todayStart.setUTCHours(0, 0, 0, 0);
+      const since = todayStart.getTime();
+
+      // Fetch all today's cycle logs (up to 10k, plenty for a single day)
+      const rows = await db
+        .select({
+          decision: liveCycleLogs.decision,
+          direction: liveCycleLogs.direction,
+          holdReason: liveCycleLogs.holdReason,
+          cycleTs: liveCycleLogs.cycleTs,
+        })
+        .from(liveCycleLogs)
+        .where(gte(liveCycleLogs.cycleTs, since))
+        .orderBy(desc(liveCycleLogs.cycleTs))
+        .limit(10000);
+
+      let entered = 0;
+      let blockedByV5Score = 0;
+      let blockedByRegime = 0;
+      let blockedByOBGate = 0;
+      let blockedByCooldown = 0;
+      let blockedByOther = 0;
+      let longEntered = 0;
+      let shortEntered = 0;
+
+      // 24-hour hourly buckets (0-23)
+      const hourBuckets: Array<{ hour: number; v5Score: number; regime: number; obGate: number; entered: number; other: number }> =
+        Array.from({ length: 24 }, (_, h) => ({ hour: h, v5Score: 0, regime: 0, obGate: 0, entered: 0, other: 0 }));
+
+      for (const row of rows) {
+        const hour = new Date(row.cycleTs).getUTCHours();
+        const bucket = hourBuckets[hour];
+
+        if (row.decision === "ENTER") {
+          entered++;
+          if (row.direction === "LONG") longEntered++;
+          else if (row.direction === "SHORT") shortEntered++;
+          if (bucket) bucket.entered++;
+        } else if (row.decision === "COOLDOWN") {
+          blockedByCooldown++;
+          if (bucket) bucket.other++;
+        } else {
+          // HOLD — classify by holdReason
+          const reason = row.holdReason ?? "";
+          if (reason.startsWith("v5_score") || reason.includes("<thr=")) {
+            blockedByV5Score++;
+            if (bucket) bucket.v5Score++;
+          } else if (reason.startsWith("REGIME_BLOCK") || reason.startsWith("H4_DIR_GATE") || reason.startsWith("EMA200")) {
+            blockedByRegime++;
+            if (bucket) bucket.regime++;
+          } else if (reason.includes("OF_GATE") || reason.includes("of_gate") || reason.includes("OB_GATE") || reason.includes("ORDER_FLOW")) {
+            blockedByOBGate++;
+            if (bucket) bucket.obGate++;
+          } else {
+            blockedByOther++;
+            if (bucket) bucket.other++;
+          }
+        }
+      }
+
+      const todayTotal = rows.length;
+      const longBias = (longEntered + shortEntered) > 0
+        ? Math.round((longEntered / (longEntered + shortEntered)) * 100) : 0;
+      const shortBias = 100 - longBias;
+
+      // Get regime grid from live regime states
+      const regimeStates = await getAllRegimeStates();
+      const regimeGrid = regimeStates.map((s) => ({
+        symbol: s.symbol,
+        regime: s.tier,      // TRENDING | SOFT_CHOP | HARD_CHOP
+        adx: s.adx,
+      }));
+
+      // Circuit breaker state
+      const cbState = await _checkSessionCircuitBreaker();
+
+      res.json({
+        todayTotal,
+        entered,
+        blockedByV5Score,
+        blockedByRegime,
+        blockedByOBGate,
+        blockedByCooldown,
+        blockedByOther,
+        longBias,
+        shortBias,
+        longEntered,
+        shortEntered,
+        hourlyBuckets: hourBuckets,
+        regimeGrid,
+        circuitBreakerActive: cbState.tripped,
+        windowStart: since,
+        windowEnd: now,
+      });
+    } catch (err: any) {
+      console.error("[gate-stats] error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get("/api/pro/trades", async (req, res) => {
     try {
       const from = Number(req.query.from) || 0;

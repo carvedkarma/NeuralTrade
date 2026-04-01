@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState, useEffect, useCallback } from "react";
 import { formatDistanceToNow } from "date-fns";
-import { AreaChart, Area, ResponsiveContainer } from "recharts";
+import { AreaChart, Area, ResponsiveContainer, XAxis, YAxis, CartesianGrid, Tooltip, BarChart, Bar } from "recharts";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import {
@@ -172,6 +172,25 @@ interface RegimeSymbol {
   tier: "TRENDING" | "SOFT_CHOP" | "HARD_CHOP";
 }
 
+interface GateStats {
+  todayTotal: number;
+  entered: number;
+  blockedByV5Score: number;
+  blockedByRegime: number;
+  blockedByOBGate: number;
+  blockedByCooldown: number;
+  blockedByOther: number;
+  longBias: number;
+  shortBias: number;
+  longEntered: number;
+  shortEntered: number;
+  hourlyBuckets: Array<{ hour: number; v5Score: number; regime: number; obGate: number; entered: number; other: number }>;
+  regimeGrid: Array<{ symbol: string; regime: string; adx: number }>;
+  circuitBreakerActive: boolean;
+  windowStart: number;
+  windowEnd: number;
+}
+
 export default function CommandCenter() {
   const { subscribe } = useTradingWs();
   const [realtimeCycles, setRealtimeCycles] = useState<CycleLog[]>([]);
@@ -225,6 +244,11 @@ export default function CommandCenter() {
   const { data: regimeData } = useQuery<{ symbols: RegimeSymbol[]; blockedCount: number }>({
     queryKey: ["/api/market/regime"],
     refetchInterval: 60000,
+  });
+
+  const { data: gateStats } = useQuery<GateStats>({
+    queryKey: ["/api/live/gate-stats"],
+    refetchInterval: 15000,
   });
 
   const handleCycleUpdate = useCallback((payload: Record<string, unknown>) => {
@@ -379,6 +403,105 @@ export default function CommandCenter() {
           </div>
         );
       })()}
+
+      {/* ── Signal Gate Scorecard ───────────────────────────────────────────── */}
+      {gateStats && (
+        <div className="glass-card rounded-lg p-4" data-testid="gate-scorecard">
+          <div className="flex items-center gap-2 mb-3">
+            <Shield className="w-4 h-4 text-cyan-400" />
+            <span className="text-sm font-semibold uppercase tracking-wider">Today's Signal Funnel</span>
+            {gateStats.circuitBreakerActive && (
+              <Badge className="no-default-hover-elevate no-default-active-elevate bg-red-500/20 text-red-400 text-xs animate-pulse" data-testid="badge-circuit-breaker">
+                CIRCUIT BREAKER ACTIVE
+              </Badge>
+            )}
+            <span className="ml-auto text-xs text-muted-foreground number-mono" data-testid="gate-total-count">
+              {gateStats.todayTotal} signals today
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* Funnel */}
+            <div className="space-y-1.5">
+              {[
+                { label: "Signals received", count: gateStats.todayTotal, color: "text-foreground", bar: "bg-white/10", pct: 100 },
+                { label: "Blocked by V5 score", count: gateStats.blockedByV5Score, color: "text-muted-foreground", bar: "bg-slate-500/40", pct: gateStats.todayTotal > 0 ? Math.round(gateStats.blockedByV5Score / gateStats.todayTotal * 100) : 0 },
+                { label: "Blocked by regime gate", count: gateStats.blockedByRegime, color: "text-amber-400", bar: "bg-amber-500/40", pct: gateStats.todayTotal > 0 ? Math.round(gateStats.blockedByRegime / gateStats.todayTotal * 100) : 0 },
+                { label: "Blocked by OB/flow gate", count: gateStats.blockedByOBGate, color: "text-orange-400", bar: "bg-orange-500/40", pct: gateStats.todayTotal > 0 ? Math.round(gateStats.blockedByOBGate / gateStats.todayTotal * 100) : 0 },
+                { label: "Cooldown / other", count: gateStats.blockedByCooldown + gateStats.blockedByOther, color: "text-muted-foreground/70", bar: "bg-muted/30", pct: gateStats.todayTotal > 0 ? Math.round((gateStats.blockedByCooldown + gateStats.blockedByOther) / gateStats.todayTotal * 100) : 0 },
+                { label: "ENTERED", count: gateStats.entered, color: "text-emerald-400", bar: "bg-emerald-500/50", pct: gateStats.todayTotal > 0 ? Math.round(gateStats.entered / gateStats.todayTotal * 100) : 0 },
+              ].map(({ label, count, color, bar, pct }) => (
+                <div key={label} className="flex items-center gap-2" data-testid={`funnel-row-${label.replace(/\s+/g, '-').toLowerCase()}`}>
+                  <span className={`text-xs w-48 shrink-0 ${color}`}>{label}</span>
+                  <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full ${bar} transition-all`} style={{ width: `${pct}%` }} />
+                  </div>
+                  <span className={`text-xs number-mono w-8 text-right ${color}`}>{count}</span>
+                  <span className="text-[10px] text-muted-foreground/60 w-8 text-right">{pct}%</span>
+                </div>
+              ))}
+            </div>
+
+            {/* L/S bias */}
+            <div className="space-y-3">
+              <div>
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1.5">LONG / SHORT Balance (Today's Entries)</p>
+                <div className="flex h-5 rounded-full overflow-hidden" data-testid="ls-bias-bar">
+                  <div
+                    className="bg-emerald-500/70 flex items-center justify-center text-[10px] font-bold text-emerald-100 transition-all"
+                    style={{ width: `${gateStats.longBias}%` }}
+                  >
+                    {gateStats.longBias > 15 && `${gateStats.longBias}%`}
+                  </div>
+                  <div
+                    className="bg-red-500/70 flex items-center justify-center text-[10px] font-bold text-red-100 transition-all"
+                    style={{ width: `${gateStats.shortBias}%` }}
+                  >
+                    {gateStats.shortBias > 15 && `${gateStats.shortBias}%`}
+                  </div>
+                </div>
+                <div className="flex justify-between mt-1">
+                  <span className="text-[10px] text-emerald-400">LONG {gateStats.longEntered}</span>
+                  <span className="text-[10px] text-red-400">SHORT {gateStats.shortEntered}</span>
+                </div>
+                {gateStats.longBias >= 80 && (
+                  <p className="text-[10px] text-amber-400/80 mt-1" data-testid="text-bias-warning">
+                    Bull regime — mostly longs. Shorts being blocked.
+                  </p>
+                )}
+                {gateStats.shortBias >= 80 && (
+                  <p className="text-[10px] text-amber-400/80 mt-1" data-testid="text-bias-warning">
+                    Bear regime — mostly shorts. Longs being blocked.
+                  </p>
+                )}
+              </div>
+
+              {/* Mini regime grid */}
+              <div>
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1.5">Regime Grid (20 Symbols)</p>
+                <div className="grid grid-cols-5 gap-1" data-testid="regime-grid">
+                  {gateStats.regimeGrid.map((s) => {
+                    const sym = s.symbol.replace("USDT", "");
+                    const color = s.regime === "TRENDING" ? "bg-emerald-500/25 text-emerald-400 border-emerald-500/30"
+                      : s.regime === "SOFT_CHOP" ? "bg-amber-500/25 text-amber-400 border-amber-500/30"
+                      : "bg-red-500/25 text-red-400 border-red-500/30";
+                    return (
+                      <div key={s.symbol} className={`text-[9px] font-mono border rounded px-1 py-0.5 text-center ${color}`} data-testid={`regime-cell-${s.symbol}`} title={`${s.symbol}: ${s.regime} (ADX: ${s.adx.toFixed(0)})`}>
+                        {sym}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex gap-2 mt-1.5">
+                  <span className="text-[9px] text-emerald-400">● TRENDING</span>
+                  <span className="text-[9px] text-amber-400">● SOFT CHOP</span>
+                  <span className="text-[9px] text-red-400">● HARD CHOP</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-6 gap-3" data-testid="metrics-bar">
         {statusLoading ? (

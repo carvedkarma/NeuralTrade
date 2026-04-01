@@ -921,6 +921,136 @@ function computeHistogram(rValues: number[]) {
   return bins;
 }
 
+interface GateStats {
+  todayTotal: number;
+  entered: number;
+  blockedByV5Score: number;
+  blockedByRegime: number;
+  blockedByOBGate: number;
+  blockedByCooldown: number;
+  blockedByOther: number;
+  longBias: number;
+  shortBias: number;
+  longEntered: number;
+  shortEntered: number;
+  hourlyBuckets: Array<{ hour: number; v5Score: number; regime: number; obGate: number; entered: number; other: number }>;
+  regimeGrid: Array<{ symbol: string; regime: string; adx: number }>;
+  circuitBreakerActive: boolean;
+}
+
+function GateIntelligenceSection() {
+  const [open, setOpen] = useState(true);
+  const { data: gs, isLoading } = useQuery<GateStats>({
+    queryKey: ["/api/live/gate-stats"],
+    refetchInterval: 30000,
+  });
+
+  const blocked = gs ? gs.blockedByV5Score + gs.blockedByRegime + gs.blockedByOBGate + gs.blockedByCooldown + gs.blockedByOther : 0;
+  const passRate = gs && gs.todayTotal > 0 ? Math.round(gs.entered / gs.todayTotal * 100) : 0;
+
+  return (
+    <div className="glass-card rounded-md p-4 space-y-3" data-testid="gate-intelligence">
+      <button
+        className="flex items-center justify-between w-full text-sm font-semibold hover:text-white transition-colors"
+        onClick={() => setOpen(v => !v)}
+        data-testid="btn-toggle-gate-intelligence"
+      >
+        <span className="flex items-center gap-1.5">
+          <Shield className="w-4 h-4" />
+          Gate Intelligence (24h)
+        </span>
+        {open ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+      </button>
+
+      {open && (
+        <div className="space-y-4">
+          {/* KPI row */}
+          <div className="grid grid-cols-4 gap-3">
+            <div className="bg-background/30 rounded p-3" data-testid="gate-kpi-total">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Signals Today</p>
+              <p className="text-xl font-bold number-mono">{isLoading ? "—" : gs?.todayTotal ?? 0}</p>
+            </div>
+            <div className="bg-background/30 rounded p-3" data-testid="gate-kpi-entered">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Entered</p>
+              <p className="text-xl font-bold number-mono text-emerald-400">{isLoading ? "—" : gs?.entered ?? 0}</p>
+              <p className="text-[10px] text-muted-foreground">{passRate}% pass rate</p>
+            </div>
+            <div className="bg-background/30 rounded p-3" data-testid="gate-kpi-blocked">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Blocked</p>
+              <p className="text-xl font-bold number-mono text-amber-400">{isLoading ? "—" : blocked}</p>
+            </div>
+            <div className="bg-background/30 rounded p-3" data-testid="gate-kpi-bias">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Dominant Side</p>
+              {gs && gs.entered > 0 ? (
+                <p className={`text-xl font-bold number-mono ${gs.longBias >= 50 ? "text-emerald-400" : "text-red-400"}`}>
+                  {gs.longBias >= 50 ? "LONG" : "SHORT"} {Math.max(gs.longBias, gs.shortBias)}%
+                </p>
+              ) : (
+                <p className="text-xl font-bold number-mono text-muted-foreground">—</p>
+              )}
+            </div>
+          </div>
+
+          {/* Gate breakdown bars */}
+          <div className="space-y-2">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Block reasons</p>
+            {gs && [
+              { label: "V5 Score gate", value: gs.blockedByV5Score, color: "#64748b" },
+              { label: "Regime gate", value: gs.blockedByRegime, color: "#f59e0b" },
+              { label: "OB/Flow gate", value: gs.blockedByOBGate, color: "#f97316" },
+              { label: "Cooldown / other", value: gs.blockedByCooldown + gs.blockedByOther, color: "#6b7280" },
+            ].map(({ label, value, color }) => (
+              <div key={label} className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground w-36">{label}</span>
+                <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all"
+                    style={{ width: gs.todayTotal > 0 ? `${value / gs.todayTotal * 100}%` : "0%", backgroundColor: color }}
+                  />
+                </div>
+                <span className="text-xs number-mono w-6 text-right" style={{ color }}>{value}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Hourly stacked bar chart */}
+          {gs && gs.hourlyBuckets && (
+            <div>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-2">Hourly gate breakdown (UTC)</p>
+              <ResponsiveContainer width="100%" height={120}>
+                <BarChart data={gs.hourlyBuckets} margin={{ top: 4, right: 4, left: -20, bottom: 0 }} barSize={8}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                  <XAxis dataKey="hour" tick={{ fontSize: 9 }} tickFormatter={(v: number) => `${v}h`} />
+                  <YAxis tick={{ fontSize: 9 }} />
+                  <Tooltip
+                    contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, fontSize: 11 }}
+                    formatter={(value: number, name: string) => {
+                      const labels: Record<string, string> = { v5Score: "V5 blocked", regime: "Regime blocked", obGate: "OB blocked", other: "Other", entered: "Entered" };
+                      return [value, labels[name] ?? name];
+                    }}
+                    labelFormatter={(h: number) => `Hour ${h}:00 UTC`}
+                  />
+                  <Bar dataKey="v5Score" stackId="a" fill="#475569" />
+                  <Bar dataKey="regime" stackId="a" fill="#d97706" />
+                  <Bar dataKey="obGate" stackId="a" fill="#ea580c" />
+                  <Bar dataKey="other" stackId="a" fill="#374151" />
+                  <Bar dataKey="entered" stackId="a" fill="#10b981" radius={[2, 2, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+              <div className="flex gap-3 mt-1">
+                <span className="text-[9px] flex items-center gap-1"><span className="w-2 h-2 rounded-sm inline-block" style={{ background: "#10b981" }} /> Entered</span>
+                <span className="text-[9px] flex items-center gap-1"><span className="w-2 h-2 rounded-sm inline-block" style={{ background: "#d97706" }} /> Regime</span>
+                <span className="text-[9px] flex items-center gap-1"><span className="w-2 h-2 rounded-sm inline-block" style={{ background: "#ea580c" }} /> OB/Flow</span>
+                <span className="text-[9px] flex items-center gap-1"><span className="w-2 h-2 rounded-sm inline-block" style={{ background: "#475569" }} /> V5 score</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type LeverageTier = { tier: string; leverageNum?: number; trades: number; wins: number; winRate: number; totalR: number; avgR?: number; totalPnlUsdt: number };
 
 function LeverageIntelligenceSection({
@@ -1490,6 +1620,8 @@ export default function Analytics() {
           <EdgeDecayAnalysis data={neuralAdj} />
         </div>
       )}
+
+      <GateIntelligenceSection />
 
       {source === "paper" && (perf.leverageBreakdown?.length ?? 0) + (leverageStats?.configTiers?.length ?? 0) > 0 && (() => {
         const tiers = leverageStats?.byTier ?? perf.leverageBreakdown ?? [];
