@@ -777,6 +777,7 @@ export const paperTradeHistory = pgTable("paper_trade_history", {
   regime: varchar("regime", { length: 20 }),
   signalConfidence: real("signal_confidence"),
   signalEdge: real("signal_edge"),
+  leverage: real("leverage").default(1),
   createdAt: bigint("created_at", { mode: "number" }).notNull().$defaultFn(() => Date.now()),
 }, (table) => ({
   symbolIdx: index("paper_trade_history_symbol_idx").on(table.symbol),

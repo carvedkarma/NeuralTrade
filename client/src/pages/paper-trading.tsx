@@ -1273,6 +1273,17 @@ export default function PaperTrading() {
     refetchInterval: 30000,
   });
 
+  const { data: leverageStats } = useQuery<{
+    open: { count: number; avgLeverage: number; maxLeverage: number; totalNotionalUsdt: number; exposurePct: number };
+    closed: { count: number; avgLeverage: number; maxLeverage: number; byTier: Array<{ tier: string; leverageNum: number; trades: number; wins: number; winRate: number; totalR: number; totalPnlUsdt: number }> };
+    configTiers: Array<{ minScore: number; leverage: number }>;
+    maxConfigLeverage: number;
+    leverageEnabled: boolean;
+  }>({
+    queryKey: ["/api/paper/leverage-stats"],
+    refetchInterval: 15000,
+  });
+
   const { data: openPosSummary } = useQuery<{ count: number; symbols: string[] }>({
     queryKey: ["/api/paper/open-positions-summary"],
     refetchInterval: 15000,
@@ -1586,6 +1597,51 @@ export default function PaperTrading() {
           </p>
           <p className="text-[10px] text-muted-foreground/50 mt-0.5">
             {totalTrades > 0 ? `per trade · n=${totalTrades}` : "no trades yet"}
+          </p>
+        </div>
+      </div>
+
+      {/* ── Leverage Monitor Row ─────────────────────────────────── */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="glass-card rounded-md px-4 py-3" data-testid="kpi-avg-leverage">
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Avg Leverage (Closed)</p>
+          <p className="number-mono text-lg font-bold mt-0.5 text-cyan-400" data-testid="text-avg-leverage">
+            {leverageStats ? `${leverageStats.closed.avgLeverage.toFixed(1)}x` : "—"}
+          </p>
+          <p className="text-[10px] text-muted-foreground/50 mt-0.5">
+            {leverageStats ? `${leverageStats.closed.count} trades` : "loading..."}
+          </p>
+        </div>
+
+        <div className="glass-card rounded-md px-4 py-3" data-testid="kpi-max-leverage">
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Peak Leverage</p>
+          <p className={`number-mono text-lg font-bold mt-0.5 ${(leverageStats?.closed.maxLeverage ?? 0) >= 25 ? "text-amber-400" : "text-emerald-400"}`} data-testid="text-max-leverage">
+            {leverageStats ? `${leverageStats.closed.maxLeverage}x` : "—"}
+          </p>
+          <p className="text-[10px] text-muted-foreground/50 mt-0.5">
+            max configured: {leverageStats ? `${leverageStats.maxConfigLeverage}x` : "—"}
+          </p>
+        </div>
+
+        <div className="glass-card rounded-md px-4 py-3" data-testid="kpi-open-leverage">
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Open Avg Leverage</p>
+          <p className={`number-mono text-lg font-bold mt-0.5 ${(leverageStats?.open.avgLeverage ?? 0) > 0 ? "text-violet-400" : "text-muted-foreground"}`} data-testid="text-open-leverage">
+            {leverageStats && leverageStats.open.count > 0 ? `${leverageStats.open.avgLeverage.toFixed(1)}x` : "—"}
+          </p>
+          <p className="text-[10px] text-muted-foreground/50 mt-0.5">
+            {leverageStats?.open.count ?? 0} open position{leverageStats?.open.count !== 1 ? "s" : ""}
+          </p>
+        </div>
+
+        <div className="glass-card rounded-md px-4 py-3" data-testid="kpi-effective-exposure">
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Effective Exposure</p>
+          <p className={`number-mono text-lg font-bold mt-0.5 ${(leverageStats?.open.exposurePct ?? 0) > 200 ? "text-amber-400" : "text-emerald-400"}`} data-testid="text-effective-exposure">
+            {leverageStats && leverageStats.open.count > 0 ? `${leverageStats.open.exposurePct.toFixed(1)}%` : "0%"}
+          </p>
+          <p className="text-[10px] text-muted-foreground/50 mt-0.5">
+            {leverageStats && leverageStats.open.count > 0
+              ? `$${(leverageStats.open.totalNotionalUsdt / 1000).toFixed(1)}k notional`
+              : "no open exposure"}
           </p>
         </div>
       </div>

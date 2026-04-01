@@ -547,6 +547,47 @@ export default function SettingsPage() {
         </div>
       </div>
 
+      {/* ── Leverage Tiers ───────────────────────────────────── */}
+      <div className="glass-card rounded-md p-4" data-testid="leverage-tiers-card">
+        <div className="flex items-center gap-2 mb-3">
+          <Zap className="w-5 h-5 text-amber-400" />
+          <h2 className="font-semibold text-lg">Leverage Tiers</h2>
+          {paperConfig?.leverageEnabled != null && (
+            <Badge className={paperConfig.leverageEnabled ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30 text-[10px]" : "bg-red-500/20 text-red-400 border-red-500/30 text-[10px]"} data-testid="leverage-enabled-badge">
+              {paperConfig.leverageEnabled ? "Enabled" : "Disabled"}
+            </Badge>
+          )}
+        </div>
+        <p className="text-[10px] text-muted-foreground mb-3">
+          V5 score threshold → exchange leverage applied to both qty and initialRiskUsdt. Max: {paperConfig?.maxLeverage ?? 50}x
+        </p>
+        {paperConfig?.leverageTiers && paperConfig.leverageTiers.length > 0 ? (
+          <div className="space-y-1.5">
+            {paperConfig.leverageTiers.map((tier: { minScore: number; leverage: number }, i: number) => {
+              const nextTier = paperConfig.leverageTiers[i + 1];
+              const rangeLabel = nextTier
+                ? `${tier.minScore} – ${nextTier.minScore}`
+                : `≥ ${tier.minScore}`;
+              const pct = (tier.leverage / (paperConfig.maxLeverage ?? 50)) * 100;
+              return (
+                <div key={i} className="flex items-center gap-3" data-testid={`leverage-tier-${i}`}>
+                  <span className="text-[10px] font-mono text-muted-foreground w-20 shrink-0">score {rangeLabel}</span>
+                  <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-amber-400/70"
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className="text-xs font-bold text-amber-400 w-10 text-right" data-testid={`leverage-value-${i}`}>{tier.leverage}x</span>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground/50">No leverage tiers configured</p>
+        )}
+      </div>
+
       <div className="glass-card rounded-md p-4" data-testid="data-freshness-card">
         <div className="flex items-center gap-2 mb-3">
           <Database className="w-5 h-5 text-cyan-500" />

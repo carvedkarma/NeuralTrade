@@ -177,6 +177,18 @@ export interface TradeCloseRecord {
 
 export async function recordTradeClose(record: TradeCloseRecord): Promise<void> {
   try {
+    // Auto-lookup leverage from paper_positions using positionId
+    let leverage = 1;
+    try {
+      const posRows = await db.select({ leverage: paperPositions.leverage })
+        .from(paperPositions)
+        .where(eq(paperPositions.id, record.positionId))
+        .limit(1);
+      if (posRows.length > 0 && posRows[0].leverage != null) {
+        leverage = posRows[0].leverage;
+      }
+    } catch (_) { /* fallback to 1x */ }
+
     await db.insert(paperTradeHistory).values({
       positionId: record.positionId,
       symbol: record.symbol,
@@ -201,6 +213,7 @@ export async function recordTradeClose(record: TradeCloseRecord): Promise<void> 
       regime: record.regime,
       signalConfidence: record.signalConfidence,
       signalEdge: record.signalEdge,
+      leverage,
     });
   } catch (err) {
     console.error("[Paper Storage] Failed to record trade close:", err);

@@ -58,7 +58,7 @@ interface PerformanceData {
   weeklyData: Array<{ week: string; totalR: number; trades: number; wins: number; winRate: number }>;
   rolling7d: { trades: number; wins: number; winRate: number; totalR: number; expectancy: number };
   rolling30d: { trades: number; wins: number; winRate: number; totalR: number; expectancy: number };
-  leverageBreakdown?: Array<{ tier: string; trades: number; wins: number; winRate: number; totalR: number; totalPnlUsdt: number }>;
+  leverageBreakdown?: Array<{ tier: string; leverageNum?: number; trades: number; wins: number; winRate: number; totalR: number; totalPnlUsdt: number }>;
   totalPnlUsdt?: number;
   totalRiskUsdt?: number;
 }
@@ -951,6 +951,18 @@ export default function Analytics() {
     refetchInterval: source === "paper" ? 30000 : undefined,
   });
 
+  const { data: leverageStats } = useQuery<{
+    open: { count: number; avgLeverage: number; maxLeverage: number; totalNotionalUsdt: number; exposurePct: number };
+    closed: { count: number; avgLeverage: number; maxLeverage: number; byTier: Array<{ tier: string; leverageNum: number; trades: number; wins: number; winRate: number; totalR: number; totalPnlUsdt: number }> };
+    configTiers: Array<{ minScore: number; leverage: number }>;
+    maxConfigLeverage: number;
+    leverageEnabled: boolean;
+  }>({
+    queryKey: ["/api/paper/leverage-stats"],
+    enabled: source === "paper",
+    refetchInterval: 60000,
+  });
+
   const isLoading = perfLoading || equityLoading;
 
   if (isLoading) {
@@ -1332,34 +1344,106 @@ export default function Analytics() {
         </div>
       )}
 
-      {source === "paper" && perf.leverageBreakdown && perf.leverageBreakdown.length > 0 && (
-        <div className="glass-card rounded-md p-4" data-testid="leverage-analysis">
-          <p className="text-sm font-semibold mb-3">
+      {source === "paper" && (perf.leverageBreakdown?.length ?? 0) + (leverageStats?.configTiers?.length ?? 0) > 0 && (
+        <div className="glass-card rounded-md p-4 space-y-4" data-testid="leverage-analysis">
+          <p className="text-sm font-semibold">
             <Scale className="w-4 h-4 inline mr-1" />
-            Leverage Tier Performance
+            Leverage Intelligence
           </p>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="text-xs">Tier</TableHead>
-                <TableHead className="text-xs text-center">Trades</TableHead>
-                <TableHead className="text-xs text-center">Win Rate</TableHead>
-                <TableHead className="text-xs text-right">Total R</TableHead>
-                <TableHead className="text-xs text-right">P&L (USDT)</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {perf.leverageBreakdown.map((l) => (
-                <TableRow key={l.tier}>
-                  <TableCell className="text-sm font-mono text-amber-400">{l.tier}</TableCell>
-                  <TableCell className="text-sm text-center number-mono">{l.trades}</TableCell>
-                  <TableCell className={`text-sm text-center number-mono ${getWinRateColor(l.winRate)}`}>{l.winRate.toFixed(1)}%</TableCell>
-                  <TableCell className={`text-sm text-right number-mono ${l.totalR >= 0 ? "text-emerald-400" : "text-red-400"}`}>{l.totalR >= 0 ? "+" : ""}{l.totalR.toFixed(2)}R</TableCell>
-                  <TableCell className={`text-sm text-right number-mono ${l.totalPnlUsdt >= 0 ? "text-emerald-400" : "text-red-400"}`}>{l.totalPnlUsdt >= 0 ? "+" : ""}{l.totalPnlUsdt.toFixed(2)}</TableCell>
+
+          {/* KPI row */}
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-background/30 rounded p-3">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Avg Leverage Used</p>
+              <p className="number-mono text-base font-bold text-cyan-400" data-testid="text-analytics-avg-lev">
+                {leverageStats ? `${leverageStats.closed.avgLeverage.toFixed(1)}x` : perf.leverageBreakdown && perf.leverageBreakdown.length > 0
+                  ? `${(perf.leverageBreakdown.reduce((s, l) => s + (l.leverageNum ?? 1) * l.trades, 0) / perf.leverageBreakdown.reduce((s, l) => s + l.trades, 0)).toFixed(1)}x`
+                  : "1.0x"}
+              </p>
+              <p className="text-[10px] text-muted-foreground/50">{leverageStats?.closed.count ?? 0} closed trades</p>
+            </div>
+            <div className="bg-background/30 rounded p-3">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Peak Leverage</p>
+              <p className={`number-mono text-base font-bold ${(leverageStats?.closed.maxLeverage ?? 0) >= 25 ? "text-amber-400" : "text-emerald-400"}`} data-testid="text-analytics-max-lev">
+                {leverageStats ? `${leverageStats.closed.maxLeverage}x` : "—"}
+              </p>
+              <p className="text-[10px] text-muted-foreground/50">max config: {leverageStats?.maxConfigLeverage ?? 50}x</p>
+            </div>
+            <div className="bg-background/30 rounded p-3">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Best Tier (R)</p>
+              {(() => {
+                const tiers = leverageStats?.closed.byTier ?? perf.leverageBreakdown ?? [];
+                const best = tiers.length > 0 ? tiers.reduce((a, b) => b.totalR > a.totalR ? b : a) : null;
+                return (
+                  <>
+                    <p className="number-mono text-base font-bold text-amber-400" data-testid="text-analytics-best-tier">{best?.tier ?? "—"}</p>
+                    <p className="text-[10px] text-muted-foreground/50">{best ? `+${best.totalR.toFixed(2)}R (${best.trades}t)` : "no data"}</p>
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+
+          {/* Bar chart: Trades by leverage tier */}
+          {(leverageStats?.closed.byTier ?? perf.leverageBreakdown ?? []).length > 0 && (
+            <div>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-2">Trades by Tier</p>
+              <div className="h-28">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={leverageStats?.closed.byTier ?? perf.leverageBreakdown ?? []} margin={{ top: 2, right: 8, bottom: 2, left: 8 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                    <XAxis dataKey="tier" tick={{ fontSize: 10, fill: "#94a3b8" }} />
+                    <YAxis tick={{ fontSize: 10, fill: "#94a3b8" }} />
+                    <Tooltip
+                      contentStyle={{ background: "hsl(var(--background))", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "6px", fontSize: 11 }}
+                      formatter={(v: number, name: string) => [v, name === "trades" ? "Trades" : "Win%"]}
+                    />
+                    <Bar dataKey="trades" fill="#06b6d4" radius={[3, 3, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          )}
+
+          {/* Performance table */}
+          {(leverageStats?.closed.byTier ?? perf.leverageBreakdown ?? []).length > 0 && (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="text-xs">Tier</TableHead>
+                  <TableHead className="text-xs text-center">Trades</TableHead>
+                  <TableHead className="text-xs text-center">Win Rate</TableHead>
+                  <TableHead className="text-xs text-right">Total R</TableHead>
+                  <TableHead className="text-xs text-right">P&L (USDT)</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {(leverageStats?.closed.byTier ?? perf.leverageBreakdown ?? []).map((l) => (
+                  <TableRow key={l.tier}>
+                    <TableCell className="text-sm font-mono text-amber-400">{l.tier}</TableCell>
+                    <TableCell className="text-sm text-center number-mono">{l.trades}</TableCell>
+                    <TableCell className={`text-sm text-center number-mono ${getWinRateColor(l.winRate)}`}>{l.winRate.toFixed(1)}%</TableCell>
+                    <TableCell className={`text-sm text-right number-mono ${l.totalR >= 0 ? "text-emerald-400" : "text-red-400"}`}>{l.totalR >= 0 ? "+" : ""}{l.totalR.toFixed(2)}R</TableCell>
+                    <TableCell className={`text-sm text-right number-mono ${l.totalPnlUsdt >= 0 ? "text-emerald-400" : "text-red-400"}`}>{l.totalPnlUsdt >= 0 ? "+" : ""}{l.totalPnlUsdt.toFixed(2)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+
+          {/* Config tiers reference */}
+          {leverageStats?.configTiers && (
+            <div>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-2">Score → Leverage Mapping</p>
+              <div className="flex flex-wrap gap-1.5">
+                {leverageStats.configTiers.map((t, i) => (
+                  <span key={i} className="text-[10px] font-mono bg-background/40 border border-white/10 rounded px-2 py-0.5 text-muted-foreground">
+                    ≥{t.minScore} → <span className="text-amber-400">{t.leverage}x</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

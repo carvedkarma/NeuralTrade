@@ -14,7 +14,7 @@ The frontend is built with React, TypeScript, and Vite, utilizing `shadcn/ui` (R
 **Core Pages:**
 -   **Command Center:** Live system status, KPIs, market overview, real-time signal feed, active positions, mini equity curve.
 -   **Live Trading:** Symbol selector, price charts, market scanner, detailed signal analysis, order flow panel (OB imbalance, aggressor ratio, CVD, composite score), position management, manual trade entry, signal history.
--   **Paper Trading:** Portfolio metrics, equity curve, open/closed positions, health gauges, neural status, MFE tracker, breakeven indicator, adaptive trail visualization, configuration.
+-   **Paper Trading:** Portfolio metrics, equity curve, open/closed positions, health gauges, neural status, MFE tracker, breakeven indicator, adaptive trail visualization, configuration. **Leverage Monitor row** (Avg Leverage Closed, Peak Leverage, Open Avg Leverage, Effective Exposure) powered by `/api/paper/leverage-stats`.
 -   **Analytics:** Performance metrics, equity curves, rolling performance, hourly heatmaps, per-symbol breakdowns, advanced analytics.
 -   **Training Monitor:** Visualizes live GPU training progress, status, model knowledge, loss curves, action accuracy, walk-forward validation.
 -   **Bitget Trading:** Live Bitget exchange connection, positions table, balance overview, trading toggle, recent V5 signals, risk config display.

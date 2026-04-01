@@ -273,24 +273,28 @@ router.get("/performance", async (req, res) => {
     const rolling7d = computeRolling(7 * 86400000);
     const rolling30d = computeRolling(30 * 86400000);
 
-    const leverageMap: Record<string, { trades: number; wins: number; totalR: number; totalPnlUsdt: number }> = {};
+    const leverageMap: Record<string, { trades: number; wins: number; totalR: number; totalPnlUsdt: number; leverageNum: number }> = {};
     for (const t of trades) {
-      const lev = "1x";
+      const leverageNum = (t as any).leverage ?? 1;
+      const lev = `${leverageNum}x`;
       const key = lev;
-      if (!leverageMap[key]) leverageMap[key] = { trades: 0, wins: 0, totalR: 0, totalPnlUsdt: 0 };
+      if (!leverageMap[key]) leverageMap[key] = { trades: 0, wins: 0, totalR: 0, totalPnlUsdt: 0, leverageNum };
       leverageMap[key].trades++;
       if (getR(t) > 0) leverageMap[key].wins++;
       leverageMap[key].totalR += getR(t);
       leverageMap[key].totalPnlUsdt += t.pnlUsdt ?? 0;
     }
-    const leverageBreakdown = Object.entries(leverageMap).map(([tier, l]) => ({
-      tier,
-      trades: l.trades,
-      wins: l.wins,
-      winRate: l.trades > 0 ? Math.round((l.wins / l.trades) * 1000) / 10 : 0,
-      totalR: Math.round(l.totalR * 100) / 100,
-      totalPnlUsdt: Math.round(l.totalPnlUsdt * 100) / 100,
-    }));
+    const leverageBreakdown = Object.entries(leverageMap)
+      .sort((a, b) => a[1].leverageNum - b[1].leverageNum)
+      .map(([tier, l]) => ({
+        tier,
+        leverageNum: l.leverageNum,
+        trades: l.trades,
+        wins: l.wins,
+        winRate: l.trades > 0 ? Math.round((l.wins / l.trades) * 1000) / 10 : 0,
+        totalR: Math.round(l.totalR * 100) / 100,
+        totalPnlUsdt: Math.round(l.totalPnlUsdt * 100) / 100,
+      }));
 
     res.json({
       totalTrades,
@@ -394,6 +398,80 @@ router.get("/equity", async (req, res) => {
   } catch (error) {
     console.error("Error getting equity curve:", error);
     res.status(500).json({ error: "Failed to get equity curve" });
+  }
+});
+
+router.get("/leverage-stats", async (req, res) => {
+  try {
+    const config = getConfig();
+    const portfolio = await storage.getOrCreatePortfolio();
+    const openPositions = await storage.getPositions("OPEN", 200);
+    const allTrades = await storage.getTradeHistory({ limit: 100000 });
+
+    // Open positions leverage stats
+    const openLeverages = openPositions.map(p => p.leverage ?? 1);
+    const avgOpenLeverage = openLeverages.length > 0
+      ? openLeverages.reduce((s, v) => s + v, 0) / openLeverages.length : 0;
+    const maxOpenLeverage = openLeverages.length > 0 ? Math.max(...openLeverages) : 0;
+
+    // Notional exposure from open positions
+    const totalNotionalUsdt = openPositions.reduce((s, p) => {
+      const notional = (p.qty ?? 0) * (p.entryPrice ?? 0);
+      return s + notional;
+    }, 0);
+    const equity = portfolio.currentEquityUsdt ?? 15000;
+    const exposurePct = equity > 0 ? (totalNotionalUsdt / equity) * 100 : 0;
+
+    // Closed trades leverage breakdown
+    const leverageMap: Record<number, { trades: number; wins: number; totalR: number; totalPnlUsdt: number }> = {};
+    const closedLeverages: number[] = [];
+    for (const t of allTrades) {
+      const lev = (t as any).leverage ?? 1;
+      closedLeverages.push(lev);
+      if (!leverageMap[lev]) leverageMap[lev] = { trades: 0, wins: 0, totalR: 0, totalPnlUsdt: 0 };
+      leverageMap[lev].trades++;
+      const r = (t as any).netR ?? (t as any).grossR ?? 0;
+      if (r > 0) leverageMap[lev].wins++;
+      leverageMap[lev].totalR += r;
+      leverageMap[lev].totalPnlUsdt += (t as any).pnlUsdt ?? 0;
+    }
+    const avgClosedLeverage = closedLeverages.length > 0
+      ? closedLeverages.reduce((s, v) => s + v, 0) / closedLeverages.length : 0;
+    const maxClosedLeverage = closedLeverages.length > 0 ? Math.max(...closedLeverages) : 0;
+
+    const byTier = Object.entries(leverageMap)
+      .sort((a, b) => Number(a[0]) - Number(b[0]))
+      .map(([lev, l]) => ({
+        tier: `${lev}x`,
+        leverageNum: Number(lev),
+        trades: l.trades,
+        wins: l.wins,
+        winRate: l.trades > 0 ? Math.round((l.wins / l.trades) * 1000) / 10 : 0,
+        totalR: Math.round(l.totalR * 100) / 100,
+        totalPnlUsdt: Math.round(l.totalPnlUsdt * 100) / 100,
+      }));
+
+    res.json({
+      open: {
+        count: openPositions.length,
+        avgLeverage: Math.round(avgOpenLeverage * 10) / 10,
+        maxLeverage: maxOpenLeverage,
+        totalNotionalUsdt: Math.round(totalNotionalUsdt * 100) / 100,
+        exposurePct: Math.round(exposurePct * 10) / 10,
+      },
+      closed: {
+        count: allTrades.length,
+        avgLeverage: Math.round(avgClosedLeverage * 100) / 100,
+        maxLeverage: maxClosedLeverage,
+        byTier,
+      },
+      configTiers: config.leverageTiers,
+      maxConfigLeverage: config.maxLeverage,
+      leverageEnabled: config.leverageEnabled,
+    });
+  } catch (err: any) {
+    console.error("Error getting leverage stats:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
