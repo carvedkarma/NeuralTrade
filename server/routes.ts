@@ -5507,7 +5507,8 @@ Provide your analysis in this JSON format:
         .where(and(eq(candles.symbol, symbol), eq(candles.timeframe, "15m")))
         .orderBy(desc(candles.timestamp))
         .limit(20);
-      if (rows.length < 2) return null;
+      // Need at least 15 candles to produce 14 true-range values for strict ATR14
+      if (rows.length < 15) return null;
       // Reverse to chronological order (oldest first)
       rows.reverse();
       const trs: number[] = [];
