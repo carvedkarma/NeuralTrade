@@ -903,9 +903,9 @@ export async function registerRoutes(
       }
 
       const todayTotal = rows.length;
-      const longBias = (longEntered + shortEntered) > 0
-        ? Math.round((longEntered / (longEntered + shortEntered)) * 100) : 0;
-      const shortBias = 100 - longBias;
+      const totalDirectional = longEntered + shortEntered;
+      const longBias = totalDirectional > 0 ? Math.round((longEntered / totalDirectional) * 100) : 0;
+      const shortBias = totalDirectional > 0 ? Math.round((shortEntered / totalDirectional) * 100) : 0;
 
       // Get regime grid from live regime states
       const regimeStates = await getAllRegimeStates();
