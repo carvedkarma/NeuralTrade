@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   Cpu,
   Wallet,
@@ -562,27 +563,34 @@ export default function SettingsPage() {
           V5 score threshold → exchange leverage applied to both qty and initialRiskUsdt. Max: {paperConfig?.maxLeverage ?? 50}x
         </p>
         {paperConfig?.leverageTiers && paperConfig.leverageTiers.length > 0 ? (
-          <div className="space-y-1.5">
-            {paperConfig.leverageTiers.map((tier: { minScore: number; leverage: number }, i: number) => {
-              const nextTier = paperConfig.leverageTiers[i + 1];
-              const rangeLabel = nextTier
-                ? `${tier.minScore} – ${nextTier.minScore}`
-                : `≥ ${tier.minScore}`;
-              const pct = (tier.leverage / (paperConfig.maxLeverage ?? 50)) * 100;
-              return (
-                <div key={i} className="flex items-center gap-3" data-testid={`leverage-tier-${i}`}>
-                  <span className="text-[10px] font-mono text-muted-foreground w-20 shrink-0">score {rangeLabel}</span>
-                  <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-amber-400/70"
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                  <span className="text-xs font-bold text-amber-400 w-10 text-right" data-testid={`leverage-value-${i}`}>{tier.leverage}x</span>
-                </div>
-              );
-            })}
-          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="text-xs">Min V5 Score</TableHead>
+                <TableHead className="text-xs text-center">Leverage</TableHead>
+                <TableHead className="text-xs text-right">At 1.5% Base Risk</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {paperConfig.leverageTiers.map((tier: { minScore: number; leverage: number }, i: number) => {
+                const nextTier = paperConfig.leverageTiers[i + 1];
+                const rangeLabel = nextTier ? `${tier.minScore} – ${nextTier.minScore}` : `≥ ${tier.minScore}`;
+                const effectiveRisk = (tier.leverage * 1.5).toFixed(1);
+                const riskColor = tier.leverage >= 50 ? "text-red-400"
+                  : tier.leverage >= 35 ? "text-orange-400"
+                  : tier.leverage >= 25 ? "text-amber-400"
+                  : tier.leverage >= 15 ? "text-yellow-400"
+                  : "text-muted-foreground";
+                return (
+                  <TableRow key={i} data-testid={`leverage-tier-${i}`}>
+                    <TableCell className="text-xs font-mono text-muted-foreground">{rangeLabel}</TableCell>
+                    <TableCell className={`text-sm font-bold text-center ${riskColor}`} data-testid={`leverage-value-${i}`}>{tier.leverage}x</TableCell>
+                    <TableCell className={`text-xs text-right font-mono ${riskColor}`}>{effectiveRisk}%</TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
         ) : (
           <p className="text-xs text-muted-foreground/50">No leverage tiers configured</p>
         )}

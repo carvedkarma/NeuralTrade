@@ -48,6 +48,12 @@ import {
 import { CloseButton, PartialCloseButton, EditSLTPDialog } from "@/components/position-actions";
 import { usePingMonitor } from "@/hooks/use-ping";
 import { PingBadge } from "@/components/ping-badge";
+import {
+  Tooltip as ShadTooltip,
+  TooltipContent,
+  TooltipTrigger,
+  TooltipProvider,
+} from "@/components/ui/tooltip";
 
 interface MonteCarloStats {
   medianFinalEquity: number;
@@ -755,11 +761,34 @@ function PositionPriceGauge({ pos, livePrice, health, isFlashing, isNew, isGlowi
           {pos.source === "v5_signal" && (
             <Badge className="no-default-hover-elevate no-default-active-elevate text-[10px] bg-cyan-500/20 text-cyan-400 px-1.5">V5</Badge>
           )}
-          {pos.leverage != null && pos.leverage > 1 && (
-            <Badge variant="outline" className="text-amber-400 border-amber-400/30 text-[10px] px-1.5" data-testid="badge-leverage">
-              {pos.leverage}x
-            </Badge>
-          )}
+          {pos.leverage != null && (() => {
+            const lev = pos.leverage;
+            const tierColor = lev >= 50 ? "text-red-400 border-red-400/40"
+              : lev >= 35 ? "text-orange-400 border-orange-400/40"
+              : lev >= 25 ? "text-amber-400 border-amber-400/40"
+              : lev >= 20 ? "text-yellow-400 border-yellow-400/40"
+              : lev >= 15 ? "text-emerald-400 border-emerald-400/40"
+              : "text-muted-foreground border-border/50";
+            const notionalUsdt = (pos.qty ?? 0) * (pos.entryPrice ?? 0);
+            const riskUsdt = pos.initialRiskUsdt ?? 0;
+            return (
+              <TooltipProvider>
+                <ShadTooltip>
+                  <TooltipTrigger asChild>
+                    <Badge variant="outline" className={`${tierColor} text-[10px] px-1.5 cursor-default`} data-testid="badge-leverage">
+                      {lev}x
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="text-xs space-y-0.5">
+                    <p><span className="text-muted-foreground">Entry:</span> ${(pos.entryPrice ?? 0).toFixed(pos.entryPrice && pos.entryPrice > 100 ? 2 : 4)}</p>
+                    <p><span className="text-muted-foreground">SL:</span> {pos.stopLoss ? `$${pos.stopLoss.toFixed(pos.stopLoss > 100 ? 2 : 4)}` : "—"}</p>
+                    <p><span className="text-muted-foreground">Notional:</span> ${notionalUsdt.toFixed(2)}</p>
+                    <p><span className="text-muted-foreground">Risk:</span> ${riskUsdt.toFixed(2)}</p>
+                  </TooltipContent>
+                </ShadTooltip>
+              </TooltipProvider>
+            );
+          })()}
           {(pos.trailMode === "atr" || pos.trailMode === "atr_runner") && (
             <Badge variant="outline" className="text-purple-400 border-purple-400/40 text-[10px] px-1.5 gap-1 animate-pulse" data-testid="badge-trail-active">
               <TrendingUp className="w-2.5 h-2.5" />
@@ -1274,8 +1303,15 @@ export default function PaperTrading() {
   });
 
   const { data: leverageStats } = useQuery<{
-    open: { count: number; avgLeverage: number; maxLeverage: number; totalNotionalUsdt: number; exposurePct: number };
-    closed: { count: number; avgLeverage: number; maxLeverage: number; byTier: Array<{ tier: string; leverageNum: number; trades: number; wins: number; winRate: number; totalR: number; totalPnlUsdt: number }> };
+    byTier: Array<{ tier: string; leverageNum: number; trades: number; wins: number; winRate: number; totalR: number; avgR: number; totalPnlUsdt: number }>;
+    avgLeverage: number;
+    bestTier: string | null;
+    currentOpenAvgLeverage: number;
+    currentOpenMaxLeverage: number;
+    totalExposurePct: number;
+    openPositionCount: number;
+    totalNotionalUsdt: number;
+    closedCount: number;
     configTiers: Array<{ minScore: number; leverage: number }>;
     maxConfigLeverage: number;
     leverageEnabled: boolean;
@@ -1606,41 +1642,41 @@ export default function PaperTrading() {
         <div className="glass-card rounded-md px-4 py-3" data-testid="kpi-avg-leverage">
           <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Avg Leverage (Closed)</p>
           <p className="number-mono text-lg font-bold mt-0.5 text-cyan-400" data-testid="text-avg-leverage">
-            {leverageStats ? `${leverageStats.closed.avgLeverage.toFixed(1)}x` : "—"}
+            {leverageStats ? `${leverageStats.avgLeverage.toFixed(1)}x` : "—"}
           </p>
           <p className="text-[10px] text-muted-foreground/50 mt-0.5">
-            {leverageStats ? `${leverageStats.closed.count} trades` : "loading..."}
+            {leverageStats ? `${leverageStats.closedCount} trades` : "loading..."}
           </p>
         </div>
 
         <div className="glass-card rounded-md px-4 py-3" data-testid="kpi-max-leverage">
-          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Peak Leverage</p>
-          <p className={`number-mono text-lg font-bold mt-0.5 ${(leverageStats?.closed.maxLeverage ?? 0) >= 25 ? "text-amber-400" : "text-emerald-400"}`} data-testid="text-max-leverage">
-            {leverageStats ? `${leverageStats.closed.maxLeverage}x` : "—"}
+          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Best Tier (Avg R)</p>
+          <p className="number-mono text-lg font-bold mt-0.5 text-amber-400" data-testid="text-max-leverage">
+            {leverageStats?.bestTier ?? "—"}
           </p>
           <p className="text-[10px] text-muted-foreground/50 mt-0.5">
-            max configured: {leverageStats ? `${leverageStats.maxConfigLeverage}x` : "—"}
+            max config: {leverageStats ? `${leverageStats.maxConfigLeverage}x` : "—"}
           </p>
         </div>
 
         <div className="glass-card rounded-md px-4 py-3" data-testid="kpi-open-leverage">
           <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Open Avg Leverage</p>
-          <p className={`number-mono text-lg font-bold mt-0.5 ${(leverageStats?.open.avgLeverage ?? 0) > 0 ? "text-violet-400" : "text-muted-foreground"}`} data-testid="text-open-leverage">
-            {leverageStats && leverageStats.open.count > 0 ? `${leverageStats.open.avgLeverage.toFixed(1)}x` : "—"}
+          <p className={`number-mono text-lg font-bold mt-0.5 ${(leverageStats?.currentOpenAvgLeverage ?? 0) > 0 ? "text-violet-400" : "text-muted-foreground"}`} data-testid="text-open-leverage">
+            {leverageStats && leverageStats.openPositionCount > 0 ? `${leverageStats.currentOpenAvgLeverage.toFixed(1)}x` : "—"}
           </p>
           <p className="text-[10px] text-muted-foreground/50 mt-0.5">
-            {leverageStats?.open.count ?? 0} open position{leverageStats?.open.count !== 1 ? "s" : ""}
+            {leverageStats?.openPositionCount ?? 0} open position{(leverageStats?.openPositionCount ?? 0) !== 1 ? "s" : ""}
           </p>
         </div>
 
         <div className="glass-card rounded-md px-4 py-3" data-testid="kpi-effective-exposure">
           <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Effective Exposure</p>
-          <p className={`number-mono text-lg font-bold mt-0.5 ${(leverageStats?.open.exposurePct ?? 0) > 200 ? "text-amber-400" : "text-emerald-400"}`} data-testid="text-effective-exposure">
-            {leverageStats && leverageStats.open.count > 0 ? `${leverageStats.open.exposurePct.toFixed(1)}%` : "0%"}
+          <p className={`number-mono text-lg font-bold mt-0.5 ${(leverageStats?.totalExposurePct ?? 0) > 200 ? "text-amber-400" : "text-emerald-400"}`} data-testid="text-effective-exposure">
+            {leverageStats && leverageStats.openPositionCount > 0 ? `${leverageStats.totalExposurePct.toFixed(1)}%` : "0%"}
           </p>
           <p className="text-[10px] text-muted-foreground/50 mt-0.5">
-            {leverageStats && leverageStats.open.count > 0
-              ? `$${(leverageStats.open.totalNotionalUsdt / 1000).toFixed(1)}k notional`
+            {leverageStats && leverageStats.openPositionCount > 0
+              ? `$${(leverageStats.totalNotionalUsdt / 1000).toFixed(1)}k notional`
               : "no open exposure"}
           </p>
         </div>

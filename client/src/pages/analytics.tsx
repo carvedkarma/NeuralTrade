@@ -15,6 +15,7 @@ import {
 import { Card } from "@/components/ui/card";
 import { Slider } from "@/components/ui/slider";
 import { useState } from "react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 
 interface PerformanceData {
   totalTrades: number;
@@ -920,6 +921,144 @@ function computeHistogram(rValues: number[]) {
   return bins;
 }
 
+type LeverageTier = { tier: string; leverageNum?: number; trades: number; wins: number; winRate: number; totalR: number; avgR?: number; totalPnlUsdt: number };
+
+function LeverageIntelligenceSection({
+  leverageStats,
+  tiers,
+  maxConfigLeverage,
+}: {
+  leverageStats: {
+    avgLeverage: number; bestTier: string | null; closedCount: number;
+    configTiers?: Array<{ minScore: number; leverage: number }>;
+  } | null;
+  tiers: LeverageTier[];
+  maxConfigLeverage: number;
+}) {
+  const [levOpen, setLevOpen] = useState(true);
+
+  return (
+    <div className="glass-card rounded-md p-4 space-y-3" data-testid="leverage-analysis">
+      <button
+        className="flex items-center justify-between w-full text-sm font-semibold hover:text-white transition-colors"
+        onClick={() => setLevOpen(v => !v)}
+        data-testid="btn-toggle-leverage"
+      >
+        <span className="flex items-center gap-1.5">
+          <Scale className="w-4 h-4" />
+          Leverage Intelligence
+        </span>
+        {levOpen ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+      </button>
+
+      {levOpen && (
+        <div className="space-y-4">
+          {/* KPI row */}
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-background/30 rounded p-3">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Avg Leverage Used</p>
+              <p className="number-mono text-base font-bold text-cyan-400" data-testid="text-analytics-avg-lev">
+                {leverageStats ? `${leverageStats.avgLeverage.toFixed(1)}x` : tiers.length > 0
+                  ? `${(tiers.reduce((s, l) => s + (l.leverageNum ?? 1) * l.trades, 0) / tiers.reduce((s, l) => s + l.trades, 0)).toFixed(1)}x`
+                  : "1.0x"}
+              </p>
+              <p className="text-[10px] text-muted-foreground/50">{leverageStats?.closedCount ?? 0} closed trades</p>
+            </div>
+            <div className="bg-background/30 rounded p-3">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Best Tier (Avg R)</p>
+              <p className="number-mono text-base font-bold text-amber-400" data-testid="text-analytics-best-tier">
+                {leverageStats?.bestTier ?? (tiers.length > 0 ? tiers.reduce((a, b) => (b.avgR ?? 0) > (a.avgR ?? 0) ? b : a).tier : "—")}
+              </p>
+              <p className="text-[10px] text-muted-foreground/50">
+                {tiers.length > 0 ? (() => {
+                  const best = tiers.length > 0 ? tiers.reduce((a, b) => (b.avgR ?? 0) > (a.avgR ?? 0) ? b : a) : null;
+                  return best ? `${best.avgR != null ? (best.avgR >= 0 ? "+" : "") + best.avgR.toFixed(3) : ""}R avg (${best.trades}t)` : "no data";
+                })() : "no data"}
+              </p>
+            </div>
+            <div className="bg-background/30 rounded p-3">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Max Config Lev</p>
+              <p className="number-mono text-base font-bold text-muted-foreground" data-testid="text-analytics-max-lev">
+                {maxConfigLeverage}x
+              </p>
+              <p className="text-[10px] text-muted-foreground/50">{tiers.length} tier{tiers.length !== 1 ? "s" : ""} active</p>
+            </div>
+          </div>
+
+          {/* Bar chart: Avg R by tier */}
+          {tiers.length > 0 && (
+            <div>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-2">Avg R by Tier</p>
+              <div className="h-28">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={tiers} margin={{ top: 2, right: 8, bottom: 2, left: 8 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                    <XAxis dataKey="tier" tick={{ fontSize: 10, fill: "#94a3b8" }} />
+                    <YAxis tick={{ fontSize: 10, fill: "#94a3b8" }} />
+                    <Tooltip
+                      contentStyle={{ background: "hsl(var(--background))", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "6px", fontSize: 11 }}
+                      formatter={(v: number) => [v.toFixed(4), "Avg R"]}
+                    />
+                    <Bar dataKey="avgR" radius={[3, 3, 0, 0]}>
+                      {tiers.map((entry, idx) => (
+                        <Cell key={idx} fill={(entry.avgR ?? 0) >= 0 ? "#34d399" : "#f87171"} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          )}
+
+          {/* Performance table */}
+          {tiers.length > 0 && (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="text-xs">Tier</TableHead>
+                  <TableHead className="text-xs text-center">Trades</TableHead>
+                  <TableHead className="text-xs text-center">Win Rate</TableHead>
+                  <TableHead className="text-xs text-right">Avg R</TableHead>
+                  <TableHead className="text-xs text-right">Total R</TableHead>
+                  <TableHead className="text-xs text-right">P&L (USDT)</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {tiers.map((l) => (
+                  <TableRow key={l.tier}>
+                    <TableCell className="text-sm font-mono text-amber-400">{l.tier}</TableCell>
+                    <TableCell className="text-sm text-center number-mono">{l.trades}</TableCell>
+                    <TableCell className={`text-sm text-center number-mono ${getWinRateColor(l.winRate)}`}>{l.winRate.toFixed(1)}%</TableCell>
+                    <TableCell className={`text-sm text-right number-mono ${(l.avgR ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {l.avgR != null ? `${l.avgR >= 0 ? "+" : ""}${l.avgR.toFixed(3)}R` : "—"}
+                    </TableCell>
+                    <TableCell className={`text-sm text-right number-mono ${l.totalR >= 0 ? "text-emerald-400" : "text-red-400"}`}>{l.totalR >= 0 ? "+" : ""}{l.totalR.toFixed(2)}R</TableCell>
+                    <TableCell className={`text-sm text-right number-mono ${l.totalPnlUsdt >= 0 ? "text-emerald-400" : "text-red-400"}`}>{l.totalPnlUsdt >= 0 ? "+" : ""}{l.totalPnlUsdt.toFixed(2)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+
+          {/* Config tiers reference */}
+          {leverageStats?.configTiers && (
+            <div>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-2">Score → Leverage Mapping</p>
+              <div className="flex flex-wrap gap-1.5">
+                {leverageStats.configTiers.map((t, i) => (
+                  <span key={i} className="text-[10px] font-mono bg-background/40 border border-white/10 rounded px-2 py-0.5 text-muted-foreground">
+                    ≥{t.minScore} → <span className="text-amber-400">{t.leverage}x</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Analytics() {
   const [pnlView, setPnlView] = useState<"monthly" | "weekly">("monthly");
   const [source, setSource] = useState<"live" | "paper">("paper");
@@ -952,8 +1091,15 @@ export default function Analytics() {
   });
 
   const { data: leverageStats } = useQuery<{
-    open: { count: number; avgLeverage: number; maxLeverage: number; totalNotionalUsdt: number; exposurePct: number };
-    closed: { count: number; avgLeverage: number; maxLeverage: number; byTier: Array<{ tier: string; leverageNum: number; trades: number; wins: number; winRate: number; totalR: number; totalPnlUsdt: number }> };
+    byTier: Array<{ tier: string; leverageNum: number; trades: number; wins: number; winRate: number; totalR: number; avgR: number; totalPnlUsdt: number }>;
+    avgLeverage: number;
+    bestTier: string | null;
+    currentOpenAvgLeverage: number;
+    currentOpenMaxLeverage: number;
+    totalExposurePct: number;
+    openPositionCount: number;
+    totalNotionalUsdt: number;
+    closedCount: number;
     configTiers: Array<{ minScore: number; leverage: number }>;
     maxConfigLeverage: number;
     leverageEnabled: boolean;
@@ -1344,108 +1490,16 @@ export default function Analytics() {
         </div>
       )}
 
-      {source === "paper" && (perf.leverageBreakdown?.length ?? 0) + (leverageStats?.configTiers?.length ?? 0) > 0 && (
-        <div className="glass-card rounded-md p-4 space-y-4" data-testid="leverage-analysis">
-          <p className="text-sm font-semibold">
-            <Scale className="w-4 h-4 inline mr-1" />
-            Leverage Intelligence
-          </p>
-
-          {/* KPI row */}
-          <div className="grid grid-cols-3 gap-3">
-            <div className="bg-background/30 rounded p-3">
-              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Avg Leverage Used</p>
-              <p className="number-mono text-base font-bold text-cyan-400" data-testid="text-analytics-avg-lev">
-                {leverageStats ? `${leverageStats.closed.avgLeverage.toFixed(1)}x` : perf.leverageBreakdown && perf.leverageBreakdown.length > 0
-                  ? `${(perf.leverageBreakdown.reduce((s, l) => s + (l.leverageNum ?? 1) * l.trades, 0) / perf.leverageBreakdown.reduce((s, l) => s + l.trades, 0)).toFixed(1)}x`
-                  : "1.0x"}
-              </p>
-              <p className="text-[10px] text-muted-foreground/50">{leverageStats?.closed.count ?? 0} closed trades</p>
-            </div>
-            <div className="bg-background/30 rounded p-3">
-              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Peak Leverage</p>
-              <p className={`number-mono text-base font-bold ${(leverageStats?.closed.maxLeverage ?? 0) >= 25 ? "text-amber-400" : "text-emerald-400"}`} data-testid="text-analytics-max-lev">
-                {leverageStats ? `${leverageStats.closed.maxLeverage}x` : "—"}
-              </p>
-              <p className="text-[10px] text-muted-foreground/50">max config: {leverageStats?.maxConfigLeverage ?? 50}x</p>
-            </div>
-            <div className="bg-background/30 rounded p-3">
-              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Best Tier (R)</p>
-              {(() => {
-                const tiers = leverageStats?.closed.byTier ?? perf.leverageBreakdown ?? [];
-                const best = tiers.length > 0 ? tiers.reduce((a, b) => b.totalR > a.totalR ? b : a) : null;
-                return (
-                  <>
-                    <p className="number-mono text-base font-bold text-amber-400" data-testid="text-analytics-best-tier">{best?.tier ?? "—"}</p>
-                    <p className="text-[10px] text-muted-foreground/50">{best ? `+${best.totalR.toFixed(2)}R (${best.trades}t)` : "no data"}</p>
-                  </>
-                );
-              })()}
-            </div>
-          </div>
-
-          {/* Bar chart: Trades by leverage tier */}
-          {(leverageStats?.closed.byTier ?? perf.leverageBreakdown ?? []).length > 0 && (
-            <div>
-              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-2">Trades by Tier</p>
-              <div className="h-28">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={leverageStats?.closed.byTier ?? perf.leverageBreakdown ?? []} margin={{ top: 2, right: 8, bottom: 2, left: 8 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-                    <XAxis dataKey="tier" tick={{ fontSize: 10, fill: "#94a3b8" }} />
-                    <YAxis tick={{ fontSize: 10, fill: "#94a3b8" }} />
-                    <Tooltip
-                      contentStyle={{ background: "hsl(var(--background))", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "6px", fontSize: 11 }}
-                      formatter={(v: number, name: string) => [v, name === "trades" ? "Trades" : "Win%"]}
-                    />
-                    <Bar dataKey="trades" fill="#06b6d4" radius={[3, 3, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          )}
-
-          {/* Performance table */}
-          {(leverageStats?.closed.byTier ?? perf.leverageBreakdown ?? []).length > 0 && (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="text-xs">Tier</TableHead>
-                  <TableHead className="text-xs text-center">Trades</TableHead>
-                  <TableHead className="text-xs text-center">Win Rate</TableHead>
-                  <TableHead className="text-xs text-right">Total R</TableHead>
-                  <TableHead className="text-xs text-right">P&L (USDT)</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {(leverageStats?.closed.byTier ?? perf.leverageBreakdown ?? []).map((l) => (
-                  <TableRow key={l.tier}>
-                    <TableCell className="text-sm font-mono text-amber-400">{l.tier}</TableCell>
-                    <TableCell className="text-sm text-center number-mono">{l.trades}</TableCell>
-                    <TableCell className={`text-sm text-center number-mono ${getWinRateColor(l.winRate)}`}>{l.winRate.toFixed(1)}%</TableCell>
-                    <TableCell className={`text-sm text-right number-mono ${l.totalR >= 0 ? "text-emerald-400" : "text-red-400"}`}>{l.totalR >= 0 ? "+" : ""}{l.totalR.toFixed(2)}R</TableCell>
-                    <TableCell className={`text-sm text-right number-mono ${l.totalPnlUsdt >= 0 ? "text-emerald-400" : "text-red-400"}`}>{l.totalPnlUsdt >= 0 ? "+" : ""}{l.totalPnlUsdt.toFixed(2)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-
-          {/* Config tiers reference */}
-          {leverageStats?.configTiers && (
-            <div>
-              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-2">Score → Leverage Mapping</p>
-              <div className="flex flex-wrap gap-1.5">
-                {leverageStats.configTiers.map((t, i) => (
-                  <span key={i} className="text-[10px] font-mono bg-background/40 border border-white/10 rounded px-2 py-0.5 text-muted-foreground">
-                    ≥{t.minScore} → <span className="text-amber-400">{t.leverage}x</span>
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      {source === "paper" && (perf.leverageBreakdown?.length ?? 0) + (leverageStats?.configTiers?.length ?? 0) > 0 && (() => {
+        const tiers = leverageStats?.byTier ?? perf.leverageBreakdown ?? [];
+        return (
+          <LeverageIntelligenceSection
+            leverageStats={leverageStats ?? null}
+            tiers={tiers}
+            maxConfigLeverage={leverageStats?.maxConfigLeverage ?? 50}
+          />
+        );
+      })()}
     </div>
   );
 }

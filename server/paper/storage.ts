@@ -1,6 +1,6 @@
 import { db } from "../db";
 import { paperPortfolio, paperPositions, paperTrades, paperEquityCurve, paperTradeHistory } from "@shared/schema";
-import type { PaperPortfolio, PaperPosition, PaperTrade, PaperEquityCurve } from "@shared/schema";
+import type { PaperPortfolio, PaperPosition, PaperTrade, PaperEquityCurve, PaperTradeHistory } from "@shared/schema";
 import { eq, desc, gte, and } from "drizzle-orm";
 import { getConfig } from "./config";
 
@@ -179,15 +179,13 @@ export async function recordTradeClose(record: TradeCloseRecord): Promise<void> 
   try {
     // Auto-lookup leverage from paper_positions using positionId
     let leverage = 1;
-    try {
-      const posRows = await db.select({ leverage: paperPositions.leverage })
-        .from(paperPositions)
-        .where(eq(paperPositions.id, record.positionId))
-        .limit(1);
-      if (posRows.length > 0 && posRows[0].leverage != null) {
-        leverage = posRows[0].leverage;
-      }
-    } catch (_) { /* fallback to 1x */ }
+    const posRows = await db.select({ leverage: paperPositions.leverage })
+      .from(paperPositions)
+      .where(eq(paperPositions.id, record.positionId))
+      .limit(1);
+    if (posRows.length > 0 && posRows[0].leverage != null) {
+      leverage = posRows[0].leverage;
+    }
 
     await db.insert(paperTradeHistory).values({
       positionId: record.positionId,
@@ -220,7 +218,7 @@ export async function recordTradeClose(record: TradeCloseRecord): Promise<void> 
   }
 }
 
-export async function getTradeHistory(options?: { symbol?: string; limit?: number; offset?: number }): Promise<any[]> {
+export async function getTradeHistory(options?: { symbol?: string; limit?: number; offset?: number }): Promise<PaperTradeHistory[]> {
   const conditions = [];
   if (options?.symbol) conditions.push(eq(paperTradeHistory.symbol, options.symbol));
   return db.select()

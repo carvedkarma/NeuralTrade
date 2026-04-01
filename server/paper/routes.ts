@@ -408,63 +408,64 @@ router.get("/leverage-stats", async (req, res) => {
     const openPositions = await storage.getPositions("OPEN", 200);
     const allTrades = await storage.getTradeHistory({ limit: 100000 });
 
-    // Open positions leverage stats
+    // Open positions stats
     const openLeverages = openPositions.map(p => p.leverage ?? 1);
-    const avgOpenLeverage = openLeverages.length > 0
-      ? openLeverages.reduce((s, v) => s + v, 0) / openLeverages.length : 0;
-    const maxOpenLeverage = openLeverages.length > 0 ? Math.max(...openLeverages) : 0;
+    const currentOpenAvgLeverage = openLeverages.length > 0
+      ? Math.round((openLeverages.reduce((s, v) => s + v, 0) / openLeverages.length) * 10) / 10 : 0;
+    const currentOpenMaxLeverage = openLeverages.length > 0 ? Math.max(...openLeverages) : 0;
 
-    // Notional exposure from open positions
-    const totalNotionalUsdt = openPositions.reduce((s, p) => {
-      const notional = (p.qty ?? 0) * (p.entryPrice ?? 0);
-      return s + notional;
-    }, 0);
+    const totalNotionalUsdt = openPositions.reduce((s, p) => s + (p.qty ?? 0) * (p.entryPrice ?? 0), 0);
     const equity = portfolio.currentEquityUsdt ?? 15000;
-    const exposurePct = equity > 0 ? (totalNotionalUsdt / equity) * 100 : 0;
+    const totalExposurePct = Math.round(equity > 0 ? (totalNotionalUsdt / equity) * 100 * 10 : 0) / 10;
 
-    // Closed trades leverage breakdown
-    const leverageMap: Record<number, { trades: number; wins: number; totalR: number; totalPnlUsdt: number }> = {};
+    // Closed trades — build per-tier bucket
+    type TierBucket = { trades: number; wins: number; totalR: number; totalPnlUsdt: number };
+    const leverageMap: Record<number, TierBucket> = {};
     const closedLeverages: number[] = [];
+
     for (const t of allTrades) {
-      const lev = (t as any).leverage ?? 1;
+      const lev = t.leverage ?? 1;
+      const r = t.netR ?? t.grossR ?? 0;
       closedLeverages.push(lev);
       if (!leverageMap[lev]) leverageMap[lev] = { trades: 0, wins: 0, totalR: 0, totalPnlUsdt: 0 };
       leverageMap[lev].trades++;
-      const r = (t as any).netR ?? (t as any).grossR ?? 0;
       if (r > 0) leverageMap[lev].wins++;
       leverageMap[lev].totalR += r;
-      leverageMap[lev].totalPnlUsdt += (t as any).pnlUsdt ?? 0;
+      leverageMap[lev].totalPnlUsdt += t.pnlUsdt ?? 0;
     }
-    const avgClosedLeverage = closedLeverages.length > 0
-      ? closedLeverages.reduce((s, v) => s + v, 0) / closedLeverages.length : 0;
-    const maxClosedLeverage = closedLeverages.length > 0 ? Math.max(...closedLeverages) : 0;
+
+    const avgLeverage = closedLeverages.length > 0
+      ? Math.round((closedLeverages.reduce((s, v) => s + v, 0) / closedLeverages.length) * 100) / 100 : 0;
 
     const byTier = Object.entries(leverageMap)
       .sort((a, b) => Number(a[0]) - Number(b[0]))
-      .map(([lev, l]) => ({
-        tier: `${lev}x`,
-        leverageNum: Number(lev),
-        trades: l.trades,
-        wins: l.wins,
-        winRate: l.trades > 0 ? Math.round((l.wins / l.trades) * 1000) / 10 : 0,
-        totalR: Math.round(l.totalR * 100) / 100,
-        totalPnlUsdt: Math.round(l.totalPnlUsdt * 100) / 100,
-      }));
+      .map(([lev, l]) => {
+        const totalR = Math.round(l.totalR * 100) / 100;
+        const avgR = l.trades > 0 ? Math.round((l.totalR / l.trades) * 10000) / 10000 : 0;
+        return {
+          tier: `${lev}x`,
+          leverageNum: Number(lev),
+          trades: l.trades,
+          wins: l.wins,
+          winRate: l.trades > 0 ? Math.round((l.wins / l.trades) * 1000) / 10 : 0,
+          totalR,
+          avgR,
+          totalPnlUsdt: Math.round(l.totalPnlUsdt * 100) / 100,
+        };
+      });
+
+    const bestTier = byTier.length > 0 ? byTier.reduce((a, b) => b.avgR > a.avgR ? b : a).tier : null;
 
     res.json({
-      open: {
-        count: openPositions.length,
-        avgLeverage: Math.round(avgOpenLeverage * 10) / 10,
-        maxLeverage: maxOpenLeverage,
-        totalNotionalUsdt: Math.round(totalNotionalUsdt * 100) / 100,
-        exposurePct: Math.round(exposurePct * 10) / 10,
-      },
-      closed: {
-        count: allTrades.length,
-        avgLeverage: Math.round(avgClosedLeverage * 100) / 100,
-        maxLeverage: maxClosedLeverage,
-        byTier,
-      },
+      byTier,
+      avgLeverage,
+      bestTier,
+      currentOpenAvgLeverage,
+      currentOpenMaxLeverage,
+      totalExposurePct,
+      openPositionCount: openPositions.length,
+      totalNotionalUsdt: Math.round(totalNotionalUsdt * 100) / 100,
+      closedCount: allTrades.length,
       configTiers: config.leverageTiers,
       maxConfigLeverage: config.maxLeverage,
       leverageEnabled: config.leverageEnabled,
