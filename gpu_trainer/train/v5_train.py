@@ -6953,7 +6953,6 @@ def train_v5_model(
              f"LONG={action_class_weights[1]:.3f} SHORT={action_class_weights[2]:.3f}")
 
     if short_oversample and n_long > 0:
-        import math
         min_frac = float(short_min_fraction)
         target_short = int(math.ceil(n_long * min_frac / max(1.0 - min_frac, 1e-8)))
         if n_short < target_short:
