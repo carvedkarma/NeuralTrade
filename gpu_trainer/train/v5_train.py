@@ -813,18 +813,19 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
     action_logits = outputs['action_logits'][valid]
     action_true = batch['action_label'][valid]
 
-    # Specialist training: relabel the opposite direction to HOLD so each specialist
-    # model learns only one direction vs HOLD.  Uses a clone so the original batch
-    # tensor (shared across training-loop dynamic-label logic) is not modified.
-    # SHORT specialist: LONG(1) → HOLD(0); model sees only SHORT(2) and HOLD(0).
-    # LONG  specialist: SHORT(2) → HOLD(0); model sees only LONG(1) and HOLD(0).
-    HOLD_IDX_S, LONG_IDX_S, SHORT_IDX_S = 0, 1, 2
-    if specialist_mode == 'short':
-        action_true = action_true.clone()
-        action_true[action_true == LONG_IDX_S] = HOLD_IDX_S
-    elif specialist_mode == 'long':
-        action_true = action_true.clone()
-        action_true[action_true == SHORT_IDX_S] = HOLD_IDX_S
+    # Specialist training: NO label relabeling.
+    # Previously LONG→HOLD (short specialist) and SHORT→HOLD (long specialist) were
+    # applied here to create binary training sets.  This caused 67% HOLD labels (vs 33%
+    # normal), making HOLD the dominant CE attractor that side_bal_weight could not
+    # overcome.  Additionally, the suppressed class had 0.0 in the KL target, which
+    # zero-outs all KL gradient via KL(target||pred) with target=0 → 0*log(0/pred)=0.
+    # Result: SHORT specialist collapsed to 100% HOLD; LONG specialist collapsed to
+    # 100% SHORT (warm-start logit drift with no CE or KL anchor).
+    #
+    # Fix: keep all 3 classes in CE labels (33/33/33 balance preserved).
+    # The specialist direction is enforced solely by (a) asymmetric KL targets that
+    # strongly favour the specialist direction and (b) the specialist scoring branch in
+    # compute_v5_scores which forces all output signals to the specialist side.
 
     # B2: Return-magnitude CE upweighting (Task #56).
     # High-return bars (bull/bear) dominate less than 13% of data but carry the direction signal.
@@ -889,25 +890,27 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
     _chop_side = (1.0 - _chop_h) / 2.0
     if specialist_mode == 'short':
         # SHORT specialist KL targets: [hold, long, short].
-        # bull bars: price rose → originally LONG labels, now relabeled HOLD → mostly HOLD output.
-        # bear bars: price fell → SHORT labels intact → strong SHORT conviction.
-        # chop bars: mixed, slight SHORT lean vs HOLD.
-        # long slot is always 0.0: pressure p_long → 0 so specialist stays unidirectional.
+        # Strongly favour SHORT on bear bars, suppress LONG everywhere.
+        # LONG slot uses 0.03 (not 0.0): KL(target||pred) gives zero gradient when
+        # target=0 (0 * log(0/pred) = 0), so the LONG logit would be completely
+        # unanchored and could drift via warm-start or optimizer momentum.
+        # 0.03 is small enough to strongly discourage p_long while keeping a live
+        # gradient that anchors the logit near a very small but finite value.
+        # All rows sum to 1.00.
         _3CLS_TARGETS = {
-            'bull':  [0.60, 0.0, 0.40],
-            'bear':  [0.20, 0.0, 0.80],
-            'chop':  [0.55, 0.0, 0.45],
+            'bull':  [0.57, 0.03, 0.40],   # bull: HOLD dominant, SHORT floor, LONG suppressed
+            'bear':  [0.17, 0.03, 0.80],   # bear: strong SHORT, minimal HOLD, LONG suppressed
+            'chop':  [0.52, 0.03, 0.45],   # chop: slight SHORT lean vs HOLD, LONG suppressed
         }
     elif specialist_mode == 'long':
         # LONG specialist KL targets: [hold, long, short].
-        # bull bars: price rose → LONG labels intact → strong LONG conviction.
-        # bear bars: price fell → originally SHORT labels, now relabeled HOLD → mostly HOLD output.
-        # chop bars: mixed, slight LONG lean vs HOLD.
-        # short slot is always 0.0: pressure p_short → 0 so specialist stays unidirectional.
+        # Strongly favour LONG on bull bars, suppress SHORT everywhere.
+        # SHORT slot uses 0.03 for the same anchoring reason as LONG above.
+        # All rows sum to 1.00.
         _3CLS_TARGETS = {
-            'bull':  [0.20, 0.80, 0.0],
-            'bear':  [0.60, 0.40, 0.0],
-            'chop':  [0.55, 0.45, 0.0],
+            'bull':  [0.20, 0.77, 0.03],   # bull: strong LONG, minimal HOLD, SHORT suppressed
+            'bear':  [0.60, 0.37, 0.03],   # bear: HOLD dominant, LONG floor, SHORT suppressed
+            'chop':  [0.55, 0.42, 0.03],   # chop: slight LONG lean vs HOLD, SHORT suppressed
         }
     else:
         _3CLS_TARGETS = {
