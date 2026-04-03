@@ -2245,7 +2245,7 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                           val_bars, symbol_ids, symbols_list, global_threshold,
                           r_long=None, r_short=None, out_long=None, out_short=None,
                           quality_mask=None, candidate_mask=None,
-                          min_trades_per_symbol=10, cooldown=4):
+                          min_trades_per_symbol=10, cooldown=4, specialist_mode='none'):
     """Per-symbol threshold sweep: find optimal threshold per symbol.
 
     For each symbol, runs a mini-sweep on its bars only.
@@ -2397,12 +2397,17 @@ def _run_per_symbol_sweep(scores, sides, precomputed_outcomes, precomputed_r,
 
         side_bias_tag = ""
         _bias_dir = None
-        if sym_long_pct > 85.0:
+        # BUG FIX (Task #68): suppress SIDE_BIAS false alarm in specialist mode.
+        # LONG specialist forces all sides=1 (100% LONG) and SHORT specialist forces all sides=-1.
+        # These are not data imbalance problems — they are intentional specialist constraints.
+        _long_specialist = specialist_mode == 'long'
+        _short_specialist = specialist_mode == 'short'
+        if sym_long_pct > 85.0 and not _long_specialist:
             _bias_dir = "LONG"
             side_bias_tag = f" [SIDE_BIAS: {sym_long_pct:.0f}% LONG]"
             log.warning(f"[SIDE_BIAS] {sym_name}: LONG={sym_long_pct:.0f}% — heavy long bias in candidate pool. "
                         f"Increase short_min_fraction or short_oversample strength.")
-        elif sym_short_pct > 85.0:
+        elif sym_short_pct > 85.0 and not _short_specialist:
             _bias_dir = "SHORT"
             side_bias_tag = f" [SIDE_BIAS: {sym_short_pct:.0f}% SHORT]"
             log.warning(f"[SIDE_BIAS] {sym_name}: SHORT={sym_short_pct:.0f}% — heavy short bias in candidate pool.")
@@ -2599,6 +2604,7 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
         min_p_short=config.min_p_short,
         side_aware_scoring=config.side_aware_scoring,
         min_mu_r_score=0.0,
+        specialist_mode=getattr(config, 'specialist_mode', 'none'),  # BUG FIX (Task #68): reference calibration must use specialist scoring
     )
     ref_arrays['_train_scores'] = train_scores
 
@@ -7535,6 +7541,26 @@ def train_v5_model(
 
     action_weights_tensor = torch.tensor(action_class_weights, dtype=torch.float32).to(device)
 
+    # ---- BUG FIX (Task #68): Specialist CE class weights ----------------------------
+    # With balanced 33/33/33 labels, CE pushes p_long DOWN on 67% of bars (SHORT+HOLD),
+    # overwhelming the KL side-balance signal (weight 0.15 vs CE weight 1.0).
+    # Fix: override action_weights for specialist mode to amplify the specialist direction:
+    #   LONG specialist: HOLD=1.0, LONG=3.0, SHORT=0.3  (LONG bars get 10× more CE gradient)
+    #   SHORT specialist: HOLD=1.0, LONG=0.3, SHORT=3.0  (SHORT bars get 10× more CE gradient)
+    # This shifts CE gradient budget to ~70% specialist-direction / 23% HOLD / 7% suppressed.
+    # Combined with KL targets pushing p_specialist high on aligned-regime bars, the model
+    # genuinely learns to discriminate high-conviction specialist setups.
+    if specialist_mode == 'long':
+        _spec_weights = torch.tensor([1.0, 3.0, 0.3], dtype=torch.float32, device=device)
+        action_weights_tensor = _spec_weights
+        log.info(f"[{vtag}_SPEC_WEIGHTS] LONG specialist CE weights: HOLD=1.0 LONG=3.0 SHORT=0.3 "
+                 f"(overrides inverse-freq weights; CE gradient budget ~70% LONG / 23% HOLD / 7% SHORT)")
+    elif specialist_mode == 'short':
+        _spec_weights = torch.tensor([1.0, 0.3, 3.0], dtype=torch.float32, device=device)
+        action_weights_tensor = _spec_weights
+        log.info(f"[{vtag}_SPEC_WEIGHTS] SHORT specialist CE weights: HOLD=1.0 LONG=0.3 SHORT=3.0 "
+                 f"(overrides inverse-freq weights; CE gradient budget ~70% SHORT / 23% HOLD / 7% LONG)")
+
     valid_val_action = val_action_arr[val_valid]
     vn_hold = int(np.sum(valid_val_action == 0))
     vn_long = int(np.sum(valid_val_action == 1))
@@ -7957,7 +7983,9 @@ def train_v5_model(
             # (LONG specialist correctly fires SHORT on bear bars; SHORT specialist
             # correctly fires LONG on bull bars).  Only HOLD collapse is dangerous in
             # specialist mode (it starves the specialist head of gradient).
-            if not use_v6 and not _batch_collapse_warned:
+            # BUG FIX (Task #68): Phase 1 suppresses action head training — action logits are
+            # random init, so collapse check during phase1 always fires false alarms.
+            if not use_v6 and not _batch_collapse_warned and not phase1_active:
                 _batch_valid = batch_gpu.get('valid')
                 if _batch_valid is not None and _batch_valid.sum() > 0:
                     _bl_action_logits = outputs.get('action_logits')
@@ -8108,7 +8136,9 @@ def train_v5_model(
         # LONG specialist model correctly predicts SHORT on bear validation bars (that is not
         # collapse, the scoring branch forces LONG at inference anyway).  Only HOLD collapse
         # is dangerous because it would suppress the specialist head entirely.
-        if not use_v6 and n_pred > 0:
+        # BUG FIX (Task #68): skip during Phase 1 — action head is untrained (random init),
+        # so argmax predictions are meaningless noise that always triggers false collapse alarms.
+        if not use_v6 and n_pred > 0 and not phase1_active:
             _dir_pct_long = pred_long / n_pred
             _dir_pct_short = pred_short / n_pred
             _dir_pct_hold = pred_hold / n_pred
@@ -8310,6 +8340,7 @@ def train_v5_model(
                 side_aware_scoring=side_aware_scoring,
                 slippage_bps=slippage_base_bps,
                 min_mu_r_score=0.0,
+                specialist_mode=specialist_mode,  # BUG FIX (Task #68): was missing; sweep chose wrong direction
             )
 
             log.info(f"[{vtag}_SCORE_DIAG] mu_R: mean={score_diag['mu_R_mean']:.4f} std={score_diag['mu_R_std']:.4f} | "
@@ -8407,7 +8438,7 @@ def train_v5_model(
                         out_long=val_out_long_arr, out_short=val_out_short_arr,
                         quality_mask=quality_mask, candidate_mask=sweep_cand_mask,
                         min_trades_per_symbol=_MIN_SIDE_TRADES,
-                        cooldown=cooldown,
+                        cooldown=cooldown, specialist_mode=specialist_mode,
                     )
                     log.info("[V5_PER_SIDE_THR] === SHORT threshold sweep ===")
                     per_sym_short, _, _sb_short = _run_per_symbol_sweep(
@@ -8417,7 +8448,7 @@ def train_v5_model(
                         out_long=val_out_long_arr, out_short=val_out_short_arr,
                         quality_mask=quality_mask, candidate_mask=sweep_cand_mask,
                         min_trades_per_symbol=_MIN_SIDE_TRADES,
-                        cooldown=cooldown,
+                        cooldown=cooldown, specialist_mode=specialist_mode,
                     )
                     best_per_sym_thresholds = {}
                     all_sym_ids_sweep = set(per_sym_long.keys()) | set(per_sym_short.keys())
@@ -8441,7 +8472,7 @@ def train_v5_model(
                         out_long=val_out_long_arr, out_short=val_out_short_arr,
                         quality_mask=quality_mask, candidate_mask=sweep_cand_mask,
                         min_trades_per_symbol=max(5, min_trades // 2),
-                        cooldown=cooldown,
+                        cooldown=cooldown, specialist_mode=specialist_mode,
                     )
 
             if quality_gate_cfg.enable_calib:
@@ -8590,6 +8621,7 @@ def train_v5_model(
                             atr_normalize_risk_heads=atr_normalize_risk_heads,
                             side_bal_weight=side_bal_weight,
                             action_entropy_weight=action_entropy_weight,
+                            specialist_mode=specialist_mode,  # BUG FIX (Task #68): was missing; fine-tune reverted to standard training
                         )
                         ft_optimizer.zero_grad()
                         loss.backward()
@@ -8652,6 +8684,7 @@ def train_v5_model(
                 side_aware_scoring=side_aware_scoring,
                 slippage_bps=slippage_base_bps,
                 min_mu_r_score=0.0,
+                specialist_mode=specialist_mode,  # BUG FIX (Task #68): final sweep must use specialist scoring
             )
             _sweep_cand = val_cand_mask if use_candidates_this_epoch else None
             if per_side_threshold:
@@ -8666,7 +8699,7 @@ def train_v5_model(
                     r_long=val_r_long_arr, r_short=val_r_short_arr,
                     out_long=val_out_long_arr, out_short=val_out_short_arr,
                     quality_mask=_fs_quality_mask, candidate_mask=_sweep_cand,
-                    min_trades_per_symbol=5, cooldown=cooldown,
+                    min_trades_per_symbol=5, cooldown=cooldown, specialist_mode=specialist_mode,
                 )
                 _ps_short, _, _sb_fss = _run_per_symbol_sweep(
                     _sc_short, _fs_sides, val_outcomes, val_realized_r,
@@ -8674,7 +8707,7 @@ def train_v5_model(
                     r_long=val_r_long_arr, r_short=val_r_short_arr,
                     out_long=val_out_long_arr, out_short=val_out_short_arr,
                     quality_mask=_fs_quality_mask, candidate_mask=_sweep_cand,
-                    min_trades_per_symbol=5, cooldown=cooldown,
+                    min_trades_per_symbol=5, cooldown=cooldown, specialist_mode=specialist_mode,
                 )
                 _all_sids = set(_ps_long.keys()) | set(_ps_short.keys())
                 # Guard: current_score_threshold can be None if every epoch SKIPped
@@ -8693,6 +8726,7 @@ def train_v5_model(
                     out_long=val_out_long_arr, out_short=val_out_short_arr,
                     quality_mask=_fs_quality_mask, candidate_mask=_sweep_cand,
                     min_trades_per_symbol=max(5, min_trades // 2), cooldown=cooldown,
+                    specialist_mode=specialist_mode,
                 )
             # Log delta vs. what was in the checkpoint
             _old_thr = _fs_ckpt.get('per_symbol_thresholds') or {}
