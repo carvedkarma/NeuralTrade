@@ -2628,6 +2628,80 @@ def _print_directional_balance_diagnostics(stage_distributions, gate_blocks):
     log.info("=" * 80)
 
 
+def _compute_percentile_calibration(cand_indices, scores, sides, safe_r, test_bars):
+    """Compute E[R]/PF/WR/maxDD/T/day for top-5/10/15/20% score cutoffs.
+
+    Uses all quality-gate-passed, finite-score candidates (pre-threshold,
+    pre-cooldown) so the result reflects pure score → outcome relationship
+    without gating artifacts.
+
+    Returns list of dicts with keys:
+        pct_label, threshold, n, er, pf, wr, maxdd, tpd,
+        long_n, long_er, short_n, short_er
+    """
+    if len(cand_indices) == 0:
+        return []
+
+    cand_scores = scores[cand_indices]
+
+    finite_mask = np.isfinite(cand_scores)
+    if not np.any(finite_mask):
+        return []
+
+    finite_scores = cand_scores[finite_mask]
+    results = []
+
+    for pct in (5, 10, 15, 20):
+        thr = float(np.percentile(finite_scores, 100 - pct))
+        sel = cand_indices[finite_mask][finite_scores >= thr]
+        n = len(sel)
+        if n == 0:
+            continue
+
+        r_arr  = safe_r[sel]
+        s_arr  = sides[sel]
+
+        wins   = r_arr[r_arr > 0]
+        losses = r_arr[r_arr <= 0]
+        er     = float(np.mean(r_arr))
+        pf_val = (float(np.sum(wins) / max(abs(float(np.sum(losses))), 1e-8))
+                  if len(wins) > 0 and len(losses) > 0
+                  else (999.0 if len(losses) == 0 and len(wins) > 0 else 0.0))
+        wr     = float(np.sum(r_arr > 0)) / max(n, 1)
+
+        equity  = np.cumsum(r_arr)
+        peak    = np.maximum.accumulate(equity)
+        drawdowns = equity - peak
+        maxdd   = float(np.min(drawdowns)) if len(drawdowns) > 0 else 0.0
+
+        days    = max(test_bars / (4 * 24), 1)
+        tpd     = n / days
+
+        long_mask  = s_arr == 1
+        short_mask = s_arr == -1
+        long_n   = int(np.sum(long_mask))
+        short_n  = int(np.sum(short_mask))
+        long_er  = float(np.mean(r_arr[long_mask]))  if long_n  > 0 else 0.0
+        short_er = float(np.mean(r_arr[short_mask])) if short_n > 0 else 0.0
+
+        results.append({
+            'pct_label': f"Top{pct}%",
+            'threshold': round(thr, 4),
+            'n':         n,
+            'er':        round(er,    4),
+            'pf':        round(pf_val, 2),
+            'wr':        round(wr,    3),
+            'maxdd':     round(maxdd, 2),
+            'tpd':       round(tpd,   1),
+            'long_n':    long_n,
+            'long_er':   round(long_er,  4),
+            'short_n':   short_n,
+            'short_er':  round(short_er, 4),
+        })
+
+    return results
+
+
 def run_v5_forward_test(
     model, device,
     test_features, test_outcomes, test_realized_r,
@@ -4384,11 +4458,26 @@ def run_v5_forward_test(
         n_long_v = int(np.sum(long_mask_v))
         n_short_v = int(np.sum(short_mask_v))
 
+        def _side_agree_stats(r_arr):
+            if len(r_arr) == 0:
+                return None
+            w = r_arr[r_arr > 0]
+            l = r_arr[r_arr <= 0]
+            er = float(np.mean(r_arr))
+            pf = (float(np.sum(w) / max(abs(float(np.sum(l))), 1e-8))
+                  if len(w) > 0 and len(l) > 0
+                  else (999.0 if len(l) == 0 and len(w) > 0 else 0.0))
+            return {'n': len(r_arr), 'er': round(er, 4), 'pf': round(pf, 2)}
+
         if n_long_v > 0:
             side_quality['long_avg_score'] = float(np.mean(t_scores_valid[long_mask_v]))
             side_quality['long_avg_p_side'] = float(np.mean(t_p_side_valid[long_mask_v]))
             side_quality['long_avg_mu_r'] = float(np.mean(t_mu_r_valid[long_mask_v]))
             side_quality['long_head_agree_pct'] = float(100 * np.mean(t_mu_r_valid[long_mask_v] > 0))
+            long_r = t_r_valid[long_mask_v]
+            long_agree_m = t_mu_r_valid[long_mask_v] > 0
+            side_quality['long_agree']    = _side_agree_stats(long_r[long_agree_m])
+            side_quality['long_disagree'] = _side_agree_stats(long_r[~long_agree_m])
 
         if n_short_v > 0:
             side_quality['short_avg_score'] = float(np.mean(t_scores_valid[short_mask_v]))
@@ -4402,6 +4491,10 @@ def run_v5_forward_test(
             if n_disagree > 0:
                 disagree_r = t_r_valid[short_mask_v][short_disagree]
                 side_quality['short_disagree_expect'] = float(np.mean(disagree_r))
+            short_r = t_r_valid[short_mask_v]
+            short_agree_m = t_mu_r_valid[short_mask_v] < 0
+            side_quality['short_agree']    = _side_agree_stats(short_r[short_agree_m])
+            side_quality['short_disagree_stats'] = _side_agree_stats(short_r[~short_agree_m])
 
         score_decile_rows, score_monotonic = _compute_score_decile_table(
             t_scores_valid, t_r_valid, t_sides=t_sides_valid)
@@ -4619,6 +4712,39 @@ def run_v5_forward_test(
 
     _print_directional_balance_diagnostics(stage_distributions, gate_blocks)
 
+    if test_sym_ids is not None and (sym_id_to_name or (config.symbols_list)):
+        _sym_map = sym_id_to_name if sym_id_to_name else {
+            i: s for i, s in enumerate(config.symbols_list or [])}
+        _stage_arrays = {
+            'pre':          np.array(chronological_idx,     dtype=np.intp),
+            'post_ema200':  np.array(post_ema200_indices,   dtype=np.intp) if post_ema200_indices else np.array([], dtype=np.intp),
+            'post_regime':  np.array(post_regime_indices,   dtype=np.intp) if post_regime_indices else np.array([], dtype=np.intp),
+            'final':        taken if isinstance(taken, np.ndarray) else np.array(taken, dtype=np.intp),
+        }
+        unique_syms_funnel = sorted(_sym_map.keys())
+        hdr = f"  {'Symbol':<12} {'RawL':>6} {'RawS':>6} {'EmaL':>6} {'EmaS':>6} {'RegL':>6} {'RegS':>6} {'FinL':>6} {'FinS':>6}"
+        log.info("")
+        log.info("=" * 80)
+        log.info("  PER-SYMBOL SIDE FUNNEL")
+        log.info("=" * 80)
+        log.info(hdr)
+        log.info("  " + "-" * 76)
+        for _sid in unique_syms_funnel:
+            _sname = _sym_map.get(_sid, f"sym_{_sid}")
+            row_parts = [f"  {_sname:<12}"]
+            for _stage_key in ('pre', 'post_ema200', 'post_regime', 'final'):
+                _idx = _stage_arrays[_stage_key]
+                if len(_idx) == 0:
+                    row_parts += [f"{'0':>6}", f"{'0':>6}"]
+                    continue
+                _sym_mask = test_sym_ids[_idx] == _sid
+                _sym_sides = sides[_idx[_sym_mask]]
+                _nl = int(np.sum(_sym_sides == 1))
+                _ns = int(np.sum(_sym_sides == -1))
+                row_parts += [f"{_nl:>6}", f"{_ns:>6}"]
+            log.info("".join(row_parts))
+        log.info("=" * 80)
+
     report['directional_balance'] = {
         'stage_distributions': {k: dict(v) for k, v in stage_distributions.items()},
         'gate_blocks': dict(gate_blocks),
@@ -4675,6 +4801,11 @@ def run_v5_forward_test(
                 }
             if _side_bias_map:
                 report['per_sym_side_bias'] = _side_bias_map
+
+    _pct_cal_indices = np.where(np.isfinite(scores_work))[0]
+    pct_calibration = _compute_percentile_calibration(
+        _pct_cal_indices, scores_work, sides, safe_r, test_bars)
+    report['pct_calibration'] = pct_calibration
 
     _print_forward_report(report)
     return report
@@ -5014,6 +5145,18 @@ def _print_forward_report(report):
             log.info(f"    SHORT head-disagree trades (mu_R>0): {sq['short_disagree_trades']} "
                      f"({sq.get('short_disagree_pct',0):.0f}%) → "
                      f"expect={sq.get('short_disagree_expect',0):+.4f} R")
+        la = sq.get('long_agree');   ld = sq.get('long_disagree')
+        sa = sq.get('short_agree');  sd = sq.get('short_disagree_stats')
+        if la is not None or ld is not None or sa is not None or sd is not None:
+            log.info("  Head Agreement by Side:")
+
+            def _fmt_agree(d):
+                if d is None or d['n'] == 0:
+                    return "N=0"
+                return f"N={d['n']:>4}  E[R]={d['er']:+.4f}  PF={d['pf']:.2f}"
+
+            log.info(f"    LONG  agree (mu_R>0): {_fmt_agree(la)}  |  disagree: {_fmt_agree(ld)}")
+            log.info(f"    SHORT agree (mu_R<0): {_fmt_agree(sa)}  |  disagree: {_fmt_agree(sd)}")
     decile_rows = report.get('score_decile_table', [])
     if decile_rows:
         log.info("-" * 80)
@@ -5024,6 +5167,21 @@ def _print_forward_report(report):
             log.info(f"  {row['decile']:>3} {row['score_lo']:>9.4f} {row['score_hi']:>9.4f} "
                      f"{row['n_trades']:>5} {row['avg_r']:>+8.4f} {row['win_rate']:>6.1%}")
     log.info("-" * 80)
+    pct_cal = report.get('pct_calibration', [])
+    if pct_cal:
+        log.info("  Percentile Calibration (all quality-passed cands, no cooldown):")
+        log.info(f"  {'Pct':<7} {'Thr':>7} {'N':>6} {'E[R]':>8} {'PF':>6} {'WR%':>7} "
+                 f"{'MaxDD':>8} {'T/day':>6} {'LongN':>6} {'LongER':>8} {'ShortN':>6} {'ShortER':>8}")
+        log.info("  " + "-" * 88)
+        for row in pct_cal:
+            log.info(
+                f"  {row['pct_label']:<7} {row['threshold']:>7.4f} {row['n']:>6} "
+                f"{row['er']:>+8.4f} {row['pf']:>6.2f} {row['wr']:>6.1%} "
+                f"{row['maxdd']:>7.2f}R {row['tpd']:>6.1f} "
+                f"{row['long_n']:>6} {row['long_er']:>+8.4f} "
+                f"{row['short_n']:>6} {row['short_er']:>+8.4f}"
+            )
+        log.info("-" * 80)
     if report.get('weekly_stats'):
         log.info("  Weekly Breakdown:")
         has_week_start = 'week_start' in report['weekly_stats'][0]
