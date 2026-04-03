@@ -7953,6 +7953,10 @@ def train_v5_model(
 
             # Batch-level [V5_DIR_COLLAPSE] detection (Task #54).
             # Check on valid rows only; emit at most once per epoch to avoid log spam.
+            # Specialist-aware: in specialist mode, the opposite direction is expected
+            # (LONG specialist correctly fires SHORT on bear bars; SHORT specialist
+            # correctly fires LONG on bull bars).  Only HOLD collapse is dangerous in
+            # specialist mode (it starves the specialist head of gradient).
             if not use_v6 and not _batch_collapse_warned:
                 _batch_valid = batch_gpu.get('valid')
                 if _batch_valid is not None and _batch_valid.sum() > 0:
@@ -7966,13 +7970,15 @@ def train_v5_model(
                             _bl_short_pct = (_bl_preds == 2).float().mean().item()
                             _bl_hold_pct = (_bl_preds == 0).float().mean().item()
                             _bat_thresh = 0.90
-                            if _bl_long_pct > _bat_thresh:
+                            _is_long_spec = (specialist_mode == 'long')
+                            _is_short_spec = (specialist_mode == 'short')
+                            if _bl_long_pct > _bat_thresh and not _is_long_spec:
                                 log.warning(
                                     f"[V5_DIR_COLLAPSE] Epoch {epoch:03d} batch: "
                                     f"{_bl_long_pct*100:.1f}% LONG (>{_bat_thresh*100:.0f}%% — "
                                     f"training batch collapsed to LONG)")
                                 _batch_collapse_warned = True
-                            elif _bl_short_pct > _bat_thresh:
+                            elif _bl_short_pct > _bat_thresh and not _is_short_spec:
                                 log.warning(
                                     f"[V5_DIR_COLLAPSE] Epoch {epoch:03d} batch: "
                                     f"{_bl_short_pct*100:.1f}% SHORT (>{_bat_thresh*100:.0f}%% — "
@@ -8098,15 +8104,20 @@ def train_v5_model(
 
         # [V5_DIR_COLLAPSE] warning: flag when >90% of validation predictions are one direction.
         # This makes direction collapse immediately visible without needing the Training Monitor UI.
+        # Specialist-aware: in specialist mode the opposite direction is expected behaviour —
+        # LONG specialist model correctly predicts SHORT on bear validation bars (that is not
+        # collapse, the scoring branch forces LONG at inference anyway).  Only HOLD collapse
+        # is dangerous because it would suppress the specialist head entirely.
         if not use_v6 and n_pred > 0:
             _dir_pct_long = pred_long / n_pred
             _dir_pct_short = pred_short / n_pred
             _dir_pct_hold = pred_hold / n_pred
             _collapse_threshold = 0.90
-            if _dir_pct_long > _collapse_threshold:
+            _spec = specialist_mode  # 'none' | 'long' | 'short'
+            if _dir_pct_long > _collapse_threshold and _spec != 'long':
                 log.warning(f"[V5_DIR_COLLAPSE] Epoch {epoch:03d}: {_dir_pct_long*100:.1f}% LONG "
                             f"(>{_collapse_threshold*100:.0f}% one-sided — action head collapsed to LONG)")
-            elif _dir_pct_short > _collapse_threshold:
+            elif _dir_pct_short > _collapse_threshold and _spec != 'short':
                 log.warning(f"[V5_DIR_COLLAPSE] Epoch {epoch:03d}: {_dir_pct_short*100:.1f}% SHORT "
                             f"(>{_collapse_threshold*100:.0f}% one-sided — action head collapsed to SHORT)")
             elif _dir_pct_hold > _collapse_threshold:
