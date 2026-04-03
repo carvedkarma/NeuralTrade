@@ -5333,6 +5333,18 @@ Examples:
     parser.add_argument("--v5-ret-mag-scale", type=float, default=1.0,
                         help="v5 return-magnitude CE weight scaling factor (default: 1.0, optimal: 2.0). "
                              "Active only when --v5-ret-mag-ce-weight is set. Task #56 B2.")
+    parser.add_argument("--v5-side-specialist", type=str, default='none',
+                        choices=['none', 'short', 'long'],
+                        help="Task #67: train a SINGLE direction specialist. "
+                             "'short' → relabels LONG→HOLD, KL targets push p_short; "
+                             "'long'  → relabels SHORT→HOLD, KL targets push p_long; "
+                             "'none'  → standard bidirectional training (default). "
+                             "See also --v5-dual-specialist for both directions per fold.")
+    parser.add_argument("--v5-dual-specialist", action="store_true", default=False,
+                        help="Task #67: train SHORT specialist then LONG specialist per walk-forward fold. "
+                             "Each fold trains two models; their forward-test reports are merged. "
+                             "Checkpoints saved as best_v5_short_fold{N}.pt and best_v5_long_fold{N}.pt. "
+                             "Overrides --v5-side-specialist inside the walk-forward loop.")
 
     parser.add_argument("--v5-train-end-date", type=str, default=None,
                         help="v5 time-based split: train on data before this date (YYYY-MM-DD)")
@@ -6420,6 +6432,8 @@ Examples:
                     chop_hold_target=args.v5_chop_hold_target,
                     ret_mag_ce_weight=args.v5_ret_mag_ce_weight,
                     ret_mag_scale=args.v5_ret_mag_scale,
+                    specialist_mode=getattr(args, 'v5_side_specialist', 'none'),
+                    dual_specialist=getattr(args, 'v5_dual_specialist', False),
                 )
                 return
 
@@ -6633,6 +6647,8 @@ Examples:
                 chop_hold_target=args.v5_chop_hold_target,
                 ret_mag_ce_weight=args.v5_ret_mag_ce_weight,
                 ret_mag_scale=args.v5_ret_mag_scale,
+                specialist_mode=getattr(args, 'v5_side_specialist', 'none'),
+                dual_specialist=getattr(args, 'v5_dual_specialist', False),
             )
 
               if _single_pusher is not None:

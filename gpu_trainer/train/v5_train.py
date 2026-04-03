@@ -272,6 +272,7 @@ class V5ForwardTestConfig:
     ema200_soft_mult: Optional[float] = None
     per_side_threshold: bool = False
     gate_mode: str = "ref_magnitude"   # choices: ref_magnitude | percentile_top15
+    specialist_mode: str = "none"      # "none" | "short" | "long" — dual-specialist training
 
 
 def compute_feature_importance_report(
@@ -710,7 +711,8 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
                     atr_normalize_risk_heads=True,
                     chop_hold_target=0.20,
                     ret_mag_ce_weight=False,
-                    ret_mag_scale=1.0):
+                    ret_mag_scale=1.0,
+                    specialist_mode='none'):
     """Compute v5 composite loss with class-balanced action CE.
 
     Uses clamped Gaussian NLL to prevent log(sigma) term from dominating.
@@ -811,6 +813,19 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
     action_logits = outputs['action_logits'][valid]
     action_true = batch['action_label'][valid]
 
+    # Specialist training: relabel the opposite direction to HOLD so each specialist
+    # model learns only one direction vs HOLD.  Uses a clone so the original batch
+    # tensor (shared across training-loop dynamic-label logic) is not modified.
+    # SHORT specialist: LONG(1) → HOLD(0); model sees only SHORT(2) and HOLD(0).
+    # LONG  specialist: SHORT(2) → HOLD(0); model sees only LONG(1) and HOLD(0).
+    HOLD_IDX_S, LONG_IDX_S, SHORT_IDX_S = 0, 1, 2
+    if specialist_mode == 'short':
+        action_true = action_true.clone()
+        action_true[action_true == LONG_IDX_S] = HOLD_IDX_S
+    elif specialist_mode == 'long':
+        action_true = action_true.clone()
+        action_true[action_true == SHORT_IDX_S] = HOLD_IDX_S
+
     # B2: Return-magnitude CE upweighting (Task #56).
     # High-return bars (bull/bear) dominate less than 13% of data but carry the direction signal.
     # With 87.7% chop bars at near-zero ret_R, plain CE is dominated by chop noise.
@@ -872,11 +887,34 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
     #   Task #56 B1: chop_hold_target=0.20 (was hardcoded 0.35).
     _chop_h = float(max(0.0, min(1.0, chop_hold_target)))
     _chop_side = (1.0 - _chop_h) / 2.0
-    _3CLS_TARGETS = {
-        'bull': [0.25, 0.50, 0.25],
-        'bear': [0.25, 0.25, 0.50],
-        'chop': [_chop_h, _chop_side, _chop_side],
-    }
+    if specialist_mode == 'short':
+        # SHORT specialist KL targets: [hold, long, short].
+        # bull bars: price rose → originally LONG labels, now relabeled HOLD → mostly HOLD output.
+        # bear bars: price fell → SHORT labels intact → strong SHORT conviction.
+        # chop bars: mixed, slight SHORT lean vs HOLD.
+        # long slot is always 0.0: pressure p_long → 0 so specialist stays unidirectional.
+        _3CLS_TARGETS = {
+            'bull':  [0.60, 0.0, 0.40],
+            'bear':  [0.20, 0.0, 0.80],
+            'chop':  [0.55, 0.0, 0.45],
+        }
+    elif specialist_mode == 'long':
+        # LONG specialist KL targets: [hold, long, short].
+        # bull bars: price rose → LONG labels intact → strong LONG conviction.
+        # bear bars: price fell → originally SHORT labels, now relabeled HOLD → mostly HOLD output.
+        # chop bars: mixed, slight LONG lean vs HOLD.
+        # short slot is always 0.0: pressure p_short → 0 so specialist stays unidirectional.
+        _3CLS_TARGETS = {
+            'bull':  [0.20, 0.80, 0.0],
+            'bear':  [0.60, 0.40, 0.0],
+            'chop':  [0.55, 0.45, 0.0],
+        }
+    else:
+        _3CLS_TARGETS = {
+            'bull': [0.25, 0.50, 0.25],
+            'bear': [0.25, 0.25, 0.50],
+            'chop': [_chop_h, _chop_side, _chop_side],
+        }
 
     group_kl_list = []
     for mask, regime_key in [(bull_mask, 'bull'), (bear_mask, 'bear'), (chop_mask, 'chop')]:
@@ -1384,7 +1422,8 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
                       side_mode='action_head', rr_weight=0.0,
                       min_mu_r_score=0.005, slippage_bps=0.0,
                       sigma_discount=False, min_p_side=0.0,
-                      min_p_short=0.0, side_aware_scoring=False):
+                      min_p_short=0.0, side_aware_scoring=False,
+                      specialist_mode='none'):
     """Compute execution-aware v5 scores -- all in R-units.
 
     Two side-selection modes:
@@ -1486,22 +1525,40 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
         edge_long = p_long * np.divide(mu_R, risk, out=np.zeros_like(mu_R), where=risk > 0)
         edge_short = p_short * np.divide(-mu_R, risk, out=np.zeros_like(mu_R), where=risk > 0)
 
-    best_edge = np.maximum(edge_long, edge_short)
-    sides = np.where(edge_long >= edge_short, 1, -1)
-
-    if side_mode == 'action_head':
-        p_side = np.where(sides == 1, p_long, p_short)
+    if specialist_mode == 'short':
+        # SHORT specialist: direction is always SHORT.  Score is driven purely by p_short.
+        # score = p_short * mu_over_risk - lambda*(1-p_short)*mu_over_risk
+        #       = mu_over_risk * [(1+lambda)*p_short - lambda]
+        # Positive when p_short > lambda/(1+lambda) = 0.231 at default lambda=0.30.
+        p_side = p_short
         directional_penalty = (1.0 - p_side) * mu_over_risk
         penalty = score_lambda * directional_penalty
-    else:
-        penalty_long = np.maximum(0.0, -mu_R_adj)
-        penalty_short = np.maximum(0.0, mu_R_adj)
-        penalty_long_scaled = np.divide(penalty_long, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
-        penalty_short_scaled = np.divide(penalty_short, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
-        directional_penalty = np.where(sides == 1, penalty_long_scaled, penalty_short_scaled)
+        scores = p_short * mu_over_risk - penalty
+        sides = np.full(len(scores), -1, dtype=np.int64)
+    elif specialist_mode == 'long':
+        # LONG specialist: direction is always LONG.  Score is driven purely by p_long.
+        p_side = p_long
+        directional_penalty = (1.0 - p_side) * mu_over_risk
         penalty = score_lambda * directional_penalty
+        scores = p_long * mu_over_risk - penalty
+        sides = np.full(len(scores), 1, dtype=np.int64)
+    else:
+        best_edge = np.maximum(edge_long, edge_short)
+        sides = np.where(edge_long >= edge_short, 1, -1)
 
-    scores = best_edge - penalty
+        if side_mode == 'action_head':
+            p_side = np.where(sides == 1, p_long, p_short)
+            directional_penalty = (1.0 - p_side) * mu_over_risk
+            penalty = score_lambda * directional_penalty
+        else:
+            penalty_long = np.maximum(0.0, -mu_R_adj)
+            penalty_short = np.maximum(0.0, mu_R_adj)
+            penalty_long_scaled = np.divide(penalty_long, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
+            penalty_short_scaled = np.divide(penalty_short, risk, out=np.zeros_like(mu_R_adj), where=risk > 0)
+            directional_penalty = np.where(sides == 1, penalty_long_scaled, penalty_short_scaled)
+            penalty = score_lambda * directional_penalty
+
+        scores = best_edge - penalty
 
     if rr_weight > 0:
         rr_ratio = np.divide(mfe_pred, risk, out=np.ones_like(mfe_pred), where=risk > 0)
@@ -2984,6 +3041,7 @@ def run_v5_forward_test(
         min_p_short=config.min_p_short,
         side_aware_scoring=config.side_aware_scoring,
         min_mu_r_score=0.0,
+        specialist_mode=getattr(config, 'specialist_mode', 'none'),
     )
 
     if 'edge_L' in score_diag:
@@ -5201,7 +5259,92 @@ def _print_forward_report(report):
             log.info(f"  {'Week':>6} {'Trades':>8} {'Expect':>10} {'Total R':>10}")
             for ws in report['weekly_stats']:
                 log.info(f"  {ws['week']:>6} {ws['trades']:>8} {ws['expectancy']:>+10.4f} {ws['total_r']:>+10.4f}")
+    if report.get('dual_specialist'):
+        ss = report.get('short_specialist', {})
+        ls = report.get('long_specialist', {})
+        log.info("=" * 80)
+        log.info("  DUAL SPECIALIST BREAKDOWN")
+        log.info("-" * 80)
+        log.info(f"  {'Specialist':<12} {'Trades':>7} {'Total R':>9} {'WR':>7} {'PF':>7} {'E[R]':>9}")
+        log.info(f"  {'SHORT':<12} {ss.get('total_trades',0):>7} "
+                 f"{ss.get('total_r',0):>+9.4f} {ss.get('win_rate',0):>6.1%} "
+                 f"{ss.get('profit_factor',0):>7.2f} {ss.get('expectancy_r',0):>+9.4f}")
+        log.info(f"  {'LONG':<12} {ls.get('total_trades',0):>7} "
+                 f"{ls.get('total_r',0):>+9.4f} {ls.get('win_rate',0):>6.1%} "
+                 f"{ls.get('profit_factor',0):>7.2f} {ls.get('expectancy_r',0):>+9.4f}")
+        log.info(f"  {'-'*12} {'-'*7} {'-'*9} {'-'*7} {'-'*7} {'-'*9}")
+        log.info(f"  {'COMBINED':<12} {report.get('total_trades',0):>7} "
+                 f"{report.get('total_r',0):>+9.4f} {report.get('win_rate',0):>6.1%} "
+                 f"{report.get('profit_factor',0):>7.2f} {report.get('expectancy_r',0):>+9.4f}")
     log.info("=" * 80)
+
+
+def _merge_dual_specialist_reports(short_report: dict, long_report: dict, fold: int) -> dict:
+    """Merge SHORT and LONG specialist forward-test reports into a single combined report.
+
+    Additive fields (trades, R totals) are summed.  Rate fields (win rate,
+    profit factor, expectancy, Sharpe) are recomputed from the summed stats where
+    possible, or fall back to the SHORT-specialist value as a conservative proxy.
+    The original per-specialist dicts are embedded under 'short_specialist' and
+    'long_specialist' for inspection.
+    """
+    s_trades = int(short_report.get('total_trades', 0))
+    l_trades = int(long_report.get('total_trades', 0))
+    total_trades = s_trades + l_trades
+
+    s_r = float(short_report.get('total_r', 0.0))
+    l_r = float(long_report.get('total_r', 0.0))
+    total_r = s_r + l_r
+
+    s_wins = int(round(s_trades * float(short_report.get('win_rate', 0.0))))
+    l_wins = int(round(l_trades * float(long_report.get('win_rate', 0.0))))
+    total_wins = s_wins + l_wins
+    combined_wr = total_wins / max(total_trades, 1)
+
+    expectancy = total_r / max(total_trades, 1)
+
+    s_gross_profit = float(short_report.get('gross_profit', s_wins * float(short_report.get('avg_win_r', 0.0))))
+    l_gross_profit = float(long_report.get('gross_profit', l_wins * float(long_report.get('avg_win_r', 0.0))))
+    s_gross_loss   = float(short_report.get('gross_loss',  abs((s_trades - s_wins) * float(short_report.get('avg_loss_r', 0.0)))))
+    l_gross_loss   = float(long_report.get('gross_loss',   abs((l_trades - l_wins) * float(long_report.get('avg_loss_r', 0.0)))))
+    combined_gross_profit = s_gross_profit + l_gross_profit
+    combined_gross_loss   = s_gross_loss   + l_gross_loss
+    combined_pf = combined_gross_profit / max(combined_gross_loss, 1e-9)
+
+    merged: dict = {
+        # --- combined stats ---
+        'fold': fold,
+        'total_trades': total_trades,
+        'total_r': round(total_r, 4),
+        'win_rate': round(combined_wr, 4),
+        'profit_factor': round(combined_pf, 4),
+        'expectancy_r': round(expectancy, 4),
+        'gross_profit': round(combined_gross_profit, 4),
+        'gross_loss': round(combined_gross_loss, 4),
+        # --- forward pass-through from SHORT (used by threshold-EMA logic) ---
+        'score_threshold': short_report.get('score_threshold', long_report.get('score_threshold', None)),
+        'low_confidence': short_report.get('low_confidence', False) and long_report.get('low_confidence', False),
+        # --- dual specialist marker ---
+        'dual_specialist': True,
+        # --- per-specialist breakdown ---
+        'short_specialist': {
+            'total_trades': s_trades, 'total_r': round(s_r, 4),
+            'win_rate': round(float(short_report.get('win_rate', 0.0)), 4),
+            'profit_factor': round(float(short_report.get('profit_factor', 0.0)), 4),
+            'expectancy_r': round(float(short_report.get('expectancy_r', s_r / max(s_trades, 1))), 4),
+        },
+        'long_specialist': {
+            'total_trades': l_trades, 'total_r': round(l_r, 4),
+            'win_rate': round(float(long_report.get('win_rate', 0.0)), 4),
+            'profit_factor': round(float(long_report.get('profit_factor', 0.0)), 4),
+            'expectancy_r': round(float(long_report.get('expectancy_r', l_r / max(l_trades, 1))), 4),
+        },
+    }
+    # pass through Sharpe / max_dd if available (use SHORT's value as proxy)
+    for _k in ('sharpe', 'max_dd', 'max_drawdown', 'avg_bars_held', 'test_start', 'test_end'):
+        if _k in short_report:
+            merged[_k] = short_report[_k]
+    return merged
 
 
 def run_v5_walk_forward(
@@ -5303,6 +5446,8 @@ def run_v5_walk_forward(
     chop_hold_target=0.20,  # Task #56 B1: chop KL HOLD fraction (was hardcoded 0.35)
     ret_mag_ce_weight=False,  # Task #56 B2: return-magnitude CE upweighting; opt-in
     ret_mag_scale=1.0,  # Task #56 B2: multiplier for ret_mag_ce_weight (optimal: 2.0)
+    specialist_mode='none',  # Task #67: "none" | "short" | "long" — single specialist
+    dual_specialist=False,   # Task #67: train SHORT+LONG specialists per fold; merge reports
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -5654,6 +5799,7 @@ def run_v5_walk_forward(
                 chop_hold_target=chop_hold_target,
                 ret_mag_ce_weight=ret_mag_ce_weight,
                 ret_mag_scale=ret_mag_scale,
+                specialist_mode='short' if dual_specialist else specialist_mode,
             )
         except Exception as _fold_err:
             import traceback as _tb
@@ -5661,6 +5807,225 @@ def run_v5_walk_forward(
             log.error(_tb.format_exc())
             _log_cuda_mem("[V5_WF][FOLD_CRASH]")
             raise
+
+        # --- Task #67: Dual Specialist — second pass (LONG) + report merge ---
+        if dual_specialist:
+            import shutil as _shutil, json as _j_ds
+            _ds_ckpt_base = Path("checkpoints") / "best_v5_expectancy.pt"
+            _ds_short_ckpt = Path("checkpoints") / f"best_v5_short_fold{fold['fold']}.pt"
+            if _ds_ckpt_base.exists():
+                _shutil.copy2(_ds_ckpt_base, _ds_short_ckpt)
+                log.info("[V5_WF_DUAL] Fold %d: SHORT specialist checkpoint saved → %s",
+                         fold['fold'], _ds_short_ckpt)
+            _ds_rp = Path("checkpoints") / "v5_forward_report.json"
+            _ds_short_report: dict = {}
+            if _ds_rp.exists():
+                with open(_ds_rp) as _dsf:
+                    _ds_short_report = _j_ds.load(_dsf)
+
+            log.info("[V5_WF_DUAL] Fold %d: starting LONG specialist training...", fold['fold'])
+            try:
+                train_v5_model(
+                    data_path, device, epochs, batch_size, lr,
+                    warmup_epochs=warmup_epochs, min_lr=min_lr,
+                    tp_mult=tp_mult, sl_mult=sl_mult, horizon=horizon,
+                    symbols=symbols,
+                    w_ret=w_ret, w_mfe=w_mfe, w_mae=w_mae, w_action=w_action,
+                    w_barrier=w_barrier, w_regime=w_regime,
+                    sigma_spread_reg=sigma_spread_reg,
+                    sigma_reg_threshold=sigma_reg_threshold,
+                    phase1_epochs=phase1_epochs,
+                    atr_normalize_risk_heads=atr_normalize_risk_heads,
+                    dynamic_action_labels=dynamic_action_labels,
+                    loss_warmup_epochs=loss_warmup_epochs,
+                    loss_warmup_ret_mult=loss_warmup_ret_mult,
+                    loss_warmup_action_mult=loss_warmup_action_mult,
+                    score_lambda=score_lambda, risk_proxy=risk_proxy,
+                    hold_target=hold_target, mfe_min=mfe_min,
+                    barrier_mode=barrier_mode, barrier_presets=barrier_presets,
+                    use_regime_head=use_regime_head,
+                    candidate_config=candidate_config, risk_controls=risk_controls,
+                    cand_warmup_epochs=cand_warmup_epochs,
+                    quality_gate_cfg=quality_gate_cfg, tpd_ctrl_cfg=tpd_ctrl_cfg,
+                    train_end_date=fold['train_end'],
+                    test_start_date=fold['test_start'],
+                    test_end_date=fold['test_end'],
+                    run_forward_test=True,
+                    freeze_decision=True,
+                    ema200_regime_gate=ema200_regime_gate,
+                    weekly_loss_cap=weekly_loss_cap,
+                    warmup_skip_bars=warmup_skip_bars,
+                    corr_block=corr_block,
+                    corr_window_days=corr_window_days,
+                    corr_thresh=corr_thresh,
+                    corr_same_side_only=corr_same_side_only,
+                    corr_log_matrix=corr_log_matrix,
+                    corr_max_block=corr_max_block,
+                    adaptive_sizing=adaptive_sizing,
+                    kelly_fraction=kelly_fraction,
+                    max_size_mult=max_size_mult,
+                    min_size_mult=min_size_mult,
+                    regime_scaling=regime_scaling,
+                    regime_bull_mult=regime_bull_mult,
+                    regime_bear_mult=regime_bear_mult,
+                    regime_lookback=regime_lookback,
+                    daily_loss_cap=daily_loss_cap,
+                    trailing_equity_stop=trailing_equity_stop,
+                    per_symbol_daily_r_budget=per_symbol_daily_r_budget,
+                    max_threshold=max_threshold,
+                    min_threshold=min_threshold,
+                    min_threshold_pct=min_threshold_pct,
+                    max_trades_per_day=max_trades_per_day,
+                    trailing_sl=trailing_sl,
+                    trail_activation=trail_activation,
+                    trail_distance=trail_distance,
+                    allow_runner=allow_runner,
+                    conviction_sizing=conviction_sizing,
+                    conviction_tier_top_pct=conviction_tier_top_pct,
+                    conviction_tier_top_mult=conviction_tier_top_mult,
+                    conviction_tier_high_pct=conviction_tier_high_pct,
+                    conviction_tier_high_mult=conviction_tier_high_mult,
+                    conviction_confidence_threshold=conviction_confidence_threshold,
+                    conviction_confidence_boost=conviction_confidence_boost,
+                    adx_gate=adx_gate,
+                    adx_period=adx_period,
+                    adx_min=adx_min,
+                    adx_exception_top_pct=adx_exception_top_pct,
+                    temp_scale=temp_scale,
+                    promote_metric=promote_metric,
+                    stage_a_epochs=stage_a_epochs,
+                    balanced_sampling=balanced_sampling,
+                    balanced_sampling_mode=balanced_sampling_mode,
+                    symbol_embed_dim=symbol_embed_dim,
+                    per_symbol_scaler=per_symbol_scaler,
+                    ultra_conviction=ultra_conviction,
+                    ultra_risk_cap=ultra_risk_cap,
+                    ultra_score_pct=ultra_score_pct,
+                    ultra_adx_min=ultra_adx_min,
+                    ultra_edge_min=ultra_edge_min,
+                    ultra_dd_max=ultra_dd_max,
+                    ultra_max_per_day=ultra_max_per_day,
+                    ultra_mult=ultra_mult,
+                    ddt_enable=ddt_enable,
+                    ddt_lookback_trades=ddt_lookback_trades,
+                    ddt_bad_rollr=ddt_bad_rollr,
+                    ddt_thr_k=ddt_thr_k,
+                    ddt_thr_min=ddt_thr_min,
+                    ddt_thr_max=ddt_thr_max,
+                    ddt_size_k=ddt_size_k,
+                    ddt_min_size_mult=ddt_min_size_mult,
+                    ddt_alpha_down=ddt_alpha_down,
+                    ddt_alpha_up=ddt_alpha_up,
+                    ddt_warmup_trades=ddt_warmup_trades,
+                    multi_regime=multi_regime,
+                    regime_adx_trending=regime_adx_trending,
+                    regime_adx_choppy=regime_adx_choppy,
+                    regime_atr_high_vol=regime_atr_high_vol,
+                    regime_atr_low_vol=regime_atr_low_vol,
+                    regime_atr_window=regime_atr_window,
+                    regime_ema_slope_window=regime_ema_slope_window,
+                    regime_ema_buffer=regime_ema_buffer,
+                    edge_first=edge_first,
+                    edge_min=edge_min,
+                    edge_pct_floor=edge_pct_floor,
+                    edge_topn_per_day=edge_topn_per_day,
+                    regime_side_map=regime_side_map,
+                    regime_soft=regime_soft,
+                    regime_disagree_mult=regime_disagree_mult,
+                    regime_none_mult=regime_none_mult,
+                    per_symbol_soft_kill=per_symbol_soft_kill,
+                    edge_topn_soft=edge_topn_soft,
+                    edge_topn_decay=edge_topn_decay,
+                    size_floor=size_floor,
+                    soft_gate_floor=soft_gate_floor,
+                    weekly_cap_dynamic=weekly_cap_dynamic,
+                    weekly_cap_scale=weekly_cap_scale,
+                    quality_gate_enabled=quality_gate_enabled,
+                    quality_gate_window=quality_gate_window,
+                    direction_balance_cap=direction_balance_cap,
+                    direction_balance_threshold=direction_balance_threshold,
+                    recency_weight=recency_weight,
+                    recency_half_life=recency_half_life,
+                    finetune_months=finetune_months,
+                    finetune_epochs=finetune_epochs,
+                    finetune_lr_mult=finetune_lr_mult,
+                    warm_start_state_dict=prev_fold_state_dict if warm_start else None,
+                    head_disagreement_gate=head_disagreement_gate,
+                    slippage_base_bps=slippage_base_bps,
+                    sigma_discount=sigma_discount,
+                    min_p_side=min_p_side,
+                    min_p_short=min_p_short,
+                    side_aware_scoring=side_aware_scoring,
+                    mae_asym_weight=mae_asym_weight,
+                    per_symbol_cooldown=per_symbol_cooldown,
+                    cooldown=cooldown,
+                    min_trades=min_trades,
+                    mu_debias=mu_debias,
+                    mu_debias_alpha=mu_debias_alpha,
+                    wf_threshold_override=blended_threshold if threshold_ema is not None and wf_threshold_ema else None,
+                    fold_id=fold['fold'],
+                    per_symbol_r_kill=per_symbol_r_kill,
+                    kill_recovery_bars=kill_recovery_bars,
+                    kill_recovery_r_threshold=kill_recovery_r_threshold,
+                    kill_hysteresis_r=kill_hysteresis_r,
+                    per_symbol_threshold=per_symbol_threshold,
+                    short_oversample=short_oversample,
+                    short_min_fraction=short_min_fraction,
+                    ema200_soft_mult=ema200_soft_mult,
+                    per_side_threshold=per_side_threshold,
+                    rolling_er_gate=rolling_er_gate,
+                    rolling_er_window=rolling_er_window,
+                    rolling_er_min=rolling_er_min,
+                    gate_mode=gate_mode,
+                    model_version=model_version,
+                    v6_seq_len=v6_seq_len,
+                    v6_conv_channels=v6_conv_channels,
+                    v6_n_conv_layers=v6_n_conv_layers,
+                    v6_attn_heads=v6_attn_heads,
+                    v6_attn_layers=v6_attn_layers,
+                    v6_n_experts=v6_n_experts,
+                    v6_expert_top_k=v6_expert_top_k,
+                    v6_feature_mask_ratio=v6_feature_mask_ratio,
+                    v6_aux_weight=v6_aux_weight,
+                    v6_confidence_weight=v6_confidence_weight,
+                    v6_moe_balance_weight=v6_moe_balance_weight,
+                    candidate_logger=candidate_logger,
+                    side_bal_weight=side_bal_weight,
+                    action_entropy_weight=action_entropy_weight,
+                    chop_hold_target=chop_hold_target,
+                    ret_mag_ce_weight=ret_mag_ce_weight,
+                    ret_mag_scale=ret_mag_scale,
+                    specialist_mode='long',
+                )
+            except Exception as _long_err:
+                import traceback as _tbl
+                log.error("[V5_WF_DUAL][LONG_CRASH] fold=%d  error=%s", fold['fold'], _long_err)
+                log.error(_tbl.format_exc())
+                raise
+
+            _ds_long_ckpt = Path("checkpoints") / f"best_v5_long_fold{fold['fold']}.pt"
+            if _ds_ckpt_base.exists():
+                _shutil.copy2(_ds_ckpt_base, _ds_long_ckpt)
+                log.info("[V5_WF_DUAL] Fold %d: LONG specialist checkpoint saved → %s",
+                         fold['fold'], _ds_long_ckpt)
+            _ds_long_report: dict = {}
+            if _ds_rp.exists():
+                with open(_ds_rp) as _dsf:
+                    _ds_long_report = _j_ds.load(_dsf)
+
+            _ds_merged = _merge_dual_specialist_reports(
+                _ds_short_report, _ds_long_report, fold['fold']
+            )
+            with open(_ds_rp, 'w') as _dsf:
+                _j_ds.dump(_ds_merged, _dsf, indent=2, default=str)
+            log.info(
+                "[V5_WF_DUAL] Fold %d merged: SHORT=%dT/%.2fR  LONG=%dT/%.2fR  COMBINED=%dT/%.2fR",
+                fold['fold'],
+                _ds_short_report.get('total_trades', 0), _ds_short_report.get('total_r', 0.0),
+                _ds_long_report.get('total_trades', 0),  _ds_long_report.get('total_r', 0.0),
+                _ds_merged.get('total_trades', 0),       _ds_merged.get('total_r', 0.0),
+            )
+        # --- end dual specialist block ---
 
         report_path = Path("checkpoints") / "v5_forward_report.json"
         if report_path.exists():
@@ -6562,6 +6927,7 @@ def train_v5_model(
     chop_hold_target=0.20,  # Task #56 B1: chop KL target HOLD fraction (was hardcoded 0.35)
     ret_mag_ce_weight=False,  # Task #56 B2: upweight CE by return magnitude; opt-in
     ret_mag_scale=1.0,  # Task #56 B2: multiplier for return-magnitude CE upweighting (optimal: 2.0)
+    specialist_mode='none',  # Task #67: "none" | "short" | "long" — dual-specialist training
 ):
     """V5/V6 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -7574,6 +7940,7 @@ def train_v5_model(
                     chop_hold_target=chop_hold_target,
                     ret_mag_ce_weight=ret_mag_ce_weight,
                     ret_mag_scale=ret_mag_scale,
+                    specialist_mode=specialist_mode,
                 )
 
             optimizer.zero_grad()
@@ -7680,6 +8047,7 @@ def train_v5_model(
                         chop_hold_target=chop_hold_target,
                         ret_mag_ce_weight=ret_mag_ce_weight,
                         ret_mag_scale=ret_mag_scale,
+                        specialist_mode=specialist_mode,
                     )
                 val_losses.append(vloss.item())
 
@@ -8584,6 +8952,7 @@ def train_v5_model(
                 ema200_soft_mult=ema200_soft_mult,
                 per_side_threshold=per_side_threshold,
                 gate_mode=gate_mode,
+                specialist_mode=specialist_mode,
             )
 
             train_ref_arrays = _build_train_ref_arrays(
