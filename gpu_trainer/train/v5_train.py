@@ -4383,6 +4383,9 @@ def run_v5_forward_test(
             'gate_blocks': dict(gate_blocks),
         }
         report['debias_spread_ratio'] = debias_spread_ratio
+        _df_pct_cal_indices = np.where(np.isfinite(scores_work))[0]
+        report['pct_calibration'] = _compute_percentile_calibration(
+            _df_pct_cal_indices, scores_work, sides, safe_r, test_bars)
         _print_forward_report(report)
         return report
 
