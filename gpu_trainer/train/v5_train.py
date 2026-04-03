@@ -4383,6 +4383,8 @@ def run_v5_forward_test(
             'gate_blocks': dict(gate_blocks),
         }
         report['debias_spread_ratio'] = debias_spread_ratio
+        # scores_work = scores masked by quality gate + valid bars (pre-threshold,
+        # pre-cooldown). finite indices are "quality-passed candidates".
         _df_pct_cal_indices = np.where(np.isfinite(scores_work))[0]
         report['pct_calibration'] = _compute_percentile_calibration(
             _df_pct_cal_indices, scores_work, sides, safe_r, test_bars)
@@ -4497,7 +4499,7 @@ def run_v5_forward_test(
             short_r = t_r_valid[short_mask_v]
             short_agree_m = t_mu_r_valid[short_mask_v] < 0
             side_quality['short_agree']    = _side_agree_stats(short_r[short_agree_m])
-            side_quality['short_disagree_stats'] = _side_agree_stats(short_r[~short_agree_m])
+            side_quality['short_disagree'] = _side_agree_stats(short_r[~short_agree_m])
 
         score_decile_rows, score_monotonic = _compute_score_decile_table(
             t_scores_valid, t_r_valid, t_sides=t_sides_valid)
@@ -4805,6 +4807,8 @@ def run_v5_forward_test(
             if _side_bias_map:
                 report['per_sym_side_bias'] = _side_bias_map
 
+    # scores_work = scores masked by quality gate + valid bars (pre-threshold,
+    # pre-cooldown). finite indices are "quality-passed candidates".
     _pct_cal_indices = np.where(np.isfinite(scores_work))[0]
     pct_calibration = _compute_percentile_calibration(
         _pct_cal_indices, scores_work, sides, safe_r, test_bars)
@@ -5149,7 +5153,7 @@ def _print_forward_report(report):
                      f"({sq.get('short_disagree_pct',0):.0f}%) → "
                      f"expect={sq.get('short_disagree_expect',0):+.4f} R")
         la = sq.get('long_agree');   ld = sq.get('long_disagree')
-        sa = sq.get('short_agree');  sd = sq.get('short_disagree_stats')
+        sa = sq.get('short_agree');  sd = sq.get('short_disagree')
         if la is not None or ld is not None or sa is not None or sd is not None:
             log.info("  Head Agreement by Side:")
 
