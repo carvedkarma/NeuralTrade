@@ -6685,7 +6685,6 @@ Examples:
                 ret_mag_ce_weight=args.v5_ret_mag_ce_weight,
                 ret_mag_scale=args.v5_ret_mag_scale,
                 specialist_mode=getattr(args, 'v5_side_specialist', 'none'),
-                dual_specialist=getattr(args, 'v5_dual_specialist', False),
                 min_mu_r_long=getattr(args, 'v5_min_mu_r_long', -1e9),              # Task #69
                 long_disagree_mult=getattr(args, 'v5_long_disagree_mult', 1.0),     # Task #69
                 specialist_align_weight=getattr(args, 'v5_specialist_align_weight', 0.0),  # Task #69
