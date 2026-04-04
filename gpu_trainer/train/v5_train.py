@@ -1669,7 +1669,7 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
     # negative E[R] in forward tests.  Gate fires only in 'long' specialist mode.
     n_mu_r_long_killed = 0
     if specialist_mode == 'long' and min_mu_r_long > -1e8:
-        mu_r_long_block = mu_R_adj < min_mu_r_long
+        mu_r_long_block = mu_R <= min_mu_r_long
         n_mu_r_long_killed = int(np.sum(mu_r_long_block & np.isfinite(scores)))
         scores[mu_r_long_block] = -np.inf
         if n_mu_r_long_killed > 0:
@@ -1683,7 +1683,7 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
     # Gate fires only in 'short' specialist mode.
     n_mu_r_short_killed = 0
     if specialist_mode == 'short' and max_mu_r_short < 1e8:
-        mu_r_short_block = mu_R_adj > max_mu_r_short   # block if mu_R above threshold
+        mu_r_short_block = mu_R >= max_mu_r_short   # block if mu_R above threshold (raw mu_R, >= catches slippage-zeroed boundary)
         n_mu_r_short_killed = int(np.sum(mu_r_short_block & np.isfinite(scores)))
         scores[mu_r_short_block] = -np.inf
         if n_mu_r_short_killed > 0:
