@@ -8823,6 +8823,8 @@ def train_v5_model(
                 specialist_mode=specialist_mode,  # BUG FIX (Task #68): final sweep must use specialist scoring
                 min_mu_r_long=min_mu_r_long,            # Task #69: LONG specialist head-agree gate
                 long_disagree_mult=long_disagree_mult,  # Task #69: soft disagree penalty
+                max_mu_r_short=max_mu_r_short,          # Task #68: SHORT specialist head-agree gate
+                short_disagree_mult=short_disagree_mult,  # Task #68: soft disagree penalty
             )
             _sweep_cand = val_cand_mask if use_candidates_this_epoch else None
             if per_side_threshold:
