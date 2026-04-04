@@ -277,6 +277,9 @@ class V5ForwardTestConfig:
     min_mu_r_long: float = -1e9        # hard gate: block LONG specialist trades where mu_R < this (0.0 = agree-only)
     long_disagree_mult: float = 1.0    # soft multiplier on LONG disagree trades (mu_R<0); 0.3 = 70% score penalty
     specialist_align_weight: float = 0.0  # loss weight pushing return head to agree with action head on specialist bars
+    # --- Signal quality: SHORT specialist head-agreement gates (Task #68) ---
+    max_mu_r_short: float = 1e9        # hard gate: block SHORT specialist trades where mu_R > this (0.0 = agree-only)
+    short_disagree_mult: float = 1.0   # soft multiplier on SHORT disagree trades (mu_R>0); 0.3 = 70% score penalty
 
 
 def compute_feature_importance_report(
@@ -1014,6 +1017,22 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
         L_specialist_align = (p_long_align * neg_mu_penalty).mean()
         total = total + specialist_align_weight * L_specialist_align
         losses['L_specialist_align'] = float(L_specialist_align.item())
+    elif specialist_align_weight > 0.0 and specialist_mode == 'short' and not phase1_mode:
+        # Task #68 Fix 3: SHORT specialist alignment loss — symmetric mirror of LONG.
+        # Fires when the action head predicts SHORT (high p_short) but the return head
+        # predicts a positive return (mu_R > 0, i.e. market goes up while we're short).
+        # Gradient flows only through ret_mu (return head), not the action head.
+        # Formula: L_align = mean(p_short.detach() * relu(ret_mu))
+        #   - Penalises positive mu_R on bars where action head is confident SHORT
+        #   - No effect on bars where ret_mu <= 0 (relu gives 0) — agree bars untouched
+        #   - Skipped in Phase 1 (action_probs are random noise during return pretraining)
+        #   - Pushes mu_R toward 0- on confident SHORT bars → head-agree% rises over training
+        SHORT_IDX_align = 2  # same index as SHORT_IDX used in KL targets above
+        p_short_align = action_probs[:, SHORT_IDX_align].detach()  # shape (N,)
+        pos_mu_penalty = F.relu(ret_mu)                             # shape (N,) — penalise positive mu_R
+        L_specialist_align = (p_short_align * pos_mu_penalty).mean()
+        total = total + specialist_align_weight * L_specialist_align
+        losses['L_specialist_align'] = float(L_specialist_align.item())
     else:
         losses['L_specialist_align'] = 0.0
 
@@ -1454,7 +1473,9 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
                       min_p_short=0.0, side_aware_scoring=False,
                       specialist_mode='none',
                       min_mu_r_long=-1e9,
-                      long_disagree_mult=1.0):
+                      long_disagree_mult=1.0,
+                      max_mu_r_short=1e9,
+                      short_disagree_mult=1.0):
     """Compute execution-aware v5 scores -- all in R-units.
 
     Two side-selection modes:
@@ -1566,6 +1587,15 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
         penalty = score_lambda * directional_penalty
         scores = p_short * mu_over_risk - penalty
         sides = np.full(len(scores), -1, dtype=np.int64)
+
+        # --- Task #68 Fix 2: soft disagree multiplier for SHORT specialist ---
+        # When the return head predicts a positive mu_R (return head disagrees with SHORT
+        # direction — market predicted to go up but we're shorting), apply short_disagree_mult
+        # to reduce the score without blocking it entirely.  Default 1.0 = no change.
+        # 0.3 = 70% score penalty.  Agree trades (mu_R<=0) naturally rank higher.
+        if short_disagree_mult < 1.0:
+            mu_disagree_mask_short = mu_R_adj > 0.0
+            scores = np.where(mu_disagree_mask_short, scores * short_disagree_mult, scores)
     elif specialist_mode == 'long':
         # LONG specialist: direction is always LONG.  Score is driven purely by p_long.
         p_side = p_long
@@ -1645,6 +1675,20 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
         if n_mu_r_long_killed > 0:
             log.debug(f"[LONG_SPEC_GATE] min_mu_r_long={min_mu_r_long:.3f} blocked {n_mu_r_long_killed} trades")
 
+    # --- Task #68 Fix 1: SHORT specialist hard mu_R gate ---
+    # When max_mu_r_short <= 0.0 (e.g. 0.0), block all SHORT specialist trades where
+    # the return head predicts mu_R above the threshold.  At 0.0 this only passes
+    # head-agree trades (mu_R < 0), removing counter-trend shorts in bull-market folds
+    # (e.g. Dec 2022 - Feb 2023 recovery: ha=0% → all 31 trades blocked → 0R instead of -27.6R).
+    # Gate fires only in 'short' specialist mode.
+    n_mu_r_short_killed = 0
+    if specialist_mode == 'short' and max_mu_r_short < 1e8:
+        mu_r_short_block = mu_R_adj > max_mu_r_short   # block if mu_R above threshold
+        n_mu_r_short_killed = int(np.sum(mu_r_short_block & np.isfinite(scores)))
+        scores[mu_r_short_block] = -np.inf
+        if n_mu_r_short_killed > 0:
+            log.debug(f"[SHORT_SPEC_GATE] max_mu_r_short={max_mu_r_short:.3f} blocked {n_mu_r_short_killed} trades")
+
     n_long_sides = int(np.sum(sides == 1))
     n_short_sides = int(np.sum(sides == -1))
 
@@ -1708,6 +1752,7 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
             'n_pside_killed': n_pside_killed,
             'n_pshort_killed': n_pshort_killed,
             'n_mu_r_long_killed': n_mu_r_long_killed,   # Task #69: LONG specialist hard mu_R gate
+            'n_mu_r_short_killed': n_mu_r_short_killed,  # Task #68: SHORT specialist hard mu_R gate
             'side_aware_scoring': side_aware_scoring,
             'n_long_all': n_long_sides,
             'n_short_all': n_short_sides,
@@ -2659,6 +2704,8 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
         specialist_mode=getattr(config, 'specialist_mode', 'none'),  # BUG FIX (Task #68): reference calibration must use specialist scoring
         min_mu_r_long=getattr(config, 'min_mu_r_long', -1e9),        # Task #69: LONG specialist head-agree gate
         long_disagree_mult=getattr(config, 'long_disagree_mult', 1.0),  # Task #69: soft disagree penalty
+        max_mu_r_short=getattr(config, 'max_mu_r_short', 1e9),       # Task #68: SHORT specialist head-agree gate
+        short_disagree_mult=getattr(config, 'short_disagree_mult', 1.0),  # Task #68: soft disagree penalty
     )
     ref_arrays['_train_scores'] = train_scores
 
@@ -3107,6 +3154,8 @@ def run_v5_forward_test(
         specialist_mode=getattr(config, 'specialist_mode', 'none'),
         min_mu_r_long=getattr(config, 'min_mu_r_long', -1e9),        # Task #69: LONG specialist head-agree gate
         long_disagree_mult=getattr(config, 'long_disagree_mult', 1.0),  # Task #69: soft disagree penalty
+        max_mu_r_short=getattr(config, 'max_mu_r_short', 1e9),       # Task #68: SHORT specialist head-agree gate
+        short_disagree_mult=getattr(config, 'short_disagree_mult', 1.0),  # Task #68: soft disagree penalty
     )
 
     if 'edge_L' in score_diag:
@@ -5517,6 +5566,9 @@ def run_v5_walk_forward(
     min_mu_r_long=-1e9,         # hard gate: LONG specialist trades blocked when mu_R < this (0.0 = agree-only)
     long_disagree_mult=1.0,     # soft penalty on LONG disagree trades; 0.3 = 70% score reduction
     specialist_align_weight=0.0,  # loss weight pushing return head to agree with action head
+    # Task #68: signal quality — SHORT specialist head-agreement improvements
+    max_mu_r_short=1e9,         # hard gate: SHORT specialist trades blocked when mu_R > this (0.0 = agree-only)
+    short_disagree_mult=1.0,    # soft penalty on SHORT disagree trades; 0.3 = 70% score reduction
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -5872,6 +5924,8 @@ def run_v5_walk_forward(
                 min_mu_r_long=min_mu_r_long,            # Task #69
                 long_disagree_mult=long_disagree_mult,  # Task #69
                 specialist_align_weight=specialist_align_weight,  # Task #69
+                max_mu_r_short=max_mu_r_short,          # Task #68
+                short_disagree_mult=short_disagree_mult,  # Task #68
             )
         except Exception as _fold_err:
             import traceback as _tb
@@ -6071,6 +6125,8 @@ def run_v5_walk_forward(
                     min_mu_r_long=min_mu_r_long,            # Task #69
                     long_disagree_mult=long_disagree_mult,  # Task #69
                     specialist_align_weight=specialist_align_weight,  # Task #69
+                    max_mu_r_short=max_mu_r_short,          # Task #68 (no-op in long mode, default)
+                    short_disagree_mult=short_disagree_mult,  # Task #68 (no-op in long mode, default)
                 )
             except Exception as _long_err:
                 import traceback as _tbl
@@ -7007,6 +7063,9 @@ def train_v5_model(
     min_mu_r_long=-1e9,         # hard gate: LONG specialist trades blocked when mu_R < this (0.0 = agree-only)
     long_disagree_mult=1.0,     # soft penalty on LONG disagree trades; 0.3 = 70% score reduction
     specialist_align_weight=0.0,  # loss weight pushing return head to agree with action head
+    # Task #68: signal quality — SHORT specialist head-agreement improvements
+    max_mu_r_short=1e9,         # hard gate: SHORT specialist trades blocked when mu_R > this (0.0 = agree-only)
+    short_disagree_mult=1.0,    # soft penalty on SHORT disagree trades; 0.3 = 70% score reduction
 ):
     """V5/V6 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -8415,6 +8474,8 @@ def train_v5_model(
                 specialist_mode=specialist_mode,  # BUG FIX (Task #68): was missing; sweep chose wrong direction
                 min_mu_r_long=min_mu_r_long,            # Task #69: LONG specialist head-agree gate
                 long_disagree_mult=long_disagree_mult,  # Task #69: soft disagree penalty
+                max_mu_r_short=max_mu_r_short,          # Task #68: SHORT specialist head-agree gate
+                short_disagree_mult=short_disagree_mult,  # Task #68: soft disagree penalty
             )
 
             log.info(f"[{vtag}_SCORE_DIAG] mu_R: mean={score_diag['mu_R_mean']:.4f} std={score_diag['mu_R_std']:.4f} | "

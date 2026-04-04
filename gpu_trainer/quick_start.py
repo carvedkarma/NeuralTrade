@@ -5360,8 +5360,23 @@ Examples:
     parser.add_argument("--v5-specialist-align-weight", type=float, default=0.0,
                         help="Task #69: alignment loss weight — during LONG specialist training, penalise "
                              "negative mu_R on bars where the action head predicts LONG (p_long.detach() * relu(-mu_R)). "
+                             "Also fires for SHORT specialist: penalises positive mu_R on bars where action "
+                             "head predicts SHORT (p_short.detach() * relu(mu_R)). Task #68 extension. "
                              "Pushes return head to agree with action head over training. "
                              "Recommended: 0.5. Default: 0.0 (disabled).")
+
+    # Task #68: SHORT specialist signal quality improvements (symmetric to Task #69)
+    parser.add_argument("--v5-max-mu-r-short", type=float, default=1e9,
+                        help="Task #68: SHORT specialist hard gate — block SHORT trades where mu_R > threshold. "
+                             "0.0 = agree-only mode (return head must predict negative return). "
+                             "Symmetric to --v5-min-mu-r-long: prevents counter-trend shorts in bull-recovery "
+                             "folds (e.g. Dec 2022 - Feb 2023: ha=0%%, 31 trades, -0.89 R expectancy). "
+                             "Default: 1e9 (disabled). Recommended: 0.0 with --v5-dual-specialist.")
+    parser.add_argument("--v5-short-disagree-mult", type=float, default=1.0,
+                        help="Task #68: SHORT specialist soft disagree multiplier — reduce score of SHORT "
+                             "trades where mu_R > 0 (return head disagrees with SHORT direction). "
+                             "0.3 = 70%% score penalty, pushes agree trades higher in threshold sweep. "
+                             "Default: 1.0 (disabled). Use 0.3 with --v5-max-mu-r-short for dual-gate effect.")
 
     parser.add_argument("--v5-train-end-date", type=str, default=None,
                         help="v5 time-based split: train on data before this date (YYYY-MM-DD)")
@@ -6454,6 +6469,8 @@ Examples:
                     min_mu_r_long=getattr(args, 'v5_min_mu_r_long', -1e9),              # Task #69
                     long_disagree_mult=getattr(args, 'v5_long_disagree_mult', 1.0),     # Task #69
                     specialist_align_weight=getattr(args, 'v5_specialist_align_weight', 0.0),  # Task #69
+                    max_mu_r_short=getattr(args, 'v5_max_mu_r_short', 1e9),             # Task #68
+                    short_disagree_mult=getattr(args, 'v5_short_disagree_mult', 1.0),   # Task #68
                 )
                 return
 
@@ -6672,6 +6689,8 @@ Examples:
                 min_mu_r_long=getattr(args, 'v5_min_mu_r_long', -1e9),              # Task #69
                 long_disagree_mult=getattr(args, 'v5_long_disagree_mult', 1.0),     # Task #69
                 specialist_align_weight=getattr(args, 'v5_specialist_align_weight', 0.0),  # Task #69
+                max_mu_r_short=getattr(args, 'v5_max_mu_r_short', 1e9),             # Task #68
+                short_disagree_mult=getattr(args, 'v5_short_disagree_mult', 1.0),   # Task #68
             )
 
               if _single_pusher is not None:
