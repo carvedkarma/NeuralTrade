@@ -5346,6 +5346,23 @@ Examples:
                              "Checkpoints saved as best_v5_short_fold{N}.pt and best_v5_long_fold{N}.pt. "
                              "Overrides --v5-side-specialist inside the walk-forward loop.")
 
+    # Task #69: LONG specialist signal quality improvements
+    parser.add_argument("--v5-min-mu-r-long", type=float, default=-1e9,
+                        help="Task #69: LONG specialist hard gate — block LONG trades where mu_R < threshold. "
+                             "0.0 = agree-only mode (return head must predict positive return). "
+                             "Simulation shows +12%% total R and prevents all losses in ha=0%% bear folds. "
+                             "Default: -1e9 (disabled). Recommended: 0.0 with --v5-dual-specialist.")
+    parser.add_argument("--v5-long-disagree-mult", type=float, default=1.0,
+                        help="Task #69: LONG specialist soft disagree multiplier — reduce score of LONG "
+                             "trades where mu_R < 0 (return head disagrees with action head). "
+                             "0.3 = 70%% score penalty, pushes agree trades higher in threshold sweep. "
+                             "Default: 1.0 (disabled). Use 0.3 with --v5-min-mu-r-long for dual-gate effect.")
+    parser.add_argument("--v5-specialist-align-weight", type=float, default=0.0,
+                        help="Task #69: alignment loss weight — during LONG specialist training, penalise "
+                             "negative mu_R on bars where the action head predicts LONG (p_long.detach() * relu(-mu_R)). "
+                             "Pushes return head to agree with action head over training. "
+                             "Recommended: 0.5. Default: 0.0 (disabled).")
+
     parser.add_argument("--v5-train-end-date", type=str, default=None,
                         help="v5 time-based split: train on data before this date (YYYY-MM-DD)")
     parser.add_argument("--v5-test-start-date", type=str, default=None,
@@ -6434,6 +6451,9 @@ Examples:
                     ret_mag_scale=args.v5_ret_mag_scale,
                     specialist_mode=getattr(args, 'v5_side_specialist', 'none'),
                     dual_specialist=getattr(args, 'v5_dual_specialist', False),
+                    min_mu_r_long=getattr(args, 'v5_min_mu_r_long', -1e9),              # Task #69
+                    long_disagree_mult=getattr(args, 'v5_long_disagree_mult', 1.0),     # Task #69
+                    specialist_align_weight=getattr(args, 'v5_specialist_align_weight', 0.0),  # Task #69
                 )
                 return
 
@@ -6649,6 +6669,9 @@ Examples:
                 ret_mag_scale=args.v5_ret_mag_scale,
                 specialist_mode=getattr(args, 'v5_side_specialist', 'none'),
                 dual_specialist=getattr(args, 'v5_dual_specialist', False),
+                min_mu_r_long=getattr(args, 'v5_min_mu_r_long', -1e9),              # Task #69
+                long_disagree_mult=getattr(args, 'v5_long_disagree_mult', 1.0),     # Task #69
+                specialist_align_weight=getattr(args, 'v5_specialist_align_weight', 0.0),  # Task #69
             )
 
               if _single_pusher is not None:

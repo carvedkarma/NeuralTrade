@@ -273,6 +273,10 @@ class V5ForwardTestConfig:
     per_side_threshold: bool = False
     gate_mode: str = "ref_magnitude"   # choices: ref_magnitude | percentile_top15
     specialist_mode: str = "none"      # "none" | "short" | "long" — dual-specialist training
+    # --- Signal quality: LONG specialist head-agreement gates (Task #69) ---
+    min_mu_r_long: float = -1e9        # hard gate: block LONG specialist trades where mu_R < this (0.0 = agree-only)
+    long_disagree_mult: float = 1.0    # soft multiplier on LONG disagree trades (mu_R<0); 0.3 = 70% score penalty
+    specialist_align_weight: float = 0.0  # loss weight pushing return head to agree with action head on specialist bars
 
 
 def compute_feature_importance_report(
@@ -712,7 +716,8 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
                     chop_hold_target=0.20,
                     ret_mag_ce_weight=False,
                     ret_mag_scale=1.0,
-                    specialist_mode='none'):
+                    specialist_mode='none',
+                    specialist_align_weight=0.0):
     """Compute v5 composite loss with class-balanced action CE.
 
     Uses clamped Gaussian NLL to prevent log(sigma) term from dominating.
@@ -990,6 +995,27 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
     else:
         total = eff_w_ret * L_ret + eff_w_mfe * L_mfe + eff_w_mae * L_mae + eff_w_action * L_action + L_sigma_reg
         losses['phase'] = 2
+
+    # --- Task #69: Specialist mu_R alignment loss (Phase 2 only) ---
+    # When specialist_mode='long', push the return head to predict positive mu_R on bars
+    # where the action head has high p_long conviction.  Gradient flows through ret_mu
+    # only (action_probs is detached), so this does NOT alter the action head's distribution.
+    #
+    # Loss = mean(p_long.detach() * relu(-ret_mu))
+    #   - Fires only when p_long is high (action head confident about LONG)
+    #   - AND mu_R < 0 (return head disagrees)
+    #   - Pushes mu_R toward 0+ on confident LONG bars → head-agree% rises over training
+    #   - No effect on bars where ret_mu >= 0 (relu gives 0)
+    #   - Skipped in Phase 1 (action_probs are random noise during return pretraining)
+    if specialist_align_weight > 0.0 and specialist_mode == 'long' and not phase1_mode:
+        LONG_IDX_align = 1  # same index as LONG_IDX used in KL targets above
+        p_long_align = action_probs[:, LONG_IDX_align].detach()   # shape (N,)
+        neg_mu_penalty = F.relu(-ret_mu)                           # shape (N,) — penalise negative mu_R
+        L_specialist_align = (p_long_align * neg_mu_penalty).mean()
+        total = total + specialist_align_weight * L_specialist_align
+        losses['L_specialist_align'] = float(L_specialist_align.item())
+    else:
+        losses['L_specialist_align'] = 0.0
 
     # [V5_LOSS_BUDGET] structured log — emitted once per call so callers can aggregate.
     # Use losses dict directly (avoids re-calling .item() on tensors already consumed).
@@ -1426,7 +1452,9 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
                       min_mu_r_score=0.005, slippage_bps=0.0,
                       sigma_discount=False, min_p_side=0.0,
                       min_p_short=0.0, side_aware_scoring=False,
-                      specialist_mode='none'):
+                      specialist_mode='none',
+                      min_mu_r_long=-1e9,
+                      long_disagree_mult=1.0):
     """Compute execution-aware v5 scores -- all in R-units.
 
     Two side-selection modes:
@@ -1545,6 +1573,16 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
         penalty = score_lambda * directional_penalty
         scores = p_long * mu_over_risk - penalty
         sides = np.full(len(scores), 1, dtype=np.int64)
+
+        # --- Task #69 Fix 2: soft disagree multiplier ---
+        # When the return head predicts a negative mu_R (return head disagrees with LONG
+        # direction), apply long_disagree_mult to reduce the score without blocking it
+        # entirely.  Default 1.0 = no change.  0.3 = 70% score penalty.
+        # This naturally pushes agree trades (mu_R>=0) higher in the threshold sweep so
+        # they are selected first, leaving disagree trades only when supply runs short.
+        if long_disagree_mult < 1.0:
+            mu_disagree_mask = mu_R_adj < 0.0
+            scores = np.where(mu_disagree_mask, scores * long_disagree_mult, scores)
     else:
         best_edge = np.maximum(edge_long, edge_short)
         sides = np.where(edge_long >= edge_short, 1, -1)
@@ -1593,6 +1631,19 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
         tiny_mu_mask = abs_mu < min_mu_r_score
         n_suppressed = int(np.sum(tiny_mu_mask))
         scores[tiny_mu_mask] = -np.inf
+
+    # --- Task #69 Fix 1: LONG specialist hard mu_R gate ---
+    # When min_mu_r_long >= 0.0 (e.g. 0.0), block all LONG specialist trades where
+    # the return head predicts mu_R below the threshold.  At 0.0 this only passes
+    # head-agree trades (mu_R > 0), removing the ~23-47% of disagree trades that have
+    # negative E[R] in forward tests.  Gate fires only in 'long' specialist mode.
+    n_mu_r_long_killed = 0
+    if specialist_mode == 'long' and min_mu_r_long > -1e8:
+        mu_r_long_block = mu_R_adj < min_mu_r_long
+        n_mu_r_long_killed = int(np.sum(mu_r_long_block & np.isfinite(scores)))
+        scores[mu_r_long_block] = -np.inf
+        if n_mu_r_long_killed > 0:
+            log.debug(f"[LONG_SPEC_GATE] min_mu_r_long={min_mu_r_long:.3f} blocked {n_mu_r_long_killed} trades")
 
     n_long_sides = int(np.sum(sides == 1))
     n_short_sides = int(np.sum(sides == -1))
@@ -1656,6 +1707,7 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
             'n_sigma_discounted': n_sigma_discounted,
             'n_pside_killed': n_pside_killed,
             'n_pshort_killed': n_pshort_killed,
+            'n_mu_r_long_killed': n_mu_r_long_killed,   # Task #69: LONG specialist hard mu_R gate
             'side_aware_scoring': side_aware_scoring,
             'n_long_all': n_long_sides,
             'n_short_all': n_short_sides,
@@ -2605,6 +2657,8 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
         side_aware_scoring=config.side_aware_scoring,
         min_mu_r_score=0.0,
         specialist_mode=getattr(config, 'specialist_mode', 'none'),  # BUG FIX (Task #68): reference calibration must use specialist scoring
+        min_mu_r_long=getattr(config, 'min_mu_r_long', -1e9),        # Task #69: LONG specialist head-agree gate
+        long_disagree_mult=getattr(config, 'long_disagree_mult', 1.0),  # Task #69: soft disagree penalty
     )
     ref_arrays['_train_scores'] = train_scores
 
@@ -3051,6 +3105,8 @@ def run_v5_forward_test(
         side_aware_scoring=config.side_aware_scoring,
         min_mu_r_score=0.0,
         specialist_mode=getattr(config, 'specialist_mode', 'none'),
+        min_mu_r_long=getattr(config, 'min_mu_r_long', -1e9),        # Task #69: LONG specialist head-agree gate
+        long_disagree_mult=getattr(config, 'long_disagree_mult', 1.0),  # Task #69: soft disagree penalty
     )
 
     if 'edge_L' in score_diag:
@@ -5457,6 +5513,10 @@ def run_v5_walk_forward(
     ret_mag_scale=1.0,  # Task #56 B2: multiplier for ret_mag_ce_weight (optimal: 2.0)
     specialist_mode='none',  # Task #67: "none" | "short" | "long" — single specialist
     dual_specialist=False,   # Task #67: train SHORT+LONG specialists per fold; merge reports
+    # Task #69: signal quality — LONG specialist head-agreement improvements
+    min_mu_r_long=-1e9,         # hard gate: LONG specialist trades blocked when mu_R < this (0.0 = agree-only)
+    long_disagree_mult=1.0,     # soft penalty on LONG disagree trades; 0.3 = 70% score reduction
+    specialist_align_weight=0.0,  # loss weight pushing return head to agree with action head
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -5809,6 +5869,9 @@ def run_v5_walk_forward(
                 ret_mag_ce_weight=ret_mag_ce_weight,
                 ret_mag_scale=ret_mag_scale,
                 specialist_mode='short' if dual_specialist else specialist_mode,
+                min_mu_r_long=min_mu_r_long,            # Task #69
+                long_disagree_mult=long_disagree_mult,  # Task #69
+                specialist_align_weight=specialist_align_weight,  # Task #69
             )
         except Exception as _fold_err:
             import traceback as _tb
@@ -6005,6 +6068,9 @@ def run_v5_walk_forward(
                     ret_mag_ce_weight=ret_mag_ce_weight,
                     ret_mag_scale=ret_mag_scale,
                     specialist_mode='long',
+                    min_mu_r_long=min_mu_r_long,            # Task #69
+                    long_disagree_mult=long_disagree_mult,  # Task #69
+                    specialist_align_weight=specialist_align_weight,  # Task #69
                 )
             except Exception as _long_err:
                 import traceback as _tbl
@@ -6937,6 +7003,10 @@ def train_v5_model(
     ret_mag_ce_weight=False,  # Task #56 B2: upweight CE by return magnitude; opt-in
     ret_mag_scale=1.0,  # Task #56 B2: multiplier for return-magnitude CE upweighting (optimal: 2.0)
     specialist_mode='none',  # Task #67: "none" | "short" | "long" — dual-specialist training
+    # Task #69: signal quality — LONG specialist head-agreement improvements
+    min_mu_r_long=-1e9,         # hard gate: LONG specialist trades blocked when mu_R < this (0.0 = agree-only)
+    long_disagree_mult=1.0,     # soft penalty on LONG disagree trades; 0.3 = 70% score reduction
+    specialist_align_weight=0.0,  # loss weight pushing return head to agree with action head
 ):
     """V5/V6 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -7970,6 +8040,7 @@ def train_v5_model(
                     ret_mag_ce_weight=ret_mag_ce_weight,
                     ret_mag_scale=ret_mag_scale,
                     specialist_mode=specialist_mode,
+                    specialist_align_weight=specialist_align_weight,  # Task #69
                 )
 
             optimizer.zero_grad()
@@ -8085,6 +8156,7 @@ def train_v5_model(
                         ret_mag_ce_weight=ret_mag_ce_weight,
                         ret_mag_scale=ret_mag_scale,
                         specialist_mode=specialist_mode,
+                        specialist_align_weight=specialist_align_weight,  # Task #69
                     )
                 val_losses.append(vloss.item())
 
@@ -8341,6 +8413,8 @@ def train_v5_model(
                 slippage_bps=slippage_base_bps,
                 min_mu_r_score=0.0,
                 specialist_mode=specialist_mode,  # BUG FIX (Task #68): was missing; sweep chose wrong direction
+                min_mu_r_long=min_mu_r_long,            # Task #69: LONG specialist head-agree gate
+                long_disagree_mult=long_disagree_mult,  # Task #69: soft disagree penalty
             )
 
             log.info(f"[{vtag}_SCORE_DIAG] mu_R: mean={score_diag['mu_R_mean']:.4f} std={score_diag['mu_R_std']:.4f} | "
@@ -8622,6 +8696,7 @@ def train_v5_model(
                             side_bal_weight=side_bal_weight,
                             action_entropy_weight=action_entropy_weight,
                             specialist_mode=specialist_mode,  # BUG FIX (Task #68): was missing; fine-tune reverted to standard training
+                            specialist_align_weight=specialist_align_weight,  # Task #69
                         )
                         ft_optimizer.zero_grad()
                         loss.backward()
@@ -8685,6 +8760,8 @@ def train_v5_model(
                 slippage_bps=slippage_base_bps,
                 min_mu_r_score=0.0,
                 specialist_mode=specialist_mode,  # BUG FIX (Task #68): final sweep must use specialist scoring
+                min_mu_r_long=min_mu_r_long,            # Task #69: LONG specialist head-agree gate
+                long_disagree_mult=long_disagree_mult,  # Task #69: soft disagree penalty
             )
             _sweep_cand = val_cand_mask if use_candidates_this_epoch else None
             if per_side_threshold:
