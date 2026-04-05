@@ -5378,6 +5378,27 @@ Examples:
                              "0.3 = 70%% score penalty, pushes agree trades higher in threshold sweep. "
                              "Default: 1.0 (disabled). Use 0.3 with --v5-max-mu-r-short for dual-gate effect.")
 
+    # Task #69 Phase 2: gate calibration fixes
+    parser.add_argument("--v5-per-symbol-no-ceiling", action="store_true", default=False,
+                        help="Task #69 P2: when set, per-symbol thresholds bypass the global max_threshold ceiling cap. "
+                             "This allows BNB (0.1822), AAVE (1.014) etc to keep their learned thresholds instead "
+                             "of being crushed to 0.02. The global base threshold (applied to bars not in per-symbol map) "
+                             "is still capped by max_threshold. CRITICAL: use with --v5-per-symbol-threshold or "
+                             "--v5-per-side-threshold. Default: False (backward-compatible).")
+    parser.add_argument("--v5-ema200-long-only", action="store_true", default=False,
+                        help="Task #69 P2: when used with --v5-ema200-regime-gate, restrict EMA200 blocking to LONG "
+                             "signals only. SHORT signals are never blocked by EMA200. "
+                             "Analysis shows 36 profitable shorts (+12.00R) were blocked by EMA200 in the 98-trade "
+                             "forward test; EMA200 is a poor SHORT filter (price above EMA = bullish = SHORT opportunity). "
+                             "Default: False (backward-compatible, both sides blocked).")
+    parser.add_argument("--v5-score-pside-weight", type=float, default=1.0,
+                        help="Task #69 P2: p_side contribution weight in specialist scoring formula. "
+                             "Controls how much p_short/p_long influences the specialist score relative to mu_over_risk. "
+                             "1.0 = current formula (p_side * mu_over_risk - lambda*(1-p_side)*mu_over_risk). "
+                             "0.0 = pure mu_over_risk (p_side has zero influence; removes anti-predictive p_side effect). "
+                             "0.5 = blend. Analysis confirmed p_side is anti-predictive (winners had LOWER p_side "
+                             "than losers), so reducing this weight is recommended. Default: 1.0 (backward-compatible).")
+
     parser.add_argument("--v5-train-end-date", type=str, default=None,
                         help="v5 time-based split: train on data before this date (YYYY-MM-DD)")
     parser.add_argument("--v5-test-start-date", type=str, default=None,
@@ -6471,6 +6492,9 @@ Examples:
                     specialist_align_weight=getattr(args, 'v5_specialist_align_weight', 0.0),  # Task #69
                     max_mu_r_short=getattr(args, 'v5_max_mu_r_short', 1e9),             # Task #68
                     short_disagree_mult=getattr(args, 'v5_short_disagree_mult', 1.0),   # Task #68
+                    per_symbol_no_ceiling=getattr(args, 'v5_per_symbol_no_ceiling', False),  # Task #69 P2
+                    ema200_long_only=getattr(args, 'v5_ema200_long_only', False),            # Task #69 P2
+                    score_pside_weight=getattr(args, 'v5_score_pside_weight', 1.0),         # Task #69 P2
                 )
                 return
 
@@ -6690,6 +6714,9 @@ Examples:
                 specialist_align_weight=getattr(args, 'v5_specialist_align_weight', 0.0),  # Task #69
                 max_mu_r_short=getattr(args, 'v5_max_mu_r_short', 1e9),             # Task #68
                 short_disagree_mult=getattr(args, 'v5_short_disagree_mult', 1.0),   # Task #68
+                per_symbol_no_ceiling=getattr(args, 'v5_per_symbol_no_ceiling', False),  # Task #69 P2
+                ema200_long_only=getattr(args, 'v5_ema200_long_only', False),            # Task #69 P2
+                score_pside_weight=getattr(args, 'v5_score_pside_weight', 1.0),         # Task #69 P2
             )
 
               if _single_pusher is not None:

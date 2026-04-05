@@ -280,6 +280,10 @@ class V5ForwardTestConfig:
     # --- Signal quality: SHORT specialist head-agreement gates (Task #68) ---
     max_mu_r_short: float = 1e9        # hard gate: block SHORT specialist trades where mu_R > this (0.0 = agree-only)
     short_disagree_mult: float = 1.0   # soft multiplier on SHORT disagree trades (mu_R>0); 0.3 = 70% score penalty
+    # --- Gate calibration fixes (Task #69 Phase 2) ---
+    per_symbol_no_ceiling: bool = False  # when True, per-symbol thresholds bypass max_threshold ceiling cap
+    ema200_long_only: bool = False       # when True, EMA200 gate only blocks LONG signals; SHORTs are never blocked
+    score_pside_weight: float = 1.0     # p_side contribution weight in specialist scoring; 0.0 = pure mu_over_risk
 
 
 def compute_feature_importance_report(
@@ -1475,7 +1479,8 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
                       min_mu_r_long=-1e9,
                       long_disagree_mult=1.0,
                       max_mu_r_short=1e9,
-                      short_disagree_mult=1.0):
+                      short_disagree_mult=1.0,
+                      score_pside_weight=1.0):
     """Compute execution-aware v5 scores -- all in R-units.
 
     Two side-selection modes:
@@ -1582,10 +1587,13 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
         # score = p_short * mu_over_risk - lambda*(1-p_short)*mu_over_risk
         #       = mu_over_risk * [(1+lambda)*p_short - lambda]
         # Positive when p_short > lambda/(1+lambda) = 0.231 at default lambda=0.30.
+        # When score_pside_weight < 1.0, p_side contribution is blended toward 1.0
+        # (i.e. p_short has less influence; at weight=0.0, score = pure mu_over_risk).
         p_side = p_short
-        directional_penalty = (1.0 - p_side) * mu_over_risk
+        effective_p = score_pside_weight * p_side + (1.0 - score_pside_weight)
+        directional_penalty = score_pside_weight * (1.0 - p_side) * mu_over_risk
         penalty = score_lambda * directional_penalty
-        scores = p_short * mu_over_risk - penalty
+        scores = effective_p * mu_over_risk - penalty
         sides = np.full(len(scores), -1, dtype=np.int64)
 
         # --- Task #68 Fix 2: soft disagree multiplier for SHORT specialist ---
@@ -1598,10 +1606,13 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
             scores = np.where(mu_disagree_mask_short, scores * short_disagree_mult, scores)
     elif specialist_mode == 'long':
         # LONG specialist: direction is always LONG.  Score is driven purely by p_long.
+        # When score_pside_weight < 1.0, p_side contribution is blended toward 1.0
+        # (i.e. p_long has less influence; at weight=0.0, score = pure mu_over_risk).
         p_side = p_long
-        directional_penalty = (1.0 - p_side) * mu_over_risk
+        effective_p = score_pside_weight * p_side + (1.0 - score_pside_weight)
+        directional_penalty = score_pside_weight * (1.0 - p_side) * mu_over_risk
         penalty = score_lambda * directional_penalty
-        scores = p_long * mu_over_risk - penalty
+        scores = effective_p * mu_over_risk - penalty
         sides = np.full(len(scores), 1, dtype=np.int64)
 
         # --- Task #69 Fix 2: soft disagree multiplier ---
@@ -2706,6 +2717,7 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
         long_disagree_mult=getattr(config, 'long_disagree_mult', 1.0),  # Task #69: soft disagree penalty
         max_mu_r_short=getattr(config, 'max_mu_r_short', 1e9),       # Task #68: SHORT specialist head-agree gate
         short_disagree_mult=getattr(config, 'short_disagree_mult', 1.0),  # Task #68: soft disagree penalty
+        score_pside_weight=getattr(config, 'score_pside_weight', 1.0),   # Task #69 P2: p_side weight in specialist scoring
     )
     ref_arrays['_train_scores'] = train_scores
 
@@ -3156,6 +3168,7 @@ def run_v5_forward_test(
         long_disagree_mult=getattr(config, 'long_disagree_mult', 1.0),  # Task #69: soft disagree penalty
         max_mu_r_short=getattr(config, 'max_mu_r_short', 1e9),       # Task #68: SHORT specialist head-agree gate
         short_disagree_mult=getattr(config, 'short_disagree_mult', 1.0),  # Task #68: soft disagree penalty
+        score_pside_weight=getattr(config, 'score_pside_weight', 1.0),   # Task #69 P2: p_side weight in specialist scoring
     )
 
     if 'edge_L' in score_diag:
@@ -3329,29 +3342,31 @@ def run_v5_forward_test(
                     clamped = thr_val
                     if np.isfinite(clamped):
                         clamped = max(clamped, hard_floor)
-                        if config.max_threshold is not None:
+                        if config.max_threshold is not None and not getattr(config, 'per_symbol_no_ceiling', False):
                             clamped = min(clamped, config.max_threshold)
                     side_bar_mask = sym_mask & (sides == side_val)
                     per_bar_threshold[side_bar_mask] = clamped
             n_inf_thr = int(np.sum(np.isinf(per_bar_threshold) & (per_bar_threshold > 0)))
+            _no_ceil_str = " (per_symbol_no_ceiling=True: ceiling bypassed)" if getattr(config, 'per_symbol_no_ceiling', False) else f" ceiling={config.max_threshold}"
             log.info(f"[V5_FWD] Per-symbol per-side thresholds active: "
                      f"{len(config.per_symbol_thresholds)} symbols configured, "
                      f"{n_inf_thr} bars have inf threshold (NO EDGE), "
-                     f"floor={hard_floor:.4f} ceiling={config.max_threshold}")
+                     f"floor={hard_floor:.4f}{_no_ceil_str}")
         else:
             for sym_id_key, sym_thr in config.per_symbol_thresholds.items():
                 clamped_thr = sym_thr if not isinstance(sym_thr, dict) else ddt_base_threshold
                 if np.isfinite(clamped_thr):
                     clamped_thr = max(clamped_thr, hard_floor)
-                    if config.max_threshold is not None:
+                    if config.max_threshold is not None and not getattr(config, 'per_symbol_no_ceiling', False):
                         clamped_thr = min(clamped_thr, config.max_threshold)
                 sym_mask = test_sym_ids == int(sym_id_key)
                 per_bar_threshold[sym_mask] = clamped_thr
             n_inf_thr = int(np.sum(np.isinf(per_bar_threshold) & (per_bar_threshold > 0)))
+            _no_ceil_str2 = " (per_symbol_no_ceiling=True: ceiling bypassed)" if getattr(config, 'per_symbol_no_ceiling', False) else f" ceiling={config.max_threshold}"
             log.info(f"[V5_FWD] Per-symbol thresholds active: "
                      f"{len(config.per_symbol_thresholds)} symbols configured, "
                      f"{n_inf_thr} bars have inf threshold (NO EDGE symbols), "
-                     f"floor={hard_floor:.4f} ceiling={config.max_threshold}")
+                     f"floor={hard_floor:.4f}{_no_ceil_str2}")
         # --- All-inf gate: warn loudly when every bar is HIGH_BAR-blocked ---------
         n_inf_bars_total = int(np.sum(np.isinf(per_bar_threshold) & (per_bar_threshold > 0)))
         n_total_bars_thr = len(per_bar_threshold)
@@ -3880,7 +3895,8 @@ def run_v5_forward_test(
             side_val = sides[idx]
             close_val = close_prices[idx]
             ema_val = ema200[idx]
-            _ema200_against = (side_val == 1 and close_val < ema_val) or (side_val == -1 and close_val > ema_val)
+            _ema200_against = (side_val == 1 and close_val < ema_val) or \
+                              (side_val == -1 and close_val > ema_val and not getattr(config, 'ema200_long_only', False))
             if _ema200_against:
                 _side_str = "LONG" if side_val == 1 else "SHORT"
                 if config.ema200_soft_mult is not None:
@@ -5569,6 +5585,9 @@ def run_v5_walk_forward(
     # Task #68: signal quality — SHORT specialist head-agreement improvements
     max_mu_r_short=1e9,         # hard gate: SHORT specialist trades blocked when mu_R > this (0.0 = agree-only)
     short_disagree_mult=1.0,    # soft penalty on SHORT disagree trades; 0.3 = 70% score reduction
+    score_pside_weight=1.0,     # Task #69 P2: p_side contribution weight in specialist scoring (0.0 = pure mu_over_risk)
+    per_symbol_no_ceiling=False,  # Task #69 P2: bypass max_threshold ceiling cap for per-symbol thresholds
+    ema200_long_only=False,     # Task #69 P2: EMA200 gate only blocks LONG; SHORTs are never blocked by EMA200
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -5926,6 +5945,9 @@ def run_v5_walk_forward(
                 specialist_align_weight=specialist_align_weight,  # Task #69
                 max_mu_r_short=max_mu_r_short,          # Task #68
                 short_disagree_mult=short_disagree_mult,  # Task #68
+                score_pside_weight=score_pside_weight,  # Task #69 P2
+                per_symbol_no_ceiling=per_symbol_no_ceiling,  # Task #69 P2
+                ema200_long_only=ema200_long_only,      # Task #69 P2
             )
         except Exception as _fold_err:
             import traceback as _tb
@@ -6127,6 +6149,9 @@ def run_v5_walk_forward(
                     specialist_align_weight=specialist_align_weight,  # Task #69
                     max_mu_r_short=max_mu_r_short,          # Task #68 (no-op in long mode, default)
                     short_disagree_mult=short_disagree_mult,  # Task #68 (no-op in long mode, default)
+                    score_pside_weight=score_pside_weight,  # Task #69 P2
+                    per_symbol_no_ceiling=per_symbol_no_ceiling,  # Task #69 P2
+                    ema200_long_only=ema200_long_only,      # Task #69 P2
                 )
             except Exception as _long_err:
                 import traceback as _tbl
@@ -7066,6 +7091,9 @@ def train_v5_model(
     # Task #68: signal quality — SHORT specialist head-agreement improvements
     max_mu_r_short=1e9,         # hard gate: SHORT specialist trades blocked when mu_R > this (0.0 = agree-only)
     short_disagree_mult=1.0,    # soft penalty on SHORT disagree trades; 0.3 = 70% score reduction
+    score_pside_weight=1.0,     # Task #69 P2: p_side contribution weight in specialist scoring (0.0 = pure mu_over_risk)
+    per_symbol_no_ceiling=False,  # Task #69 P2: bypass max_threshold ceiling cap for per-symbol thresholds
+    ema200_long_only=False,     # Task #69 P2: EMA200 gate only blocks LONG; SHORTs are never blocked by EMA200
 ):
     """V5/V6 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -8476,6 +8504,7 @@ def train_v5_model(
                 long_disagree_mult=long_disagree_mult,  # Task #69: soft disagree penalty
                 max_mu_r_short=max_mu_r_short,          # Task #68: SHORT specialist head-agree gate
                 short_disagree_mult=short_disagree_mult,  # Task #68: soft disagree penalty
+                score_pside_weight=score_pside_weight,  # Task #69 P2: p_side weight in specialist scoring
             )
 
             log.info(f"[{vtag}_SCORE_DIAG] mu_R: mean={score_diag['mu_R_mean']:.4f} std={score_diag['mu_R_std']:.4f} | "
@@ -8825,6 +8854,7 @@ def train_v5_model(
                 long_disagree_mult=long_disagree_mult,  # Task #69: soft disagree penalty
                 max_mu_r_short=max_mu_r_short,          # Task #68: SHORT specialist head-agree gate
                 short_disagree_mult=short_disagree_mult,  # Task #68: soft disagree penalty
+                score_pside_weight=score_pside_weight,  # Task #69 P2: p_side weight in specialist scoring
             )
             _sweep_cand = val_cand_mask if use_candidates_this_epoch else None
             if per_side_threshold:
@@ -9141,6 +9171,9 @@ def train_v5_model(
                 per_side_threshold=per_side_threshold,
                 gate_mode=gate_mode,
                 specialist_mode=specialist_mode,
+                per_symbol_no_ceiling=per_symbol_no_ceiling,  # Task #69 P2: bypass ceiling cap for per-symbol thresholds
+                ema200_long_only=ema200_long_only,            # Task #69 P2: EMA200 only blocks LONG signals
+                score_pside_weight=score_pside_weight,        # Task #69 P2: p_side weight in specialist scoring
             )
 
             train_ref_arrays = _build_train_ref_arrays(
