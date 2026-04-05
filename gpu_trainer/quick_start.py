@@ -5381,7 +5381,7 @@ Examples:
     # Task #69 Phase 2: gate calibration fixes
     parser.add_argument("--v5-per-symbol-no-ceiling", action="store_true", default=False,
                         help="Task #69 P2: when set, per-symbol thresholds bypass the global max_threshold ceiling cap. "
-                             "This allows BNB (0.1822), AAVE (1.014) etc to keep their learned thresholds instead "
+                             "This allows BNB (0.1822), AAVE (0.1014) etc to keep their learned thresholds instead "
                              "of being crushed to 0.02. The global base threshold (applied to bars not in per-symbol map) "
                              "is still capped by max_threshold. CRITICAL: use with --v5-per-symbol-threshold or "
                              "--v5-per-side-threshold. Default: False (backward-compatible).")

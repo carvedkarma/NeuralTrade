@@ -3331,6 +3331,10 @@ def run_v5_forward_test(
     if config.per_symbol_thresholds and test_sym_ids is not None:
         hard_floor = config.min_threshold if config.min_threshold is not None else 0.0
         per_bar_threshold = np.full(len(scores_work), ddt_base_threshold, dtype=np.float64)
+        if getattr(config, 'per_symbol_no_ceiling', False):
+            log.info("[V5_FWD] Per-symbol ceiling cap DISABLED — using raw per-symbol thresholds "
+                     "(max_threshold=%s bypassed; floor=%.4f still active)",
+                     config.max_threshold, hard_floor)
         _first_val = next(iter(config.per_symbol_thresholds.values()), None)
         _is_per_side_format = isinstance(_first_val, dict)
         if _is_per_side_format and config.per_side_threshold:
@@ -3895,8 +3899,12 @@ def run_v5_forward_test(
             side_val = sides[idx]
             close_val = close_prices[idx]
             ema_val = ema200[idx]
+            _ema200_long_only = getattr(config, 'ema200_long_only', False)
+            if _ema200_long_only and side_val == -1 and close_val > ema_val:
+                log.debug("[V5_GATE] ema200_long_only — skipping EMA200 block for SHORT side close=%.2f ema200=%.2f",
+                          close_val, ema_val)
             _ema200_against = (side_val == 1 and close_val < ema_val) or \
-                              (side_val == -1 and close_val > ema_val and not getattr(config, 'ema200_long_only', False))
+                              (side_val == -1 and close_val > ema_val and not _ema200_long_only)
             if _ema200_against:
                 _side_str = "LONG" if side_val == 1 else "SHORT"
                 if config.ema200_soft_mult is not None:
