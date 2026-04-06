@@ -681,7 +681,7 @@ export default function SettingsPage() {
               </Badge>
             )}
             <Switch
-              checked={disableLongsData?.disableLongs ?? false}
+              checked={disableLongsData?.disableLongs ?? true}
               onCheckedChange={(checked) => toggleDisableLongsMutation.mutate(checked)}
               disabled={toggleDisableLongsMutation.isPending}
               data-testid="switch-disable-longs"

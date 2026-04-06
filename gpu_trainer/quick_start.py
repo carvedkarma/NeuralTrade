@@ -5091,8 +5091,8 @@ Examples:
     parser.add_argument("--balanced-sampling-mode", type=str, choices=["cap", "weighted", "none"],
                         default="cap",
                         help="Symbol balancing mode: 'cap' truncates to min count, 'weighted' keeps all data with inverse-frequency loss weights, 'none' disables (default: cap)")
-    parser.add_argument("--v5-symbol-embed-dim", type=int, default=8,
-                        help="Symbol embedding dimension for multi-asset models (default: 8)")
+    parser.add_argument("--v5-symbol-embed-dim", type=int, default=32,
+                        help="Symbol embedding dimension for multi-asset models (default: 32; increased from 8 for richer per-symbol microstructure capture)")
     parser.add_argument("--per-symbol-scaler", action="store_true", default=False,
                         help="Fit/apply RobustScaler per symbol instead of global (default: off)")
 

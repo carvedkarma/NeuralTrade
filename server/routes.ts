@@ -3670,10 +3670,25 @@ export async function registerRoutes(
   });
 
   // ── LONG disable toggle ────────────────────────────────────────────────────
+  // Seed disable_longs default=true on first access (LONG specialist is unprofitable; block by default)
+  const _seedDisableLongs = async () => {
+    try {
+      const existing = await db.select().from(settings).where(eq(settings.key, "disable_longs")).limit(1);
+      if (existing.length === 0) {
+        await db.insert(settings).values({ key: "disable_longs", valueJson: true, updatedAt: Date.now() });
+        console.log("[Trade Gates] disable_longs seeded to true (LONG specialist disabled by default)");
+      }
+    } catch (e: any) {
+      console.warn(`[Trade Gates] Failed to seed disable_longs: ${e.message}`);
+    }
+  };
+  _seedDisableLongs();
+
   app.get("/api/trade-gates/disable-longs", async (req, res) => {
     try {
       const row = await db.select().from(settings).where(eq(settings.key, "disable_longs")).limit(1);
-      const disabled = row.length > 0 && (row[0].valueJson as any) === true;
+      // Default to true — LONG specialist is unprofitable (30% WR); block until retrained
+      const disabled = row.length === 0 ? true : (row[0].valueJson as any) === true;
       res.json({ disableLongs: disabled });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -5047,7 +5062,8 @@ export async function registerRoutes(
         // Gate 0: LONG disable toggle — block LONG signals when disable_longs setting is true
         try {
           const _disableLongsRow = await db.select().from(settings).where(eq(settings.key, "disable_longs")).limit(1);
-          const _longsDisabled = _disableLongsRow.length > 0 && (_disableLongsRow[0].valueJson as any) === true;
+          // Default true when row missing — LONG specialist is unprofitable (30% WR), block until retrained
+          const _longsDisabled = _disableLongsRow.length === 0 ? true : (_disableLongsRow[0].valueJson as any) === true;
           if (_longsDisabled && side === "LONG") {
             console.log(`[Auto-Trade] LONG DISABLED — blocked ${t.symbol} LONG signal (disable_longs=true)`);
             autoTradeResult = { opened: false, reason: "longs_disabled" };
