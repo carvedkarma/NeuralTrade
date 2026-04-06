@@ -3669,6 +3669,32 @@ export async function registerRoutes(
     }
   });
 
+  // ── LONG disable toggle ────────────────────────────────────────────────────
+  app.get("/api/trade-gates/disable-longs", async (req, res) => {
+    try {
+      const row = await db.select().from(settings).where(eq(settings.key, "disable_longs")).limit(1);
+      const disabled = row.length > 0 && (row[0].valueJson as any) === true;
+      res.json({ disableLongs: disabled });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/trade-gates/disable-longs", async (req, res) => {
+    try {
+      const { disableLongs } = req.body;
+      if (typeof disableLongs !== "boolean") {
+        return res.status(400).json({ error: "disableLongs must be a boolean" });
+      }
+      await db.insert(settings).values({ key: "disable_longs", valueJson: disableLongs, updatedAt: Date.now() })
+        .onConflictDoUpdate({ target: settings.key, set: { valueJson: disableLongs, updatedAt: Date.now() } });
+      console.log(`[Trade Gates] disable_longs set to ${disableLongs}`);
+      res.json({ success: true, disableLongs });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Get GPU trainer connection settings
   app.get("/api/gpu/settings", (req, res) => {
     res.json({
@@ -5017,6 +5043,20 @@ export async function registerRoutes(
         autoTradeResult = { opened: false, reason: "invalid_sl_tp" };
       } else {
         // ── Node.js safety gates (defense-in-depth) ──
+
+        // Gate 0: LONG disable toggle — block LONG signals when disable_longs setting is true
+        try {
+          const _disableLongsRow = await db.select().from(settings).where(eq(settings.key, "disable_longs")).limit(1);
+          const _longsDisabled = _disableLongsRow.length > 0 && (_disableLongsRow[0].valueJson as any) === true;
+          if (_longsDisabled && side === "LONG") {
+            console.log(`[Auto-Trade] LONG DISABLED — blocked ${t.symbol} LONG signal (disable_longs=true)`);
+            autoTradeResult = { opened: false, reason: "longs_disabled" };
+            res.json({ success: true, id: record.id, autoTrade: autoTradeResult });
+            return;
+          }
+        } catch (_longGateErr: any) {
+          console.warn(`[Auto-Trade] Failed to check disable_longs setting: ${_longGateErr.message}`);
+        }
 
         // Gate 1: Session circuit breaker — always applied regardless of signal source
         const _cbCheck = await _checkSessionCircuitBreaker();

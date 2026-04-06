@@ -50,7 +50,7 @@ class V5TradeDefaults:
     # ── Position sizing ──────────────────────────────────────────────────────
     min_size_mult: float = 0.25           # Minimum size multiplier
     max_size_mult: float = 2.5            # Maximum size multiplier
-    size_floor: float = 0.5              # Floor applied after all modifiers
+    size_floor: float = 0.0              # Floor applied after all modifiers (0.0 = disabled; was 0.5 but overrode CLI --v5-size-floor 0.0 via sentinel comparison)
     kelly_fraction: float = 0.25         # Fractional Kelly (legacy, kept for compat)
     score_buffer_size: int = 200          # Rolling buffer for score-percentile sizing
 

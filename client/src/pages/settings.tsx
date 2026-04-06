@@ -155,6 +155,19 @@ export default function SettingsPage() {
     },
   });
 
+  const { data: disableLongsData, refetch: refetchDisableLongs } = useQuery<{ disableLongs: boolean }>({
+    queryKey: ["/api/trade-gates/disable-longs"],
+    refetchInterval: 30000,
+  });
+
+  const toggleDisableLongsMutation = useMutation({
+    mutationFn: (disableLongs: boolean) => apiRequest("POST", "/api/trade-gates/disable-longs", { disableLongs }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/trade-gates/disable-longs"] });
+      refetchDisableLongs();
+    },
+  });
+
   const gpuConnected = systemStatus?.gpu?.isAvailable ?? false;
   const gpuUrl = systemStatus?.gpu?.url ?? "";
   const gpuLastActivity = systemStatus?.gpu?.lastActivity ?? null;
@@ -637,6 +650,43 @@ export default function SettingsPage() {
               </div>
             );
           })}
+        </div>
+      </div>
+
+      <div
+        className="glass-card rounded-md p-4 border-amber-500/40"
+        data-testid="trade-gates-card"
+      >
+        <div className="flex items-center gap-2 mb-3">
+          <Shield className="w-5 h-5 text-amber-400" />
+          <h2 className="font-semibold text-lg">Trade Gates</h2>
+        </div>
+        <p className="text-sm text-muted-foreground mb-4">
+          Control which trade directions the auto-trade pipeline will execute. LONG signals are currently unprofitable
+          (30% WR) — disabling them keeps only the high-performing SHORT specialist active.
+        </p>
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium" data-testid="label-disable-longs">Disable LONG Trades</p>
+            <p className="text-xs text-muted-foreground">Block all LONG auto-trade signals at Gate 0</p>
+          </div>
+          <div className="flex items-center gap-3">
+            {disableLongsData?.disableLongs ? (
+              <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/30" data-testid="badge-longs-status">
+                LONGs Blocked
+              </Badge>
+            ) : (
+              <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30" data-testid="badge-longs-status">
+                LONGs Active
+              </Badge>
+            )}
+            <Switch
+              checked={disableLongsData?.disableLongs ?? false}
+              onCheckedChange={(checked) => toggleDisableLongsMutation.mutate(checked)}
+              disabled={toggleDisableLongsMutation.isPending}
+              data-testid="switch-disable-longs"
+            />
+          </div>
         </div>
       </div>
 

@@ -5357,13 +5357,13 @@ Examples:
                              "trades where mu_R < 0 (return head disagrees with action head). "
                              "0.3 = 70%% score penalty, pushes agree trades higher in threshold sweep. "
                              "Default: 1.0 (disabled). Use 0.3 with --v5-min-mu-r-long for dual-gate effect.")
-    parser.add_argument("--v5-specialist-align-weight", type=float, default=0.0,
+    parser.add_argument("--v5-specialist-align-weight", type=float, default=0.5,
                         help="Task #69: alignment loss weight — during LONG specialist training, penalise "
                              "negative mu_R on bars where the action head predicts LONG (p_long.detach() * relu(-mu_R)). "
                              "Also fires for SHORT specialist: penalises positive mu_R on bars where action "
                              "head predicts SHORT (p_short.detach() * relu(mu_R)). Task #68 extension. "
                              "Pushes return head to agree with action head over training. "
-                             "Recommended: 0.5. Default: 0.0 (disabled).")
+                             "Recommended: 0.5. Default: 0.5 (enabled for specialist training).")
 
     # Task #68: SHORT specialist signal quality improvements (symmetric to Task #69)
     parser.add_argument("--v5-max-mu-r-short", type=float, default=1e9,
@@ -5631,8 +5631,8 @@ Examples:
                         help="v5.3: apply sigma sharpness multiplier 1/(1+sigma) to scores (default: enabled)")
     parser.add_argument("--v5-no-sigma-discount", action="store_true", default=False,
                         help="v5.3: disable sigma discount")
-    parser.add_argument("--v5-min-p-side", type=float, default=0.45,
-                        help="v5.3: minimum p_side conviction to allow a trade (default: 0.45, 0=disabled)")
+    parser.add_argument("--v5-min-p-side", type=float, default=0.0,
+                        help="v5.3: minimum p_side conviction to allow a trade (default: 0.0=disabled; was 0.45 but conflicts with --v5-score-pside-weight 0.0)")
     parser.add_argument("--v5-min-p-short", type=float, default=0.0,
                         help="v5.3: minimum p_short to allow SHORT trades (default: 0=disabled, e.g. 0.55)")
     parser.add_argument("--v5-side-aware-scoring", action="store_true", default=False,
