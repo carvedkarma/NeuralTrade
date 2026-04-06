@@ -3688,7 +3688,7 @@ export async function registerRoutes(
     try {
       const row = await db.select().from(settings).where(eq(settings.key, "disable_longs")).limit(1);
       // Default to true — LONG specialist is unprofitable (30% WR); block until retrained
-      const disabled = row.length === 0 ? true : (row[0].valueJson as any) === true;
+      const disabled = row.length === 0 ? true : row[0].valueJson === true;
       res.json({ disableLongs: disabled });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -5063,7 +5063,7 @@ export async function registerRoutes(
         try {
           const _disableLongsRow = await db.select().from(settings).where(eq(settings.key, "disable_longs")).limit(1);
           // Default true when row missing — LONG specialist is unprofitable (30% WR), block until retrained
-          const _longsDisabled = _disableLongsRow.length === 0 ? true : (_disableLongsRow[0].valueJson as any) === true;
+          const _longsDisabled = _disableLongsRow.length === 0 ? true : _disableLongsRow[0].valueJson === true;
           if (_longsDisabled && side === "LONG") {
             console.log(`[Auto-Trade] LONG DISABLED — blocked ${t.symbol} LONG signal (disable_longs=true)`);
             autoTradeResult = { opened: false, reason: "longs_disabled" };
