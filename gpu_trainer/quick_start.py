@@ -5357,13 +5357,14 @@ Examples:
                              "trades where mu_R < 0 (return head disagrees with action head). "
                              "0.3 = 70%% score penalty, pushes agree trades higher in threshold sweep. "
                              "Default: 1.0 (disabled). Use 0.3 with --v5-min-mu-r-long for dual-gate effect.")
-    parser.add_argument("--v5-specialist-align-weight", type=float, default=0.5,
+    parser.add_argument("--v5-specialist-align-weight", type=float, default=0.05,
                         help="Task #69: alignment loss weight — during LONG specialist training, penalise "
                              "negative mu_R on bars where the action head predicts LONG (p_long.detach() * relu(-mu_R)). "
                              "Also fires for SHORT specialist: penalises positive mu_R on bars where action "
                              "head predicts SHORT (p_short.detach() * relu(mu_R)). Task #68 extension. "
                              "Pushes return head to agree with action head over training. "
-                             "Recommended: 0.5. Default: 0.5 (enabled for specialist training).")
+                             "CAUTION: weight>=0.3 causes mu_R collapse to near-zero (all scores→0, 0 trades). "
+                             "Default: 0.05 (gentle nudge; was 0.5 which caused score collapse — Task #70 fix).")
 
     # Task #68: SHORT specialist signal quality improvements (symmetric to Task #69)
     parser.add_argument("--v5-max-mu-r-short", type=float, default=1e9,

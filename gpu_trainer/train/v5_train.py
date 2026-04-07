@@ -9179,6 +9179,10 @@ def train_v5_model(
                 per_side_threshold=per_side_threshold,
                 gate_mode=gate_mode,
                 specialist_mode=specialist_mode,
+                min_mu_r_long=min_mu_r_long,            # Task #70 fix: was missing → gate silently ignored
+                long_disagree_mult=long_disagree_mult,  # Task #70 fix: was missing → soft penalty silently ignored
+                max_mu_r_short=max_mu_r_short,          # Task #70 fix: was missing → gate silently ignored
+                short_disagree_mult=short_disagree_mult,  # Task #70 fix: was missing → soft penalty silently ignored
                 per_symbol_no_ceiling=per_symbol_no_ceiling,  # Task #69 P2: bypass ceiling cap for per-symbol thresholds
                 ema200_long_only=ema200_long_only,            # Task #69 P2: EMA200 only blocks LONG signals
                 score_pside_weight=score_pside_weight,        # Task #69 P2: p_side weight in specialist scoring
