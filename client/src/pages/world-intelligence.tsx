@@ -256,20 +256,28 @@ function CategoryBar({ label, score }: { label: string; score: number }) {
 
 // ─── Macro Indicator Card ────────────────────────────────────────────────────
 
-function MacroCard({ label, value, unit, impact, icon }: {
+function MacroCard({ label, value, unit, impact, icon, trend }: {
   label: string;
   value: number | null;
   unit?: string;
   impact?: string;
   icon?: React.ReactNode;
+  trend?: "up" | "down" | "neutral";
 }) {
   return (
     <div className="flex flex-col gap-1 p-3 rounded-lg bg-card border border-border" data-testid={`macro-card-${label.toLowerCase()}`}>
-      <div className="flex items-center gap-1.5 text-muted-foreground text-xs">
-        {icon}
-        <span>{label}</span>
+      <div className="flex items-center justify-between gap-1">
+        <div className="flex items-center gap-1.5 text-muted-foreground text-xs">
+          {icon}
+          <span>{label}</span>
+        </div>
+        {trend === "up" && <TrendingUp className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+        {trend === "down" && <TrendingDown className="w-3.5 h-3.5 text-red-400 shrink-0" />}
+        {trend === "neutral" && <Minus className="w-3.5 h-3.5 text-yellow-400 shrink-0" />}
       </div>
-      <div className="font-mono text-lg font-bold text-foreground">
+      <div className={cn("font-mono text-lg font-bold",
+        trend === "up" ? "text-emerald-400" : trend === "down" ? "text-red-400" : "text-foreground"
+      )}>
         {value !== null ? `${unit ?? ""}${value.toLocaleString()}` : <span className="text-muted-foreground text-sm">—</span>}
       </div>
       {impact && <div className="text-[10px] text-muted-foreground leading-tight">{impact}</div>}
@@ -451,8 +459,8 @@ export default function WorldIntelligence() {
     queryKey: ["/api/world-intel/events", selectedCategory],
     queryFn: () => {
       const url = selectedCategory
-        ? `/api/world-intel/events?limit=20&category=${encodeURIComponent(selectedCategory)}`
-        : "/api/world-intel/events?limit=20";
+        ? `/api/world-intel/events?limit=50&category=${encodeURIComponent(selectedCategory)}`
+        : "/api/world-intel/events?limit=50";
       return fetch(url).then(r => r.json());
     },
     refetchInterval: 60_000,
@@ -621,15 +629,34 @@ export default function WorldIntelligence() {
           {prediction24h && (
             <Card className="border border-primary/20 bg-primary/5" data-testid="card-prediction-24h">
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
-                  <Clock className="w-4 h-4 text-primary" />
-                  24-Hour Crypto Prediction
+                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center justify-between gap-1.5">
+                  <div className="flex items-center gap-1.5">
+                    <Clock className="w-4 h-4 text-primary" />
+                    24-Hour Crypto Prediction
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={cn("text-xs font-semibold", directionColor(direction))}>
+                      {direction}
+                    </span>
+                    <span className="text-xs text-muted-foreground">{confidence.toFixed(0)}% conf.</span>
+                  </div>
                 </CardTitle>
               </CardHeader>
-              <CardContent>
+              <CardContent className="space-y-3">
                 <p className="text-sm text-foreground leading-relaxed" data-testid="text-prediction-24h">
                   {prediction24h}
                 </p>
+                {keyCatalysts.length > 0 && (
+                  <div className="border-t border-border/50 pt-3 space-y-1.5">
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Primary Catalysts</p>
+                    {keyCatalysts.slice(0, 3).map((c, i) => (
+                      <div key={i} className="flex items-start gap-2 text-xs" data-testid={`prediction-catalyst-${i}`}>
+                        <ChevronRight className="w-3 h-3 text-primary mt-0.5 shrink-0" />
+                        <span className="text-muted-foreground">{c}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </CardContent>
             </Card>
           )}
@@ -642,12 +669,14 @@ export default function WorldIntelligence() {
               <MacroCard
                 label="DXY"
                 value={macro?.dxy ?? null}
+                trend={macro?.dxy ? (macro.dxy > 105 ? "down" : macro.dxy < 100 ? "up" : "neutral") : undefined}
                 impact={macro?.dxy ? (macro.dxy > 105 ? "Risk-off pressure on crypto" : macro.dxy < 100 ? "Risk-on, positive for crypto" : "Neutral DXY reading") : undefined}
                 icon={<DollarSign className="w-3.5 h-3.5" />}
               />
               <MacroCard
                 label="S&P 500"
                 value={macro?.sp500 ?? null}
+                trend={macro?.sp500 ? (macro.sp500 > 5000 ? "up" : macro.sp500 < 4000 ? "down" : "neutral") : undefined}
                 impact="Crypto typically follows with 1.2-1.5x leverage"
                 icon={<BarChart2 className="w-3.5 h-3.5" />}
               />
@@ -655,6 +684,7 @@ export default function WorldIntelligence() {
                 label="Gold"
                 value={macro?.gold ?? null}
                 unit="$"
+                trend={macro?.gold ? (macro.gold > 2000 ? "up" : "neutral") : undefined}
                 impact="Safe-haven signal — BTC correlation rising"
                 icon={<Activity className="w-3.5 h-3.5" />}
               />
@@ -662,13 +692,14 @@ export default function WorldIntelligence() {
                 label="Oil (WTI)"
                 value={macro?.oil ?? null}
                 unit="$"
+                trend={macro?.oil ? (macro.oil > 85 ? "down" : macro.oil < 70 ? "up" : "neutral") : undefined}
                 impact="Inflation proxy — high oil → Fed hawkish risk"
                 icon={<Activity className="w-3.5 h-3.5" />}
               />
               <MacroCard
                 label="BTC Dominance"
                 value={macro?.btcDominance ?? null}
-                unit=""
+                trend={macro?.btcDominance ? (macro.btcDominance > 55 ? "down" : macro.btcDominance < 45 ? "up" : "neutral") : undefined}
                 impact={macro?.btcDominance ? (macro.btcDominance > 55 ? "Capital in BTC — altcoin pressure" : "Alt season conditions building") : undefined}
                 icon={<Zap className="w-3.5 h-3.5" />}
               />
