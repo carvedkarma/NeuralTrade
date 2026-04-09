@@ -389,13 +389,92 @@ function clamp(n: number, min: number, max: number): number {
 
 // ─── Risk Calendar ──────────────────────────────────────────────────────────
 
-export const RISK_CALENDAR: Array<{ event: string; date: string; category: string; btcImpact: string; direction: string }> = [
-  { event: "FOMC Meeting", date: "2026-05-07", category: "Monetary Policy", btcImpact: "±8% avg move", direction: "volatile" },
-  { event: "US CPI Release", date: "2026-05-14", category: "Economic", btcImpact: "±5% on surprise", direction: "volatile" },
-  { event: "US Jobs Report", date: "2026-05-02", category: "Economic", btcImpact: "±3% typically", direction: "volatile" },
-  { event: "Bitcoin Halving Anniversary", date: "2026-04-20", category: "Crypto", btcImpact: "+15-40% post-halving historically", direction: "bullish" },
-  { event: "FOMC Minutes Release", date: "2026-04-23", category: "Monetary Policy", btcImpact: "±3% on hawkish signals", direction: "volatile" },
-];
+type RiskCalendarEntry = { event: string; date: string; category: string; btcImpact: string; direction: string };
+
+function nextOccurrence(month: number, day: number): string {
+  const now = new Date();
+  let year = now.getFullYear();
+  const candidate = new Date(year, month - 1, day);
+  if (candidate < now) {
+    const nextCandidate = new Date(year + 1, month - 1, day);
+    return nextCandidate.toISOString().slice(0, 10);
+  }
+  return candidate.toISOString().slice(0, 10);
+}
+
+function nextWeekdayOfMonth(month: number, weekday: number, nth: number): string {
+  const now = new Date();
+  let year = now.getFullYear();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const d = new Date(year, month - 1, 1);
+    let count = 0;
+    while (d.getMonth() === month - 1) {
+      if (d.getDay() === weekday) {
+        count++;
+        if (count === nth) {
+          if (d > now) return d.toISOString().slice(0, 10);
+          break;
+        }
+      }
+      d.setDate(d.getDate() + 1);
+    }
+    year++;
+    month = month > 12 ? 1 : month;
+  }
+  return new Date(now.getFullYear(), month - 1, 15).toISOString().slice(0, 10);
+}
+
+function buildRiskCalendar(): RiskCalendarEntry[] {
+  const now = new Date();
+  const m = now.getMonth() + 1;
+
+  const fomcMonths = [1, 3, 5, 6, 7, 9, 11, 12];
+  const nextFomcMonth = fomcMonths.find(fm => fm > m) ?? fomcMonths[0];
+  const nextCpiMonth = m < 12 ? m + 1 : 1;
+  const nextJobsMonth = m < 12 ? m + 1 : 1;
+
+  return [
+    {
+      event: "FOMC Meeting",
+      date: nextWeekdayOfMonth(nextFomcMonth, 3, 2),
+      category: "Monetary Policy",
+      btcImpact: "±8% avg move on rate decision",
+      direction: "volatile",
+    },
+    {
+      event: "US CPI Release",
+      date: nextWeekdayOfMonth(nextCpiMonth, 3, 2),
+      category: "Economic",
+      btcImpact: "±5% on surprise vs expectations",
+      direction: "volatile",
+    },
+    {
+      event: "US Non-Farm Payrolls",
+      date: nextWeekdayOfMonth(nextJobsMonth, 5, 1),
+      category: "Economic",
+      btcImpact: "±3% typically within 24h",
+      direction: "volatile",
+    },
+    {
+      event: "FOMC Minutes Release",
+      date: nextWeekdayOfMonth(m < 12 ? m + 1 : 1, 3, 3),
+      category: "Monetary Policy",
+      btcImpact: "±3% on hawkish signals",
+      direction: "volatile",
+    },
+    {
+      event: "Bitcoin Halving Anniversary",
+      date: nextOccurrence(4, 20),
+      category: "Crypto",
+      btcImpact: "+15-40% post-halving historically",
+      direction: "bullish",
+    },
+  ];
+}
+
+export function getRiskCalendar(): RiskCalendarEntry[] {
+  return buildRiskCalendar();
+}
 
 // ─── Main Intelligence Runner ─────────────────────────────────────────────
 
@@ -554,13 +633,14 @@ export async function getLatestMacro() {
   return rows[0] ?? null;
 }
 
-export async function getRecentEvents(limit = 50, category?: string) {
+export async function getRecentEvents(limit = 20, category?: string, sort: "recent" | "relevance" = "relevance") {
   const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000;
   const condition = category
     ? and(gt(worldEvents.fetchedAt, sixHoursAgo), eq(worldEvents.category, category))
     : gt(worldEvents.fetchedAt, sixHoursAgo);
+  const orderCol = sort === "relevance" ? desc(worldEvents.relevanceScore) : desc(worldEvents.fetchedAt);
   return db.select().from(worldEvents)
     .where(condition)
-    .orderBy(desc(worldEvents.fetchedAt))
+    .orderBy(orderCol)
     .limit(limit);
 }

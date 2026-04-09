@@ -458,10 +458,10 @@ export default function WorldIntelligence() {
   const eventsQ = useQuery<EventsResponse>({
     queryKey: ["/api/world-intel/events", selectedCategory],
     queryFn: () => {
-      const url = selectedCategory
-        ? `/api/world-intel/events?limit=50&category=${encodeURIComponent(selectedCategory)}`
-        : "/api/world-intel/events?limit=50";
-      return fetch(url).then(r => r.json());
+      const base = selectedCategory
+        ? `/api/world-intel/events?limit=20&sort=relevance&category=${encodeURIComponent(selectedCategory)}`
+        : "/api/world-intel/events?limit=20&sort=relevance";
+      return fetch(base).then(r => r.json());
     },
     refetchInterval: 60_000,
   });

@@ -8,7 +8,7 @@ import { getPositionsBySymbol } from "./paper/storage";
 import ingestRouter from "./ingest";
 import { db } from "./db";
 import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema, openInterestHistory, v5Signals, paperPositions, paperPortfolio, paperTradeHistory, trainingSessions, trainingEpochs, trainingFolds, neuralAdjustments, worldEvents, worldIntelSnapshots, macroIndicators } from "@shared/schema";
-import { getLatestSnapshot, getLatestMacro, getRecentEvents, runWorldIntelCycle, isRunning as worldIntelRunning, lastRunAt as worldIntelLastRunAt, RISK_CALENDAR } from "./world-intel";
+import { getLatestSnapshot, getLatestMacro, getRecentEvents, runWorldIntelCycle, getRiskCalendar, isRunning as worldIntelRunning, lastRunAt as worldIntelLastRunAt } from "./world-intel";
 import type { ModelLearningStatsEntry, MoneyConfig } from "@shared/schema";
 import { and, eq, gte, lte, asc, desc, sql, count } from "drizzle-orm";
 import { z } from "zod";
@@ -6748,10 +6748,11 @@ Provide your analysis in this JSON format:
 
   app.get("/api/world-intel/events", async (req, res) => {
     try {
-      const parsedLimit = parseInt(String(req.query.limit ?? "50"), 10);
-      const limit = Math.min(isNaN(parsedLimit) || parsedLimit < 1 ? 50 : parsedLimit, 100);
+      const parsedLimit = parseInt(String(req.query.limit ?? "20"), 10);
+      const limit = Math.min(isNaN(parsedLimit) || parsedLimit < 1 ? 20 : parsedLimit, 100);
       const category = req.query.category ? String(req.query.category) : undefined;
-      const events = await getRecentEvents(limit, category);
+      const sortParam = req.query.sort === "recent" ? "recent" as const : "relevance" as const;
+      const events = await getRecentEvents(limit, category, sortParam);
       res.json({ events, count: events.length });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Unknown error";
@@ -6762,7 +6763,7 @@ Provide your analysis in this JSON format:
   app.get("/api/world-intel/macro", async (_req, res) => {
     try {
       const macro = await getLatestMacro();
-      res.json({ macro, riskCalendar: RISK_CALENDAR });
+      res.json({ macro, riskCalendar: getRiskCalendar() });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Unknown error";
       res.status(500).json({ error: message });
