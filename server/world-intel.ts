@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { db } from "./db";
 import { worldEvents, worldIntelSnapshots, macroIndicators } from "@shared/schema";
-import { desc, gt } from "drizzle-orm";
+import { desc, gt, and, eq } from "drizzle-orm";
 
 let openai: OpenAI | null = null;
 try {
@@ -17,11 +17,12 @@ try {
 const RSS_FEEDS = [
   { url: "https://feeds.reuters.com/reuters/topNews", category: "Markets", source: "Reuters" },
   { url: "http://feeds.bbci.co.uk/news/business/rss.xml", category: "Markets", source: "BBC Business" },
+  { url: "https://rsshub.app/apnews/topics/apf-finance", category: "Markets", source: "AP Finance" },
+  { url: "https://www.federalreserve.gov/feeds/speeches.xml", category: "Monetary Policy", source: "Federal Reserve" },
+  { url: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=&datetype=custom&owner=include&count=10&output=atom", category: "Regulatory", source: "SEC" },
   { url: "https://www.coindesk.com/arc/outboundfeeds/rss/", category: "Crypto", source: "CoinDesk" },
   { url: "https://decrypt.co/feed", category: "Crypto", source: "Decrypt" },
-  { url: "https://www.federalreserve.gov/feeds/speeches.xml", category: "Monetary Policy", source: "Federal Reserve" },
-  { url: "https://feeds.a.dj.com/rss/RSSMarketsMain.xml", category: "Markets", source: "WSJ Markets" },
-  { url: "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines", category: "Markets", source: "MarketWatch" },
+  { url: "https://www.theblock.co/rss.xml", category: "Crypto", source: "The Block" },
 ];
 
 // ─── RSS Parsing ────────────────────────────────────────────────────────────
@@ -156,6 +157,16 @@ async function fetchMacroData(): Promise<MacroData> {
 
 // ─── Reddit Sentiment ────────────────────────────────────────────────────────
 
+interface RedditChild {
+  data?: { title?: string };
+}
+
+interface RedditListingResponse {
+  data?: {
+    children?: RedditChild[];
+  };
+}
+
 async function fetchRedditTop(subreddit: string): Promise<string[]> {
   try {
     const url = `https://www.reddit.com/r/${subreddit}/hot.json?limit=10`;
@@ -164,10 +175,10 @@ async function fetchRedditTop(subreddit: string): Promise<string[]> {
       headers: { "User-Agent": "Mozilla/5.0 (compatible; NeuralTerminal/1.0)" },
     });
     if (!res.ok) return [];
-    const data = await res.json();
+    const data = (await res.json()) as RedditListingResponse;
     return (data?.data?.children ?? [])
-      .map((c: any) => c?.data?.title ?? "")
-      .filter((t: string) => t.length > 10)
+      .map((c) => c?.data?.title ?? "")
+      .filter((t) => t.length > 10)
       .slice(0, 5);
   } catch (_) {
     return [];
@@ -455,8 +466,8 @@ export async function runWorldIntelCycle(): Promise<{ success: boolean; eventsSt
     lastRunAt = now;
     console.log(`[WorldIntel] Cycle complete. Score=${aiResult.macroClimateScore}, Events=${eventsStored}`);
     return { success: true, eventsStored };
-  } catch (err: any) {
-    lastError = err?.message ?? String(err);
+  } catch (err: unknown) {
+    lastError = err instanceof Error ? err.message : String(err);
     console.error("[WorldIntel] Cycle error:", err);
     return { success: false, eventsStored: 0, error: lastError ?? undefined };
   } finally {
@@ -518,9 +529,11 @@ export async function getLatestMacro() {
 
 export async function getRecentEvents(limit = 50, category?: string) {
   const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000;
-  const query = db.select().from(worldEvents)
-    .where(gt(worldEvents.fetchedAt, sixHoursAgo))
+  const condition = category
+    ? and(gt(worldEvents.fetchedAt, sixHoursAgo), eq(worldEvents.category, category))
+    : gt(worldEvents.fetchedAt, sixHoursAgo);
+  return db.select().from(worldEvents)
+    .where(condition)
     .orderBy(desc(worldEvents.fetchedAt))
     .limit(limit);
-  return query;
 }

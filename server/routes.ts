@@ -6740,8 +6740,9 @@ Provide your analysis in this JSON format:
         lastRunAt: worldIntelLastRunAt,
         nextRunAt: worldIntelLastRunAt ? worldIntelLastRunAt + 30 * 60 * 1000 : null,
       });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      res.status(500).json({ error: message });
     }
   });
 
@@ -6751,8 +6752,9 @@ Provide your analysis in this JSON format:
       const category = req.query.category ? String(req.query.category) : undefined;
       const events = await getRecentEvents(limit, category);
       res.json({ events, count: events.length });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      res.status(500).json({ error: message });
     }
   });
 
@@ -6760,8 +6762,9 @@ Provide your analysis in this JSON format:
     try {
       const macro = await getLatestMacro();
       res.json({ macro, riskCalendar: RISK_CALENDAR });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      res.status(500).json({ error: message });
     }
   });
 
