@@ -7,7 +7,8 @@ import { getConfig } from "./paper/config";
 import { getPositionsBySymbol } from "./paper/storage";
 import ingestRouter from "./ingest";
 import { db } from "./db";
-import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema, openInterestHistory, v5Signals, paperPositions, paperPortfolio, paperTradeHistory, trainingSessions, trainingEpochs, trainingFolds, neuralAdjustments } from "@shared/schema";
+import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema, openInterestHistory, v5Signals, paperPositions, paperPortfolio, paperTradeHistory, trainingSessions, trainingEpochs, trainingFolds, neuralAdjustments, worldEvents, worldIntelSnapshots, macroIndicators } from "@shared/schema";
+import { getLatestSnapshot, getLatestMacro, getRecentEvents, runWorldIntelCycle, isRunning as worldIntelRunning, lastRunAt as worldIntelLastRunAt, RISK_CALENDAR } from "./world-intel";
 import type { ModelLearningStatsEntry, MoneyConfig } from "@shared/schema";
 import { and, eq, gte, lte, asc, desc, sql, count } from "drizzle-orm";
 import { z } from "zod";
@@ -6727,6 +6728,49 @@ Provide your analysis in this JSON format:
       console.error("Error in sync-all:", error);
       res.status(500).json({ error: "Failed to sync all symbols" });
     }
+  });
+
+  // ─── World Intelligence Routes ───────────────────────────────────────────
+  app.get("/api/world-intel/snapshot", async (_req, res) => {
+    try {
+      const snapshot = await getLatestSnapshot();
+      res.json({
+        snapshot,
+        isRunning: worldIntelRunning,
+        lastRunAt: worldIntelLastRunAt,
+        nextRunAt: worldIntelLastRunAt ? worldIntelLastRunAt + 30 * 60 * 1000 : null,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/world-intel/events", async (req, res) => {
+    try {
+      const limit = Math.min(parseInt(String(req.query.limit ?? "50"), 10), 100);
+      const category = req.query.category ? String(req.query.category) : undefined;
+      const events = await getRecentEvents(limit, category);
+      res.json({ events, count: events.length });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/world-intel/macro", async (_req, res) => {
+    try {
+      const macro = await getLatestMacro();
+      res.json({ macro, riskCalendar: RISK_CALENDAR });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/world-intel/refresh", async (_req, res) => {
+    if (worldIntelRunning) {
+      return res.status(409).json({ error: "Analysis cycle already running" });
+    }
+    runWorldIntelCycle().catch(console.error);
+    res.json({ success: true, message: "World intelligence cycle started" });
   });
 
   return httpServer;

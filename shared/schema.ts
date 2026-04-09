@@ -1708,3 +1708,61 @@ export const moneyConfigSchema = z.object({
   base_currency: z.string().default("USD"),
 });
 export type MoneyConfig = z.infer<typeof moneyConfigSchema>;
+
+// ─── World Intelligence / Macro Oracle Tables ───────────────────────────────
+
+export const worldEvents = pgTable("world_events", {
+  id: serial("id").primaryKey(),
+  title: text("title").notNull(),
+  source: varchar("source", { length: 100 }),
+  category: varchar("category", { length: 50 }),
+  url: text("url"),
+  rawContent: text("raw_content"),
+  relevanceScore: real("relevance_score"),
+  sentiment: varchar("sentiment", { length: 20 }),
+  cryptoImpactExplanation: text("crypto_impact_explanation"),
+  publishedAt: bigint("published_at", { mode: "number" }),
+  fetchedAt: bigint("fetched_at", { mode: "number" }).notNull(),
+}, (table) => ({
+  fetchedAtIdx: index("world_events_fetched_at_idx").on(table.fetchedAt),
+  categoryIdx: index("world_events_category_idx").on(table.category),
+}));
+
+export const insertWorldEventSchema = createInsertSchema(worldEvents).omit({ id: true });
+export type InsertWorldEvent = z.infer<typeof insertWorldEventSchema>;
+export type WorldEvent = typeof worldEvents.$inferSelect;
+
+export const worldIntelSnapshots = pgTable("world_intel_snapshots", {
+  id: serial("id").primaryKey(),
+  macroClimateScore: real("macro_climate_score").notNull(),
+  direction: varchar("direction", { length: 20 }).notNull(),
+  confidence: real("confidence").notNull(),
+  narrative: text("narrative"),
+  keyCatalysts: jsonb("key_catalysts"),
+  categoryScores: jsonb("category_scores"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (table) => ({
+  createdAtIdx: index("world_intel_snapshots_created_at_idx").on(table.createdAt),
+}));
+
+export const insertWorldIntelSnapshotSchema = createInsertSchema(worldIntelSnapshots).omit({ id: true });
+export type InsertWorldIntelSnapshot = z.infer<typeof insertWorldIntelSnapshotSchema>;
+export type WorldIntelSnapshot = typeof worldIntelSnapshots.$inferSelect;
+
+export const macroIndicators = pgTable("macro_indicators", {
+  id: serial("id").primaryKey(),
+  dxy: real("dxy"),
+  sp500: real("sp500"),
+  gold: real("gold"),
+  oil: real("oil"),
+  btcDominance: real("btc_dominance"),
+  fearGreedIndex: integer("fear_greed_index"),
+  fearGreedLabel: varchar("fear_greed_label", { length: 30 }),
+  recordedAt: bigint("recorded_at", { mode: "number" }).notNull(),
+}, (table) => ({
+  recordedAtIdx: index("macro_indicators_recorded_at_idx").on(table.recordedAt),
+}));
+
+export const insertMacroIndicatorsSchema = createInsertSchema(macroIndicators).omit({ id: true });
+export type InsertMacroIndicators = z.infer<typeof insertMacroIndicatorsSchema>;
+export type MacroIndicators = typeof macroIndicators.$inferSelect;

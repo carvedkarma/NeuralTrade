@@ -19,6 +19,7 @@ The frontend is built with React, TypeScript, and Vite, utilizing `shadcn/ui` (R
 -   **Training Monitor:** Visualizes live GPU training progress, status, model knowledge, loss curves, action accuracy, walk-forward validation.
 -   **Bitget Trading:** Live Bitget exchange connection, positions table, balance overview, trading toggle, recent V5 signals, risk config display.
 -   **Neural Monitor:** Per-symbol neural intelligence dashboard. Shows V5 model outputs (p_long/p_hold/p_short gauges, expected return, MFE/MAE predicted risk-reward, HTF trend alignment, V5 score vs threshold, decision status) for all 20 symbols in real-time. Live WebSocket updates. Market bias summary bar. Route: `/neural`.
+-   **World Intel (Task #71):** Macro Oracle dashboard at `/world-intel`. Fetches global signals from RSS feeds (Reuters, BBC, CoinDesk, Federal Reserve, WSJ), macro indicators (Fear & Greed, DXY, S&P500, Gold, Oil, BTC Dominance), Reddit sentiment (r/worldnews, r/economics, r/Bitcoin). GPT-4o runs every 30 minutes to produce a Global Macro Climate Score (−100 to +100), plain English narrative, 24h prediction, per-category sentiment scores, and per-event crypto impact explanations. Includes Risk Calendar with upcoming FOMC/CPI/earnings dates. Auto-refreshes with countdown timer. Route: `/world-intel`.
 -   **Trade History:** Complete trade history with filtering and export.
 -   **Settings:** Manages GPU connection, Bybit connection, Bitget credentials & config, account configuration, model information, risk parameters, data freshness.
 

@@ -10,6 +10,7 @@ import { loadCandleTimestamps } from "./unified-learning-controller";
 import { initializeSelfLearning } from "./pattern-memory";
 import { setupWebSocket } from "./ws";
 import { startBinanceWs } from "./binance-ws";
+import { startWorldIntelScheduler } from "./world-intel";
 
 const app = express();
 const httpServer = createServer(app);
@@ -117,6 +118,8 @@ app.use((req, res, next) => {
       }).then(() => {
         // Initialize Pattern Memory self-learning system
         initializeSelfLearning();
+      }).then(() => {
+        startWorldIntelScheduler();
       }).then(() => {
         return checkIncompleteBackfillJobs();
       }).then(async (result) => {
