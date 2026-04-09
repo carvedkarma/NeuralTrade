@@ -36,21 +36,37 @@ interface RssItem {
   category: string;
 }
 
-function parseRssXml(xml: string, source: string, category: string): RssItem[] {
+function parseFeedXml(xml: string, source: string, category: string): RssItem[] {
   const items: RssItem[] = [];
-  const itemRegex = /<item[^>]*>([\s\S]*?)<\/item>/gi;
+
+  const isAtom = xml.includes("<entry") || xml.includes("xmlns=\"http://www.w3.org/2005/Atom\"");
+  const tagName = isAtom ? "entry" : "item";
+  const itemRegex = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`, "gi");
+
   let match;
   while ((match = itemRegex.exec(xml)) !== null) {
     const block = match[1];
     const title = extractXmlTag(block, "title");
-    const link = extractXmlTag(block, "link") || extractXmlTag(block, "guid");
-    const desc = extractXmlTag(block, "description");
-    const pubDate = extractXmlTag(block, "pubDate");
+    let link = "";
+    if (isAtom) {
+      const linkMatch = /<link[^>]+href=["']([^"']+)["'][^>]*\/?>/.exec(block);
+      link = linkMatch ? linkMatch[1] : extractXmlTag(block, "id");
+    } else {
+      link = extractXmlTag(block, "link") || extractXmlTag(block, "guid");
+    }
+    const desc = isAtom
+      ? (extractXmlTag(block, "summary") || extractXmlTag(block, "content"))
+      : extractXmlTag(block, "description");
+    const pubDate = isAtom ? extractXmlTag(block, "updated") : extractXmlTag(block, "pubDate");
     if (title && title.length > 10) {
       items.push({ title: cleanText(title), link: link || "", description: cleanText(desc || ""), pubDate: pubDate || "", source, category });
     }
   }
   return items.slice(0, 15);
+}
+
+function parseRssXml(xml: string, source: string, category: string): RssItem[] {
+  return parseFeedXml(xml, source, category);
 }
 
 function extractXmlTag(xml: string, tag: string): string {
@@ -207,6 +223,8 @@ interface AiAnalysisResult {
   direction: string;
   confidence: number;
   narrative: string;
+  prediction24h: string;
+  heroVerdict: string;
   keyCatalysts: string[];
   categoryScores: Record<string, number>;
   events: Array<{
@@ -270,7 +288,9 @@ Respond ONLY with this exact JSON structure:
   "macroClimateScore": <number from -100 to +100, where +100 = extremely bullish for crypto, -100 = extremely bearish>,
   "direction": <"Bullish" | "Bearish" | "Neutral">,
   "confidence": <number 0-100>,
+  "heroVerdict": "<one sentence verdict: e.g. 'Risk-off macro environment with DXY strength likely to pressure BTC toward $60k support in the next 24 hours.'>",
   "narrative": "<3-5 sentence plain English explanation of current macro situation and specific crypto implications>",
+  "prediction24h": "<2-3 sentences: specific 24-hour directional prediction for BTC/crypto — what price action is likely, key levels to watch, and the primary catalyst that will drive it>",
   "keyCatalysts": ["<catalyst 1>", "<catalyst 2>", "<catalyst 3>"],
   "categoryScores": {
     "Monetary Policy": <-100 to 100>,
@@ -319,7 +339,9 @@ async function runOpenAiAnalysis(events: RssItem[], macro: MacroData, redditTopi
       macroClimateScore: clamp(Number(parsed.macroClimateScore ?? 0), -100, 100),
       direction: parsed.direction ?? "Neutral",
       confidence: clamp(Number(parsed.confidence ?? 50), 0, 100),
+      heroVerdict: parsed.heroVerdict ?? "",
       narrative: parsed.narrative ?? "Analysis unavailable.",
+      prediction24h: parsed.prediction24h ?? "",
       keyCatalysts: Array.isArray(parsed.keyCatalysts) ? parsed.keyCatalysts.slice(0, 5) : [],
       categoryScores: parsed.categoryScores ?? {},
       events: Array.isArray(parsed.events) ? parsed.events.slice(0, 25) : [],
@@ -339,13 +361,16 @@ function buildFallbackAnalysis(events: RssItem[], macro: MacroData): AiAnalysisR
   if (dxy < 100) score += 15;
   else if (dxy > 106) score -= 20;
 
+  const dirStr = score > 10 ? "Bullish" : score < -10 ? "Bearish" : "Neutral";
   return {
     macroClimateScore: clamp(score, -100, 100),
-    direction: score > 10 ? "Bullish" : score < -10 ? "Bearish" : "Neutral",
+    direction: dirStr,
     confidence: 40,
+    heroVerdict: `${dirStr} macro backdrop based on Fear & Greed ${fg} and DXY ${dxy.toFixed(1)} — AI offline, basic heuristics only.`,
     narrative: "AI analysis unavailable. Basic macro signals suggest " +
       (score > 0 ? "mildly positive" : score < 0 ? "mildly negative" : "neutral") +
       " conditions for crypto based on fear/greed and DXY readings.",
+    prediction24h: "24-hour prediction unavailable — AI offline. Monitor Fear & Greed and DXY for directional signals.",
     keyCatalysts: events.slice(0, 3).map(e => e.title),
     categoryScores: { "Monetary Policy": 0, "Regulatory": 0, "Geopolitical": 0, "Market Structure": score, "Tech/Innovation": 0, "Social Sentiment": fg > 50 ? 20 : -20 },
     events: events.slice(0, 15).map(e => ({
@@ -417,7 +442,9 @@ export async function runWorldIntelCycle(): Promise<{ success: boolean; eventsSt
         macroClimateScore: aiResult.macroClimateScore,
         direction: aiResult.direction,
         confidence: aiResult.confidence,
+        heroVerdict: aiResult.heroVerdict,
         narrative: aiResult.narrative,
+        prediction24h: aiResult.prediction24h,
         keyCatalysts: aiResult.keyCatalysts,
         categoryScores: aiResult.categoryScores,
         createdAt: now,

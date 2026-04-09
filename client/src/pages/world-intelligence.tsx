@@ -32,7 +32,9 @@ interface WorldIntelSnapshot {
   macroClimateScore: number;
   direction: string;
   confidence: number;
+  heroVerdict: string | null;
   narrative: string;
+  prediction24h: string | null;
   keyCatalysts: string[];
   categoryScores: Record<string, number>;
   createdAt: number;
@@ -449,8 +451,8 @@ export default function WorldIntelligence() {
     queryKey: ["/api/world-intel/events", selectedCategory],
     queryFn: () => {
       const url = selectedCategory
-        ? `/api/world-intel/events?limit=50&category=${encodeURIComponent(selectedCategory)}`
-        : "/api/world-intel/events?limit=50";
+        ? `/api/world-intel/events?limit=20&category=${encodeURIComponent(selectedCategory)}`
+        : "/api/world-intel/events?limit=20";
       return fetch(url).then(r => r.json());
     },
     refetchInterval: 60_000,
@@ -491,7 +493,9 @@ export default function WorldIntelligence() {
   const score = snapshot?.macroClimateScore ?? 0;
   const direction = snapshot?.direction ?? "Neutral";
   const confidence = snapshot?.confidence ?? 0;
+  const heroVerdict = snapshot?.heroVerdict;
   const narrative = snapshot?.narrative;
+  const prediction24h = snapshot?.prediction24h;
   const keyCatalysts = snapshot?.keyCatalysts ?? [];
 
   return (
@@ -541,6 +545,21 @@ export default function WorldIntelligence() {
       {/* ─── Dashboard ────────────────────────────────────────────── */}
       {snapshot && (
         <div className="p-6 space-y-5">
+          {/* Hero Verdict Banner */}
+          {heroVerdict && (
+            <div className={cn("rounded-lg border px-4 py-3 flex items-start gap-3", scoreBgColor(score))} data-testid="hero-verdict-banner">
+              <div className="shrink-0 mt-0.5">
+                <SentimentIcon sentiment={direction} size={5} />
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-0.5">AI Verdict</p>
+                <p className={cn("text-sm font-medium leading-snug", directionColor(direction))} data-testid="text-hero-verdict">
+                  {heroVerdict}
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Row 1: Hero + AI Narrative */}
           <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
             {/* Macro Climate Score Gauge */}
@@ -564,7 +583,7 @@ export default function WorldIntelligence() {
               </CardContent>
             </Card>
 
-            {/* AI Narrative + Prediction */}
+            {/* AI Narrative + Key Catalysts */}
             <Card className="col-span-3 border border-border">
               <CardHeader className="pb-3">
                 <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
@@ -597,6 +616,23 @@ export default function WorldIntelligence() {
               </CardContent>
             </Card>
           </div>
+
+          {/* 24-Hour Prediction Card */}
+          {prediction24h && (
+            <Card className="border border-primary/20 bg-primary/5" data-testid="card-prediction-24h">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
+                  <Clock className="w-4 h-4 text-primary" />
+                  24-Hour Crypto Prediction
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-foreground leading-relaxed" data-testid="text-prediction-24h">
+                  {prediction24h}
+                </p>
+              </CardContent>
+            </Card>
+          )}
 
           {/* Row 2: Macro Indicators */}
           <div>

@@ -1738,6 +1738,8 @@ export const worldIntelSnapshots = pgTable("world_intel_snapshots", {
   direction: varchar("direction", { length: 20 }).notNull(),
   confidence: real("confidence").notNull(),
   narrative: text("narrative"),
+  prediction24h: text("prediction_24h"),
+  heroVerdict: text("hero_verdict"),
   keyCatalysts: jsonb("key_catalysts"),
   categoryScores: jsonb("category_scores"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
