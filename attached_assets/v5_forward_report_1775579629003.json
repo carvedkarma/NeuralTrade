@@ -1,0 +1,125 @@
+{
+  "window_start": "2025-10-01",
+  "window_end": null,
+  "total_trades": 0,
+  "trades_per_day": 0.0,
+  "win_rate": 0.0,
+  "expectancy_r": 0.0,
+  "profit_factor": 0.0,
+  "max_drawdown_r": 0.0,
+  "avg_win_r": 0.0,
+  "avg_loss_r": 0.0,
+  "pct_tp": 0.0,
+  "pct_sl": 0.0,
+  "pct_exp": 0.0,
+  "sharpe": 0.0,
+  "total_r": 0.0,
+  "score_threshold": 0.001,
+  "tp_mult": 2.5,
+  "sl_mult": 2.5,
+  "horizon": 48,
+  "cooldown": 1,
+  "ddt_diagnostics": null,
+  "ddt_blocked": 0,
+  "low_confidence": false,
+  "directional_balance": {
+    "stage_distributions": {
+      "pre": {
+        "total": 0,
+        "long": 0,
+        "short": 0,
+        "hold": 0,
+        "long_pct": 0.0,
+        "short_pct": 0.0,
+        "hold_pct": 0.0
+      },
+      "post_ema200": {
+        "total": 0,
+        "long": 0,
+        "short": 0,
+        "hold": 0,
+        "long_pct": 0.0,
+        "short_pct": 0.0,
+        "hold_pct": 0.0
+      },
+      "post_regime": {
+        "total": 0,
+        "long": 0,
+        "short": 0,
+        "hold": 0,
+        "long_pct": 0.0,
+        "short_pct": 0.0,
+        "hold_pct": 0.0
+      },
+      "final": {
+        "total": 0,
+        "long": 0,
+        "short": 0,
+        "hold": 0,
+        "long_pct": 0.0,
+        "short_pct": 0.0,
+        "hold_pct": 0.0
+      }
+    },
+    "gate_blocks": {}
+  },
+  "debias_spread_ratio": null,
+  "pct_calibration": [
+    {
+      "pct_label": "Top5%",
+      "threshold": 0.0,
+      "n": 459,
+      "er": 0.0123,
+      "pf": 1.04,
+      "wr": 0.512,
+      "maxdd": -24.83,
+      "tpd": 0.3,
+      "long_n": 0,
+      "long_er": 0.0,
+      "short_n": 459,
+      "short_er": 0.0123
+    },
+    {
+      "pct_label": "Top10%",
+      "threshold": 0.0,
+      "n": 459,
+      "er": 0.0123,
+      "pf": 1.04,
+      "wr": 0.512,
+      "maxdd": -24.83,
+      "tpd": 0.3,
+      "long_n": 0,
+      "long_er": 0.0,
+      "short_n": 459,
+      "short_er": 0.0123
+    },
+    {
+      "pct_label": "Top15%",
+      "threshold": 0.0,
+      "n": 459,
+      "er": 0.0123,
+      "pf": 1.04,
+      "wr": 0.512,
+      "maxdd": -24.83,
+      "tpd": 0.3,
+      "long_n": 0,
+      "long_er": 0.0,
+      "short_n": 459,
+      "short_er": 0.0123
+    },
+    {
+      "pct_label": "Top20%",
+      "threshold": 0.0,
+      "n": 459,
+      "er": 0.0123,
+      "pf": 1.04,
+      "wr": 0.512,
+      "maxdd": -24.83,
+      "tpd": 0.3,
+      "long_n": 0,
+      "long_er": 0.0,
+      "short_n": 459,
+      "short_er": 0.0123
+    }
+  ]
+}
