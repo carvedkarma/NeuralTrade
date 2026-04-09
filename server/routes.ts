@@ -6748,8 +6748,8 @@ Provide your analysis in this JSON format:
 
   app.get("/api/world-intel/events", async (req, res) => {
     try {
-      const parsedLimit = parseInt(String(req.query.limit ?? "20"), 10);
-      const limit = Math.min(isNaN(parsedLimit) || parsedLimit < 1 ? 20 : parsedLimit, 100);
+      const parsedLimit = parseInt(String(req.query.limit ?? "50"), 10);
+      const limit = Math.min(isNaN(parsedLimit) || parsedLimit < 1 ? 50 : parsedLimit, 100);
       const category = req.query.category ? String(req.query.category) : undefined;
       const sortParam = req.query.sort === "recent" ? "recent" as const : "relevance" as const;
       const events = await getRecentEvents(limit, category, sortParam);

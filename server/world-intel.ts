@@ -633,7 +633,7 @@ export async function getLatestMacro() {
   return rows[0] ?? null;
 }
 
-export async function getRecentEvents(limit = 20, category?: string, sort: "recent" | "relevance" = "relevance") {
+export async function getRecentEvents(limit = 50, category?: string, sort: "recent" | "relevance" = "relevance") {
   const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000;
   const condition = category
     ? and(gt(worldEvents.fetchedAt, sixHoursAgo), eq(worldEvents.category, category))
