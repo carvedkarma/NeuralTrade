@@ -479,8 +479,8 @@ export default function WorldIntelligence() {
   const events = eventsQ.data?.events ?? [];
   const riskCalendar = macroQ.data?.riskCalendar ?? [];
   const isRunning = snapshotQ.data?.isRunning ?? refreshMut.isPending;
-  const lastRunAt = snapshotQ.data?.lastRunAt;
-  const nextRunAt = snapshotQ.data?.nextRunAt;
+  const lastRunAt = snapshotQ.data?.lastRunAt ?? null;
+  const nextRunAt = snapshotQ.data?.nextRunAt ?? null;
 
   const isLoading = snapshotQ.isLoading && eventsQ.isLoading;
 
