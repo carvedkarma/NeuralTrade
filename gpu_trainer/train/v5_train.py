@@ -1756,8 +1756,9 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
             'n_sigma_discounted': n_sigma_discounted,
             'n_pside_killed': n_pside_killed,
             'n_pshort_killed': n_pshort_killed,
-            'n_mu_r_long_killed': n_mu_r_long_killed,   # Task #69: LONG specialist hard mu_R gate
-            'n_mu_r_short_killed': n_mu_r_short_killed,  # Task #68: SHORT specialist hard mu_R gate
+            'n_mu_r_long_killed': n_mu_r_long_killed,
+            'n_mu_r_short_killed': n_mu_r_short_killed,
+            'mu_over_risk_mean': float(np.nanmean(mu_over_risk)),
             'side_aware_scoring': side_aware_scoring,
             'n_long_all': n_long_sides,
             'n_short_all': n_short_sides,
@@ -3248,14 +3249,19 @@ def run_v5_forward_test(
             log.info(f"  |mu_R|: mean={float(np.mean(_finite_abs_mu)):.4f}  "
                      f"p50={float(np.percentile(_finite_abs_mu, 50)):.4f}  "
                      f"p90={float(np.percentile(_finite_abs_mu, 90)):.4f}")
+        _mu_over_risk_mean = score_diag.get('mu_over_risk_mean', 0.0)
+        log.info(f"  mu_over_risk: mean={_mu_over_risk_mean:.4f}")
         log.info(f"  head_agree: LONG={score_diag.get('head_agree_long_pct', 0.0):.1f}%  "
                  f"SHORT={score_diag.get('head_agree_short_pct', 0.0):.1f}%")
-        log.info(f"  Bars killed by gate:"
-                 f"  min_p_side={score_diag.get('n_pside_killed', 0)}"
-                 f"  min_p_short={score_diag.get('n_pshort_killed', 0)}"
-                 f"  min_mu_r_score={score_diag.get('n_suppressed', 0)} (floor={_fwd_min_mu_r_score:.4f})"
-                 f"  min_mu_r_long={score_diag.get('n_mu_r_long_killed', 0)}"
-                 f"  max_mu_r_short={score_diag.get('n_mu_r_short_killed', 0)}")
+        _n_tot = max(_n_total_scores, 1)
+        def _kill_str(n):
+            return f"{n} ({100.0*n/_n_tot:.1f}%)"
+        log.info(f"  Bars killed by gate (count / % of total bars):")
+        log.info(f"    min_p_side    = {_kill_str(score_diag.get('n_pside_killed', 0))}")
+        log.info(f"    min_p_short   = {_kill_str(score_diag.get('n_pshort_killed', 0))}")
+        log.info(f"    min_mu_r_score= {_kill_str(score_diag.get('n_suppressed', 0))}  (floor={_fwd_min_mu_r_score:.4f})")
+        log.info(f"    min_mu_r_long = {_kill_str(score_diag.get('n_mu_r_long_killed', 0))}")
+        log.info(f"    max_mu_r_short= {_kill_str(score_diag.get('n_mu_r_short_killed', 0))}")
     log.info("=" * 70)
 
     log.info(f"[V5_FWD] side_mode={config.side_mode} rr_weight={config.rr_weight}")
@@ -3502,10 +3508,20 @@ def run_v5_forward_test(
                     int(_inf_mask.sum()), _fallback_thr, effective_threshold, _promoted_syms,
                 )
         elif n_inf_bars_total > 0:
+            # Identify which symbols have inf threshold and how many bars each has
+            _inf_sym_report = []
+            for _sk, _sv in (config.per_symbol_thresholds or {}).items():
+                _is_inf = (not isinstance(_sv, dict) and not np.isfinite(float(_sv))) or \
+                          (isinstance(_sv, dict) and not np.isfinite(_sv.get('long', float('inf')))
+                           and not np.isfinite(_sv.get('short', float('inf'))))
+                if _is_inf:
+                    _sym_name = (symbols[int(_sk)] if symbols and int(_sk) < len(symbols) else f"sym_{_sk}")
+                    _sym_bar_ct = int(np.sum(test_sym_ids == int(_sk)))
+                    _inf_sym_report.append(f"{_sym_name}({_sym_bar_ct}bars)")
             log.warning(
-                "[V5_FWD] %d/%d bars have inf threshold (HIGH_BAR symbols fully blocked). "
-                "Those symbols will produce 0 trades.",
-                n_inf_bars_total, n_total_bars_thr,
+                "[V5_FWD] %d/%d bars have inf threshold (HIGH_BAR fully blocked). "
+                "Affected symbols: %s",
+                n_inf_bars_total, n_total_bars_thr, ", ".join(_inf_sym_report) if _inf_sym_report else "unknown",
             )
         # -------------------------------------------------------------------------
         selected = scores_work >= per_bar_threshold
@@ -5578,6 +5594,11 @@ def _print_forward_report(report):
              "|  Try higher (fewer/better): --v5-min-threshold %.5f",
              _thr, _thr_hint, _thr_up)
     log.info("  Score distribution fix: --v5-min-mu-r-score 0.0002 --v5-score-exponent 0.5")
+    _pside_w = getattr(config, 'score_pside_weight', 1.0)
+    _pside_hint = "lower" if _pside_w > 0.5 else "current"
+    log.info("  p_side gate: --v5-score-pside-weight %.1f (current=%.1f, %s). "
+             "Reduce toward 0.5 if p_side anti-predictive (lower p_side on winners than losers).",
+             max(_pside_w - 0.25, 0.25), _pside_w, _pside_hint)
     log.info("-" * 80)
     log.info("=" * 80)
 
