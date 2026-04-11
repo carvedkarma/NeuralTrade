@@ -2694,7 +2694,7 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
     ref_arrays['_raw_mu_R_ref'] = _mu_R_raw_for_gate
 
     _ref_min_mu_r_score = getattr(config, 'min_mu_r_score', 0.0)  # Task #73: configurable floor
-    train_scores, _, _ = compute_v5_scores(
+    train_scores, _, _ref_score_diag = compute_v5_scores(
         None, horizon_bars=config.horizon,
         score_lambda=config.score_lambda,
         risk_proxy=config.risk_proxy,
@@ -2708,24 +2708,20 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
         min_p_short=config.min_p_short,
         side_aware_scoring=config.side_aware_scoring,
         min_mu_r_score=_ref_min_mu_r_score,  # Task #73: was hardcoded 0.0
-        specialist_mode=getattr(config, 'specialist_mode', 'none'),  # BUG FIX (Task #68): reference calibration must use specialist scoring
-        min_mu_r_long=getattr(config, 'min_mu_r_long', -1e9),        # Task #69: LONG specialist head-agree gate
-        long_disagree_mult=getattr(config, 'long_disagree_mult', 1.0),  # Task #69: soft disagree penalty
-        max_mu_r_short=getattr(config, 'max_mu_r_short', 1e9),       # Task #68: SHORT specialist head-agree gate
-        short_disagree_mult=getattr(config, 'short_disagree_mult', 1.0),  # Task #68: soft disagree penalty
-        score_pside_weight=getattr(config, 'score_pside_weight', 1.0),   # Task #69 P2: p_side weight in specialist scoring
+        specialist_mode=getattr(config, 'specialist_mode', 'none'),
+        min_mu_r_long=getattr(config, 'min_mu_r_long', -1e9),
+        long_disagree_mult=getattr(config, 'long_disagree_mult', 1.0),
+        max_mu_r_short=getattr(config, 'max_mu_r_short', 1e9),
+        short_disagree_mult=getattr(config, 'short_disagree_mult', 1.0),
+        score_pside_weight=getattr(config, 'score_pside_weight', 1.0),
     )
     ref_arrays['_train_scores'] = train_scores
 
     _ref_finite = train_scores[np.isfinite(train_scores)]
-    # Task #73: count bars that were floor-rejected (score=-inf due to min_mu_r_score)
-    # These bars have finite mu_R but |mu_R| < min_mu_r_score, so they received score=-inf.
-    # We identify them as: score==-inf AND NOT originally -inf from gate kills.
-    # Approximation: any -inf finite score is floor-rejected (gate kills typically set to -np.inf too,
-    # but this at least bounds the floor-reject count for logging purposes).
-    _ref_n_neg_inf = int(np.sum(np.isneginf(train_scores)))
+    # Use exact n_suppressed from score_diag (counts bars where |mu_R|<floor, set to -inf).
+    _ref_n_suppressed = _ref_score_diag.get('n_suppressed', 0) if _ref_score_diag else 0
     _ref_floor_rejected_note = (
-        f", floor_rejected(|mu_R|<{_ref_min_mu_r_score:.4f})≤{_ref_n_neg_inf} bars"
+        f", floor_rejected(|mu_R|<{_ref_min_mu_r_score:.4f})={_ref_n_suppressed} bars"
         if _ref_min_mu_r_score > 0 else ""
     )
     log.info(f"[V5_REF] Training reference arrays built: mu_R mean={float(np.mean(ref_arrays['mu_R'])):.4f}, "
@@ -4736,7 +4732,7 @@ def run_v5_forward_test(
         _df_pct_cal_indices = np.where(np.isfinite(scores_work))[0]
         report['pct_calibration'] = _compute_percentile_calibration(
             _df_pct_cal_indices, scores_work, sides, safe_r, test_bars)
-        _print_forward_report(report)
+        _print_forward_report(report, config)
         return report
 
     taken = np.array(taken)
@@ -5162,7 +5158,7 @@ def run_v5_forward_test(
         _pct_cal_indices, scores_work, sides, safe_r, test_bars)
     report['pct_calibration'] = pct_calibration
 
-    _print_forward_report(report)
+    _print_forward_report(report, config)
     return report
 
 
@@ -5434,7 +5430,7 @@ def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_
     }
 
 
-def _print_forward_report(report):
+def _print_forward_report(report, config=None):
     log.info("")
     log.info("=" * 80)
     log.info("  FORWARD TEST REPORT")
@@ -5594,7 +5590,7 @@ def _print_forward_report(report):
              "|  Try higher (fewer/better): --v5-min-threshold %.5f",
              _thr, _thr_hint, _thr_up)
     log.info("  Score distribution fix: --v5-min-mu-r-score 0.0002 --v5-score-exponent 0.5")
-    _pside_w = getattr(config, 'score_pside_weight', 1.0)
+    _pside_w = getattr(config, 'score_pside_weight', None) or report.get('score_pside_weight', 1.0)
     _pside_hint = "lower" if _pside_w > 0.5 else "current"
     log.info("  p_side gate: --v5-score-pside-weight %.1f (current=%.1f, %s). "
              "Reduce toward 0.5 if p_side anti-predictive (lower p_side on winners than losers).",
