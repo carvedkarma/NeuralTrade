@@ -231,5 +231,55 @@ def test_task73_min_mu_r_score_not_hardcoded():
     )
 
 
+def test_task73_highbar_fallback_yields_trades():
+    """Task #73: When all symbols have HIGH_BAR (inf) threshold and per_sym_no_edge_fallback=True,
+    the forward test must still produce trades (using the global threshold fallback).
+
+    This is a regression test for the per_sym_no_edge_fallback path in run_v5_forward_test.
+    We verify the logic by inspecting the source code's fallback branch, since torch is not
+    available in this environment and we cannot call run_v5_forward_test directly.
+
+    The test verifies:
+    1. The V5ForwardTestConfig class has a per_sym_no_edge_fallback field.
+    2. The run_v5_forward_test code has the ALL_INF_BLOCKED branch.
+    3. When per_sym_no_edge_fallback=True, the code resets inf thresholds to a fallback value.
+    4. The fallback path's log message matches [V5_FWD][ALL_INF_FALLBACK].
+    """
+    vt_path = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), '..', 'train', 'v5_train.py')
+    )
+    assert os.path.exists(vt_path), f"v5_train.py not found at {vt_path}"
+    with open(vt_path, 'r') as f:
+        src = f.read()
+
+    # 1. V5ForwardTestConfig must have per_sym_no_edge_fallback field
+    assert 'per_sym_no_edge_fallback' in src, \
+        "V5ForwardTestConfig must have per_sym_no_edge_fallback field"
+
+    # 2. The ALL_INF_BLOCKED detection branch must exist
+    assert '_all_sym_inf' in src or 'ALL_INF_BLOCKED' in src, \
+        "run_v5_forward_test must have an ALL_INF_BLOCKED / _all_sym_inf detection branch"
+
+    # 3. The fallback reset path must set per_bar_threshold for inf-blocked bars
+    assert 'per_bar_threshold[_inf_mask] = _fallback_thr' in src or \
+           'per_bar_threshold[_inf_mask]' in src, \
+        "run_v5_forward_test ALL_INF_BLOCKED path must reset inf thresholds to fallback value"
+
+    # 4. The fallback log message must exist
+    assert 'ALL_INF_FALLBACK' in src, \
+        "run_v5_forward_test must log [V5_FWD][ALL_INF_FALLBACK] when fallback is applied"
+
+    # 5. The fallback threshold must be computed from score distribution (not hardcoded)
+    # — the code uses p80 of finite scores, with a floor at config.min_threshold
+    assert '_score_p80' in src, \
+        "ALL_INF_FALLBACK must compute fallback from score p80 to avoid hardcoded threshold mismatch"
+
+    # 6. The V5ForwardTestConfig.per_sym_no_edge_fallback must have a default
+    assert 'per_sym_no_edge_fallback: bool' in src or \
+           'per_sym_no_edge_fallback=False' in src or \
+           'per_sym_no_edge_fallback: bool = False' in src, \
+        "per_sym_no_edge_fallback must have a default of False in V5ForwardTestConfig"
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

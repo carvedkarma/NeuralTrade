@@ -5402,20 +5402,15 @@ Examples:
 
     # Task #73: score audit & fix — configurable min_mu_r_score and score_exponent
     parser.add_argument("--v5-min-mu-r-score", type=float, default=0.0,
-                        help="Task #73: minimum |mu_R| required to generate a positive score. "
-                             "Bars with |mu_R| below this floor get score=-inf and are excluded from the "
-                             "threshold sweep, preventing zero-edge trades from polluting the reference distribution. "
-                             "0.0 = disabled (backward-compatible). Recommended: 0.0002 (tiny floor, removes "
-                             "negligible-mu bars without hurting trade count; 17%% E[R] improvement in simulation). "
-                             "This is the fix for the hardcoded 0.0 at the two call sites (lines 2714 and 3165 "
-                             "were the confirmed bugs). Default: 0.0.")
+                        help="Minimum |mu_R| required to generate a positive score. "
+                             "Bars with |mu_R| below this floor receive score=-inf and are excluded from "
+                             "the threshold sweep. 0.0 = disabled (default). "
+                             "Recommended starting value: 0.0002.")
     parser.add_argument("--v5-score-exponent", type=float, default=1.0,
-                        help="Task #73: monotonic rank-preserving right-tail stretch for specialist scores. "
-                             "Applies score → clamp(score, 0, inf)^exponent. Rank among positive scores is preserved. "
-                             "1.0 = no change (default). 0.5 = square-root stretch (compresses high scores less). "
-                             "Use when p90/|mean| < 2x (score distribution is collapsed). "
-                             "Increases p90/mean ratio without changing which trades rank highest. "
-                             "Default: 1.0 (backward-compatible).")
+                        help="Monotonic right-tail transform for specialist scores: "
+                             "positive scores → score^exponent; NaN/-inf unchanged. "
+                             "1.0 = identity (default). Values < 1 (e.g. 0.5) stretch rank separation. "
+                             "Use when the forward-test score distribution is collapsed.")
 
     parser.add_argument("--v5-train-end-date", type=str, default=None,
                         help="v5 time-based split: train on data before this date (YYYY-MM-DD)")

@@ -1676,11 +1676,7 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
         n_suppressed = int(np.sum(tiny_mu_mask))
         scores[tiny_mu_mask] = -np.inf
 
-    # --- Task #69 Fix 1: LONG specialist hard mu_R gate ---
-    # When min_mu_r_long >= 0.0 (e.g. 0.0), block all LONG specialist trades where
-    # the return head predicts mu_R below the threshold.  At 0.0 this only passes
-    # head-agree trades (mu_R > 0), removing the ~23-47% of disagree trades that have
-    # negative E[R] in forward tests.  Gate fires only in 'long' specialist mode.
+    # LONG specialist hard mu_R gate — blocks trades where mu_R <= threshold (long mode only).
     n_mu_r_long_killed = 0
     if specialist_mode == 'long' and min_mu_r_long > -1e8:
         mu_r_long_block = mu_R <= min_mu_r_long
@@ -1689,12 +1685,7 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
         if n_mu_r_long_killed > 0:
             log.debug(f"[LONG_SPEC_GATE] min_mu_r_long={min_mu_r_long:.3f} blocked {n_mu_r_long_killed} trades")
 
-    # --- Task #68 Fix 1: SHORT specialist hard mu_R gate ---
-    # When max_mu_r_short <= 0.0 (e.g. 0.0), block all SHORT specialist trades where
-    # the return head predicts mu_R above the threshold.  At 0.0 this only passes
-    # head-agree trades (mu_R < 0), removing counter-trend shorts in bull-market folds
-    # (e.g. Dec 2022 - Feb 2023 recovery: ha=0% → all 31 trades blocked → 0R instead of -27.6R).
-    # Gate fires only in 'short' specialist mode.
+    # SHORT specialist hard mu_R gate — blocks trades where mu_R >= threshold (short mode only).
     n_mu_r_short_killed = 0
     if specialist_mode == 'short' and max_mu_r_short < 1e8:
         mu_r_short_block = mu_R >= max_mu_r_short   # block if mu_R above threshold (raw mu_R, >= catches slippage-zeroed boundary)
@@ -3205,14 +3196,8 @@ def run_v5_forward_test(
         arrays['edge_S'] = score_diag['edge_S']
 
     # --- Task #73: score_exponent monotonic transform ---
-    # Applies score → clamp(score, 0, inf)^exponent to stretch the right tail.
-    # Semantics:
-    #   - NaN scores → remain NaN (never transformed)
-    #   - -inf scores (gate-killed bars) → remain -inf (never transformed)
-    #   - finite score <= 0 → remain unchanged (transform does not apply below zero)
-    #   - finite score > 0 → score ** exponent (rank-preserving, stretches right tail)
-    # This is strictly rank-preserving: if score_a > score_b > 0, then
-    # score_a**exp > score_b**exp for any exp > 0. Only fires when exponent != 1.0.
+    # score → score**exponent for positive-finite entries; NaN/-inf unchanged.
+    # Rank-preserving (x^e is monotone on (0,inf) for e>0). Fires only when exponent != 1.0.
     _score_exponent = getattr(config, 'score_exponent', 1.0)
     if _score_exponent != 1.0:
         _scores_orig = scores.copy()
@@ -3265,10 +3250,12 @@ def run_v5_forward_test(
                      f"p90={float(np.percentile(_finite_abs_mu, 90)):.4f}")
         log.info(f"  head_agree: LONG={score_diag.get('head_agree_long_pct', 0.0):.1f}%  "
                  f"SHORT={score_diag.get('head_agree_short_pct', 0.0):.1f}%")
-        log.info(f"  Bars killed: min_p_side={score_diag.get('n_pside_killed', 0)}  "
-                 f"min_p_short={score_diag.get('n_pshort_killed', 0)}  "
-                 f"min_mu_r_score={score_diag.get('n_suppressed', 0)} "
-                 f"(floor={_fwd_min_mu_r_score:.4f})")
+        log.info(f"  Bars killed by gate:"
+                 f"  min_p_side={score_diag.get('n_pside_killed', 0)}"
+                 f"  min_p_short={score_diag.get('n_pshort_killed', 0)}"
+                 f"  min_mu_r_score={score_diag.get('n_suppressed', 0)} (floor={_fwd_min_mu_r_score:.4f})"
+                 f"  min_mu_r_long={score_diag.get('n_mu_r_long_killed', 0)}"
+                 f"  max_mu_r_short={score_diag.get('n_mu_r_short_killed', 0)}")
     log.info("=" * 70)
 
     log.info(f"[V5_FWD] side_mode={config.side_mode} rr_weight={config.rr_weight}")
@@ -4553,11 +4540,6 @@ def run_v5_forward_test(
     _n_after_cooldown = n_candidates - cooldown_blocked
     _n_after_head_dis = _n_after_cooldown - head_disagree_blocked
     _n_taken          = n_taken
-
-    # Oracle E[R] helpers — use the blocked-oracle data collected in gate_blocked_r
-    def _oracle_er_for(stage_remaining, total_candidates):
-        """Return oracle mean R at this funnel stage (approximate from gate_blocked_r)."""
-        return float('nan')  # we only have the blocked trade R, not the remaining stage R
 
     # Simple funnel row: name, count, % of total candidates, delta from previous stage
     _prev = n_candidates
