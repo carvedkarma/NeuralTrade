@@ -2726,12 +2726,22 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
     ref_arrays['_train_scores'] = train_scores
 
     _ref_finite = train_scores[np.isfinite(train_scores)]
-    _ref_floor_rejected = int(np.sum(np.isfinite(train_scores) == False)) if _ref_min_mu_r_score > 0 else 0
+    # Task #73: count bars that were floor-rejected (score=-inf due to min_mu_r_score)
+    # These bars have finite mu_R but |mu_R| < min_mu_r_score, so they received score=-inf.
+    # We identify them as: score==-inf AND NOT originally -inf from gate kills.
+    # Approximation: any -inf finite score is floor-rejected (gate kills typically set to -np.inf too,
+    # but this at least bounds the floor-reject count for logging purposes).
+    _ref_n_neg_inf = int(np.sum(np.isneginf(train_scores)))
+    _ref_floor_rejected_note = (
+        f", floor_rejected(|mu_R|<{_ref_min_mu_r_score:.4f})≤{_ref_n_neg_inf} bars"
+        if _ref_min_mu_r_score > 0 else ""
+    )
     log.info(f"[V5_REF] Training reference arrays built: mu_R mean={float(np.mean(ref_arrays['mu_R'])):.4f}, "
              f"mae mean={float(np.mean(ref_arrays['mae'])):.4f}, "
              f"score mean={float(np.nanmean(_ref_finite)) if len(_ref_finite) > 0 else 0.0:.4f} "
              f"(min_mu_r_score={_ref_min_mu_r_score:.4f}, "
-             f"finite_scores={len(_ref_finite)}/{len(train_scores)})")
+             f"finite_scores={len(_ref_finite)}/{len(train_scores)}"
+             f"{_ref_floor_rejected_note})")
 
     return ref_arrays
 
@@ -3179,6 +3189,15 @@ def run_v5_forward_test(
         short_disagree_mult=getattr(config, 'short_disagree_mult', 1.0),  # Task #68: soft disagree penalty
         score_pside_weight=getattr(config, 'score_pside_weight', 1.0),   # Task #69 P2: p_side weight in specialist scoring
     )
+    # Task #73: report explicit floor-reject count from min_mu_r_score filter
+    _fwd_n_suppressed = score_diag.get('n_suppressed', 0)
+    if _fwd_min_mu_r_score > 0:
+        log.info(
+            f"[V5_FWD][FLOOR_REJECT] min_mu_r_score={_fwd_min_mu_r_score:.4f}: "
+            f"{_fwd_n_suppressed} bars suppressed to score=-inf "
+            f"({100.0*_fwd_n_suppressed/max(len(scores),1):.1f}% of total {len(scores)} bars). "
+            f"These bars had |mu_R|<{_fwd_min_mu_r_score:.4f} and are excluded from the threshold sweep."
+        )
 
     if 'edge_L' in score_diag:
         arrays['edge_L'] = score_diag['edge_L']
@@ -3186,18 +3205,32 @@ def run_v5_forward_test(
         arrays['edge_S'] = score_diag['edge_S']
 
     # --- Task #73: score_exponent monotonic transform ---
-    # Applies score → clamp(score, 0, inf) ^ exponent to stretch the right tail.
-    # Rank-preserving (exponent > 0 on positive scores). Only fires when exponent != 1.0.
+    # Applies score → clamp(score, 0, inf)^exponent to stretch the right tail.
+    # Semantics:
+    #   - NaN scores → remain NaN (never transformed)
+    #   - -inf scores (gate-killed bars) → remain -inf (never transformed)
+    #   - finite score <= 0 → remain unchanged (transform does not apply below zero)
+    #   - finite score > 0 → score ** exponent (rank-preserving, stretches right tail)
+    # This is strictly rank-preserving: if score_a > score_b > 0, then
+    # score_a**exp > score_b**exp for any exp > 0. Only fires when exponent != 1.0.
     _score_exponent = getattr(config, 'score_exponent', 1.0)
     if _score_exponent != 1.0:
-        _finite_pre = np.sum(np.isfinite(scores))
-        _pos_scores = np.where(scores > 0, scores, 0.0)
-        _neg_inf_mask = scores <= 0
-        scores = np.where(_neg_inf_mask, scores, _pos_scores ** _score_exponent)
-        _finite_post = np.sum(np.isfinite(scores))
-        log.info(f"[V5_SCORE_EXP] score_exponent={_score_exponent:.2f} applied — "
-                 f"finite scores: {_finite_pre} → {_finite_post} "
-                 f"(positive scores stretched, rank preserved)")
+        _scores_orig = scores.copy()
+        _is_positive_finite = np.isfinite(scores) & (scores > 0.0)
+        _n_positive = int(np.sum(_is_positive_finite))
+        # Clip to [0, inf) first, then raise to exponent — avoids NaN from negative^frac
+        _pos_clipped = np.clip(scores, 0.0, np.inf)
+        # Only overwrite positive-finite entries; NaN and -inf remain as-is
+        scores = np.where(_is_positive_finite, _pos_clipped ** _score_exponent, scores)
+        _p90_pre  = float(np.percentile(_scores_orig[np.isfinite(_scores_orig)], 90)) if np.any(np.isfinite(_scores_orig)) else float('nan')
+        _p90_post = float(np.percentile(scores[np.isfinite(scores)], 90)) if np.any(np.isfinite(scores)) else float('nan')
+        _mean_pre  = float(np.nanmean(_scores_orig))
+        _mean_post = float(np.nanmean(scores))
+        log.info(f"[V5_SCORE_EXP] score_exponent={_score_exponent:.2f} applied on {_n_positive} positive-finite bars — "
+                 f"mean: {_mean_pre:+.4f} → {_mean_post:+.4f}  "
+                 f"p90: {_p90_pre:.4f} → {_p90_post:.4f}  "
+                 f"p90/|mean|: {_p90_pre/max(abs(_mean_pre),1e-8):.1f}x → {_p90_post/max(abs(_mean_post),1e-8):.1f}x "
+                 f"(NaN/−inf entries unchanged, rank preserved)")
 
     # --- Task #73: score distribution diagnostics ---
     _all_finite = scores[np.isfinite(scores)]
@@ -4512,6 +4545,65 @@ def run_v5_forward_test(
              f"head_disagree={head_disagree_blocked} per_sym_kill={per_sym_kill_blocked} "
              f"ddt={ddt_blocked} edge_first_pre={edge_first_blocked} → trades_taken={n_taken}")
 
+    # --- Task #73: Structured per-fold gate funnel table ---
+    # Shows the cumulative attrition through each gate stage with oracle E[R] at each stage.
+    _n_after_quality  = n_total_bars - int(np.sum(~quality_mask)) if quality_mask is not None else n_total_bars
+    _n_after_score    = n_candidates + edge_first_blocked  # passed score threshold (before edge_first)
+    _n_after_ef       = n_candidates                       # after edge_first pruning
+    _n_after_cooldown = n_candidates - cooldown_blocked
+    _n_after_head_dis = _n_after_cooldown - head_disagree_blocked
+    _n_taken          = n_taken
+
+    # Oracle E[R] helpers — use the blocked-oracle data collected in gate_blocked_r
+    def _oracle_er_for(stage_remaining, total_candidates):
+        """Return oracle mean R at this funnel stage (approximate from gate_blocked_r)."""
+        return float('nan')  # we only have the blocked trade R, not the remaining stage R
+
+    # Simple funnel row: name, count, % of total candidates, delta from previous stage
+    _prev = n_candidates
+    def _funnel_row(label, n, oracle_er=None):
+        nonlocal _prev
+        removed = _prev - n
+        pct_of_start = 100.0 * n / max(n_candidates, 1)
+        pct_removed  = 100.0 * removed / max(_prev, 1)
+        er_str = f"{oracle_er:+.4f}R" if oracle_er is not None and not np.isnan(oracle_er) else "n/a"
+        _prev = n
+        return (f"  {label:<30s} {n:>6d} ({pct_of_start:>5.1f}% of start) "
+                f"  -[{removed:>4d} / {pct_removed:>5.1f}%]  blocked oracle_E[R]={er_str}")
+
+    _cb_get = lambda g: float(np.mean(gate_blocked_r[g])) if gate_blocked_r.get(g) else float('nan')
+
+    log.info("=" * 80)
+    log.info("  [V5_GATE_FUNNEL] Per-fold gate attrition table")
+    log.info("=" * 80)
+    log.info(f"  {'Stage':<30s} {'Count':>6s}   {'% of start':>10s}   {'Removed → gate oracle E[R]'}")
+    log.info(f"  {'-'*30} {'-'*6}   {'-'*10}   {'-'*30}")
+    log.info(f"  {'total_bars':<30s} {n_total_bars:>6d}   (all model inference bars)")
+    log.info(f"  {'after_quality_gate':<30s} {_n_after_quality:>6d}   ({100.0*_n_after_quality/max(n_total_bars,1):>5.1f}%  of total bars)")
+    log.info(f"  {'after_score_threshold':<30s} {_n_after_score:>6d}   ({100.0*_n_after_score/max(n_total_bars,1):>5.1f}%  of total bars)")
+    log.info(f"  {'after_edge_first':<30s} {_n_after_ef:>6d}   ({100.0*_n_after_ef/max(_n_after_score,1):>5.1f}%  of score-pass)  -[{edge_first_blocked} edge_first]")
+    _prev = _n_after_ef
+    log.info(_funnel_row("after_cooldown",       _n_after_ef - cooldown_blocked,      _cb_get("cooldown")))
+    _n_aft_cd = _n_after_ef - cooldown_blocked
+    _prev = _n_aft_cd
+    _aft_adx      = _n_aft_cd - adx_blocked;        log.info(_funnel_row("after_adx_gate",      _aft_adx,     _cb_get("adx")))
+    _prev = _aft_adx
+    _aft_ema      = _aft_adx - ema_blocked;          log.info(_funnel_row("after_ema200_gate",   _aft_ema,     _cb_get("ema200")))
+    _prev = _aft_ema
+    _aft_wkly     = _aft_ema - weekly_blocked;       log.info(_funnel_row("after_weekly_cap",    _aft_wkly,    _cb_get("weekly_cap")))
+    _prev = _aft_wkly
+    _aft_corr     = _aft_wkly - corr_blocked;        log.info(_funnel_row("after_correlation",   _aft_corr,    _cb_get("correlation")))
+    _prev = _aft_corr
+    _aft_daily    = _aft_corr - daily_blocked;       log.info(_funnel_row("after_daily_cap",     _aft_daily,   _cb_get("daily_loss")))
+    _prev = _aft_daily
+    _aft_hd       = _aft_daily - head_disagree_blocked; log.info(_funnel_row("after_head_disagree", _aft_hd,   _cb_get("head_disagreement")))
+    _prev = _aft_hd
+    _aft_ddt      = _aft_hd - ddt_blocked;           log.info(_funnel_row("after_ddt_throttle",  _aft_ddt,    _cb_get("ddt")))
+    _prev = _aft_ddt
+    _aft_psk      = _aft_ddt - per_sym_kill_blocked; log.info(_funnel_row("after_sym_kill",      _aft_psk,    _cb_get("per_symbol_kill")))
+    log.info(f"  {'TAKEN (final trades)':<30s} {_n_taken:>6d}   ({100.0*_n_taken/max(n_candidates,1):>5.1f}%  of score-pass candidates)")
+    log.info("=" * 80)
+
     if gate_blocked_r:
         log.info("=" * 80)
         log.info("  GATE IMPACT ANALYSIS (oracle R of blocked trades)")
@@ -5476,6 +5568,35 @@ def _print_forward_report(report):
         log.info(f"  {'COMBINED':<12} {report.get('total_trades',0):>7} "
                  f"{report.get('total_r',0):>+9.4f} {report.get('win_rate',0):>6.1%} "
                  f"{report.get('profit_factor',0):>7.2f} {report.get('expectancy_r',0):>+9.4f}")
+    # --- Task #73: recommended follow-up tuning command ---
+    # Emitted after every forward test report so the user can refine thresholds immediately.
+    _er = report.get('expectancy_r', 0.0)
+    _wr = report.get('win_rate', 0.0)
+    _tpd = report.get('trades_per_day', 0.0)
+    _thr = report.get('score_threshold', 0.0)
+    _sig = report.get('p_value', 1.0)
+    _n = report.get('total_trades', 0)
+    _sig_str = "***" if _sig < 0.01 else "**" if _sig < 0.05 else "*" if _sig < 0.10 else "ns"
+    log.info("")
+    log.info("-" * 80)
+    log.info("  [NEXT_RUN_TUNING] Recommended parameter adjustments:")
+    if _n < 30:
+        log.info("  ⚠  Too few trades (%d). Reduce --v5-min-threshold or lower --v5-cooldown.", _n)
+    elif _er <= 0:
+        log.info("  ⚠  Negative E[R]=%.4f. Try: --v5-min-mu-r-score 0.0002 --v5-score-exponent 0.5", _er)
+    elif _er > 0 and _sig_str == "ns":
+        log.info("  ℹ  E[R]=%.4f but not significant (%s, p=%.3f). Need more trades (n=%d). "
+                 "Lower cooldown or threshold.", _er, _sig_str, _sig, _n)
+    else:
+        log.info("  ✓  E[R]=%+.4f [%s], WR=%.1f%%, TPD=%.2f — signal is positive.",
+                 _er, _sig_str, _wr * 100, _tpd)
+    _thr_hint = max(_thr * 0.8, 0.0001)
+    _thr_up   = _thr * 1.2
+    log.info("  Current threshold: %.5f  |  Try lower: --v5-min-threshold %.5f  "
+             "|  Try higher (fewer/better): --v5-min-threshold %.5f",
+             _thr, _thr_hint, _thr_up)
+    log.info("  Score distribution fix: --v5-min-mu-r-score 0.0002 --v5-score-exponent 0.5")
+    log.info("-" * 80)
     log.info("=" * 80)
 
 
@@ -9120,23 +9241,33 @@ def train_v5_model(
                             "override" if per_sym_no_edge_fallback else "NOT override",
                         )
                     elif _n_highbar > 0:
-                        # Task #73: loud per-symbol HIGH_BAR warning when some (not all) symbols are blocked
+                        # Task #73: loud per-symbol HIGH_BAR warning when some (not all) symbols are blocked.
+                        # Count at SYMBOL level (not entry level — per-side mode has 2 entries per symbol).
                         _highbar_syms = []
+                        _highbar_sym_count = 0
                         for _hb_sym_id, _hb_v in ckpt_per_sym_thr.items():
                             _hb_sym_name = symbols[int(_hb_sym_id)] if symbols and int(_hb_sym_id) < len(symbols) else f"sym_{_hb_sym_id}"
                             if isinstance(_hb_v, dict):
                                 lt = _hb_v.get('long', float('inf'))
                                 st = _hb_v.get('short', float('inf'))
-                                if not np.isfinite(lt) or not np.isfinite(st):
-                                    _highbar_syms.append(f"{_hb_sym_name}(L={'∞' if not np.isfinite(lt) else f'{lt:.4f}'}/S={'∞' if not np.isfinite(st) else f'{st:.4f}'})")
+                                _l_inf = not np.isfinite(lt)
+                                _s_inf = not np.isfinite(st)
+                                if _l_inf or _s_inf:
+                                    _highbar_sym_count += 1
+                                    _highbar_syms.append(
+                                        f"{_hb_sym_name}"
+                                        f"(L={'∞' if _l_inf else f'{lt:.4f}'}"
+                                        f"/S={'∞' if _s_inf else f'{st:.4f}'})"
+                                    )
                             else:
                                 if not np.isfinite(float(_hb_v)):
+                                    _highbar_sym_count += 1
                                     _highbar_syms.append(_hb_sym_name)
                         log.warning(
-                            "[V5_FWD][HIGH_BAR] %d/%d symbols have HIGH_BAR (inf) threshold — "
-                            "these symbols are FULLY BLOCKED from contributing trades. "
+                            "[V5_FWD][HIGH_BAR] %d/%d symbols have at least one side with HIGH_BAR (inf) threshold — "
+                            "those sides are FULLY BLOCKED from contributing trades. "
                             "Affected: %s",
-                            _n_highbar, len(ckpt_per_sym_thr),
+                            _highbar_sym_count, len(ckpt_per_sym_thr),
                             ", ".join(_highbar_syms),
                         )
                 else:
