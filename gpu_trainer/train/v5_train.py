@@ -284,6 +284,9 @@ class V5ForwardTestConfig:
     per_symbol_no_ceiling: bool = False  # when True, per-symbol thresholds bypass max_threshold ceiling cap
     ema200_long_only: bool = False       # when True, EMA200 gate only blocks LONG signals; SHORTs are never blocked
     score_pside_weight: float = 1.0     # p_side contribution weight in specialist scoring; 0.0 = pure mu_over_risk
+    # --- Task #73: configurable min_mu_r_score and score_exponent ---
+    min_mu_r_score: float = 0.0         # minimum |mu_R| for a positive score; 0.0 = disabled (backward compat)
+    score_exponent: float = 1.0         # monotonic transform: score → clamp(score,0,inf)^exponent; 1.0 = no change
 
 
 def compute_feature_importance_report(
@@ -2698,6 +2701,7 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
     # Attach raw mu_R (pre-debias) so the quality gate call site can use real magnitudes.
     ref_arrays['_raw_mu_R_ref'] = _mu_R_raw_for_gate
 
+    _ref_min_mu_r_score = getattr(config, 'min_mu_r_score', 0.0)  # Task #73: configurable floor
     train_scores, _, _ = compute_v5_scores(
         None, horizon_bars=config.horizon,
         score_lambda=config.score_lambda,
@@ -2711,7 +2715,7 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
         min_p_side=config.min_p_side,
         min_p_short=config.min_p_short,
         side_aware_scoring=config.side_aware_scoring,
-        min_mu_r_score=0.0,
+        min_mu_r_score=_ref_min_mu_r_score,  # Task #73: was hardcoded 0.0
         specialist_mode=getattr(config, 'specialist_mode', 'none'),  # BUG FIX (Task #68): reference calibration must use specialist scoring
         min_mu_r_long=getattr(config, 'min_mu_r_long', -1e9),        # Task #69: LONG specialist head-agree gate
         long_disagree_mult=getattr(config, 'long_disagree_mult', 1.0),  # Task #69: soft disagree penalty
@@ -2721,9 +2725,13 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
     )
     ref_arrays['_train_scores'] = train_scores
 
+    _ref_finite = train_scores[np.isfinite(train_scores)]
+    _ref_floor_rejected = int(np.sum(np.isfinite(train_scores) == False)) if _ref_min_mu_r_score > 0 else 0
     log.info(f"[V5_REF] Training reference arrays built: mu_R mean={float(np.mean(ref_arrays['mu_R'])):.4f}, "
              f"mae mean={float(np.mean(ref_arrays['mae'])):.4f}, "
-             f"score mean={float(np.nanmean(train_scores[np.isfinite(train_scores)])):.4f}")
+             f"score mean={float(np.nanmean(_ref_finite)) if len(_ref_finite) > 0 else 0.0:.4f} "
+             f"(min_mu_r_score={_ref_min_mu_r_score:.4f}, "
+             f"finite_scores={len(_ref_finite)}/{len(train_scores)})")
 
     return ref_arrays
 
@@ -3149,6 +3157,7 @@ def run_v5_forward_test(
                                                ref_arrays=_gate_ref)
     _qual_gate_pass_rate = 100.0 * qual_diag.get('final', 0) / max(qual_diag.get('total', 1), 1)
 
+    _fwd_min_mu_r_score = getattr(config, 'min_mu_r_score', 0.0)  # Task #73: configurable floor
     scores, sides, score_diag = compute_v5_scores(
         None, horizon_bars=config.horizon,
         score_lambda=config.score_lambda,
@@ -3162,7 +3171,7 @@ def run_v5_forward_test(
         min_p_side=config.min_p_side,
         min_p_short=config.min_p_short,
         side_aware_scoring=config.side_aware_scoring,
-        min_mu_r_score=0.0,
+        min_mu_r_score=_fwd_min_mu_r_score,  # Task #73: was hardcoded 0.0
         specialist_mode=getattr(config, 'specialist_mode', 'none'),
         min_mu_r_long=getattr(config, 'min_mu_r_long', -1e9),        # Task #69: LONG specialist head-agree gate
         long_disagree_mult=getattr(config, 'long_disagree_mult', 1.0),  # Task #69: soft disagree penalty
@@ -3175,6 +3184,59 @@ def run_v5_forward_test(
         arrays['edge_L'] = score_diag['edge_L']
     if 'edge_S' in score_diag:
         arrays['edge_S'] = score_diag['edge_S']
+
+    # --- Task #73: score_exponent monotonic transform ---
+    # Applies score → clamp(score, 0, inf) ^ exponent to stretch the right tail.
+    # Rank-preserving (exponent > 0 on positive scores). Only fires when exponent != 1.0.
+    _score_exponent = getattr(config, 'score_exponent', 1.0)
+    if _score_exponent != 1.0:
+        _finite_pre = np.sum(np.isfinite(scores))
+        _pos_scores = np.where(scores > 0, scores, 0.0)
+        _neg_inf_mask = scores <= 0
+        scores = np.where(_neg_inf_mask, scores, _pos_scores ** _score_exponent)
+        _finite_post = np.sum(np.isfinite(scores))
+        log.info(f"[V5_SCORE_EXP] score_exponent={_score_exponent:.2f} applied — "
+                 f"finite scores: {_finite_pre} → {_finite_post} "
+                 f"(positive scores stretched, rank preserved)")
+
+    # --- Task #73: score distribution diagnostics ---
+    _all_finite = scores[np.isfinite(scores)]
+    _n_total_scores = len(scores)
+    _n_finite_scores = len(_all_finite)
+    log.info("=" * 70)
+    log.info("  SCORE DISTRIBUTION DIAGNOSTICS (pre-threshold)")
+    log.info("=" * 70)
+    log.info(f"  Total bars:         {_n_total_scores}")
+    log.info(f"  Finite scores:      {_n_finite_scores} ({100.0*_n_finite_scores/max(_n_total_scores,1):.1f}%)")
+    if _n_finite_scores > 0:
+        _s_mean = float(np.mean(_all_finite))
+        _s_std  = float(np.std(_all_finite))
+        _s_p50  = float(np.percentile(_all_finite, 50))
+        _s_p75  = float(np.percentile(_all_finite, 75))
+        _s_p90  = float(np.percentile(_all_finite, 90))
+        _s_p95  = float(np.percentile(_all_finite, 95))
+        _s_p99  = float(np.percentile(_all_finite, 99))
+        _s_max  = float(np.max(_all_finite))
+        _p90_vs_mean_ratio = _s_p90 / max(abs(_s_mean), 1e-8)
+        log.info(f"  Score:  mean={_s_mean:+.4f}  std={_s_std:.4f}  "
+                 f"p50={_s_p50:.4f}  p75={_s_p75:.4f}  p90={_s_p90:.4f}  "
+                 f"p95={_s_p95:.4f}  p99={_s_p99:.4f}  max={_s_max:.4f}")
+        log.info(f"  Score right-tail: p90/|mean|={_p90_vs_mean_ratio:.1f}x "
+                 f"({'OK — right tail separated' if _p90_vs_mean_ratio >= 2.0 else 'LOW — distribution collapsed; try --v5-score-exponent 0.5'})")
+        _mu_arr = arrays.get('mu_R', np.array([]))
+        _abs_mu = np.abs(_mu_arr) if len(_mu_arr) > 0 else np.array([])
+        _finite_abs_mu = _abs_mu[np.isfinite(_abs_mu)]
+        if len(_finite_abs_mu) > 0:
+            log.info(f"  |mu_R|: mean={float(np.mean(_finite_abs_mu)):.4f}  "
+                     f"p50={float(np.percentile(_finite_abs_mu, 50)):.4f}  "
+                     f"p90={float(np.percentile(_finite_abs_mu, 90)):.4f}")
+        log.info(f"  head_agree: LONG={score_diag.get('head_agree_long_pct', 0.0):.1f}%  "
+                 f"SHORT={score_diag.get('head_agree_short_pct', 0.0):.1f}%")
+        log.info(f"  Bars killed: min_p_side={score_diag.get('n_pside_killed', 0)}  "
+                 f"min_p_short={score_diag.get('n_pshort_killed', 0)}  "
+                 f"min_mu_r_score={score_diag.get('n_suppressed', 0)} "
+                 f"(floor={_fwd_min_mu_r_score:.4f})")
+    log.info("=" * 70)
 
     log.info(f"[V5_FWD] side_mode={config.side_mode} rr_weight={config.rr_weight}")
     log.info(f"[V5_FWD] Score stats: mean={score_diag['score_mean']:.4f} "
@@ -7102,6 +7164,8 @@ def train_v5_model(
     score_pside_weight=1.0,     # Task #69 P2: p_side contribution weight in specialist scoring (0.0 = pure mu_over_risk)
     per_symbol_no_ceiling=False,  # Task #69 P2: bypass max_threshold ceiling cap for per-symbol thresholds
     ema200_long_only=False,     # Task #69 P2: EMA200 gate only blocks LONG; SHORTs are never blocked by EMA200
+    min_mu_r_score=0.0,         # Task #73: minimum |mu_R| floor for positive score; 0.0 = disabled
+    score_exponent=1.0,         # Task #73: monotonic right-tail stretch exponent; 1.0 = no change
 ):
     """V5/V6 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -8506,7 +8570,7 @@ def train_v5_model(
                 min_p_short=min_p_short,
                 side_aware_scoring=side_aware_scoring,
                 slippage_bps=slippage_base_bps,
-                min_mu_r_score=0.0,
+                min_mu_r_score=min_mu_r_score,          # Task #73: propagate from train_v5_model param (was hardcoded 0.0)
                 specialist_mode=specialist_mode,  # BUG FIX (Task #68): was missing; sweep chose wrong direction
                 min_mu_r_long=min_mu_r_long,            # Task #69: LONG specialist head-agree gate
                 long_disagree_mult=long_disagree_mult,  # Task #69: soft disagree penalty
@@ -8856,7 +8920,7 @@ def train_v5_model(
                 min_p_short=min_p_short,
                 side_aware_scoring=side_aware_scoring,
                 slippage_bps=slippage_base_bps,
-                min_mu_r_score=0.0,
+                min_mu_r_score=min_mu_r_score,          # Task #73: propagate from train_v5_model param (was hardcoded 0.0)
                 specialist_mode=specialist_mode,  # BUG FIX (Task #68): final sweep must use specialist scoring
                 min_mu_r_long=min_mu_r_long,            # Task #69: LONG specialist head-agree gate
                 long_disagree_mult=long_disagree_mult,  # Task #69: soft disagree penalty
@@ -9055,6 +9119,26 @@ def train_v5_model(
                             per_sym_no_edge_fallback,
                             "override" if per_sym_no_edge_fallback else "NOT override",
                         )
+                    elif _n_highbar > 0:
+                        # Task #73: loud per-symbol HIGH_BAR warning when some (not all) symbols are blocked
+                        _highbar_syms = []
+                        for _hb_sym_id, _hb_v in ckpt_per_sym_thr.items():
+                            _hb_sym_name = symbols[int(_hb_sym_id)] if symbols and int(_hb_sym_id) < len(symbols) else f"sym_{_hb_sym_id}"
+                            if isinstance(_hb_v, dict):
+                                lt = _hb_v.get('long', float('inf'))
+                                st = _hb_v.get('short', float('inf'))
+                                if not np.isfinite(lt) or not np.isfinite(st):
+                                    _highbar_syms.append(f"{_hb_sym_name}(L={'∞' if not np.isfinite(lt) else f'{lt:.4f}'}/S={'∞' if not np.isfinite(st) else f'{st:.4f}'})")
+                            else:
+                                if not np.isfinite(float(_hb_v)):
+                                    _highbar_syms.append(_hb_sym_name)
+                        log.warning(
+                            "[V5_FWD][HIGH_BAR] %d/%d symbols have HIGH_BAR (inf) threshold — "
+                            "these symbols are FULLY BLOCKED from contributing trades. "
+                            "Affected: %s",
+                            _n_highbar, len(ckpt_per_sym_thr),
+                            ", ".join(_highbar_syms),
+                        )
                 else:
                     log.warning("[V5_FWD] Per-symbol threshold enabled but not found in checkpoint — using global threshold")
 
@@ -9186,6 +9270,8 @@ def train_v5_model(
                 per_symbol_no_ceiling=per_symbol_no_ceiling,  # Task #69 P2: bypass ceiling cap for per-symbol thresholds
                 ema200_long_only=ema200_long_only,            # Task #69 P2: EMA200 only blocks LONG signals
                 score_pside_weight=score_pside_weight,        # Task #69 P2: p_side weight in specialist scoring
+                min_mu_r_score=min_mu_r_score,                # Task #73: configurable floor (was hardcoded 0.0)
+                score_exponent=score_exponent,                # Task #73: monotonic right-tail stretch
             )
 
             train_ref_arrays = _build_train_ref_arrays(

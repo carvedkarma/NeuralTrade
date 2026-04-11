@@ -5400,6 +5400,23 @@ Examples:
                              "0.5 = blend. Analysis confirmed p_side is anti-predictive (winners had LOWER p_side "
                              "than losers), so reducing this weight is recommended. Default: 1.0 (backward-compatible).")
 
+    # Task #73: score audit & fix — configurable min_mu_r_score and score_exponent
+    parser.add_argument("--v5-min-mu-r-score", type=float, default=0.0,
+                        help="Task #73: minimum |mu_R| required to generate a positive score. "
+                             "Bars with |mu_R| below this floor get score=-inf and are excluded from the "
+                             "threshold sweep, preventing zero-edge trades from polluting the reference distribution. "
+                             "0.0 = disabled (backward-compatible). Recommended: 0.0002 (tiny floor, removes "
+                             "negligible-mu bars without hurting trade count; 17%% E[R] improvement in simulation). "
+                             "This is the fix for the hardcoded 0.0 at the two call sites (lines 2714 and 3165 "
+                             "were the confirmed bugs). Default: 0.0.")
+    parser.add_argument("--v5-score-exponent", type=float, default=1.0,
+                        help="Task #73: monotonic rank-preserving right-tail stretch for specialist scores. "
+                             "Applies score → clamp(score, 0, inf)^exponent. Rank among positive scores is preserved. "
+                             "1.0 = no change (default). 0.5 = square-root stretch (compresses high scores less). "
+                             "Use when p90/|mean| < 2x (score distribution is collapsed). "
+                             "Increases p90/mean ratio without changing which trades rank highest. "
+                             "Default: 1.0 (backward-compatible).")
+
     parser.add_argument("--v5-train-end-date", type=str, default=None,
                         help="v5 time-based split: train on data before this date (YYYY-MM-DD)")
     parser.add_argument("--v5-test-start-date", type=str, default=None,
@@ -6496,6 +6513,8 @@ Examples:
                     per_symbol_no_ceiling=getattr(args, 'v5_per_symbol_no_ceiling', False),  # Task #69 P2
                     ema200_long_only=getattr(args, 'v5_ema200_long_only', False),            # Task #69 P2
                     score_pside_weight=getattr(args, 'v5_score_pside_weight', 1.0),         # Task #69 P2
+                    min_mu_r_score=getattr(args, 'v5_min_mu_r_score', 0.0),                 # Task #73
+                    score_exponent=getattr(args, 'v5_score_exponent', 1.0),                 # Task #73
                 )
                 return
 
@@ -6718,6 +6737,8 @@ Examples:
                 per_symbol_no_ceiling=getattr(args, 'v5_per_symbol_no_ceiling', False),  # Task #69 P2
                 ema200_long_only=getattr(args, 'v5_ema200_long_only', False),            # Task #69 P2
                 score_pside_weight=getattr(args, 'v5_score_pside_weight', 1.0),         # Task #69 P2
+                min_mu_r_score=getattr(args, 'v5_min_mu_r_score', 0.0),                 # Task #73
+                score_exponent=getattr(args, 'v5_score_exponent', 1.0),                 # Task #73
             )
 
               if _single_pusher is not None:
