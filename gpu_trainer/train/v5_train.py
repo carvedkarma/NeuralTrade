@@ -1595,44 +1595,58 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
         edge_short = p_short * np.divide(-mu_R, risk, out=np.zeros_like(mu_R), where=risk > 0)
 
     if specialist_mode == 'short':
-        # SHORT specialist: direction is always SHORT.  Score is driven purely by p_short.
-        # score = p_short * mu_over_risk - lambda*(1-p_short)*mu_over_risk
-        #       = mu_over_risk * [(1+lambda)*p_short - lambda]
-        # Positive when p_short > lambda/(1+lambda) = 0.231 at default lambda=0.30.
-        # When score_pside_weight < 1.0, p_side contribution is blended toward 1.0
-        # (i.e. p_short has less influence; at weight=0.0, score = pure mu_over_risk).
+        # SHORT specialist: direction is always SHORT.
+        #
+        # Bug A fix: use max(0, -mu_R_adj)/risk instead of abs(mu_R_adj)/risk.
+        # Before this fix, a bar where mu_R=+0.15R (model predicts price going UP) scored
+        # identically to mu_R=-0.15R (model predicts price going DOWN), because abs() removes
+        # the sign.  This made the scoring blind to return-head direction, so head-disagree
+        # trades (positive mu_R on a SHORT) generated full-strength signals.
+        #
+        # Fix: only bearish mu_R contributes positively to the SHORT score.
+        #   head-agree bars (mu_R <= 0): short_mu = |mu_R| / risk  (positive contribution)
+        #   head-disagree bars (mu_R > 0): short_mu = 0            (zero score, falls below threshold)
+        #
+        # The short_disagree_mult soft penalty is preserved as an optional extra layer,
+        # but is now redundant when short_mu=0 already suppresses disagree trades.
+        short_mu = np.divide(np.maximum(0.0, -mu_R_adj), risk,
+                             out=np.zeros_like(mu_R_adj), where=risk > 0)
         p_side = p_short
         effective_p = score_pside_weight * p_side + (1.0 - score_pside_weight)
-        directional_penalty = score_pside_weight * (1.0 - p_side) * mu_over_risk
+        directional_penalty = score_pside_weight * (1.0 - p_side) * short_mu
         penalty = score_lambda * directional_penalty
-        scores = effective_p * mu_over_risk - penalty
+        scores = effective_p * short_mu - penalty
         sides = np.full(len(scores), -1, dtype=np.int64)
 
-        # --- Task #68 Fix 2: soft disagree multiplier for SHORT specialist ---
-        # When the return head predicts a positive mu_R (return head disagrees with SHORT
-        # direction — market predicted to go up but we're shorting), apply short_disagree_mult
-        # to reduce the score without blocking it entirely.  Default 1.0 = no change.
-        # 0.3 = 70% score penalty.  Agree trades (mu_R<=0) naturally rank higher.
+        n_short_agree = int(np.sum(mu_R_adj <= 0.0))
+        n_short_disagree = int(np.sum(mu_R_adj > 0.0))
+        log.debug("[V5_SCORE][SHORT_SPECIALIST] head-agree(mu<=0)=%d head-disagree(mu>0)=%d "
+                  "(disagree bars score=0, will fall below threshold)", n_short_agree, n_short_disagree)
+
         if short_disagree_mult < 1.0:
             mu_disagree_mask_short = mu_R_adj > 0.0
             scores = np.where(mu_disagree_mask_short, scores * short_disagree_mult, scores)
     elif specialist_mode == 'long':
-        # LONG specialist: direction is always LONG.  Score is driven purely by p_long.
-        # When score_pside_weight < 1.0, p_side contribution is blended toward 1.0
-        # (i.e. p_long has less influence; at weight=0.0, score = pure mu_over_risk).
+        # LONG specialist: direction is always LONG.
+        #
+        # Bug A fix: use max(0, mu_R_adj)/risk instead of abs(mu_R_adj)/risk.
+        # Only bullish mu_R contributes positively to the LONG score.
+        #   head-agree bars (mu_R >= 0): long_mu = mu_R / risk   (positive contribution)
+        #   head-disagree bars (mu_R < 0): long_mu = 0            (zero score, below threshold)
+        long_mu = np.divide(np.maximum(0.0, mu_R_adj), risk,
+                            out=np.zeros_like(mu_R_adj), where=risk > 0)
         p_side = p_long
         effective_p = score_pside_weight * p_side + (1.0 - score_pside_weight)
-        directional_penalty = score_pside_weight * (1.0 - p_side) * mu_over_risk
+        directional_penalty = score_pside_weight * (1.0 - p_side) * long_mu
         penalty = score_lambda * directional_penalty
-        scores = effective_p * mu_over_risk - penalty
+        scores = effective_p * long_mu - penalty
         sides = np.full(len(scores), 1, dtype=np.int64)
 
-        # --- Task #69 Fix 2: soft disagree multiplier ---
-        # When the return head predicts a negative mu_R (return head disagrees with LONG
-        # direction), apply long_disagree_mult to reduce the score without blocking it
-        # entirely.  Default 1.0 = no change.  0.3 = 70% score penalty.
-        # This naturally pushes agree trades (mu_R>=0) higher in the threshold sweep so
-        # they are selected first, leaving disagree trades only when supply runs short.
+        n_long_agree = int(np.sum(mu_R_adj >= 0.0))
+        n_long_disagree = int(np.sum(mu_R_adj < 0.0))
+        log.debug("[V5_SCORE][LONG_SPECIALIST] head-agree(mu>=0)=%d head-disagree(mu<0)=%d "
+                  "(disagree bars score=0, will fall below threshold)", n_long_agree, n_long_disagree)
+
         if long_disagree_mult < 1.0:
             mu_disagree_mask = mu_R_adj < 0.0
             scores = np.where(mu_disagree_mask, scores * long_disagree_mult, scores)
@@ -2896,6 +2910,85 @@ def _compute_percentile_calibration(cand_indices, scores, sides, safe_r, test_ba
     return results
 
 
+def _compute_dynamic_trade_r(
+    idx: int,
+    side: int,
+    arrays: dict,
+    close_prices,
+    high_prices,
+    low_prices,
+    atr14,
+    tp_scale: float,
+    sl_scale: float,
+    min_tp_atr: float,
+    max_tp_atr: float,
+    min_sl_atr: float,
+    max_sl_atr: float,
+    horizon: int,
+) -> float:
+    """Simulate a trade's outcome using the model's predicted MFE/MAE as dynamic TP/SL barriers.
+
+    Bug B fix: config.dynamic_tp_sl was stored in V5ForwardTestConfig but never read inside
+    run_v5_forward_test.  Every trade always used precomputed fixed-ATR barriers regardless of
+    the flag.  This function implements the per-trade barrier re-simulation that was missing.
+
+    Args:
+        idx:        Bar index in the test window where the trade is entered.
+        side:       +1 for LONG, -1 for SHORT.
+        arrays:     Dict with 'mfe' and 'mae' arrays (model-predicted, in R-units).
+        close_prices, high_prices, low_prices: Price arrays for the test window.
+        atr14:      Per-bar ATR14 array (price units).  Used to convert R-units → price.
+        tp_scale:   TP = mfe_pred * tp_scale (applied to R-units before ATR conversion).
+        sl_scale:   SL = mae_pred * sl_scale.
+        min/max_tp_atr, min/max_sl_atr: Clamps on the final TP/SL in ATR multiples.
+        horizon:    Maximum bars to hold the position before forced exit.
+
+    Returns:
+        Realized R = (exit_price - entry_price) / ATR14[idx] (signed for direction).
+        Returns NaN if inputs are invalid.
+    """
+    n = len(close_prices)
+    if idx >= n or idx < 0:
+        return float('nan')
+
+    entry_price = float(close_prices[idx])
+    atr_val = float(atr14[idx]) if atr14 is not None and idx < len(atr14) else 0.0
+    if atr_val <= 0 or not np.isfinite(atr_val) or not np.isfinite(entry_price):
+        return float('nan')
+
+    mfe_r = float(arrays['mfe'][idx]) if 'mfe' in arrays and np.isfinite(arrays['mfe'][idx]) else 1.0
+    mae_r = float(arrays['mae'][idx]) if 'mae' in arrays and np.isfinite(arrays['mae'][idx]) else 1.0
+
+    tp_r = np.clip(mfe_r * tp_scale, min_tp_atr, max_tp_atr)
+    sl_r = np.clip(mae_r * sl_scale, min_sl_atr, max_sl_atr)
+
+    tp_price = entry_price + (tp_r * atr_val) * side
+    sl_price = entry_price - (sl_r * atr_val) * side
+
+    end_bar = min(idx + horizon, n - 1)
+    exit_price = float(close_prices[end_bar])
+    for bar in range(idx + 1, end_bar + 1):
+        h = float(high_prices[bar])
+        lo = float(low_prices[bar])
+        if side == 1:
+            if h >= tp_price:
+                exit_price = tp_price
+                break
+            if lo <= sl_price:
+                exit_price = sl_price
+                break
+        else:
+            if lo <= tp_price:
+                exit_price = tp_price
+                break
+            if h >= sl_price:
+                exit_price = sl_price
+                break
+
+    realized_r = (exit_price - entry_price) * side / atr_val
+    return float(realized_r)
+
+
 def run_v5_forward_test(
     model, device,
     test_features, test_outcomes, test_realized_r,
@@ -2911,6 +3004,7 @@ def run_v5_forward_test(
     symbols=None,
     candidate_logger=None,
     fold_idx=None,
+    test_atr14=None,
 ):
     """Run forward test with completely frozen decision layer.
 
@@ -4384,7 +4478,25 @@ def run_v5_forward_test(
                         or config.quality_gate_enabled
                         or config.rolling_er_gate)
         if needs_post_r:
-            if use_side_conditional_for_cap:
+            if config.dynamic_tp_sl and test_atr14 is not None and close_prices is not None \
+                    and high_prices is not None and low_prices is not None:
+                post_trade_r = _compute_dynamic_trade_r(
+                    idx=idx,
+                    side=int(sides[idx]),
+                    arrays=arrays,
+                    close_prices=close_prices,
+                    high_prices=high_prices,
+                    low_prices=low_prices,
+                    atr14=test_atr14,
+                    tp_scale=config.tp_scale,
+                    sl_scale=config.sl_scale,
+                    min_tp_atr=config.min_tp_atr,
+                    max_tp_atr=config.max_tp_atr,
+                    min_sl_atr=config.min_sl_atr,
+                    max_sl_atr=config.max_sl_atr,
+                    horizon=config.horizon,
+                )
+            elif use_side_conditional_for_cap:
                 post_trade_r = float(r_long[idx]) if sides[idx] == 1 else float(r_short[idx])
             else:
                 post_trade_r = float(test_realized_r[idx]) if test_realized_r is not None else 0.0
@@ -7847,6 +7959,7 @@ def train_v5_model(
     val_close_arr = np.concatenate(val_close_list, axis=0)
     val_high_arr = np.concatenate(val_high_list, axis=0)
     val_low_arr = np.concatenate(val_low_list, axis=0)
+    val_atr14_arr = _concat_lists(val_atr14_list) if val_atr14_list else None
 
     for label, arr, vmask in [
         ('train_ret_R', train_ret_R, train_valid),
@@ -9515,6 +9628,7 @@ def train_v5_model(
                     symbols=symbols,
                     candidate_logger=candidate_logger,
                     fold_idx=fold_id,
+                    test_atr14=val_atr14_arr,
                 )
             except Exception as _fwd_err:
                 import traceback as _tb

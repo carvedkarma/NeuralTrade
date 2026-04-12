@@ -5849,6 +5849,23 @@ Examples:
 
     args = parser.parse_args()
 
+    # Bug C fix: when running SHORT specialist mode, enforce head-agree-only gates by default.
+    # --v5-max-mu-r-short defaults to 1e9 (all SHORTs pass) and --v5-short-disagree-mult
+    # defaults to 1.0 (no penalty).  Without explicit flags, the hard gate is a no-op and
+    # head-disagree SHORTs (positive mu_R) are NOT blocked.  Auto-set to 0.0 when the user
+    # chose specialist mode=short without explicitly overriding these flags.
+    # Note: Bug A already makes head-disagree SHORTs score 0; this is a defensive hard gate.
+    _specialist = getattr(args, 'v5_side_specialist', 'none')
+    _dual = getattr(args, 'v5_dual_specialist', False)
+    if (_specialist == 'short' or _dual) and '--v5-max-mu-r-short' not in sys.argv:
+        args.v5_max_mu_r_short = 0.0
+        log.info("[BUG_C_FIX] SHORT specialist: auto-set --v5-max-mu-r-short=0.0 "
+                 "(blocks head-disagree SHORTs; override with --v5-max-mu-r-short <value>)")
+    if (_specialist == 'short' or _dual) and '--v5-short-disagree-mult' not in sys.argv:
+        args.v5_short_disagree_mult = 0.0
+        log.info("[BUG_C_FIX] SHORT specialist: auto-set --v5-short-disagree-mult=0.0 "
+                 "(zeroes out any residual head-disagree score; override with --v5-short-disagree-mult <value>)")
+
     print()
     print("=" * 60)
     print(f"  BTC FUTURES - ENTER QUALITY MODEL {SYSTEM_VERSION}")

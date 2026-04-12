@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import logging
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, List
 
 logger = logging.getLogger(__name__)
 
@@ -449,15 +449,26 @@ def apply_risk_controls(
     selected_r: np.ndarray,
     selected_symbols: Optional[np.ndarray],
     risk: RiskControls,
+    horizon_bars: int = 16,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Apply risk controls to selected trades, returning filtered indices and R values."""
+    """Apply risk controls to selected trades, returning filtered indices and R values.
+
+    Bug 4 fix: the previous implementation incremented `concurrent` but never decremented it.
+    Once `max_concurrent_trades` was reached (e.g. 6 trades), ALL subsequent trades were
+    blocked permanently — even hours or days later when those positions had long since closed.
+
+    Fix: track each open trade's expiry bar (entry_bar + horizon_bars).  Before evaluating
+    each new candidate bar, expire any trades whose horizon has passed, then recompute
+    `concurrent` as the number of still-open positions.  This correctly allows new trades
+    after existing positions close.
+    """
     if len(selected_indices) == 0:
         return selected_indices, selected_r
 
     kept_indices = []
     kept_r = []
     cumulative_r = 0.0
-    concurrent = 0
+    open_trade_expiry: List[int] = []
     symbol_counts: Dict[int, int] = {}
     daily_bar_count = 96
 
@@ -467,6 +478,9 @@ def apply_risk_controls(
 
         if cumulative_r <= risk.daily_loss_limit_r:
             continue
+
+        open_trade_expiry = [exp for exp in open_trade_expiry if exp > idx]
+        concurrent = len(open_trade_expiry)
 
         if concurrent >= risk.max_concurrent_trades:
             continue
@@ -480,7 +494,7 @@ def apply_risk_controls(
         kept_indices.append(idx)
         kept_r.append(float(r_val))
         cumulative_r += float(r_val)
-        concurrent += 1
+        open_trade_expiry.append(idx + horizon_bars)
 
     if len(kept_indices) == 0:
         return np.array([], dtype=int), np.array([], dtype=float)
