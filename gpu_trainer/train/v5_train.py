@@ -2927,7 +2927,7 @@ def _compute_dynamic_trade_r(
     min_sl_atr: float,
     max_sl_atr: float,
     horizon: int,
-) -> float:
+) -> "tuple[float, str]":
     """Simulate a trade's outcome using the model's predicted MFE/MAE as dynamic TP/SL barriers.
 
     [Task #81 / Bug B] config.dynamic_tp_sl was stored in V5ForwardTestConfig but never read
@@ -2938,29 +2938,34 @@ def _compute_dynamic_trade_r(
     The test_atr14 parameter was also added to run_v5_forward_test() as part of this fix,
     and val_atr14_arr is passed from the train_v5_model call site.
 
+    Returns:
+        Tuple of (realized_r, outcome) where realized_r is a float (exit R in ATR units,
+        signed for direction) and outcome is one of "TP", "SL", "EXP_WIN", "EXP_LOSS".
+        Returns (float('nan'), "EXP_LOSS") when inputs are invalid (atr=0, out-of-bounds idx).
+        When arrays['mfe'] or arrays['mae'] are missing/non-finite, defaults to 1.0 R so
+        the simulation proceeds with neutral barriers (min_tp_atr / min_sl_atr after clamping).
+
     Args:
         idx:        Bar index in the test window where the trade is entered.
         side:       +1 for LONG, -1 for SHORT.
         arrays:     Dict with 'mfe' and 'mae' arrays (model-predicted, in R-units).
+                    Missing or non-finite values default to 1.0 R (neutral, not fallback to
+                    fixed barriers — for true fixed-barrier fallback, do not call this function).
         close_prices, high_prices, low_prices: Price arrays for the test window.
         atr14:      Per-bar ATR14 array (price units).  Used to convert R-units → price.
         tp_scale:   TP = mfe_pred * tp_scale (applied to R-units before ATR conversion).
         sl_scale:   SL = mae_pred * sl_scale.
         min/max_tp_atr, min/max_sl_atr: Clamps on the final TP/SL in ATR multiples.
         horizon:    Maximum bars to hold the position before forced exit.
-
-    Returns:
-        Realized R = (exit_price - entry_price) / ATR14[idx] (signed for direction).
-        Returns NaN if inputs are invalid.
     """
     n = len(close_prices)
     if idx >= n or idx < 0:
-        return float('nan')
+        return float('nan'), "EXP_LOSS"
 
     entry_price = float(close_prices[idx])
     atr_val = float(atr14[idx]) if atr14 is not None and idx < len(atr14) else 0.0
     if atr_val <= 0 or not np.isfinite(atr_val) or not np.isfinite(entry_price):
-        return float('nan')
+        return float('nan'), "EXP_LOSS"
 
     mfe_r = float(arrays['mfe'][idx]) if 'mfe' in arrays and np.isfinite(arrays['mfe'][idx]) else 1.0
     mae_r = float(arrays['mae'][idx]) if 'mae' in arrays and np.isfinite(arrays['mae'][idx]) else 1.0
