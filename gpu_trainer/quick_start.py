@@ -41,6 +41,37 @@ Model size: [512, 256, 128, 64] hidden dims (~250K params for ~32K samples)
 Target label mix: HOLD ~25-30%, LONG ~30-35%, SHORT ~30-35% (with oversample)
 Target trades/day in forward test: 3-6
 Bear-market folds: expect balanced LONG/SHORT split (not 100% LONG)
+
+===========================================================================
+SHORT SPECIALIST TRAINING COMMAND (Bug C fix — head-agree-only SHORTs)
+===========================================================================
+REQUIRED: --v5-max-mu-r-short 0.0 and --v5-short-disagree-mult 0.0 are both
+mandatory for the SHORT specialist.  Without them the hard gate (max-mu-r-short
+defaults to 1e9 = all trades pass) and soft penalty (disagree-mult defaults to
+1.0 = no penalty) are both no-ops, so head-disagree SHORTs (positive mu_R)
+pass through at full strength.  The post-parse auto-override in main() applies
+these as defaults when --v5-side-specialist short is detected, but it's best
+practice to include them explicitly in the command so the intent is clear.
+
+python quick_start.py --train-v5 --v5-walk-forward --v5-ema200-soft-mult 0.50 \\
+    --v5-side-specialist short \\
+    --v5-max-mu-r-short 0.0 --v5-short-disagree-mult 0.0 \\
+    --v5-adx-gate --v5-adx-min 18 --v5-min-threshold 0.04 \\
+    --v5-trailing-sl --v5-trail-activation 1.5 --v5-trail-distance 1.0 \\
+    --v5-corr-thresh 0.90 --v5-side-aware-scoring --v5-recency-weight \\
+    --v5-short-oversample --v5-short-min-fraction 0.35 \\
+    --v5-per-symbol-threshold --v5-per-side-threshold
+
+Key rules for SHORT specialist:
+  - --v5-max-mu-r-short 0.0 : hard gate — blocks ALL SHORTs where mu_R > 0
+                              (model return head predicts UP = head-disagree)
+  - --v5-short-disagree-mult 0.0 : soft gate — zeroes residual score for
+                              any head-disagree SHORTs that slip through
+  - Both flags work alongside Bug A fix (directional max(0,-mu_R)/risk scoring)
+    which already makes head-disagree bars score 0 — these flags add redundant
+    hard gates as a defence-in-depth measure
+  - DO NOT use --v5-regime-side-map (redundant when specialist forces all SHORT)
+  - Target: 4-8 high-confidence SHORTs/day, p_short ≥ 0.55, mu_R < 0
 ===========================================================================
 """
 
