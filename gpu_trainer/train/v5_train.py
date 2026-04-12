@@ -2973,26 +2973,39 @@ def _compute_dynamic_trade_r(
 
     end_bar = min(idx + horizon, n - 1)
     exit_price = float(close_prices[end_bar])
+    exit_reason = "EXP"
     for bar in range(idx + 1, end_bar + 1):
         h = float(high_prices[bar])
         lo = float(low_prices[bar])
         if side == 1:
             if h >= tp_price:
                 exit_price = tp_price
+                exit_reason = "TP"
                 break
             if lo <= sl_price:
                 exit_price = sl_price
+                exit_reason = "SL"
                 break
         else:
             if lo <= tp_price:
                 exit_price = tp_price
+                exit_reason = "TP"
                 break
             if h >= sl_price:
                 exit_price = sl_price
+                exit_reason = "SL"
                 break
 
     realized_r = (exit_price - entry_price) * side / atr_val
-    return float(realized_r)
+
+    if exit_reason == "TP":
+        outcome = "TP"
+    elif exit_reason == "SL":
+        outcome = "SL"
+    else:
+        outcome = "EXP_WIN" if realized_r > 0 else "EXP_LOSS"
+
+    return float(realized_r), outcome
 
 
 def run_v5_forward_test(
@@ -4486,7 +4499,7 @@ def run_v5_forward_test(
         if needs_post_r:
             if config.dynamic_tp_sl and test_atr14 is not None and close_prices is not None \
                     and high_prices is not None and low_prices is not None:
-                post_trade_r = _compute_dynamic_trade_r(
+                _dyn_r, _dyn_out = _compute_dynamic_trade_r(
                     idx=idx,
                     side=int(sides[idx]),
                     arrays=arrays,
@@ -4502,6 +4515,7 @@ def run_v5_forward_test(
                     max_sl_atr=config.max_sl_atr,
                     horizon=config.horizon,
                 )
+                post_trade_r = _dyn_r
             elif use_side_conditional_for_cap:
                 post_trade_r = float(r_long[idx]) if sides[idx] == 1 else float(r_short[idx])
             else:
@@ -4885,6 +4899,49 @@ def run_v5_forward_test(
         return report
 
     taken = np.array(taken)
+
+    # [Task #81 / Bug B] When dynamic_tp_sl is on, re-simulate every taken trade using
+    # the model's predicted MFE/MAE barriers and overwrite safe_r + safe_outcomes so that
+    # ALL downstream metrics (WR, PF, ER, outcome counts) reflect the dynamic simulation.
+    # Previously this was only done for post_trade_r inside gate bookkeeping; the final
+    # report arrays still used the fixed precomputed r_long/r_short and out_long/out_short.
+    _dyn_available = (
+        config.dynamic_tp_sl
+        and test_atr14 is not None
+        and close_prices is not None
+        and high_prices is not None
+        and low_prices is not None
+    )
+    if _dyn_available and len(taken) > 0:
+        _n_dyn_ok = 0
+        _n_dyn_nan = 0
+        for _idx in taken:
+            _dyn_r, _dyn_out = _compute_dynamic_trade_r(
+                idx=int(_idx),
+                side=int(sides[_idx]),
+                arrays=arrays,
+                close_prices=close_prices,
+                high_prices=high_prices,
+                low_prices=low_prices,
+                atr14=test_atr14,
+                tp_scale=config.tp_scale,
+                sl_scale=config.sl_scale,
+                min_tp_atr=config.min_tp_atr,
+                max_tp_atr=config.max_tp_atr,
+                min_sl_atr=config.min_sl_atr,
+                max_sl_atr=config.max_sl_atr,
+                horizon=config.horizon,
+            )
+            if np.isfinite(_dyn_r):
+                safe_r[_idx] = _dyn_r
+                safe_outcomes[_idx] = _dyn_out
+                _n_dyn_ok += 1
+            else:
+                _n_dyn_nan += 1
+        log.info("[V5_FWD][DYN_TP_SL] Patched safe_r/safe_outcomes for %d/%d taken trades "
+                 "(%d NaN fallback to fixed barriers)",
+                 _n_dyn_ok, len(taken), _n_dyn_nan)
+
     t_outcomes = safe_outcomes[taken]
     t_r_unsized = safe_r[taken].copy()
     t_sides = sides[taken]
