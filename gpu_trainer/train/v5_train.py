@@ -1597,18 +1597,19 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
     if specialist_mode == 'short':
         # SHORT specialist: direction is always SHORT.
         #
-        # Bug A fix: use max(0, -mu_R_adj)/risk instead of abs(mu_R_adj)/risk.
-        # Before this fix, a bar where mu_R=+0.15R (model predicts price going UP) scored
-        # identically to mu_R=-0.15R (model predicts price going DOWN), because abs() removes
-        # the sign.  This made the scoring blind to return-head direction, so head-disagree
-        # trades (positive mu_R on a SHORT) generated full-strength signals.
+        # [Task #81 / Bug A] Fix directional mu_R scoring.
+        # Was: abs(mu_R_adj)/risk — makes head-disagree SHORTs (positive mu_R = model predicts
+        # price going UP) score identically to head-agree SHORTs (negative mu_R = DOWN).
+        # The abs() erased the return-head direction signal entirely.
         #
-        # Fix: only bearish mu_R contributes positively to the SHORT score.
+        # Fix: use max(0, -mu_R_adj)/risk so only bearish mu_R contributes positively.
         #   head-agree bars (mu_R <= 0): short_mu = |mu_R| / risk  (positive contribution)
         #   head-disagree bars (mu_R > 0): short_mu = 0            (zero score, falls below threshold)
         #
         # The short_disagree_mult soft penalty is preserved as an optional extra layer,
-        # but is now redundant when short_mu=0 already suppresses disagree trades.
+        # but is now redundant because short_mu=0 already suppresses disagree trades.
+        # See also: quick_start.py post-parse auto-override (Bug C) which enforces
+        # --v5-max-mu-r-short 0.0 and --v5-short-disagree-mult 0.0 as defensive hard gates.
         short_mu = np.divide(np.maximum(0.0, -mu_R_adj), risk,
                              out=np.zeros_like(mu_R_adj), where=risk > 0)
         p_side = p_short
@@ -1629,8 +1630,9 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
     elif specialist_mode == 'long':
         # LONG specialist: direction is always LONG.
         #
-        # Bug A fix: use max(0, mu_R_adj)/risk instead of abs(mu_R_adj)/risk.
-        # Only bullish mu_R contributes positively to the LONG score.
+        # [Task #81 / Bug A] Fix directional mu_R scoring (symmetric with SHORT above).
+        # Was: abs(mu_R_adj)/risk — head-disagree LONGs (negative mu_R = DOWN) scored as well.
+        # Fix: max(0, mu_R_adj)/risk — only bullish mu_R contributes to the LONG score.
         #   head-agree bars (mu_R >= 0): long_mu = mu_R / risk   (positive contribution)
         #   head-disagree bars (mu_R < 0): long_mu = 0            (zero score, below threshold)
         long_mu = np.divide(np.maximum(0.0, mu_R_adj), risk,
@@ -2928,9 +2930,13 @@ def _compute_dynamic_trade_r(
 ) -> float:
     """Simulate a trade's outcome using the model's predicted MFE/MAE as dynamic TP/SL barriers.
 
-    Bug B fix: config.dynamic_tp_sl was stored in V5ForwardTestConfig but never read inside
-    run_v5_forward_test.  Every trade always used precomputed fixed-ATR barriers regardless of
-    the flag.  This function implements the per-trade barrier re-simulation that was missing.
+    [Task #81 / Bug B] config.dynamic_tp_sl was stored in V5ForwardTestConfig but never read
+    inside run_v5_forward_test.  Every trade always used precomputed fixed-ATR barriers regardless
+    of the flag.  This function implements the per-trade barrier re-simulation that was missing.
+
+    Called from run_v5_forward_test when config.dynamic_tp_sl=True and test_atr14 is provided.
+    The test_atr14 parameter was also added to run_v5_forward_test() as part of this fix,
+    and val_atr14_arr is passed from the train_v5_model call site.
 
     Args:
         idx:        Bar index in the test window where the trade is entered.
