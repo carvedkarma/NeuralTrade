@@ -287,6 +287,15 @@ class V5ForwardTestConfig:
     # --- Task #73: configurable min_mu_r_score and score_exponent ---
     min_mu_r_score: float = 0.0         # minimum |mu_R| for a positive score; 0.0 = disabled (backward compat)
     score_exponent: float = 1.0         # monotonic transform: score → clamp(score,0,inf)^exponent; 1.0 = no change
+    # --- Task #79: predicted R:R gate + dynamic TP/SL ---
+    min_pred_rr: float = 0.0            # minimum predicted MFE/MAE R:R to allow a signal; 0.0 = disabled
+    dynamic_tp_sl: bool = False         # use model's predicted MFE/MAE to set TP/SL barriers; False = fixed ATR mult
+    tp_scale: float = 0.75              # TP = mfe_pred * tp_scale (when dynamic_tp_sl=True)
+    sl_scale: float = 1.25             # SL = mae_pred * sl_scale (when dynamic_tp_sl=True)
+    min_tp_atr: float = 1.0            # minimum TP in ATR multiples (clamp floor)
+    max_tp_atr: float = 5.0            # maximum TP in ATR multiples (clamp ceiling)
+    min_sl_atr: float = 0.5            # minimum SL in ATR multiples (clamp floor)
+    max_sl_atr: float = 3.0            # maximum SL in ATR multiples (clamp ceiling)
 
 
 def compute_feature_importance_report(
@@ -3192,6 +3201,28 @@ def run_v5_forward_test(
     if 'edge_S' in score_diag:
         arrays['edge_S'] = score_diag['edge_S']
 
+    # --- Task #79: predicted R:R gate ---
+    # Suppress bars where the model's predicted MFE/MAE ratio falls below min_pred_rr.
+    # This rejects low-quality signals where the model expects insufficient reward vs risk.
+    _min_pred_rr = getattr(config, 'min_pred_rr', 0.0)
+    if _min_pred_rr > 0.0 and 'mfe' in arrays and 'mae' in arrays:
+        _mfe_arr = arrays['mfe']
+        _mae_arr = np.maximum(arrays['mae'], 1e-4)
+        _pred_rr_arr = _mfe_arr / _mae_arr
+        _rr_gate_mask = _pred_rr_arr < _min_pred_rr
+        _n_rr_rejected = int(np.sum(np.isfinite(scores) & _rr_gate_mask))
+        scores = np.where(_rr_gate_mask, -np.inf, scores)
+        log.info(
+            f"[V5_FWD][PRED_RR_GATE] min_pred_rr={_min_pred_rr:.2f}: "
+            f"{_n_rr_rejected} bars suppressed ({100.0*_n_rr_rejected/max(len(scores),1):.1f}%). "
+            f"pred_rr stats: mean={float(np.nanmean(_pred_rr_arr)):.2f} "
+            f"p25={float(np.nanpercentile(_pred_rr_arr, 25)):.2f} "
+            f"p50={float(np.nanpercentile(_pred_rr_arr, 50)):.2f} "
+            f"p75={float(np.nanpercentile(_pred_rr_arr, 75)):.2f}"
+        )
+    elif _min_pred_rr > 0.0:
+        log.warning(f"[V5_FWD][PRED_RR_GATE] min_pred_rr={_min_pred_rr:.2f} requested but mfe/mae not in arrays — gate skipped")
+
     # --- Task #73: score_exponent monotonic transform ---
     # score → score**exponent for positive-finite entries; NaN/-inf unchanged.
     # Rank-preserving (x^e is monotone on (0,inf) for e>0). Fires only when exponent != 1.0.
@@ -5778,6 +5809,16 @@ def run_v5_walk_forward(
     score_pside_weight=1.0,     # Task #69 P2: p_side contribution weight in specialist scoring (0.0 = pure mu_over_risk)
     per_symbol_no_ceiling=False,  # Task #69 P2: bypass max_threshold ceiling cap for per-symbol thresholds
     ema200_long_only=False,     # Task #69 P2: EMA200 gate only blocks LONG; SHORTs are never blocked by EMA200
+    min_mu_r_score=0.0,         # Task #73: minimum |mu_R| for a positive score
+    score_exponent=1.0,         # Task #73: monotonic right-tail stretch
+    min_pred_rr=0.0,            # Task #79: minimum predicted MFE/MAE R:R gate
+    dynamic_tp_sl=False,        # Task #79: use model MFE/MAE to set TP/SL barriers
+    tp_scale=0.75,              # Task #79: TP = mfe_pred * tp_scale
+    sl_scale=1.25,              # Task #79: SL = mae_pred * sl_scale
+    min_tp_atr=1.0,             # Task #79: minimum TP in ATR multiples
+    max_tp_atr=5.0,             # Task #79: maximum TP in ATR multiples
+    min_sl_atr=0.5,             # Task #79: minimum SL in ATR multiples
+    max_sl_atr=3.0,             # Task #79: maximum SL in ATR multiples
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -9402,6 +9443,14 @@ def train_v5_model(
                 score_pside_weight=score_pside_weight,        # Task #69 P2: p_side weight in specialist scoring
                 min_mu_r_score=min_mu_r_score,                # Task #73: configurable floor (was hardcoded 0.0)
                 score_exponent=score_exponent,                # Task #73: monotonic right-tail stretch
+                min_pred_rr=min_pred_rr,                      # Task #79: predicted R:R gate
+                dynamic_tp_sl=dynamic_tp_sl,                  # Task #79: use predicted MFE/MAE for barriers
+                tp_scale=tp_scale,                            # Task #79
+                sl_scale=sl_scale,                            # Task #79
+                min_tp_atr=min_tp_atr,                        # Task #79
+                max_tp_atr=max_tp_atr,                        # Task #79
+                min_sl_atr=min_sl_atr,                        # Task #79
+                max_sl_atr=max_sl_atr,                        # Task #79
             )
 
             train_ref_arrays = _build_train_ref_arrays(

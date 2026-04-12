@@ -160,6 +160,48 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/v5/signal", async (req, res) => {
+    try {
+      const s = req.body;
+      if (!s || !s.symbol || !s.direction) {
+        return res.status(400).json({ error: "symbol and direction are required" });
+      }
+      const predMfe = s.predicted_mfe_r ?? s.mfe_pred ?? null;
+      const predMae = s.predicted_mae_r ?? s.mae_pred ?? null;
+      const predRr = (predMfe != null && predMae != null && predMae > 0)
+        ? predMfe / predMae
+        : (s.predicted_rr ?? null);
+      const [row] = await db.insert(v5Signals).values({
+        symbol: s.symbol,
+        direction: String(s.direction).toUpperCase(),
+        confidence: s.confidence ?? s.p_enter ?? 0,
+        score: s.v5_score ?? s.score ?? null,
+        muR: s.v5_ret_mu ?? s.mu_r ?? null,
+        pSide: s.p_side ?? null,
+        lane: s.lane ?? null,
+        regime: s.regime ?? null,
+        entryPrice: s.entry_price ?? s.price ?? null,
+        slPrice: s.stop_loss ?? s.sl_price ?? null,
+        tpPrice: s.take_profit ?? s.tp_price ?? null,
+        thresholdUsed: s.threshold_used ?? s.v5_threshold ?? null,
+        htfScore: s.htf_score ?? null,
+        sizeMultiplier: s.size_multiplier ?? null,
+        predictedMfeR: predMfe,
+        predictedMaeR: predMae,
+        predictedRr: predRr,
+        signalTs: s.signal_ts ?? s.cycle_ts ?? Date.now(),
+        createdAt: Date.now(),
+      }).returning();
+      gpuBridge.recordActivity();
+      if (s.gpu_callback_url) gpuBridge.registerGpuUrl(s.gpu_callback_url);
+      broadcast("V5_SIGNAL", { ...row });
+      res.json({ success: true, id: row.id });
+    } catch (err: any) {
+      console.error("[V5 Signal] Insert error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get("/api/v5/performance", async (req, res) => {
     try {
       const trades = await db
@@ -5752,6 +5794,42 @@ Provide your analysis in this JSON format:
         createdAt: Date.now(),
       });
       gpuBridge.recordActivity();
+
+      if (c.decision === "ENTER" && c.direction) {
+        try {
+          const _predMfe = c.v5_mfe ?? c.mfe_pred ?? c.predicted_mfe_r ?? null;
+          const _predMae = c.v5_mae ?? c.mae_pred ?? c.predicted_mae_r ?? null;
+          const _predRr = (_predMfe != null && _predMae != null && _predMae > 0)
+            ? _predMfe / _predMae
+            : (c.predicted_rr ?? null);
+          const [_sigRow] = await db.insert(v5Signals).values({
+            symbol: c.symbol,
+            direction: String(c.direction).toUpperCase(),
+            confidence: c.p_enter ?? 0,
+            score: c.v5_score ?? null,
+            muR: c.v5_ret_mu ?? c.ret_mu ?? null,
+            pSide: c.v5_p_long != null || c.v5_p_short != null
+              ? Math.max(c.v5_p_long ?? 0, c.v5_p_short ?? 0)
+              : null,
+            lane: c.lane_selected ?? null,
+            regime: null,
+            entryPrice: c.price != null ? Number(c.price) : null,
+            slPrice: null,
+            tpPrice: null,
+            thresholdUsed: c.threshold_used ?? c.v5_threshold ?? null,
+            htfScore: c.htf_score ?? null,
+            sizeMultiplier: c.lane_size_mult ?? null,
+            predictedMfeR: _predMfe,
+            predictedMaeR: _predMae,
+            predictedRr: _predRr,
+            signalTs: c.cycle_ts ?? Date.now(),
+            createdAt: Date.now(),
+          }).returning();
+          broadcast("V5_SIGNAL", { ..._sigRow });
+        } catch (_sigErr: any) {
+          console.warn(`[CycleLog] Failed to insert v5_signal record: ${_sigErr.message}`);
+        }
+      }
 
       const cachedNeuralSignal: NeuralSignalData = {
         v5Score: c.v5_score ?? null,

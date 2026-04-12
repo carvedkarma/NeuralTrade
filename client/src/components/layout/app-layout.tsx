@@ -15,6 +15,7 @@ import {
   ArrowRightLeft,
   Cpu,
   Globe,
+  Target,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -29,6 +30,7 @@ import RiskAlertBar from "@/components/risk-alert-bar";
 
 const NAV_ITEMS = [
   { path: "/", label: "Command Center", icon: LayoutDashboard },
+  { path: "/signals", label: "Signal Dashboard", icon: Target },
   { path: "/live", label: "Live Trading", icon: Activity },
   { path: "/bitget", label: "Bitget Trading", icon: ArrowRightLeft },
   { path: "/paper", label: "Paper Trading", icon: FileText },

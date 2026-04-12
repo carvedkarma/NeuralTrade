@@ -5737,6 +5737,22 @@ Examples:
                         help="v5.7+: warm-start each walk-forward fold from previous fold model (default: False)")
     parser.add_argument("--v5-wf-warm-start-lr-mult", type=float, default=0.3,
                         help="v5.7+: LR multiplier for warm-start first epoch (default: 0.3, not yet used — reserved)")
+    parser.add_argument("--v5-min-pred-rr", type=float, default=0.0,
+                        help="Task #79: minimum predicted MFE/MAE R:R gate (0.0=disabled, 1.3=recommended for 8-12 trades/day)")
+    parser.add_argument("--v5-dynamic-tp-sl", action="store_true", default=False,
+                        help="Task #79: use model predicted MFE/MAE to set TP/SL barriers in forward test")
+    parser.add_argument("--v5-tp-scale", type=float, default=0.75,
+                        help="Task #79: TP = mfe_pred * tp_scale when --v5-dynamic-tp-sl (default: 0.75)")
+    parser.add_argument("--v5-sl-scale", type=float, default=1.25,
+                        help="Task #79: SL = mae_pred * sl_scale when --v5-dynamic-tp-sl (default: 1.25)")
+    parser.add_argument("--v5-min-tp-atr", type=float, default=1.0,
+                        help="Task #79: minimum TP in ATR multiples when dynamic (default: 1.0)")
+    parser.add_argument("--v5-max-tp-atr", type=float, default=5.0,
+                        help="Task #79: maximum TP in ATR multiples when dynamic (default: 5.0)")
+    parser.add_argument("--v5-min-sl-atr", type=float, default=0.5,
+                        help="Task #79: minimum SL in ATR multiples when dynamic (default: 0.5)")
+    parser.add_argument("--v5-max-sl-atr", type=float, default=3.0,
+                        help="Task #79: maximum SL in ATR multiples when dynamic (default: 3.0)")
 
     parser.add_argument("--multi-horizon", action="store_true", default=False,
                         help="Train multiple horizons (8,16,32) and select best per bar")
@@ -6510,6 +6526,14 @@ Examples:
                     score_pside_weight=getattr(args, 'v5_score_pside_weight', 1.0),         # Task #69 P2
                     min_mu_r_score=getattr(args, 'v5_min_mu_r_score', 0.0),                 # Task #73
                     score_exponent=getattr(args, 'v5_score_exponent', 1.0),                 # Task #73
+                    min_pred_rr=getattr(args, 'v5_min_pred_rr', 0.0),                       # Task #79
+                    dynamic_tp_sl=getattr(args, 'v5_dynamic_tp_sl', False),                 # Task #79
+                    tp_scale=getattr(args, 'v5_tp_scale', 0.75),                            # Task #79
+                    sl_scale=getattr(args, 'v5_sl_scale', 1.25),                            # Task #79
+                    min_tp_atr=getattr(args, 'v5_min_tp_atr', 1.0),                         # Task #79
+                    max_tp_atr=getattr(args, 'v5_max_tp_atr', 5.0),                         # Task #79
+                    min_sl_atr=getattr(args, 'v5_min_sl_atr', 0.5),                         # Task #79
+                    max_sl_atr=getattr(args, 'v5_max_sl_atr', 3.0),                         # Task #79
                 )
                 return
 

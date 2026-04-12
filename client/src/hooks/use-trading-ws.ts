@@ -10,7 +10,8 @@ export type WsEventType =
   | "GPU_STATUS_UPDATE"
   | "SIGNAL_UPDATE"
   | "HEALTH_STATUS"
-  | "PRICE_TICK";
+  | "PRICE_TICK"
+  | "V5_SIGNAL";
 
 export type WsConnectionState = "connecting" | "connected" | "disconnected" | "error";
 

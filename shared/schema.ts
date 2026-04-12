@@ -1666,6 +1666,9 @@ export const v5Signals = pgTable("v5_signals", {
   liqProximity: real("liq_proximity"),
   ofGatePassed: boolean("of_gate_passed"),
   ofGateReason: varchar("of_gate_reason", { length: 200 }),
+  predictedMfeR: real("predicted_mfe_r"),
+  predictedMaeR: real("predicted_mae_r"),
+  predictedRr: real("predicted_rr"),
   signalTs: bigint("signal_ts", { mode: "number" }).notNull(),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (table) => ({
