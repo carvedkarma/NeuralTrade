@@ -6179,6 +6179,16 @@ def run_v5_walk_forward(
                 score_pside_weight=score_pside_weight,  # Task #69 P2
                 per_symbol_no_ceiling=per_symbol_no_ceiling,  # Task #69 P2
                 ema200_long_only=ema200_long_only,      # Task #69 P2
+                min_mu_r_score=min_mu_r_score,          # Task #73
+                score_exponent=score_exponent,          # Task #73
+                min_pred_rr=min_pred_rr,                # Task #79
+                dynamic_tp_sl=dynamic_tp_sl,            # Task #79
+                tp_scale=tp_scale,                      # Task #79
+                sl_scale=sl_scale,                      # Task #79
+                min_tp_atr=min_tp_atr,                  # Task #79
+                max_tp_atr=max_tp_atr,                  # Task #79
+                min_sl_atr=min_sl_atr,                  # Task #79
+                max_sl_atr=max_sl_atr,                  # Task #79
             )
         except Exception as _fold_err:
             import traceback as _tb
@@ -6383,6 +6393,16 @@ def run_v5_walk_forward(
                     score_pside_weight=score_pside_weight,  # Task #69 P2
                     per_symbol_no_ceiling=per_symbol_no_ceiling,  # Task #69 P2
                     ema200_long_only=ema200_long_only,      # Task #69 P2
+                    min_mu_r_score=min_mu_r_score,          # Task #73
+                    score_exponent=score_exponent,          # Task #73
+                    min_pred_rr=min_pred_rr,                # Task #79
+                    dynamic_tp_sl=dynamic_tp_sl,            # Task #79
+                    tp_scale=tp_scale,                      # Task #79
+                    sl_scale=sl_scale,                      # Task #79
+                    min_tp_atr=min_tp_atr,                  # Task #79
+                    max_tp_atr=max_tp_atr,                  # Task #79
+                    min_sl_atr=min_sl_atr,                  # Task #79
+                    max_sl_atr=max_sl_atr,                  # Task #79
                 )
             except Exception as _long_err:
                 import traceback as _tbl
@@ -7327,6 +7347,14 @@ def train_v5_model(
     ema200_long_only=False,     # Task #69 P2: EMA200 gate only blocks LONG; SHORTs are never blocked by EMA200
     min_mu_r_score=0.0,         # Task #73: minimum |mu_R| floor for positive score; 0.0 = disabled
     score_exponent=1.0,         # Task #73: monotonic right-tail stretch exponent; 1.0 = no change
+    min_pred_rr=0.0,            # Task #79: minimum predicted MFE/MAE R:R gate; 0.0 = disabled
+    dynamic_tp_sl=False,        # Task #79: use model's predicted MFE/MAE to set TP/SL barriers
+    tp_scale=0.75,              # Task #79: TP = mfe_pred * tp_scale (when dynamic_tp_sl=True)
+    sl_scale=1.25,              # Task #79: SL = mae_pred * sl_scale (when dynamic_tp_sl=True)
+    min_tp_atr=1.0,             # Task #79: clamp dynamic TP >= this many ATR units
+    max_tp_atr=5.0,             # Task #79: clamp dynamic TP <= this many ATR units
+    min_sl_atr=0.5,             # Task #79: clamp dynamic SL >= this many ATR units
+    max_sl_atr=3.0,             # Task #79: clamp dynamic SL <= this many ATR units
 ):
     """V5/V6 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
