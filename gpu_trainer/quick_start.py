@@ -5259,8 +5259,7 @@ Examples:
     parser.add_argument("--cand-adx-min", type=float, default=15.0,
                         help="Minimum ADX for candidate mask chop filter (default: 15.0). "
                              "Bars with ADX < this AND ATR-rank < 0.20 are excluded from the candidate pool. "
-                             "Previously hardcoded at 18.0 in CandidateConfig — now CLI-controllable. "
-                             "Note: --v5-adx-min controls the FORWARD TEST gate separately.")
+                             "Note: --v5-adx-min controls the forward test gate separately.")
 
     parser.add_argument("--multi-preset-mode", type=str, default="fixed:standard",
                         help="Multi-preset mode: 'oracle' (best-of hindsight, research only), "

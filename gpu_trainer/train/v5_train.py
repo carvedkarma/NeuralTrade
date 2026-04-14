@@ -7607,10 +7607,8 @@ def train_v5_model(
     if specialist_mode in ('short', 'long') and side_aware_scoring:
         log.warning(
             "[V5_WARN] --v5-side-aware-scoring has NO EFFECT when --v5-side-specialist='%s' is active. "
-            "The specialist scoring path (compute_v5_scores lines 1597-1649) computes short_mu/long_mu "
-            "directly from mu_R and completely overrides the edge_long/edge_short values that "
-            "side_aware_scoring computes at lines 1573-1589. Remove --v5-side-aware-scoring from "
-            "the training command to suppress this warning and avoid confusion.",
+            "The specialist scoring path overrides edge_long/edge_short entirely. "
+            "Remove --v5-side-aware-scoring from the training command.",
             specialist_mode,
         )
     log.info(f"{ctag} w_barrier={w_barrier} w_regime={w_regime}")
