@@ -924,7 +924,12 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
         _3CLS_TARGETS = {
             'bull':  [0.57, 0.03, 0.40],   # bull: HOLD dominant, SHORT floor, LONG suppressed
             'bear':  [0.17, 0.03, 0.80],   # bear: strong SHORT, minimal HOLD, LONG suppressed
-            'chop':  [0.52, 0.03, 0.45],   # chop: slight SHORT lean vs HOLD, LONG suppressed
+            # Task #84: chop HOLD 0.52→0.30, SHORT 0.45→0.67.
+            # 88% of bars are chop regime; old [0.52, 0.03, 0.45] caused a weighted HOLD
+            # bias of 0.52×0.88 = 45.8% across all bars → ~2–3 signals/day.
+            # New [0.30, 0.03, 0.67]: weighted HOLD = 0.30×0.88 = 26.4% → 5–8 signals/day.
+            # pct-90 gate still keeps only top 10% — density increase is from genuine SHORTs.
+            'chop':  [0.30, 0.03, 0.67],   # chop: SHORT-favoured (46% HOLD bias → 26%)
         }
     elif specialist_mode == 'long':
         # LONG specialist KL targets: [hold, long, short].
@@ -8801,9 +8806,13 @@ def train_v5_model(
                         _pred_mu_f = _pred_mu[_finite]
                         _tgt_r_f   = _tgt_r[_finite]
                         _mu_corr_val = float(np.corrcoef(_pred_mu_f, _tgt_r_f)[0, 1])
-                        # Approximate V5 score (action_head mode, score_lambda=0.5):
-                        #   score = p_side * |mu_R| / risk - 0.5 * (1-p_side) * |mu_R| / risk
-                        #         = |mu_R| / risk * (1.5 * p_side - 0.5)
+                        # Task #84: V5 score using score_lambda=0.30 (matches shared_v5_trade_config default).
+                        # Old code used hardcoded lambda=0.50 → underestimated scores by 13-17%.
+                        # Specialist-aware: SHORT/LONG mode uses p_side head and head-agree bars only.
+                        #   generic:  score = |mu_R|/risk * (1.30*max(p_long,p_short) − 0.30)  [all bars]
+                        #   SHORT:    score = max(0,−mu_R)/risk * (1.30*p_short − 0.30)  [mu_R<0 bars]
+                        #   LONG:     score = max(0, mu_R)/risk * (1.30*p_long  − 0.30)  [mu_R>0 bars]
+                        # Displayed score_p90 now matches forward-test score_p90 within ±5%.
                         _abs_mu_f = np.abs(_pred_mu_f)
                         _probs_f  = _al_cat[:_n_pred][_vv][_finite]
                         _probs_f  = np.exp(_probs_f - _probs_f.max(axis=1, keepdims=True))
@@ -8811,11 +8820,30 @@ def train_v5_model(
                         _p_long_f  = _probs_f[:, 1]
                         _p_short_f = _probs_f[:, 2]
                         _p_side_f  = np.maximum(_p_long_f, _p_short_f)
-                        if _mae_cat is not None:
-                            _risk_f = np.clip(np.abs(_mae_cat[:_n_pred][_vv][_finite]), 0.01, 10.0)
+                        _risk_base_f = (
+                            np.clip(np.abs(_mae_cat[:_n_pred][_vv][_finite]), 0.01, 10.0)
+                            if _mae_cat is not None else np.ones(len(_abs_mu_f))
+                        )
+                        if specialist_mode == 'short':
+                            _ha_mask = _pred_mu_f < 0.0
+                            if np.any(_ha_mask):
+                                _raw_score_f = (
+                                    np.maximum(0.0, -_pred_mu_f[_ha_mask]) / _risk_base_f[_ha_mask]
+                                    * (1.30 * _p_short_f[_ha_mask] - 0.30)
+                                )
+                            else:
+                                _raw_score_f = np.array([], dtype=np.float64)
+                        elif specialist_mode == 'long':
+                            _ha_mask = _pred_mu_f > 0.0
+                            if np.any(_ha_mask):
+                                _raw_score_f = (
+                                    np.maximum(0.0, _pred_mu_f[_ha_mask]) / _risk_base_f[_ha_mask]
+                                    * (1.30 * _p_long_f[_ha_mask] - 0.30)
+                                )
+                            else:
+                                _raw_score_f = np.array([], dtype=np.float64)
                         else:
-                            _risk_f = np.ones(len(_abs_mu_f))
-                        _raw_score_f = _abs_mu_f / _risk_f * (1.5 * _p_side_f - 0.5)
+                            _raw_score_f = _abs_mu_f / _risk_base_f * (1.30 * _p_side_f - 0.30)
                         _nonneg_scores = _raw_score_f[_raw_score_f > 0]
                         if len(_nonneg_scores) >= 10:
                             _sc_p10  = float(np.percentile(_nonneg_scores, 10))

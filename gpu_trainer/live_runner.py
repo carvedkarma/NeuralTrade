@@ -41,10 +41,14 @@ RETRY_DELAY = 2.0
 MIN_H1_BARS = 100
 MIN_H4_BARS = 50
 
-V5_SCORE_LAMBDA = 0.5
-V5_SCORE_THRESHOLD = 0.5   # default live threshold — calibrated for MAE floor of 0.5
-V5_MIN_MU_R = 0.03
-V5_MAE_FLOOR = 0.5         # minimum MAE to prevent score explosion in low-vol markets
+V5_SCORE_LAMBDA = 0.30       # Task #84: 0.5→0.30. Matches shared_v5_trade_config.score_lambda=0.30
+                             # and training default. Old 0.5 caused train/live signal reranking mismatch.
+V5_SCORE_THRESHOLD = 0.20   # Task #84: 0.5→0.20. Old 0.5 was the original pre-specialist calibration;
+                             # shared_v5_trade_config overrides this to 0.20 (updated from broken 0.001).
+                             # This fallback fires only when shared config import fails at runtime.
+V5_MIN_MU_R = 0.0           # Task #84: 0.03→0.0. Matches shared_v5_trade_config.min_mu_r_score=0.0.
+                             # Post-sigma-reg fix, mu_R will be 0.4–1.5R — floor not needed.
+V5_MAE_FLOOR = 0.5          # minimum MAE to prevent score explosion in low-vol markets
 
 COST_BPS = 8.0
 
