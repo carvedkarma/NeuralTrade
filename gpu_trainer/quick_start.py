@@ -43,35 +43,40 @@ Target trades/day in forward test: 3-6
 Bear-market folds: expect balanced LONG/SHORT split (not 100% LONG)
 
 ===========================================================================
-SHORT SPECIALIST TRAINING COMMAND (Bug C fix — head-agree-only SHORTs)
+SHORT SPECIALIST TRAINING COMMAND (Task #83 corrected)
 ===========================================================================
-REQUIRED: --v5-max-mu-r-short 0.0 and --v5-short-disagree-mult 0.0 are both
-mandatory for the SHORT specialist.  Without them the hard gate (max-mu-r-short
-defaults to 1e9 = all trades pass) and soft penalty (disagree-mult defaults to
-1.0 = no penalty) are both no-ops, so head-disagree SHORTs (positive mu_R)
-pass through at full strength.  The post-parse auto-override in main() applies
-these as defaults when --v5-side-specialist short is detected, but it's best
-practice to include them explicitly in the command so the intent is clear.
+CONFIRMED BUG FIXES applied in this command vs older versions:
+  - REMOVED --v5-min-threshold 0.04  (was 40-80x above all actual scores → 0 trades)
+  - REMOVED --v5-side-aware-scoring  (confirmed NO-OP when specialist mode active;
+    specialist path overrides edge_long/edge_short entirely — see v5_train.py:1597)
+  - CHANGED --v5-adx-min 15          (candidate mask default already 15.0 now)
+  - ADDED   --v5-min-threshold-pct 90 (adapts threshold to actual score distribution)
+  - sigma-spread-reg default raised 0.1→0.5 and phase1-epochs raised 50→80 globally
 
 python quick_start.py --train-v5 --v5-walk-forward --v5-ema200-soft-mult 0.50 \\
     --v5-side-specialist short \\
     --v5-max-mu-r-short 0.0 --v5-short-disagree-mult 0.0 \\
-    --v5-adx-gate --v5-adx-min 18 --v5-min-threshold 0.04 \\
+    --v5-min-p-short 0.50 --v5-specialist-align-weight 0.05 \\
+    --v5-adx-gate --v5-adx-min 15 --v5-min-threshold-pct 90 \\
+    --v5-min-pred-rr 0.5 \\
     --v5-trailing-sl --v5-trail-activation 1.5 --v5-trail-distance 1.0 \\
-    --v5-corr-thresh 0.90 --v5-side-aware-scoring --v5-recency-weight \\
+    --v5-corr-thresh 0.90 --v5-recency-weight --v5-recency-half-life 60 \\
     --v5-short-oversample --v5-short-min-fraction 0.35 \\
-    --v5-per-symbol-threshold --v5-per-side-threshold
+    --v5-per-symbol-threshold --v5-per-side-threshold \\
+    --v5-wf-warm-start --v5-wf-threshold-decay 0.5
 
 Key rules for SHORT specialist:
-  - --v5-max-mu-r-short 0.0 : hard gate — blocks ALL SHORTs where mu_R > 0
+  - --v5-max-mu-r-short 0.0 : hard gate — blocks ALL SHORTs where mu_R >= 0
                               (model return head predicts UP = head-disagree)
   - --v5-short-disagree-mult 0.0 : soft gate — zeroes residual score for
-                              any head-disagree SHORTs that slip through
-  - Both flags work alongside Bug A fix (directional max(0,-mu_R)/risk scoring)
-    which already makes head-disagree bars score 0 — these flags add redundant
-    hard gates as a defence-in-depth measure
+                              any head-disagree SHORTs; redundant with above
+                              but kept for defence-in-depth clarity
+  - --v5-min-threshold-pct 90 : threshold = 90th percentile of actual scores;
+                              adapts automatically regardless of score scale
+  - DO NOT use --v5-min-threshold <fixed_value> (kills trades if value > all scores)
+  - DO NOT use --v5-side-aware-scoring (confirmed no-op with specialist mode)
   - DO NOT use --v5-regime-side-map (redundant when specialist forces all SHORT)
-  - Target: 4-8 high-confidence SHORTs/day, p_short ≥ 0.55, mu_R < 0
+  - Target: 4-8 high-confidence SHORTs/day, p_short >= 0.55, mu_R < 0
 ===========================================================================
 """
 
@@ -5251,6 +5256,11 @@ Examples:
                         help="Target candidate eligibility rate (default: 0.40)")
     parser.add_argument("--cand-min-rate", type=float, default=0.25,
                         help="Min candidate rate before auto-relax triggers (default: 0.25)")
+    parser.add_argument("--cand-adx-min", type=float, default=15.0,
+                        help="Minimum ADX for candidate mask chop filter (default: 15.0). "
+                             "Bars with ADX < this AND ATR-rank < 0.20 are excluded from the candidate pool. "
+                             "Previously hardcoded at 18.0 in CandidateConfig — now CLI-controllable. "
+                             "Note: --v5-adx-min controls the FORWARD TEST gate separately.")
 
     parser.add_argument("--multi-preset-mode", type=str, default="fixed:standard",
                         help="Multi-preset mode: 'oracle' (best-of hindsight, research only), "
@@ -5274,14 +5284,17 @@ Examples:
                         help="v5 weight for barrier CE loss (default: 0.25)")
     parser.add_argument("--v5-w-regime", type=float, default=0.1,
                         help="v5 weight for regime CE loss (default: 0.1)")
-    parser.add_argument("--v5-sigma-spread-reg", type=float, default=0.1,
-                        help="v5 penalty on sigma>threshold to prevent NLL collapse (default: 0.1, set 0 to disable)")
+    parser.add_argument("--v5-sigma-spread-reg", type=float, default=0.5,
+                        help="v5 penalty on sigma>threshold to prevent NLL collapse (default: 0.5, set 0 to disable). "
+                             "Raised from 0.1: stronger sigma compression forces model to learn mu_R signal "
+                             "instead of hiding uncertainty in large sigma. Fixes 100-500x score deflation.")
     parser.add_argument("--v5-sigma-reg-threshold", type=float, default=0.40,
                         help="v5 sigma threshold above which penalty fires (default: 0.40; old hardcoded 1.5 "
                              "never fired at typical sigma=0.607 — Task #58)")
-    parser.add_argument("--v5-phase1-epochs", type=int, default=50,
+    parser.add_argument("--v5-phase1-epochs", type=int, default=80,
                         help="v5 two-phase curriculum: epochs in Phase 1 (return-only, no MFE/MAE/action "
-                             "gradient); default: 50. Set 0 to disable Phase 1. Task #58")
+                             "gradient); default: 80 (raised from 50). Longer Phase 1 gives the return head "
+                             "more time to learn mu_R before action/MFE/MAE noise is introduced. Task #58")
     parser.add_argument("--v5-atr-normalize-risk-heads", action="store_true", default=True,
                         help="[API stub — no-op] mfe_R and mae_R are already R-units from build_v5_targets "
                              "(price_delta/ATR14). Dividing by ATR again would be price_delta/ATR^2 (unit error). "

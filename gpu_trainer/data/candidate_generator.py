@@ -30,7 +30,7 @@ class CandidateConfig:
     realized_vol_lookback: int = 20
 
     chop_filter_enabled: bool = True
-    chop_adx_threshold: float = 18.0
+    chop_adx_threshold: float = 15.0
     chop_atr_rank_threshold: float = 0.20
 
     breakout_enabled: bool = True
@@ -61,6 +61,7 @@ class CandidateConfig:
             round_trip_cost=getattr(args, 'cand_round_trip_cost', 0.0009),
             target_candidate_rate=getattr(args, 'cand_target_rate', 0.40),
             auto_relax_min_rate=getattr(args, 'cand_min_rate', 0.25),
+            chop_adx_threshold=getattr(args, 'cand_adx_min', 15.0),
         )
 
 
