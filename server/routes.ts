@@ -3713,13 +3713,15 @@ export async function registerRoutes(
   });
 
   // ── LONG disable toggle ────────────────────────────────────────────────────
-  // Seed disable_longs default=true on first access (LONG specialist is unprofitable; block by default)
+  // Seed disable_longs default=false on first access.
+  // Both SHORT and LONG specialists are now trained and viable. Enable both by default.
+  // Toggle this to true in Settings if you want SHORT-only execution.
   const _seedDisableLongs = async () => {
     try {
       const existing = await db.select().from(settings).where(eq(settings.key, "disable_longs")).limit(1);
       if (existing.length === 0) {
-        await db.insert(settings).values({ key: "disable_longs", valueJson: true, updatedAt: Date.now() });
-        console.log("[Trade Gates] disable_longs seeded to true (LONG specialist disabled by default)");
+        await db.insert(settings).values({ key: "disable_longs", valueJson: false, updatedAt: Date.now() });
+        console.log("[Trade Gates] disable_longs seeded to false (both SHORT and LONG specialists active by default)");
       }
     } catch (e: any) {
       console.warn(`[Trade Gates] Failed to seed disable_longs: ${e.message}`);

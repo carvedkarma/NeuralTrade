@@ -6543,7 +6543,7 @@ def run_v5_walk_forward(
                     kill_recovery_r_threshold=kill_recovery_r_threshold,
                     kill_hysteresis_r=kill_hysteresis_r,
                     per_symbol_threshold=per_symbol_threshold,
-                    short_oversample=short_oversample,
+                    short_oversample=False,          # Bug fix: LONG specialist must NOT oversample SHORT labels
                     short_min_fraction=short_min_fraction,
                     ema200_soft_mult=ema200_soft_mult,
                     per_side_threshold=per_side_threshold,

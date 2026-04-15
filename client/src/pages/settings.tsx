@@ -662,8 +662,8 @@ export default function SettingsPage() {
           <h2 className="font-semibold text-lg">Trade Gates</h2>
         </div>
         <p className="text-sm text-muted-foreground mb-4">
-          Control which trade directions the auto-trade pipeline will execute. LONG signals are currently unprofitable
-          (30% WR) — disabling them keeps only the high-performing SHORT specialist active.
+          Control which trade directions the auto-trade pipeline will execute. Both SHORT and LONG specialists
+          are trained and active. Disable LONGs only if you want SHORT-only execution.
         </p>
         <div className="flex items-center justify-between">
           <div>

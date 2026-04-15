@@ -5909,6 +5909,22 @@ Examples:
         log.info("[BUG_C_FIX] SHORT specialist: auto-set --v5-short-disagree-mult=0.0 "
                  "(zeroes out any residual head-disagree score; override with --v5-short-disagree-mult <value>)")
 
+    # Bug C fix (LONG side): symmetric to SHORT fix above.
+    # --v5-min-mu-r-long defaults to -1e9 (no-op) and --v5-long-disagree-mult defaults to 1.0 (no penalty).
+    # Without explicit flags, the hard gate is disabled and head-disagree LONGs (negative mu_R = model
+    # predicts price going DOWN) are NOT blocked.  Auto-set to 0.0 when the user chose LONG specialist
+    # or dual specialist mode without explicitly overriding these flags.
+    # Note: Bug A already makes head-disagree LONGs score 0 (max(0, mu_R_adj)/risk = 0 when mu_R < 0);
+    # this is a defensive hard gate for belt-and-suspenders correctness.
+    if (_specialist == 'long' or _dual) and '--v5-min-mu-r-long' not in sys.argv:
+        args.v5_min_mu_r_long = 0.0
+        log.info("[BUG_C_FIX] LONG specialist: auto-set --v5-min-mu-r-long=0.0 "
+                 "(blocks head-disagree LONGs; override with --v5-min-mu-r-long <value>)")
+    if (_specialist == 'long' or _dual) and '--v5-long-disagree-mult' not in sys.argv:
+        args.v5_long_disagree_mult = 0.0
+        log.info("[BUG_C_FIX] LONG specialist: auto-set --v5-long-disagree-mult=0.0 "
+                 "(zeroes out any residual head-disagree score; override with --v5-long-disagree-mult <value>)")
+
     print()
     print("=" * 60)
     print(f"  BTC FUTURES - ENTER QUALITY MODEL {SYSTEM_VERSION}")
@@ -6050,6 +6066,7 @@ Examples:
             v5_live_threshold=getattr(args, 'v5_live_threshold', None),
             v5_mae_floor=getattr(args, 'v5_live_mae_floor', None),
             predictive_sltp=getattr(args, 'v5_predictive_sltp', False),
+            specialist_mode=getattr(args, 'v5_side_specialist', 'none'),  # passes 'short'/'long'/'none' to _load_model
         )
         runner.learning_manager = learning_mgr
 

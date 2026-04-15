@@ -318,7 +318,7 @@ export default function SignalDashboard() {
             Signal Dashboard
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            High-confidence V5 signals for manual execution — SHORT specialist active
+            High-confidence V5 signals for manual execution — SHORT + LONG specialists active
           </p>
         </div>
         <button
