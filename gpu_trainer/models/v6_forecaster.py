@@ -475,10 +475,10 @@ class V6Forecaster(nn.Module):
         ret_sigma = torch.exp(ret_log_sigma)
 
         mfe_pred = self.mfe_head(trunk_features)
-        mfe_pred = torch.clamp(mfe_pred, 0.0, 20.0)
+        mfe_pred = F.softplus(mfe_pred).clamp(max=20.0)
 
         mae_pred = self.mae_head(trunk_features)
-        mae_pred = torch.clamp(mae_pred, 0.0, 20.0)
+        mae_pred = F.softplus(mae_pred).clamp(max=20.0)
 
         action_logits = self.action_head(trunk_features)
         action_logits = torch.clamp(action_logits, -10.0, 10.0)

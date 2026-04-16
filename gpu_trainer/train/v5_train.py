@@ -540,7 +540,11 @@ def _compute_time_split(sym_df, train_end_date=None, test_start_date=None, test_
 
 @dataclass
 class V5QualityGateConfig:
-    sigma_max: float = 1.0
+    # sigma_max default raised 1.0 → 1.5 to match the V5/V6 model's actual sigma
+    # output range (~1.1–1.2 in R units). Old 1.0 default caused passed_sigma=0
+    # for ~100% of bars on every fold — the sigma gate was effectively a hard
+    # rejector that the relaxation loop then had to burn budget undoing.
+    sigma_max: float = 1.5
     mae_max: float = 1.0
     mu_R_min: float = 0.05
     p_trade_min: float = 0.40
@@ -7680,6 +7684,28 @@ def train_v5_model(
              f"loss_warmup_ret_mult={loss_warmup_ret_mult} loss_warmup_action_mult={loss_warmup_action_mult}")
     log.info(f"{ctag} phase1_epochs={phase1_epochs} dynamic_action_labels={dynamic_action_labels} "
              f"atr_normalize_risk_heads={atr_normalize_risk_heads}")
+    # CRITICAL GUARD: phase1_epochs >= epochs causes the action/MFE/MAE heads, the
+    # specialist CE weights, the side_balance KL loss and the specialist alignment
+    # loss to NEVER receive any gradient — training silently collapses to a return-only
+    # pretrainer. This was the root cause of the LONG/SHORT specialist direction
+    # collapses (CE weight 3.0× had zero effect, model defaulted to majority class).
+    # Auto-clamp with a loud warning rather than letting the run waste GPU hours.
+    if phase1_epochs > 0 and phase1_epochs >= epochs:
+        _orig_phase1 = phase1_epochs
+        # Strict guarantee that Phase 2 always exists when epochs > 1.
+        # For epochs <= 1 there is no room for a two-phase curriculum at all,
+        # so disable Phase 1 entirely rather than silently trapping training.
+        if epochs > 1:
+            phase1_epochs = min(max(1, epochs // 3), epochs - 1)
+        else:
+            phase1_epochs = 0
+        log.warning(
+            f"[V5_PHASE1_GUARD] phase1_epochs={_orig_phase1} >= epochs={epochs} would "
+            f"keep training in Phase 1 forever (action/MFE/MAE heads never trained). "
+            f"Auto-clamping phase1_epochs to {phase1_epochs} so Phase 2 runs for the "
+            f"remaining {max(0, epochs - phase1_epochs)} epochs. "
+            f"To silence this warning, pass --v5-phase1-epochs <= {max(0, epochs // 2)}."
+        )
     if phase1_epochs > 0:
         log.info(
             f"[V5_PHASE1] Two-phase curriculum enabled: epochs 1-{phase1_epochs} = return-only pretraining "
