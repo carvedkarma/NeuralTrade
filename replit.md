@@ -1,7 +1,7 @@
 # Neural Terminal — AI Trading Dashboard
 
 ## Overview
-Neural Terminal is an institutional-grade, GPU-accelerated AI trading system for multi-asset crypto futures. It functions as a trading terminal, providing real-time signals, managing paper and live trading operations, and tracking performance. The system leverages a v5 neural network running on a local GPU trainer, with this web application serving as the interface. The project aims to deliver a comprehensive solution for AI-driven crypto futures trading, offering advanced analytics and automated trading capabilities.
+Neural Terminal is an institutional-grade, GPU-accelerated AI trading system for multi-asset crypto futures. It functions as a trading terminal, providing real-time signals, managing paper and live trading operations, and tracking performance. The system aims to deliver a comprehensive solution for AI-driven crypto futures trading, offering advanced analytics and automated trading capabilities.
 
 ## User Preferences
 Preferred communication style: Simple, everyday language.
@@ -13,66 +13,49 @@ The frontend is built with React, TypeScript, and Vite, utilizing `shadcn/ui` (R
 
 **Core Pages:**
 -   **Command Center:** Live system status, KPIs, market overview, real-time signal feed, active positions, mini equity curve.
--   **Live Trading:** Symbol selector, price charts, market scanner, detailed signal analysis, order flow panel (OB imbalance, aggressor ratio, CVD, composite score), position management, manual trade entry, signal history.
--   **Paper Trading:** Portfolio metrics, equity curve, open/closed positions, health gauges, neural status, MFE tracker, breakeven indicator, adaptive trail visualization, configuration. **Leverage Monitor row** (Avg Leverage Closed, Peak Leverage, Open Avg Leverage, Effective Exposure) powered by `/api/paper/leverage-stats`.
--   **Analytics:** Performance metrics, equity curves, rolling performance, hourly heatmaps, per-symbol breakdowns, advanced analytics.
+-   **Live Trading:** Symbol selector, price charts, market scanner, detailed signal analysis, order flow panel, position management, manual trade entry, signal history.
+-   **Paper Trading:** Portfolio metrics, equity curve, open/closed positions, health gauges, neural status, MFE tracker, breakeven indicator, adaptive trail visualization, configuration, and leverage monitoring.
+-   **Analytics:** Performance metrics, equity curves, rolling performance, hourly heatmaps, per-symbol breakdowns.
 -   **Training Monitor:** Visualizes live GPU training progress, status, model knowledge, loss curves, action accuracy, walk-forward validation.
--   **Bitget Trading:** Live Bitget exchange connection, positions table, balance overview, trading toggle, recent V5 signals, risk config display.
--   **Neural Monitor:** Per-symbol neural intelligence dashboard. Shows V5 model outputs (p_long/p_hold/p_short gauges, expected return, MFE/MAE predicted risk-reward, HTF trend alignment, V5 score vs threshold, decision status) for all 20 symbols in real-time. Live WebSocket updates. Market bias summary bar. Route: `/neural`.
--   **World Intel (Task #71):** Macro Oracle dashboard at `/world-intel`. Fetches global signals from RSS feeds (Reuters, BBC, CoinDesk, Federal Reserve, WSJ), macro indicators (Fear & Greed, DXY, S&P500, Gold, Oil, BTC Dominance), Reddit sentiment (r/worldnews, r/economics, r/Bitcoin). GPT-4o runs every 30 minutes to produce a Global Macro Climate Score (−100 to +100), plain English narrative, 24h prediction, per-category sentiment scores, and per-event crypto impact explanations. Includes Risk Calendar with upcoming FOMC/CPI/earnings dates. Auto-refreshes with countdown timer. Route: `/world-intel`.
--   **Signal Dashboard (Task #80):** Manual leveraged trading page at `/signals`. Displays high-confidence V5 SHORT signals in real-time via WebSocket (`V5_SIGNAL` event). Each signal card shows entry/SL/TP, score/μR/p_side/confidence, predicted MFE/MAE/R:R from V5 model, and an integrated Leverage Calculator with adjustable win rate, risk %, and leverage — computing EV, 13-loss streak drawdown, and safety rating. Stat bar shows total/SHORT/LONG/R:R≥1.3 counts. Risk warning banner with 5x leverage guidance. Auto-refreshes every 30s, flashes "NEW" badge on incoming signals for 10 seconds.
+-   **Bitget Trading:** Live Bitget exchange connection, positions, balance, trading toggle, V5 signals, risk config.
+-   **Neural Monitor:** Per-symbol neural intelligence dashboard displaying V5 model outputs in real-time via WebSockets.
+-   **World Intel:** Macro Oracle dashboard providing global signals from various sources (RSS feeds, macro indicators, Reddit sentiment), a GPT-4o generated Global Macro Climate Score and narrative, 24h prediction, sentiment scores, and crypto impact explanations. Includes a Risk Calendar.
+-   **Signal Dashboard:** Manual leveraged trading page displaying high-confidence V5 SHORT signals in real-time with entry/SL/TP, score, predicted MFE/MAE/R:R, and an integrated Leverage Calculator.
 -   **Trade History:** Complete trade history with filtering and export.
--   **Settings:** Manages GPU connection, Bybit connection, Bitget credentials & config, account configuration, model information, risk parameters, data freshness.
+-   **Settings:** Manages connections, credentials, account configuration, model information, risk parameters, and data freshness.
 
 ### Backend (Node.js + Express + TypeScript)
 The backend provides API routes and services to support the frontend and interact with external systems.
 
 **Key Features:**
--   **API Routes:** Manages data retrieval for signals, performance, equity curves, trade history, system status, market data, and cycle logs. Handles POST requests for cycle logs and executed trades, enabling auto-trading.
--   **GPU Trainer Bridge:** Facilitates communication with the local GPU trainer, including push-based activity detection and auto-registration.
+-   **API Routes:** Manages data retrieval for signals, performance, equity curves, trade history, system status, market data, and cycle logs. Handles POST requests for cycle logs and executed trades.
+-   **GPU Trainer Bridge:** Facilitates communication with the local GPU trainer.
 -   **Live Candle Sync:** Synchronizes real-time 15-minute candle data.
--   **Paper Trading Engine:** Simulates trades, monitors positions, manages SL/TP, and applies neural position management strategies (direction flip exit, MFE protection, confidence decay tightening, breakeven automation, adaptive trailing).
--   **Execution Service Bridge:** Caches execution state and monitors connection status from the GPU trainer's execution service.
--   **Bitget Client & Live Engine:** Interfaces with the Bitget V2 REST API for live trading operations (HMAC-SHA256 auth, credentials stored in DB settings table). Auto-trade signals route through Bitget when enabled (takes priority over Bybit).
--   **Bybit Client & Live Engine:** Interfaces with the Bybit V5 REST API for live trading operations.
--   **Market Regime / Chop Protection:** `server/market-regime.ts` computes ADX (14-period), Chop Index, and Bollinger Band Width from DB candles. Three tiers: HARD_CHOP (ADX<15, signal blocked), SOFT_CHOP (ADX 15-25, threshold raised to 0.62 + leverage cut to 0.4x), TRENDING (ADX>25, no changes). Applied as Gate 3 in auto-trade ingestion. `GET /api/market/regime` returns all 20 symbols' regime state.
--   **Order Flow Pipeline (Gate 4):** `server/order-flow.ts` fetches real-time orderbook, recent trades, and ticker data from Bybit V5 public API. Computes OB imbalance, buy/sell aggressor ratio, CVD (cumulative volume delta) with slope, liquidation proximity, and a weighted composite score (40% OB + 35% aggressor + 25% CVD normalized by total traded volume). Applied as Gate 4 in both auto-trade ingestion (routes.ts) and paper trading engine (paper/engine.ts) after chop protection. LONG blocked when OB imbalance<0.35 AND aggressor<0.40, or CVD falling AND composite<-0.3. SHORT blocked when OB imbalance>0.65 AND aggressor>0.60, or CVD rising AND composite>0.3. Falls back gracefully (allows trade) when Bybit public API is unreachable. `GET /api/market/order-flow` and `GET /api/orderflow/:symbol` return per-symbol snapshots (60s TTL cache). 6 new columns on `v5_signals` table (`ob_imbalance`, `aggressor_ratio`, `cvd_at_signal`, `liq_proximity`, `of_gate_passed`, `of_gate_reason`) are enriched at auto-trade time by matching the most recent signal within a 5-minute window.
+-   **Paper Trading Engine:** Simulates trades, monitors positions, manages SL/TP, and applies neural position management strategies.
+-   **Execution Service Bridge:** Caches execution state and monitors connection status.
+-   **Bitget & Bybit Client & Live Engine:** Interfaces with respective exchange APIs for live trading operations.
+-   **Market Regime / Chop Protection:** Computes ADX, Chop Index, and Bollinger Band Width to apply trade gating based on market conditions (HARD_CHOP, SOFT_CHOP, TRENDING).
+-   **Order Flow Pipeline:** Fetches real-time order book, trades, and ticker data to compute OB imbalance, aggressor ratio, CVD, liquidation proximity, and a composite score for trade gating.
 -   **WebSocket Server:** Enables real-time event streaming for continuous updates.
 
 ### Symbol Configuration
-All 20 trading symbols are defined in `shared/symbols.ts`, including `TRADING_SYMBOLS`, `QTY_PRECISION`, and `PRICE_PRECISION`.
-
-**20 Symbols:** BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, AVAXUSDT, ADAUSDT, DOGEUSDT, LINKUSDT, LTCUSDT, NEARUSDT, PEPEUSDT, SUIUSDT, AAVEUSDT, ARBUSDT, DOTUSDT, MATICUSDT, FILUSDT, APTUSDT, OPUSDT.
+All 20 trading symbols (e.g., BTCUSDT, ETHUSDT) are defined in `shared/symbols.ts` with their respective precision settings.
 
 ### Database (PostgreSQL via Drizzle ORM)
-PostgreSQL with Drizzle ORM is used for data persistence.
-
-**Key Tables:** `v5_signals`, `live_trade_records`, `live_cycle_logs`, `paper_positions`, `paper_portfolio`, `paper_trades`, `paper_trade_history`, `candles`, `settings`, `training_sessions`, `training_epochs`, `training_folds`, `neural_adjustments`.
+PostgreSQL with Drizzle ORM is used for data persistence across various trading and training tables.
 
 ### v5 Neural Network
 A v5 neural network, `V5Forecaster`, runs on a local GPU.
--   **Architecture:** Multi-head output (return distribution, MFE, MAE, action probabilities) based on 95 features from a 15-minute timeframe (85 base + 3 funding rate + 3 OI + 4 L/S ratio).
--   **Symbols:** Supports trading for all 20 defined symbols.
--   **Composite Scoring:** Employs a V5 Composite Scoring Engine.
--   **Per-symbol Edge Learning:** Incorporates symbol-specific scalers, thresholds, and kill switches.
--   **Live Feature Pipeline:** Integrates real-time funding rates, open interest, and long/short ratio data during live inference.
--   **Improvements:** Side balance fix for biased training labels, sigma discount for penalizing uncertain predictions, minimum conviction gate, larger MFE/MAE heads, asymmetric MAE loss, per-symbol cooldowns, per-symbol edge topN, EMA200 auto-skip with multi-regime, correlation max-block cap, prediction quality diagnostics, v5.5 soft gates (regime soft sizing, graduated symbol kill, edge topn decay, gate impact diagnostics), dead-fold diagnostics (cause logging when 0 trades), threshold EMA decay on dead folds (`--v5-wf-threshold-decay`, default 0.5), min_trades soft floor (trades kept as LOW_CONF instead of wiped, threshold EMA skips low-confidence folds), cooldown CLI threading (`--cooldown` now properly passed through all layers), sizing stacking fix (position sizers use max-of-modifiers instead of multiplicative stacking to avoid pinning all trades to size_floor), per-symbol threshold cap (no-edge symbols get HIGH_BAR = global_threshold×3 instead of inf, allowing recovery when market conditions change), side-aware scoring (`--v5-side-aware-scoring`: shorts require mu_R<0, longs require mu_R>0 — both heads must agree), per-side short confidence gate (`--v5-min-p-short`: separate minimum p_short threshold for short trades), per-side quality diagnostics (forward test reports head agreement %, avg mu_R, avg p_side per direction, and short head-disagree trade expectancy), v5.6 soft gate floor (`--v5-soft-gate-floor`: clamps soft gate multiplier minimum to size_floor so position sizers can amplify above floor instead of all trades pinned at 0.5x), dynamic weekly cap (`--v5-weekly-cap-dynamic`: scales weekly loss cap based on rolling 4-week performance — widens when profitable, tightens when losing), rolling quality gate (`--v5-quality-gate`: tracks rolling action accuracy and win rate over last N trades, reduces sizing to 0.25x when accuracy drops below 30% and WR below 35%, to 0.1x when accuracy below 20%), direction balance cap (`--v5-direction-balance-cap`: reduces sizing on the dominant direction when one side exceeds 75% of recent candidates, 0.5x at 75% imbalance, 0.25x at 85%), v5.7 recency-weighted training (`--v5-recency-weight`, `--v5-recency-half-life`: exponential time-decay weighting so recent samples get higher loss weight, configurable half-life in days), walk-forward warm-start (`--v5-wf-warm-start`: conditional warm-start — carries previous fold model weights as initialization for next fold only when the previous fold was profitable; resets to random init after negative or dead folds to prevent loss cascading), fine-tuning phase (`--v5-finetune-months`, `--v5-finetune-epochs`, `--v5-finetune-lr-mult`: after main training, fine-tunes on last N months of training window with reduced LR), and long/short ratio features (4 features: ls_ratio, ls_deviation, ls_extreme, crowd_sentiment — fetched from Binance globalLongShortAccountRatio API, wired into both training and live inference pipelines).
-
-### v5 Code-Level Bug Fixes (April 2026)
-Three structural bugs were found by analyzing LONG and SHORT specialist walk-forward training logs that showed the action head producing the wrong direction (LONG specialist predicting all-SHORT, fold collapses to all-HOLD, MAE head outputting 0.0 for full epochs):
-
-1. **Dead-clamp on MAE/MFE heads** (`gpu_trainer/models/v5_forecaster.py`, `v6_forecaster.py`): the heads were `torch.clamp(x, 0.0, 20.0)` on raw Linear logits. With `_init_weights` setting final weights to N(0, 0.01) and bias=0, ~50% of outputs started ≤0 and were clamped to exactly 0.0 with **zero gradient** — a permanent dead zone. Replaced with `F.softplus(x).clamp(max=20.0)` which is always non-negative AND has gradient everywhere.
-
-2. **Phase 1 trap guard** (`gpu_trainer/train/v5_train.py` near line 7686): if `--v5-phase1-epochs >= --v5-epochs` the training never exits Phase 1, meaning `L_action`, `L_mfe`, `L_mae`, `L_side_balance`, and `L_specialist_align` all receive **zero gradient** for the entire run. The CE specialist weights (LONG=3.0×, SHORT=3.0×) and the side-balance KL targets become invisible to the model. Added a hard guard that auto-clamps `phase1_epochs = max(1, epochs // 3)` and emits a critical `[V5_PHASE1_GUARD]` warning before the run starts.
-
-3. **`sigma_max` default** (`V5QualityGateConfig` line 545): default 1.0 but the model's natural sigma output is ~1.1–1.2, so `passed_sigma=0` for ~100% of bars on every fold. The relaxation loop eventually saved it but burned its budget on a pre-broken gate, leaving no slack for the other gates. Default raised to 1.5 to match actual model output range.
+-   **Architecture:** Multi-head output (return distribution, MFE, MAE, action probabilities) based on 95 features from a 15-minute timeframe.
+-   **Capabilities:** Supports trading for 20 symbols, uses a Composite Scoring Engine, incorporates per-symbol edge learning, and integrates real-time funding rates, open interest, and long/short ratio data.
+-   **Enhancements:** Includes various improvements for training stability, prediction accuracy, risk management, and sizing adjustments, such as side balance fixes, sigma discount, conviction gates, adaptive loss functions, dynamic caps, and quality gates.
+-   **Specialist Fixes:** Addressed structural bugs in the LONG/SHORT specialist training pipeline by improving gradient flow, adjusting entropy regularization, recalibrating KL targets, and implementing intelligent oversampling.
 
 ### v6 Neural Network (V6Forecaster)
-The next-generation `V6Forecaster` offers advanced capabilities while maintaining the same output interface as V5.
+The next-generation `V6Forecaster` offers advanced capabilities while maintaining output compatibility with V5.
 -   **Architecture:** Causal Conv1D, Positional Encoding, Transformer Blocks, Mixture-of-Experts trunk (4 experts), and 6 output heads.
--   **New capabilities:** Temporal context (16 bars of history), MoE routing with collapse recovery mechanisms, feature masking, auxiliary self-supervised loss for next-bar feature prediction, and a confidence calibration head for signal gating.
--   **Training:** Supports V6-specific arguments for architecture and loss components, including MoE balance, aux next-bar MSE, and confidence calibration BCE. Balanced sampling uses inverse-frequency loss weighting.
--   **Live Inference:** Automatically loads V6 models, computes sequential features, and uses confidence output to gate signals. Supports flexible scaler loading.
+-   **New Features:** Incorporates temporal context, MoE routing with collapse recovery, feature masking, auxiliary self-supervised loss for next-bar feature prediction, and a confidence calibration head for signal gating.
+-   **Training & Inference:** Supports V6-specific arguments for architecture and loss components, balanced sampling, and automatic model loading with sequential feature computation and confidence-based signal gating.
 
 ## External Dependencies
 

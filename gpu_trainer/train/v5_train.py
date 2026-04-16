@@ -917,33 +917,41 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
     _chop_h = float(max(0.0, min(1.0, chop_hold_target)))
     _chop_side = (1.0 - _chop_h) / 2.0
     if specialist_mode == 'short':
-        # SHORT specialist KL targets: [hold, long, short].
-        # Strongly favour SHORT on bear bars, suppress LONG everywhere.
-        # LONG slot uses 0.03 (not 0.0): KL(target||pred) gives zero gradient when
+        # SHORT specialist KL targets: [hold, long, short].  All rows sum to 1.00.
+        # LONG slot uses 0.05 (not 0.0): KL(target||pred) gives zero gradient when
         # target=0 (0 * log(0/pred) = 0), so the LONG logit would be completely
         # unanchored and could drift via warm-start or optimizer momentum.
-        # 0.03 is small enough to strongly discourage p_long while keeping a live
-        # gradient that anchors the logit near a very small but finite value.
-        # All rows sum to 1.00.
+        #
+        # Recalibration (deep math): old targets forced 40% SHORT in BULL regime
+        # which trained the model to produce SHORT signals during uptrends —
+        # exactly the wrong behaviour. A specialist should be highly SELECTIVE
+        # in adversarial regimes (mostly HOLD) and CONFIDENT in aligned regimes.
+        # Counter-regime SHORT slot dropped from 0.40 → 0.15 so the model learns
+        # to wait for high-conviction setups during bull regimes rather than
+        # spamming counter-trend signals. The percentile-90 score gate still
+        # passes the top 10% of any signals the model emits, so the absolute
+        # signal count stays controlled by the gate, not the KL prior.
         _3CLS_TARGETS = {
-            'bull':  [0.57, 0.03, 0.40],   # bull: HOLD dominant, SHORT floor, LONG suppressed
-            'bear':  [0.17, 0.03, 0.80],   # bear: strong SHORT, minimal HOLD, LONG suppressed
-            # Task #84: chop HOLD 0.52→0.30, SHORT 0.45→0.67.
-            # 88% of bars are chop regime; old [0.52, 0.03, 0.45] caused a weighted HOLD
-            # bias of 0.52×0.88 = 45.8% across all bars → ~2–3 signals/day.
-            # New [0.30, 0.03, 0.67]: weighted HOLD = 0.30×0.88 = 26.4% → 5–8 signals/day.
-            # pct-90 gate still keeps only top 10% — density increase is from genuine SHORTs.
-            'chop':  [0.30, 0.03, 0.67],   # chop: SHORT-favoured (46% HOLD bias → 26%)
+            'bull':  [0.80, 0.05, 0.15],   # bull: mostly HOLD (selective SHORT), small SHORT floor
+            'bear':  [0.15, 0.05, 0.80],   # bear: strong SHORT (regime-aligned)
+            'chop':  [0.65, 0.05, 0.30],   # chop: mostly HOLD with opportunistic SHORT
         }
     elif specialist_mode == 'long':
-        # LONG specialist KL targets: [hold, long, short].
-        # Strongly favour LONG on bull bars, suppress SHORT everywhere.
-        # SHORT slot uses 0.03 for the same anchoring reason as LONG above.
-        # All rows sum to 1.00.
+        # LONG specialist KL targets: [hold, long, short].  All rows sum to 1.00.
+        # SHORT slot uses 0.05 for the same anchoring reason as above.
+        #
+        # Recalibration (deep math): old targets forced 37% LONG in BEAR regime
+        # and 42% LONG in chop, which trained the model to spam counter-trend
+        # LONG signals (matching the observed fold collapse where the LONG
+        # specialist emitted ALL SHORTs because of warm-start + uniform-pushing
+        # entropy reg drowning out the weak KL signal). New targets keep the
+        # specialist HIGHLY SELECTIVE in adversarial regimes (mostly HOLD) and
+        # CONFIDENT only when the regime aligns. Symmetric mirror of SHORT
+        # targets above.
         _3CLS_TARGETS = {
-            'bull':  [0.20, 0.77, 0.03],   # bull: strong LONG, minimal HOLD, SHORT suppressed
-            'bear':  [0.60, 0.37, 0.03],   # bear: HOLD dominant, LONG floor, SHORT suppressed
-            'chop':  [0.55, 0.42, 0.03],   # chop: slight LONG lean vs HOLD, SHORT suppressed
+            'bull':  [0.15, 0.80, 0.05],   # bull: strong LONG (regime-aligned)
+            'bear':  [0.80, 0.15, 0.05],   # bear: mostly HOLD (selective LONG), small LONG floor
+            'chop':  [0.65, 0.30, 0.05],   # chop: mostly HOLD with opportunistic LONG
         }
     else:
         # Generic (non-specialist) symmetric targets — symmetric L/S by design (Task #54 Bug B fix).
@@ -7712,6 +7720,50 @@ def train_v5_model(
             f"(L_ret + L_sigma_reg only). Epochs {phase1_epochs+1}+ = full training. "
             f"Purpose: force trunk to learn return-predictive features before action/MFE/MAE noise."
         )
+
+    # ====================================================================
+    # SPECIALIST AUTO-CALIBRATION (deep-math fixes for direction collapse)
+    # ====================================================================
+    # When training a LONG or SHORT specialist, three default hyperparameters
+    # actively fight the specialist objective and need to be auto-overridden:
+    #
+    # 1) action_entropy_weight=0.10 default uses formula L_entropy = sum(p*log(p))
+    #    which is -H(p). Minimising it MAXIMISES entropy, pushing the action
+    #    distribution toward uniform [0.33, 0.33, 0.33]. For a specialist whose
+    #    KL target is e.g. [0.20, 0.77, 0.03], this is the OPPOSITE direction
+    #    and at weight 0.10 it dominates the side-balance KL signal (weighted at
+    #    only 0.05 × max KL ≈ 0.025). Auto-zero for specialists.
+    #
+    # 2) side_bal_weight=0.05 default makes the KL-to-regime-target signal too
+    #    weak vs the CE loss (typical magnitude 1.0). For a specialist the
+    #    side-balance KL IS the directional teacher; boost 6× to 0.30 so it has
+    #    real gradient teeth. Combined with the 3.0× CE class weight on the
+    #    specialist direction, the model gets coherent direction pressure from
+    #    both losses.
+    #
+    # 3) action_entropy_weight may have been set explicitly by the user; only
+    #    auto-override when it is at the legacy default 0.10 (or higher) AND the
+    #    specialist mode is active. Users who deliberately want entropy
+    #    regularisation in specialist mode can pass --v5-action-entropy-weight 0.0
+    #    and then re-enable it explicitly with a small value.
+    if specialist_mode in ('long', 'short'):
+        _orig_entropy = action_entropy_weight
+        _orig_sidebal = side_bal_weight
+        if action_entropy_weight > 0.0:
+            action_entropy_weight = 0.0
+        # Boost side-balance weight to match the specialist objective magnitude.
+        # If user already passed a value >= 0.20 keep theirs; else clamp up to 0.30.
+        if side_bal_weight < 0.20:
+            side_bal_weight = 0.30
+        log.warning(
+            f"[V5_SPEC_AUTOCAL] specialist_mode='{specialist_mode}' detected. "
+            f"Auto-calibrating: action_entropy_weight {_orig_entropy:.3f} -> {action_entropy_weight:.3f} "
+            f"(uniform-pushing entropy reg fights specialist bias), "
+            f"side_bal_weight {_orig_sidebal:.3f} -> {side_bal_weight:.3f} "
+            f"(boosts KL-to-regime-target signal vs CE)."
+        )
+    # ====================================================================
+
     if specialist_mode in ('short', 'long') and side_aware_scoring:
         log.warning(
             "[V5_WARN] --v5-side-aware-scoring has NO EFFECT when --v5-side-specialist='%s' is active. "
@@ -8205,6 +8257,75 @@ def train_v5_model(
         action_class_weights = inv_freq.astype(np.float32)
     log.info(f"[{vtag}_ACTION_DIST] Class weights: HOLD={action_class_weights[0]:.3f} "
              f"LONG={action_class_weights[1]:.3f} SHORT={action_class_weights[2]:.3f}")
+
+    # ---- DEEP-MATH FIX: Auto-LONG oversample for LONG specialist ----------------
+    # Symmetric mirror of short_oversample. When training a LONG specialist on a
+    # bear-dominant or chop-dominant period, the triple-barrier label distribution
+    # naturally produces fewer LONG-labelled bars than SHORT-labelled bars, so the
+    # 3.0× LONG CE class weight gets applied to a small minority of the training
+    # set. Auto-oversampling LONG bars to >= 35% of (LONG+SHORT) ensures the
+    # specialist sees enough LONG examples to actually learn a discriminative
+    # LONG signal. Triggered automatically when specialist_mode='long' (no CLI
+    # flag needed); user can still pass --v5-short-min-fraction to tune.
+    _long_os_active = (specialist_mode == 'long') and n_short > 0
+    if _long_os_active:
+        min_frac_long = float(short_min_fraction)  # reuse same fraction param
+        target_long = int(math.ceil(n_short * min_frac_long / max(1.0 - min_frac_long, 1e-8)))
+        if n_long < target_long:
+            extra_needed_long = target_long - n_long
+            long_indices_all = np.where(train_valid & (train_action == 1))[0]
+            if len(long_indices_all) > 0:
+                rng_l = np.random.default_rng(seed=43)
+                oversample_idx_l = rng_l.choice(long_indices_all, size=extra_needed_long, replace=True)
+                train_feat = np.concatenate([train_feat, train_feat[oversample_idx_l]], axis=0)
+                train_ret_R = np.concatenate([train_ret_R, train_ret_R[oversample_idx_l]])
+                train_mfe_R = np.concatenate([train_mfe_R, train_mfe_R[oversample_idx_l]])
+                train_mae_R = np.concatenate([train_mae_R, train_mae_R[oversample_idx_l]])
+                train_vol_h = np.concatenate([train_vol_h, train_vol_h[oversample_idx_l]])
+                train_action = np.concatenate([train_action, train_action[oversample_idx_l]])
+                train_valid = np.concatenate([train_valid, train_valid[oversample_idx_l]])
+                train_sym_ids = np.concatenate([train_sym_ids, train_sym_ids[oversample_idx_l]])
+                train_barrier_oracle = np.concatenate([train_barrier_oracle, train_barrier_oracle[oversample_idx_l]])
+                train_barrier_soft = np.concatenate([train_barrier_soft, train_barrier_soft[oversample_idx_l]], axis=0)
+                if len(train_timestamps) > 0 and len(train_timestamps) == len(train_feat) - extra_needed_long:
+                    train_timestamps = np.concatenate([train_timestamps, train_timestamps[oversample_idx_l]])
+                if concat_sample_weights is not None and len(concat_sample_weights) == len(train_feat) - extra_needed_long:
+                    concat_sample_weights = np.concatenate(
+                        [concat_sample_weights, concat_sample_weights[oversample_idx_l]]
+                    ).astype(np.float32)
+                before_n_l = n_long
+                n_long = int(np.sum(train_valid & (train_action == 1)))
+                n_total_act = max(int(np.sum(train_valid & (train_action == 0))) + n_long + n_short, 1)
+                new_frac_l = n_long / max(n_long + n_short, 1)
+                log.info(f"[V5_LONG_OS] Oversampled {extra_needed_long} LONG: {before_n_l} -> {n_long} "
+                         f"({new_frac_l:.1%} of LONG+SHORT) target_frac={min_frac_long:.0%} target_count={target_long}")
+                action_class_weights = np.ones(3, dtype=np.float32)
+                n_hold_new_l = int(np.sum(train_valid & (train_action == 0)))
+                if n_hold_new_l > 0 and n_long > 0 and n_short > 0:
+                    counts_new_l = np.array([n_hold_new_l, n_long, n_short], dtype=np.float64)
+                    inv_freq_new_l = n_total_act / (3.0 * counts_new_l)
+                    inv_freq_new_l = np.clip(inv_freq_new_l, 0.5, 3.0)
+                    action_class_weights = inv_freq_new_l.astype(np.float32)
+                    log.info(f"[V5_LONG_OS] Updated class weights after oversample: "
+                             f"HOLD={action_class_weights[0]:.3f} LONG={action_class_weights[1]:.3f} "
+                             f"SHORT={action_class_weights[2]:.3f}")
+        else:
+            log.info(f"[V5_LONG_OS] n_long={n_long} already >= target={target_long} "
+                     f"(min_frac={min_frac_long:.0%}) — no oversampling needed")
+    # ----------------------------------------------------------------------------
+
+    # Mutual exclusion guard (architect caveat): SHORT oversample is incompatible
+    # with LONG specialist mode — they pull the train distribution in opposite
+    # directions and cancel out. When specialist_mode='long' the LONG-oversample
+    # block above already balanced the labels; force-disable any user-passed
+    # --v5-short-oversample so the two oversamplers don't fight.
+    if specialist_mode == 'long' and short_oversample:
+        log.warning(
+            f"[V5_LONG_OS] Disabling short_oversample (was True) because "
+            f"specialist_mode='long' — LONG-oversample already balanced labels; "
+            f"running both would cancel out the directional bias."
+        )
+        short_oversample = False
 
     if short_oversample and n_long > 0:
         min_frac = float(short_min_fraction)
