@@ -273,12 +273,15 @@ class TestEntropyRegularisation:
         loss, ld = compute_v5_loss(outputs, batch, action_entropy_weight=1.0)
         loss.backward()
 
-        # Gradient for LONG class (index 1) should be negative:
-        # updating with -lr * grad → logit decreases → less collapsed
+        # Gradient for LONG class (index 1) should be POSITIVE:
+        # gradient-descent update: logit -= lr * grad.  With grad > 0,
+        # the dominant logit DECREASES → distribution moves toward uniform.
+        # (A negative grad would increase the logit, worsening collapse.)
         grad_long = logits_leaf.grad[:, 1].mean().item()
-        assert grad_long < 0, (
-            f"Entropy gradient for dominant LONG class should be negative "
-            f"(push toward uniform), got {grad_long:.4f}"
+        assert grad_long > 0, (
+            f"Entropy gradient for dominant LONG class should be positive "
+            f"(gradient descent then decreases the dominant logit → uniform), "
+            f"got {grad_long:.4f}"
         )
 
 
