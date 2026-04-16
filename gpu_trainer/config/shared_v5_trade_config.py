@@ -23,10 +23,12 @@ log = logging.getLogger(__name__)
 @dataclass
 class V5TradeDefaults:
     # ── Scoring / signal gate ────────────────────────────────────────────────
-    score_threshold: float = 0.20         # Task #84: 0.001→0.20. Old 0.001 was calibrated for broken NLL-collapse
-                                          # scores (range 0.001–0.002); healthy model (sigma_reg=0.5) produces
-                                          # scores 0.10–0.55. 0.20 targets top ~35% of healthy signals, ~5–8/day
-                                          # across 20 symbols. 0.001 was a no-op live gate — every signal passed.
+    score_threshold: float = 0.001        # Task #85: reverted 0.20→0.001. Task #84's 0.20 was calibrated for an
+                                          # aspirational "healthy model" (scores 0.10–0.55) that doesn't exist yet.
+                                          # Fold evidence shows actual score range 0.001–0.05 (fold 1 p90=0.218 is
+                                          # an outlier; fold 6 p90=0.0012 collapses to zero live signals at 0.20).
+                                          # Must match V5ForwardTestConfig default (also 0.001). Raise together with
+                                          # the training score once model consistently produces 0.10+ output.
     score_lambda: float = 0.30            # Task #56 A1: Lambda lowered 0.50→0.30; break-even p_side 0.333→0.231
     min_mu_r_score: float = 0.0           # Minimum expected-return component (0.0 = disabled; 0.005 caused NaN cascade after mu_debias EMA converged)
     min_p_side: float = 0.0               # Minimum directional probability

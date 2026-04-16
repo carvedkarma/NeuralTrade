@@ -1,0 +1,51 @@
+{
+  "fold_id": 3,
+  "window_train": "2022-01-06",
+  "window_test": "2022-01-06\u21922022-02-06",
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT"
+  ],
+  "corr_matrix": [
+    [
+      1.0,
+      null,
+      null
+    ],
+    [
+      null,
+      1.0,
+      null
+    ],
+    [
+      null,
+      null,
+      1.0
+    ]
+  ],
+  "mean_abs_corr": 0.0,
+  "max_abs_corr": 0.0,
+  "max_abs_corr_pair": [
+    "",
+    ""
+  ],
+  "overlap_ratio": 0.0,
+  "daily_r_series": {
+    "BTCUSDT": {},
+    "ETHUSDT": {
+      "2022-01-12": 1.92058627307415,
+      "2022-01-13": -1.0,
+      "2022-01-20": -4.105934381484985,
+      "2022-01-26": -2.666666626930237,
+      "2022-01-29": 1.1594202518463135,
+      "2022-01-31": 0.9145914167165756,
+      "2022-02-04": 0.0575280487537384
+    },
+    "SOLUSDT": {}
+  },
+  "corr_blocked_trades": 0,
+  "corr_penalty_trades": 0,
+  "corr_penalty_log": [],
+  "corr_block_log": []
+}

@@ -1,0 +1,586 @@
+{
+  "window_start": "2022-04-06",
+  "window_end": "2022-05-06",
+  "total_trades": 22,
+  "trades_per_day": 0.2443595973620271,
+  "n_long": 22,
+  "n_short": 0,
+  "win_rate": 0.5454545454545454,
+  "expectancy_r": 0.15691501105373556,
+  "profit_factor": 1.4827713817755115,
+  "sharpe": 2.974209467560864,
+  "sortino": 7.446254551678923,
+  "t_stat": 0.7863919757157222,
+  "p_value": 0.44042223876313885,
+  "ci_95_lower": -0.26407581059770147,
+  "ci_95_upper": 0.5260369947518814,
+  "max_drawdown_r": -3.867307037115097,
+  "avg_win_r": 0.8835652035971483,
+  "avg_loss_r": -0.7150652199983597,
+  "total_r": 3.4521302431821823,
+  "pct_tp": 0.3181818181818182,
+  "pct_sl": 0.2727272727272727,
+  "pct_exp": 0.4090909090909091,
+  "n_trail_win": 0,
+  "n_trail_be": 0,
+  "pct_trail": 0.0,
+  "score_threshold": 0.0013768920907750726,
+  "tp_mult": 2.0,
+  "sl_mult": 1.5,
+  "horizon": 16,
+  "cooldown": 4,
+  "equity_final_r": 3.4521302431821823,
+  "direction_stats": {
+    "long_trades": 22,
+    "long_win_rate": 0.5454545454545454,
+    "long_expectancy_r": 0.15691501105373556,
+    "long_total_r": 3.4521302431821823,
+    "short_trades": 0,
+    "short_win_rate": 0.0,
+    "short_expectancy_r": 0.0,
+    "short_total_r": 0.0
+  },
+  "weekly_stats": [
+    {
+      "week": 1,
+      "week_start": "04/04",
+      "trades": 1,
+      "expectancy": -1.0,
+      "total_r": -1.0,
+      "win_rate": 0.0
+    },
+    {
+      "week": 2,
+      "week_start": "04/11",
+      "trades": 4,
+      "expectancy": 0.6687207743525505,
+      "total_r": 2.674883097410202,
+      "win_rate": 0.75
+    },
+    {
+      "week": 3,
+      "week_start": "04/18",
+      "trades": 6,
+      "expectancy": 0.39536484082539874,
+      "total_r": 2.3721890449523926,
+      "win_rate": 0.6666666666666666
+    },
+    {
+      "week": 4,
+      "week_start": "04/25",
+      "trades": 8,
+      "expectancy": 0.055540578439831734,
+      "total_r": 0.44432462751865387,
+      "win_rate": 0.5
+    },
+    {
+      "week": 5,
+      "week_start": "05/02",
+      "trades": 3,
+      "expectancy": -0.3464221755663554,
+      "total_r": -1.0392665266990662,
+      "win_rate": 0.3333333333333333
+    }
+  ],
+  "low_confidence": true,
+  "gate_mode": "ref_magnitude",
+  "gate_cutoff": 0.006361989304423332,
+  "gate_select_rate": 0.25,
+  "gate_pass_rate": 10.216360060164295,
+  "score_decile_table": [
+    {
+      "decile": 1,
+      "label": "D1",
+      "score_lo": 0.006361989304423332,
+      "score_hi": 0.006430114014074206,
+      "n_trades": 3,
+      "avg_r": 0.4975845416386922,
+      "win_rate": 0.6666666666666666
+    },
+    {
+      "decile": 2,
+      "label": "D2",
+      "score_lo": 0.006430114014074206,
+      "score_hi": 0.006494640465825796,
+      "n_trades": 2,
+      "avg_r": 0.5249941051006317,
+      "win_rate": 0.5
+    },
+    {
+      "decile": 3,
+      "label": "D3",
+      "score_lo": 0.006494640465825796,
+      "score_hi": 0.0065202557947486636,
+      "n_trades": 2,
+      "avg_r": 0.5511390641331673,
+      "win_rate": 0.5
+    },
+    {
+      "decile": 4,
+      "label": "D4",
+      "score_lo": 0.0065202557947486636,
+      "score_hi": 0.006550607923418284,
+      "n_trades": 2,
+      "avg_r": 0.1666666865348816,
+      "win_rate": 0.5
+    },
+    {
+      "decile": 5,
+      "label": "D5",
+      "score_lo": 0.006550607923418284,
+      "score_hi": 0.006678133504465222,
+      "n_trades": 2,
+      "avg_r": -0.7323313653469086,
+      "win_rate": 0.0
+    },
+    {
+      "decile": 6,
+      "label": "D6",
+      "score_lo": 0.006678133504465222,
+      "score_hi": 0.006751779559999704,
+      "n_trades": 2,
+      "avg_r": 0.1666666865348816,
+      "win_rate": 0.5
+    },
+    {
+      "decile": 7,
+      "label": "D7",
+      "score_lo": 0.006751779559999704,
+      "score_hi": 0.006833416782319546,
+      "n_trades": 2,
+      "avg_r": 0.44791510701179504,
+      "win_rate": 1.0
+    },
+    {
+      "decile": 8,
+      "label": "D8",
+      "score_lo": 0.006833416782319546,
+      "score_hi": 0.006941331084817648,
+      "n_trades": 2,
+      "avg_r": -0.5857945308089256,
+      "win_rate": 0.0
+    },
+    {
+      "decile": 9,
+      "label": "D9",
+      "score_lo": 0.006941331084817648,
+      "score_hi": 0.007059317082166672,
+      "n_trades": 2,
+      "avg_r": -0.4679092466831207,
+      "win_rate": 0.5
+    },
+    {
+      "decile": 10,
+      "label": "D10",
+      "score_lo": 0.007059317082166672,
+      "score_hi": 0.00728943757712841,
+      "n_trades": 3,
+      "avg_r": 0.6055612017711004,
+      "win_rate": 1.0
+    },
+    {
+      "decile": 1,
+      "label": "L_D1",
+      "score_lo": 0.006361989304423332,
+      "score_hi": 0.006430114014074206,
+      "n_trades": 3,
+      "avg_r": 0.4975845416386922,
+      "win_rate": 0.6666666666666666
+    },
+    {
+      "decile": 2,
+      "label": "L_D2",
+      "score_lo": 0.006430114014074206,
+      "score_hi": 0.006494640465825796,
+      "n_trades": 2,
+      "avg_r": 0.5249941051006317,
+      "win_rate": 0.5
+    },
+    {
+      "decile": 3,
+      "label": "L_D3",
+      "score_lo": 0.006494640465825796,
+      "score_hi": 0.0065202557947486636,
+      "n_trades": 2,
+      "avg_r": 0.5511390641331673,
+      "win_rate": 0.5
+    },
+    {
+      "decile": 4,
+      "label": "L_D4",
+      "score_lo": 0.0065202557947486636,
+      "score_hi": 0.006550607923418284,
+      "n_trades": 2,
+      "avg_r": 0.1666666865348816,
+      "win_rate": 0.5
+    },
+    {
+      "decile": 5,
+      "label": "L_D5",
+      "score_lo": 0.006550607923418284,
+      "score_hi": 0.006678133504465222,
+      "n_trades": 2,
+      "avg_r": -0.7323313653469086,
+      "win_rate": 0.0
+    },
+    {
+      "decile": 6,
+      "label": "L_D6",
+      "score_lo": 0.006678133504465222,
+      "score_hi": 0.006751779559999704,
+      "n_trades": 2,
+      "avg_r": 0.1666666865348816,
+      "win_rate": 0.5
+    },
+    {
+      "decile": 7,
+      "label": "L_D7",
+      "score_lo": 0.006751779559999704,
+      "score_hi": 0.006833416782319546,
+      "n_trades": 2,
+      "avg_r": 0.44791510701179504,
+      "win_rate": 1.0
+    },
+    {
+      "decile": 8,
+      "label": "L_D8",
+      "score_lo": 0.006833416782319546,
+      "score_hi": 0.006941331084817648,
+      "n_trades": 2,
+      "avg_r": -0.5857945308089256,
+      "win_rate": 0.0
+    },
+    {
+      "decile": 9,
+      "label": "L_D9",
+      "score_lo": 0.006941331084817648,
+      "score_hi": 0.007059317082166672,
+      "n_trades": 2,
+      "avg_r": -0.4679092466831207,
+      "win_rate": 0.5
+    },
+    {
+      "decile": 10,
+      "label": "L_D10",
+      "score_lo": 0.007059317082166672,
+      "score_hi": 0.00728943757712841,
+      "n_trades": 3,
+      "avg_r": 0.6055612017711004,
+      "win_rate": 1.0
+    }
+  ],
+  "score_monotonic": false,
+  "side_quality": {
+    "long_avg_score": 0.006716561503708363,
+    "long_avg_p_side": 0.5532374978065491,
+    "long_avg_mu_r": 0.048655107617378235,
+    "long_head_agree_pct": 100.0,
+    "long_agree": {
+      "n": 22,
+      "er": 0.1569,
+      "pf": 1.48
+    },
+    "long_disagree": null
+  },
+  "slice_audit": [
+    {
+      "threshold_label": "top5%",
+      "threshold": 0.0066514392383396626,
+      "side": "ALL",
+      "n_trades": 46,
+      "expectancy": -0.08440999557142673,
+      "win_rate": 0.43478260869565216,
+      "pf": 0.8095834714917179,
+      "avg_score": 0.007129870820790529,
+      "tpd": 0.5109337035751476,
+      "avg_mu_R": 0.0622,
+      "avg_p_side": 0.5308
+    },
+    {
+      "threshold_label": "top5%",
+      "threshold": 0.0066514392383396626,
+      "side": "LONG",
+      "n_trades": 46,
+      "expectancy": -0.08440999557142673,
+      "win_rate": 0.43478260869565216,
+      "pf": 0.8095834714917179,
+      "avg_score": 0.007129870820790529,
+      "tpd": 0.5109337035751476,
+      "avg_mu_R": 0.0622,
+      "avg_p_side": 0.5308
+    },
+    {
+      "threshold_label": "top10%",
+      "threshold": 0.006184508558362722,
+      "side": "ALL",
+      "n_trades": 117,
+      "expectancy": -0.17565116765073094,
+      "win_rate": 0.38461538461538464,
+      "pf": 0.6732733973896254,
+      "avg_score": 0.0066320146434009075,
+      "tpd": 1.2995487677889621,
+      "avg_mu_R": 0.0604,
+      "avg_p_side": 0.5267
+    },
+    {
+      "threshold_label": "top10%",
+      "threshold": 0.006184508558362722,
+      "side": "LONG",
+      "n_trades": 117,
+      "expectancy": -0.17565116765073094,
+      "win_rate": 0.38461538461538464,
+      "pf": 0.6732733973896254,
+      "avg_score": 0.0066320146434009075,
+      "tpd": 1.2995487677889621,
+      "avg_mu_R": 0.0604,
+      "avg_p_side": 0.5267
+    },
+    {
+      "threshold_label": "top20%",
+      "threshold": 0.005902752745896578,
+      "side": "ALL",
+      "n_trades": 248,
+      "expectancy": -0.11851663756627409,
+      "win_rate": 0.4032258064516129,
+      "pf": 0.7799721966432219,
+      "avg_score": 0.006278073415160179,
+      "tpd": 2.754599097535578,
+      "avg_mu_R": 0.0598,
+      "avg_p_side": 0.5169
+    },
+    {
+      "threshold_label": "top20%",
+      "threshold": 0.005902752745896578,
+      "side": "LONG",
+      "n_trades": 248,
+      "expectancy": -0.11851663756627409,
+      "win_rate": 0.4032258064516129,
+      "pf": 0.7799721966432219,
+      "avg_score": 0.006278073415160179,
+      "tpd": 2.754599097535578,
+      "avg_mu_R": 0.0598,
+      "avg_p_side": 0.5169
+    },
+    {
+      "threshold_label": "top30%",
+      "threshold": 0.005564392544329166,
+      "side": "ALL",
+      "n_trades": 324,
+      "expectancy": -0.06831313469044772,
+      "win_rate": 0.42592592592592593,
+      "pf": 0.865892561195003,
+      "avg_score": 0.006101182661950588,
+      "tpd": 3.598750433877126,
+      "avg_mu_R": 0.0584,
+      "avg_p_side": 0.5161
+    },
+    {
+      "threshold_label": "top30%",
+      "threshold": 0.005564392544329166,
+      "side": "LONG",
+      "n_trades": 324,
+      "expectancy": -0.06831313469044772,
+      "win_rate": 0.42592592592592593,
+      "pf": 0.865892561195003,
+      "avg_score": 0.006101182661950588,
+      "tpd": 3.598750433877126,
+      "avg_mu_R": 0.0584,
+      "avg_p_side": 0.5161
+    }
+  ],
+  "score_spread": {
+    "p1": 0.000156,
+    "p10": 0.001557,
+    "p25": 0.003118,
+    "p50": 0.004771,
+    "p75": 0.005743,
+    "p90": 0.006185,
+    "p99": 0.007525
+  },
+  "score_disc_p90p50": 1.3,
+  "score_disc_p99p50": 1.58,
+  "ddt_diagnostics": null,
+  "ddt_blocked": 0,
+  "per_symbol_stats": {
+    "BTCUSDT": {
+      "trades": 19,
+      "win_rate": 0.474,
+      "expectancy_r": -0.0288,
+      "total_r": -0.5479
+    },
+    "ETHUSDT": {
+      "trades": 3,
+      "win_rate": 1.0,
+      "expectancy_r": 1.3333,
+      "total_r": 4.0
+    }
+  },
+  "per_symbol_r_kill": {
+    "floor": -8.0,
+    "killed_symbols": [],
+    "blocked_trades": 0,
+    "cumulative_r": {
+      "BTCUSDT": -0.5479,
+      "ETHUSDT": 4.0
+    }
+  },
+  "prediction_quality": {
+    "action_accuracy": 0.5455,
+    "mu_r_correlation": -0.2288,
+    "mean_predicted_mae": 1.6191,
+    "mean_predicted_mfe": 2.2324,
+    "mean_predicted_mu_R": 0.0487,
+    "mean_actual_R": 0.1569,
+    "sigma_1std_coverage": 0.4091,
+    "sigma_2std_coverage": 1.0,
+    "mean_predicted_sigma": 0.8702,
+    "mean_p_side": 0.5532,
+    "mean_p_side_winners": 0.559,
+    "mean_p_side_losers": 0.5463
+  },
+  "corr_blocked_trades": 0,
+  "sizing_diagnostics": {
+    "daily_loss_management": {
+      "daily_loss_cap": -4.0,
+      "per_symbol_daily_r_budget": null,
+      "days_killed": 0,
+      "trades_blocked_daily_cap": 0,
+      "trades_blocked_symbol_cap": 0,
+      "symbol_kill_counts": {}
+    }
+  },
+  "daily_blocked_trades": 0,
+  "equity_blocked_trades": 0,
+  "directional_balance": {
+    "stage_distributions": {
+      "pre": {
+        "total": 59,
+        "long": 59,
+        "short": 0,
+        "hold": 0,
+        "long_pct": 100.0,
+        "short_pct": 0.0,
+        "hold_pct": 0.0
+      },
+      "post_ema200": {
+        "total": 22,
+        "long": 22,
+        "short": 0,
+        "hold": 0,
+        "long_pct": 100.0,
+        "short_pct": 0.0,
+        "hold_pct": 0.0
+      },
+      "post_regime": {
+        "total": 22,
+        "long": 22,
+        "short": 0,
+        "hold": 0,
+        "long_pct": 100.0,
+        "short_pct": 0.0,
+        "hold_pct": 0.0
+      },
+      "final": {
+        "total": 22,
+        "long": 22,
+        "short": 0,
+        "hold": 0,
+        "long_pct": 100.0,
+        "short_pct": 0.0,
+        "hold_pct": 0.0
+      }
+    },
+    "gate_blocks": {
+      "cooldown": 37
+    }
+  },
+  "debias_spread_ratio": null,
+  "per_symbol_thresholds": {
+    "BTCUSDT": {
+      "long": null,
+      "short": null
+    },
+    "ETHUSDT": {
+      "long": null,
+      "short": null
+    },
+    "SOLUSDT": {
+      "long": null,
+      "short": null
+    }
+  },
+  "per_sym_side_bias": {
+    "BTCUSDT": {
+      "long_pct": 100.0,
+      "short_pct": 0.0,
+      "n_taken": 19,
+      "biased": true,
+      "bias_dir": "LONG"
+    },
+    "ETHUSDT": {
+      "long_pct": 100.0,
+      "short_pct": 0.0,
+      "n_taken": 3,
+      "biased": true,
+      "bias_dir": "LONG"
+    }
+  },
+  "pct_calibration": [
+    {
+      "pct_label": "Top5%",
+      "threshold": 0.0071,
+      "n": 12,
+      "er": 0.2847,
+      "pf": 2.12,
+      "wr": 0.667,
+      "maxdd": -1.19,
+      "tpd": 0.1,
+      "long_n": 12,
+      "long_er": 0.2847,
+      "short_n": 0,
+      "short_er": 0.0
+    },
+    {
+      "pct_label": "Top10%",
+      "threshold": 0.0069,
+      "n": 24,
+      "er": 0.0684,
+      "pf": 1.22,
+      "wr": 0.542,
+      "maxdd": -4.49,
+      "tpd": 0.3,
+      "long_n": 24,
+      "long_er": 0.0684,
+      "short_n": 0,
+      "short_er": 0.0
+    },
+    {
+      "pct_label": "Top15%",
+      "threshold": 0.0067,
+      "n": 35,
+      "er": 0.0052,
+      "pf": 1.02,
+      "wr": 0.514,
+      "maxdd": -5.05,
+      "tpd": 0.4,
+      "long_n": 35,
+      "long_er": 0.0052,
+      "short_n": 0,
+      "short_er": 0.0
+    },
+    {
+      "pct_label": "Top20%",
+      "threshold": 0.0065,
+      "n": 47,
+      "er": 0.0658,
+      "pf": 1.22,
+      "wr": 0.489,
+      "maxdd": -5.48,
+      "tpd": 0.5,
+      "long_n": 47,
+      "long_er": 0.0658,
+      "short_n": 0,
+      "short_er": 0.0
+    }
+  ]
+}

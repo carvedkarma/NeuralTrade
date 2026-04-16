@@ -1,0 +1,303 @@
+I need a strict patch pass on the V5 pipeline. Patch these exact files and prove each fix with targeted tests.
+
+FILES
+1. gpu_trainer/train/v5_train.py
+2. gpu_trainer/config/shared_v5_trade_config.py
+3. gpu_trainer/quick_start.py
+
+==================================================
+PATCH 1 — UNIFY THRESHOLD SOURCE OF TRUTH
+==================================================
+
+Problem:
+Backtest/forward-test and live/shared defaults are still on different score scales.
+
+Current mismatch:
+- gpu_trainer/train/v5_train.py:
+  V5ForwardTestConfig.score_threshold = 0.001
+- gpu_trainer/config/shared_v5_trade_config.py:
+  V5TradeDefaults.score_threshold = 0.20
+
+This is a real engineering bug. One side is using 0.001-scale, the other is using 0.20-scale.
+
+Required fix:
+- Set one source-of-truth score threshold default for all V5 paths.
+- Use the same default in:
+  - V5ForwardTestConfig
+  - V5TradeDefaults
+  - any quick_start / CLI fallback defaults
+- Current score scale suggests the unified default should be 0.001, not 0.20.
+
+Patch targets:
+- gpu_trainer/train/v5_train.py
+- gpu_trainer/config/shared_v5_trade_config.py
+- gpu_trainer/quick_start.py
+
+Acceptance:
+- grep proof showing only one default threshold scale remains
+- targeted synthetic score check:
+  - small batch of finite scores around 0.001–0.05
+  - show backtest and live/shared thresholds accept/reject consistently
+
+==================================================
+PATCH 2 — FIX v5_quality_mask EDGE GATE FOR REAL
+==================================================
+
+Problem:
+edge_pass exists in final_mask, but relax/fallback still nullifies it.
+
+Observed behavior:
+- low-edge bars fail real gate
+- relax loop runs
+- finiteness-only fallback activates
+- all bars pass anyway
+
+Required fix:
+- Add strict audit mode:
+  quality_gate_strict_audit: bool = False
+- When strict audit mode is True:
+  - DO NOT allow finiteness-only fallback
+  - preserve a real edge / mu_R floor during relaxation
+- Even in production mode, fallback must not completely erase edge filtering.
+
+Patch target:
+- gpu_trainer/train/v5_train.py
+- function: v5_quality_mask()
+
+Implementation direction:
+- keep sigma/mae relaxation if needed
+- do not relax edge_pass all the way to “any finite mu_R”
+- if fallback remains, preserve a minimum edge floor
+- optionally split:
+  - adaptive_sigma_min
+  - adaptive_mae_max
+  - adaptive_ptrade_min
+  - adaptive_mu_min
+  and only relax the first three aggressively
+
+Acceptance:
+- pytest -q tests/test_v5_precision_audit.py::test_bug1_edge_pass_filters_low_mu_r_bars
+  must pass
+- add/verify a strict-audit regression where fallback does not rescue low-edge bars
+
+==================================================
+PATCH 3 — FIX RAW vs DEBIASED mu_R SCALE MISMATCH
+==================================================
+
+Problem:
+v5_quality_mask still mixes scales.
+The gate threshold is derived from one mu_R representation while the forward array can be on another scale.
+
+Required fix:
+- Make scale selection explicit:
+  - if cfg.mu_debias == False:
+    use raw forward mu_R and raw reference mu_R
+  - if cfg.mu_debias == True:
+    either:
+      A) use debiased forward mu_R and debiased reference mu_R
+      OR
+      B) bypass mu_R gate entirely if reference scale cannot be matched
+- Do not compare raw training mu_R against debiased forward mu_R.
+
+Patch target:
+- gpu_trainer/train/v5_train.py
+- function: v5_quality_mask()
+- any ref-array construction path in forward-test setup
+
+Implementation direction:
+- if _raw_mu_R_ref exists, use it only when comparing with raw forward mu_R
+- if debiased gate is desired, create/store explicit debiased reference mu_R too
+- add a debug log line showing which scale path is active:
+  - RAW_MU_GATE
+  - DEBIASED_MU_GATE
+  - MU_GATE_DISABLED
+
+Acceptance:
+- add/update regression test:
+  - mu_debias OFF path uses raw/raw consistently
+  - mu_debias ON path uses matched scale or skips mu gate explicitly
+- logs must prove which path ran
+
+==================================================
+PATCH 4 — FIX compute_v5_scores CONTRACT DRIFT
+==================================================
+
+Problem:
+compute_v5_scores now returns tuple:
+  (scores, sides, diag)
+but parts of the ecosystem/tests still expect dict-like access.
+
+Required fix:
+- Choose one stable contract and update everything.
+Recommended:
+- keep tuple return for runtime performance
+- update all tests/audit helpers/callers to use tuple consistently
+OR
+- return a lightweight dataclass / namedtuple with explicit fields
+
+Patch target:
+- gpu_trainer/train/v5_train.py
+- all failing tests referencing old score dict API
+
+Acceptance:
+- no test should expect old dict-style access if runtime API is tuple-based
+- task53 / precision audit score tests must pass
+
+==================================================
+PATCH 5 — FIX DIRECTION-COLLAPSE / SIDE-BALANCE LOGIC
+==================================================
+
+Problem:
+Direction-collapse fix is incomplete and tests fail around:
+- 3-class target expectations
+- entropy gradient direction
+- CLI/default wiring for action_entropy_weight
+Also current live runs still show:
+- all HOLD collapse
+- SIDE_BAL_W showing stale values in real training path
+
+Required fix:
+A) Ensure actual executed defaults are correct everywhere:
+- side_bal_weight default = 0.05
+- action_entropy_weight default = intended repaired value
+- no stale 0.15 default in real entry points
+
+B) Fix side-balance / entropy implementation:
+- inspect compute_v5_loss()
+- verify entropy term has the correct sign
+- dominant class should be penalized, not reinforced
+- verify 3-class action probs [H, L, S] are handled consistently
+
+C) Add runtime proof log each validation epoch:
+- pred[H/L/S]
+- hold%
+- long%
+- short%
+- warn loudly if any class >90%
+
+Patch target:
+- gpu_trainer/train/v5_train.py
+- gpu_trainer/quick_start.py
+- any CLI config/default layer that feeds these params
+
+Acceptance:
+- pytest -q tests/test_task54_direction_collapse_fix.py
+  must pass
+- grep proof that 0.15 stale default is gone from real training entry points
+
+==================================================
+PATCH 6 — FIX MFE/MAE LOSS SHAPE MISMATCH
+==================================================
+
+Problem:
+Core loss still shows broadcasting risk:
+- mfe_true [N,1] vs mfe_pred [N]
+- mae_true [N,1] vs mae_pred [N]
+
+Required fix:
+- normalize shapes before loss
+- explicitly squeeze or reshape true tensors to match pred tensors
+- do not rely on PyTorch broadcasting in smooth_l1_loss
+
+Patch target:
+- gpu_trainer/train/v5_train.py
+- function: compute_v5_loss()
+
+Implementation direction:
+- before loss:
+  mfe_true = mfe_true.view(-1)
+  mae_true = mae_true.view(-1)
+  ret_true = ret_true.view(-1) if needed
+- ensure pred tensors are same shape
+
+Acceptance:
+- targeted loss-path tests pass without broadcasting warnings
+
+==================================================
+PATCH 7 — FIX WALK-FORWARD THRESHOLD EMA FLOOR EVERYWHERE
+==================================================
+
+Problem:
+Old stale 0.01 floor logic previously survived in some dead-fold / no-report paths.
+Need to ensure all threshold EMA decay uses the actual configured floor, not stale constants.
+
+Required fix:
+- search for every hardcoded threshold floor in walk-forward logic
+- replace with configured floor:
+  - tpd_ctrl_cfg.min_threshold_floor
+  or
+  - config.min_threshold
+- no hidden 0.01 floor should remain in dead-fold or no-report handling
+
+Patch target:
+- gpu_trainer/train/v5_train.py
+
+Acceptance:
+- pytest -q tests/test_wf_threshold_ema.py
+  must pass
+- grep proof no stale 0.01 threshold floor remains in WF EMA paths
+
+==================================================
+PATCH 8 — ADD STRICT TRAINING HEALTH TELEMETRY
+==================================================
+
+Problem:
+All-HOLD collapse and dead score spread are only visible late unless logged explicitly.
+
+Required telemetry each validation epoch:
+- pred[H/L/S]
+- hold%, long%, short%
+- mu_r_corr_val
+- raw mu_R mean/std
+- debiased mu_R mean/std if debias enabled
+- mae_R mean/std
+- score_p50 / p90 / p99
+- disc(p90/p50), disc(p99/p50)
+- p_long mean
+- p_short mean
+- whether quality-gate fallback activated
+- whether strict audit mode is on
+
+Patch target:
+- gpu_trainer/train/v5_train.py
+
+Acceptance:
+- one short proof run must clearly show these values
+- no ambiguity about whether the model is collapsing to HOLD
+
+==================================================
+PATCH 9 — ONE SHORT PROOF RUN AFTER PATCH
+==================================================
+
+After all fixes, run one short proof training run and show:
+
+1. pred[H/L/S] is no longer all HOLD
+2. finite scores > 0
+3. score_p90 > score_p50
+4. no EMPTY score percentiles
+5. strict audit mode does not trigger finiteness-only fallback
+6. backtest/live threshold defaults are aligned
+7. side_bal_weight in actual runtime logs shows 0.05, not 0.15
+
+==================================================
+REQUIRED OUTPUT FORMAT
+==================================================
+
+For each patch:
+- file path
+- exact old line(s)
+- exact new line(s)
+- why it mattered
+- test proof
+
+Then run and report:
+1. pytest -q tests/test_v5_precision_audit.py -q
+2. pytest -q tests/test_task51_signal_fix.py -q
+3. pytest -q tests/test_task53_score_collapse_fix.py -q
+4. pytest -q tests/test_task54_direction_collapse_fix.py -q
+5. pytest -q tests/test_wf_threshold_ema.py -q
+
+Important:
+- Do not hide failures by weakening tests
+- Do not keep fallback behavior that masks broken signal
+- Fix the actual executed path, not just helper functions

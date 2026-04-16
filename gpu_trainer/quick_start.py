@@ -5353,10 +5353,11 @@ Examples:
                         help="v5 TPD controller: initial score threshold (default: auto p90)")
     parser.add_argument("--v5-mae-cap", type=float, default=2.0,
                         help="v5 score penalty: clamp MAE to this cap (default: 2.0)")
-    parser.add_argument("--v5-side-bal-weight", type=float, default=0.05,
+    parser.add_argument("--v5-side-bal-weight", type=float, default=0.15,
                         help="3-class side-balance KL loss weight added to L_action. "
-                             "T5 fix: default 0.05 (was 0.15). 3-class targets include HOLD so "
-                             "all-HOLD collapse is penalised. Lower weight reduces HOLD-bias pressure.")
+                             "Task #53 canonical default 0.15; T5 found 0.05 works better in specialist mode. "
+                             "Pass --v5-side-bal-weight 0.05 explicitly to use the T5-optimised value. "
+                             "3-class targets include HOLD so all-HOLD collapse is penalised.")
     parser.add_argument("--v5-action-entropy-weight", type=float, default=0.12,
                         help="v5 action head entropy regularisation weight (default: 0.12). "
                              "Task #56 A3: raised 0.10→0.12 for slightly stronger diversity push. "

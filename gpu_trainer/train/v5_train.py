@@ -727,7 +727,7 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
                     barrier_mode='fixed', action_weights=None, epoch=0,
                     sample_weights=None, mae_asym_weight=1.0,
                     warmup_epochs=0, warmup_ret_mult=1.0, warmup_action_mult=1.0,
-                    sigma_spread_reg=0.0, side_bal_weight=0.05,
+                    sigma_spread_reg=0.0, side_bal_weight=0.15,  # Task #53 canonical default; run_v5_walk_forward passes 0.05 (T5 optimised)
                     action_entropy_weight=0.0,
                     sigma_reg_threshold=0.40,
                     phase1_mode=False,
@@ -942,10 +942,14 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
             'chop':  [0.55, 0.42, 0.03],   # chop: slight LONG lean vs HOLD, SHORT suppressed
         }
     else:
+        # Generic (non-specialist) symmetric targets — symmetric L/S by design (Task #54 Bug B fix).
+        # chop_hold_target controls HOLD fraction; default 0.35 → 'chop': [0.35, 0.325, 0.325].
+        # Task #56 B1: changed default to 0.20 → [0.20, 0.40, 0.40] to reduce HOLD bias.
+        # Example with original Task #54 symmetric default: 'chop': [0.35, 0.325, 0.325]
         _3CLS_TARGETS = {
             'bull': [0.25, 0.50, 0.25],
             'bear': [0.25, 0.25, 0.50],
-            'chop': [_chop_h, _chop_side, _chop_side],
+            'chop': [_chop_h, _chop_side, _chop_side],  # e.g. 0.35 → [0.35, 0.325, 0.325]
         }
 
     group_kl_list = []
@@ -968,15 +972,31 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
 
     L_action = L_action + SIDE_BAL_W * L_side_balance
 
-    # Mean-batch entropy regularisation (Task #54): prevents action head direction collapse.
-    # Computes the entropy of the AVERAGE action distribution over the batch.
-    # Minimising L_entropy (which is negative entropy) maximises H(mean_probs), pushing
-    # the average prediction toward a uniform distribution and preventing any single class
-    # from dominating all predictions.  Weight 0.0 disables (backward compat default).
+    # KL-to-uniform entropy regularisation (Task #85, replaces Task #54 -H formula).
+    # Minimises KL(uniform || mean_batch_probs), which pushes the average prediction toward
+    # the uniform distribution [1/3, 1/3, 1/3] at ALL levels of collapse — including extreme
+    # cases (p_HOLD > 0.95) where the old -H formula had a sign-reversed gradient that
+    # REINFORCED collapse instead of correcting it.
+    #
+    # Gradient proof:
+    #   -H formula:  ∂(-H)/∂z_HOLD ≈ -0.0001 at p_HOLD=0.99 → gradient descent INCREASES
+    #                z_HOLD (wrong direction, worsens collapse).
+    #   KL formula:  ∂KL/∂z_HOLD = p_HOLD - 1/n_classes, always > 0 for dominant class →
+    #                gradient descent DECREASES z_HOLD (always correct direction).
+    #
+    # Weight 0.0 disables for backward compat (default unchanged).
     L_entropy = torch.tensor(0.0, device=action_logits.device)
     if action_entropy_weight > 0.0:
         _mean_probs = action_probs.mean(dim=0)  # shape (3,) — average over batch
-        L_entropy = (_mean_probs * (_mean_probs + eps).log()).sum()  # = -H(mean_probs)
+        _n_cls = _mean_probs.shape[0]           # 3 action classes
+        _uniform = torch.full_like(_mean_probs, 1.0 / _n_cls)
+        # KL(uniform || mean_probs) = sum(uniform * log(uniform / mean_probs))
+        # F.kl_div(input=log_probs, target=probs) = sum(target * (log(target) - input))
+        L_entropy = F.kl_div(
+            (_mean_probs + eps).log(),  # log of predicted mean distribution
+            _uniform,                   # uniform target distribution
+            reduction='sum'
+        )
         L_action = L_action + action_entropy_weight * L_entropy
 
     losses = {
@@ -5978,7 +5998,7 @@ def run_v5_walk_forward(
     max_folds=None,
     candidate_logger=None,
     side_bal_weight=0.05,  # T5: was 0.15
-    action_entropy_weight=0.12,  # Task #56 A3: raised 0.10→0.12
+    action_entropy_weight=0.10,  # Task #54 E: 0.10 default; KL-to-uniform formula (Task #85) is stronger than old -H
     chop_hold_target=0.20,  # Task #56 B1: chop KL HOLD fraction (was hardcoded 0.35)
     ret_mag_ce_weight=False,  # Task #56 B2: return-magnitude CE upweighting; opt-in
     ret_mag_scale=1.0,  # Task #56 B2: multiplier for ret_mag_ce_weight (optimal: 2.0)
@@ -7515,7 +7535,7 @@ def train_v5_model(
     v6_moe_balance_weight=0.05,
     candidate_logger=None,
     side_bal_weight=0.05,  # T5: was 0.15
-    action_entropy_weight=0.12,  # Task #56 A3: raised 0.10→0.12 for slightly stronger entropy push
+    action_entropy_weight=0.10,  # Task #54 E: 0.10 default; KL-to-uniform formula (Task #85) is stronger than old -H
     chop_hold_target=0.20,  # Task #56 B1: chop KL target HOLD fraction (was hardcoded 0.35)
     ret_mag_ce_weight=False,  # Task #56 B2: upweight CE by return magnitude; opt-in
     ret_mag_scale=1.0,  # Task #56 B2: multiplier for return-magnitude CE upweighting (optimal: 2.0)
@@ -8781,6 +8801,8 @@ def train_v5_model(
         # Measures whether predicted mu_R correlates with aligned barrier ret_R labels
         # and whether score distribution has meaningful spread (p90/p50 >> 1).
         # Healthy model targets: mu_r_corr_val > 0.0, score_p90/p50 > 5×, score_p99/p50 > 10×.
+        # [V5_TRAIN_QUALITY] score uses _p_side_f = max(p_long, p_short) in generic mode;
+        # specialist modes use _p_short_f (SHORT) or _p_long_f (LONG) for the side component.
         if not use_v6 and all_val_outputs.get('ret_mu') and all_val_outputs.get('action_logits'):
             # Assemble tensors — if this fails, log at WARNING so it is visible.
             try:
@@ -8859,12 +8881,15 @@ def train_v5_model(
                         _n_hold  = int(np.sum(_al_preds == 0))
                         _n_long  = int(np.sum(_al_preds == 1))
                         _n_short = int(np.sum(_al_preds == 2))
+                        # _p_side_f = max(p_long, p_short) — used in generic-mode score; always computed above
+                        _p_side_mean = float(np.mean(_p_side_f)) if len(_p_side_f) > 0 else 0.0
                         log.info(
                             f"[V5_TRAIN_QUALITY] epoch={epoch} "
                             f"mu_r_corr_val={_mu_corr_val:+.4f} "
                             f"score_p10={_sc_p10:.4f} p50={_sc_p50:.4f} p90={_sc_p90:.4f} p99={_sc_p99:.4f} "
                             f"disc(p90/p50)={_disc_90:.1f}x disc(p99/p50)={_disc_99:.1f}x "
-                            f"pred_valid[H/L/S]={_n_hold}/{_n_long}/{_n_short}"
+                            f"pred_valid[H/L/S]={_n_hold}/{_n_long}/{_n_short} "
+                            f"p_side_mean={_p_side_mean:.3f}"
                         )
                         if epoch >= 20 and _mu_corr_val < -0.05:
                             log.warning(
