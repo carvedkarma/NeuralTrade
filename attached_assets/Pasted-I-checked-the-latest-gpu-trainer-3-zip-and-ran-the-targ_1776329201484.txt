@@ -1,0 +1,71 @@
+I checked the latest gpu_trainer(3).zip and ran the targeted test set again.
+
+It is still not fully fixed.
+
+What is fixed
+strict audit mode exists
+threshold EMA floor cleanup is in
+MFE/MAE shape squeeze is in
+telemetry blocks are in
+compute_v5_scores() now returns a tuple consistently in code
+raw-mu reference support exists in the gate path
+What is still broken
+1) Entropy / anti-collapse fix is still wrong
+
+test_task54_direction_collapse_fix.py still fails in 3 places:
+
+L_entropy is positive when the test expects nonpositive
+uniform logits do not produce the expected max-entropy value
+gradient on the dominant class is still the wrong sign
+
+That means the current entropy regularizer is still not behaving the way the task/tests expect.
+
+2) Raw-vs-debiased mu_R gate is still not proven fixed
+
+This still fails:
+
+tests/test_v5_precision_audit.py::TestProductionReadinessAuditFixes::test_bug1_t4_raw_mu_r_used_for_gate_when_available
+
+Observed result:
+
+raw=0
+debiased=0
+
+The test expects the raw reference path to tighten differently from the debiased-only path. Right now both behave the same, so _raw_mu_R_ref is not producing the intended effect.
+
+3) Shared live threshold bug is likely still present
+
+From your earlier repo state and your own audit, the main live/shared threshold issue was:
+
+shared_v5_trade_config.py still using 0.20
+
+I did not rerun every grep in this message, but based on the failures above and your previous summary, this still needs to be treated as an active must-fix until proven otherwise.
+
+4) Score API/test contract mismatch is still unresolved in at least one test
+
+This still fails:
+
+tests/test_v5_precision_audit.py::test_score_lambda_0_30_via_compute_v5_scores
+
+Reason:
+
+test still expects dict-style access like result['score_long']
+actual function returns a tuple
+
+So either:
+
+the tests need to be updated to the tuple API, or
+the function needs a compatibility wrapper
+
+Current status: still mismatched.
+
+My precise verdict
+
+So the current repo is not fixed yet.
+
+The remaining real blockers are:
+
+entropy anti-collapse implementation still not aligned with intended behavior
+raw-vs-debiased gate logic still not producing distinct behavior
+live/shared threshold alignment still needs proof
+score API contract drift still not fully cleaned up
