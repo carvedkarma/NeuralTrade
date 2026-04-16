@@ -22,6 +22,13 @@ import math
 import pytest
 import numpy as np
 
+HAS_TORCH = False
+try:
+    import torch  # noqa: F401
+    HAS_TORCH = True
+except ImportError:
+    pass
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -356,3 +363,80 @@ class TestParameterThreading:
             "run_v5_walk_forward must forward side_bal_weight to train_v5_model; "
             "check that side_bal_weight=side_bal_weight appears in the call"
         )
+
+
+@pytest.mark.skipif(not HAS_TORCH, reason="torch not available in this environment")
+class TestV5ScoreBundleApiCompatibility:
+    """Regression guard for V5ScoreBundle return type of compute_v5_scores.
+
+    Ensures both call styles (tuple unpacking and dict access) work together
+    without breaking.  Requires torch because v5_train.py imports it at
+    module level; skipped automatically in torch-less environments.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _imports(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from train.v5_train import compute_v5_scores, V5ScoreBundle
+        self.compute_v5_scores = compute_v5_scores
+        self.V5ScoreBundle = V5ScoreBundle
+
+    def _make_arrays(self, n=40):
+        return {
+            'mu_R':    np.full(n, 0.30, dtype=np.float32),
+            'mae':     np.full(n, 0.30, dtype=np.float32),
+            'mfe':     np.full(n, 0.60, dtype=np.float32),
+            'p_long':  np.full(n, 0.60, dtype=np.float32),
+            'p_short': np.full(n, 0.05, dtype=np.float32),
+        }
+
+    def test_return_type_is_score_bundle(self):
+        n = 40
+        result = self.compute_v5_scores(None, _arrays=self._make_arrays(n),
+                                        min_mu_r_score=0.0)
+        assert isinstance(result, self.V5ScoreBundle), (
+            f"compute_v5_scores must return V5ScoreBundle, got {type(result)}")
+
+    def test_tuple_unpacking_yields_three_elements(self):
+        n = 40
+        result = self.compute_v5_scores(None, _arrays=self._make_arrays(n),
+                                        min_mu_r_score=0.0)
+        scores_a, sides_a, diag_a = result
+        assert len(scores_a) == n, "scores must have n elements"
+        assert len(sides_a)  == n, "sides must have n elements"
+        assert isinstance(diag_a, dict), "diag must be a dict"
+
+    def test_integer_index_access(self):
+        n = 40
+        result = self.compute_v5_scores(None, _arrays=self._make_arrays(n),
+                                        min_mu_r_score=0.0)
+        scores_a, sides_a, diag_a = result
+        assert (result[0] == scores_a).all(), "result[0] must equal scores"
+        assert (result[1] == sides_a).all(),  "result[1] must equal sides"
+        assert result[2] is diag_a,           "result[2] must be the diag dict"
+
+    def test_dict_access_score_long_and_short(self):
+        n = 40
+        result = self.compute_v5_scores(None, _arrays=self._make_arrays(n),
+                                        min_mu_r_score=0.0)
+        scores_a, _, _ = result
+        long_scores  = result['score_long']
+        short_scores = result['score_short']
+        assert len(long_scores) + len(short_scores) <= n, (
+            "score_long + score_short must not exceed n")
+        assert long_scores.dtype == scores_a.dtype, (
+            "score_long must have the same dtype as scores array")
+
+    def test_dict_access_diag_keys_pass_through(self):
+        n = 40
+        result = self.compute_v5_scores(None, _arrays=self._make_arrays(n),
+                                        min_mu_r_score=0.0)
+        _, _, diag_a = result
+        assert result['mu_R_mean'] == diag_a['mu_R_mean'], (
+            "dict access to diag keys must return diag values")
+
+    def test_len_is_three(self):
+        n = 40
+        result = self.compute_v5_scores(None, _arrays=self._make_arrays(n),
+                                        min_mu_r_score=0.0)
+        assert len(result) == 3, "len(V5ScoreBundle) must be 3"

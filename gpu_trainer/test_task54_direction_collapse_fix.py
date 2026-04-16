@@ -249,14 +249,17 @@ class TestEntropyRegularisation:
 
     @pytest.mark.skipif(not HAS_TORCH, reason="torch not available in this environment")
     def test_entropy_gradient_pushes_toward_uniform(self):
-        """Gradient of entropy loss w.r.t. collapsed logits should push
-        the dominant class DOWN and minority classes UP (toward uniform).
+        """Total loss gradient w.r.t. collapsed logits pushes toward uniform.
 
-        This verifies the gradient direction is correct, not just sign of loss.
-        A logit of +10 for LONG → softmax ≈ [ε, 1, ε].
-        Gradient of L_entropy = Σ p*log(p) w.r.t. logits should be negative
-        for the dominant class (LONG, index 1) so that updating logits with
-        -lr * grad DECREASES the LONG logit (pushes toward uniform).
+        Gradient-descent update rule:  logit -= lr * grad.
+        For the dominant LONG class (logit=+10) to DECREASE toward uniform,
+        the total gradient w.r.t. z_LONG must be POSITIVE (grad > 0).
+
+        This verifies the gradient direction of the full combined loss, not only
+        the entropy term in isolation.  A logit of +10 for LONG →
+        softmax ≈ [ε, 1, ε].  The L_action KL-to-regime-targets term contributes
+        ≈ (p_LONG − q_LONG) ≈ +0.6 per sample, which dominates and is POSITIVE,
+        so gradient descent correctly drives z_LONG downward.
         """
         from train.v5_train import compute_v5_loss
         torch.manual_seed(77)
