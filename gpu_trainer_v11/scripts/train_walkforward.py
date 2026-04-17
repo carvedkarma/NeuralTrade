@@ -150,7 +150,7 @@ def _refresh_canonical_outputs():
                     f"{f.get('adversarial_auc', float('nan')):.3f} | "
                     f"{f.get('n_trades', 0)} | {f.get('pf', 0.0):.2f} |"
                 )
-    (REPORT_DIR / "drift.md").write_text("\n".join(drift_lines) + "\n")
+    (REPORT_DIR / "drift.md").write_text("\n".join(drift_lines) + "\n", encoding="utf-8")
     print(f"Wrote {REPORT_DIR / 'walkforward.json'} and {REPORT_DIR / 'drift.md'}")
 
 
