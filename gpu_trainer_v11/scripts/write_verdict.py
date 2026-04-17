@@ -200,7 +200,7 @@ def main():
         print(f"Appended V11 verdict to {VERDICT_PATH}")
     else:
         VERDICT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        VERDICT_PATH.write_text("# V5 Static Post-Mortem — Verdict\n" + section)
+        VERDICT_PATH.write_text("# V5 Static Post-Mortem — Verdict\n" + section, encoding="utf-8")
         print(f"Wrote new verdict file at {VERDICT_PATH}")
 
 
