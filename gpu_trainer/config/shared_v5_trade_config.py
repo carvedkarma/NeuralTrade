@@ -23,12 +23,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class V5TradeDefaults:
     # ── Scoring / signal gate ────────────────────────────────────────────────
-    score_threshold: float = 0.001        # Task #85: reverted 0.20→0.001. Task #84's 0.20 was calibrated for an
-                                          # aspirational "healthy model" (scores 0.10–0.55) that doesn't exist yet.
-                                          # Fold evidence shows actual score range 0.001–0.05 (fold 1 p90=0.218 is
-                                          # an outlier; fold 6 p90=0.0012 collapses to zero live signals at 0.20).
-                                          # Must match V5ForwardTestConfig default (also 0.001). Raise together with
-                                          # the training score once model consistently produces 0.10+ output.
+    score_threshold: float = 0.001         # Minimum composite V5 score to enter (post NaN-fix: scores are 0.001-0.002)
     score_lambda: float = 0.30            # Task #56 A1: Lambda lowered 0.50→0.30; break-even p_side 0.333→0.231
     min_mu_r_score: float = 0.0           # Minimum expected-return component (0.0 = disabled; 0.005 caused NaN cascade after mu_debias EMA converged)
     min_p_side: float = 0.0               # Minimum directional probability
@@ -55,7 +50,7 @@ class V5TradeDefaults:
     # ── Position sizing ──────────────────────────────────────────────────────
     min_size_mult: float = 0.25           # Minimum size multiplier
     max_size_mult: float = 2.5            # Maximum size multiplier
-    size_floor: float = 0.0              # Floor applied after all modifiers (0.0 = disabled; was 0.5 but overrode CLI --v5-size-floor 0.0 via sentinel comparison)
+    size_floor: float = 0.5              # Floor applied after all modifiers
     kelly_fraction: float = 0.25         # Fractional Kelly (legacy, kept for compat)
     score_buffer_size: int = 200          # Rolling buffer for score-percentile sizing
 

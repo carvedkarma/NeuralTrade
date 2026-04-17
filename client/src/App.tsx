@@ -14,15 +14,12 @@ import SettingsPage from "@/pages/settings";
 import BitgetTrading from "@/pages/bitget-trading";
 import NotFound from "@/pages/not-found";
 import NeuralMonitor from "@/pages/neural-monitor";
-import WorldIntelligence from "@/pages/world-intelligence";
-import SignalDashboard from "@/pages/signal-dashboard";
 
 function Router() {
   return (
     <AppLayout>
       <Switch>
         <Route path="/" component={CommandCenter} />
-        <Route path="/signals" component={SignalDashboard} />
         <Route path="/live" component={LiveTrading} />
         <Route path="/bitget" component={BitgetTrading} />
         <Route path="/paper" component={PaperTrading} />
@@ -31,7 +28,6 @@ function Router() {
         <Route path="/training" component={TrainingMonitor} />
         <Route path="/settings" component={SettingsPage} />
         <Route path="/neural" component={NeuralMonitor} />
-        <Route path="/world-intel" component={WorldIntelligence} />
         <Route component={NotFound} />
       </Switch>
     </AppLayout>

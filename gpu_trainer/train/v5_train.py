@@ -277,25 +277,6 @@ class V5ForwardTestConfig:
     min_mu_r_long: float = -1e9        # hard gate: block LONG specialist trades where mu_R < this (0.0 = agree-only)
     long_disagree_mult: float = 1.0    # soft multiplier on LONG disagree trades (mu_R<0); 0.3 = 70% score penalty
     specialist_align_weight: float = 0.0  # loss weight pushing return head to agree with action head on specialist bars
-    # --- Signal quality: SHORT specialist head-agreement gates (Task #68) ---
-    max_mu_r_short: float = 1e9        # hard gate: block SHORT specialist trades where mu_R > this (0.0 = agree-only)
-    short_disagree_mult: float = 1.0   # soft multiplier on SHORT disagree trades (mu_R>0); 0.3 = 70% score penalty
-    # --- Gate calibration fixes (Task #69 Phase 2) ---
-    per_symbol_no_ceiling: bool = False  # when True, per-symbol thresholds bypass max_threshold ceiling cap
-    ema200_long_only: bool = False       # when True, EMA200 gate only blocks LONG signals; SHORTs are never blocked
-    score_pside_weight: float = 1.0     # p_side contribution weight in specialist scoring; 0.0 = pure mu_over_risk
-    # --- Task #73: configurable min_mu_r_score and score_exponent ---
-    min_mu_r_score: float = 0.0         # minimum |mu_R| for a positive score; 0.0 = disabled (backward compat)
-    score_exponent: float = 1.0         # monotonic transform: score → clamp(score,0,inf)^exponent; 1.0 = no change
-    # --- Task #79: predicted R:R gate + dynamic TP/SL ---
-    min_pred_rr: float = 0.0            # minimum predicted MFE/MAE R:R to allow a signal; 0.0 = disabled
-    dynamic_tp_sl: bool = False         # use model's predicted MFE/MAE to set TP/SL barriers; False = fixed ATR mult
-    tp_scale: float = 0.75              # TP = mfe_pred * tp_scale (when dynamic_tp_sl=True)
-    sl_scale: float = 1.25             # SL = mae_pred * sl_scale (when dynamic_tp_sl=True)
-    min_tp_atr: float = 1.0            # minimum TP in ATR multiples (clamp floor)
-    max_tp_atr: float = 5.0            # maximum TP in ATR multiples (clamp ceiling)
-    min_sl_atr: float = 0.5            # minimum SL in ATR multiples (clamp floor)
-    max_sl_atr: float = 3.0            # maximum SL in ATR multiples (clamp ceiling)
 
 
 def compute_feature_importance_report(
@@ -540,11 +521,7 @@ def _compute_time_split(sym_df, train_end_date=None, test_start_date=None, test_
 
 @dataclass
 class V5QualityGateConfig:
-    # sigma_max default raised 1.0 → 1.5 to match the V5/V6 model's actual sigma
-    # output range (~1.1–1.2 in R units). Old 1.0 default caused passed_sigma=0
-    # for ~100% of bars on every fold — the sigma gate was effectively a hard
-    # rejector that the relaxation loop then had to burn budget undoing.
-    sigma_max: float = 1.5
+    sigma_max: float = 1.0
     mae_max: float = 1.0
     mu_R_min: float = 0.05
     p_trade_min: float = 0.40
@@ -731,7 +708,7 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
                     barrier_mode='fixed', action_weights=None, epoch=0,
                     sample_weights=None, mae_asym_weight=1.0,
                     warmup_epochs=0, warmup_ret_mult=1.0, warmup_action_mult=1.0,
-                    sigma_spread_reg=0.0, side_bal_weight=0.15,  # Task #53 canonical default; run_v5_walk_forward passes 0.05 (T5 optimised)
+                    sigma_spread_reg=0.0, side_bal_weight=0.05,
                     action_entropy_weight=0.0,
                     sigma_reg_threshold=0.40,
                     phase1_mode=False,
@@ -917,51 +894,34 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
     _chop_h = float(max(0.0, min(1.0, chop_hold_target)))
     _chop_side = (1.0 - _chop_h) / 2.0
     if specialist_mode == 'short':
-        # SHORT specialist KL targets: [hold, long, short].  All rows sum to 1.00.
-        # LONG slot uses 0.05 (not 0.0): KL(target||pred) gives zero gradient when
+        # SHORT specialist KL targets: [hold, long, short].
+        # Strongly favour SHORT on bear bars, suppress LONG everywhere.
+        # LONG slot uses 0.03 (not 0.0): KL(target||pred) gives zero gradient when
         # target=0 (0 * log(0/pred) = 0), so the LONG logit would be completely
         # unanchored and could drift via warm-start or optimizer momentum.
-        #
-        # Recalibration (deep math): old targets forced 40% SHORT in BULL regime
-        # which trained the model to produce SHORT signals during uptrends —
-        # exactly the wrong behaviour. A specialist should be highly SELECTIVE
-        # in adversarial regimes (mostly HOLD) and CONFIDENT in aligned regimes.
-        # Counter-regime SHORT slot dropped from 0.40 → 0.15 so the model learns
-        # to wait for high-conviction setups during bull regimes rather than
-        # spamming counter-trend signals. The percentile-90 score gate still
-        # passes the top 10% of any signals the model emits, so the absolute
-        # signal count stays controlled by the gate, not the KL prior.
+        # 0.03 is small enough to strongly discourage p_long while keeping a live
+        # gradient that anchors the logit near a very small but finite value.
+        # All rows sum to 1.00.
         _3CLS_TARGETS = {
-            'bull':  [0.80, 0.05, 0.15],   # bull: mostly HOLD (selective SHORT), small SHORT floor
-            'bear':  [0.15, 0.05, 0.80],   # bear: strong SHORT (regime-aligned)
-            'chop':  [0.65, 0.05, 0.30],   # chop: mostly HOLD with opportunistic SHORT
+            'bull':  [0.57, 0.03, 0.40],   # bull: HOLD dominant, SHORT floor, LONG suppressed
+            'bear':  [0.17, 0.03, 0.80],   # bear: strong SHORT, minimal HOLD, LONG suppressed
+            'chop':  [0.52, 0.03, 0.45],   # chop: slight SHORT lean vs HOLD, LONG suppressed
         }
     elif specialist_mode == 'long':
-        # LONG specialist KL targets: [hold, long, short].  All rows sum to 1.00.
-        # SHORT slot uses 0.05 for the same anchoring reason as above.
-        #
-        # Recalibration (deep math): old targets forced 37% LONG in BEAR regime
-        # and 42% LONG in chop, which trained the model to spam counter-trend
-        # LONG signals (matching the observed fold collapse where the LONG
-        # specialist emitted ALL SHORTs because of warm-start + uniform-pushing
-        # entropy reg drowning out the weak KL signal). New targets keep the
-        # specialist HIGHLY SELECTIVE in adversarial regimes (mostly HOLD) and
-        # CONFIDENT only when the regime aligns. Symmetric mirror of SHORT
-        # targets above.
+        # LONG specialist KL targets: [hold, long, short].
+        # Strongly favour LONG on bull bars, suppress SHORT everywhere.
+        # SHORT slot uses 0.03 for the same anchoring reason as LONG above.
+        # All rows sum to 1.00.
         _3CLS_TARGETS = {
-            'bull':  [0.15, 0.80, 0.05],   # bull: strong LONG (regime-aligned)
-            'bear':  [0.80, 0.15, 0.05],   # bear: mostly HOLD (selective LONG), small LONG floor
-            'chop':  [0.65, 0.30, 0.05],   # chop: mostly HOLD with opportunistic LONG
+            'bull':  [0.20, 0.77, 0.03],   # bull: strong LONG, minimal HOLD, SHORT suppressed
+            'bear':  [0.60, 0.37, 0.03],   # bear: HOLD dominant, LONG floor, SHORT suppressed
+            'chop':  [0.55, 0.42, 0.03],   # chop: slight LONG lean vs HOLD, SHORT suppressed
         }
     else:
-        # Generic (non-specialist) symmetric targets — symmetric L/S by design (Task #54 Bug B fix).
-        # chop_hold_target controls HOLD fraction; default 0.35 → 'chop': [0.35, 0.325, 0.325].
-        # Task #56 B1: changed default to 0.20 → [0.20, 0.40, 0.40] to reduce HOLD bias.
-        # Example with original Task #54 symmetric default: 'chop': [0.35, 0.325, 0.325]
         _3CLS_TARGETS = {
             'bull': [0.25, 0.50, 0.25],
             'bear': [0.25, 0.25, 0.50],
-            'chop': [_chop_h, _chop_side, _chop_side],  # e.g. 0.35 → [0.35, 0.325, 0.325]
+            'chop': [_chop_h, _chop_side, _chop_side],
         }
 
     group_kl_list = []
@@ -984,20 +944,15 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
 
     L_action = L_action + SIDE_BAL_W * L_side_balance
 
-    # Negentropy regularisation (-H formula, Task #54 spec).
-    # L_entropy = sum(p * log(p)) = -H(p)  →  always ≤ 0.
-    # Minimising L_action + w*L_entropy = minimising -H = maximising entropy = pushes toward
-    # uniform.  At uniform: L_entropy = log(1/3) = -log(3) ≈ -1.099.  At full collapse: ≈ 0.
-    # The dominant-class gradient ∂(-H)/∂z_i = p_i*(log(p_i) - H_mean), which is positive
-    # for the dominant class at moderate imbalance; gradient descent then decreases z_i
-    # (correct anti-collapse direction).  At extreme collapse the L_action KL-to-regime-target
-    # term provides the dominant restoring gradient.
-    # Weight 0.0 disables for backward compat (default unchanged).
+    # Mean-batch entropy regularisation (Task #54): prevents action head direction collapse.
+    # Computes the entropy of the AVERAGE action distribution over the batch.
+    # Minimising L_entropy (which is negative entropy) maximises H(mean_probs), pushing
+    # the average prediction toward a uniform distribution and preventing any single class
+    # from dominating all predictions.  Weight 0.0 disables (backward compat default).
     L_entropy = torch.tensor(0.0, device=action_logits.device)
     if action_entropy_weight > 0.0:
         _mean_probs = action_probs.mean(dim=0)  # shape (3,) — average over batch
-        # -H = sum(p * log(p))  ≤ 0 always; equals -log(n_cls) at uniform distribution.
-        L_entropy = (_mean_probs * (_mean_probs + eps).log()).sum()
+        L_entropy = (_mean_probs * (_mean_probs + eps).log()).sum()  # = -H(mean_probs)
         L_action = L_action + action_entropy_weight * L_entropy
 
     losses = {
@@ -1057,22 +1012,6 @@ def compute_v5_loss(outputs, batch, w_ret=6.0, w_mfe=0.15, w_mae=0.15,
         p_long_align = action_probs[:, LONG_IDX_align].detach()   # shape (N,)
         neg_mu_penalty = F.relu(-ret_mu)                           # shape (N,) — penalise negative mu_R
         L_specialist_align = (p_long_align * neg_mu_penalty).mean()
-        total = total + specialist_align_weight * L_specialist_align
-        losses['L_specialist_align'] = float(L_specialist_align.item())
-    elif specialist_align_weight > 0.0 and specialist_mode == 'short' and not phase1_mode:
-        # Task #68 Fix 3: SHORT specialist alignment loss — symmetric mirror of LONG.
-        # Fires when the action head predicts SHORT (high p_short) but the return head
-        # predicts a positive return (mu_R > 0, i.e. market goes up while we're short).
-        # Gradient flows only through ret_mu (return head), not the action head.
-        # Formula: L_align = mean(p_short.detach() * relu(ret_mu))
-        #   - Penalises positive mu_R on bars where action head is confident SHORT
-        #   - No effect on bars where ret_mu <= 0 (relu gives 0) — agree bars untouched
-        #   - Skipped in Phase 1 (action_probs are random noise during return pretraining)
-        #   - Pushes mu_R toward 0- on confident SHORT bars → head-agree% rises over training
-        SHORT_IDX_align = 2  # same index as SHORT_IDX used in KL targets above
-        p_short_align = action_probs[:, SHORT_IDX_align].detach()  # shape (N,)
-        pos_mu_penalty = F.relu(ret_mu)                             # shape (N,) — penalise positive mu_R
-        L_specialist_align = (p_short_align * pos_mu_penalty).mean()
         total = total + specialist_align_weight * L_specialist_align
         losses['L_specialist_align'] = float(L_specialist_align.item())
     else:
@@ -1266,20 +1205,15 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999,
     adaptive_sigma = cfg.sigma_max
     if arrays['sigma'] is not None:
         if using_ref:
-            # Ref-based sigma threshold with permissiveness floor.
-            # The floor prevents ref arrays whose sigma is much tighter than the current
-            # window from rejecting 100 % of bars before the mu-gate can differentiate.
-            # Floor = p25 of current arrays' sigma — ensuring at worst 75 % fail the gate.
+            # Strict ref-only contract: when ref_arrays is supplied, the adaptive threshold
+            # MUST come from ref_arrays['sigma']. If ref_arrays has no 'sigma' field, do
+            # NOT fall back to current-window statistics — that would introduce lookahead
+            # bias. Instead leave adaptive_sigma at the cfg.sigma_max config default.
             ref_sigma_data = ref.get('sigma')
             if ref_sigma_data is not None:
                 finite_sigma = ref_sigma_data[np.isfinite(ref_sigma_data)]
                 if len(finite_sigma) > 100:
-                    ref_sigma_threshold = min(cfg.sigma_max,
-                                             float(np.percentile(finite_sigma, 90)))
-                    arr_sig_finite = arrays['sigma'][np.isfinite(arrays['sigma'])]
-                    arrays_sigma_floor = (float(np.percentile(arr_sig_finite, 25))
-                                         if len(arr_sig_finite) > 0 else 0.0)
-                    adaptive_sigma = max(ref_sigma_threshold, arrays_sigma_floor)
+                    adaptive_sigma = min(cfg.sigma_max, float(np.percentile(finite_sigma, 90)))
             # else: ref provided but has no sigma → keep cfg.sigma_max (conservative default)
         else:
             finite_sigma = arrays['sigma'][np.isfinite(arrays['sigma'])]
@@ -1291,15 +1225,7 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999,
     finite_mae = ref_mae[np.isfinite(ref_mae)]
     adaptive_mae = cfg.mae_max
     if len(finite_mae) > 100:
-        ref_mae_threshold = min(cfg.mae_max, float(np.percentile(finite_mae, 90)))
-        if using_ref:
-            # Permissiveness floor for MAE gate (same rationale as sigma gate above).
-            arr_mae_finite = arrays['mae'][np.isfinite(arrays['mae'])]
-            arrays_mae_floor = (float(np.percentile(arr_mae_finite, 25))
-                                if len(arr_mae_finite) > 0 else 0.0)
-            adaptive_mae = max(ref_mae_threshold, arrays_mae_floor)
-        else:
-            adaptive_mae = ref_mae_threshold
+        adaptive_mae = min(cfg.mae_max, float(np.percentile(finite_mae, 90)))
     mae_pass = np.isfinite(arrays['mae']) & (arrays['mae'] <= adaptive_mae)
 
     mu_R = arrays['mu_R']
@@ -1328,18 +1254,7 @@ def v5_quality_mask(arrays, cfg: V5QualityGateConfig, epoch: int = 999,
     ref_pt = ref['p_trade'] if ref is not None else pt
     adaptive_ptrade = cfg.p_trade_min
     if len(ref_pt) > 100:
-        ref_ptrade_threshold = max(cfg.p_trade_min * 0.3, float(np.percentile(ref_pt, 40)))
-        if using_ref:
-            # Permissiveness ceiling for p_trade gate.
-            # p_trade is a lower-bound gate (bars fail when p_trade < threshold).
-            # If ref has much higher p_trade than arrays, the threshold becomes too strict.
-            # Cap threshold at p60 of current arrays — ensuring at least 40 % can pass.
-            pt_finite = pt[np.isfinite(pt)]
-            arrays_ptrade_ceiling = (float(np.percentile(pt_finite, 60))
-                                     if len(pt_finite) > 100 else 1.0)
-            adaptive_ptrade = min(ref_ptrade_threshold, arrays_ptrade_ceiling)
-        else:
-            adaptive_ptrade = ref_ptrade_threshold
+        adaptive_ptrade = max(cfg.p_trade_min * 0.3, float(np.percentile(ref_pt, 40)))
     ptrade_pass = pt >= adaptive_ptrade
 
     final_mask = sigma_pass & mae_pass & ptrade_pass & edge_pass  # BUG FIX: edge_pass was computed but never applied
@@ -1531,50 +1446,6 @@ def fit_temperature_scaling(logits, labels, n_classes=3, lr=0.01, max_iter=200):
     return temp_val, ece_before, ece_after
 
 
-class V5ScoreBundle:
-    """Return type of compute_v5_scores — supports both tuple unpacking and dict-style access.
-
-    Tuple unpacking (all existing callers):
-        scores, sides, diag = compute_v5_scores(...)
-        scores_no_slip, _, _ = compute_v5_scores(...)
-
-    Dict access (Task #85 — test_score_lambda_0_30_via_compute_v5_scores):
-        result = compute_v5_scores(...)
-        long_scores  = result['score_long']   # scores where sides == +1
-        short_scores = result['score_short']  # scores where sides == -1
-        mean_mu      = result['mu_R_mean']    # any key from the diag dict
-    """
-
-    def __init__(self, scores: 'np.ndarray', sides: 'np.ndarray', diag: dict):
-        self._scores = scores
-        self._sides  = sides
-        self._diag   = diag
-
-    def __iter__(self):
-        yield self._scores
-        yield self._sides
-        yield self._diag
-
-    def __len__(self):
-        return 3
-
-    def __getitem__(self, key):
-        if isinstance(key, int):
-            return (self._scores, self._sides, self._diag)[key]
-        if key == 'score_long':
-            return self._scores[self._sides == 1]
-        if key == 'score_short':
-            return self._scores[self._sides == -1]
-        if key in self._diag:
-            return self._diag[key]
-        raise KeyError(f"V5ScoreBundle has no key {key!r}")
-
-    def __repr__(self):
-        return (f"V5ScoreBundle(n={len(self._scores)}, "
-                f"n_long={int((self._sides==1).sum())}, "
-                f"n_short={int((self._sides==-1).sum())})")
-
-
 def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # Task #56 A1
                       risk_proxy='mae', mae_cap=2.0, _arrays=None,
                       side_mode='action_head', rr_weight=0.0,
@@ -1583,10 +1454,7 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
                       min_p_short=0.0, side_aware_scoring=False,
                       specialist_mode='none',
                       min_mu_r_long=-1e9,
-                      long_disagree_mult=1.0,
-                      max_mu_r_short=1e9,
-                      short_disagree_mult=1.0,
-                      score_pside_weight=1.0):
+                      long_disagree_mult=1.0):
     """Compute execution-aware v5 scores -- all in R-units.
 
     Two side-selection modes:
@@ -1689,60 +1557,29 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
         edge_short = p_short * np.divide(-mu_R, risk, out=np.zeros_like(mu_R), where=risk > 0)
 
     if specialist_mode == 'short':
-        # SHORT specialist: direction is always SHORT.
-        #
-        # [Task #81 / Bug A] Fix directional mu_R scoring.
-        # Was: abs(mu_R_adj)/risk — makes head-disagree SHORTs (positive mu_R = model predicts
-        # price going UP) score identically to head-agree SHORTs (negative mu_R = DOWN).
-        # The abs() erased the return-head direction signal entirely.
-        #
-        # Fix: use max(0, -mu_R_adj)/risk so only bearish mu_R contributes positively.
-        #   head-agree bars (mu_R <= 0): short_mu = |mu_R| / risk  (positive contribution)
-        #   head-disagree bars (mu_R > 0): short_mu = 0            (zero score, falls below threshold)
-        #
-        # The short_disagree_mult soft penalty is preserved as an optional extra layer,
-        # but is now redundant because short_mu=0 already suppresses disagree trades.
-        # See also: quick_start.py post-parse auto-override (Bug C) which enforces
-        # --v5-max-mu-r-short 0.0 and --v5-short-disagree-mult 0.0 as defensive hard gates.
-        short_mu = np.divide(np.maximum(0.0, -mu_R_adj), risk,
-                             out=np.zeros_like(mu_R_adj), where=risk > 0)
+        # SHORT specialist: direction is always SHORT.  Score is driven purely by p_short.
+        # score = p_short * mu_over_risk - lambda*(1-p_short)*mu_over_risk
+        #       = mu_over_risk * [(1+lambda)*p_short - lambda]
+        # Positive when p_short > lambda/(1+lambda) = 0.231 at default lambda=0.30.
         p_side = p_short
-        effective_p = score_pside_weight * p_side + (1.0 - score_pside_weight)
-        directional_penalty = score_pside_weight * (1.0 - p_side) * short_mu
+        directional_penalty = (1.0 - p_side) * mu_over_risk
         penalty = score_lambda * directional_penalty
-        scores = effective_p * short_mu - penalty
+        scores = p_short * mu_over_risk - penalty
         sides = np.full(len(scores), -1, dtype=np.int64)
-
-        n_short_agree = int(np.sum(mu_R_adj <= 0.0))
-        n_short_disagree = int(np.sum(mu_R_adj > 0.0))
-        log.debug("[V5_SCORE][SHORT_SPECIALIST] head-agree(mu<=0)=%d head-disagree(mu>0)=%d "
-                  "(disagree bars score=0, will fall below threshold)", n_short_agree, n_short_disagree)
-
-        if short_disagree_mult < 1.0:
-            mu_disagree_mask_short = mu_R_adj > 0.0
-            scores = np.where(mu_disagree_mask_short, scores * short_disagree_mult, scores)
     elif specialist_mode == 'long':
-        # LONG specialist: direction is always LONG.
-        #
-        # [Task #81 / Bug A] Fix directional mu_R scoring (symmetric with SHORT above).
-        # Was: abs(mu_R_adj)/risk — head-disagree LONGs (negative mu_R = DOWN) scored as well.
-        # Fix: max(0, mu_R_adj)/risk — only bullish mu_R contributes to the LONG score.
-        #   head-agree bars (mu_R >= 0): long_mu = mu_R / risk   (positive contribution)
-        #   head-disagree bars (mu_R < 0): long_mu = 0            (zero score, below threshold)
-        long_mu = np.divide(np.maximum(0.0, mu_R_adj), risk,
-                            out=np.zeros_like(mu_R_adj), where=risk > 0)
+        # LONG specialist: direction is always LONG.  Score is driven purely by p_long.
         p_side = p_long
-        effective_p = score_pside_weight * p_side + (1.0 - score_pside_weight)
-        directional_penalty = score_pside_weight * (1.0 - p_side) * long_mu
+        directional_penalty = (1.0 - p_side) * mu_over_risk
         penalty = score_lambda * directional_penalty
-        scores = effective_p * long_mu - penalty
+        scores = p_long * mu_over_risk - penalty
         sides = np.full(len(scores), 1, dtype=np.int64)
 
-        n_long_agree = int(np.sum(mu_R_adj >= 0.0))
-        n_long_disagree = int(np.sum(mu_R_adj < 0.0))
-        log.debug("[V5_SCORE][LONG_SPECIALIST] head-agree(mu>=0)=%d head-disagree(mu<0)=%d "
-                  "(disagree bars score=0, will fall below threshold)", n_long_agree, n_long_disagree)
-
+        # --- Task #69 Fix 2: soft disagree multiplier ---
+        # When the return head predicts a negative mu_R (return head disagrees with LONG
+        # direction), apply long_disagree_mult to reduce the score without blocking it
+        # entirely.  Default 1.0 = no change.  0.3 = 70% score penalty.
+        # This naturally pushes agree trades (mu_R>=0) higher in the threshold sweep so
+        # they are selected first, leaving disagree trades only when supply runs short.
         if long_disagree_mult < 1.0:
             mu_disagree_mask = mu_R_adj < 0.0
             scores = np.where(mu_disagree_mask, scores * long_disagree_mult, scores)
@@ -1795,23 +1632,18 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
         n_suppressed = int(np.sum(tiny_mu_mask))
         scores[tiny_mu_mask] = -np.inf
 
-    # LONG specialist hard mu_R gate — blocks trades where mu_R <= threshold (long mode only).
+    # --- Task #69 Fix 1: LONG specialist hard mu_R gate ---
+    # When min_mu_r_long >= 0.0 (e.g. 0.0), block all LONG specialist trades where
+    # the return head predicts mu_R below the threshold.  At 0.0 this only passes
+    # head-agree trades (mu_R > 0), removing the ~23-47% of disagree trades that have
+    # negative E[R] in forward tests.  Gate fires only in 'long' specialist mode.
     n_mu_r_long_killed = 0
     if specialist_mode == 'long' and min_mu_r_long > -1e8:
-        mu_r_long_block = mu_R <= min_mu_r_long
+        mu_r_long_block = mu_R_adj < min_mu_r_long
         n_mu_r_long_killed = int(np.sum(mu_r_long_block & np.isfinite(scores)))
         scores[mu_r_long_block] = -np.inf
         if n_mu_r_long_killed > 0:
             log.debug(f"[LONG_SPEC_GATE] min_mu_r_long={min_mu_r_long:.3f} blocked {n_mu_r_long_killed} trades")
-
-    # SHORT specialist hard mu_R gate — blocks trades where mu_R >= threshold (short mode only).
-    n_mu_r_short_killed = 0
-    if specialist_mode == 'short' and max_mu_r_short < 1e8:
-        mu_r_short_block = mu_R >= max_mu_r_short   # block if mu_R above threshold (raw mu_R, >= catches slippage-zeroed boundary)
-        n_mu_r_short_killed = int(np.sum(mu_r_short_block & np.isfinite(scores)))
-        scores[mu_r_short_block] = -np.inf
-        if n_mu_r_short_killed > 0:
-            log.debug(f"[SHORT_SPEC_GATE] max_mu_r_short={max_mu_r_short:.3f} blocked {n_mu_r_short_killed} trades")
 
     n_long_sides = int(np.sum(sides == 1))
     n_short_sides = int(np.sum(sides == -1))
@@ -1875,9 +1707,7 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
             'n_sigma_discounted': n_sigma_discounted,
             'n_pside_killed': n_pside_killed,
             'n_pshort_killed': n_pshort_killed,
-            'n_mu_r_long_killed': n_mu_r_long_killed,
-            'n_mu_r_short_killed': n_mu_r_short_killed,
-            'mu_over_risk_mean': float(np.nanmean(mu_over_risk)),
+            'n_mu_r_long_killed': n_mu_r_long_killed,   # Task #69: LONG specialist hard mu_R gate
             'side_aware_scoring': side_aware_scoring,
             'n_long_all': n_long_sides,
             'n_short_all': n_short_sides,
@@ -1887,7 +1717,7 @@ def compute_v5_scores(outputs_or_arrays, horizon_bars=16, score_lambda=0.30,  # 
         }
     if _sigma_mean is not None:
         _diag['sigma_mean'] = _sigma_mean
-    return V5ScoreBundle(scores, sides, _diag)
+    return scores, sides, _diag
 
 
 def _tpd_controller_step(scores, quality_mask, candidate_mask,
@@ -2812,8 +2642,7 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
     # Attach raw mu_R (pre-debias) so the quality gate call site can use real magnitudes.
     ref_arrays['_raw_mu_R_ref'] = _mu_R_raw_for_gate
 
-    _ref_min_mu_r_score = getattr(config, 'min_mu_r_score', 0.0)  # Task #73: configurable floor
-    train_scores, _, _ref_score_diag = compute_v5_scores(
+    train_scores, _, _ = compute_v5_scores(
         None, horizon_bars=config.horizon,
         score_lambda=config.score_lambda,
         risk_proxy=config.risk_proxy,
@@ -2826,29 +2655,16 @@ def _build_train_ref_arrays(model, device, train_feat, train_sym_ids,
         min_p_side=config.min_p_side,
         min_p_short=config.min_p_short,
         side_aware_scoring=config.side_aware_scoring,
-        min_mu_r_score=_ref_min_mu_r_score,  # Task #73: was hardcoded 0.0
-        specialist_mode=getattr(config, 'specialist_mode', 'none'),
-        min_mu_r_long=getattr(config, 'min_mu_r_long', -1e9),
-        long_disagree_mult=getattr(config, 'long_disagree_mult', 1.0),
-        max_mu_r_short=getattr(config, 'max_mu_r_short', 1e9),
-        short_disagree_mult=getattr(config, 'short_disagree_mult', 1.0),
-        score_pside_weight=getattr(config, 'score_pside_weight', 1.0),
+        min_mu_r_score=0.0,
+        specialist_mode=getattr(config, 'specialist_mode', 'none'),  # BUG FIX (Task #68): reference calibration must use specialist scoring
+        min_mu_r_long=getattr(config, 'min_mu_r_long', -1e9),        # Task #69: LONG specialist head-agree gate
+        long_disagree_mult=getattr(config, 'long_disagree_mult', 1.0),  # Task #69: soft disagree penalty
     )
     ref_arrays['_train_scores'] = train_scores
 
-    _ref_finite = train_scores[np.isfinite(train_scores)]
-    # Use exact n_suppressed from score_diag (counts bars where |mu_R|<floor, set to -inf).
-    _ref_n_suppressed = _ref_score_diag.get('n_suppressed', 0) if _ref_score_diag else 0
-    _ref_floor_rejected_note = (
-        f", floor_rejected(|mu_R|<{_ref_min_mu_r_score:.4f})={_ref_n_suppressed} bars"
-        if _ref_min_mu_r_score > 0 else ""
-    )
     log.info(f"[V5_REF] Training reference arrays built: mu_R mean={float(np.mean(ref_arrays['mu_R'])):.4f}, "
              f"mae mean={float(np.mean(ref_arrays['mae'])):.4f}, "
-             f"score mean={float(np.nanmean(_ref_finite)) if len(_ref_finite) > 0 else 0.0:.4f} "
-             f"(min_mu_r_score={_ref_min_mu_r_score:.4f}, "
-             f"finite_scores={len(_ref_finite)}/{len(train_scores)}"
-             f"{_ref_floor_rejected_note})")
+             f"score mean={float(np.nanmean(train_scores[np.isfinite(train_scores)])):.4f}")
 
     return ref_arrays
 
@@ -3006,107 +2822,6 @@ def _compute_percentile_calibration(cand_indices, scores, sides, safe_r, test_ba
     return results
 
 
-def _compute_dynamic_trade_r(
-    idx: int,
-    side: int,
-    arrays: dict,
-    close_prices,
-    high_prices,
-    low_prices,
-    atr14,
-    tp_scale: float,
-    sl_scale: float,
-    min_tp_atr: float,
-    max_tp_atr: float,
-    min_sl_atr: float,
-    max_sl_atr: float,
-    horizon: int,
-) -> "tuple[float, str]":
-    """Simulate a trade's outcome using the model's predicted MFE/MAE as dynamic TP/SL barriers.
-
-    [Task #81 / Bug B] config.dynamic_tp_sl was stored in V5ForwardTestConfig but never read
-    inside run_v5_forward_test.  Every trade always used precomputed fixed-ATR barriers regardless
-    of the flag.  This function implements the per-trade barrier re-simulation that was missing.
-
-    Called from run_v5_forward_test when config.dynamic_tp_sl=True and test_atr14 is provided.
-    The test_atr14 parameter was also added to run_v5_forward_test() as part of this fix,
-    and val_atr14_arr is passed from the train_v5_model call site.
-
-    Returns:
-        Tuple of (realized_r, outcome) where realized_r is a float (exit R in ATR units,
-        signed for direction) and outcome is one of "TP", "SL", "EXP_WIN", "EXP_LOSS".
-        Returns (float('nan'), "EXP_LOSS") when inputs are invalid (atr=0, out-of-bounds idx).
-        When arrays['mfe'] or arrays['mae'] are missing/non-finite, defaults to 1.0 R so
-        the simulation proceeds with neutral barriers (min_tp_atr / min_sl_atr after clamping).
-
-    Args:
-        idx:        Bar index in the test window where the trade is entered.
-        side:       +1 for LONG, -1 for SHORT.
-        arrays:     Dict with 'mfe' and 'mae' arrays (model-predicted, in R-units).
-                    Missing or non-finite values default to 1.0 R (neutral, not fallback to
-                    fixed barriers — for true fixed-barrier fallback, do not call this function).
-        close_prices, high_prices, low_prices: Price arrays for the test window.
-        atr14:      Per-bar ATR14 array (price units).  Used to convert R-units → price.
-        tp_scale:   TP = mfe_pred * tp_scale (applied to R-units before ATR conversion).
-        sl_scale:   SL = mae_pred * sl_scale.
-        min/max_tp_atr, min/max_sl_atr: Clamps on the final TP/SL in ATR multiples.
-        horizon:    Maximum bars to hold the position before forced exit.
-    """
-    n = len(close_prices)
-    if idx >= n or idx < 0:
-        return float('nan'), "EXP_LOSS"
-
-    entry_price = float(close_prices[idx])
-    atr_val = float(atr14[idx]) if atr14 is not None and idx < len(atr14) else 0.0
-    if atr_val <= 0 or not np.isfinite(atr_val) or not np.isfinite(entry_price):
-        return float('nan'), "EXP_LOSS"
-
-    mfe_r = float(arrays['mfe'][idx]) if 'mfe' in arrays and np.isfinite(arrays['mfe'][idx]) else 1.0
-    mae_r = float(arrays['mae'][idx]) if 'mae' in arrays and np.isfinite(arrays['mae'][idx]) else 1.0
-
-    tp_r = np.clip(mfe_r * tp_scale, min_tp_atr, max_tp_atr)
-    sl_r = np.clip(mae_r * sl_scale, min_sl_atr, max_sl_atr)
-
-    tp_price = entry_price + (tp_r * atr_val) * side
-    sl_price = entry_price - (sl_r * atr_val) * side
-
-    end_bar = min(idx + horizon, n - 1)
-    exit_price = float(close_prices[end_bar])
-    exit_reason = "EXP"
-    for bar in range(idx + 1, end_bar + 1):
-        h = float(high_prices[bar])
-        lo = float(low_prices[bar])
-        if side == 1:
-            if h >= tp_price:
-                exit_price = tp_price
-                exit_reason = "TP"
-                break
-            if lo <= sl_price:
-                exit_price = sl_price
-                exit_reason = "SL"
-                break
-        else:
-            if lo <= tp_price:
-                exit_price = tp_price
-                exit_reason = "TP"
-                break
-            if h >= sl_price:
-                exit_price = sl_price
-                exit_reason = "SL"
-                break
-
-    realized_r = (exit_price - entry_price) * side / atr_val
-
-    if exit_reason == "TP":
-        outcome = "TP"
-    elif exit_reason == "SL":
-        outcome = "SL"
-    else:
-        outcome = "EXP_WIN" if realized_r > 0 else "EXP_LOSS"
-
-    return float(realized_r), outcome
-
-
 def run_v5_forward_test(
     model, device,
     test_features, test_outcomes, test_realized_r,
@@ -3122,7 +2837,6 @@ def run_v5_forward_test(
     symbols=None,
     candidate_logger=None,
     fold_idx=None,
-    test_atr14=None,
 ):
     """Run forward test with completely frozen decision layer.
 
@@ -3376,7 +3090,6 @@ def run_v5_forward_test(
                                                ref_arrays=_gate_ref)
     _qual_gate_pass_rate = 100.0 * qual_diag.get('final', 0) / max(qual_diag.get('total', 1), 1)
 
-    _fwd_min_mu_r_score = getattr(config, 'min_mu_r_score', 0.0)  # Task #73: configurable floor
     scores, sides, score_diag = compute_v5_scores(
         None, horizon_bars=config.horizon,
         score_lambda=config.score_lambda,
@@ -3390,118 +3103,16 @@ def run_v5_forward_test(
         min_p_side=config.min_p_side,
         min_p_short=config.min_p_short,
         side_aware_scoring=config.side_aware_scoring,
-        min_mu_r_score=_fwd_min_mu_r_score,  # Task #73: was hardcoded 0.0
+        min_mu_r_score=0.0,
         specialist_mode=getattr(config, 'specialist_mode', 'none'),
         min_mu_r_long=getattr(config, 'min_mu_r_long', -1e9),        # Task #69: LONG specialist head-agree gate
         long_disagree_mult=getattr(config, 'long_disagree_mult', 1.0),  # Task #69: soft disagree penalty
-        max_mu_r_short=getattr(config, 'max_mu_r_short', 1e9),       # Task #68: SHORT specialist head-agree gate
-        short_disagree_mult=getattr(config, 'short_disagree_mult', 1.0),  # Task #68: soft disagree penalty
-        score_pside_weight=getattr(config, 'score_pside_weight', 1.0),   # Task #69 P2: p_side weight in specialist scoring
     )
-    # Task #73: report explicit floor-reject count from min_mu_r_score filter
-    _fwd_n_suppressed = score_diag.get('n_suppressed', 0)
-    if _fwd_min_mu_r_score > 0:
-        log.info(
-            f"[V5_FWD][FLOOR_REJECT] min_mu_r_score={_fwd_min_mu_r_score:.4f}: "
-            f"{_fwd_n_suppressed} bars suppressed to score=-inf "
-            f"({100.0*_fwd_n_suppressed/max(len(scores),1):.1f}% of total {len(scores)} bars). "
-            f"These bars had |mu_R|<{_fwd_min_mu_r_score:.4f} and are excluded from the threshold sweep."
-        )
 
     if 'edge_L' in score_diag:
         arrays['edge_L'] = score_diag['edge_L']
     if 'edge_S' in score_diag:
         arrays['edge_S'] = score_diag['edge_S']
-
-    # --- Task #79: predicted R:R gate ---
-    # Suppress bars where the model's predicted MFE/MAE ratio falls below min_pred_rr.
-    # This rejects low-quality signals where the model expects insufficient reward vs risk.
-    _min_pred_rr = getattr(config, 'min_pred_rr', 0.0)
-    if _min_pred_rr > 0.0 and 'mfe' in arrays and 'mae' in arrays:
-        _mfe_arr = arrays['mfe']
-        _mae_arr = np.maximum(arrays['mae'], 1e-4)
-        _pred_rr_arr = _mfe_arr / _mae_arr
-        _rr_gate_mask = _pred_rr_arr < _min_pred_rr
-        _n_rr_rejected = int(np.sum(np.isfinite(scores) & _rr_gate_mask))
-        scores = np.where(_rr_gate_mask, -np.inf, scores)
-        log.info(
-            f"[V5_FWD][PRED_RR_GATE] min_pred_rr={_min_pred_rr:.2f}: "
-            f"{_n_rr_rejected} bars suppressed ({100.0*_n_rr_rejected/max(len(scores),1):.1f}%). "
-            f"pred_rr stats: mean={float(np.nanmean(_pred_rr_arr)):.2f} "
-            f"p25={float(np.nanpercentile(_pred_rr_arr, 25)):.2f} "
-            f"p50={float(np.nanpercentile(_pred_rr_arr, 50)):.2f} "
-            f"p75={float(np.nanpercentile(_pred_rr_arr, 75)):.2f}"
-        )
-    elif _min_pred_rr > 0.0:
-        log.warning(f"[V5_FWD][PRED_RR_GATE] min_pred_rr={_min_pred_rr:.2f} requested but mfe/mae not in arrays — gate skipped")
-
-    # --- Task #73: score_exponent monotonic transform ---
-    # score → score**exponent for positive-finite entries; NaN/-inf unchanged.
-    # Rank-preserving (x^e is monotone on (0,inf) for e>0). Fires only when exponent != 1.0.
-    _score_exponent = getattr(config, 'score_exponent', 1.0)
-    if _score_exponent != 1.0:
-        _scores_orig = scores.copy()
-        _is_positive_finite = np.isfinite(scores) & (scores > 0.0)
-        _n_positive = int(np.sum(_is_positive_finite))
-        # Clip to [0, inf) first, then raise to exponent — avoids NaN from negative^frac
-        _pos_clipped = np.clip(scores, 0.0, np.inf)
-        # Only overwrite positive-finite entries; NaN and -inf remain as-is
-        scores = np.where(_is_positive_finite, _pos_clipped ** _score_exponent, scores)
-        _p90_pre  = float(np.percentile(_scores_orig[np.isfinite(_scores_orig)], 90)) if np.any(np.isfinite(_scores_orig)) else float('nan')
-        _p90_post = float(np.percentile(scores[np.isfinite(scores)], 90)) if np.any(np.isfinite(scores)) else float('nan')
-        _mean_pre  = float(np.nanmean(_scores_orig))
-        _mean_post = float(np.nanmean(scores))
-        log.info(f"[V5_SCORE_EXP] score_exponent={_score_exponent:.2f} applied on {_n_positive} positive-finite bars — "
-                 f"mean: {_mean_pre:+.4f} → {_mean_post:+.4f}  "
-                 f"p90: {_p90_pre:.4f} → {_p90_post:.4f}  "
-                 f"p90/|mean|: {_p90_pre/max(abs(_mean_pre),1e-8):.1f}x → {_p90_post/max(abs(_mean_post),1e-8):.1f}x "
-                 f"(NaN/−inf entries unchanged, rank preserved)")
-
-    # --- Task #73: score distribution diagnostics ---
-    _all_finite = scores[np.isfinite(scores)]
-    _n_total_scores = len(scores)
-    _n_finite_scores = len(_all_finite)
-    log.info("=" * 70)
-    log.info("  SCORE DISTRIBUTION DIAGNOSTICS (pre-threshold)")
-    log.info("=" * 70)
-    log.info(f"  Total bars:         {_n_total_scores}")
-    log.info(f"  Finite scores:      {_n_finite_scores} ({100.0*_n_finite_scores/max(_n_total_scores,1):.1f}%)")
-    if _n_finite_scores > 0:
-        _s_mean = float(np.mean(_all_finite))
-        _s_std  = float(np.std(_all_finite))
-        _s_p50  = float(np.percentile(_all_finite, 50))
-        _s_p75  = float(np.percentile(_all_finite, 75))
-        _s_p90  = float(np.percentile(_all_finite, 90))
-        _s_p95  = float(np.percentile(_all_finite, 95))
-        _s_p99  = float(np.percentile(_all_finite, 99))
-        _s_max  = float(np.max(_all_finite))
-        _p90_vs_mean_ratio = _s_p90 / max(abs(_s_mean), 1e-8)
-        log.info(f"  Score:  mean={_s_mean:+.4f}  std={_s_std:.4f}  "
-                 f"p50={_s_p50:.4f}  p75={_s_p75:.4f}  p90={_s_p90:.4f}  "
-                 f"p95={_s_p95:.4f}  p99={_s_p99:.4f}  max={_s_max:.4f}")
-        log.info(f"  Score right-tail: p90/|mean|={_p90_vs_mean_ratio:.1f}x "
-                 f"({'OK — right tail separated' if _p90_vs_mean_ratio >= 2.0 else 'LOW — distribution collapsed; try --v5-score-exponent 0.5'})")
-        _mu_arr = arrays.get('mu_R', np.array([]))
-        _abs_mu = np.abs(_mu_arr) if len(_mu_arr) > 0 else np.array([])
-        _finite_abs_mu = _abs_mu[np.isfinite(_abs_mu)]
-        if len(_finite_abs_mu) > 0:
-            log.info(f"  |mu_R|: mean={float(np.mean(_finite_abs_mu)):.4f}  "
-                     f"p50={float(np.percentile(_finite_abs_mu, 50)):.4f}  "
-                     f"p90={float(np.percentile(_finite_abs_mu, 90)):.4f}")
-        _mu_over_risk_mean = score_diag.get('mu_over_risk_mean', 0.0)
-        log.info(f"  mu_over_risk: mean={_mu_over_risk_mean:.4f}")
-        log.info(f"  head_agree: LONG={score_diag.get('head_agree_long_pct', 0.0):.1f}%  "
-                 f"SHORT={score_diag.get('head_agree_short_pct', 0.0):.1f}%")
-        _n_tot = max(_n_total_scores, 1)
-        def _kill_str(n):
-            return f"{n} ({100.0*n/_n_tot:.1f}%)"
-        log.info(f"  Bars killed by gate (count / % of total bars):")
-        log.info(f"    min_p_side    = {_kill_str(score_diag.get('n_pside_killed', 0))}")
-        log.info(f"    min_p_short   = {_kill_str(score_diag.get('n_pshort_killed', 0))}")
-        log.info(f"    min_mu_r_score= {_kill_str(score_diag.get('n_suppressed', 0))}  (floor={_fwd_min_mu_r_score:.4f})")
-        log.info(f"    min_mu_r_long = {_kill_str(score_diag.get('n_mu_r_long_killed', 0))}")
-        log.info(f"    max_mu_r_short= {_kill_str(score_diag.get('n_mu_r_short_killed', 0))}")
-    log.info("=" * 70)
 
     log.info(f"[V5_FWD] side_mode={config.side_mode} rr_weight={config.rr_weight}")
     log.info(f"[V5_FWD] Score stats: mean={score_diag['score_mean']:.4f} "
@@ -3658,10 +3269,6 @@ def run_v5_forward_test(
     if config.per_symbol_thresholds and test_sym_ids is not None:
         hard_floor = config.min_threshold if config.min_threshold is not None else 0.0
         per_bar_threshold = np.full(len(scores_work), ddt_base_threshold, dtype=np.float64)
-        if getattr(config, 'per_symbol_no_ceiling', False):
-            log.info("[V5_FWD] Per-symbol ceiling cap DISABLED — using raw per-symbol thresholds "
-                     "(max_threshold=%s bypassed; floor=%.4f still active)",
-                     config.max_threshold, hard_floor)
         _first_val = next(iter(config.per_symbol_thresholds.values()), None)
         _is_per_side_format = isinstance(_first_val, dict)
         if _is_per_side_format and config.per_side_threshold:
@@ -3673,31 +3280,29 @@ def run_v5_forward_test(
                     clamped = thr_val
                     if np.isfinite(clamped):
                         clamped = max(clamped, hard_floor)
-                        if config.max_threshold is not None and not getattr(config, 'per_symbol_no_ceiling', False):
+                        if config.max_threshold is not None:
                             clamped = min(clamped, config.max_threshold)
                     side_bar_mask = sym_mask & (sides == side_val)
                     per_bar_threshold[side_bar_mask] = clamped
             n_inf_thr = int(np.sum(np.isinf(per_bar_threshold) & (per_bar_threshold > 0)))
-            _no_ceil_str = " (per_symbol_no_ceiling=True: ceiling bypassed)" if getattr(config, 'per_symbol_no_ceiling', False) else f" ceiling={config.max_threshold}"
             log.info(f"[V5_FWD] Per-symbol per-side thresholds active: "
                      f"{len(config.per_symbol_thresholds)} symbols configured, "
                      f"{n_inf_thr} bars have inf threshold (NO EDGE), "
-                     f"floor={hard_floor:.4f}{_no_ceil_str}")
+                     f"floor={hard_floor:.4f} ceiling={config.max_threshold}")
         else:
             for sym_id_key, sym_thr in config.per_symbol_thresholds.items():
                 clamped_thr = sym_thr if not isinstance(sym_thr, dict) else ddt_base_threshold
                 if np.isfinite(clamped_thr):
                     clamped_thr = max(clamped_thr, hard_floor)
-                    if config.max_threshold is not None and not getattr(config, 'per_symbol_no_ceiling', False):
+                    if config.max_threshold is not None:
                         clamped_thr = min(clamped_thr, config.max_threshold)
                 sym_mask = test_sym_ids == int(sym_id_key)
                 per_bar_threshold[sym_mask] = clamped_thr
             n_inf_thr = int(np.sum(np.isinf(per_bar_threshold) & (per_bar_threshold > 0)))
-            _no_ceil_str2 = " (per_symbol_no_ceiling=True: ceiling bypassed)" if getattr(config, 'per_symbol_no_ceiling', False) else f" ceiling={config.max_threshold}"
             log.info(f"[V5_FWD] Per-symbol thresholds active: "
                      f"{len(config.per_symbol_thresholds)} symbols configured, "
                      f"{n_inf_thr} bars have inf threshold (NO EDGE symbols), "
-                     f"floor={hard_floor:.4f}{_no_ceil_str2}")
+                     f"floor={hard_floor:.4f} ceiling={config.max_threshold}")
         # --- All-inf gate: warn loudly when every bar is HIGH_BAR-blocked ---------
         n_inf_bars_total = int(np.sum(np.isinf(per_bar_threshold) & (per_bar_threshold > 0)))
         n_total_bars_thr = len(per_bar_threshold)
@@ -3747,20 +3352,10 @@ def run_v5_forward_test(
                     int(_inf_mask.sum()), _fallback_thr, effective_threshold, _promoted_syms,
                 )
         elif n_inf_bars_total > 0:
-            # Identify which symbols have inf threshold and how many bars each has
-            _inf_sym_report = []
-            for _sk, _sv in (config.per_symbol_thresholds or {}).items():
-                _is_inf = (not isinstance(_sv, dict) and not np.isfinite(float(_sv))) or \
-                          (isinstance(_sv, dict) and not np.isfinite(_sv.get('long', float('inf')))
-                           and not np.isfinite(_sv.get('short', float('inf'))))
-                if _is_inf:
-                    _sym_name = (symbols[int(_sk)] if symbols and int(_sk) < len(symbols) else f"sym_{_sk}")
-                    _sym_bar_ct = int(np.sum(test_sym_ids == int(_sk)))
-                    _inf_sym_report.append(f"{_sym_name}({_sym_bar_ct}bars)")
             log.warning(
-                "[V5_FWD] %d/%d bars have inf threshold (HIGH_BAR fully blocked). "
-                "Affected symbols: %s",
-                n_inf_bars_total, n_total_bars_thr, ", ".join(_inf_sym_report) if _inf_sym_report else "unknown",
+                "[V5_FWD] %d/%d bars have inf threshold (HIGH_BAR symbols fully blocked). "
+                "Those symbols will produce 0 trades.",
+                n_inf_bars_total, n_total_bars_thr,
             )
         # -------------------------------------------------------------------------
         selected = scores_work >= per_bar_threshold
@@ -4236,12 +3831,7 @@ def run_v5_forward_test(
             side_val = sides[idx]
             close_val = close_prices[idx]
             ema_val = ema200[idx]
-            _ema200_long_only = getattr(config, 'ema200_long_only', False)
-            if _ema200_long_only and side_val == -1 and close_val > ema_val:
-                log.debug("[V5_GATE] ema200_long_only — skipping EMA200 block for SHORT side close=%.2f ema200=%.2f",
-                          close_val, ema_val)
-            _ema200_against = (side_val == 1 and close_val < ema_val) or \
-                              (side_val == -1 and close_val > ema_val and not _ema200_long_only)
+            _ema200_against = (side_val == 1 and close_val < ema_val) or (side_val == -1 and close_val > ema_val)
             if _ema200_against:
                 _side_str = "LONG" if side_val == 1 else "SHORT"
                 if config.ema200_soft_mult is not None:
@@ -4596,26 +4186,7 @@ def run_v5_forward_test(
                         or config.quality_gate_enabled
                         or config.rolling_er_gate)
         if needs_post_r:
-            if config.dynamic_tp_sl and test_atr14 is not None and close_prices is not None \
-                    and high_prices is not None and low_prices is not None:
-                _dyn_r, _dyn_out = _compute_dynamic_trade_r(
-                    idx=idx,
-                    side=int(sides[idx]),
-                    arrays=arrays,
-                    close_prices=close_prices,
-                    high_prices=high_prices,
-                    low_prices=low_prices,
-                    atr14=test_atr14,
-                    tp_scale=config.tp_scale,
-                    sl_scale=config.sl_scale,
-                    min_tp_atr=config.min_tp_atr,
-                    max_tp_atr=config.max_tp_atr,
-                    min_sl_atr=config.min_sl_atr,
-                    max_sl_atr=config.max_sl_atr,
-                    horizon=config.horizon,
-                )
-                post_trade_r = _dyn_r
-            elif use_side_conditional_for_cap:
+            if use_side_conditional_for_cap:
                 post_trade_r = float(r_long[idx]) if sides[idx] == 1 else float(r_short[idx])
             else:
                 post_trade_r = float(test_realized_r[idx]) if test_realized_r is not None else 0.0
@@ -4806,60 +4377,6 @@ def run_v5_forward_test(
              f"head_disagree={head_disagree_blocked} per_sym_kill={per_sym_kill_blocked} "
              f"ddt={ddt_blocked} edge_first_pre={edge_first_blocked} → trades_taken={n_taken}")
 
-    # --- Task #73: Structured per-fold gate funnel table ---
-    # Shows the cumulative attrition through each gate stage with oracle E[R] at each stage.
-    _n_after_quality  = n_total_bars - int(np.sum(~quality_mask)) if quality_mask is not None else n_total_bars
-    _n_after_score    = n_candidates + edge_first_blocked  # passed score threshold (before edge_first)
-    _n_after_ef       = n_candidates                       # after edge_first pruning
-    _n_after_cooldown = n_candidates - cooldown_blocked
-    _n_after_head_dis = _n_after_cooldown - head_disagree_blocked
-    _n_taken          = n_taken
-
-    # Simple funnel row: name, count, % of total candidates, delta from previous stage
-    _prev = n_candidates
-    def _funnel_row(label, n, oracle_er=None):
-        nonlocal _prev
-        removed = _prev - n
-        pct_of_start = 100.0 * n / max(n_candidates, 1)
-        pct_removed  = 100.0 * removed / max(_prev, 1)
-        er_str = f"{oracle_er:+.4f}R" if oracle_er is not None and not np.isnan(oracle_er) else "n/a"
-        _prev = n
-        return (f"  {label:<30s} {n:>6d} ({pct_of_start:>5.1f}% of start) "
-                f"  -[{removed:>4d} / {pct_removed:>5.1f}%]  blocked oracle_E[R]={er_str}")
-
-    _cb_get = lambda g: float(np.mean(gate_blocked_r[g])) if gate_blocked_r.get(g) else float('nan')
-
-    log.info("=" * 80)
-    log.info("  [V5_GATE_FUNNEL] Per-fold gate attrition table")
-    log.info("=" * 80)
-    log.info(f"  {'Stage':<30s} {'Count':>6s}   {'% of start':>10s}   {'Removed → gate oracle E[R]'}")
-    log.info(f"  {'-'*30} {'-'*6}   {'-'*10}   {'-'*30}")
-    log.info(f"  {'total_bars':<30s} {n_total_bars:>6d}   (all model inference bars)")
-    log.info(f"  {'after_quality_gate':<30s} {_n_after_quality:>6d}   ({100.0*_n_after_quality/max(n_total_bars,1):>5.1f}%  of total bars)")
-    log.info(f"  {'after_score_threshold':<30s} {_n_after_score:>6d}   ({100.0*_n_after_score/max(n_total_bars,1):>5.1f}%  of total bars)")
-    log.info(f"  {'after_edge_first':<30s} {_n_after_ef:>6d}   ({100.0*_n_after_ef/max(_n_after_score,1):>5.1f}%  of score-pass)  -[{edge_first_blocked} edge_first]")
-    _prev = _n_after_ef
-    log.info(_funnel_row("after_cooldown",       _n_after_ef - cooldown_blocked,      _cb_get("cooldown")))
-    _n_aft_cd = _n_after_ef - cooldown_blocked
-    _prev = _n_aft_cd
-    _aft_adx      = _n_aft_cd - adx_blocked;        log.info(_funnel_row("after_adx_gate",      _aft_adx,     _cb_get("adx")))
-    _prev = _aft_adx
-    _aft_ema      = _aft_adx - ema_blocked;          log.info(_funnel_row("after_ema200_gate",   _aft_ema,     _cb_get("ema200")))
-    _prev = _aft_ema
-    _aft_wkly     = _aft_ema - weekly_blocked;       log.info(_funnel_row("after_weekly_cap",    _aft_wkly,    _cb_get("weekly_cap")))
-    _prev = _aft_wkly
-    _aft_corr     = _aft_wkly - corr_blocked;        log.info(_funnel_row("after_correlation",   _aft_corr,    _cb_get("correlation")))
-    _prev = _aft_corr
-    _aft_daily    = _aft_corr - daily_blocked;       log.info(_funnel_row("after_daily_cap",     _aft_daily,   _cb_get("daily_loss")))
-    _prev = _aft_daily
-    _aft_hd       = _aft_daily - head_disagree_blocked; log.info(_funnel_row("after_head_disagree", _aft_hd,   _cb_get("head_disagreement")))
-    _prev = _aft_hd
-    _aft_ddt      = _aft_hd - ddt_blocked;           log.info(_funnel_row("after_ddt_throttle",  _aft_ddt,    _cb_get("ddt")))
-    _prev = _aft_ddt
-    _aft_psk      = _aft_ddt - per_sym_kill_blocked; log.info(_funnel_row("after_sym_kill",      _aft_psk,    _cb_get("per_symbol_kill")))
-    log.info(f"  {'TAKEN (final trades)':<30s} {_n_taken:>6d}   ({100.0*_n_taken/max(n_candidates,1):>5.1f}%  of score-pass candidates)")
-    log.info("=" * 80)
-
     if gate_blocked_r:
         log.info("=" * 80)
         log.info("  GATE IMPACT ANALYSIS (oracle R of blocked trades)")
@@ -4994,53 +4511,10 @@ def run_v5_forward_test(
         _df_pct_cal_indices = np.where(np.isfinite(scores_work))[0]
         report['pct_calibration'] = _compute_percentile_calibration(
             _df_pct_cal_indices, scores_work, sides, safe_r, test_bars)
-        _print_forward_report(report, config)
+        _print_forward_report(report)
         return report
 
     taken = np.array(taken)
-
-    # [Task #81 / Bug B] When dynamic_tp_sl is on, re-simulate every taken trade using
-    # the model's predicted MFE/MAE barriers and overwrite safe_r + safe_outcomes so that
-    # ALL downstream metrics (WR, PF, ER, outcome counts) reflect the dynamic simulation.
-    # Previously this was only done for post_trade_r inside gate bookkeeping; the final
-    # report arrays still used the fixed precomputed r_long/r_short and out_long/out_short.
-    _dyn_available = (
-        config.dynamic_tp_sl
-        and test_atr14 is not None
-        and close_prices is not None
-        and high_prices is not None
-        and low_prices is not None
-    )
-    if _dyn_available and len(taken) > 0:
-        _n_dyn_ok = 0
-        _n_dyn_nan = 0
-        for _idx in taken:
-            _dyn_r, _dyn_out = _compute_dynamic_trade_r(
-                idx=int(_idx),
-                side=int(sides[_idx]),
-                arrays=arrays,
-                close_prices=close_prices,
-                high_prices=high_prices,
-                low_prices=low_prices,
-                atr14=test_atr14,
-                tp_scale=config.tp_scale,
-                sl_scale=config.sl_scale,
-                min_tp_atr=config.min_tp_atr,
-                max_tp_atr=config.max_tp_atr,
-                min_sl_atr=config.min_sl_atr,
-                max_sl_atr=config.max_sl_atr,
-                horizon=config.horizon,
-            )
-            if np.isfinite(_dyn_r):
-                safe_r[_idx] = _dyn_r
-                safe_outcomes[_idx] = _dyn_out
-                _n_dyn_ok += 1
-            else:
-                _n_dyn_nan += 1
-        log.info("[V5_FWD][DYN_TP_SL] Patched safe_r/safe_outcomes for %d/%d taken trades "
-                 "(%d NaN fallback to fixed barriers)",
-                 _n_dyn_ok, len(taken), _n_dyn_nan)
-
     t_outcomes = safe_outcomes[taken]
     t_r_unsized = safe_r[taken].copy()
     t_sides = sides[taken]
@@ -5463,7 +4937,7 @@ def run_v5_forward_test(
         _pct_cal_indices, scores_work, sides, safe_r, test_bars)
     report['pct_calibration'] = pct_calibration
 
-    _print_forward_report(report, config)
+    _print_forward_report(report)
     return report
 
 
@@ -5735,7 +5209,7 @@ def _compute_forward_metrics(t_r, t_outcomes, t_sides, test_bars, config, start_
     }
 
 
-def _print_forward_report(report, config=None):
+def _print_forward_report(report):
     log.info("")
     log.info("=" * 80)
     log.info("  FORWARD TEST REPORT")
@@ -5867,40 +5341,6 @@ def _print_forward_report(report, config=None):
         log.info(f"  {'COMBINED':<12} {report.get('total_trades',0):>7} "
                  f"{report.get('total_r',0):>+9.4f} {report.get('win_rate',0):>6.1%} "
                  f"{report.get('profit_factor',0):>7.2f} {report.get('expectancy_r',0):>+9.4f}")
-    # --- Task #73: recommended follow-up tuning command ---
-    # Emitted after every forward test report so the user can refine thresholds immediately.
-    _er = report.get('expectancy_r', 0.0)
-    _wr = report.get('win_rate', 0.0)
-    _tpd = report.get('trades_per_day', 0.0)
-    _thr = report.get('score_threshold', 0.0)
-    _sig = report.get('p_value', 1.0)
-    _n = report.get('total_trades', 0)
-    _sig_str = "***" if _sig < 0.01 else "**" if _sig < 0.05 else "*" if _sig < 0.10 else "ns"
-    log.info("")
-    log.info("-" * 80)
-    log.info("  [NEXT_RUN_TUNING] Recommended parameter adjustments:")
-    if _n < 30:
-        log.info("  ⚠  Too few trades (%d). Reduce --v5-min-threshold or lower --v5-cooldown.", _n)
-    elif _er <= 0:
-        log.info("  ⚠  Negative E[R]=%.4f. Try: --v5-min-mu-r-score 0.0002 --v5-score-exponent 0.5", _er)
-    elif _er > 0 and _sig_str == "ns":
-        log.info("  ℹ  E[R]=%.4f but not significant (%s, p=%.3f). Need more trades (n=%d). "
-                 "Lower cooldown or threshold.", _er, _sig_str, _sig, _n)
-    else:
-        log.info("  ✓  E[R]=%+.4f [%s], WR=%.1f%%, TPD=%.2f — signal is positive.",
-                 _er, _sig_str, _wr * 100, _tpd)
-    _thr_hint = max(_thr * 0.8, 0.0001)
-    _thr_up   = _thr * 1.2
-    log.info("  Current threshold: %.5f  |  Try lower: --v5-min-threshold %.5f  "
-             "|  Try higher (fewer/better): --v5-min-threshold %.5f",
-             _thr, _thr_hint, _thr_up)
-    log.info("  Score distribution fix: --v5-min-mu-r-score 0.0002 --v5-score-exponent 0.5")
-    _pside_w = getattr(config, 'score_pside_weight', None) or report.get('score_pside_weight', 1.0)
-    _pside_hint = "lower" if _pside_w > 0.5 else "current"
-    log.info("  p_side gate: --v5-score-pside-weight %.1f (current=%.1f, %s). "
-             "Reduce toward 0.5 if p_side anti-predictive (lower p_side on winners than losers).",
-             max(_pside_w - 0.25, 0.25), _pside_w, _pside_hint)
-    log.info("-" * 80)
     log.info("=" * 80)
 
 
@@ -6067,7 +5507,7 @@ def run_v5_walk_forward(
     max_folds=None,
     candidate_logger=None,
     side_bal_weight=0.05,  # T5: was 0.15
-    action_entropy_weight=0.10,  # Task #54 E: 0.10 default; KL-to-uniform formula (Task #85) is stronger than old -H
+    action_entropy_weight=0.12,  # Task #56 A3: raised 0.10→0.12
     chop_hold_target=0.20,  # Task #56 B1: chop KL HOLD fraction (was hardcoded 0.35)
     ret_mag_ce_weight=False,  # Task #56 B2: return-magnitude CE upweighting; opt-in
     ret_mag_scale=1.0,  # Task #56 B2: multiplier for ret_mag_ce_weight (optimal: 2.0)
@@ -6077,22 +5517,6 @@ def run_v5_walk_forward(
     min_mu_r_long=-1e9,         # hard gate: LONG specialist trades blocked when mu_R < this (0.0 = agree-only)
     long_disagree_mult=1.0,     # soft penalty on LONG disagree trades; 0.3 = 70% score reduction
     specialist_align_weight=0.0,  # loss weight pushing return head to agree with action head
-    # Task #68: signal quality — SHORT specialist head-agreement improvements
-    max_mu_r_short=1e9,         # hard gate: SHORT specialist trades blocked when mu_R > this (0.0 = agree-only)
-    short_disagree_mult=1.0,    # soft penalty on SHORT disagree trades; 0.3 = 70% score reduction
-    score_pside_weight=1.0,     # Task #69 P2: p_side contribution weight in specialist scoring (0.0 = pure mu_over_risk)
-    per_symbol_no_ceiling=False,  # Task #69 P2: bypass max_threshold ceiling cap for per-symbol thresholds
-    ema200_long_only=False,     # Task #69 P2: EMA200 gate only blocks LONG; SHORTs are never blocked by EMA200
-    min_mu_r_score=0.0,         # Task #73: minimum |mu_R| for a positive score
-    score_exponent=1.0,         # Task #73: monotonic right-tail stretch
-    min_pred_rr=0.0,            # Task #79: minimum predicted MFE/MAE R:R gate
-    dynamic_tp_sl=False,        # Task #79: use model MFE/MAE to set TP/SL barriers
-    tp_scale=0.75,              # Task #79: TP = mfe_pred * tp_scale
-    sl_scale=1.25,              # Task #79: SL = mae_pred * sl_scale
-    min_tp_atr=1.0,             # Task #79: minimum TP in ATR multiples
-    max_tp_atr=5.0,             # Task #79: maximum TP in ATR multiples
-    min_sl_atr=0.5,             # Task #79: minimum SL in ATR multiples
-    max_sl_atr=3.0,             # Task #79: maximum SL in ATR multiples
 ):
     """Walk-forward analysis: rolling train/test windows."""
     try:
@@ -6448,21 +5872,6 @@ def run_v5_walk_forward(
                 min_mu_r_long=min_mu_r_long,            # Task #69
                 long_disagree_mult=long_disagree_mult,  # Task #69
                 specialist_align_weight=specialist_align_weight,  # Task #69
-                max_mu_r_short=max_mu_r_short,          # Task #68
-                short_disagree_mult=short_disagree_mult,  # Task #68
-                score_pside_weight=score_pside_weight,  # Task #69 P2
-                per_symbol_no_ceiling=per_symbol_no_ceiling,  # Task #69 P2
-                ema200_long_only=ema200_long_only,      # Task #69 P2
-                min_mu_r_score=min_mu_r_score,          # Task #73
-                score_exponent=score_exponent,          # Task #73
-                min_pred_rr=min_pred_rr,                # Task #79
-                dynamic_tp_sl=dynamic_tp_sl,            # Task #79
-                tp_scale=tp_scale,                      # Task #79
-                sl_scale=sl_scale,                      # Task #79
-                min_tp_atr=min_tp_atr,                  # Task #79
-                max_tp_atr=max_tp_atr,                  # Task #79
-                min_sl_atr=min_sl_atr,                  # Task #79
-                max_sl_atr=max_sl_atr,                  # Task #79
             )
         except Exception as _fold_err:
             import traceback as _tb
@@ -6632,7 +6041,7 @@ def run_v5_walk_forward(
                     kill_recovery_r_threshold=kill_recovery_r_threshold,
                     kill_hysteresis_r=kill_hysteresis_r,
                     per_symbol_threshold=per_symbol_threshold,
-                    short_oversample=False,          # Bug fix: LONG specialist must NOT oversample SHORT labels
+                    short_oversample=short_oversample,
                     short_min_fraction=short_min_fraction,
                     ema200_soft_mult=ema200_soft_mult,
                     per_side_threshold=per_side_threshold,
@@ -6662,21 +6071,6 @@ def run_v5_walk_forward(
                     min_mu_r_long=min_mu_r_long,            # Task #69
                     long_disagree_mult=long_disagree_mult,  # Task #69
                     specialist_align_weight=specialist_align_weight,  # Task #69
-                    max_mu_r_short=max_mu_r_short,          # Task #68 (no-op in long mode, default)
-                    short_disagree_mult=short_disagree_mult,  # Task #68 (no-op in long mode, default)
-                    score_pside_weight=score_pside_weight,  # Task #69 P2
-                    per_symbol_no_ceiling=per_symbol_no_ceiling,  # Task #69 P2
-                    ema200_long_only=ema200_long_only,      # Task #69 P2
-                    min_mu_r_score=min_mu_r_score,          # Task #73
-                    score_exponent=score_exponent,          # Task #73
-                    min_pred_rr=min_pred_rr,                # Task #79
-                    dynamic_tp_sl=dynamic_tp_sl,            # Task #79
-                    tp_scale=tp_scale,                      # Task #79
-                    sl_scale=sl_scale,                      # Task #79
-                    min_tp_atr=min_tp_atr,                  # Task #79
-                    max_tp_atr=max_tp_atr,                  # Task #79
-                    min_sl_atr=min_sl_atr,                  # Task #79
-                    max_sl_atr=max_sl_atr,                  # Task #79
                 )
             except Exception as _long_err:
                 import traceback as _tbl
@@ -7604,7 +6998,7 @@ def train_v5_model(
     v6_moe_balance_weight=0.05,
     candidate_logger=None,
     side_bal_weight=0.05,  # T5: was 0.15
-    action_entropy_weight=0.10,  # Task #54 E: 0.10 default; KL-to-uniform formula (Task #85) is stronger than old -H
+    action_entropy_weight=0.12,  # Task #56 A3: raised 0.10→0.12 for slightly stronger entropy push
     chop_hold_target=0.20,  # Task #56 B1: chop KL target HOLD fraction (was hardcoded 0.35)
     ret_mag_ce_weight=False,  # Task #56 B2: upweight CE by return magnitude; opt-in
     ret_mag_scale=1.0,  # Task #56 B2: multiplier for return-magnitude CE upweighting (optimal: 2.0)
@@ -7613,22 +7007,6 @@ def train_v5_model(
     min_mu_r_long=-1e9,         # hard gate: LONG specialist trades blocked when mu_R < this (0.0 = agree-only)
     long_disagree_mult=1.0,     # soft penalty on LONG disagree trades; 0.3 = 70% score reduction
     specialist_align_weight=0.0,  # loss weight pushing return head to agree with action head
-    # Task #68: signal quality — SHORT specialist head-agreement improvements
-    max_mu_r_short=1e9,         # hard gate: SHORT specialist trades blocked when mu_R > this (0.0 = agree-only)
-    short_disagree_mult=1.0,    # soft penalty on SHORT disagree trades; 0.3 = 70% score reduction
-    score_pside_weight=1.0,     # Task #69 P2: p_side contribution weight in specialist scoring (0.0 = pure mu_over_risk)
-    per_symbol_no_ceiling=False,  # Task #69 P2: bypass max_threshold ceiling cap for per-symbol thresholds
-    ema200_long_only=False,     # Task #69 P2: EMA200 gate only blocks LONG; SHORTs are never blocked by EMA200
-    min_mu_r_score=0.0,         # Task #73: minimum |mu_R| floor for positive score; 0.0 = disabled
-    score_exponent=1.0,         # Task #73: monotonic right-tail stretch exponent; 1.0 = no change
-    min_pred_rr=0.0,            # Task #79: minimum predicted MFE/MAE R:R gate; 0.0 = disabled
-    dynamic_tp_sl=False,        # Task #79: use model's predicted MFE/MAE to set TP/SL barriers
-    tp_scale=0.75,              # Task #79: TP = mfe_pred * tp_scale (when dynamic_tp_sl=True)
-    sl_scale=1.25,              # Task #79: SL = mae_pred * sl_scale (when dynamic_tp_sl=True)
-    min_tp_atr=1.0,             # Task #79: clamp dynamic TP >= this many ATR units
-    max_tp_atr=5.0,             # Task #79: clamp dynamic TP <= this many ATR units
-    min_sl_atr=0.5,             # Task #79: clamp dynamic SL >= this many ATR units
-    max_sl_atr=3.0,             # Task #79: clamp dynamic SL <= this many ATR units
 ):
     """V5/V6 Forecaster training pipeline with quality gating + TPD controller."""
     from config import config as app_config
@@ -7692,84 +7070,11 @@ def train_v5_model(
              f"loss_warmup_ret_mult={loss_warmup_ret_mult} loss_warmup_action_mult={loss_warmup_action_mult}")
     log.info(f"{ctag} phase1_epochs={phase1_epochs} dynamic_action_labels={dynamic_action_labels} "
              f"atr_normalize_risk_heads={atr_normalize_risk_heads}")
-    # CRITICAL GUARD: phase1_epochs >= epochs causes the action/MFE/MAE heads, the
-    # specialist CE weights, the side_balance KL loss and the specialist alignment
-    # loss to NEVER receive any gradient — training silently collapses to a return-only
-    # pretrainer. This was the root cause of the LONG/SHORT specialist direction
-    # collapses (CE weight 3.0× had zero effect, model defaulted to majority class).
-    # Auto-clamp with a loud warning rather than letting the run waste GPU hours.
-    if phase1_epochs > 0 and phase1_epochs >= epochs:
-        _orig_phase1 = phase1_epochs
-        # Strict guarantee that Phase 2 always exists when epochs > 1.
-        # For epochs <= 1 there is no room for a two-phase curriculum at all,
-        # so disable Phase 1 entirely rather than silently trapping training.
-        if epochs > 1:
-            phase1_epochs = min(max(1, epochs // 3), epochs - 1)
-        else:
-            phase1_epochs = 0
-        log.warning(
-            f"[V5_PHASE1_GUARD] phase1_epochs={_orig_phase1} >= epochs={epochs} would "
-            f"keep training in Phase 1 forever (action/MFE/MAE heads never trained). "
-            f"Auto-clamping phase1_epochs to {phase1_epochs} so Phase 2 runs for the "
-            f"remaining {max(0, epochs - phase1_epochs)} epochs. "
-            f"To silence this warning, pass --v5-phase1-epochs <= {max(0, epochs // 2)}."
-        )
     if phase1_epochs > 0:
         log.info(
             f"[V5_PHASE1] Two-phase curriculum enabled: epochs 1-{phase1_epochs} = return-only pretraining "
             f"(L_ret + L_sigma_reg only). Epochs {phase1_epochs+1}+ = full training. "
             f"Purpose: force trunk to learn return-predictive features before action/MFE/MAE noise."
-        )
-
-    # ====================================================================
-    # SPECIALIST AUTO-CALIBRATION (deep-math fixes for direction collapse)
-    # ====================================================================
-    # When training a LONG or SHORT specialist, three default hyperparameters
-    # actively fight the specialist objective and need to be auto-overridden:
-    #
-    # 1) action_entropy_weight=0.10 default uses formula L_entropy = sum(p*log(p))
-    #    which is -H(p). Minimising it MAXIMISES entropy, pushing the action
-    #    distribution toward uniform [0.33, 0.33, 0.33]. For a specialist whose
-    #    KL target is e.g. [0.20, 0.77, 0.03], this is the OPPOSITE direction
-    #    and at weight 0.10 it dominates the side-balance KL signal (weighted at
-    #    only 0.05 × max KL ≈ 0.025). Auto-zero for specialists.
-    #
-    # 2) side_bal_weight=0.05 default makes the KL-to-regime-target signal too
-    #    weak vs the CE loss (typical magnitude 1.0). For a specialist the
-    #    side-balance KL IS the directional teacher; boost 6× to 0.30 so it has
-    #    real gradient teeth. Combined with the 3.0× CE class weight on the
-    #    specialist direction, the model gets coherent direction pressure from
-    #    both losses.
-    #
-    # 3) action_entropy_weight may have been set explicitly by the user; only
-    #    auto-override when it is at the legacy default 0.10 (or higher) AND the
-    #    specialist mode is active. Users who deliberately want entropy
-    #    regularisation in specialist mode can pass --v5-action-entropy-weight 0.0
-    #    and then re-enable it explicitly with a small value.
-    if specialist_mode in ('long', 'short'):
-        _orig_entropy = action_entropy_weight
-        _orig_sidebal = side_bal_weight
-        if action_entropy_weight > 0.0:
-            action_entropy_weight = 0.0
-        # Boost side-balance weight to match the specialist objective magnitude.
-        # If user already passed a value >= 0.20 keep theirs; else clamp up to 0.30.
-        if side_bal_weight < 0.20:
-            side_bal_weight = 0.30
-        log.warning(
-            f"[V5_SPEC_AUTOCAL] specialist_mode='{specialist_mode}' detected. "
-            f"Auto-calibrating: action_entropy_weight {_orig_entropy:.3f} -> {action_entropy_weight:.3f} "
-            f"(uniform-pushing entropy reg fights specialist bias), "
-            f"side_bal_weight {_orig_sidebal:.3f} -> {side_bal_weight:.3f} "
-            f"(boosts KL-to-regime-target signal vs CE)."
-        )
-    # ====================================================================
-
-    if specialist_mode in ('short', 'long') and side_aware_scoring:
-        log.warning(
-            "[V5_WARN] --v5-side-aware-scoring has NO EFFECT when --v5-side-specialist='%s' is active. "
-            "The specialist scoring path overrides edge_long/edge_short entirely. "
-            "Remove --v5-side-aware-scoring from the training command.",
-            specialist_mode,
         )
     log.info(f"{ctag} w_barrier={w_barrier} w_regime={w_regime}")
     log.info(f"{ctag} score_lambda={score_lambda} risk_proxy={risk_proxy}")
@@ -8194,7 +7499,6 @@ def train_v5_model(
     val_close_arr = np.concatenate(val_close_list, axis=0)
     val_high_arr = np.concatenate(val_high_list, axis=0)
     val_low_arr = np.concatenate(val_low_list, axis=0)
-    val_atr14_arr = _concat_lists(val_atr14_list) if val_atr14_list else None
 
     for label, arr, vmask in [
         ('train_ret_R', train_ret_R, train_valid),
@@ -8257,75 +7561,6 @@ def train_v5_model(
         action_class_weights = inv_freq.astype(np.float32)
     log.info(f"[{vtag}_ACTION_DIST] Class weights: HOLD={action_class_weights[0]:.3f} "
              f"LONG={action_class_weights[1]:.3f} SHORT={action_class_weights[2]:.3f}")
-
-    # ---- DEEP-MATH FIX: Auto-LONG oversample for LONG specialist ----------------
-    # Symmetric mirror of short_oversample. When training a LONG specialist on a
-    # bear-dominant or chop-dominant period, the triple-barrier label distribution
-    # naturally produces fewer LONG-labelled bars than SHORT-labelled bars, so the
-    # 3.0× LONG CE class weight gets applied to a small minority of the training
-    # set. Auto-oversampling LONG bars to >= 35% of (LONG+SHORT) ensures the
-    # specialist sees enough LONG examples to actually learn a discriminative
-    # LONG signal. Triggered automatically when specialist_mode='long' (no CLI
-    # flag needed); user can still pass --v5-short-min-fraction to tune.
-    _long_os_active = (specialist_mode == 'long') and n_short > 0
-    if _long_os_active:
-        min_frac_long = float(short_min_fraction)  # reuse same fraction param
-        target_long = int(math.ceil(n_short * min_frac_long / max(1.0 - min_frac_long, 1e-8)))
-        if n_long < target_long:
-            extra_needed_long = target_long - n_long
-            long_indices_all = np.where(train_valid & (train_action == 1))[0]
-            if len(long_indices_all) > 0:
-                rng_l = np.random.default_rng(seed=43)
-                oversample_idx_l = rng_l.choice(long_indices_all, size=extra_needed_long, replace=True)
-                train_feat = np.concatenate([train_feat, train_feat[oversample_idx_l]], axis=0)
-                train_ret_R = np.concatenate([train_ret_R, train_ret_R[oversample_idx_l]])
-                train_mfe_R = np.concatenate([train_mfe_R, train_mfe_R[oversample_idx_l]])
-                train_mae_R = np.concatenate([train_mae_R, train_mae_R[oversample_idx_l]])
-                train_vol_h = np.concatenate([train_vol_h, train_vol_h[oversample_idx_l]])
-                train_action = np.concatenate([train_action, train_action[oversample_idx_l]])
-                train_valid = np.concatenate([train_valid, train_valid[oversample_idx_l]])
-                train_sym_ids = np.concatenate([train_sym_ids, train_sym_ids[oversample_idx_l]])
-                train_barrier_oracle = np.concatenate([train_barrier_oracle, train_barrier_oracle[oversample_idx_l]])
-                train_barrier_soft = np.concatenate([train_barrier_soft, train_barrier_soft[oversample_idx_l]], axis=0)
-                if len(train_timestamps) > 0 and len(train_timestamps) == len(train_feat) - extra_needed_long:
-                    train_timestamps = np.concatenate([train_timestamps, train_timestamps[oversample_idx_l]])
-                if concat_sample_weights is not None and len(concat_sample_weights) == len(train_feat) - extra_needed_long:
-                    concat_sample_weights = np.concatenate(
-                        [concat_sample_weights, concat_sample_weights[oversample_idx_l]]
-                    ).astype(np.float32)
-                before_n_l = n_long
-                n_long = int(np.sum(train_valid & (train_action == 1)))
-                n_total_act = max(int(np.sum(train_valid & (train_action == 0))) + n_long + n_short, 1)
-                new_frac_l = n_long / max(n_long + n_short, 1)
-                log.info(f"[V5_LONG_OS] Oversampled {extra_needed_long} LONG: {before_n_l} -> {n_long} "
-                         f"({new_frac_l:.1%} of LONG+SHORT) target_frac={min_frac_long:.0%} target_count={target_long}")
-                action_class_weights = np.ones(3, dtype=np.float32)
-                n_hold_new_l = int(np.sum(train_valid & (train_action == 0)))
-                if n_hold_new_l > 0 and n_long > 0 and n_short > 0:
-                    counts_new_l = np.array([n_hold_new_l, n_long, n_short], dtype=np.float64)
-                    inv_freq_new_l = n_total_act / (3.0 * counts_new_l)
-                    inv_freq_new_l = np.clip(inv_freq_new_l, 0.5, 3.0)
-                    action_class_weights = inv_freq_new_l.astype(np.float32)
-                    log.info(f"[V5_LONG_OS] Updated class weights after oversample: "
-                             f"HOLD={action_class_weights[0]:.3f} LONG={action_class_weights[1]:.3f} "
-                             f"SHORT={action_class_weights[2]:.3f}")
-        else:
-            log.info(f"[V5_LONG_OS] n_long={n_long} already >= target={target_long} "
-                     f"(min_frac={min_frac_long:.0%}) — no oversampling needed")
-    # ----------------------------------------------------------------------------
-
-    # Mutual exclusion guard (architect caveat): SHORT oversample is incompatible
-    # with LONG specialist mode — they pull the train distribution in opposite
-    # directions and cancel out. When specialist_mode='long' the LONG-oversample
-    # block above already balanced the labels; force-disable any user-passed
-    # --v5-short-oversample so the two oversamplers don't fight.
-    if specialist_mode == 'long' and short_oversample:
-        log.warning(
-            f"[V5_LONG_OS] Disabling short_oversample (was True) because "
-            f"specialist_mode='long' — LONG-oversample already balanced labels; "
-            f"running both would cancel out the directional bias."
-        )
-        short_oversample = False
 
     if short_oversample and n_long > 0:
         min_frac = float(short_min_fraction)
@@ -9005,8 +8240,6 @@ def train_v5_model(
         # Measures whether predicted mu_R correlates with aligned barrier ret_R labels
         # and whether score distribution has meaningful spread (p90/p50 >> 1).
         # Healthy model targets: mu_r_corr_val > 0.0, score_p90/p50 > 5×, score_p99/p50 > 10×.
-        # [V5_TRAIN_QUALITY] score uses _p_side_f = max(p_long, p_short) in generic mode;
-        # specialist modes use _p_short_f (SHORT) or _p_long_f (LONG) for the side component.
         if not use_v6 and all_val_outputs.get('ret_mu') and all_val_outputs.get('action_logits'):
             # Assemble tensors — if this fails, log at WARNING so it is visible.
             try:
@@ -9032,13 +8265,9 @@ def train_v5_model(
                         _pred_mu_f = _pred_mu[_finite]
                         _tgt_r_f   = _tgt_r[_finite]
                         _mu_corr_val = float(np.corrcoef(_pred_mu_f, _tgt_r_f)[0, 1])
-                        # Task #84: V5 score using score_lambda=0.30 (matches shared_v5_trade_config default).
-                        # Old code used hardcoded lambda=0.50 → underestimated scores by 13-17%.
-                        # Specialist-aware: SHORT/LONG mode uses p_side head and head-agree bars only.
-                        #   generic:  score = |mu_R|/risk * (1.30*max(p_long,p_short) − 0.30)  [all bars]
-                        #   SHORT:    score = max(0,−mu_R)/risk * (1.30*p_short − 0.30)  [mu_R<0 bars]
-                        #   LONG:     score = max(0, mu_R)/risk * (1.30*p_long  − 0.30)  [mu_R>0 bars]
-                        # Displayed score_p90 now matches forward-test score_p90 within ±5%.
+                        # Approximate V5 score (action_head mode, score_lambda=0.5):
+                        #   score = p_side * |mu_R| / risk - 0.5 * (1-p_side) * |mu_R| / risk
+                        #         = |mu_R| / risk * (1.5 * p_side - 0.5)
                         _abs_mu_f = np.abs(_pred_mu_f)
                         _probs_f  = _al_cat[:_n_pred][_vv][_finite]
                         _probs_f  = np.exp(_probs_f - _probs_f.max(axis=1, keepdims=True))
@@ -9046,30 +8275,11 @@ def train_v5_model(
                         _p_long_f  = _probs_f[:, 1]
                         _p_short_f = _probs_f[:, 2]
                         _p_side_f  = np.maximum(_p_long_f, _p_short_f)
-                        _risk_base_f = (
-                            np.clip(np.abs(_mae_cat[:_n_pred][_vv][_finite]), 0.01, 10.0)
-                            if _mae_cat is not None else np.ones(len(_abs_mu_f))
-                        )
-                        if specialist_mode == 'short':
-                            _ha_mask = _pred_mu_f < 0.0
-                            if np.any(_ha_mask):
-                                _raw_score_f = (
-                                    np.maximum(0.0, -_pred_mu_f[_ha_mask]) / _risk_base_f[_ha_mask]
-                                    * (1.30 * _p_short_f[_ha_mask] - 0.30)
-                                )
-                            else:
-                                _raw_score_f = np.array([], dtype=np.float64)
-                        elif specialist_mode == 'long':
-                            _ha_mask = _pred_mu_f > 0.0
-                            if np.any(_ha_mask):
-                                _raw_score_f = (
-                                    np.maximum(0.0, _pred_mu_f[_ha_mask]) / _risk_base_f[_ha_mask]
-                                    * (1.30 * _p_long_f[_ha_mask] - 0.30)
-                                )
-                            else:
-                                _raw_score_f = np.array([], dtype=np.float64)
+                        if _mae_cat is not None:
+                            _risk_f = np.clip(np.abs(_mae_cat[:_n_pred][_vv][_finite]), 0.01, 10.0)
                         else:
-                            _raw_score_f = _abs_mu_f / _risk_base_f * (1.30 * _p_side_f - 0.30)
+                            _risk_f = np.ones(len(_abs_mu_f))
+                        _raw_score_f = _abs_mu_f / _risk_f * (1.5 * _p_side_f - 0.5)
                         _nonneg_scores = _raw_score_f[_raw_score_f > 0]
                         if len(_nonneg_scores) >= 10:
                             _sc_p10  = float(np.percentile(_nonneg_scores, 10))
@@ -9085,15 +8295,12 @@ def train_v5_model(
                         _n_hold  = int(np.sum(_al_preds == 0))
                         _n_long  = int(np.sum(_al_preds == 1))
                         _n_short = int(np.sum(_al_preds == 2))
-                        # _p_side_f = max(p_long, p_short) — used in generic-mode score; always computed above
-                        _p_side_mean = float(np.mean(_p_side_f)) if len(_p_side_f) > 0 else 0.0
                         log.info(
                             f"[V5_TRAIN_QUALITY] epoch={epoch} "
                             f"mu_r_corr_val={_mu_corr_val:+.4f} "
                             f"score_p10={_sc_p10:.4f} p50={_sc_p50:.4f} p90={_sc_p90:.4f} p99={_sc_p99:.4f} "
                             f"disc(p90/p50)={_disc_90:.1f}x disc(p99/p50)={_disc_99:.1f}x "
-                            f"pred_valid[H/L/S]={_n_hold}/{_n_long}/{_n_short} "
-                            f"p_side_mean={_p_side_mean:.3f}"
+                            f"pred_valid[H/L/S]={_n_hold}/{_n_long}/{_n_short}"
                         )
                         if epoch >= 20 and _mu_corr_val < -0.05:
                             log.warning(
@@ -9204,13 +8411,10 @@ def train_v5_model(
                 min_p_short=min_p_short,
                 side_aware_scoring=side_aware_scoring,
                 slippage_bps=slippage_base_bps,
-                min_mu_r_score=min_mu_r_score,          # Task #73: propagate from train_v5_model param (was hardcoded 0.0)
+                min_mu_r_score=0.0,
                 specialist_mode=specialist_mode,  # BUG FIX (Task #68): was missing; sweep chose wrong direction
                 min_mu_r_long=min_mu_r_long,            # Task #69: LONG specialist head-agree gate
                 long_disagree_mult=long_disagree_mult,  # Task #69: soft disagree penalty
-                max_mu_r_short=max_mu_r_short,          # Task #68: SHORT specialist head-agree gate
-                short_disagree_mult=short_disagree_mult,  # Task #68: soft disagree penalty
-                score_pside_weight=score_pside_weight,  # Task #69 P2: p_side weight in specialist scoring
             )
 
             log.info(f"[{vtag}_SCORE_DIAG] mu_R: mean={score_diag['mu_R_mean']:.4f} std={score_diag['mu_R_std']:.4f} | "
@@ -9554,13 +8758,10 @@ def train_v5_model(
                 min_p_short=min_p_short,
                 side_aware_scoring=side_aware_scoring,
                 slippage_bps=slippage_base_bps,
-                min_mu_r_score=min_mu_r_score,          # Task #73: propagate from train_v5_model param (was hardcoded 0.0)
+                min_mu_r_score=0.0,
                 specialist_mode=specialist_mode,  # BUG FIX (Task #68): final sweep must use specialist scoring
                 min_mu_r_long=min_mu_r_long,            # Task #69: LONG specialist head-agree gate
                 long_disagree_mult=long_disagree_mult,  # Task #69: soft disagree penalty
-                max_mu_r_short=max_mu_r_short,          # Task #68: SHORT specialist head-agree gate
-                short_disagree_mult=short_disagree_mult,  # Task #68: soft disagree penalty
-                score_pside_weight=score_pside_weight,  # Task #69 P2: p_side weight in specialist scoring
             )
             _sweep_cand = val_cand_mask if use_candidates_this_epoch else None
             if per_side_threshold:
@@ -9753,36 +8954,6 @@ def train_v5_model(
                             per_sym_no_edge_fallback,
                             "override" if per_sym_no_edge_fallback else "NOT override",
                         )
-                    elif _n_highbar > 0:
-                        # Task #73: loud per-symbol HIGH_BAR warning when some (not all) symbols are blocked.
-                        # Count at SYMBOL level (not entry level — per-side mode has 2 entries per symbol).
-                        _highbar_syms = []
-                        _highbar_sym_count = 0
-                        for _hb_sym_id, _hb_v in ckpt_per_sym_thr.items():
-                            _hb_sym_name = symbols[int(_hb_sym_id)] if symbols and int(_hb_sym_id) < len(symbols) else f"sym_{_hb_sym_id}"
-                            if isinstance(_hb_v, dict):
-                                lt = _hb_v.get('long', float('inf'))
-                                st = _hb_v.get('short', float('inf'))
-                                _l_inf = not np.isfinite(lt)
-                                _s_inf = not np.isfinite(st)
-                                if _l_inf or _s_inf:
-                                    _highbar_sym_count += 1
-                                    _highbar_syms.append(
-                                        f"{_hb_sym_name}"
-                                        f"(L={'∞' if _l_inf else f'{lt:.4f}'}"
-                                        f"/S={'∞' if _s_inf else f'{st:.4f}'})"
-                                    )
-                            else:
-                                if not np.isfinite(float(_hb_v)):
-                                    _highbar_sym_count += 1
-                                    _highbar_syms.append(_hb_sym_name)
-                        log.warning(
-                            "[V5_FWD][HIGH_BAR] %d/%d symbols have at least one side with HIGH_BAR (inf) threshold — "
-                            "those sides are FULLY BLOCKED from contributing trades. "
-                            "Affected: %s",
-                            _highbar_sym_count, len(ckpt_per_sym_thr),
-                            ", ".join(_highbar_syms),
-                        )
                 else:
                     log.warning("[V5_FWD] Per-symbol threshold enabled but not found in checkpoint — using global threshold")
 
@@ -9907,23 +9078,6 @@ def train_v5_model(
                 per_side_threshold=per_side_threshold,
                 gate_mode=gate_mode,
                 specialist_mode=specialist_mode,
-                min_mu_r_long=min_mu_r_long,            # Task #70 fix: was missing → gate silently ignored
-                long_disagree_mult=long_disagree_mult,  # Task #70 fix: was missing → soft penalty silently ignored
-                max_mu_r_short=max_mu_r_short,          # Task #70 fix: was missing → gate silently ignored
-                short_disagree_mult=short_disagree_mult,  # Task #70 fix: was missing → soft penalty silently ignored
-                per_symbol_no_ceiling=per_symbol_no_ceiling,  # Task #69 P2: bypass ceiling cap for per-symbol thresholds
-                ema200_long_only=ema200_long_only,            # Task #69 P2: EMA200 only blocks LONG signals
-                score_pside_weight=score_pside_weight,        # Task #69 P2: p_side weight in specialist scoring
-                min_mu_r_score=min_mu_r_score,                # Task #73: configurable floor (was hardcoded 0.0)
-                score_exponent=score_exponent,                # Task #73: monotonic right-tail stretch
-                min_pred_rr=min_pred_rr,                      # Task #79: predicted R:R gate
-                dynamic_tp_sl=dynamic_tp_sl,                  # Task #79: use predicted MFE/MAE for barriers
-                tp_scale=tp_scale,                            # Task #79
-                sl_scale=sl_scale,                            # Task #79
-                min_tp_atr=min_tp_atr,                        # Task #79
-                max_tp_atr=max_tp_atr,                        # Task #79
-                min_sl_atr=min_sl_atr,                        # Task #79
-                max_sl_atr=max_sl_atr,                        # Task #79
             )
 
             train_ref_arrays = _build_train_ref_arrays(
@@ -9960,7 +9114,6 @@ def train_v5_model(
                     symbols=symbols,
                     candidate_logger=candidate_logger,
                     fold_idx=fold_id,
-                    test_atr14=val_atr14_arr,
                 )
             except Exception as _fwd_err:
                 import traceback as _tb

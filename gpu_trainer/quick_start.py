@@ -41,42 +41,6 @@ Model size: [512, 256, 128, 64] hidden dims (~250K params for ~32K samples)
 Target label mix: HOLD ~25-30%, LONG ~30-35%, SHORT ~30-35% (with oversample)
 Target trades/day in forward test: 3-6
 Bear-market folds: expect balanced LONG/SHORT split (not 100% LONG)
-
-===========================================================================
-SHORT SPECIALIST TRAINING COMMAND (Task #83 corrected)
-===========================================================================
-CONFIRMED BUG FIXES applied in this command vs older versions:
-  - REMOVED --v5-min-threshold 0.04  (was 40-80x above all actual scores → 0 trades)
-  - REMOVED --v5-side-aware-scoring  (confirmed NO-OP when specialist mode active;
-    specialist path overrides edge_long/edge_short entirely — see v5_train.py:1597)
-  - CHANGED --v5-adx-min 15          (candidate mask default already 15.0 now)
-  - ADDED   --v5-min-threshold-pct 90 (adapts threshold to actual score distribution)
-  - sigma-spread-reg default raised 0.1→0.5 and phase1-epochs raised 50→80 globally
-
-python quick_start.py --train-v5 --v5-walk-forward --v5-ema200-soft-mult 0.50 \\
-    --v5-side-specialist short \\
-    --v5-max-mu-r-short 0.0 --v5-short-disagree-mult 0.0 \\
-    --v5-min-p-short 0.50 --v5-specialist-align-weight 0.05 \\
-    --v5-adx-gate --v5-adx-min 15 --v5-min-threshold-pct 90 \\
-    --v5-min-pred-rr 0.5 \\
-    --v5-trailing-sl --v5-trail-activation 1.5 --v5-trail-distance 1.0 \\
-    --v5-corr-thresh 0.90 --v5-recency-weight --v5-recency-half-life 60 \\
-    --v5-short-oversample --v5-short-min-fraction 0.35 \\
-    --v5-per-symbol-threshold --v5-per-side-threshold \\
-    --v5-wf-warm-start --v5-wf-threshold-decay 0.5
-
-Key rules for SHORT specialist:
-  - --v5-max-mu-r-short 0.0 : hard gate — blocks ALL SHORTs where mu_R >= 0
-                              (model return head predicts UP = head-disagree)
-  - --v5-short-disagree-mult 0.0 : soft gate — zeroes residual score for
-                              any head-disagree SHORTs; redundant with above
-                              but kept for defence-in-depth clarity
-  - --v5-min-threshold-pct 90 : threshold = 90th percentile of actual scores;
-                              adapts automatically regardless of score scale
-  - DO NOT use --v5-min-threshold <fixed_value> (kills trades if value > all scores)
-  - DO NOT use --v5-side-aware-scoring (confirmed no-op with specialist mode)
-  - DO NOT use --v5-regime-side-map (redundant when specialist forces all SHORT)
-  - Target: 4-8 high-confidence SHORTs/day, p_short >= 0.55, mu_R < 0
 ===========================================================================
 """
 
@@ -5127,8 +5091,8 @@ Examples:
     parser.add_argument("--balanced-sampling-mode", type=str, choices=["cap", "weighted", "none"],
                         default="cap",
                         help="Symbol balancing mode: 'cap' truncates to min count, 'weighted' keeps all data with inverse-frequency loss weights, 'none' disables (default: cap)")
-    parser.add_argument("--v5-symbol-embed-dim", type=int, default=32,
-                        help="Symbol embedding dimension for multi-asset models (default: 32; increased from 8 for richer per-symbol microstructure capture)")
+    parser.add_argument("--v5-symbol-embed-dim", type=int, default=8,
+                        help="Symbol embedding dimension for multi-asset models (default: 8)")
     parser.add_argument("--per-symbol-scaler", action="store_true", default=False,
                         help="Fit/apply RobustScaler per symbol instead of global (default: off)")
 
@@ -5256,10 +5220,6 @@ Examples:
                         help="Target candidate eligibility rate (default: 0.40)")
     parser.add_argument("--cand-min-rate", type=float, default=0.25,
                         help="Min candidate rate before auto-relax triggers (default: 0.25)")
-    parser.add_argument("--cand-adx-min", type=float, default=15.0,
-                        help="Minimum ADX for candidate mask chop filter (default: 15.0). "
-                             "Bars with ADX < this AND ATR-rank < 0.20 are excluded from the candidate pool. "
-                             "Note: --v5-adx-min controls the forward test gate separately.")
 
     parser.add_argument("--multi-preset-mode", type=str, default="fixed:standard",
                         help="Multi-preset mode: 'oracle' (best-of hindsight, research only), "
@@ -5283,17 +5243,14 @@ Examples:
                         help="v5 weight for barrier CE loss (default: 0.25)")
     parser.add_argument("--v5-w-regime", type=float, default=0.1,
                         help="v5 weight for regime CE loss (default: 0.1)")
-    parser.add_argument("--v5-sigma-spread-reg", type=float, default=0.5,
-                        help="v5 penalty on sigma>threshold to prevent NLL collapse (default: 0.5, set 0 to disable). "
-                             "Raised from 0.1: stronger sigma compression forces model to learn mu_R signal "
-                             "instead of hiding uncertainty in large sigma. Fixes 100-500x score deflation.")
+    parser.add_argument("--v5-sigma-spread-reg", type=float, default=0.1,
+                        help="v5 penalty on sigma>threshold to prevent NLL collapse (default: 0.1, set 0 to disable)")
     parser.add_argument("--v5-sigma-reg-threshold", type=float, default=0.40,
                         help="v5 sigma threshold above which penalty fires (default: 0.40; old hardcoded 1.5 "
                              "never fired at typical sigma=0.607 — Task #58)")
-    parser.add_argument("--v5-phase1-epochs", type=int, default=80,
+    parser.add_argument("--v5-phase1-epochs", type=int, default=50,
                         help="v5 two-phase curriculum: epochs in Phase 1 (return-only, no MFE/MAE/action "
-                             "gradient); default: 80 (raised from 50). Longer Phase 1 gives the return head "
-                             "more time to learn mu_R before action/MFE/MAE noise is introduced. Task #58")
+                             "gradient); default: 50. Set 0 to disable Phase 1. Task #58")
     parser.add_argument("--v5-atr-normalize-risk-heads", action="store_true", default=True,
                         help="[API stub — no-op] mfe_R and mae_R are already R-units from build_v5_targets "
                              "(price_delta/ATR14). Dividing by ATR again would be price_delta/ATR^2 (unit error). "
@@ -5353,11 +5310,10 @@ Examples:
                         help="v5 TPD controller: initial score threshold (default: auto p90)")
     parser.add_argument("--v5-mae-cap", type=float, default=2.0,
                         help="v5 score penalty: clamp MAE to this cap (default: 2.0)")
-    parser.add_argument("--v5-side-bal-weight", type=float, default=0.15,
+    parser.add_argument("--v5-side-bal-weight", type=float, default=0.05,
                         help="3-class side-balance KL loss weight added to L_action. "
-                             "Task #53 canonical default 0.15; T5 found 0.05 works better in specialist mode. "
-                             "Pass --v5-side-bal-weight 0.05 explicitly to use the T5-optimised value. "
-                             "3-class targets include HOLD so all-HOLD collapse is penalised.")
+                             "T5 fix: default 0.05 (was 0.15). 3-class targets include HOLD so "
+                             "all-HOLD collapse is penalised. Lower weight reduces HOLD-bias pressure.")
     parser.add_argument("--v5-action-entropy-weight", type=float, default=0.12,
                         help="v5 action head entropy regularisation weight (default: 0.12). "
                              "Task #56 A3: raised 0.10→0.12 for slightly stronger diversity push. "
@@ -5401,60 +5357,11 @@ Examples:
                              "trades where mu_R < 0 (return head disagrees with action head). "
                              "0.3 = 70%% score penalty, pushes agree trades higher in threshold sweep. "
                              "Default: 1.0 (disabled). Use 0.3 with --v5-min-mu-r-long for dual-gate effect.")
-    parser.add_argument("--v5-specialist-align-weight", type=float, default=0.05,
+    parser.add_argument("--v5-specialist-align-weight", type=float, default=0.0,
                         help="Task #69: alignment loss weight — during LONG specialist training, penalise "
                              "negative mu_R on bars where the action head predicts LONG (p_long.detach() * relu(-mu_R)). "
-                             "Also fires for SHORT specialist: penalises positive mu_R on bars where action "
-                             "head predicts SHORT (p_short.detach() * relu(mu_R)). Task #68 extension. "
                              "Pushes return head to agree with action head over training. "
-                             "CAUTION: weight>=0.3 causes mu_R collapse to near-zero (all scores→0, 0 trades). "
-                             "Default: 0.05 (gentle nudge; was 0.5 which caused score collapse — Task #70 fix).")
-
-    # Task #68: SHORT specialist signal quality improvements (symmetric to Task #69)
-    parser.add_argument("--v5-max-mu-r-short", type=float, default=1e9,
-                        help="Task #68: SHORT specialist hard gate — block SHORT trades where mu_R > threshold. "
-                             "0.0 = agree-only mode (return head must predict negative return). "
-                             "Symmetric to --v5-min-mu-r-long: prevents counter-trend shorts in bull-recovery "
-                             "folds (e.g. Dec 2022 - Feb 2023: ha=0%%, 31 trades, -0.89 R expectancy). "
-                             "Default: 1e9 (disabled). Recommended: 0.0 with --v5-dual-specialist.")
-    parser.add_argument("--v5-short-disagree-mult", type=float, default=1.0,
-                        help="Task #68: SHORT specialist soft disagree multiplier — reduce score of SHORT "
-                             "trades where mu_R > 0 (return head disagrees with SHORT direction). "
-                             "0.3 = 70%% score penalty, pushes agree trades higher in threshold sweep. "
-                             "Default: 1.0 (disabled). Use 0.3 with --v5-max-mu-r-short for dual-gate effect.")
-
-    # Task #69 Phase 2: gate calibration fixes
-    parser.add_argument("--v5-per-symbol-no-ceiling", action="store_true", default=False,
-                        help="Task #69 P2: when set, per-symbol thresholds bypass the global max_threshold ceiling cap. "
-                             "This allows BNB (0.1822), AAVE (0.1014) etc to keep their learned thresholds instead "
-                             "of being crushed to 0.02. The global base threshold (applied to bars not in per-symbol map) "
-                             "is still capped by max_threshold. CRITICAL: use with --v5-per-symbol-threshold or "
-                             "--v5-per-side-threshold. Default: False (backward-compatible).")
-    parser.add_argument("--v5-ema200-long-only", action="store_true", default=False,
-                        help="Task #69 P2: when used with --v5-ema200-regime-gate, restrict EMA200 blocking to LONG "
-                             "signals only. SHORT signals are never blocked by EMA200. "
-                             "Analysis shows 36 profitable shorts (+12.00R) were blocked by EMA200 in the 98-trade "
-                             "forward test; EMA200 is a poor SHORT filter (price above EMA = bullish = SHORT opportunity). "
-                             "Default: False (backward-compatible, both sides blocked).")
-    parser.add_argument("--v5-score-pside-weight", type=float, default=1.0,
-                        help="Task #69 P2: p_side contribution weight in specialist scoring formula. "
-                             "Controls how much p_short/p_long influences the specialist score relative to mu_over_risk. "
-                             "1.0 = current formula (p_side * mu_over_risk - lambda*(1-p_side)*mu_over_risk). "
-                             "0.0 = pure mu_over_risk (p_side has zero influence; removes anti-predictive p_side effect). "
-                             "0.5 = blend. Analysis confirmed p_side is anti-predictive (winners had LOWER p_side "
-                             "than losers), so reducing this weight is recommended. Default: 1.0 (backward-compatible).")
-
-    # Task #73: score audit & fix — configurable min_mu_r_score and score_exponent
-    parser.add_argument("--v5-min-mu-r-score", type=float, default=0.0,
-                        help="Minimum |mu_R| required to generate a positive score. "
-                             "Bars with |mu_R| below this floor receive score=-inf and are excluded from "
-                             "the threshold sweep. 0.0 = disabled (default). "
-                             "Recommended starting value: 0.0002.")
-    parser.add_argument("--v5-score-exponent", type=float, default=1.0,
-                        help="Monotonic right-tail transform for specialist scores: "
-                             "positive scores → score^exponent; NaN/-inf unchanged. "
-                             "1.0 = identity (default). Values < 1 (e.g. 0.5) stretch rank separation. "
-                             "Use when the forward-test score distribution is collapsed.")
+                             "Recommended: 0.5. Default: 0.0 (disabled).")
 
     parser.add_argument("--v5-train-end-date", type=str, default=None,
                         help="v5 time-based split: train on data before this date (YYYY-MM-DD)")
@@ -5688,8 +5595,8 @@ Examples:
                         help="v5.3: apply sigma sharpness multiplier 1/(1+sigma) to scores (default: enabled)")
     parser.add_argument("--v5-no-sigma-discount", action="store_true", default=False,
                         help="v5.3: disable sigma discount")
-    parser.add_argument("--v5-min-p-side", type=float, default=0.0,
-                        help="v5.3: minimum p_side conviction to allow a trade (default: 0.0=disabled; was 0.45 but conflicts with --v5-score-pside-weight 0.0)")
+    parser.add_argument("--v5-min-p-side", type=float, default=0.45,
+                        help="v5.3: minimum p_side conviction to allow a trade (default: 0.45, 0=disabled)")
     parser.add_argument("--v5-min-p-short", type=float, default=0.0,
                         help="v5.3: minimum p_short to allow SHORT trades (default: 0=disabled, e.g. 0.55)")
     parser.add_argument("--v5-side-aware-scoring", action="store_true", default=False,
@@ -5781,22 +5688,6 @@ Examples:
                         help="v5.7+: warm-start each walk-forward fold from previous fold model (default: False)")
     parser.add_argument("--v5-wf-warm-start-lr-mult", type=float, default=0.3,
                         help="v5.7+: LR multiplier for warm-start first epoch (default: 0.3, not yet used — reserved)")
-    parser.add_argument("--v5-min-pred-rr", type=float, default=0.0,
-                        help="Task #79: minimum predicted MFE/MAE R:R gate (0.0=disabled, 1.3=recommended for 8-12 trades/day)")
-    parser.add_argument("--v5-dynamic-tp-sl", action="store_true", default=False,
-                        help="Task #79: use model predicted MFE/MAE to set TP/SL barriers in forward test")
-    parser.add_argument("--v5-tp-scale", type=float, default=0.75,
-                        help="Task #79: TP = mfe_pred * tp_scale when --v5-dynamic-tp-sl (default: 0.75)")
-    parser.add_argument("--v5-sl-scale", type=float, default=1.25,
-                        help="Task #79: SL = mae_pred * sl_scale when --v5-dynamic-tp-sl (default: 1.25)")
-    parser.add_argument("--v5-min-tp-atr", type=float, default=1.0,
-                        help="Task #79: minimum TP in ATR multiples when dynamic (default: 1.0)")
-    parser.add_argument("--v5-max-tp-atr", type=float, default=5.0,
-                        help="Task #79: maximum TP in ATR multiples when dynamic (default: 5.0)")
-    parser.add_argument("--v5-min-sl-atr", type=float, default=0.5,
-                        help="Task #79: minimum SL in ATR multiples when dynamic (default: 0.5)")
-    parser.add_argument("--v5-max-sl-atr", type=float, default=3.0,
-                        help="Task #79: maximum SL in ATR multiples when dynamic (default: 3.0)")
 
     parser.add_argument("--multi-horizon", action="store_true", default=False,
                         help="Train multiple horizons (8,16,32) and select best per bar")
@@ -5892,39 +5783,6 @@ Examples:
                         help="Number of cycles for --verify-system/--verify-separation mode (default: 30)")
 
     args = parser.parse_args()
-
-    # Bug C fix: when running SHORT specialist mode, enforce head-agree-only gates by default.
-    # --v5-max-mu-r-short defaults to 1e9 (all SHORTs pass) and --v5-short-disagree-mult
-    # defaults to 1.0 (no penalty).  Without explicit flags, the hard gate is a no-op and
-    # head-disagree SHORTs (positive mu_R) are NOT blocked.  Auto-set to 0.0 when the user
-    # chose specialist mode=short without explicitly overriding these flags.
-    # Note: Bug A already makes head-disagree SHORTs score 0; this is a defensive hard gate.
-    _specialist = getattr(args, 'v5_side_specialist', 'none')
-    _dual = getattr(args, 'v5_dual_specialist', False)
-    if (_specialist == 'short' or _dual) and '--v5-max-mu-r-short' not in sys.argv:
-        args.v5_max_mu_r_short = 0.0
-        log.info("[BUG_C_FIX] SHORT specialist: auto-set --v5-max-mu-r-short=0.0 "
-                 "(blocks head-disagree SHORTs; override with --v5-max-mu-r-short <value>)")
-    if (_specialist == 'short' or _dual) and '--v5-short-disagree-mult' not in sys.argv:
-        args.v5_short_disagree_mult = 0.0
-        log.info("[BUG_C_FIX] SHORT specialist: auto-set --v5-short-disagree-mult=0.0 "
-                 "(zeroes out any residual head-disagree score; override with --v5-short-disagree-mult <value>)")
-
-    # Bug C fix (LONG side): symmetric to SHORT fix above.
-    # --v5-min-mu-r-long defaults to -1e9 (no-op) and --v5-long-disagree-mult defaults to 1.0 (no penalty).
-    # Without explicit flags, the hard gate is disabled and head-disagree LONGs (negative mu_R = model
-    # predicts price going DOWN) are NOT blocked.  Auto-set to 0.0 when the user chose LONG specialist
-    # or dual specialist mode without explicitly overriding these flags.
-    # Note: Bug A already makes head-disagree LONGs score 0 (max(0, mu_R_adj)/risk = 0 when mu_R < 0);
-    # this is a defensive hard gate for belt-and-suspenders correctness.
-    if (_specialist == 'long' or _dual) and '--v5-min-mu-r-long' not in sys.argv:
-        args.v5_min_mu_r_long = 0.0
-        log.info("[BUG_C_FIX] LONG specialist: auto-set --v5-min-mu-r-long=0.0 "
-                 "(blocks head-disagree LONGs; override with --v5-min-mu-r-long <value>)")
-    if (_specialist == 'long' or _dual) and '--v5-long-disagree-mult' not in sys.argv:
-        args.v5_long_disagree_mult = 0.0
-        log.info("[BUG_C_FIX] LONG specialist: auto-set --v5-long-disagree-mult=0.0 "
-                 "(zeroes out any residual head-disagree score; override with --v5-long-disagree-mult <value>)")
 
     print()
     print("=" * 60)
@@ -6067,7 +5925,6 @@ Examples:
             v5_live_threshold=getattr(args, 'v5_live_threshold', None),
             v5_mae_floor=getattr(args, 'v5_live_mae_floor', None),
             predictive_sltp=getattr(args, 'v5_predictive_sltp', False),
-            specialist_mode=getattr(args, 'v5_side_specialist', 'none'),  # passes 'short'/'long'/'none' to _load_model
         )
         runner.learning_manager = learning_mgr
 
@@ -6597,21 +6454,6 @@ Examples:
                     min_mu_r_long=getattr(args, 'v5_min_mu_r_long', -1e9),              # Task #69
                     long_disagree_mult=getattr(args, 'v5_long_disagree_mult', 1.0),     # Task #69
                     specialist_align_weight=getattr(args, 'v5_specialist_align_weight', 0.0),  # Task #69
-                    max_mu_r_short=getattr(args, 'v5_max_mu_r_short', 1e9),             # Task #68
-                    short_disagree_mult=getattr(args, 'v5_short_disagree_mult', 1.0),   # Task #68
-                    per_symbol_no_ceiling=getattr(args, 'v5_per_symbol_no_ceiling', False),  # Task #69 P2
-                    ema200_long_only=getattr(args, 'v5_ema200_long_only', False),            # Task #69 P2
-                    score_pside_weight=getattr(args, 'v5_score_pside_weight', 1.0),         # Task #69 P2
-                    min_mu_r_score=getattr(args, 'v5_min_mu_r_score', 0.0),                 # Task #73
-                    score_exponent=getattr(args, 'v5_score_exponent', 1.0),                 # Task #73
-                    min_pred_rr=getattr(args, 'v5_min_pred_rr', 0.0),                       # Task #79
-                    dynamic_tp_sl=getattr(args, 'v5_dynamic_tp_sl', False),                 # Task #79
-                    tp_scale=getattr(args, 'v5_tp_scale', 0.75),                            # Task #79
-                    sl_scale=getattr(args, 'v5_sl_scale', 1.25),                            # Task #79
-                    min_tp_atr=getattr(args, 'v5_min_tp_atr', 1.0),                         # Task #79
-                    max_tp_atr=getattr(args, 'v5_max_tp_atr', 5.0),                         # Task #79
-                    min_sl_atr=getattr(args, 'v5_min_sl_atr', 0.5),                         # Task #79
-                    max_sl_atr=getattr(args, 'v5_max_sl_atr', 3.0),                         # Task #79
                 )
                 return
 
@@ -6826,16 +6668,10 @@ Examples:
                 ret_mag_ce_weight=args.v5_ret_mag_ce_weight,
                 ret_mag_scale=args.v5_ret_mag_scale,
                 specialist_mode=getattr(args, 'v5_side_specialist', 'none'),
+                dual_specialist=getattr(args, 'v5_dual_specialist', False),
                 min_mu_r_long=getattr(args, 'v5_min_mu_r_long', -1e9),              # Task #69
                 long_disagree_mult=getattr(args, 'v5_long_disagree_mult', 1.0),     # Task #69
                 specialist_align_weight=getattr(args, 'v5_specialist_align_weight', 0.0),  # Task #69
-                max_mu_r_short=getattr(args, 'v5_max_mu_r_short', 1e9),             # Task #68
-                short_disagree_mult=getattr(args, 'v5_short_disagree_mult', 1.0),   # Task #68
-                per_symbol_no_ceiling=getattr(args, 'v5_per_symbol_no_ceiling', False),  # Task #69 P2
-                ema200_long_only=getattr(args, 'v5_ema200_long_only', False),            # Task #69 P2
-                score_pside_weight=getattr(args, 'v5_score_pside_weight', 1.0),         # Task #69 P2
-                min_mu_r_score=getattr(args, 'v5_min_mu_r_score', 0.0),                 # Task #73
-                score_exponent=getattr(args, 'v5_score_exponent', 1.0),                 # Task #73
             )
 
               if _single_pusher is not None:

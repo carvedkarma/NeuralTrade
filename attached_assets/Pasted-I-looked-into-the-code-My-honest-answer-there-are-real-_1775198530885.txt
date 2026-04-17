@@ -1,0 +1,225 @@
+I looked into the code. My honest answer:
+
+there are real code-level problems here, not just bad config.
+
+The repo is still solid overall, but the parts that control v5 scoring, side balance, and collapse prevention are inconsistent enough that they can absolutely create the behavior you’re seeing.
+
+Biggest code findings
+1. side_bal_weight is still too weak in the actual code path
+
+In train/v5_train.py, the live defaults are still:
+
+side_bal_weight=0.05
+SIDE_BAL_W = side_bal_weight
+
+And there are comments saying it was lowered from 0.15 to reduce HOLD-bias pressure.
+
+That is a problem because your logs are showing direction collapse, not just HOLD collapse. A 0.05 weight is probably too weak to stop the action head from drifting into one-sided behavior.
+
+So this is not just “training chose shorts.”
+The code is currently set up to warn about collapse more than prevent it.
+
+2. Collapse detection exists, but collapse prevention is mostly missing
+
+The code has many V5_DIR_COLLAPSE warnings in the training loop.
+
+But from what I inspected, the system mainly:
+
+detects collapse,
+logs collapse,
+continues training.
+
+I did not see a strong corrective mechanism that says:
+
+if one side exceeds threshold persistently,
+materially increase penalty,
+or reset / damp / rebalance the head.
+
+That means the training loop is observing failure, not controlling failure.
+
+3. compute_v5_scores() is fragile enough to create dead-score states
+
+This is one of the most important findings.
+
+In compute_v5_scores():
+
+scores are built from best_edge - penalty
+then several filters can set entries to -inf:
+min_p_side
+min_p_short
+min_mu_r_score
+
+So if the model shifts into a regime where:
+
+p_side is too weak,
+p_short is below threshold,
+or |mu_R| is below floor,
+
+you can easily wipe out huge parts of the candidate pool.
+
+Then downstream, _tpd_controller_step() does this:
+
+uses only finite eligible scores
+if too few, falls back to all finite scores
+if still too few, logs:
+SKIP: only X total finite scores
+
+That matches your broken log state exactly.
+
+So yes: there is a real code path where the score pipeline can become practically unusable.
+
+4. min_mu_r_score / score suppression is dangerous in this design
+
+Inside compute_v5_scores():
+
+if min_mu_r_score > 0:
+    tiny_mu_mask = abs_mu < min_mu_r_score
+    scores[tiny_mu_mask] = -np.inf
+
+This is a hard kill.
+
+That means when mu_R shrinks because of:
+
+debiasing,
+slippage deduction,
+noisy fold,
+or weak head outputs,
+
+the system does not gracefully down-rank trades.
+It just removes them from the finite-score population.
+
+That is exactly the kind of mechanism that can turn a weak model into a dead controller.
+
+5. There is a contradiction inside the repo about what settings are “correct”
+
+This is a big engineering smell.
+
+quick_start.py still pushes things like:
+
+--v5-min-threshold 0.04
+--v5-side-aware-scoring
+--v5-regime-side-map
+--v5-short-oversample
+
+But param_sweep.py literally says:
+
+--v5-side-aware-scoring removed
+--v5-regime-side-map removed
+--v5-min-threshold changed from 0.04 to 0.02
+
+That means the codebase itself does not have one stable operating philosophy.
+
+So when you run commands copied from quick_start.py, you may be activating exactly the paths that later sweeps learned were harmful.
+
+That is not a market problem.
+That is a repo consistency problem.
+
+6. The score system is mixing hard suppression with adaptive control
+
+This combo is unstable:
+
+score generation can hard-kill bars to -inf
+quality mask can reduce eligibility sharply
+TPD controller then adapts threshold from the remaining finite scores
+
+That means the threshold controller is standing on top of an already-fragile filtered distribution.
+
+If finite-score count collapses, threshold adaptation becomes garbage.
+So the controller is not the root fix; it is downstream of the fragile part.
+
+7. Head disagreement support exists, but it is not central enough
+
+There is code for head_disagreement_gate in train/v5_train.py, and it is wired through quick_start.py.
+
+That is good.
+
+But the core scoring logic still allows a state where:
+
+action head drives side choice,
+mu_R magnitude drives edge,
+optional side-aware logic partially penalizes disagreement rather than resolving it.
+
+So if the heads diverge structurally, the system can still produce nonsense before the disagreement gate cleans it up.
+
+My actual verdict after looking at code
+This is not only a configuration problem
+
+There are real code-design issues in the v5 training/scoring contract:
+
+collapse is logged more than prevented
+score validity is too easy to destroy
+hard -inf suppression is too aggressive
+threshold control depends on a fragile finite-score population
+repo guidance is internally inconsistent
+But it is also not a full rewrite-from-scratch situation
+
+The architecture of the repo is still decent.
+The problem is concentrated in a few sensitive places:
+
+compute_v5_scores()
+quality mask / gating
+side-balance weighting
+threshold control
+quick-start defaults vs sweep defaults
+What I would change first in code
+A. Make collapse prevention active, not passive
+
+When one-side share exceeds, say, 85% for persistent batches:
+
+add a real penalty,
+not just a warning.
+B. Stop turning weak signals into -inf so aggressively
+
+Instead of hard-killing so many scores:
+
+consider soft suppression for some conditions,
+keep the finite-score population alive,
+let ranking handle more of the filtering.
+C. Add component-level finite diagnostics inside compute_v5_scores()
+
+Log finite counts for:
+
+mu_over_risk
+edge_long
+edge_short
+penalty
+final scores
+
+Right now, when scores die, the logs tell you too late.
+
+D. Unify one official operating profile
+
+Choose one:
+
+either quick_start.py
+or param_sweep.py
+
+Right now they disagree in ways that matter.
+
+E. Raise side-balance pressure from the current default
+
+0.05 is too soft for the behavior you’ve shown.
+
+My blunt answer
+
+After looking into code:
+
+yes, there is a code problem.
+
+Not a “the whole repo is bad” problem.
+But a real v5 scoring/training stability problem.
+
+If I had to split it now:
+
+60% config/calibration
+40% code/stability design
+
+Earlier I leaned more toward config.
+After looking into the actual code paths, I’m more convinced the v5 core has enough fragility that bad configs can push it into broken states too easily.
+
+If you want, next I’ll give you a precise patch list by file/function, starting with:
+
+train/v5_train.py -> compute_v5_scores()
+compute_v5_loss()
+batch collapse handling
+threshold controller protections.

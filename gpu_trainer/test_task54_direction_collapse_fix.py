@@ -249,17 +249,14 @@ class TestEntropyRegularisation:
 
     @pytest.mark.skipif(not HAS_TORCH, reason="torch not available in this environment")
     def test_entropy_gradient_pushes_toward_uniform(self):
-        """Total loss gradient w.r.t. collapsed logits pushes toward uniform.
+        """Gradient of entropy loss w.r.t. collapsed logits should push
+        the dominant class DOWN and minority classes UP (toward uniform).
 
-        Gradient-descent update rule:  logit -= lr * grad.
-        For the dominant LONG class (logit=+10) to DECREASE toward uniform,
-        the total gradient w.r.t. z_LONG must be POSITIVE (grad > 0).
-
-        This verifies the gradient direction of the full combined loss, not only
-        the entropy term in isolation.  A logit of +10 for LONG →
-        softmax ≈ [ε, 1, ε].  The L_action KL-to-regime-targets term contributes
-        ≈ (p_LONG − q_LONG) ≈ +0.6 per sample, which dominates and is POSITIVE,
-        so gradient descent correctly drives z_LONG downward.
+        This verifies the gradient direction is correct, not just sign of loss.
+        A logit of +10 for LONG → softmax ≈ [ε, 1, ε].
+        Gradient of L_entropy = Σ p*log(p) w.r.t. logits should be negative
+        for the dominant class (LONG, index 1) so that updating logits with
+        -lr * grad DECREASES the LONG logit (pushes toward uniform).
         """
         from train.v5_train import compute_v5_loss
         torch.manual_seed(77)
@@ -276,15 +273,12 @@ class TestEntropyRegularisation:
         loss, ld = compute_v5_loss(outputs, batch, action_entropy_weight=1.0)
         loss.backward()
 
-        # Gradient for LONG class (index 1) should be POSITIVE:
-        # gradient-descent update: logit -= lr * grad.  With grad > 0,
-        # the dominant logit DECREASES → distribution moves toward uniform.
-        # (A negative grad would increase the logit, worsening collapse.)
+        # Gradient for LONG class (index 1) should be negative:
+        # updating with -lr * grad → logit decreases → less collapsed
         grad_long = logits_leaf.grad[:, 1].mean().item()
-        assert grad_long > 0, (
-            f"Entropy gradient for dominant LONG class should be positive "
-            f"(gradient descent then decreases the dominant logit → uniform), "
-            f"got {grad_long:.4f}"
+        assert grad_long < 0, (
+            f"Entropy gradient for dominant LONG class should be negative "
+            f"(push toward uniform), got {grad_long:.4f}"
         )
 
 

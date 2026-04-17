@@ -14,8 +14,6 @@ import {
   ClipboardList,
   ArrowRightLeft,
   Cpu,
-  Globe,
-  Target,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -30,12 +28,10 @@ import RiskAlertBar from "@/components/risk-alert-bar";
 
 const NAV_ITEMS = [
   { path: "/", label: "Command Center", icon: LayoutDashboard },
-  { path: "/signals", label: "Signal Dashboard", icon: Target },
   { path: "/live", label: "Live Trading", icon: Activity },
   { path: "/bitget", label: "Bitget Trading", icon: ArrowRightLeft },
   { path: "/paper", label: "Paper Trading", icon: FileText },
   { path: "/neural", label: "Neural Monitor", icon: Cpu },
-  { path: "/world-intel", label: "World Intel", icon: Globe },
   { path: "/trade-history", label: "Trade History", icon: ClipboardList },
   { path: "/analytics", label: "Analytics", icon: BarChart3 },
   { path: "/training", label: "Training Monitor", icon: Brain },

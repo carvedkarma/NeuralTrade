@@ -1,0 +1,133 @@
+Yes — I checked the latest model path again, and the code now points to a much clearer answer.
+
+## What’s fixed in this repo
+
+A few of the earlier major issues are now actually addressed:
+
+* `mu_debias` is **off by default**
+* training ref arrays are also debiased **only if** `mu_debias` is enabled
+* the training ref arrays now keep `_raw_mu_R_ref` for gate use
+* barrier-aligned `ret_R` is present in `data/v5_target_generator.py`
+* `mae_cap` is now actually applied inside `compute_v5_scores()`
+
+Those are all good changes.
+
+## What still looks wrong
+
+### 1) `SIDE_BAL_W` is still too high in the current code
+
+It is **not** `0.05` in the actual code I checked.
+
+It is still:
+
+* `side_bal_weight=0.15` in the loss function signature
+* `SIDE_BAL_W = side_bal_weight`
+* default `side_bal_weight=0.15` in training/walk-forward entry points
+
+So the branch you uploaded has **not** fully landed the “reduce side balance to 0.05” fix.
+
+That matters because a 0.15 regime prior can still noticeably pull the action head toward average regime behavior instead of bar-level truth.
+
+### 2) The quality gate still uses debiased `mu_R` for `edge_pass`
+
+This is the biggest remaining design issue.
+
+In `v5_quality_mask()`:
+
+* `mu_R = arrays['mu_R']`
+* `ref_mu = ref['mu_R'] if ref is not None else mu_R`
+* `adaptive_mu_min` is built from `abs(ref_mu)`
+* `edge_pass` is checked against `abs(mu_R)`
+
+Even though `_raw_mu_R_ref` is attached to ref arrays later, the gate code here is **still not using it**.
+
+So the raw-vs-debiased scale mismatch is still effectively present.
+
+That means your strongest suspected issue is **not fixed yet**.
+
+### 3) The relax loop / finiteness fallback is still there
+
+From the code and your logs, the gate can still fall back to “finiteness-only gate.”
+
+So if the signal is weak, the gate still does this pattern:
+
+* real thresholds fail
+* relax loop activates
+* fallback lets everything finite through
+
+That does not solve the signal problem; it hides it.
+
+### 4) `mae_cap` fix is real, but the score can still be dead if `p_side < 0.333`
+
+The score formula is still:
+
+* best edge from `p_long/p_short * mu_over_risk`
+* minus `score_lambda * (1 - p_side) * mu_over_risk`
+
+With `score_lambda=0.5`, the effective multiplier is negative if `p_side < 1/3`.
+
+So if the action head is weak and sits around `0.28–0.30` like in your logs, scores can still collapse or go negative even after the `mae_cap` fix.
+
+That means:
+
+> even if MAE is less broken now, the action head can still kill the score.
+
+### 5) The action head collapse is still the main live risk
+
+Your recent logs showed:
+
+* `pred[H/L/S]=2689/0/0`
+
+That is not a threshold issue.
+That is the action head learning “always HOLD.”
+
+And from the code I checked, I do **not** see a fundamental architectural change that would prevent that by itself.
+
+## My current verdict
+
+The latest code is **better**, but the real signal-path fix is still incomplete.
+
+The two biggest unresolved problems are:
+
+1. **quality gate still calibrated on the wrong `mu_R` scale**
+2. **side-balance prior still stronger than it should be**
+
+And the model can still fail this way:
+
+* action head predicts HOLD everywhere
+* `p_side` stays below useful confidence
+* score multiplier becomes tiny or negative
+* threshold sees nothing tradable
+
+## What I think you should do next
+
+### Must-fix code items
+
+1. Change the quality gate to use **raw training `mu_R` reference** consistently when computing the `mu_R` floor, and compare it against the matching raw forward scale or disable that gate when debias is active.
+2. Reduce `side_bal_weight` default from **0.15 to 0.05** in all real entry points, not just in logs or task notes.
+3. Add a strict audit mode that disables finiteness-only fallback.
+
+### Most important model check
+
+Run one short training proof and watch these live:
+
+* predicted class distribution `pred[H/L/S]`
+* `mu_r_corr_val`
+* score p50/p90/p99
+* `p_side` mean
+* top-decile avg R
+
+If `pred[H/L/S]` keeps staying all HOLD after these two code fixes, then the next problem is deeper in the action targets or class weighting.
+
+## My blunt answer
+
+Yes — I checked the model again.
+
+The latest repo is improved, but the signal path is **still not fully fixed**.
+
+The clearest remaining problem is:
+
+> **the gate and scoring path are still using an inconsistent `mu_R` scale, and the side-balance prior is still stronger than it should be.**
+
+So I would **not** trust the current training behavior yet.
+You are closer, but not through the main bottleneck.

@@ -4,7 +4,7 @@ hidden = [".config", ".git", "generated-icon.png", "node_modules", "dist"]
 
 [nix]
 channel = "stable-24_05"
-packages = ["arrow-cpp", "glibcLocales", "libxcrypt", "pkg-config", "xsimd"]
+packages = ["arrow-cpp", "glibcLocales", "pkg-config"]
 
 [[ports]]
 localPort = 5000
@@ -41,7 +41,3 @@ waitForPort = 5000
 
 [agent]
 integrations = ["javascript_openai_ai_integrations:2.0.0"]
-
-[postMerge]
-path = "scripts/post-merge.sh"
-timeoutMs = 20000

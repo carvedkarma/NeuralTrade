@@ -7,8 +7,7 @@ import { getConfig } from "./paper/config";
 import { getPositionsBySymbol } from "./paper/storage";
 import ingestRouter from "./ingest";
 import { db } from "./db";
-import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema, openInterestHistory, v5Signals, paperPositions, paperPortfolio, paperTradeHistory, trainingSessions, trainingEpochs, trainingFolds, neuralAdjustments, worldEvents, worldIntelSnapshots, macroIndicators } from "@shared/schema";
-import { getLatestSnapshot, getLatestMacro, getRecentEvents, runWorldIntelCycle, getRiskCalendar, isRunning as worldIntelRunning, lastRunAt as worldIntelLastRunAt } from "./world-intel";
+import { candles, insertShotPlanHistorySchema, liveCycleLogs, liveTradeRecords, learningRuns, healthStatus, tradeEvents, settings, moneyConfigSchema, openInterestHistory, v5Signals, paperPositions, paperPortfolio, paperTradeHistory, trainingSessions, trainingEpochs, trainingFolds, neuralAdjustments } from "@shared/schema";
 import type { ModelLearningStatsEntry, MoneyConfig } from "@shared/schema";
 import { and, eq, gte, lte, asc, desc, sql, count } from "drizzle-orm";
 import { z } from "zod";
@@ -156,48 +155,6 @@ export async function registerRoutes(
         .limit(limit);
       res.json(rows);
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  app.post("/api/v5/signal", async (req, res) => {
-    try {
-      const s = req.body;
-      if (!s || !s.symbol || !s.direction) {
-        return res.status(400).json({ error: "symbol and direction are required" });
-      }
-      const predMfe = s.predicted_mfe_r ?? s.mfe_pred ?? null;
-      const predMae = s.predicted_mae_r ?? s.mae_pred ?? null;
-      const predRr = (predMfe != null && predMae != null && predMae > 0)
-        ? predMfe / predMae
-        : (s.predicted_rr ?? null);
-      const [row] = await db.insert(v5Signals).values({
-        symbol: s.symbol,
-        direction: String(s.direction).toUpperCase(),
-        confidence: s.confidence ?? s.p_enter ?? 0,
-        score: s.v5_score ?? s.score ?? null,
-        muR: s.v5_ret_mu ?? s.mu_r ?? null,
-        pSide: s.p_side ?? null,
-        lane: s.lane ?? null,
-        regime: s.regime ?? null,
-        entryPrice: s.entry_price ?? s.price ?? null,
-        slPrice: s.stop_loss ?? s.sl_price ?? null,
-        tpPrice: s.take_profit ?? s.tp_price ?? null,
-        thresholdUsed: s.threshold_used ?? s.v5_threshold ?? null,
-        htfScore: s.htf_score ?? null,
-        sizeMultiplier: s.size_multiplier ?? null,
-        predictedMfeR: predMfe,
-        predictedMaeR: predMae,
-        predictedRr: predRr,
-        signalTs: s.signal_ts ?? s.cycle_ts ?? Date.now(),
-        createdAt: Date.now(),
-      }).returning();
-      gpuBridge.recordActivity();
-      if (s.gpu_callback_url) gpuBridge.registerGpuUrl(s.gpu_callback_url);
-      broadcast("V5_SIGNAL", { ...row });
-      res.json({ success: true, id: row.id });
-    } catch (err: any) {
-      console.error("[V5 Signal] Insert error:", err.message);
       res.status(500).json({ error: err.message });
     }
   });
@@ -3712,49 +3669,6 @@ export async function registerRoutes(
     }
   });
 
-  // ── LONG disable toggle ────────────────────────────────────────────────────
-  // Seed disable_longs default=false on first access.
-  // Both SHORT and LONG specialists are now trained and viable. Enable both by default.
-  // Toggle this to true in Settings if you want SHORT-only execution.
-  const _seedDisableLongs = async () => {
-    try {
-      const existing = await db.select().from(settings).where(eq(settings.key, "disable_longs")).limit(1);
-      if (existing.length === 0) {
-        await db.insert(settings).values({ key: "disable_longs", valueJson: false, updatedAt: Date.now() });
-        console.log("[Trade Gates] disable_longs seeded to false (both SHORT and LONG specialists active by default)");
-      }
-    } catch (e: any) {
-      console.warn(`[Trade Gates] Failed to seed disable_longs: ${e.message}`);
-    }
-  };
-  _seedDisableLongs();
-
-  app.get("/api/trade-gates/disable-longs", async (req, res) => {
-    try {
-      const row = await db.select().from(settings).where(eq(settings.key, "disable_longs")).limit(1);
-      // Default to true — LONG specialist is unprofitable (30% WR); block until retrained
-      const disabled = row.length === 0 ? true : row[0].valueJson === true;
-      res.json({ disableLongs: disabled });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  app.post("/api/trade-gates/disable-longs", async (req, res) => {
-    try {
-      const { disableLongs } = req.body;
-      if (typeof disableLongs !== "boolean") {
-        return res.status(400).json({ error: "disableLongs must be a boolean" });
-      }
-      await db.insert(settings).values({ key: "disable_longs", valueJson: disableLongs, updatedAt: Date.now() })
-        .onConflictDoUpdate({ target: settings.key, set: { valueJson: disableLongs, updatedAt: Date.now() } });
-      console.log(`[Trade Gates] disable_longs set to ${disableLongs}`);
-      res.json({ success: true, disableLongs });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
   // Get GPU trainer connection settings
   app.get("/api/gpu/settings", (req, res) => {
     res.json({
@@ -5104,21 +5018,6 @@ export async function registerRoutes(
       } else {
         // ── Node.js safety gates (defense-in-depth) ──
 
-        // Gate 0: LONG disable toggle — block LONG signals when disable_longs setting is true
-        try {
-          const _disableLongsRow = await db.select().from(settings).where(eq(settings.key, "disable_longs")).limit(1);
-          // Default true when row missing — LONG specialist is unprofitable (30% WR), block until retrained
-          const _longsDisabled = _disableLongsRow.length === 0 ? true : _disableLongsRow[0].valueJson === true;
-          if (_longsDisabled && side === "LONG") {
-            console.log(`[Auto-Trade] LONG DISABLED — blocked ${t.symbol} LONG signal (disable_longs=true)`);
-            autoTradeResult = { opened: false, reason: "longs_disabled" };
-            res.json({ success: true, id: record.id, autoTrade: autoTradeResult });
-            return;
-          }
-        } catch (_longGateErr: any) {
-          console.warn(`[Auto-Trade] Failed to check disable_longs setting: ${_longGateErr.message}`);
-        }
-
         // Gate 1: Session circuit breaker — always applied regardless of signal source
         const _cbCheck = await _checkSessionCircuitBreaker();
         if (_cbCheck.tripped) {
@@ -5796,42 +5695,6 @@ Provide your analysis in this JSON format:
         createdAt: Date.now(),
       });
       gpuBridge.recordActivity();
-
-      if (c.decision === "ENTER" && c.direction) {
-        try {
-          const _predMfe = c.v5_mfe ?? c.mfe_pred ?? c.predicted_mfe_r ?? null;
-          const _predMae = c.v5_mae ?? c.mae_pred ?? c.predicted_mae_r ?? null;
-          const _predRr = (_predMfe != null && _predMae != null && _predMae > 0)
-            ? _predMfe / _predMae
-            : (c.predicted_rr ?? null);
-          const [_sigRow] = await db.insert(v5Signals).values({
-            symbol: c.symbol,
-            direction: String(c.direction).toUpperCase(),
-            confidence: c.p_enter ?? 0,
-            score: c.v5_score ?? null,
-            muR: c.v5_ret_mu ?? c.ret_mu ?? null,
-            pSide: c.v5_p_long != null || c.v5_p_short != null
-              ? Math.max(c.v5_p_long ?? 0, c.v5_p_short ?? 0)
-              : null,
-            lane: c.lane_selected ?? null,
-            regime: null,
-            entryPrice: c.price != null ? Number(c.price) : null,
-            slPrice: null,
-            tpPrice: null,
-            thresholdUsed: c.threshold_used ?? c.v5_threshold ?? null,
-            htfScore: c.htf_score ?? null,
-            sizeMultiplier: c.lane_size_mult ?? null,
-            predictedMfeR: _predMfe,
-            predictedMaeR: _predMae,
-            predictedRr: _predRr,
-            signalTs: c.cycle_ts ?? Date.now(),
-            createdAt: Date.now(),
-          }).returning();
-          broadcast("V5_SIGNAL", { ..._sigRow });
-        } catch (_sigErr: any) {
-          console.warn(`[CycleLog] Failed to insert v5_signal record: ${_sigErr.message}`);
-        }
-      }
 
       const cachedNeuralSignal: NeuralSignalData = {
         v5Score: c.v5_score ?? null,
@@ -6808,54 +6671,6 @@ Provide your analysis in this JSON format:
       console.error("Error in sync-all:", error);
       res.status(500).json({ error: "Failed to sync all symbols" });
     }
-  });
-
-  // ─── World Intelligence Routes ───────────────────────────────────────────
-  app.get("/api/world-intel/snapshot", async (_req, res) => {
-    try {
-      const snapshot = await getLatestSnapshot();
-      res.json({
-        snapshot,
-        isRunning: worldIntelRunning,
-        lastRunAt: worldIntelLastRunAt,
-        nextRunAt: worldIntelLastRunAt ? worldIntelLastRunAt + 30 * 60 * 1000 : null,
-      });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      res.status(500).json({ error: message });
-    }
-  });
-
-  app.get("/api/world-intel/events", async (req, res) => {
-    try {
-      const parsedLimit = parseInt(String(req.query.limit ?? "50"), 10);
-      const limit = Math.min(isNaN(parsedLimit) || parsedLimit < 1 ? 50 : parsedLimit, 100);
-      const category = req.query.category ? String(req.query.category) : undefined;
-      const sortParam = req.query.sort === "recent" ? "recent" as const : "relevance" as const;
-      const events = await getRecentEvents(limit, category, sortParam);
-      res.json({ events, count: events.length });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      res.status(500).json({ error: message });
-    }
-  });
-
-  app.get("/api/world-intel/macro", async (_req, res) => {
-    try {
-      const macro = await getLatestMacro();
-      res.json({ macro, riskCalendar: getRiskCalendar() });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      res.status(500).json({ error: message });
-    }
-  });
-
-  app.post("/api/world-intel/refresh", async (_req, res) => {
-    if (worldIntelRunning) {
-      return res.status(409).json({ error: "Analysis cycle already running" });
-    }
-    runWorldIntelCycle().catch(console.error);
-    res.json({ success: true, message: "World intelligence cycle started" });
   });
 
   return httpServer;

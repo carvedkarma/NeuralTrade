@@ -41,14 +41,10 @@ RETRY_DELAY = 2.0
 MIN_H1_BARS = 100
 MIN_H4_BARS = 50
 
-V5_SCORE_LAMBDA = 0.30       # Task #84: 0.5→0.30. Matches shared_v5_trade_config.score_lambda=0.30
-                             # and training default. Old 0.5 caused train/live signal reranking mismatch.
-V5_SCORE_THRESHOLD = 0.20   # Task #84: 0.5→0.20. Old 0.5 was the original pre-specialist calibration;
-                             # shared_v5_trade_config overrides this to 0.20 (updated from broken 0.001).
-                             # This fallback fires only when shared config import fails at runtime.
-V5_MIN_MU_R = 0.0           # Task #84: 0.03→0.0. Matches shared_v5_trade_config.min_mu_r_score=0.0.
-                             # Post-sigma-reg fix, mu_R will be 0.4–1.5R — floor not needed.
-V5_MAE_FLOOR = 0.5          # minimum MAE to prevent score explosion in low-vol markets
+V5_SCORE_LAMBDA = 0.5
+V5_SCORE_THRESHOLD = 0.5   # default live threshold — calibrated for MAE floor of 0.5
+V5_MIN_MU_R = 0.03
+V5_MAE_FLOOR = 0.5         # minimum MAE to prevent score explosion in low-vol markets
 
 COST_BPS = 8.0
 
@@ -83,22 +79,16 @@ def _get_exchange_time_offset() -> float:
         return 0.0
 
 
-def _load_model(device: str, symbol: Optional[str] = None, specialist_mode: str = 'none'):
+def _load_model(device: str, symbol: Optional[str] = None):
     """Load the trained model, scaler, feature columns, and temperature.
 
     Supports both legacy EnhancedMultiHeadMLP and V5Forecaster models.
     If symbol is provided, first checks checkpoints/deployed/{symbol}/ for a
     per-symbol model. Falls back to the global checkpoints/ directory.
 
-    When specialist_mode is 'short' or 'long', first searches for the matching
-    dual-specialist checkpoint (best_v5_short_fold*.pt / best_v5_long_fold*.pt)
-    saved by --v5-dual-specialist training. Falls back to best_v5_expectancy.pt
-    if no specialist checkpoint is found.
-
     Returns: (model, engineer, feature_columns, temperature, symbol_map)
     """
     import torch
-    import glob as _glob
     from data.pipeline import FeatureEngineer
 
     search_dirs = []
@@ -106,40 +96,22 @@ def _load_model(device: str, symbol: Optional[str] = None, specialist_mode: str 
         search_dirs.append(Path(f"checkpoints/deployed/{symbol}"))
     search_dirs.append(Path("checkpoints"))
 
-    # ── Dual-specialist checkpoint resolution ─────────────────────────────────
-    # When training with --v5-dual-specialist, each fold saves:
-    #   checkpoints/best_v5_short_fold{N}.pt  (SHORT specialist)
-    #   checkpoints/best_v5_long_fold{N}.pt   (LONG specialist)
-    # We pick the most recently modified fold checkpoint for the requested side.
-    checkpoint_path = None
-    if specialist_mode in ('short', 'long'):
-        pattern = str(Path("checkpoints") / f"best_v5_{specialist_mode}_fold*.pt")
-        matches = sorted(_glob.glob(pattern), key=lambda p: Path(p).stat().st_mtime, reverse=True)
-        if matches:
-            checkpoint_path = Path(matches[0])
-            log.info(f"[DUAL_SPECIALIST] Loading {specialist_mode.upper()} specialist checkpoint: {checkpoint_path}")
-        else:
-            log.warning(
-                f"[DUAL_SPECIALIST] No {specialist_mode.upper()} specialist checkpoint found "
-                f"(pattern: {pattern}). Falling back to best_v5_expectancy.pt. "
-                f"Run --v5-dual-specialist training first to generate specialist checkpoints."
-            )
+    checkpoint_names = [
+        "best_enter_prauc.pt",
+        "best_v5_expectancy.pt",
+        "best_enter_loss.pt",
+        "best_v5_loss.pt",
+    ]
 
-    if checkpoint_path is None:
-        checkpoint_names = [
-            "best_enter_prauc.pt",
-            "best_v5_expectancy.pt",
-            "best_enter_loss.pt",
-            "best_v5_loss.pt",
-        ]
-        for d in search_dirs:
-            for name in checkpoint_names:
-                p = d / name
-                if p.exists():
-                    checkpoint_path = p
-                    break
-            if checkpoint_path:
+    checkpoint_path = None
+    for d in search_dirs:
+        for name in checkpoint_names:
+            p = d / name
+            if p.exists():
+                checkpoint_path = p
                 break
+        if checkpoint_path:
+            break
 
     if not checkpoint_path:
         log.error(f"No trained model found{' for '+symbol if symbol else ''}! Run training first.")
@@ -1027,7 +999,6 @@ class LiveRunner:
         v5_live_threshold: float = None,
         v5_mae_floor: float = None,
         predictive_sltp: bool = False,
-        specialist_mode: str = 'none',
     ):
         self.replit_url = replit_url
         self.symbols = symbols
@@ -1081,7 +1052,6 @@ class LiveRunner:
             else cooldown_bars
         )
         self.predictive_sltp = predictive_sltp
-        self.specialist_mode = specialist_mode   # 'none' | 'short' | 'long'
 
         self.halt_on_data_staleness: bool = _shared.halt_on_data_staleness if _shared else True
         self.max_data_staleness_seconds: float = _shared.max_data_staleness_seconds if _shared else 300.0
@@ -1574,11 +1544,7 @@ class LiveRunner:
         self._register_gpu_url()
         self._start_execution_service()
 
-        self.model, self.engineer, self.feature_columns, self.temperature, self.symbol_map = _load_model(
-            self.device, specialist_mode=self.specialist_mode
-        )
-        if self.specialist_mode != 'none':
-            log.info(f"[DUAL_SPECIALIST] Running in {self.specialist_mode.upper()} specialist mode")
+        self.model, self.engineer, self.feature_columns, self.temperature, self.symbol_map = _load_model(self.device)
         if getattr(self.model, '_is_v6', False):
             log.info(f"[V6] V6Forecaster active — seq_len={self.model._v6_seq_len}, confidence gating enabled (min=0.4)")
         self._init_fetcher()
