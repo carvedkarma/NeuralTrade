@@ -41,10 +41,17 @@ import numpy as np
 import pandas as pd
 
 THIS_DIR = Path(__file__).resolve().parent
-GPU_TRAINER_DIR = THIS_DIR.parent
-if str(GPU_TRAINER_DIR) not in sys.path:
-    sys.path.insert(0, str(GPU_TRAINER_DIR))
+V11_DIR = THIS_DIR.parent
+REPO_ROOT = V11_DIR.parent
+LEGACY_GPU_TRAINER_DIR = REPO_ROOT / "gpu_trainer"
+if str(LEGACY_GPU_TRAINER_DIR) not in sys.path:
+    sys.path.insert(0, str(LEGACY_GPU_TRAINER_DIR))
 
+# This baseline harness is a thin wrapper around the proven Phase-1 XGBoost
+# meta-label pipeline. The feature engineer + meta-label fns + xgb trainer
+# are imported from the legacy `gpu_trainer/` tree (kept frozen as ground
+# truth). It writes its result to `gpu_trainer_v11/reports/xgb_baseline.json`
+# so `scripts/write_verdict.py` can do the mandatory beat-check.
 from data.pipeline import FeatureEngineer  # noqa: E402
 from labels.meta_label import HORIZONS_BARS, compute_meta_labels  # noqa: E402
 from baselines.xgboost_meta import (  # noqa: E402
@@ -54,8 +61,8 @@ from baselines.xgboost_meta import (  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("honest_wf")
 
-DATA_CACHE = GPU_TRAINER_DIR / "data_cache"
-REPORT_DIR = GPU_TRAINER_DIR / "reports" / "v10_phase1"
+DATA_CACHE = V11_DIR / "data_cache_dollar"   # V11 dollar bars, not legacy 15m
+REPORT_DIR = V11_DIR / "reports"
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 VERDICT_PATH = Path(__file__).resolve().parents[2] / ".local" / "tasks" / "v5-static-postmortem-verdict.md"
 
@@ -310,19 +317,23 @@ def run_horizon(horizon: str, df: pd.DataFrame, feats: pd.DataFrame) -> HorizonR
              horizon, report.avg_pf, report.min_pf, report.avg_trades,
              "PASS" if report.passed else f"FAIL ({'; '.join(fail_reasons)})")
 
-    out_path = REPORT_DIR / f"walkforward_{horizon}.json"
+    payload = {
+        "horizon": horizon, "horizon_bars": hbars,
+        "train_months": TRAIN_MONTHS_LOCKED, "test_months": TEST_MONTHS_LOCKED,
+        "max_folds": MAX_FOLDS_LOCKED,
+        "passed": report.passed, "fail_reasons": fail_reasons,
+        "avg_pf": report.avg_pf, "min_pf": report.min_pf,
+        "avg_trades": report.avg_trades,
+        "folds": [asdict(fr) for fr in report.folds],
+        "generated_at": datetime.utcnow().isoformat(),
+    }
+    out_path = REPORT_DIR / f"xgb_baseline_h{hbars}.json"
     with open(out_path, "w") as f:
-        json.dump({
-            "horizon": horizon, "horizon_bars": hbars,
-            "train_months": TRAIN_MONTHS_LOCKED, "test_months": TEST_MONTHS_LOCKED,
-            "max_folds": MAX_FOLDS_LOCKED,
-            "passed": report.passed, "fail_reasons": fail_reasons,
-            "avg_pf": report.avg_pf, "min_pf": report.min_pf,
-            "avg_trades": report.avg_trades,
-            "folds": [asdict(fr) for fr in report.folds],
-            "generated_at": datetime.utcnow().isoformat(),
-        }, f, indent=2)
-    log.info("Wrote %s", out_path)
+        json.dump(payload, f, indent=2)
+    # Also write/update the canonical filename consumed by scripts/write_verdict.py
+    with open(REPORT_DIR / "xgb_baseline.json", "w") as f:
+        json.dump(payload, f, indent=2)
+    log.info("Wrote %s (and reports/xgb_baseline.json)", out_path)
     return report
 
 

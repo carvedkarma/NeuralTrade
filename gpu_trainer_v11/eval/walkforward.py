@@ -71,8 +71,8 @@ class FoldResult:
     n_val_eligible: int
     n_cal_eligible: int
     n_test_eligible: int
-    n_features_kept_audit: int
-    selected_feature_top10_audit: list = field(default_factory=list)
+    n_features_kept: int
+    selected_feature_top10: list = field(default_factory=list)
     adversarial_auc: float = float("nan")
     n_trades: int = 0
     win_rate: float = 0.0
@@ -239,7 +239,7 @@ def run_walk_forward(
                 fold_num=fold_num, train_start=str(tr_s.date()), train_end=str(tr_e.date()),
                 test_start=str(te_s.date()), test_end=str(te_e.date()),
                 n_train_eligible=0, n_val_eligible=0, n_cal_eligible=0, n_test_eligible=0,
-                n_features_kept_audit=0, notes="train window too small after purge"))
+                n_features_kept=0, notes="train window too small after purge"))
             pfs.append(0.0); trades_list.append(0); continue
 
         i_tr_end = i_tr_a + int(0.6 * win_len)
@@ -252,7 +252,7 @@ def run_walk_forward(
                 fold_num=fold_num, train_start=str(tr_s.date()), train_end=str(tr_e.date()),
                 test_start=str(te_s.date()), test_end=str(te_e.date()),
                 n_train_eligible=0, n_val_eligible=0, n_cal_eligible=0, n_test_eligible=0,
-                n_features_kept_audit=0, notes="purged sub-windows degenerate"))
+                n_features_kept=0, notes="purged sub-windows degenerate"))
             pfs.append(0.0); trades_list.append(0); continue
 
         progress_log(f"== fold {fold_num}: train {tr_s.date()}→{tr_e.date()}, test {te_s.date()}→{te_e.date()} ==")
@@ -266,15 +266,24 @@ def run_walk_forward(
         train_mask_sup &= eligible
         ranking_top10: list[str] = []
         n_kept_audit = 0
+        keep_mask = np.ones(feat_mat.shape[1], dtype=bool)   # default: all features
         if train_mask_sup.sum() >= 200:
             ranking = select_top_k(
                 feats_full.iloc[train_mask_sup.nonzero()[0]],
                 meta_full["meta_label"].to_numpy()[train_mask_sup],
                 k=top_k_features,
             )
-            ranking_top10 = [c for c, k in zip(feats_full.columns, ranking.keep_mask) if k][:10]
-            n_kept_audit = int(sum(ranking.keep_mask))
-        progress_log(f"  audit ranking top-{top_k_features}; top10={ranking_top10}")
+            keep_mask = np.asarray(ranking.keep_mask, dtype=bool)
+            ranking_top10 = [c for c, k in zip(feats_full.columns, keep_mask) if k][:10]
+            n_kept_audit = int(keep_mask.sum())
+        progress_log(f"  per-fold causal selection: kept {int(keep_mask.sum())}/"
+                     f"{feat_mat.shape[1]}; top10={ranking_top10}")
+        # Per-fold input gate: zero out non-selected feature columns so the
+        # trunk sees only the top-K ranked features (contract: top-K=64 used,
+        # not just logged). The trunk dim stays 79 so the pooled pretrained
+        # checkpoint loads cleanly; gating is enforced on inputs.
+        feat_gate = keep_mask.astype(np.float32)[None, :]
+        feat_mat_fold = feat_mat * feat_gate
 
         # Trunk: load pooled pretrain or fallback to per-fold pretrain on train sub-window.
         cfg = V11ModelConfig(n_features=feat_mat.shape[1], seq_len=SEQ_LEN)
@@ -290,11 +299,11 @@ def run_walk_forward(
                     test_start=str(te_s.date()), test_end=str(te_e.date()),
                     n_train_eligible=int(train_mask_sup.sum()),
                     n_val_eligible=0, n_cal_eligible=0, n_test_eligible=0,
-                    n_features_kept_audit=n_kept_audit,
-                    selected_feature_top10_audit=ranking_top10,
+                    n_features_kept=n_kept_audit,
+                    selected_feature_top10=ranking_top10,
                     notes="pretrain pool too small (fallback path)"))
                 pfs.append(0.0); trades_list.append(0); continue
-            pretrain_X = np.stack([feat_mat[i - SEQ_LEN + 1: i + 1] for i in train_bar_range])
+            pretrain_X = np.stack([feat_mat_fold[i - SEQ_LEN + 1: i + 1] for i in train_bar_range])
             progress_log(f"  fallback pretrain on {len(pretrain_X)} sequences")
             trunk = pretrain(cfg, pretrain_X, epochs=pretrain_epochs, batch=128, seed=17 + fold_num)
 
@@ -315,13 +324,13 @@ def run_walk_forward(
         cal_w  = np.ones(int(cal_meta["eligible"].sum()),  dtype=np.float64)
         test_w = np.ones(int(test_meta["eligible"].sum()), dtype=np.float64)
 
-        train_seqs = build_sequences(feat_mat[i_tr_a:i_tr_end], train_meta, train_w,
+        train_seqs = build_sequences(feat_mat_fold[i_tr_a:i_tr_end], train_meta, train_w,
                                      regime_per_bar[i_tr_a:i_tr_end], seq_len=SEQ_LEN)
-        val_seqs   = build_sequences(feat_mat[i_val_a:i_val_end], val_meta, val_w,
+        val_seqs   = build_sequences(feat_mat_fold[i_val_a:i_val_end], val_meta, val_w,
                                      regime_per_bar[i_val_a:i_val_end], seq_len=SEQ_LEN)
-        cal_seqs   = build_sequences(feat_mat[i_cal_a:i_cal_end], cal_meta, cal_w,
+        cal_seqs   = build_sequences(feat_mat_fold[i_cal_a:i_cal_end], cal_meta, cal_w,
                                      regime_per_bar[i_cal_a:i_cal_end], seq_len=SEQ_LEN)
-        test_seqs  = build_sequences(feat_mat[i_te_a:i_te_b], test_meta, test_w,
+        test_seqs  = build_sequences(feat_mat_fold[i_te_a:i_te_b], test_meta, test_w,
                                      regime_per_bar[i_te_a:i_te_b], seq_len=SEQ_LEN)
 
         progress_log(f"  sequences: train={len(train_seqs.X)} val={len(val_seqs.X)} "
@@ -332,7 +341,7 @@ def run_walk_forward(
                 test_start=str(te_s.date()), test_end=str(te_e.date()),
                 n_train_eligible=len(train_seqs.X), n_val_eligible=len(val_seqs.X),
                 n_cal_eligible=len(cal_seqs.X), n_test_eligible=len(test_seqs.X),
-                n_features_kept_audit=n_kept_audit, selected_feature_top10_audit=ranking_top10,
+                n_features_kept=n_kept_audit, selected_feature_top10=ranking_top10,
                 notes="too few eligible sequences in one of train/val/cal/test"))
             pfs.append(0.0); trades_list.append(0); continue
 
@@ -356,7 +365,7 @@ def run_walk_forward(
         else:
             wr = expR = pf = mdd = 0.0
 
-        adv_auc = adversarial_auc(feat_mat[i_tr_a:i_tr_end], feat_mat[i_te_a:i_te_b])
+        adv_auc = adversarial_auc(feat_mat_fold[i_tr_a:i_tr_end], feat_mat_fold[i_te_a:i_te_b])
 
         progress_log(f"  TEST trades={n_trades} WR={wr:.3f} expR={expR:+.4f} PF={pf:.2f} "
                      f"maxDD={mdd:.2f} adv_auc={adv_auc:.3f}")
@@ -369,8 +378,8 @@ def run_walk_forward(
             n_val_eligible=len(val_seqs.X),
             n_cal_eligible=len(cal_seqs.X),
             n_test_eligible=len(test_seqs.X),
-            n_features_kept_audit=n_kept_audit,
-            selected_feature_top10_audit=ranking_top10,
+            n_features_kept=n_kept_audit,
+            selected_feature_top10=ranking_top10,
             adversarial_auc=adv_auc, n_trades=n_trades, win_rate=wr,
             expectancy_R=expR, pf=pf, max_dd_R=mdd,
             cal_diag={int(k): v for k, v in cal.diag.items()},

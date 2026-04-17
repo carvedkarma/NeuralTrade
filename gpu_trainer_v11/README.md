@@ -164,9 +164,10 @@ python -m scripts.preflight                  # writes reports/preflight.md + .js
 # 3. Pooled masked-feature pretraining (BTC+ETH+SOL, 2021-02 → 2023-02, locked)
 python -m scripts.pretrain                   # writes reports/pretrained_trunk.pt + meta
 
-# 4. (Optional) XGBoost Phase-1 baseline on dollar bars; needed for verdict beat-check
-python -m gpu_trainer_v11.eval.honest_walkforward_xgb \
-    --symbol BTCUSDT --horizon 32           # produces reports/xgb_baseline.json
+# 4. XGBoost Phase-1 baseline (REQUIRED for the verdict beat-check)
+#    Thin wrapper around the proven gpu_trainer/ baseline; writes to
+#    reports/xgb_baseline.json which write_verdict.py consumes.
+python -m gpu_trainer_v11.eval.honest_walkforward --horizon 4h
 
 # 5. Train + walk-forward each specialist that survived pre-flight
 python -m scripts.train_walkforward --rule A   # momentum specialist
@@ -223,8 +224,9 @@ gpu_trainer_v11/
 │   ├── walkforward.py              # 6-fold harness, single-shot
 │   ├── adversarial_drift.py        # train-vs-test classifier per fold
 │   ├── diversification.py          # cross-symbol generalization probe
-│   └── honest_walkforward_xgb.py   # PROVEN, copied from Phase 1 (baseline)
-├── baselines_xgboost_meta.py       # PROVEN, copied from Phase 1
+│   └── honest_walkforward.py       # PROVEN baseline wrapper (XGBoost Phase 1)
+├── baselines/
+│   └── xgboost_meta.py             # PROVEN, copied from Phase 1
 ├── reports/                        # generated per run
 ├── scripts/                        # CLI entry points
 │   ├── build_bars.py
