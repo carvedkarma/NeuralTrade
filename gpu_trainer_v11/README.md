@@ -61,6 +61,7 @@ a model checkpoint and never see each other's labels.
 | Method | Discretized lagged mutual information (transfer-entropy proxy), 8-bin equal-frequency, lag = 1 dollar bar |
 | Computed on | Train portion of fold only — never on test |
 | Top-K kept | 64 features per fold |
+| Used as | **Audit log only** — the trunk consumes all 79 bundle features so a single pooled pretrained checkpoint can be reused across folds. Per-fold transfer-entropy ranking is still computed and the top-64 list is written into every fold report for verdict review. |
 | Logged | Yes — full ranking written to fold report for verdict audit |
 
 ### Model architecture (frozen)
@@ -82,7 +83,7 @@ a model checkpoint and never see each other's labels.
 | Pretrain | Batch | 128 |
 | Pretrain | LR | 3e-4 with cosine decay |
 | Pretrain | Optimizer | AdamW (β=0.9/0.95, wd=0.01) |
-| Pretrain | Symbols | **Per-fold, single-symbol, train sub-window only** (more conservative than the originally-planned pooled pretrain — strictly inside each fold's train slice, with no cross-fold leakage) |
+| Pretrain | Symbols | **Pooled BTC + ETH + SOL, fixed window 2021-02-01 → 2023-02-01.** Window is locked so it lies inside or before every walk-forward TRAIN window — never inside any walk-forward TEST window. Produced by `scripts/pretrain.py` once and reused by every fold. If the checkpoint is missing the harness falls back to per-fold train-slice pretraining (smoke-test only; production runs MUST use the pooled checkpoint). |
 | Finetune | Bagging | N=5 independent runs per specialist, bootstrap-resampled meta-labels |
 | Finetune | Epochs | 30 |
 | Finetune | Batch | 64 |
@@ -160,14 +161,21 @@ python -m scripts.build_bars --build         # emits per-symbol dollar-bar parqu
 python -m scripts.preflight                  # writes reports/preflight.md + .json
                                              # KILL SWITCH: stops here if no rule passes
 
-# 3. Train + walk-forward each specialist that survived pre-flight
+# 3. Pooled masked-feature pretraining (BTC+ETH+SOL, 2021-02 → 2023-02, locked)
+python -m scripts.pretrain                   # writes reports/pretrained_trunk.pt + meta
+
+# 4. (Optional) XGBoost Phase-1 baseline on dollar bars; needed for verdict beat-check
+python -m gpu_trainer_v11.eval.honest_walkforward_xgb \
+    --symbol BTCUSDT --horizon 32           # produces reports/xgb_baseline.json
+
+# 5. Train + walk-forward each specialist that survived pre-flight
 python -m scripts.train_walkforward --rule A   # momentum specialist
 python -m scripts.train_walkforward --rule B   # mean-reversion specialist
 
-# 4. Per-symbol diversification probe (uses last fold's trained ensemble)
-python -m scripts.diversify
+# 6. Per-symbol diversification probe (loads last-fold artifacts persisted in step 5)
+python -m scripts.diversify --rule all
 
-# 5. Write verdict (appends to .local/tasks/v5-static-postmortem-verdict.md)
+# 7. Write verdict (appends to .local/tasks/v5-static-postmortem-verdict.md)
 python -m scripts.write_verdict
 ```
 
@@ -221,8 +229,9 @@ gpu_trainer_v11/
 ├── scripts/                        # CLI entry points
 │   ├── build_bars.py
 │   ├── preflight.py
+│   ├── pretrain.py                 # pooled BTC+ETH+SOL pretrain
 │   ├── train_walkforward.py
-│   ├── diversify.py
+│   ├── diversify.py                # loads last-fold artifacts
 │   └── write_verdict.py
 └── tests/                          # CPU smoke tests
     └── test_end_to_end.py

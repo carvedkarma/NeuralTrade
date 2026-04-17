@@ -1,5 +1,5 @@
 """
-Pre-flight signal report — pass/fail gate per (rule × horizon).
+Pre-flight signal report — pass/fail gate per (rule × horizon × symbol).
 
 For each combination of:
     rule    in {A (LONG momentum), B (SHORT mean-reversion)}
@@ -9,20 +9,21 @@ For each combination of:
 Compute on the FULL history (no train/test split — this is just to see
 if there is anything resembling a tradable structure):
 
-    n_signals       = how many bars triggered the primary rule
-    base_rate       = fraction of meta_label==1 (raw rule win rate)
-    avg_R_net       = mean R_net across signals (slippage included)
-    median_R_net    = median R_net
-    pf              = profit factor (sum positive R / sum |negative R|)
-    shuffle_pf_p95  = 95th percentile of PF under 1000 label shuffles
-                      (sanity: real PF should beat its random twin)
+    n_signals     = how many bars triggered the primary rule
+    base_rate     = fraction of meta_label==1 (raw rule win rate)
+    avg_R_net     = mean R_net across signals (slippage included)
+    pf            = profit factor (sum positive R / sum |negative R|)
+    shuffle_pf_p95= 95th percentile of PF under sign-shuffle of R
+                    (sanity: real PF should beat its random twin)
 
-Pass criteria PER RULE (across symbols, weighted by n_signals):
-    n_signals_total >= 2000
-    avg_R_net > 0     after slippage
-    pf > shuffle_pf_p95   (the structure is unlikely to be random)
+PASS criterion per RULE (per session-plan T006 spec):
+    There exists at least one (symbol, horizon) cell with R_net > 0
+    AND PF > shuffle_pf_p95 (structure unlikely to be random noise).
 
-Failing both rules is a hard kill switch — no point training Transformers.
+This is intentionally permissive — it's a kill-switch for the case
+where the rule generates only negative-expectancy signals across the
+entire pool. Full PF >= 1.3 / 500 trades hurdles are checked in
+walk-forward, not here.
 """
 from __future__ import annotations
 
@@ -57,9 +58,6 @@ def _profit_factor(R: np.ndarray) -> float:
 
 
 def _shuffle_pf_p95(R: np.ndarray, n_iter: int = 500, seed: int = 17) -> float:
-    """Sign-shuffle PF distribution. We permute the SIGN of R rather
-    than R itself to preserve magnitude distribution; this answers
-    "would the same magnitudes random-signed produce this PF?" """
     if R.size == 0:
         return 0.0
     rng = np.random.default_rng(seed)
@@ -69,9 +67,7 @@ def _shuffle_pf_p95(R: np.ndarray, n_iter: int = 500, seed: int = 17) -> float:
         signs = rng.choice([-1.0, 1.0], size=R.size)
         pfs[i] = _profit_factor(mags * signs)
     pfs = pfs[np.isfinite(pfs)]
-    if pfs.size == 0:
-        return 0.0
-    return float(np.percentile(pfs, 95))
+    return 0.0 if pfs.size == 0 else float(np.percentile(pfs, 95))
 
 
 @dataclass
@@ -85,6 +81,7 @@ class PreflightCell:
     median_R_net: float
     pf: float
     shuffle_pf_p95: float
+    cell_pass: bool
 
 
 def _load_btc() -> pd.DataFrame | None:
@@ -108,15 +105,19 @@ def evaluate_one(
     R = meta["R_net"].to_numpy()[elig]
     y = meta["meta_label"].to_numpy()[elig]
     if R.size == 0:
-        return PreflightCell(symbol, rule, horizon, 0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return PreflightCell(symbol, rule, horizon, 0, 0.0, 0.0, 0.0, 0.0, 0.0, False)
+    pf = _profit_factor(R)
+    sh = _shuffle_pf_p95(R)
+    avg_R = float(R.mean())
     return PreflightCell(
         symbol=symbol, rule=rule, horizon=horizon,
         n_signals=int(R.size),
         base_rate=float(y.mean()),
-        avg_R_net=float(R.mean()),
+        avg_R_net=avg_R,
         median_R_net=float(np.median(R)),
-        pf=_profit_factor(R),
-        shuffle_pf_p95=_shuffle_pf_p95(R),
+        pf=pf,
+        shuffle_pf_p95=sh,
+        cell_pass=bool((avg_R > 0) and (pf > sh)),
     )
 
 
@@ -134,53 +135,51 @@ def run() -> dict:
             for h in HORIZONS:
                 cell = evaluate_one(bars, btc, sym, rule, h)
                 cells.append(cell)
+                tag = "PASS" if cell.cell_pass else "fail"
                 print(f"  {sym} {rule} h={h:>3}  n={cell.n_signals:>6}  "
                       f"base={cell.base_rate:.3f}  avgR={cell.avg_R_net:+.4f}  "
-                      f"PF={cell.pf:.2f}  shufPF95={cell.shuffle_pf_p95:.2f}")
+                      f"PF={cell.pf:.2f}  shufPF95={cell.shuffle_pf_p95:.2f}  [{tag}]")
 
-    # Aggregate per rule across all training symbols and horizons
     df = pd.DataFrame([asdict(c) for c in cells])
     decisions = {}
     for rule in ("A", "B"):
         sub = df[df["rule"] == rule]
-        n_total = int(sub["n_signals"].sum())
-        if n_total == 0:
-            decisions[rule] = {"pass": False, "reason": "no signals"}
-            continue
-        # weight by n_signals
-        avg_R = float((sub["avg_R_net"] * sub["n_signals"]).sum() / max(n_total, 1))
-        # combined PF: pool R values (proxy: weight PF by n_signals)
-        pooled_pf = float((sub["pf"] * sub["n_signals"]).sum() / max(n_total, 1))
-        pooled_shuffle = float((sub["shuffle_pf_p95"] * sub["n_signals"]).sum() / max(n_total, 1))
-        ok = (n_total >= 2000) and (avg_R > 0) and (pooled_pf > pooled_shuffle)
+        n_passing_cells = int(sub["cell_pass"].sum()) if not sub.empty else 0
+        passing = sub[sub["cell_pass"]] if not sub.empty else sub
         decisions[rule] = {
-            "pass": bool(ok),
-            "n_total": n_total,
-            "weighted_avg_R": avg_R,
-            "weighted_pf": pooled_pf,
-            "weighted_shuffle_pf_p95": pooled_shuffle,
+            "pass": bool(n_passing_cells > 0),
+            "n_passing_cells": n_passing_cells,
+            "passing_combos": [
+                {"symbol": r["symbol"], "horizon": int(r["horizon"]),
+                 "avg_R_net": float(r["avg_R_net"]), "pf": float(r["pf"])}
+                for _, r in passing.iterrows()
+            ],
         }
 
     out = {"cells": [asdict(c) for c in cells], "decisions": decisions}
     (REPORT_DIR / "preflight.json").write_text(json.dumps(out, indent=2))
 
     md_lines = ["# V11 Pre-Flight Report\n",
-                "| Symbol | Rule | H | n_signals | base_rate | avg R_net | PF | shuffle PF p95 |",
-                "|---|---|---:|---:|---:|---:|---:|---:|"]
+                "Pass criterion per (symbol × rule × horizon) cell: avg R_net > 0 AND PF > shuffle PF p95.\n",
+                "Pass criterion per rule: at least one passing cell.\n",
+                "| Symbol | Rule | H | n_signals | base_rate | avg R_net | PF | shuffle PF p95 | cell |",
+                "|---|---|---:|---:|---:|---:|---:|---:|---|"]
     for c in cells:
         md_lines.append(
             f"| {c.symbol} | {c.rule} | {c.horizon} | {c.n_signals} | "
-            f"{c.base_rate:.3f} | {c.avg_R_net:+.4f} | {c.pf:.2f} | {c.shuffle_pf_p95:.2f} |"
+            f"{c.base_rate:.3f} | {c.avg_R_net:+.4f} | {c.pf:.2f} | {c.shuffle_pf_p95:.2f} | "
+            f"{'PASS' if c.cell_pass else 'fail'} |"
         )
     md_lines.append("\n## Decisions per rule\n")
     for rule, d in decisions.items():
         md_lines.append(f"- **Rule {rule}**: {'PASS' if d.get('pass') else 'FAIL'}  "
-                        f"({json.dumps({k: v for k, v in d.items() if k != 'pass'})})")
+                        f"({d.get('n_passing_cells', 0)} passing cells)")
     (REPORT_DIR / "preflight.md").write_text("\n".join(md_lines) + "\n")
 
     print("\n" + "=" * 60)
     for r, d in decisions.items():
-        print(f"  Rule {r}: {'PASS' if d.get('pass') else 'FAIL'}  {d}")
+        print(f"  Rule {r}: {'PASS' if d.get('pass') else 'FAIL'}  "
+              f"({d.get('n_passing_cells', 0)} passing cells)")
     if not any(d.get("pass") for d in decisions.values()):
         print("\n  KILL SWITCH: no rule passed pre-flight. Do NOT proceed to training.")
     return out

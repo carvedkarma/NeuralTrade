@@ -69,12 +69,19 @@ def main():
     btc_path = DOLLAR_DIR / "BTCUSDT_dollar.parquet"
     btc = pd.read_parquet(btc_path) if btc_path.exists() else None
 
+    pretrain_ckpt = REPORT_DIR / "pretrained_trunk.pt"
+    if not args.allow_without_preflight and not pretrain_ckpt.exists():
+        raise SystemExit(
+            f"FATAL: pooled pretrained trunk missing at {pretrain_ckpt}. "
+            f"Run scripts/pretrain.py first (locked contract requires pooled pretrain).")
+
     rep = run_walk_forward(
         bars, btc, args.symbol, args.rule, args.horizon,
         n_bag=LOCKED_N_BAG,
         pretrain_epochs=LOCKED_PRETRAIN_EPOCHS,
         finetune_epochs=LOCKED_FINETUNE_EPOCHS,
         top_k_features=LOCKED_TOP_K_FEATURES,
+        pretrain_checkpoint=pretrain_ckpt if pretrain_ckpt.exists() else None,
     )
 
     out = {
@@ -87,6 +94,8 @@ def main():
         "min_pf": rep.min_pf,
         "avg_trades": rep.avg_trades,
         "folds": [asdict(f) for f in rep.folds],
+        "pretrain_source": rep.pretrain_source,
+        "last_fold_artifact": rep.last_fold_artifact,
         "locked_hyperparams": {
             "n_bag": LOCKED_N_BAG,
             "pretrain_epochs": LOCKED_PRETRAIN_EPOCHS,
