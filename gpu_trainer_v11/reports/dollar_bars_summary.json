@@ -1,0 +1,19 @@
+{
+  "threshold_dollars": 50000000.0,
+  "symbols": [
+    {
+      "symbol": "ETHUSDT",
+      "n_bars": 39012,
+      "bars_per_day": 21.126704311477905,
+      "first_ts": 1613268900000,
+      "last_ts": 1772812800000
+    },
+    {
+      "symbol": "SOLUSDT",
+      "n_bars": 14200,
+      "bars_per_day": 7.698258969160657,
+      "first_ts": 1613438100000,
+      "last_ts": 1772809200000
+    }
+  ]
+}
