@@ -72,21 +72,32 @@ def _maybe_load_btc() -> pd.DataFrame | None:
 def run_one(rule: str, horizon: int) -> dict:
     blob = _load_artifacts(rule, horizon)
     feature_cols = blob["feature_cols"]
+    keep_mask = blob.get("keep_mask")
+    if keep_mask is None:
+        # Backward-compat fallback: if an older artifact lacks the gate,
+        # default to all-features-on (matches old behavior). New artifacts
+        # always carry the per-fold transfer-entropy gate.
+        keep_mask = [True] * len(feature_cols)
+    import numpy as _np
+    keep_mask_arr = _np.asarray(keep_mask, dtype=bool)
     models = _models_from_artifact(blob)
     cal = _conformal_from_artifact(blob)
     btc = _maybe_load_btc()
 
     target_symbols = [s for s in _all_symbols() if s not in TRAINING_POOL]
     print(f"  rule={rule} h={horizon}: probing {len(target_symbols)} non-pool symbols "
-          f"from 2024-01-01")
+          f"from 2024-01-01  (gate keeps {int(keep_mask_arr.sum())}/"
+          f"{len(feature_cols)} feature cols)")
     rows = probe_symbols(
         symbols=target_symbols, rule=rule, horizon_bars=horizon,
-        selected_feature_cols=feature_cols, bagged_models=models, conformal=cal,
+        feature_cols=feature_cols, keep_mask=keep_mask_arr,
+        bagged_models=models, conformal=cal,
         btc_bars=btc, seq_len=blob["cfg"]["seq_len"], start_ts_ms=START_2024_MS,
     )
     out = {
         "rule": rule, "horizon": horizon,
         "from_artifact": str(REPORT_DIR / f"last_fold_{rule}_h{horizon}.pt"),
+        "n_features_kept": int(keep_mask_arr.sum()),
         "rows": [asdict(r) for r in rows],
     }
     out_path = REPORT_DIR / f"diversification_{rule}_h{horizon}.json"

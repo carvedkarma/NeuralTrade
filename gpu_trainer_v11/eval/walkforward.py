@@ -9,7 +9,10 @@ Per fold, per specialist:
          val    = next  20%   (early-stop only)
          cal    = last  20%   (Mondrian conformal threshold)
        Purge `horizon_bars` at every boundary.
-    4. Per-fold transfer-entropy ranking on TRAIN ONLY (logged for audit).
+    4. Per-fold transfer-entropy ranking on TRAIN ONLY; the top-K=64
+       columns are kept and all others are zero-masked at the trunk
+       input for that fold (train, val, cal, test). Trunk dim stays 79
+       so the pooled pretrained checkpoint loads unchanged.
     5. Trunk init: load pooled pretrain checkpoint if present (locked
        contract); else pretrain inline on the train sub-window
        (smoke-test fallback only — production runs MUST use the
@@ -20,10 +23,12 @@ Per fold, per specialist:
     9. Persist last fold's artifacts (state dicts + conformal + cols) for
        the per-symbol diversification probe.
 
-Note on feature dim: the trunk consumes ALL 79 bundle features so that
-ONE pretrained checkpoint is shared across folds. The per-fold causal
-ranking is computed and logged for audit but is not used as a hard
-input gate (it would require a different trunk dim per fold).
+Note on feature dim: the trunk dim is fixed at 79 (full bundle) so a
+SINGLE pooled pretrained checkpoint is shared across folds. The
+per-fold transfer-entropy top-K=64 selection is enforced as a HARD
+INPUT GATE: non-selected columns are multiplied by zero before the
+trunk sees them. The fold's keep_mask is persisted in the last-fold
+artifact so the diversification probe applies the identical gate.
 """
 from __future__ import annotations
 
@@ -163,15 +168,27 @@ def _save_last_fold_artifacts(
     rule: str, horizon_bars: int,
     cfg: V11ModelConfig, models: list, conformal: MondrianCalibrator,
     feature_cols: list[str], fold_num: int,
+    keep_mask: np.ndarray,
 ) -> Path:
+    """Persist everything the diversification probe needs to score with
+    EXACTLY the same model-input regime used during training/test:
+    feature_cols (full bundle, dim-order-preserving) + keep_mask (the
+    fold's transfer-entropy top-K input gate). Diversification applies
+    the same zero-mask before inference; otherwise the OOS probe runs
+    the model under a different input distribution than it was trained
+    on, and the locked beat-check would not be auditable."""
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     out_path = REPORT_DIR / f"last_fold_{rule}_h{horizon_bars}.pt"
+    keep_mask_arr = np.asarray(keep_mask, dtype=bool)
+    selected_feature_cols = [c for c, k in zip(feature_cols, keep_mask_arr) if k]
     torch.save({
         "rule": rule,
         "horizon_bars": horizon_bars,
         "fold_num": fold_num,
         "cfg": {"n_features": cfg.n_features, "seq_len": cfg.seq_len},
         "feature_cols": feature_cols,
+        "keep_mask": keep_mask_arr.tolist(),
+        "selected_feature_cols": selected_feature_cols,
         "model_state_dicts": [m.state_dict() for m in models],
         "conformal_thresholds": dict(conformal.thresholds),
         "conformal_diag": dict(conformal.diag),
@@ -227,6 +244,7 @@ def run_walk_forward(
     last_conformal: MondrianCalibrator | None = None
     last_cfg: V11ModelConfig | None = None
     last_fold_num = 0
+    last_keep_mask: np.ndarray = np.ones(feat_mat.shape[1], dtype=bool)
 
     for fold_num, (tr_s, tr_e, te_s, te_e) in enumerate(folds, start=1):
         i_tr_a, i_tr_b = _slice_idx(ts_dt, tr_s, tr_e)
@@ -386,12 +404,13 @@ def run_walk_forward(
         ))
         pfs.append(pf); trades_list.append(n_trades)
         last_models = models; last_conformal = cal; last_fold_num = fold_num
+        last_keep_mask = keep_mask
 
     # Persist last fold's artifacts for the diversification probe.
     if last_models and last_conformal is not None and last_cfg is not None:
         artifact = _save_last_fold_artifacts(
             rule, horizon_bars, last_cfg, last_models, last_conformal,
-            feature_cols, last_fold_num,
+            feature_cols, last_fold_num, last_keep_mask,
         )
         report.last_fold_artifact = str(artifact)
         progress_log(f"  persisted last-fold artifacts -> {artifact}")

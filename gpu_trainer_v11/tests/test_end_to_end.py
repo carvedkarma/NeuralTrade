@@ -211,10 +211,14 @@ def test_diversify_artifact_roundtrip(tmp_path):
     model.eval()
     cal = MondrianCalibrator(thresholds={0: 0.5, 1: 0.5, 2: 0.5}, diag={})
     artifact_path = tmp_path / "last_fold_A_h8.pt"
+    keep_mask = np.zeros(feats.shape[1], dtype=bool)
+    keep_mask[: min(8, feats.shape[1])] = True   # nontrivial gate
     torch.save({
         "rule": "A", "horizon_bars": 8, "fold_num": 1,
         "cfg": {"n_features": cfg.n_features, "seq_len": cfg.seq_len},
         "feature_cols": list(feats.columns),
+        "keep_mask": keep_mask.tolist(),
+        "selected_feature_cols": [c for c, k in zip(feats.columns, keep_mask) if k],
         "model_state_dicts": [model.state_dict()],
         "conformal_thresholds": dict(cal.thresholds),
         "conformal_diag": {},
@@ -230,14 +234,31 @@ def test_diversify_artifact_roundtrip(tmp_path):
     # probe_symbols requires bars on disk; emulate by patching the lookup directory.
     # Instead, exercise its core path by calling it with an empty symbol list and
     # verifying it returns an empty list cleanly.
+    keep_mask_loaded = np.asarray(blob["keep_mask"], dtype=bool)
+    assert keep_mask_loaded.sum() == int(keep_mask.sum())
+    assert blob["selected_feature_cols"] == [
+        c for c, k in zip(blob["feature_cols"], keep_mask_loaded) if k
+    ]
     rows = probe_symbols(
         symbols=[],  # empty -> no IO required
         rule="A", horizon_bars=8,
-        selected_feature_cols=blob["feature_cols"],
+        feature_cols=blob["feature_cols"],
+        keep_mask=keep_mask_loaded,
         bagged_models=[m2], conformal=cal2,
         btc_bars=None, seq_len=cfg2.seq_len, start_ts_ms=None,
     )
     assert rows == []
-    # Verify the artifact dict round-trips cleanly to JSON-serialisable form
     out = {"rule": "A", "horizon": 8, "rows": [r.__dict__ for r in rows]}
     json.dumps(out)
+
+    # Regression: probe_symbols MUST refuse a misaligned gate so a
+    # diversification probe can never silently bypass the input gate
+    # the model was trained under.
+    with pytest.raises(ValueError):
+        probe_symbols(
+            symbols=[], rule="A", horizon_bars=8,
+            feature_cols=blob["feature_cols"],
+            keep_mask=np.ones(len(blob["feature_cols"]) + 5, dtype=bool),
+            bagged_models=[m2], conformal=cal2,
+            btc_bars=None, seq_len=cfg2.seq_len, start_ts_ms=None,
+        )
