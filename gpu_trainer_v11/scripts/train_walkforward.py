@@ -31,18 +31,21 @@ LOCKED_FINETUNE_EPOCHS = 30
 LOCKED_TOP_K_FEATURES = 64
 
 
-def _require_preflight_pass(rule: str):
-    """Refuse to train if pre-flight did not record a PASS for this rule."""
+def _require_preflight_pass(rule: str, horizon: int):
+    """Refuse to train if pre-flight did not record a PASS for this
+    (rule, horizon) pair. The contract is per-(rule,horizon), not per-rule."""
     p = REPORT_DIR / "preflight.json"
     if not p.exists():
         raise SystemExit(
             f"FATAL: preflight report missing at {p}. Run scripts/preflight.py first.")
     rep = json.loads(p.read_text())
     decision = rep.get("decisions", {}).get(rule, {})
-    if not decision.get("pass"):
+    per_h = decision.get("per_horizon", {}).get(str(horizon), {})
+    if not per_h.get("pass"):
         raise SystemExit(
-            f"FATAL: pre-flight FAILED for rule {rule} ({decision}). "
-            f"Per the locked contract, do NOT proceed to training.")
+            f"FATAL: pre-flight FAILED for (rule={rule}, horizon={horizon}). "
+            f"Passing horizons for rule {rule}: {decision.get('passing_horizons', [])}. "
+            f"Per the locked contract, do NOT proceed to training this pair.")
 
 
 def main():
@@ -62,7 +65,7 @@ def main():
     if args.horizon not in (16, 32, 96):
         raise SystemExit(f"horizon must be in {{16, 32, 96}} (locked); got {args.horizon}")
     if not args.allow_without_preflight:
-        _require_preflight_pass(args.rule)
+        _require_preflight_pass(args.rule, args.horizon)
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     bars = pd.read_parquet(DOLLAR_DIR / f"{args.symbol}_dollar.parquet")

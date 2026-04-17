@@ -61,7 +61,7 @@ a model checkpoint and never see each other's labels.
 | Method | Discretized lagged mutual information (transfer-entropy proxy), 8-bin equal-frequency, lag = 1 dollar bar |
 | Computed on | Train portion of fold only — never on test |
 | Top-K kept | 64 features per fold |
-| Used as | **Audit log only** — the trunk consumes all 79 bundle features so a single pooled pretrained checkpoint can be reused across folds. Per-fold transfer-entropy ranking is still computed and the top-64 list is written into every fold report for verdict review. |
+| Used as | **Per-fold input gate.** Non-selected feature columns are zero-masked at the trunk input for that fold (training, validation, calibration, and test). The trunk dim stays 79 so the pooled pretrained checkpoint loads unchanged; the gate is enforced on inputs only. The full ranking and the top-10 list are written into every fold report for audit. |
 | Logged | Yes — full ranking written to fold report for verdict audit |
 
 ### Model architecture (frozen)

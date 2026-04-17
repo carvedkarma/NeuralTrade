@@ -142,19 +142,30 @@ def run() -> dict:
                       f"PF={cell.pf:.2f}  shufPF95={cell.shuffle_pf_p95:.2f}  [{tag}]")
 
     df = pd.DataFrame([asdict(c) for c in cells])
-    decisions = {}
+    # Decisions are at (rule, horizon) granularity: a (rule, horizon) PASSes
+    # iff at least one training-pool symbol shows R_net > 0 for that pair.
+    # train_walkforward.py only admits a (rule, horizon) that passed here.
+    decisions: dict[str, dict] = {}
     for rule in ("A", "B"):
         sub = df[df["rule"] == rule]
-        n_passing_cells = int(sub["cell_pass"].sum()) if not sub.empty else 0
-        passing = sub[sub["cell_pass"]] if not sub.empty else sub
+        per_horizon: dict[str, dict] = {}
+        for h in HORIZONS:
+            cell_sub = sub[sub["horizon"] == h] if not sub.empty else sub
+            n_passing = int(cell_sub["cell_pass"].sum()) if not cell_sub.empty else 0
+            passing = cell_sub[cell_sub["cell_pass"]] if not cell_sub.empty else cell_sub
+            per_horizon[str(h)] = {
+                "pass": bool(n_passing > 0),
+                "n_passing_symbols": n_passing,
+                "passing_symbols": [
+                    {"symbol": r["symbol"], "avg_R_net": float(r["avg_R_net"]),
+                     "pf": float(r["pf"])}
+                    for _, r in passing.iterrows()
+                ],
+            }
         decisions[rule] = {
-            "pass": bool(n_passing_cells > 0),
-            "n_passing_cells": n_passing_cells,
-            "passing_combos": [
-                {"symbol": r["symbol"], "horizon": int(r["horizon"]),
-                 "avg_R_net": float(r["avg_R_net"]), "pf": float(r["pf"])}
-                for _, r in passing.iterrows()
-            ],
+            "pass": any(d["pass"] for d in per_horizon.values()),
+            "passing_horizons": [int(h) for h, d in per_horizon.items() if d["pass"]],
+            "per_horizon": per_horizon,
         }
 
     out = {"cells": [asdict(c) for c in cells], "decisions": decisions}
@@ -172,16 +183,18 @@ def run() -> dict:
             f"{c.base_rate:.3f} | {c.avg_R_net:+.4f} | {c.pf:.2f} | {c.shuffle_pf_p95:.2f} | "
             f"{'PASS' if c.cell_pass else 'fail'} |"
         )
-    md_lines.append("\n## Decisions per rule\n")
+    md_lines.append("\n## Decisions per (rule, horizon)\n")
     for rule, d in decisions.items():
-        md_lines.append(f"- **Rule {rule}**: {'PASS' if d.get('pass') else 'FAIL'}  "
-                        f"({d.get('n_passing_cells', 0)} passing cells)")
+        md_lines.append(f"- **Rule {rule}**: passing horizons "
+                        f"{sorted(d.get('passing_horizons', []))}")
+        for h, dh in d["per_horizon"].items():
+            md_lines.append(f"  - h={h}: {'PASS' if dh['pass'] else 'FAIL'} "
+                            f"({dh['n_passing_symbols']} passing symbols)")
     (REPORT_DIR / "preflight.md").write_text("\n".join(md_lines) + "\n")
 
     print("\n" + "=" * 60)
     for r, d in decisions.items():
-        print(f"  Rule {r}: {'PASS' if d.get('pass') else 'FAIL'}  "
-              f"({d.get('n_passing_cells', 0)} passing cells)")
+        print(f"  Rule {r}: passing horizons {sorted(d.get('passing_horizons', []))}")
     if not any(d.get("pass") for d in decisions.values()):
         print("\n  KILL SWITCH: no rule passed pre-flight. Do NOT proceed to training.")
     return out
