@@ -1,0 +1,180 @@
+06:45:48 [INFO] ============================================================
+06:45:48 [INFO]   V5 FORWARD TEST (frozen decision layer)
+06:45:48 [INFO] ============================================================
+06:45:48 [INFO] [V5_FWD] Effective kill-recovery config — kill_recovery_bars=48  kill_recovery_r_threshold=2.00  kill_hysteresis_r=1.00
+06:45:48 [INFO] [V5_FWD] starting forward test — fold_id=7  device=cuda
+06:45:48 [INFO] [V5_FWD][PRE_FORWARD] CUDA mem — allocated=0.02 GB  reserved=0.06 GB  peak=0.05 GB
+06:45:48 [INFO] [V5_FWD] Loaded best checkpoint from checkpoints\best_v5_expectancy.pt
+06:45:48 [INFO] [V5_FWD] Walk-forward threshold override: sweep=33.7977 → blended=56.4088
+06:45:48 [INFO] [V5_REF] Building training reference arrays (86134 bars) for quality gate...
+06:45:50 [INFO] [V5_REF] Training reference arrays built: mu_R mean=0.0667, mae mean=0.0030, score mean=95.0080
+06:45:50 [INFO] [SHARED_CFG] V5 shared trade defaults loaded:
+06:45:50 [INFO]   score_threshold=0.001  score_lambda=0.3  min_mu_r=0.0  min_p_side=0.0  min_p_short=0.0
+06:45:50 [INFO]   slippage_base_bps=6.0  corr_thresh=0.7  cooldown=4
+06:45:50 [INFO]   per_symbol_r_kill=None  kill_recovery_bars=48  kill_recovery_r_threshold=2.0
+06:45:50 [INFO]   sizing: min=0.25  max=2.5  floor=0.5  score_buffer=200
+06:45:50 [INFO]   halt: data_staleness=True/300.0s  api_errors=True/5  max_daily_loss_r=None
+06:45:50 [INFO] [V5_FWD] Effective config — scoring: score_threshold=56.4088  score_lambda=0.300  cooldown=4  min_p_side=0.450  min_p_short=0.000
+06:45:50 [INFO] [V5_FWD] Effective config — costs/correlation: slippage_bps=0.0  corr_thresh=0.70  corr_window_days=30
+06:45:50 [INFO] [V5_FWD] Effective config — sizing: size_floor=0.500  min_size_mult=0.25  max_size_mult=2.50  kelly_fraction=0.250  adaptive_sizing=False
+06:45:50 [INFO] [V5_FWD] Effective config — kill/recovery: kill_recovery_bars=48  kill_recovery_r_threshold=2.00  kill_hysteresis_r=1.00  per_symbol_soft_kill=True
+06:45:50 [INFO] [V5_TEMPORAL_FWD] V6SequenceDataset for V5 forward test: 5954 samples, seq_len=16
+06:45:50 [INFO] [V5_QUAL_GATE] raw p25(|mu_R|)=0.0367 vs debiased p25(|mu_R|)=0.0367 — using raw for gate calibration
+06:45:50 [INFO] [V5_QUAL_DIAG] T4: using '_raw_mu_R_ref' for adaptive_mu_min percentile (mu_debias active — raw magnitudes preserved for edge gate calibration)
+06:45:50 [INFO] [V5_QUAL_DIAG] total=5954 passed_sigma=3627 passed_mae=5584 passed_mu=4103 passed_ptrade=3341 final=1410 (23.7%) | adaptive: sigma<=1.000 mae<=0.011 |mu|>=0.0367 ptrade>=0.379
+06:45:50 [INFO] [V5_FWD] side_mode=action_head rr_weight=0.0
+06:45:50 [INFO] [V5_FWD] Score stats: mean=70.3004 p50=58.2460 p90=152.0158 %pos=100.0%
+06:45:50 [INFO] [V5_FWD] Score side analysis: p_long_mean=0.3798 p_short_mean=0.2480 edge_long_mean=231.9977 edge_short_mean=144.7594
+06:45:50 [INFO] [V5_FWD] Score components: edge_mean=231.9977 penalty_mean=134.9259 net_score_mean=70.3004
+06:45:50 [INFO] [V5_FWD] mu_R post-debias: mean=+0.0606 std=0.0502 |mu_R|_mean=0.0655
+06:45:50 [INFO] [V5_FWD] p_side: mean=0.2480 p10=0.1463 p50=0.2344 p90=0.3685
+06:45:50 [INFO] [V5_SIDE_DIAG] ALL bars: long=0 short=5954 long_pct=0.0% (if >95%% one-sided, this is MODEL BIAS not a bug)
+06:45:50 [INFO] [V5_FWD] Quality gate: 0.0% pass (1410/5954)
+06:45:50 [INFO] [V5_FWD] Effective threshold=56.4088 (calibrated=56.4088, fixed_floor=None, ceiling_cap=None, pct_floor=None) cooldown=4
+06:45:50 [INFO] [V5_FWD] Max trades/day cap ENABLED: 8
+06:45:50 [INFO] [V5_FWD] Threshold check: 12 finite scores, 83.3% above threshold=56.4088 (score p90=207.8338 p99=298.5753 max=309.6096)
+06:45:50 [INFO] [V5_GATE_AUDIT] percentile_cutoff(p85)=199.7857 taken_by_ref_gate=10 taken_by_pct_gate=2 overlap=20% gate_pass_rate=0.2%
+06:45:50 [INFO] [V5_FWD] Soft gate floor ENABLED: soft gates clamped to min=0.5
+06:45:50 [INFO] [V5_CORR] Correlation blocker ENABLED: thresh=0.70 window=30d same_side=True
+06:45:50 [INFO] [V5_CORR_PENALTY] ETHUSDT side=-1 vs BTCUSDT: aligned_days=0 overlap=1.000 corr=nan reliability=UNRELIABLE action=default_conservative mult=0.90
+06:45:50 [INFO] [V5_GATE] Correlation blocked 1 trades
+06:45:50 [INFO] [V5_DROPOFF] bars_total=5954 | candidates=10 | warmup=0 cooldown=1 adx=0 ema=0 regime_side=0 edge_topn=0 weekly=0 corr=1 daily=0 equity=0 tpd=0 head_disagree=0 per_sym_kill=0 ddt=0 edge_first_pre=0 → trades_taken=9
+06:45:50 [INFO] ================================================================================
+06:45:50 [INFO]   GATE IMPACT ANALYSIS (oracle R of blocked trades)
+06:45:50 [INFO] ================================================================================
+06:45:50 [INFO]   Gate                       Blocked       E[R]     TotalR    WinR%
+06:45:50 [INFO]   ------------------------- -------- ---------- ---------- --------
+06:45:50 [INFO]   cooldown                         1    +1.3333      +1.33   100.0%  ← DESTROYING VALUE
+06:45:50 [INFO] ================================================================================
+06:45:50 [INFO] [V5_SIDE_DIAG] eligible=10 long=0 short=10 hold=0 unique_sides={-1}
+06:45:50 [INFO] [V5_FWD] Using side-conditional outcomes (predicted side selects LONG/SHORT R)
+06:45:50 [WARNING] [V5_FWD] LOW CONFIDENCE: only 9 trades (minimum 30). Keeping trades but marking fold as low-confidence (threshold EMA will not blend).
+06:45:50 [INFO] [V5_SIDE_DIAG] taken=9 long=0 short=9 unique_sides_taken={-1}
+06:45:50 [INFO] [V5_FWD] Selected 10 bars above threshold, 9 after cooldown, 9 with valid outcomes
+06:45:50 [INFO] ============================================================================================================================================
+06:45:50 [INFO]   [FWD_SLICE_AUDIT] PER-THRESHOLD / PER-SIDE SLICE AUDIT
+06:45:50 [INFO] ============================================================================================================================================
+06:45:50 [INFO]   Slice        Side         N     E[R]     WR%     PF   AvgScore    TPD   AvgMuR  AvgPSide
+06:45:50 [INFO] --------------------------------------------------------------------------------------------------------------------------------------------
+06:45:50 [INFO]   top5%        ALL          8  -0.4601   25.0%   0.39  251.09131    0.1  +0.1469    0.4991 [NEG_EXPECT]
+06:45:50 [INFO]   top5%        SHORT        8  -0.4601   25.0%   0.39  251.09131    0.1  +0.1469    0.4991 [NEG_EXPECT]
+06:45:50 [INFO]   top10%       ALL         15  -0.4010   26.7%   0.45  213.32062    0.2  +0.1169    0.5341 [NEG_EXPECT]
+06:45:50 [INFO]   top10%       SHORT       15  -0.4010   26.7%   0.45  213.32062    0.2  +0.1169    0.5341 [NEG_EXPECT]
+06:45:50 [INFO]   top20%       ALL         30  -0.0899   40.0%   0.85  169.91011    0.5  +0.0771    0.5303 [NEG_EXPECT]
+06:45:50 [INFO]   top20%       SHORT       30  -0.0899   40.0%   0.85  169.91011    0.5  +0.0771    0.5303 [NEG_EXPECT]
+06:45:50 [INFO]   top30%       ALL         43  -0.0707   39.5%   0.88  144.06288    0.7  +0.0625    0.5223 [NEG_EXPECT]
+06:45:50 [INFO]   top30%       SHORT       43  -0.0707   39.5%   0.88  144.06288    0.7  +0.0625    0.5223 [NEG_EXPECT]
+06:45:50 [INFO] ============================================================================================================================================
+06:45:50 [INFO] [V5_FWD] Per-symbol breakdown:
+06:45:50 [INFO]   BTCUSDT: 6 trades | WR 50.0% | E[R]=+0.1377 | Total=+0.8261R
+06:45:50 [INFO]   ETHUSDT: 3 trades | WR 66.7% | E[R]=+0.4531 | Total=+1.3594R
+06:45:50 [INFO] [V5_PRED_QUALITY] Action accuracy: 44.4% | mu_R↔actual_R corr: 0.3745 | mean mu_R: +0.0915 vs actual: +0.2428
+06:45:50 [INFO] [V5_PRED_QUALITY] MAE pred: 0.0000 | MFE pred: 0.0266 | mean p_side: 0.4909
+06:45:50 [INFO] [V5_PRED_QUALITY] Sigma calibration: 11.1% within ±1σ (expect ~68%) | 100.0% within ±2σ (expect ~95%) | mean σ: 0.9830
+06:45:50 [INFO] [V5_PRED_QUALITY] Conviction: winners p_side=0.5047 vs losers p_side=0.4737
+06:45:50 [INFO]
+06:45:50 [INFO] ================================================================================
+06:45:50 [INFO]   DIRECTIONAL BALANCE DIAGNOSTICS
+06:45:50 [INFO] ================================================================================
+06:45:50 [INFO]   Stage                   Total     LONG    LONG%    SHORT   SHORT%     HOLD    HOLD%
+06:45:50 [INFO]   ----------------------------------------------------------------------------
+06:45:50 [INFO]   pre                        10        0     0.0%       10   100.0%        0     0.0%
+06:45:50 [INFO]   post_ema200                 9        0     0.0%        9   100.0%        0     0.0%
+06:45:50 [INFO]   post_regime                 9        0     0.0%        9   100.0%        0     0.0%
+06:45:50 [INFO]   final                       9        0     0.0%        9   100.0%        0     0.0%
+06:45:50 [INFO]
+06:45:50 [INFO]   Gate Blocks:
+06:45:50 [INFO]     cooldown                       1 blocked
+06:45:50 [INFO]     correlation                    1 blocked
+06:45:50 [WARNING] [V5_BALANCE_WARN] Stage 'pre': SHORT dominance at 100.0% (>80%% threshold). LONG=0, SHORT=10
+06:45:50 [WARNING] [V5_BALANCE_WARN] Stage 'post_ema200': SHORT dominance at 100.0% (>80%% threshold). LONG=0, SHORT=9
+06:45:50 [WARNING] [V5_BALANCE_WARN] Stage 'post_regime': SHORT dominance at 100.0% (>80%% threshold). LONG=0, SHORT=9
+06:45:50 [WARNING] [V5_BALANCE_WARN] Stage 'final': SHORT dominance at 100.0% (>80%% threshold). LONG=0, SHORT=9
+06:45:50 [INFO] ================================================================================
+06:45:50 [INFO]
+06:45:50 [INFO] ================================================================================
+06:45:50 [INFO]   PER-SYMBOL SIDE FUNNEL
+06:45:50 [INFO] ================================================================================
+06:45:50 [INFO]   Symbol         RawL   RawS   EmaL   EmaS   RegL   RegS   FinL   FinS
+06:45:50 [INFO]   ----------------------------------------------------------------------------
+06:45:50 [INFO]   BTCUSDT          0     7     0     6     0     6     0     6
+06:45:50 [INFO]   ETHUSDT          0     3     0     3     0     3     0     3
+06:45:50 [INFO] ================================================================================
+06:45:50 [INFO]
+06:45:50 [INFO] ================================================================================
+06:45:50 [INFO]   FORWARD TEST REPORT
+06:45:50 [INFO] ================================================================================
+06:45:50 [INFO]   Window:         2022-05-06 → 2022-06-06
+06:45:50 [INFO]   Threshold:      56.4088
+06:45:50 [INFO]   TP/SL/Horizon:  2.0x / 1.5x ATR / 48 bars
+06:45:50 [INFO]   Cooldown:       4 bars
+06:45:50 [INFO] --------------------------------------------------------------------------------
+06:45:50 [INFO]   Total Trades:   9
+06:45:50 [INFO]   Trades/Day:     0.15
+06:45:50 [INFO]   Long/Short:     0/9
+06:45:50 [INFO]   Win Rate:       55.6%
+06:45:50 [INFO]   Expectancy:     +0.2428 R
+06:45:50 [INFO]   Profit Factor:  1.55
+06:45:50 [INFO]   Sharpe (daily): 3.06
+06:45:50 [INFO]   Sortino:        5.35
+06:45:50 [INFO]   t-stat:         0.617  p=0.5544 [ns]
+06:45:50 [INFO]   95%% CI (E[R]):  [-0.5008, +0.9911]
+06:45:50 [INFO]   Max Drawdown:   -2.0000 R
+06:45:50 [INFO]   Avg Win R:      +1.2371
+06:45:50 [INFO]   Avg Loss R:     -1.0000
+06:45:50 [INFO]   Total R:        +2.1855
+06:45:50 [INFO]   %%TP/%%SL/%%EX:    56% / 44% / 0%
+06:45:50 [INFO]   Equity Final:   +2.1855 R
+06:45:50 [INFO] --------------------------------------------------------------------------------
+06:45:50 [INFO]   Direction Breakdown:
+06:45:50 [INFO]     LONG:  0 trades | WR 0.0% | Expect +0.0000 R | Total +0.0000 R
+06:45:50 [INFO]     SHORT: 9 trades | WR 55.6% | Expect +0.2428 R | Total +2.1855 R
+06:45:50 [INFO] --------------------------------------------------------------------------------
+06:45:50 [INFO]   Side Quality Diagnostics:
+06:45:50 [INFO]     LONG  avg_score=+0.0000  avg_p_side=0.0000  avg_mu_R=+0.0000  head_agree=0%
+06:45:50 [INFO]     SHORT avg_score=+154.1714  avg_p_side=0.4909  avg_mu_R=+0.0915  head_agree=0%
+06:45:50 [INFO]     SHORT head-disagree trades (mu_R>0): 9 (100%) → expect=+0.2428 R
+06:45:50 [INFO]   Head Agreement by Side:
+06:45:50 [INFO]     LONG  agree (mu_R>0): N=0  |  disagree: N=0
+06:45:50 [INFO]     SHORT agree (mu_R<0): N=0  |  disagree: N=   9  E[R]=+0.2428  PF=1.55
+06:45:50 [INFO] --------------------------------------------------------------------------------
+06:45:50 [INFO]   Percentile Calibration (all quality-passed cands, no cooldown):
+06:45:50 [INFO]   Pct         Thr      N     E[R]     PF     WR%    MaxDD  T/day  LongN   LongER ShortN  ShortER
+06:45:50 [INFO]   ----------------------------------------------------------------------------------------
+06:45:50 [INFO]   Top5%   254.4377      1  +1.1594 999.00 100.0%    0.00R    0.0      0  +0.0000      1  +1.1594
+06:45:50 [INFO]   Top10%  207.8338      2  +0.0797   1.16  50.0%    0.00R    0.0      0  +0.0000      2  +0.0797
+06:45:50 [INFO]   Top15%  199.7857      2  +0.0797   1.16  50.0%    0.00R    0.0      0  +0.0000      2  +0.0797
+06:45:50 [INFO]   Top20%  186.0308      3  +0.4976   2.49  66.7%    0.00R    0.0      0  +0.0000      3  +0.4976
+06:45:50 [INFO] --------------------------------------------------------------------------------
+06:45:50 [INFO]   Weekly Breakdown:
+06:45:50 [INFO]     Week    Start   Trades      WR     Expect    Total R
+06:45:50 [INFO]        1    05/02        1 100.0%    +1.2000    +1.2000
+06:45:50 [INFO]        2    05/09        1 100.0%    +1.3333    +1.3333
+06:45:50 [INFO]        3    05/16        3  33.3%    -0.2222    -0.6667
+06:45:50 [INFO]        4    05/23        2 100.0%    +1.1594    +2.3188
+06:45:50 [INFO]        5    05/30        2   0.0%    -1.0000    -2.0000
+06:45:50 [INFO] ================================================================================
+06:45:50 [INFO] [V5_FWD] Report saved to checkpoints\v5_forward_report.json
+06:45:50 [INFO] ============================================================
+06:45:50 [INFO] [V5_CORR] Fold 7 — Cross-Asset Correlation Report
+06:45:50 [INFO] ------------------------------------------------------------
+06:45:50 [INFO]                  BTCUSDT     ETHUSDT
+06:45:50 [INFO]      BTCUSDT      1.0000         N/A
+06:45:50 [INFO]      ETHUSDT         N/A      1.0000
+06:45:50 [INFO] ------------------------------------------------------------
+06:45:50 [INFO] [V5_CORR] mean_abs_corr=0.0000  max_abs_corr=0.0000 (/)
+06:45:50 [INFO] [V5_CORR] overlap_ratio=0.0081
+06:45:50 [INFO] [V5_CORR] legacy_blocked_trades=0  penalty_trades=1
+06:45:50 [INFO] ============================================================
+06:45:50 [INFO] [V5_CORR] Report saved to checkpoints\v5_corr_report_fold_7.json
+06:45:50 [INFO] [V5_WF_THR] Fold 7: LOW_CONF (9 trades) — skipping EMA blend, keeping threshold_ema=56.4088
+06:45:50 [INFO] [WF_FOLD_PROOF] fold=7 score_disc(p90/p50)=2.61x [LOW_DISC] long_pct=0.0% debias_spread=n/a monotonic=False gate_mode=ref_magnitude gate_cutoff=56.4088 score_p10=2.6902 score_p50=58.2460 score_p90=152.0158 signal_health=WARN flags=['LOW_DISC', 'NOT_MONO']
+06:45:50 [INFO] [V5_FOLD_HEALTH] fold=7
+  signal_count=9 above_threshold=4 pct_above=44%
+  mean_score=n/a p50_score=58.24597 p90_score=152.01576
+  p_long_mean=n/a p_short_mean=n/a p_hold_mean=n/a
+  mu_r_corr_train=n/a mu_r_corr_val=0.374
+  win_rate_backtest=55.6% avg_win=1.24R avg_loss=-1.00R
+  expected_daily_R=+0.099R (at current signal rate)
+  VERDICT: COLLAPSED
+06:45:50 [INFO]
