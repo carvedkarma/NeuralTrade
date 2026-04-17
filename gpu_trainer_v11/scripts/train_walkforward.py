@@ -110,6 +110,46 @@ def main():
           f"min PF {rep.min_pf:.2f}  avg trades {rep.avg_trades:.0f}")
     print(f"Wrote {out_path}")
 
+    _refresh_canonical_outputs()
+
+
+def _refresh_canonical_outputs():
+    """Aggregate every per-rule walkforward_rule_*.json into the canonical
+    `reports/walkforward.json`, and write `reports/drift.md` summarising
+    per-fold adversarial-validation AUC across all rule × horizon runs."""
+    rule_files = sorted(REPORT_DIR.glob("walkforward_rule_*.json"))
+    if not rule_files:
+        return
+    rules = {}
+    for p in rule_files:
+        d = json.loads(p.read_text())
+        rules.setdefault(d["rule"], []).append(d)
+    canonical = {
+        "generated_at": datetime.utcnow().isoformat(),
+        "rules": rules,
+        "aggregate_passed": all(r["passed"] for runs in rules.values() for r in runs),
+    }
+    (REPORT_DIR / "walkforward.json").write_text(json.dumps(canonical, indent=2, default=str))
+
+    drift_lines = ["# V11 — Adversarial-Validation Drift Report\n",
+                   "Per-fold AUC of a classifier asked to distinguish train-window "
+                   "feature distributions from test-window feature distributions. "
+                   "Values near 0.5 ⇒ no detectable drift; values ≫ 0.5 ⇒ regime shift "
+                   "during fold (informational; does not gate verdict).\n",
+                   "| Rule | H | Fold | Train start | Test start | adv_auc | n_trades | PF |",
+                   "|---|---:|---:|---|---|---:|---:|---:|"]
+    for rule, runs in sorted(rules.items()):
+        for d in runs:
+            for f in d["folds"]:
+                drift_lines.append(
+                    f"| {rule} | {d['horizon_bars']} | {f['fold_num']} | "
+                    f"{f['train_start']} | {f['test_start']} | "
+                    f"{f.get('adversarial_auc', float('nan')):.3f} | "
+                    f"{f.get('n_trades', 0)} | {f.get('pf', 0.0):.2f} |"
+                )
+    (REPORT_DIR / "drift.md").write_text("\n".join(drift_lines) + "\n")
+    print(f"Wrote {REPORT_DIR / 'walkforward.json'} and {REPORT_DIR / 'drift.md'}")
+
 
 if __name__ == "__main__":
     main()

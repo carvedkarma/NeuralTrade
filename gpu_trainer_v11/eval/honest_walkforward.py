@@ -61,7 +61,12 @@ from baselines.xgboost_meta import (  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("honest_wf")
 
-DATA_CACHE = V11_DIR / "data_cache_dollar"   # V11 dollar bars, not legacy 15m
+# Baseline runs against the LEGACY 15m bar cache + legacy feature engine,
+# exactly as Phase 1 did. This is the apples-to-apples beat-check the
+# verdict requires; switching the baseline to V11 dollar bars would be
+# a different experiment and would not be a fair beat-check against the
+# proven Phase-1 numbers.
+DATA_CACHE = LEGACY_GPU_TRAINER_DIR / "data_cache"
 REPORT_DIR = V11_DIR / "reports"
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 VERDICT_PATH = Path(__file__).resolve().parents[2] / ".local" / "tasks" / "v5-static-postmortem-verdict.md"

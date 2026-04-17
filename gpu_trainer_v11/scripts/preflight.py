@@ -16,9 +16,10 @@ if there is anything resembling a tradable structure):
     shuffle_pf_p95= 95th percentile of PF under sign-shuffle of R
                     (sanity: real PF should beat its random twin)
 
-PASS criterion per RULE (per session-plan T006 spec):
-    There exists at least one (symbol, horizon) cell with R_net > 0
-    AND PF > shuffle_pf_p95 (structure unlikely to be random noise).
+PASS criterion per RULE (per session-plan T006 spec, locked):
+    advance any (rule, horizon) where R_net > 0 on at least one
+    training-pool symbol. The shuffle PF is REPORTED as a sanity
+    metric only and never used to gate advancement.
 
 This is intentionally permissive — it's a kill-switch for the case
 where the rule generates only negative-expectancy signals across the
@@ -117,7 +118,7 @@ def evaluate_one(
         median_R_net=float(np.median(R)),
         pf=pf,
         shuffle_pf_p95=sh,
-        cell_pass=bool((avg_R > 0) and (pf > sh)),
+        cell_pass=bool(avg_R > 0),
     )
 
 
@@ -160,7 +161,8 @@ def run() -> dict:
     (REPORT_DIR / "preflight.json").write_text(json.dumps(out, indent=2))
 
     md_lines = ["# V11 Pre-Flight Report\n",
-                "Pass criterion per (symbol × rule × horizon) cell: avg R_net > 0 AND PF > shuffle PF p95.\n",
+                "Pass criterion per (symbol × rule × horizon) cell: **avg R_net > 0**.\n",
+                "Shuffle PF p95 is reported as a sanity metric only (not gated on).\n",
                 "Pass criterion per rule: at least one passing cell.\n",
                 "| Symbol | Rule | H | n_signals | base_rate | avg R_net | PF | shuffle PF p95 | cell |",
                 "|---|---|---:|---:|---:|---:|---:|---:|---|"]
