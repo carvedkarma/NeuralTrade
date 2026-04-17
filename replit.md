@@ -51,6 +51,9 @@ A v5 neural network, `V5Forecaster`, runs on a local GPU.
 -   **Enhancements:** Includes various improvements for training stability, prediction accuracy, risk management, and sizing adjustments, such as side balance fixes, sigma discount, conviction gates, adaptive loss functions, dynamic caps, and quality gates.
 -   **Specialist Fixes:** Addressed structural bugs in the LONG/SHORT specialist training pipeline by improving gradient flow, adjusting entropy regularization, recalibrating KL targets, and implementing intelligent oversampling.
 
+### v11 Green-Field Brain (research, off-dashboard)
+A separate `gpu_trainer_v11/` package contains a complete green-field redesign after V5/V6/V10 Phase 1 all proved no edge: dollar bars, fractionally-differentiated returns, two specialist primary rules (LONG momentum-after-vol-contraction; SHORT mean-reversion-after-vol-expansion), horizon-conditional triple barriers, sample-uniqueness weighting, transfer-entropy causal feature selection, a 4-layer causal Transformer meta-classifier (d=128, 4 heads, seq=128) pretrained with masked-feature reconstruction and finetuned in a bagged ensemble (N=5), Mondrian conformal calibration per ATR-pct regime bucket, honest 6-fold walk-forward with adversarial-validation drift detection, per-symbol diversification probe, and a verdict writer. Anti-tuning policy is locked in `gpu_trainer_v11/README.md`: no hyperparameter changes after pre-flight; ship only on PF≥1.3 with ≥500 trades/fold. Independent of the production dashboard, paper engine, and exchange clients.
+
 ### v6 Neural Network (V6Forecaster)
 The next-generation `V6Forecaster` offers advanced capabilities while maintaining output compatibility with V5.
 -   **Architecture:** Causal Conv1D, Positional Encoding, Transformer Blocks, Mixture-of-Experts trunk (4 experts), and 6 output heads.
