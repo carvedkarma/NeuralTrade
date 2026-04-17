@@ -1830,7 +1830,7 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
                   r_long=None, r_short=None, out_long=None, out_short=None,
                   close_prices=None, ema200_regime_gate=False,
                   timestamps=None, weekly_loss_cap=None, cooldown=4,
-                  return_full=False):
+                  return_full=False, sweep_objective='quality'):
     """Score-based sweep for v5 model.
 
     If side-conditional arrays (r_long, r_short, out_long, out_short) are provided,
@@ -2044,21 +2044,35 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
         }
         sweep_results.append(m)
 
-        composite = expect * min(sharpe, 10.0)
-        # BUG FIX: Gate on positive expectancy AND PF > 1.0 before composite comparison.
-        # Without this gate, negative expect × negative sharpe = positive composite,
-        # causing the selector to crown a LOSING bin as "BEST".
-        qualifies = expect > 0.0 and pf > 1.0
-        if qualifies and tpd_lo <= tpd <= tpd_hi and n_trades >= min_trades:
-            if composite > best_in_freq_score:
-                best_in_freq_score = composite
-                best_in_freq_label = label
+        # SWEEP OBJECTIVE — two modes:
+        #   'legacy':  composite = expect × sharpe, with TPD-window slice (best_in_freq)
+        #              taking priority over best_any. This historically caused the sweep
+        #              to crown the noisy high-TPD slice (~0.05 ER) over high-quality
+        #              low-TPD percentile slices (~0.30 ER). Kept for back-compat.
+        #   'quality': composite = expect × sqrt(N) (z-stat-like edge significance),
+        #              no TPD priority, plus PF >= 1.10 floor. Picks the slice with
+        #              the highest statistically significant per-trade edge regardless
+        #              of trade frequency. Default since post-mortem on folds 6+7.
+        if sweep_objective == 'quality':
+            composite = expect * np.sqrt(max(n_trades, 1))
+            qualifies = expect > 0.0 and pf >= 1.10 and n_trades >= min_trades
+        else:
+            composite = expect * min(sharpe, 10.0)
+            qualifies = expect > 0.0 and pf > 1.0
+
+        if sweep_objective == 'legacy':
+            # Legacy path: TPD-window slice takes priority over global best.
+            if qualifies and tpd_lo <= tpd <= tpd_hi and n_trades >= min_trades:
+                if composite > best_in_freq_score:
+                    best_in_freq_score = composite
+                    best_in_freq_label = label
+        # Quality path: only best_any matters (no TPD priority).
         if qualifies and composite > best_any_score:
             best_any_score = composite
             best_any_pct = pct_val
             best_any_label = label
 
-    if best_in_freq_label:
+    if sweep_objective == 'legacy' and best_in_freq_label:
         best_label = best_in_freq_label
         best_score_val = best_in_freq_score
         best_pct = next(m['pct'] for m in sweep_results if m['label'] == best_in_freq_label)
@@ -2070,6 +2084,7 @@ def _run_v5_sweep(scores, sides, precomputed_outcomes, precomputed_r,
         best_label = ""
         best_score_val = float('-inf')
         best_pct = 0.0
+    log.info("[V5_SWEEP_OBJ] objective=%s best=%s composite=%.4f", sweep_objective, best_label or "NONE", best_score_val if best_score_val != float('-inf') else 0.0)
 
     score_arr = np.array(scores)
     combined_eligible = np.ones(len(score_arr), dtype=bool)
@@ -5479,6 +5494,7 @@ def run_v5_walk_forward(
     mu_debias=False, mu_debias_alpha=0.003,
     per_symbol_r_kill=None,
     per_symbol_threshold=False,
+    sweep_objective='quality',
     short_oversample=False,
     short_min_fraction=0.40,  # Task #56 B3: 0.35→0.40
     ema200_soft_mult=None,
@@ -5842,6 +5858,7 @@ def run_v5_walk_forward(
                 kill_recovery_r_threshold=kill_recovery_r_threshold,
                 kill_hysteresis_r=kill_hysteresis_r,
                 per_symbol_threshold=per_symbol_threshold,
+                sweep_objective=sweep_objective,
                 short_oversample=short_oversample,
                 short_min_fraction=short_min_fraction,
                 ema200_soft_mult=ema200_soft_mult,
@@ -6041,6 +6058,7 @@ def run_v5_walk_forward(
                     kill_recovery_r_threshold=kill_recovery_r_threshold,
                     kill_hysteresis_r=kill_hysteresis_r,
                     per_symbol_threshold=per_symbol_threshold,
+                    sweep_objective=sweep_objective,
                     short_oversample=short_oversample,
                     short_min_fraction=short_min_fraction,
                     ema200_soft_mult=ema200_soft_mult,
@@ -6975,6 +6993,7 @@ def train_v5_model(
     kill_recovery_r_threshold=2.0,
     kill_hysteresis_r=1.0,
     per_symbol_threshold=False,
+    sweep_objective='quality',
     short_oversample=False,
     short_min_fraction=0.40,  # Task #56 B3: 0.35→0.40
     ema200_soft_mult=None,
@@ -8465,6 +8484,7 @@ def train_v5_model(
                 weekly_loss_cap=weekly_loss_cap,
                 cooldown=cooldown,
                 return_full=True,
+                sweep_objective=sweep_objective,
             )
 
             # BUG FIX: sweep_expect is now the actual mean R/trade of the best bin.

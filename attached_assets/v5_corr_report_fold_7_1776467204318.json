@@ -1,0 +1,70 @@
+{
+  "fold_id": 7,
+  "window_train": "2022-05-06",
+  "window_test": "2022-05-06\u21922022-06-06",
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT"
+  ],
+  "corr_matrix": [
+    [
+      1.0,
+      null
+    ],
+    [
+      null,
+      1.0
+    ]
+  ],
+  "mean_abs_corr": 0.0,
+  "max_abs_corr": 0.0,
+  "max_abs_corr_pair": [
+    "",
+    ""
+  ],
+  "overlap_ratio": 0.0081,
+  "daily_r_series": {
+    "BTCUSDT": {
+      "2022-05-13": 1.3333333730697632,
+      "2022-05-18": 1.3333333730697632,
+      "2022-05-22": -1.0,
+      "2022-05-26": 1.1594202518463135,
+      "2022-06-05": -2.0
+    },
+    "ETHUSDT": {
+      "2022-05-06": 1.3333333730697632,
+      "2022-05-17": -1.0,
+      "2022-05-26": 1.1594202518463135
+    }
+  },
+  "corr_blocked_trades": 0,
+  "corr_penalty_trades": 1,
+  "corr_penalty_log": [
+    {
+      "symbol": "ETHUSDT",
+      "side": -1,
+      "other_sym": "BTCUSDT",
+      "other_side": -1,
+      "aligned_days": 0,
+      "overlap_ratio": 1.0,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    }
+  ],
+  "corr_block_log": [
+    {
+      "symbol": "ETHUSDT",
+      "side": -1,
+      "other_sym": "BTCUSDT",
+      "other_side": -1,
+      "aligned_days": 0,
+      "overlap_ratio": 1.0,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    }
+  ]
+}

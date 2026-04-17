@@ -5294,6 +5294,14 @@ Examples:
     parser.add_argument("--v5-enable-calib", action="store_true", default=False,
                         help="v5 enable 10-bin ECE calibration logging (default: disabled)")
 
+    parser.add_argument("--v5-sweep-objective", choices=['quality', 'legacy'], default='quality',
+                        help="v5 threshold sweep selection objective. "
+                             "'quality' (default): composite=expect×sqrt(N), no TPD priority, PF>=1.10. "
+                             "Picks the slice with the highest statistically significant per-trade edge "
+                             "regardless of trade frequency. "
+                             "'legacy': composite=expect×sharpe with TPD-window slice prioritized over "
+                             "global best — historical default that crowned noisy high-TPD slices "
+                             "(~0.05 ER) over high-quality low-TPD percentile slices (~0.30 ER).")
     parser.add_argument("--v5-target-tpd", type=float, default=6.5,
                         help="v5 TPD controller: target trades per day (default: 6.5)")
     parser.add_argument("--v5-tpd-tol", type=float, default=1.5,
@@ -6422,6 +6430,7 @@ Examples:
                     mu_debias_alpha=args.v5_mu_debias_alpha,
                     per_symbol_r_kill=args.v5_per_symbol_r_kill,
                     per_symbol_threshold=args.v5_per_symbol_threshold,
+                    sweep_objective=args.v5_sweep_objective,
                     short_oversample=args.v5_short_oversample,
                     short_min_fraction=args.v5_short_min_fraction,
                     ema200_soft_mult=args.v5_ema200_soft_mult,
@@ -6641,6 +6650,7 @@ Examples:
                 feature_report=args.v5_feature_report,
                 per_symbol_r_kill=args.v5_per_symbol_r_kill,
                 per_symbol_threshold=args.v5_per_symbol_threshold,
+                sweep_objective=args.v5_sweep_objective,
                 short_oversample=args.v5_short_oversample,
                 short_min_fraction=args.v5_short_min_fraction,
                 ema200_soft_mult=args.v5_ema200_soft_mult,

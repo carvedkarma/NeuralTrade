@@ -1,0 +1,36 @@
+{
+  "fold_id": 6,
+  "window_train": "2022-04-06",
+  "window_test": "2022-04-06\u21922022-05-06",
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT"
+  ],
+  "corr_matrix": [
+    [
+      1.0,
+      null
+    ],
+    [
+      null,
+      1.0
+    ]
+  ],
+  "mean_abs_corr": 0.0,
+  "max_abs_corr": 0.0,
+  "max_abs_corr_pair": [
+    "",
+    ""
+  ],
+  "overlap_ratio": 0.0,
+  "daily_r_series": {
+    "BTCUSDT": {},
+    "ETHUSDT": {
+      "2022-04-08": -1.0
+    }
+  },
+  "corr_blocked_trades": 0,
+  "corr_penalty_trades": 0,
+  "corr_penalty_log": [],
+  "corr_block_log": []
+}

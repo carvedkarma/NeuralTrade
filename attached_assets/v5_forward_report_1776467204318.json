@@ -1,0 +1,374 @@
+{
+  "window_start": "2022-05-06",
+  "window_end": "2022-06-06",
+  "total_trades": 9,
+  "trades_per_day": 0.14511252939200536,
+  "n_long": 0,
+  "n_short": 9,
+  "win_rate": 0.5555555555555556,
+  "expectancy_r": 0.24283414284388222,
+  "profit_factor": 1.546376821398735,
+  "sharpe": 3.0648941714751357,
+  "sortino": 5.353377678842712,
+  "t_stat": 0.616983170892561,
+  "p_value": 0.5543949099466288,
+  "ci_95_lower": -0.5008051527871026,
+  "ci_95_upper": 0.9910950249764653,
+  "max_drawdown_r": -2.0,
+  "avg_win_r": 1.237101457118988,
+  "avg_loss_r": -1.0,
+  "total_r": 2.18550728559494,
+  "pct_tp": 0.5555555555555556,
+  "pct_sl": 0.4444444444444444,
+  "pct_exp": 0.0,
+  "n_trail_win": 0,
+  "n_trail_be": 0,
+  "pct_trail": 0.0,
+  "score_threshold": 56.40876770019531,
+  "tp_mult": 2.0,
+  "sl_mult": 1.5,
+  "horizon": 48,
+  "cooldown": 4,
+  "equity_final_r": 2.18550728559494,
+  "direction_stats": {
+    "long_trades": 0,
+    "long_win_rate": 0.0,
+    "long_expectancy_r": 0.0,
+    "long_total_r": 0.0,
+    "short_trades": 9,
+    "short_win_rate": 0.5555555555555556,
+    "short_expectancy_r": 0.24283414284388222,
+    "short_total_r": 2.18550728559494
+  },
+  "weekly_stats": [
+    {
+      "week": 1,
+      "week_start": "05/02",
+      "trades": 1,
+      "expectancy": 1.200000035762787,
+      "total_r": 1.200000035762787,
+      "win_rate": 1.0
+    },
+    {
+      "week": 2,
+      "week_start": "05/09",
+      "trades": 1,
+      "expectancy": 1.3333333730697632,
+      "total_r": 1.3333333730697632,
+      "win_rate": 1.0
+    },
+    {
+      "week": 3,
+      "week_start": "05/16",
+      "trades": 3,
+      "expectancy": -0.2222222089767456,
+      "total_r": -0.6666666269302368,
+      "win_rate": 0.3333333333333333
+    },
+    {
+      "week": 4,
+      "week_start": "05/23",
+      "trades": 2,
+      "expectancy": 1.1594202518463135,
+      "total_r": 2.318840503692627,
+      "win_rate": 1.0
+    },
+    {
+      "week": 5,
+      "week_start": "05/30",
+      "trades": 2,
+      "expectancy": -1.0,
+      "total_r": -2.0,
+      "win_rate": 0.0
+    }
+  ],
+  "low_confidence": true,
+  "gate_mode": "ref_magnitude",
+  "gate_cutoff": 56.40876770019531,
+  "gate_select_rate": 0.15,
+  "gate_pass_rate": 23.68155861605643,
+  "score_decile_table": [],
+  "score_monotonic": false,
+  "side_quality": {
+    "short_avg_score": 154.17144775390625,
+    "short_avg_p_side": 0.4909316599369049,
+    "short_avg_mu_r": 0.09149294346570969,
+    "short_head_agree_pct": 0.0,
+    "short_disagree_trades": 9,
+    "short_disagree_pct": 100.0,
+    "short_disagree_expect": 0.24283414284388222,
+    "short_agree": null,
+    "short_disagree": {
+      "n": 9,
+      "er": 0.2428,
+      "pf": 1.55
+    }
+  },
+  "slice_audit": [
+    {
+      "threshold_label": "top5%",
+      "threshold": 191.41497802734375,
+      "side": "ALL",
+      "n_trades": 8,
+      "expectancy": -0.46014493703842163,
+      "win_rate": 0.25,
+      "pf": 0.3864734172821045,
+      "avg_score": 251.09130859375,
+      "tpd": 0.1289889150151159,
+      "avg_mu_R": 0.1469,
+      "avg_p_side": 0.4991
+    },
+    {
+      "threshold_label": "top5%",
+      "threshold": 191.41497802734375,
+      "side": "SHORT",
+      "n_trades": 8,
+      "expectancy": -0.46014493703842163,
+      "win_rate": 0.25,
+      "pf": 0.3864734172821045,
+      "avg_score": 251.09130859375,
+      "tpd": 0.1289889150151159,
+      "avg_mu_R": 0.1469,
+      "avg_p_side": 0.4991
+    },
+    {
+      "threshold_label": "top10%",
+      "threshold": 152.01576232910156,
+      "side": "ALL",
+      "n_trades": 15,
+      "expectancy": -0.4009661833445231,
+      "win_rate": 0.26666666666666666,
+      "pf": 0.45322793180292303,
+      "avg_score": 213.32061767578125,
+      "tpd": 0.24185421565334228,
+      "avg_mu_R": 0.1169,
+      "avg_p_side": 0.5341
+    },
+    {
+      "threshold_label": "top10%",
+      "threshold": 152.01576232910156,
+      "side": "SHORT",
+      "n_trades": 15,
+      "expectancy": -0.4009661833445231,
+      "win_rate": 0.26666666666666666,
+      "pf": 0.45322793180292303,
+      "avg_score": 213.32061767578125,
+      "tpd": 0.24185421565334228,
+      "avg_mu_R": 0.1169,
+      "avg_p_side": 0.5341
+    },
+    {
+      "threshold_label": "top20%",
+      "threshold": 116.30342864990234,
+      "side": "ALL",
+      "n_trades": 30,
+      "expectancy": -0.08985506693522136,
+      "win_rate": 0.4,
+      "pf": 0.8502415551079644,
+      "avg_score": 169.9101104736328,
+      "tpd": 0.48370843130668456,
+      "avg_mu_R": 0.0771,
+      "avg_p_side": 0.5303
+    },
+    {
+      "threshold_label": "top20%",
+      "threshold": 116.30342864990234,
+      "side": "SHORT",
+      "n_trades": 30,
+      "expectancy": -0.08985506693522136,
+      "win_rate": 0.4,
+      "pf": 0.8502415551079644,
+      "avg_score": 169.9101104736328,
+      "tpd": 0.48370843130668456,
+      "avg_mu_R": 0.0771,
+      "avg_p_side": 0.5303
+    },
+    {
+      "threshold_label": "top30%",
+      "threshold": 84.74667358398438,
+      "side": "ALL",
+      "n_trades": 43,
+      "expectancy": -0.07070846578409505,
+      "win_rate": 0.3953488372093023,
+      "pf": 0.8784372550470432,
+      "avg_score": 144.06288146972656,
+      "tpd": 0.6933154182062479,
+      "avg_mu_R": 0.0625,
+      "avg_p_side": 0.5223
+    },
+    {
+      "threshold_label": "top30%",
+      "threshold": 84.74667358398438,
+      "side": "SHORT",
+      "n_trades": 43,
+      "expectancy": -0.07070846578409505,
+      "win_rate": 0.3953488372093023,
+      "pf": 0.8784372550470432,
+      "avg_score": 144.06288146972656,
+      "tpd": 0.6933154182062479,
+      "avg_mu_R": 0.0625,
+      "avg_p_side": 0.5223
+    }
+  ],
+  "score_spread": {
+    "p1": 0.143953,
+    "p10": 2.690244,
+    "p25": 17.786478,
+    "p50": 58.245972,
+    "p75": 101.441551,
+    "p90": 152.015762,
+    "p99": 267.528351
+  },
+  "score_disc_p90p50": 2.61,
+  "score_disc_p99p50": 4.59,
+  "ddt_diagnostics": null,
+  "ddt_blocked": 0,
+  "per_symbol_stats": {
+    "BTCUSDT": {
+      "trades": 6,
+      "win_rate": 0.5,
+      "expectancy_r": 0.1377,
+      "total_r": 0.8261
+    },
+    "ETHUSDT": {
+      "trades": 3,
+      "win_rate": 0.667,
+      "expectancy_r": 0.4531,
+      "total_r": 1.3594
+    }
+  },
+  "prediction_quality": {
+    "action_accuracy": 0.4444,
+    "mu_r_correlation": 0.3745,
+    "mean_predicted_mae": 0.0,
+    "mean_predicted_mfe": 0.0266,
+    "mean_predicted_mu_R": 0.0915,
+    "mean_actual_R": 0.2428,
+    "sigma_1std_coverage": 0.1111,
+    "sigma_2std_coverage": 1.0,
+    "mean_predicted_sigma": 0.983,
+    "mean_p_side": 0.4909,
+    "mean_p_side_winners": 0.5047,
+    "mean_p_side_losers": 0.4737
+  },
+  "corr_blocked_trades": 1,
+  "directional_balance": {
+    "stage_distributions": {
+      "pre": {
+        "total": 10,
+        "long": 0,
+        "short": 10,
+        "hold": 0,
+        "long_pct": 0.0,
+        "short_pct": 100.0,
+        "hold_pct": 0.0
+      },
+      "post_ema200": {
+        "total": 9,
+        "long": 0,
+        "short": 9,
+        "hold": 0,
+        "long_pct": 0.0,
+        "short_pct": 100.0,
+        "hold_pct": 0.0
+      },
+      "post_regime": {
+        "total": 9,
+        "long": 0,
+        "short": 9,
+        "hold": 0,
+        "long_pct": 0.0,
+        "short_pct": 100.0,
+        "hold_pct": 0.0
+      },
+      "final": {
+        "total": 9,
+        "long": 0,
+        "short": 9,
+        "hold": 0,
+        "long_pct": 0.0,
+        "short_pct": 100.0,
+        "hold_pct": 0.0
+      }
+    },
+    "gate_blocks": {
+      "cooldown": 1,
+      "correlation": 1
+    }
+  },
+  "debias_spread_ratio": null,
+  "per_sym_side_bias": {
+    "BTCUSDT": {
+      "long_pct": 0.0,
+      "short_pct": 100.0,
+      "n_taken": 6,
+      "biased": true,
+      "bias_dir": "SHORT"
+    },
+    "ETHUSDT": {
+      "long_pct": 0.0,
+      "short_pct": 100.0,
+      "n_taken": 3,
+      "biased": true,
+      "bias_dir": "SHORT"
+    }
+  },
+  "pct_calibration": [
+    {
+      "pct_label": "Top5%",
+      "threshold": 254.4377,
+      "n": 1,
+      "er": 1.1594,
+      "pf": 999.0,
+      "wr": 1.0,
+      "maxdd": 0.0,
+      "tpd": 0.0,
+      "long_n": 0,
+      "long_er": 0.0,
+      "short_n": 1,
+      "short_er": 1.1594
+    },
+    {
+      "pct_label": "Top10%",
+      "threshold": 207.8338,
+      "n": 2,
+      "er": 0.0797,
+      "pf": 1.16,
+      "wr": 0.5,
+      "maxdd": 0.0,
+      "tpd": 0.0,
+      "long_n": 0,
+      "long_er": 0.0,
+      "short_n": 2,
+      "short_er": 0.0797
+    },
+    {
+      "pct_label": "Top15%",
+      "threshold": 199.7857,
+      "n": 2,
+      "er": 0.0797,
+      "pf": 1.16,
+      "wr": 0.5,
+      "maxdd": 0.0,
+      "tpd": 0.0,
+      "long_n": 0,
+      "long_er": 0.0,
+      "short_n": 2,
+      "short_er": 0.0797
+    },
+    {
+      "pct_label": "Top20%",
+      "threshold": 186.0308,
+      "n": 3,
+      "er": 0.4976,
+      "pf": 2.49,
+      "wr": 0.667,
+      "maxdd": 0.0,
+      "tpd": 0.0,
+      "long_n": 0,
+      "long_er": 0.0,
+      "short_n": 3,
+      "short_er": 0.4976
+    }
+  ]
+}

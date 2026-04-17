@@ -1,0 +1,207 @@
+{
+  "fold_id": 4,
+  "window_train": "2022-02-06",
+  "window_test": "2022-02-06\u21922022-03-06",
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT"
+  ],
+  "corr_matrix": [
+    [
+      1.0,
+      -0.0961
+    ],
+    [
+      -0.0961,
+      1.0
+    ]
+  ],
+  "mean_abs_corr": 0.0961,
+  "max_abs_corr": 0.0961,
+  "max_abs_corr_pair": [
+    "BTCUSDT",
+    "ETHUSDT"
+  ],
+  "overlap_ratio": 0.4643,
+  "daily_r_series": {
+    "BTCUSDT": {
+      "2022-02-06": 1.3333333730697632,
+      "2022-02-07": -3.0,
+      "2022-02-08": -4.0,
+      "2022-02-09": 0.3333333730697632,
+      "2022-02-10": -1.0,
+      "2022-02-11": -2.0,
+      "2022-02-12": -1.0,
+      "2022-02-13": 1.3333333730697632,
+      "2022-02-14": -1.0,
+      "2022-02-15": 1.0000001192092896,
+      "2022-02-16": -3.0,
+      "2022-02-21": -1.0,
+      "2022-02-22": 1.6666667461395264,
+      "2022-02-23": 0.3333333730697632,
+      "2022-02-24": 1.5377015620470047,
+      "2022-02-25": -3.666666626930237,
+      "2022-02-26": -0.6666666269302368,
+      "2022-02-27": -2.0,
+      "2022-02-28": 6.492753744125366,
+      "2022-03-01": 6.000000238418579,
+      "2022-03-02": -3.0,
+      "2022-03-05": 1.3333333730697632
+    },
+    "ETHUSDT": {
+      "2022-02-06": 6.000000238418579,
+      "2022-02-07": -0.9999998807907104,
+      "2022-02-08": 3.666666865348816,
+      "2022-02-09": 1.3333334922790527,
+      "2022-02-10": -3.0,
+      "2022-02-11": 3.666666865348816,
+      "2022-02-12": -2.0,
+      "2022-02-13": 1.0000001192092896,
+      "2022-02-14": 1.3333334922790527,
+      "2022-02-15": 10.666666984558105,
+      "2022-02-16": -4.666666626930237,
+      "2022-02-17": -1.6666666269302368,
+      "2022-02-18": 0.3333333730697632,
+      "2022-02-19": -8.0,
+      "2022-02-20": -1.6666666269302368,
+      "2022-02-21": -2.0,
+      "2022-02-22": -0.6666666269302368,
+      "2022-02-23": -3.3333332538604736,
+      "2022-02-25": -3.3333332538604736,
+      "2022-02-26": -0.9999998807907104,
+      "2022-02-27": 2.0000001192092896,
+      "2022-02-28": 1.3333334922790527,
+      "2022-03-01": -8.0,
+      "2022-03-02": 3.666666865348816,
+      "2022-03-03": -1.6666666269302368,
+      "2022-03-04": -1.0,
+      "2022-03-05": -0.33333325386047363
+    }
+  },
+  "corr_blocked_trades": 0,
+  "corr_penalty_trades": 5,
+  "corr_penalty_log": [
+    {
+      "symbol": "ETHUSDT",
+      "side": 1,
+      "other_sym": "BTCUSDT",
+      "other_side": 1,
+      "aligned_days": 0,
+      "overlap_ratio": 0.5,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": 1,
+      "other_sym": "BTCUSDT",
+      "other_side": 1,
+      "aligned_days": 0,
+      "overlap_ratio": 1.0,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": 1,
+      "other_sym": "BTCUSDT",
+      "other_side": 1,
+      "aligned_days": 0,
+      "overlap_ratio": 1.5,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": 1,
+      "other_sym": "BTCUSDT",
+      "other_side": 1,
+      "aligned_days": 0,
+      "overlap_ratio": 2.0,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": 1,
+      "other_sym": "BTCUSDT",
+      "other_side": 1,
+      "aligned_days": 0,
+      "overlap_ratio": 2.5,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    }
+  ],
+  "corr_block_log": [
+    {
+      "symbol": "ETHUSDT",
+      "side": 1,
+      "other_sym": "BTCUSDT",
+      "other_side": 1,
+      "aligned_days": 0,
+      "overlap_ratio": 0.5,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": 1,
+      "other_sym": "BTCUSDT",
+      "other_side": 1,
+      "aligned_days": 0,
+      "overlap_ratio": 1.0,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": 1,
+      "other_sym": "BTCUSDT",
+      "other_side": 1,
+      "aligned_days": 0,
+      "overlap_ratio": 1.5,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": 1,
+      "other_sym": "BTCUSDT",
+      "other_side": 1,
+      "aligned_days": 0,
+      "overlap_ratio": 2.0,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": 1,
+      "other_sym": "BTCUSDT",
+      "other_side": 1,
+      "aligned_days": 0,
+      "overlap_ratio": 2.5,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    }
+  ]
+}

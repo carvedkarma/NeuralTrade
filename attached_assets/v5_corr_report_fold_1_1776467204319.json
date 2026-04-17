@@ -1,0 +1,219 @@
+{
+  "fold_id": 1,
+  "window_train": "2021-11-06",
+  "window_test": "2021-11-06\u21922021-12-06",
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT"
+  ],
+  "corr_matrix": [
+    [
+      1.0,
+      0.176
+    ],
+    [
+      0.176,
+      1.0
+    ]
+  ],
+  "mean_abs_corr": 0.176,
+  "max_abs_corr": 0.176,
+  "max_abs_corr_pair": [
+    "BTCUSDT",
+    "ETHUSDT"
+  ],
+  "overlap_ratio": 0.7504,
+  "daily_r_series": {
+    "BTCUSDT": {
+      "2021-11-06": -3.3333332538604736,
+      "2021-11-07": 1.3333334922790527,
+      "2021-11-08": -2.666666626930237,
+      "2021-11-09": 6.000000238418579,
+      "2021-11-10": 4.666666865348816,
+      "2021-11-11": 5.054736226797104,
+      "2021-11-12": 5.666666865348816,
+      "2021-11-13": 3.666666865348816,
+      "2021-11-14": 5.666666865348816,
+      "2021-11-15": 6.000000238418579,
+      "2021-11-16": 3.3333334922790527,
+      "2021-11-17": 3.666666865348816,
+      "2021-11-18": 3.0000001192092896,
+      "2021-11-19": -6.0,
+      "2021-11-20": 1.3333334922790527,
+      "2021-11-21": 3.666666865348816,
+      "2021-11-22": 0.31884050369262695,
+      "2021-11-23": 7.000000238418579,
+      "2021-11-24": -3.666666626930237,
+      "2021-11-25": 3.666666865348816,
+      "2021-11-26": 6.666666865348816,
+      "2021-11-27": -3.3333332538604736,
+      "2021-11-28": 2.0000001192092896,
+      "2021-11-29": 1.3333334922790527,
+      "2021-11-30": 0.6666667461395264,
+      "2021-12-01": -5.666666626930237,
+      "2021-12-02": 5.233822524547577,
+      "2021-12-03": -8.0,
+      "2021-12-04": -1.0,
+      "2021-12-05": 4.1733231246471405,
+      "2021-12-06": 1.3333333730697632
+    },
+    "ETHUSDT": {
+      "2021-11-06": 2.0000001192092896,
+      "2021-11-07": -3.3333332538604736,
+      "2021-11-08": -0.33333325386047363,
+      "2021-11-09": -0.9999998807907104,
+      "2021-11-10": -0.9999998807907104,
+      "2021-11-11": -0.6666666269302368,
+      "2021-11-12": 2.0000001192092896,
+      "2021-11-13": -0.9999998807907104,
+      "2021-11-14": 3.3333334922790527,
+      "2021-11-15": -0.9999998807907104,
+      "2021-11-16": -2.0,
+      "2021-11-17": -2.0,
+      "2021-11-18": 1.6666667461395264,
+      "2021-11-19": -4.666666626930237,
+      "2021-11-20": 3.666666865348816,
+      "2021-11-21": 3.666666865348816,
+      "2021-11-22": -0.6666666269302368,
+      "2021-11-23": -0.33333325386047363,
+      "2021-11-24": -0.9999998807907104,
+      "2021-11-25": -8.0,
+      "2021-11-26": 4.43237929046154,
+      "2021-11-27": 4.666666865348816,
+      "2021-11-28": 2.6666667461395264,
+      "2021-11-29": 1.1920928955078125e-07,
+      "2021-11-30": -3.3333332538604736,
+      "2021-12-01": 1.3333334922790527,
+      "2021-12-02": 3.9828144013881683,
+      "2021-12-03": -2.666666626930237,
+      "2021-12-04": -0.6666666269302368,
+      "2021-12-05": 1.3333334922790527
+    }
+  },
+  "corr_blocked_trades": 0,
+  "corr_penalty_trades": 5,
+  "corr_penalty_log": [
+    {
+      "symbol": "ETHUSDT",
+      "side": -1,
+      "other_sym": "BTCUSDT",
+      "other_side": -1,
+      "aligned_days": 0,
+      "overlap_ratio": 0.5,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": -1,
+      "other_sym": "BTCUSDT",
+      "other_side": -1,
+      "aligned_days": 0,
+      "overlap_ratio": 1.0,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": -1,
+      "other_sym": "BTCUSDT",
+      "other_side": -1,
+      "aligned_days": 0,
+      "overlap_ratio": 1.5,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": -1,
+      "other_sym": "BTCUSDT",
+      "other_side": -1,
+      "aligned_days": 0,
+      "overlap_ratio": 2.0,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": -1,
+      "other_sym": "BTCUSDT",
+      "other_side": -1,
+      "aligned_days": 0,
+      "overlap_ratio": 2.5,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    }
+  ],
+  "corr_block_log": [
+    {
+      "symbol": "ETHUSDT",
+      "side": -1,
+      "other_sym": "BTCUSDT",
+      "other_side": -1,
+      "aligned_days": 0,
+      "overlap_ratio": 0.5,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": -1,
+      "other_sym": "BTCUSDT",
+      "other_side": -1,
+      "aligned_days": 0,
+      "overlap_ratio": 1.0,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": -1,
+      "other_sym": "BTCUSDT",
+      "other_side": -1,
+      "aligned_days": 0,
+      "overlap_ratio": 1.5,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": -1,
+      "other_sym": "BTCUSDT",
+      "other_side": -1,
+      "aligned_days": 0,
+      "overlap_ratio": 2.0,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    },
+    {
+      "symbol": "ETHUSDT",
+      "side": -1,
+      "other_sym": "BTCUSDT",
+      "other_side": -1,
+      "aligned_days": 0,
+      "overlap_ratio": 2.5,
+      "corr_value": null,
+      "reliability_flag": "UNRELIABLE",
+      "action_taken": "default_conservative mult=0.90",
+      "size_mult": 0.9
+    }
+  ]
+}
