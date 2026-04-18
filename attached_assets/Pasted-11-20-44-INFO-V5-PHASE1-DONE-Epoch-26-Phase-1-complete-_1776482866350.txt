@@ -1,0 +1,274 @@
+11:20:44 [INFO] [V5_PHASE1_DONE] Epoch 26: Phase 1 complete. Switching to FULL TRAINING. Trunk has had 25 epochs to learn return-predictive features. All heads now active: w_ret=6.0 w_mfe=0.15 w_mae=0.15 w_action=2.5.
+11:21:04 [INFO] [V5_SIDE_BAL] Epoch 026: regime_conditional=True SIDE_BAL_W=0.15 bull=12656 bear=13037 chop=25356 avg_L_side_bal=0.0343
+11:21:06 [INFO] [V5] Epoch 026/150 [PHASE2] | train=5.5921 val=5.3940 lr=5.70e-05 act_acc=0.423 pred[H/L/S]=2432/3330/0 | L_ret=0.4067 | L_mfe=2.2880 | L_mae=5.6645 | L_action=0.7632 | L_side_balance=0.0343 | L_entropy=-0.9050 | L_sigma_reg=0.0511 | L_specialist_align=0.0000 | total=5.5921
+11:21:06 [INFO] [V5_LOSS_BUDGET] Epoch 026 avg_L_ret_pct=43.4%  L_ret=2.4398(32.2%) L_mfe=0.5261(6.9%) L_mae=1.1013(14.5%) L_action=3.4612(45.7%) L_sig=0.0520 total=7.5804
+11:21:06 [INFO] [V5_SIGMA] epoch=26 sigma_p10=0.678 p50=0.990 p90=0.997
+11:21:06 [INFO] [V5_TRAIN_QUALITY] epoch=26 mu_r_corr_val=+0.0571 score_p10=0.0012 p50=0.0050 p90=0.0053 p99=0.0093 disc(p90/p50)=1.1x disc(p99/p50)=1.8x pred_valid[H/L/S]=2432/3330/0
+11:21:06 [INFO] [V5_HEALTH] epoch=26 mu_r_corr_val=+0.0571 score_p50=0.00501 score_p90=0.00527 score_p99=0.00925 disc(p90/p50)=1.1x disc(p99/p50)=1.8x pred[H/L/S]=2432/3330/0 p_long_mean=0.517 p_short_mean=0.074 raw_muR_mean=+0.00001 raw_muR_std=0.02698 mae_R_mean=1.9288 mae_R_std=0.0213
+11:21:24 [INFO] [V5_SIDE_BAL] Epoch 027: regime_conditional=True SIDE_BAL_W=0.15 bull=12623 bear=13053 chop=25390 avg_L_side_bal=0.0310
+11:21:25 [INFO] [V5] Epoch 027/150 [PHASE2] | train=5.2387 val=5.2144 lr=5.67e-05 act_acc=0.445 pred[H/L/S]=2533/3229/0 | L_ret=0.4051 | L_mfe=1.7156 | L_mae=4.2024 | L_action=0.7477 | L_side_balance=0.0310 | L_entropy=-0.8974 | L_sigma_reg=0.0510 | L_specialist_align=0.0000 | total=5.2387
+11:21:25 [INFO] [V5_LOSS_BUDGET] Epoch 027 avg_L_ret_pct=46.1%  L_ret=2.9772(51.1%) L_mfe=0.2902(5.0%) L_mae=0.6691(11.5%) L_action=1.8415(31.6%) L_sig=0.0534 total=5.8315
+11:21:25 [INFO] [V5_SIGMA] epoch=27 sigma_p10=0.657 p50=1.015 p90=1.017
+11:21:25 [INFO] [V5_TRAIN_QUALITY] epoch=27 mu_r_corr_val=+0.0792 score_p10=0.0000 p50=0.0020 p90=0.0022 p99=0.0063 disc(p90/p50)=1.1x disc(p99/p50)=3.1x pred_valid[H/L/S]=2533/3229/0
+11:21:25 [INFO] [V5_HEALTH] epoch=27 mu_r_corr_val=+0.0792 score_p50=0.00204 score_p90=0.00223 score_p99=0.00633 disc(p90/p50)=1.1x disc(p99/p50)=3.1x pred[H/L/S]=2533/3229/0 p_long_mean=0.523 p_short_mean=0.066 raw_muR_mean=-0.01088 raw_muR_std=0.00897 mae_R_mean=3.1543 mae_R_std=0.0077
+11:21:43 [INFO] [V5_SIDE_BAL] Epoch 028: regime_conditional=True SIDE_BAL_W=0.15 bull=12797 bear=12779 chop=25473 avg_L_side_bal=0.0313
+11:21:44 [INFO] [V5] Epoch 028/150 [PHASE2] | train=5.1373 val=5.2229 lr=5.64e-05 act_acc=0.439 pred[H/L/S]=2651/3111/0 | L_ret=0.4033 | L_mfe=1.6357 | L_mae=3.7655 | L_action=0.7423 | L_side_balance=0.0313 | L_entropy=-0.8904 | L_sigma_reg=0.0513 | L_specialist_align=0.0000 | total=5.1373
+11:21:44 [INFO] [V5_LOSS_BUDGET] Epoch 028 avg_L_ret_pct=46.8%  L_ret=2.9197(48.9%) L_mfe=0.3544(5.9%) L_mae=0.5093(8.5%) L_action=2.1335(35.7%) L_sig=0.0564 total=5.9734
+11:21:44 [INFO] [V5_SIGMA] epoch=28 sigma_p10=0.639 p50=1.000 p90=1.008
+11:21:44 [INFO] [V5_TRAIN_QUALITY] epoch=28 mu_r_corr_val=+0.0650 score_p10=0.0004 p50=0.0006 p90=0.0009 p99=0.0034 disc(p90/p50)=1.6x disc(p99/p50)=5.8x pred_valid[H/L/S]=2651/3111/0
+11:21:44 [INFO] [V5_HEALTH] epoch=28 mu_r_corr_val=+0.0650 score_p50=0.00059 score_p90=0.00094 score_p99=0.00342 disc(p90/p50)=1.6x disc(p99/p50)=5.8x pred[H/L/S]=2651/3111/0 p_long_mean=0.519 p_short_mean=0.062 raw_muR_mean=+0.01092 raw_muR_std=0.01738 mae_R_mean=3.9644 mae_R_std=0.0126
+11:22:01 [INFO] [V5_SIDE_BAL] Epoch 029: regime_conditional=True SIDE_BAL_W=0.15 bull=12792 bear=12976 chop=25284 avg_L_side_bal=0.0314
+11:22:03 [INFO] [V5] Epoch 029/150 [PHASE2] | train=5.1389 val=5.1871 lr=5.61e-05 act_acc=0.434 pred[H/L/S]=2584/3178/0 | L_ret=0.4076 | L_mfe=1.6345 | L_mae=3.6005 | L_action=0.7425 | L_side_balance=0.0314 | L_entropy=-0.8896 | L_sigma_reg=0.0516 | L_specialist_align=0.0000 | total=5.1389
+11:22:03 [INFO] [V5_LOSS_BUDGET] Epoch 029 avg_L_ret_pct=47.3%  L_ret=2.6379(48.3%) L_mfe=0.2607(4.8%) L_mae=0.6201(11.4%) L_action=1.8927(34.7%) L_sig=0.0508 total=5.4622
+11:22:03 [INFO] [V5_SIGMA] epoch=29 sigma_p10=0.680 p50=1.005 p90=1.013
+11:22:03 [INFO] [V5_TRAIN_QUALITY] epoch=29 mu_r_corr_val=+0.0755 score_p10=0.0002 p50=0.0004 p90=0.0009 p99=0.0040 disc(p90/p50)=2.2x disc(p99/p50)=10.0x pred_valid[H/L/S]=2584/3178/0
+11:22:03 [INFO] [V5_HEALTH] epoch=29 mu_r_corr_val=+0.0755 score_p50=0.00040 score_p90=0.00088 score_p99=0.00402 disc(p90/p50)=2.2x disc(p99/p50)=10.0x pred[H/L/S]=2584/3178/0 p_long_mean=0.523 p_short_mean=0.067 raw_muR_mean=+0.00614 raw_muR_std=0.01434 mae_R_mean=4.2069 mae_R_std=0.1568
+11:22:21 [INFO] [V5_SIDE_BAL] Epoch 030: regime_conditional=True SIDE_BAL_W=0.15 bull=12617 bear=12988 chop=25459 avg_L_side_bal=0.0310
+11:22:21 [INFO] [V5] Epoch 030/150 [PHASE2] | train=5.1258 val=5.2072 lr=5.57e-05 act_acc=0.438 pred[H/L/S]=2680/3082/0 | L_ret=0.4049 | L_mfe=1.6234 | L_mae=3.5818 | L_action=0.7458 | L_side_balance=0.0310 | L_entropy=-0.8929 | L_sigma_reg=0.0513 | L_specialist_align=0.0000 | total=5.1258
+11:22:21 [INFO] [V5_LOSS_BUDGET] Epoch 030 avg_L_ret_pct=47.1%  L_ret=2.4056(46.7%) L_mfe=0.1837(3.6%) L_mae=0.6707(13.0%) L_action=1.8388(35.7%) L_sig=0.0527 total=5.1514
+11:22:21 [INFO] [V5_SIGMA] epoch=30 sigma_p10=0.678 p50=0.977 p90=0.991
+11:22:21 [INFO] [V5_TRAIN_QUALITY] epoch=30 mu_r_corr_val=+0.0626 score_p10=0.0001 p50=0.0016 p90=0.0017 p99=0.0026 disc(p90/p50)=1.1x disc(p99/p50)=1.6x pred_valid[H/L/S]=2680/3082/0
+11:22:21 [INFO] [V5_HEALTH] epoch=30 mu_r_corr_val=+0.0626 score_p50=0.00160 score_p90=0.00175 score_p99=0.00261 disc(p90/p50)=1.1x disc(p99/p50)=1.6x pred[H/L/S]=2680/3082/0 p_long_mean=0.501 p_short_mean=0.066 raw_muR_mean=-0.00098 raw_muR_std=0.01855 mae_R_mean=4.4614 mae_R_std=0.3731
+11:22:21 [INFO] [V5_QUAL_DIAG] T4: using ref['mu_R'] for adaptive_mu_min percentile (no '_raw_mu_R_ref' key — mu_debias not active or ref not provided)
+11:22:21 [INFO] [V5_QUAL_DIAG] pass_rate=0.0% < 10%, relaxing gates...
+11:22:21 [INFO] [V5_QUAL_DIAG] max relaxation reached, using finiteness+edge gate (strict_audit=False). last_relaxed_mu=0.0078 preserved as edge floor.
+11:22:21 [INFO] [V5_QUAL_DIAG] total=5762 passed_sigma=5186 passed_mae=0 passed_mu=4321 passed_ptrade=3457 final=5452 (94.6%) | adaptive: sigma<=0.991 mae<=1.000 |mu|>=0.0157 ptrade>=0.422
+11:22:21 [INFO] [V5_SCORE_DIAG] mu_R: mean=-0.0010 std=0.0185 | mae_R: mean=2.000 mfe_R: mean=2.548 | p_long=0.501 p_short=0.066 | edge_L=0.0044 edge_S=0.0006 penalty=0.0013 | score: mean=0.0022 p50=0.0021 p90=0.0023 %pos=100.0%
+11:22:21 [INFO] [V5_OUTPUT_DIST] mu_R: p5=-0.0186 p50=-0.0162 p95=0.0267 | sigma: p5=0.6708 p50=0.9774 p95=0.9915 | mae: p5=4.090 p50=4.102 p95=4.874 | p_trade: p5=0.372 p50=0.595 p95=0.596
+11:22:21 [INFO] [V5_TPD_CTRL] epoch=30 tpd=13.6 target=6.5±1.5 thr=0.0010->0.0020 step_mult=0.10 score_std=0.0007 action=UP trades=814 eligible=3163 clamp=[0.0020,0.0053] floor=0.0010
+11:22:21 [INFO] [V5_SWEEP_OBJ] objective=quality best=top5% composite=1.9571
+11:22:21 [INFO] ------------------------------------------------------------------------------------------------------------------------
+11:22:21 [INFO] [V5_SCORE_DIAG] total=5762 eligible=5452 finite=3163 nan_or_inf=2289
+11:22:21 [INFO] v5 score percentiles (val): p50=0.0021 p75=0.0022 p90=0.0023 p95=0.0027 p99=0.0053
+11:22:21 [INFO] [V5_SWEEP_PIPELINE] precomputed_outcomes: valid=5762 no_candidate=0 total=5762
+11:22:21 [INFO] V5 SWEEP (epoch 30) | cooldown=4 | TP=2.0x SL=1.5x ATR | val_days=60.0 | target=6.5±1.5 tpd
+11:22:21 [INFO] Select      Trds   Expect     WR  Shrpe    PF |   WinR   LosR   MedR |  %TP  %SL  %EX | T/Day
+11:22:21 [INFO] ------------------------------------------------------------------------------------------------------------------------
+11:22:21 [INFO] tpd_ctrl     781   -0.053  40.7%  -2.70  0.91 | +1.286 -0.972 -1.000 |  39%  57%   3% |  13.0
+11:22:21 [INFO] top5%         60   +0.253  56.7%   3.61  1.58 | +1.211 -1.000 +1.159 |  52%  43%   5% |   1.0 <<< BEST
+11:22:21 [INFO] top10%       102   +0.036  46.1%   0.70  1.07 | +1.136 -0.904 -0.119 |  38%  48%  14% |   1.7
+11:22:21 [INFO] top15%       149   -0.037  41.6%  -0.86  0.93 | +1.183 -0.906 -1.000 |  36%  52%  12% |   2.5
+11:22:21 [INFO] top20%       196   -0.005  43.9%  -0.12  0.99 | +1.192 -0.940 -1.000 |  39%  52%   9% |   3.3
+11:22:21 [INFO] top25%       245   +0.012  44.9%   0.36  1.02 | +1.196 -0.953 -1.000 |  40%  52%   8% |   4.1
+11:22:21 [INFO] top30%       297   +0.021  44.8%   0.66  1.04 | +1.224 -0.955 -1.000 |  41%  52%   7% |   4.9
+11:22:21 [INFO] ------------------------------------------------------------------------------------------------------------------------
+11:22:21 [INFO] ============================================================================================================================================
+11:22:21 [INFO]   [SWEEP_BEST_TOP5PCT] PER-THRESHOLD / PER-SIDE SLICE AUDIT
+11:22:21 [INFO] ============================================================================================================================================
+11:22:21 [INFO]   Slice        Side         N     E[R]     WR%     PF   AvgScore    TPD
+11:22:21 [INFO] --------------------------------------------------------------------------------------------------------------------------------------------
+11:22:21 [INFO]   top5%        ALL         60  +0.2527   56.7%   1.58    0.00387    1.0 [EDGE]
+11:22:21 [INFO]   top5%        LONG        60  +0.2527   56.7%   1.58    0.00387    1.0 [EDGE]
+11:22:21 [INFO]   top5%        ALL         60  +0.2527   56.7%   1.58    0.00387    1.0 [EDGE]
+11:22:21 [INFO]   top5%        LONG        60  +0.2527   56.7%   1.58    0.00387    1.0 [EDGE]
+11:22:21 [INFO]   top10%       ALL        102  +0.0361   46.1%   1.07    0.00315    1.7 [EDGE]
+11:22:21 [INFO]   top10%       LONG       102  +0.0361   46.1%   1.07    0.00315    1.7 [EDGE]
+11:22:21 [INFO]   top20%       ALL        196  -0.0046   43.9%   0.99    0.00269    3.3 [NEG_EXPECT]
+11:22:21 [INFO]   top20%       LONG       196  -0.0046   43.9%   0.99    0.00269    3.3 [NEG_EXPECT]
+11:22:21 [INFO] ============================================================================================================================================
+11:22:21 [INFO] [V5_EPOCH_TRADING] epoch=030 | expect=+0.2527 PF=1.58 composite=+1.9571 maxDD=-4.24 T/day=1.0 thr=0.0027 best_at=top5%
+11:22:21 [INFO] [V5_CKPT] New best (expectancy): expect=0.2527 PF=1.58 maxDD=-4.24 at top5%
+11:22:40 [INFO] [V5_SIDE_BAL] Epoch 031: regime_conditional=True SIDE_BAL_W=0.15 bull=12592 bear=12950 chop=25546 avg_L_side_bal=0.0307
+11:22:41 [INFO] [V5] Epoch 031/150 [PHASE2] | train=5.0829 val=5.2274 lr=5.54e-05 act_acc=0.437 pred[H/L/S]=2670/3092/0 | L_ret=0.4009 | L_mfe=1.6124 | L_mae=3.5125 | L_action=0.7431 | L_side_balance=0.0307 | L_entropy=-0.8927 | L_sigma_reg=0.0507 | L_specialist_align=0.0000 | total=5.0829
+11:22:41 [INFO] [V5_LOSS_BUDGET] Epoch 031 avg_L_ret_pct=47.0%  L_ret=3.5462(55.4%) L_mfe=0.2374(3.7%) L_mae=0.5334(8.3%) L_action=2.0389(31.8%) L_sig=0.0506 total=6.4064
+11:22:41 [INFO] [V5_SIGMA] epoch=31 sigma_p10=0.722 p50=0.990 p90=1.004
+11:22:41 [INFO] [V5_TRAIN_QUALITY] epoch=31 mu_r_corr_val=+0.0383 score_p10=0.0002 p50=0.0004 p90=0.0005 p99=0.0024 disc(p90/p50)=1.3x disc(p99/p50)=5.7x pred_valid[H/L/S]=2670/3092/0
+11:22:41 [INFO] [V5_HEALTH] epoch=31 mu_r_corr_val=+0.0383 score_p50=0.00042 score_p90=0.00054 score_p99=0.00237 disc(p90/p50)=1.3x disc(p99/p50)=5.7x pred[H/L/S]=2670/3092/0 p_long_mean=0.518 p_short_mean=0.067 raw_muR_mean=-0.00909 raw_muR_std=0.01266 mae_R_mean=4.5741 mae_R_std=0.5510
+11:22:59 [INFO] [V5_SIDE_BAL] Epoch 032: regime_conditional=True SIDE_BAL_W=0.15 bull=12573 bear=13034 chop=25454 avg_L_side_bal=0.0309
+11:23:00 [INFO] [V5] Epoch 032/150 [PHASE2] | train=5.1000 val=5.2113 lr=5.51e-05 act_acc=0.439 pred[H/L/S]=2669/3093/0 | L_ret=0.4030 | L_mfe=1.6309 | L_mae=3.5325 | L_action=0.7426 | L_side_balance=0.0309 | L_entropy=-0.8923 | L_sigma_reg=0.0511 | L_specialist_align=0.0000 | total=5.1000
+11:23:00 [INFO] [V5_LOSS_BUDGET] Epoch 032 avg_L_ret_pct=47.1%  L_ret=2.2787(45.9%) L_mfe=0.3141(6.3%) L_mae=0.3964(8.0%) L_action=1.9272(38.8%) L_sig=0.0461 total=4.9625
+11:23:00 [INFO] [V5_SIGMA] epoch=32 sigma_p10=0.666 p50=0.997 p90=1.010
+11:23:00 [INFO] [V5_TRAIN_QUALITY] epoch=32 mu_r_corr_val=+0.0610 score_p10=0.0000 p50=0.0028 p90=0.0031 p99=0.0033 disc(p90/p50)=1.1x disc(p99/p50)=1.2x pred_valid[H/L/S]=2669/3093/0
+11:23:00 [INFO] [V5_HEALTH] epoch=32 mu_r_corr_val=+0.0610 score_p50=0.00281 score_p90=0.00305 score_p99=0.00335 disc(p90/p50)=1.1x disc(p99/p50)=1.2x pred[H/L/S]=2669/3093/0 p_long_mean=0.509 p_short_mean=0.070 raw_muR_mean=-0.01085 raw_muR_std=0.01960 mae_R_mean=4.7242 mae_R_std=0.8055
+11:23:17 [INFO] [V5_SIDE_BAL] Epoch 033: regime_conditional=True SIDE_BAL_W=0.15 bull=12772 bear=12930 chop=25381 avg_L_side_bal=0.0310
+11:23:18 [INFO] [V5] Epoch 033/150 [PHASE2] | train=5.0840 val=5.2350 lr=5.47e-05 act_acc=0.424 pred[H/L/S]=2521/3241/0 | L_ret=0.4039 | L_mfe=1.6180 | L_mae=3.4545 | L_action=0.7394 | L_side_balance=0.0310 | L_entropy=-0.8894 | L_sigma_reg=0.0512 | L_specialist_align=0.0000 | total=5.0840
+11:23:18 [INFO] [V5_LOSS_BUDGET] Epoch 033 avg_L_ret_pct=47.4%  L_ret=2.1497(42.0%) L_mfe=0.2296(4.5%) L_mae=0.6752(13.2%) L_action=2.0191(39.4%) L_sig=0.0500 total=5.1237
+11:23:18 [INFO] [V5_SIGMA] epoch=33 sigma_p10=0.645 p50=0.984 p90=0.997
+11:23:18 [INFO] [V5_TRAIN_QUALITY] epoch=33 mu_r_corr_val=+0.0728 score_p10=0.0002 p50=0.0003 p90=0.0009 p99=0.0041 disc(p90/p50)=2.7x disc(p99/p50)=12.1x pred_valid[H/L/S]=2521/3241/0
+11:23:18 [INFO] [V5_HEALTH] epoch=33 mu_r_corr_val=+0.0728 score_p50=0.00034 score_p90=0.00093 score_p99=0.00411 disc(p90/p50)=2.7x disc(p99/p50)=12.1x pred[H/L/S]=2521/3241/0 p_long_mean=0.521 p_short_mean=0.062 raw_muR_mean=+0.01047 raw_muR_std=0.01729 mae_R_mean=4.8127 mae_R_std=0.9326
+11:23:36 [INFO] [V5_SIDE_BAL] Epoch 034: regime_conditional=True SIDE_BAL_W=0.15 bull=12688 bear=12889 chop=25476 avg_L_side_bal=0.0310
+11:23:37 [INFO] [V5] Epoch 034/150 [PHASE2] | train=5.0690 val=5.2049 lr=5.43e-05 act_acc=0.441 pred[H/L/S]=2667/3095/0 | L_ret=0.4020 | L_mfe=1.6104 | L_mae=3.4296 | L_action=0.7400 | L_side_balance=0.0310 | L_entropy=-0.8893 | L_sigma_reg=0.0512 | L_specialist_align=0.0000 | total=5.0690
+11:23:37 [INFO] [V5_LOSS_BUDGET] Epoch 034 avg_L_ret_pct=47.2%  L_ret=2.1844(45.1%) L_mfe=0.2411(5.0%) L_mae=0.5105(10.5%) L_action=1.8609(38.4%) L_sig=0.0497 total=4.8466
+11:23:37 [INFO] [V5_SIGMA] epoch=34 sigma_p10=0.629 p50=0.982 p90=0.990
+11:23:37 [INFO] [V5_TRAIN_QUALITY] epoch=34 mu_r_corr_val=+0.0682 score_p10=0.0001 p50=0.0008 p90=0.0010 p99=0.0042 disc(p90/p50)=1.2x disc(p99/p50)=5.3x pred_valid[H/L/S]=2667/3095/0
+11:23:37 [INFO] [V5_HEALTH] epoch=34 mu_r_corr_val=+0.0682 score_p50=0.00080 score_p90=0.00096 score_p99=0.00424 disc(p90/p50)=1.2x disc(p99/p50)=5.3x pred[H/L/S]=2667/3095/0 p_long_mean=0.496 p_short_mean=0.061 raw_muR_mean=+0.00846 raw_muR_std=0.02165 mae_R_mean=4.9665 mae_R_std=0.9523
+11:23:56 [INFO] [V5_SIDE_BAL] Epoch 035: regime_conditional=True SIDE_BAL_W=0.15 bull=12446 bear=13124 chop=25537 avg_L_side_bal=0.0310
+11:23:57 [INFO] [V5] Epoch 035/150 [PHASE2] | train=5.0896 val=5.2443 lr=5.39e-05 act_acc=0.400 pred[H/L/S]=2206/3556/0 | L_ret=0.4019 | L_mfe=1.6177 | L_mae=3.4690 | L_action=0.7458 | L_side_balance=0.0310 | L_entropy=-0.8944 | L_sigma_reg=0.0510 | L_specialist_align=0.0000 | total=5.0896
+11:23:57 [INFO] [V5_LOSS_BUDGET] Epoch 035 avg_L_ret_pct=47.0%  L_ret=2.3583(47.0%) L_mfe=0.2969(5.9%) L_mae=0.5181(10.3%) L_action=1.7953(35.8%) L_sig=0.0491 total=5.0176
+11:23:57 [INFO] [V5_SIGMA] epoch=35 sigma_p10=0.700 p50=0.994 p90=1.009
+11:23:57 [INFO] [V5_TRAIN_QUALITY] epoch=35 mu_r_corr_val=+0.0629 score_p10=0.0001 p50=0.0035 p90=0.0037 p99=0.0054 disc(p90/p50)=1.1x disc(p99/p50)=1.6x pred_valid[H/L/S]=2206/3556/0
+11:23:57 [INFO] [V5_HEALTH] epoch=35 mu_r_corr_val=+0.0629 score_p50=0.00349 score_p90=0.00372 score_p99=0.00542 disc(p90/p50)=1.1x disc(p99/p50)=1.6x pred[H/L/S]=2206/3556/0 p_long_mean=0.530 p_short_mean=0.070 raw_muR_mean=-0.00755 raw_muR_std=0.02961 mae_R_mean=4.8438 mae_R_std=0.9769
+11:23:57 [INFO] [V5_QUAL_DIAG] T4: using ref['mu_R'] for adaptive_mu_min percentile (no '_raw_mu_R_ref' key — mu_debias not active or ref not provided)
+11:23:57 [INFO] [V5_QUAL_DIAG] pass_rate=0.0% < 10%, relaxing gates...
+11:23:57 [INFO] [V5_QUAL_DIAG] max relaxation reached, using finiteness+edge gate (strict_audit=False). last_relaxed_mu=0.0091 preserved as edge floor.
+11:23:57 [INFO] [V5_QUAL_DIAG] total=5762 passed_sigma=2896 passed_mae=0 passed_mu=4321 passed_ptrade=3457 final=5169 (89.7%) | adaptive: sigma<=1.000 mae<=1.000 |mu|>=0.0182 ptrade>=0.480
+11:23:57 [INFO] [V5_SCORE_DIAG] mu_R: mean=-0.0076 std=0.0296 | mae_R: mean=2.000 mfe_R: mean=2.682 | p_long=0.530 p_short=0.070 | edge_L=0.0078 edge_S=0.0010 penalty=0.0018 | score: mean=0.0041 p50=0.0042 p90=0.0044 %pos=100.0%
+11:23:57 [INFO] [V5_OUTPUT_DIST] mu_R: p5=-0.0346 p50=-0.0314 p95=0.0421 | sigma: p5=0.6789 p50=0.9945 p95=1.0092 | mae: p5=3.888 p50=3.898 p95=5.969 | p_trade: p5=0.383 p50=0.615 p95=0.617
+11:23:57 [INFO] [V5_TPD_CTRL] epoch=35 tpd=16.8 target=6.5±1.5 thr=0.0020->0.0032 step_mult=0.10 score_std=0.0012 action=UP trades=1007 eligible=3919 clamp=[0.0022,0.0095] floor=0.0010
+11:23:57 [INFO] [V5_SWEEP_OBJ] objective=quality best=top5% composite=1.1952
+11:23:57 [INFO] ------------------------------------------------------------------------------------------------------------------------
+11:23:57 [INFO] [V5_SCORE_DIAG] total=5762 eligible=5169 finite=3919 nan_or_inf=1250
+11:23:57 [INFO] v5 score percentiles (val): p50=0.0042 p75=0.0042 p90=0.0044 p95=0.0052 p99=0.0095
+11:23:57 [INFO] [V5_SWEEP_PIPELINE] precomputed_outcomes: valid=5762 no_candidate=0 total=5762
+11:23:57 [INFO] V5 SWEEP (epoch 35) | cooldown=4 | TP=2.0x SL=1.5x ATR | val_days=60.0 | target=6.5±1.5 tpd
+11:23:57 [INFO] Select      Trds   Expect     WR  Shrpe    PF |   WinR   LosR   MedR |  %TP  %SL  %EX | T/Day
+11:23:57 [INFO] ------------------------------------------------------------------------------------------------------------------------
+11:23:57 [INFO] tpd_ctrl     894   -0.082  39.9%  -4.50  0.86 | +1.274 -0.983 -1.000 |  38%  59%   3% |  14.9
+11:23:57 [INFO] top5%         70   +0.143  51.4%   2.18  1.29 | +1.222 -1.000 +0.401 |  47%  49%   4% |   1.2 <<< BEST
+11:23:57 [INFO] top10%       130   -0.042  42.3%  -0.93  0.92 | +1.134 -0.904 -1.000 |  35%  52%  13% |   2.2
+11:23:57 [INFO] top15%       185   -0.127  38.4%  -3.35  0.78 | +1.168 -0.934 -1.000 |  34%  56%  10% |   3.1
+11:23:57 [INFO] top20%       246   -0.033  42.7%  -0.98  0.94 | +1.197 -0.950 -1.000 |  38%  54%   8% |   4.1
+11:23:57 [INFO] top25%       305   -0.016  42.6%  -0.51  0.97 | +1.241 -0.950 -1.000 |  40%  54%   7% |   5.1
+11:23:57 [INFO] top30%       354   -0.025  42.4%  -0.88  0.95 | +1.238 -0.954 -1.000 |  39%  54%   6% |   5.9
+11:23:57 [INFO] ------------------------------------------------------------------------------------------------------------------------
+11:23:57 [INFO] ============================================================================================================================================
+11:23:57 [INFO]   [SWEEP_BEST_TOP5PCT] PER-THRESHOLD / PER-SIDE SLICE AUDIT
+11:23:57 [INFO] ============================================================================================================================================
+11:23:57 [INFO]   Slice        Side         N     E[R]     WR%     PF   AvgScore    TPD
+11:23:57 [INFO] --------------------------------------------------------------------------------------------------------------------------------------------
+11:23:57 [INFO]   top5%        ALL         70  +0.1429   51.4%   1.29    0.00703    1.2 [EDGE]
+11:23:57 [INFO]   top5%        LONG        70  +0.1429   51.4%   1.29    0.00703    1.2 [EDGE]
+11:23:57 [INFO]   top5%        ALL         70  +0.1429   51.4%   1.29    0.00703    1.2 [EDGE]
+11:23:57 [INFO]   top5%        LONG        70  +0.1429   51.4%   1.29    0.00703    1.2 [EDGE]
+11:23:57 [INFO]   top10%       ALL        130  -0.0422   42.3%   0.92    0.00576    2.2 [NEG_EXPECT]
+11:23:57 [INFO]   top10%       LONG       130  -0.0422   42.3%   0.92    0.00576    2.2 [NEG_EXPECT]
+11:23:57 [INFO]   top20%       ALL        246  -0.0334   42.7%   0.94    0.00505    4.1 [NEG_EXPECT]
+11:23:57 [INFO]   top20%       LONG       246  -0.0334   42.7%   0.94    0.00505    4.1 [NEG_EXPECT]
+11:23:57 [INFO] ============================================================================================================================================
+11:23:57 [INFO] [V5_EPOCH_TRADING] epoch=035 | expect=+0.1429 PF=1.29 composite=+1.1952 maxDD=-7.24 T/day=1.2 thr=0.0052 best_at=top5%
+11:24:16 [INFO] [V5_SIDE_BAL] Epoch 036: regime_conditional=True SIDE_BAL_W=0.15 bull=12717 bear=13050 chop=25300 avg_L_side_bal=0.0311
+11:24:17 [INFO] [V5] Epoch 036/150 [PHASE2] | train=5.0913 val=5.2436 lr=5.35e-05 act_acc=0.335 pred[H/L/S]=1537/4225/0 | L_ret=0.4053 | L_mfe=1.6153 | L_mae=3.4486 | L_action=0.7392 | L_side_balance=0.0311 | L_entropy=-0.8886 | L_sigma_reg=0.0516 | L_specialist_align=0.0000 | total=5.0913
+11:24:17 [INFO] [V5_LOSS_BUDGET] Epoch 036 avg_L_ret_pct=47.4%  L_ret=2.3889(48.3%) L_mfe=0.2200(4.4%) L_mae=0.3867(7.8%) L_action=1.9042(38.5%) L_sig=0.0506 total=4.9504
+11:24:17 [INFO] [V5_SIGMA] epoch=36 sigma_p10=0.710 p50=1.006 p90=1.020
+11:24:17 [INFO] [V5_TRAIN_QUALITY] epoch=36 mu_r_corr_val=+0.0600 score_p10=0.0010 p50=0.0020 p90=0.0033 p99=0.0081 disc(p90/p50)=1.7x disc(p99/p50)=4.0x pred_valid[H/L/S]=1537/4225/0
+11:24:17 [INFO] [V5_HEALTH] epoch=36 mu_r_corr_val=+0.0600 score_p50=0.00201 score_p90=0.00335 score_p99=0.00812 disc(p90/p50)=1.7x disc(p99/p50)=4.0x pred[H/L/S]=1537/4225/0 p_long_mean=0.548 p_short_mean=0.066 raw_muR_mean=+0.01717 raw_muR_std=0.04010 mae_R_mean=4.8699 mae_R_std=1.0170
+11:24:36 [INFO] [V5_SIDE_BAL] Epoch 037: regime_conditional=True SIDE_BAL_W=0.15 bull=12708 bear=12992 chop=25367 avg_L_side_bal=0.0306
+11:24:37 [INFO] [V5] Epoch 037/150 [PHASE2] | train=5.0891 val=5.2128 lr=5.31e-05 act_acc=0.439 pred[H/L/S]=2744/3018/0 | L_ret=0.4056 | L_mfe=1.6121 | L_mae=3.4167 | L_action=0.7402 | L_side_balance=0.0306 | L_entropy=-0.8908 | L_sigma_reg=0.0511 | L_specialist_align=0.0000 | total=5.0891
+11:24:37 [INFO] [V5_LOSS_BUDGET] Epoch 037 avg_L_ret_pct=47.5%  L_ret=2.0748(42.5%) L_mfe=0.2400(4.9%) L_mae=0.8271(16.9%) L_action=1.6867(34.6%) L_sig=0.0530 total=4.8816
+11:24:37 [INFO] [V5_SIGMA] epoch=37 sigma_p10=0.686 p50=1.011 p90=1.025
+11:24:37 [INFO] [V5_TRAIN_QUALITY] epoch=37 mu_r_corr_val=+0.0719 score_p10=0.0000 p50=0.0025 p90=0.0028 p99=0.0034 disc(p90/p50)=1.1x disc(p99/p50)=1.3x pred_valid[H/L/S]=2744/3018/0
+11:24:37 [INFO] [V5_HEALTH] epoch=37 mu_r_corr_val=+0.0719 score_p50=0.00251 score_p90=0.00277 score_p99=0.00336 disc(p90/p50)=1.1x disc(p99/p50)=1.3x pred[H/L/S]=2744/3018/0 p_long_mean=0.507 p_short_mean=0.068 raw_muR_mean=-0.01155 raw_muR_std=0.01691 mae_R_mean=4.8257 mae_R_std=1.0683
+11:24:56 [INFO] [V5_SIDE_BAL] Epoch 038: regime_conditional=True SIDE_BAL_W=0.15 bull=12681 bear=12865 chop=25526 avg_L_side_bal=0.0307
+11:24:57 [INFO] [V5] Epoch 038/150 [PHASE2] | train=5.0583 val=5.2388 lr=5.27e-05 act_acc=0.431 pred[H/L/S]=2581/3181/0 | L_ret=0.4003 | L_mfe=1.5999 | L_mae=3.4592 | L_action=0.7387 | L_side_balance=0.0307 | L_entropy=-0.8903 | L_sigma_reg=0.0510 | L_specialist_align=0.0000 | total=5.0583
+11:24:57 [INFO] [V5_LOSS_BUDGET] Epoch 038 avg_L_ret_pct=47.1%  L_ret=2.3515(44.5%) L_mfe=0.2681(5.1%) L_mae=0.6822(12.9%) L_action=1.9297(36.6%) L_sig=0.0480 total=5.2796
+11:24:57 [INFO] [V5_SIGMA] epoch=38 sigma_p10=0.700 p50=0.993 p90=1.009
+11:24:57 [INFO] [V5_TRAIN_QUALITY] epoch=38 mu_r_corr_val=+0.0505 score_p10=0.0001 p50=0.0003 p90=0.0007 p99=0.0052 disc(p90/p50)=2.2x disc(p99/p50)=16.0x pred_valid[H/L/S]=2581/3181/0
+11:24:57 [INFO] [V5_HEALTH] epoch=38 mu_r_corr_val=+0.0505 score_p50=0.00032 score_p90=0.00072 score_p99=0.00520 disc(p90/p50)=2.2x disc(p99/p50)=16.0x pred[H/L/S]=2581/3181/0 p_long_mean=0.523 p_short_mean=0.069 raw_muR_mean=-0.00105 raw_muR_std=0.02113 mae_R_mean=4.8198 mae_R_std=1.0147
+11:25:16 [INFO] [V5_SIDE_BAL] Epoch 039: regime_conditional=True SIDE_BAL_W=0.15 bull=12623 bear=12954 chop=25510 avg_L_side_bal=0.0305
+11:25:17 [INFO] [V5] Epoch 039/150 [PHASE2] | train=5.0584 val=5.1781 lr=5.23e-05 act_acc=0.443 pred[H/L/S]=2610/3152/0 | L_ret=0.4006 | L_mfe=1.6079 | L_mae=3.4573 | L_action=0.7377 | L_side_balance=0.0305 | L_entropy=-0.8923 | L_sigma_reg=0.0507 | L_specialist_align=0.0000 | total=5.0584
+11:25:17 [INFO] [V5_LOSS_BUDGET] Epoch 039 avg_L_ret_pct=47.2%  L_ret=2.6703(50.4%) L_mfe=0.2200(4.2%) L_mae=0.4413(8.3%) L_action=1.9149(36.1%) L_sig=0.0509 total=5.2973
+11:25:17 [INFO] [V5_SIGMA] epoch=39 sigma_p10=0.601 p50=0.996 p90=1.003
+11:25:17 [INFO] [V5_TRAIN_QUALITY] epoch=39 mu_r_corr_val=+0.0732 score_p10=0.0000 p50=0.0018 p90=0.0020 p99=0.0037 disc(p90/p50)=1.1x disc(p99/p50)=2.0x pred_valid[H/L/S]=2610/3152/0
+11:25:17 [INFO] [V5_HEALTH] epoch=39 mu_r_corr_val=+0.0732 score_p50=0.00185 score_p90=0.00201 score_p99=0.00372 disc(p90/p50)=1.1x disc(p99/p50)=2.0x pred[H/L/S]=2610/3152/0 p_long_mean=0.497 p_short_mean=0.064 raw_muR_mean=-0.00495 raw_muR_std=0.01682 mae_R_mean=5.0206 mae_R_std=1.1729
+11:25:35 [INFO] [V5_SIDE_BAL] Epoch 040: regime_conditional=True SIDE_BAL_W=0.15 bull=12696 bear=12964 chop=25409 avg_L_side_bal=0.0309
+11:25:36 [INFO] [V5] Epoch 040/150 [PHASE2] | train=5.0813 val=5.2332 lr=5.19e-05 act_acc=0.438 pred[H/L/S]=2676/3086/0 | L_ret=0.4031 | L_mfe=1.6121 | L_mae=3.4754 | L_action=0.7394 | L_side_balance=0.0309 | L_entropy=-0.8914 | L_sigma_reg=0.0512 | L_specialist_align=0.0000 | total=5.0813
+11:25:36 [INFO] [V5_LOSS_BUDGET] Epoch 040 avg_L_ret_pct=47.3%  L_ret=2.3037(42.7%) L_mfe=0.3112(5.8%) L_mae=0.4095(7.6%) L_action=2.3248(43.0%) L_sig=0.0522 total=5.4013
+11:25:36 [INFO] [V5_SIGMA] epoch=40 sigma_p10=0.637 p50=0.990 p90=1.004
+11:25:36 [INFO] [V5_TRAIN_QUALITY] epoch=40 mu_r_corr_val=+0.0630 score_p10=0.0001 p50=0.0026 p90=0.0029 p99=0.0045 disc(p90/p50)=1.1x disc(p99/p50)=1.7x pred_valid[H/L/S]=2676/3086/0
+11:25:36 [INFO] [V5_HEALTH] epoch=40 mu_r_corr_val=+0.0630 score_p50=0.00260 score_p90=0.00286 score_p99=0.00447 disc(p90/p50)=1.1x disc(p99/p50)=1.7x pred[H/L/S]=2676/3086/0 p_long_mean=0.508 p_short_mean=0.064 raw_muR_mean=+0.00197 raw_muR_std=0.03081 mae_R_mean=5.0281 mae_R_std=1.0614
+11:25:36 [INFO] [V5_QUAL_DIAG] T4: using ref['mu_R'] for adaptive_mu_min percentile (no '_raw_mu_R_ref' key — mu_debias not active or ref not provided)
+11:25:36 [INFO] [V5_QUAL_DIAG] pass_rate=0.0% < 10%, relaxing gates...
+11:25:36 [INFO] [V5_QUAL_DIAG] max relaxation reached, using finiteness+edge gate (strict_audit=False). last_relaxed_mu=0.0125 preserved as edge floor.
+11:25:36 [INFO] [V5_QUAL_DIAG] total=5762 passed_sigma=2955 passed_mae=0 passed_mu=4321 passed_ptrade=3457 final=5531 (96.0%) | adaptive: sigma<=1.000 mae<=1.000 |mu|>=0.0249 ptrade>=0.412
+11:25:36 [INFO] [V5_SCORE_DIAG] mu_R: mean=0.0020 std=0.0308 | mae_R: mean=2.000 mfe_R: mean=2.579 | p_long=0.508 p_short=0.064 | edge_L=0.0072 edge_S=0.0009 penalty=0.0021 | score: mean=0.0035 p50=0.0033 p90=0.0035 %pos=100.0%
+11:25:36 [INFO] [V5_OUTPUT_DIST] mu_R: p5=-0.0269 p50=-0.0234 p95=0.0471 | sigma: p5=0.6310 p50=0.9896 p95=1.0041 | mae: p5=4.004 p50=4.021 p95=6.252 | p_trade: p5=0.349 p50=0.622 p95=0.624
+11:25:36 [INFO] [V5_TPD_CTRL] epoch=40 tpd=10.4 target=6.5±1.5 thr=0.0032->0.0037 step_mult=0.10 score_std=0.0013 action=UP trades=622 eligible=3136 clamp=[0.0030,0.0099] floor=0.0010
+11:25:36 [INFO] [V5_SWEEP_OBJ] objective=quality best=top5% composite=1.5242
+11:25:36 [INFO] ------------------------------------------------------------------------------------------------------------------------
+11:25:36 [INFO] [V5_SCORE_DIAG] total=5762 eligible=5531 finite=3136 nan_or_inf=2395
+11:25:36 [INFO] v5 score percentiles (val): p50=0.0033 p75=0.0033 p90=0.0035 p95=0.0048 p99=0.0099
+11:25:36 [INFO] [V5_SWEEP_PIPELINE] precomputed_outcomes: valid=5762 no_candidate=0 total=5762
+11:25:36 [INFO] V5 SWEEP (epoch 40) | cooldown=4 | TP=2.0x SL=1.5x ATR | val_days=60.0 | target=6.5±1.5 tpd
+11:25:36 [INFO] Select      Trds   Expect     WR  Shrpe    PF |   WinR   LosR   MedR |  %TP  %SL  %EX | T/Day
+11:25:36 [INFO] ------------------------------------------------------------------------------------------------------------------------
+11:25:36 [INFO] tpd_ctrl      79   +0.035  45.6%   0.59  1.07 | +1.149 -0.898 -0.146 |  39%  48%  13% |   1.3
+11:25:36 [INFO] top5%         57   +0.202  54.4%   2.80  1.44 | +1.210 -1.000 +0.764 |  49%  46%   5% |   0.9 <<< BEST
+11:25:36 [INFO] top10%       103   -0.066  41.7%  -1.30  0.88 | +1.124 -0.919 -1.000 |  35%  52%  13% |   1.7
+11:25:36 [INFO] top15%       151   -0.170  37.1%  -4.10  0.71 | +1.148 -0.947 -1.000 |  32%  58%  10% |   2.5
+11:25:36 [INFO] top20%       194   -0.015  43.8%  -0.38  0.97 | +1.194 -0.957 -1.000 |  39%  53%   8% |   3.2
+11:25:36 [INFO] top25%       243   +0.020  45.3%   0.57  1.04 | +1.212 -0.966 -1.000 |  41%  53%   7% |   4.0
+11:25:36 [INFO] top30%       289   +0.074  47.4%   2.32  1.15 | +1.232 -0.969 -1.000 |  44%  51%   6% |   4.8
+11:25:36 [INFO] ------------------------------------------------------------------------------------------------------------------------
+11:25:36 [INFO] ============================================================================================================================================
+11:25:36 [INFO]   [SWEEP_BEST_TOP5PCT] PER-THRESHOLD / PER-SIDE SLICE AUDIT
+11:25:36 [INFO] ============================================================================================================================================
+11:25:36 [INFO]   Slice        Side         N     E[R]     WR%     PF   AvgScore    TPD
+11:25:36 [INFO] --------------------------------------------------------------------------------------------------------------------------------------------
+11:25:36 [INFO]   top5%        ALL         57  +0.2019   54.4%   1.44    0.00710    0.9 [EDGE]
+11:25:36 [INFO]   top5%        LONG        57  +0.2019   54.4%   1.44    0.00710    0.9 [EDGE]
+11:25:36 [INFO]   top5%        ALL         57  +0.2019   54.4%   1.44    0.00710    0.9 [EDGE]
+11:25:36 [INFO]   top5%        LONG        57  +0.2019   54.4%   1.44    0.00710    0.9 [EDGE]
+11:25:36 [INFO]   top10%       ALL        103  -0.0659   41.7%   0.88    0.00547    1.7 [NEG_EXPECT]
+11:25:36 [INFO]   top10%       LONG       103  -0.0659   41.7%   0.88    0.00547    1.7 [NEG_EXPECT]
+11:25:36 [INFO]   top20%       ALL        194  -0.0147   43.8%   0.97    0.00450    3.2 [NEG_EXPECT]
+11:25:36 [INFO]   top20%       LONG       194  -0.0147   43.8%   0.97    0.00450    3.2 [NEG_EXPECT]
+11:25:36 [INFO] ============================================================================================================================================
+11:25:36 [INFO] [V5_EPOCH_TRADING] epoch=040 | expect=+0.2019 PF=1.44 composite=+1.5242 maxDD=-7.00 T/day=0.9 thr=0.0048 best_at=top5%
+11:25:55 [INFO] [V5_SIDE_BAL] Epoch 041: regime_conditional=True SIDE_BAL_W=0.15 bull=12709 bear=12989 chop=25365 avg_L_side_bal=0.0309
+11:25:56 [INFO] [V5] Epoch 041/150 [PHASE2] | train=5.0718 val=5.2291 lr=5.14e-05 act_acc=0.439 pred[H/L/S]=2685/3077/0 | L_ret=0.4028 | L_mfe=1.6161 | L_mae=3.4282 | L_action=0.7390 | L_side_balance=0.0309 | L_entropy=-0.8882 | L_sigma_reg=0.0511 | L_specialist_align=0.0000 | total=5.0718
+11:25:56 [INFO] [V5_LOSS_BUDGET] Epoch 041 avg_L_ret_pct=47.3%  L_ret=1.6428(39.4%) L_mfe=0.2115(5.1%) L_mae=0.5688(13.6%) L_action=1.6993(40.7%) L_sig=0.0504 total=4.1728
+11:25:56 [INFO] [V5_SIGMA] epoch=41 sigma_p10=0.619 p50=0.998 p90=1.013
+11:25:56 [INFO] [V5_TRAIN_QUALITY] epoch=41 mu_r_corr_val=+0.0750 score_p10=0.0000 p50=0.0014 p90=0.0016 p99=0.0046 disc(p90/p50)=1.2x disc(p99/p50)=3.4x pred_valid[H/L/S]=2685/3077/0
+11:25:56 [INFO] [V5_HEALTH] epoch=41 mu_r_corr_val=+0.0750 score_p50=0.00136 score_p90=0.00161 score_p99=0.00459 disc(p90/p50)=1.2x disc(p99/p50)=3.4x pred[H/L/S]=2685/3077/0 p_long_mean=0.499 p_short_mean=0.065 raw_muR_mean=-0.00285 raw_muR_std=0.01809 mae_R_mean=5.0322 mae_R_std=1.1392
+11:26:14 [INFO] [V5_SIDE_BAL] Epoch 042: regime_conditional=True SIDE_BAL_W=0.15 bull=12639 bear=12997 chop=25395 avg_L_side_bal=0.0309
+11:26:15 [INFO] [V5] Epoch 042/150 [PHASE2] | train=5.0810 val=5.1484 lr=5.10e-05 act_acc=0.441 pred[H/L/S]=2662/3100/0 | L_ret=0.4030 | L_mfe=1.6158 | L_mae=3.4500 | L_action=0.7407 | L_side_balance=0.0309 | L_entropy=-0.8899 | L_sigma_reg=0.0511 | L_specialist_align=0.0000 | total=5.0810
+11:26:15 [INFO] [V5_LOSS_BUDGET] Epoch 042 avg_L_ret_pct=47.2%  L_ret=1.9018(41.5%) L_mfe=0.2892(6.3%) L_mae=0.4460(9.7%) L_action=1.8948(41.4%) L_sig=0.0498 total=4.5816
+11:26:15 [INFO] [V5_SIGMA] epoch=42 sigma_p10=0.650 p50=0.989 p90=1.001
+11:26:15 [INFO] [V5_TRAIN_QUALITY] epoch=42 mu_r_corr_val=+0.0617 score_p10=0.0004 p50=0.0015 p90=0.0019 p99=0.0024 disc(p90/p50)=1.2x disc(p99/p50)=1.6x pred_valid[H/L/S]=2662/3100/0
+11:26:15 [INFO] [V5_HEALTH] epoch=42 mu_r_corr_val=+0.0617 score_p50=0.00155 score_p90=0.00186 score_p99=0.00243 disc(p90/p50)=1.2x disc(p99/p50)=1.6x pred[H/L/S]=2662/3100/0 p_long_mean=0.512 p_short_mean=0.066 raw_muR_mean=+0.00793 raw_muR_std=0.02645 mae_R_mean=5.0309 mae_R_std=1.1675
+11:26:34 [INFO] [V5_SIDE_BAL] Epoch 043: regime_conditional=True SIDE_BAL_W=0.15 bull=12605 bear=12930 chop=25521 avg_L_side_bal=0.0304
+11:26:35 [INFO] [V5] Epoch 043/150 [PHASE2] | train=5.0581 val=5.2154 lr=5.05e-05 act_acc=0.439 pred[H/L/S]=2673/3089/0 | L_ret=0.4002 | L_mfe=1.6325 | L_mae=3.4322 | L_action=0.7385 | L_side_balance=0.0304 | L_entropy=-0.8900 | L_sigma_reg=0.0510 | L_specialist_align=0.0000 | total=5.0581
+11:26:35 [INFO] [V5_LOSS_BUDGET] Epoch 043 avg_L_ret_pct=47.2%  L_ret=1.9366(40.5%) L_mfe=0.2028(4.2%) L_mae=0.5051(10.6%) L_action=2.0854(43.6%) L_sig=0.0510 total=4.7807
+11:26:35 [INFO] [V5_SIGMA] epoch=43 sigma_p10=0.618 p50=0.986 p90=0.997
+11:26:35 [INFO] [V5_TRAIN_QUALITY] epoch=43 mu_r_corr_val=+0.0702 score_p10=0.0000 p50=0.0001 p90=0.0004 p99=0.0049 disc(p90/p50)=4.2x disc(p99/p50)=47.8x pred_valid[H/L/S]=2673/3089/0
+11:26:35 [INFO] [V5_HEALTH] epoch=43 mu_r_corr_val=+0.0702 score_p50=0.00010 score_p90=0.00043 score_p99=0.00492 disc(p90/p50)=4.2x disc(p99/p50)=47.8x pred[H/L/S]=2673/3089/0 p_long_mean=0.502 p_short_mean=0.063 raw_muR_mean=+0.00210 raw_muR_std=0.01536 mae_R_mean=5.0463 mae_R_std=1.1814
+11:26:54 [INFO] [V5_SIDE_BAL] Epoch 044: regime_conditional=True SIDE_BAL_W=0.15 bull=12773 bear=12970 chop=25336 avg_L_side_bal=0.0310
+11:26:55 [INFO] [V5] Epoch 044/150 [PHASE2] | train=5.0840 val=5.2396 lr=5.00e-05 act_acc=0.432 pred[H/L/S]=2575/3187/0 | L_ret=0.4047 | L_mfe=1.6246 | L_mae=3.4631 | L_action=0.7364 | L_side_balance=0.0310 | L_entropy=-0.8893 | L_sigma_reg=0.0513 | L_specialist_align=0.0000 | total=5.0840
+11:26:55 [INFO] [V5_LOSS_BUDGET] Epoch 044 avg_L_ret_pct=47.4%  L_ret=2.2513(49.2%) L_mfe=0.1816(4.0%) L_mae=0.3383(7.4%) L_action=1.7545(38.3%) L_sig=0.0502 total=4.5759
+11:26:55 [INFO] [V5_SIGMA] epoch=44 sigma_p10=0.633 p50=0.992 p90=0.998
+11:26:55 [INFO] [V5_TRAIN_QUALITY] epoch=44 mu_r_corr_val=+0.0689 score_p10=0.0000 p50=0.0015 p90=0.0016 p99=0.0072 disc(p90/p50)=1.1x disc(p99/p50)=5.0x pred_valid[H/L/S]=2575/3187/0
+11:26:55 [INFO] [V5_HEALTH] epoch=44 mu_r_corr_val=+0.0689 score_p50=0.00146 score_p90=0.00163 score_p99=0.00723 disc(p90/p50)=1.1x disc(p99/p50)=5.0x pred[H/L/S]=2575/3187/0 p_long_mean=0.494 p_short_mean=0.067 raw_muR_mean=-0.00673 raw_muR_std=0.01929 mae_R_mean=5.0071 mae_R_std=1.1944
+11:27:12 [INFO] [V5_SIDE_BAL] Epoch 045: regime_conditional=True SIDE_BAL_W=0.15 bull=12980 bear=12967 chop=25127 avg_L_side_bal=0.0311
+11:27:13 [INFO] [V5] Epoch 045/150 [PHASE2] | train=5.1011 val=5.2398 lr=4.95e-05 act_acc=0.440 pred[H/L/S]=2644/3118/0 | L_ret=0.4085 | L_mfe=1.6198 | L_mae=3.4670 | L_action=0.7341 | L_side_balance=0.0311 | L_entropy=-0.8889 | L_sigma_reg=0.0517 | L_specialist_align=0.0000 | total=5.1011
+11:27:13 [INFO] [V5_LOSS_BUDGET] Epoch 045 avg_L_ret_pct=47.7%  L_ret=3.3680(57.2%) L_mfe=0.2499(4.2%) L_mae=0.4063(6.9%) L_action=1.8108(30.8%) L_sig=0.0495 total=5.8844
+11:27:13 [INFO] [V5_SIGMA] epoch=45 sigma_p10=0.719 p50=1.004 p90=1.018
+11:27:13 [INFO] [V5_TRAIN_QUALITY] epoch=45 mu_r_corr_val=+0.0401 score_p10=0.0003 p50=0.0013 p90=0.0015 p99=0.0029 disc(p90/p50)=1.2x disc(p99/p50)=2.3x pred_valid[H/L/S]=2644/3118/0
+11:27:13 [INFO] [V5_HEALTH] epoch=45 mu_r_corr_val=+0.0401 score_p50=0.00126 score_p90=0.00149 score_p99=0.00291 disc(p90/p50)=1.2x disc(p99/p50)=2.3x pred[H/L/S]=2644/3118/0 p_long_mean=0.533 p_short_mean=0.068 raw_muR_mean=-0.01496 raw_muR_std=0.01630 mae_R_mean=4.9140 mae_R_std=1.0064
+11:27:13 [INFO] [V5_QUAL_DIAG] T4: using ref['mu_R'] for adaptive_mu_min percentile (no '_raw_mu_R_ref' key — mu_debias not active or ref not provided)
+11:27:13 [INFO] [V5_QUAL_DIAG] pass_rate=0.0% < 10%, relaxing gates...
+11:27:13 [INFO] [V5_QUAL_DIAG] max relaxation reached, using finiteness+edge gate (strict_audit=False). last_relaxed_mu=0.0059 preserved as edge floor.
+11:27:13 [INFO] [V5_QUAL_DIAG] total=5762 passed_sigma=2877 passed_mae=0 passed_mu=4321 passed_ptrade=3457 final=5478 (95.1%) | adaptive: sigma<=1.000 mae<=1.000 |mu|>=0.0119 ptrade>=0.445
+11:27:13 [INFO] [V5_SCORE_DIAG] mu_R: mean=-0.0150 std=0.0163 | mae_R: mean=2.000 mfe_R: mean=2.695 | p_long=0.533 p_short=0.068 | edge_L=0.0047 edge_S=0.0006 penalty=0.0014 | score: mean=0.0019 p50=0.0016 p90=0.0027 %pos=100.0%
+11:27:13 [INFO] [V5_OUTPUT_DIST] mu_R: p5=-0.0401 p50=-0.0126 p95=0.0141 | sigma: p5=0.6921 p50=1.0039 p95=1.0185 | mae: p5=3.919 p50=3.942 p95=6.106 | p_trade: p5=0.403 p50=0.631 p95=0.634
+11:27:13 [INFO] [V5_TPD_CTRL] epoch=45 tpd=0.9 target=6.5±1.5 thr=0.0037->0.0031 step_mult=0.10 score_std=0.0010 action=DOWN trades=52 eligible=3338 clamp=[0.0014,0.0055] floor=0.0010
+11:27:13 [INFO] [V5_SWEEP_OBJ] objective=quality best=top5% composite=0.8539
+11:27:13 [INFO] ------------------------------------------------------------------------------------------------------------------------
+11:27:13 [INFO] [V5_SCORE_DIAG] total=5762 eligible=5478 finite=3338 nan_or_inf=2140
+11:27:13 [INFO] v5 score percentiles (val): p50=0.0016 p75=0.0017 p90=0.0027 p95=0.0035 p99=0.0055
+11:27:13 [INFO] [V5_SWEEP_PIPELINE] precomputed_outcomes: valid=5762 no_candidate=0 total=5762
+11:27:13 [INFO] V5 SWEEP (epoch 45) | cooldown=4 | TP=2.0x SL=1.5x ATR | val_days=60.0 | target=6.5±1.5 tpd
+11:27:13 [INFO] Select      Trds   Expect     WR  Shrpe    PF |   WinR   LosR   MedR |  %TP  %SL  %EX | T/Day
+11:27:13 [INFO] ------------------------------------------------------------------------------------------------------------------------
+11:27:13 [INFO] tpd_ctrl      95   +0.048  46.3%   0.86  1.09 | +1.235 -0.976 -1.000 |  42%  52%   6% |   1.6
+11:27:13 [INFO] top5%         65   +0.106  49.2%   1.57  1.21 | +1.221 -0.975 -0.179 |  45%  49%   6% |   1.1 <<< BEST
+11:27:13 [INFO] top10%       120   +0.015  45.8%   0.30  1.03 | +1.192 -0.981 -1.000 |  40%  52%   8% |   2.0
+11:27:13 [INFO] top15%       171   -0.078  40.9%  -1.96  0.86 | +1.174 -0.946 -1.000 |  35%  55%  10% |   2.8
+11:27:13 [INFO] top20%       216   -0.129  39.4%  -3.66  0.78 | +1.153 -0.961 -1.000 |  33%  57%  10% |   3.6
+11:27:13 [INFO] top25%       265   -0.080  40.8%  -2.44  0.86 | +1.205 -0.963 -1.000 |  36%  56%   8% |   4.4
+11:27:13 [INFO] top30%       311   -0.075  40.5%  -2.46  0.87 | +1.229 -0.962 -1.000 |  37%  57%   7% |   5.2
+11:27:13 [INFO] ------------------------------------------------------------------------------------------------------------------------
+11:27:13 [INFO] ============================================================================================================================================
+11:27:13 [INFO]   [SWEEP_BEST_TOP5PCT] PER-THRESHOLD / PER-SIDE SLICE AUDIT
+11:27:13 [INFO] ============================================================================================================================================
+11:27:13 [INFO]   Slice        Side         N     E[R]     WR%     PF   AvgScore    TPD
+11:27:13 [INFO] --------------------------------------------------------------------------------------------------------------------------------------------
+11:27:13 [INFO]   top5%        ALL         65  +0.1059   49.2%   1.21    0.00454    1.1 [EDGE]
+11:27:13 [INFO]   top5%        LONG        65  +0.1059   49.2%   1.21    0.00454    1.1 [EDGE]
+11:27:13 [INFO]   top5%        ALL         65  +0.1059   49.2%   1.21    0.00454    1.1 [EDGE]
+11:27:13 [INFO]   top5%        LONG        65  +0.1059   49.2%   1.21    0.00454    1.1 [EDGE]
+11:27:13 [INFO]   top10%       ALL        120  +0.0149   45.8%   1.03    0.00382    2.0 [EDGE]
+11:27:13 [INFO]   top10%       LONG       120  +0.0149   45.8%   1.03    0.00382    2.0 [EDGE]
+11:27:13 [INFO]   top20%       ALL        216  -0.1291   39.4%   0.78    0.00296    3.6 [NEG_EXPECT]
+11:27:13 [INFO]   top20%       LONG       216  -0.1291   39.4%   0.78    0.00296    3.6 [NEG_EXPECT]
+11:27:13 [INFO] ============================================================================================================================================
+11:27:13 [INFO] [V5_EPOCH_TRADING] epoch=045 | expect=+0.1059 PF=1.21 composite=+0.8539 maxDD=-6.94 T/day=1.1 thr=0.0035 best_at=top5%

@@ -1,0 +1,189 @@
+We are no longer patching the old system. We are building a new model from first principles.
+
+Mission
+Build a single unified trading model that predicts actual net expectancy and knows when NOT to trade.
+Do not rebuild dual specialists.
+Do not build another score-formula-driven system.
+Do not add more gates to hide weak signal.
+We want a model that is simpler, more truthful, and more powerful than conventional quant stacks.
+
+Why we are changing approach
+The current architecture is structurally wrong:
+- dual specialists are not truly specializing; both trunks learn nearly the same thing
+- score deciles are non-monotonic
+- top-score tail is often anti-predictive
+- sigma is miscalibrated
+- conviction is flat or inverted
+- only BTC/ETH really trade
+- the system is over-complex without proven edge
+
+So the new system must directly learn:
+1. expected net R after costs
+2. LONG / HOLD / SHORT choice
+3. calibration / uncertainty only if it is actually valid
+
+Non-negotiable design principles
+1. One trunk only
+2. One 3-class action head: LONG / HOLD / SHORT
+3. One direct expectancy head
+4. HOLD must be a first-class decision, not an afterthought
+5. No handcrafted score formula like (p_side * edge) / sigma - penalty
+6. Rank trades by predicted expectancy, not by heuristic score
+7. If uncertainty is used, it must be calibrated and validated
+8. Every trade must be explainable by model outputs, not threshold magic
+9. The model must prove monotonic ranking across deciles
+10. Simpler, sharper feature set beats bloated feature count
+
+Phase A — Validate signal before architecture work
+Before building the new model, run a full feature signal audit on the existing pipeline.
+
+I want:
+- Information Coefficient (IC) of every feature vs forward returns
+- IC by symbol
+- IC by regime
+- IC by horizon
+- mutual information / nonlinear dependence estimate
+- top 20-35 features by predictive value
+- dead features to drop
+- report whether 15m directional prediction has enough signal to justify the rebuild
+
+Decision rule:
+- if some features have IC > 0.05, proceed with rebuild
+- if most features are < 0.03, signal is weak and feature set / horizon must change
+- if almost everything is < 0.02, we are predicting noise and should pivot
+
+Deliverables for Phase A:
+- ranked feature table
+- IC heatmap by symbol and regime
+- recommendation: continue / redesign feature set / change horizon
+
+Phase B — Build the new architecture
+If Phase A confirms signal exists, build this exact model:
+
+Model
+- single shared temporal trunk
+- use a compact Transformer or TCN, not an oversized architecture
+- inputs: top 20-35 validated features only
+- add symbol embedding and regime embedding if they improve validation
+
+Heads
+1. Action head:
+   - outputs LONG / HOLD / SHORT logits
+2. Expectancy head:
+   - predicts expected net R for LONG
+   - predicts expected net R for SHORT
+   - model chooses HOLD if neither expectancy is good enough
+3. Optional uncertainty head:
+   - only if calibrated properly
+   - do not let bad uncertainty poison decisions
+
+Inference rule
+For each bar:
+- predict E[R_long]
+- predict E[R_short]
+- predict LONG/HOLD/SHORT logits
+- trade only if:
+  - action agrees with side
+  - chosen side expectancy is positive enough after costs
+  - trade lies in a historically profitable expectancy band
+- otherwise HOLD
+
+Important:
+The final ranking signal must be direct predicted expectancy, not a handcrafted formula.
+
+Training targets
+- action labels: LONG / HOLD / SHORT from barrier/trade outcome logic
+- expectancy targets: realized net R after fees and slippage
+- HOLD target for low-opportunity windows
+- no contradictory targets between action and regression heads
+
+Loss design
+Use a multi-objective loss with:
+1. action cross-entropy
+2. expectancy regression loss
+3. pairwise or listwise ranking loss so better trades rank above worse trades
+4. optional calibration loss if uncertainty head is used
+5. mild abstention regularization so HOLD remains the default unless edge is clear
+
+Do NOT:
+- use dual specialists
+- force side balance with strong KL priors
+- use unstable percentile rescue gates
+- optimize for classification accuracy as the main objective
+- keep 95+ weak features just because they exist
+
+Phase C — Evaluation framework
+The new model is only successful if it passes these tests:
+
+Signal quality
+- positive IC, meaningfully above noise
+- monotonic deciles on validation and walk-forward
+- top decile clearly better than middle deciles
+- winners have higher conviction than losers
+- uncertainty calibration is valid if uncertainty is enabled
+
+Trading quality
+- positive expectancy after fees/slippage
+- stable fold performance
+- no one-class collapse
+- HOLD used intelligently
+- not concentrated in only one accidental symbol unless explicitly BTC-only
+
+Calibration quality
+- confidence must correspond to actual success rate
+- uncertainty must have sensible coverage if used
+
+I want these metrics in every report:
+- decile table by predicted expectancy
+- IC
+- calibration stats
+- LONG/HOLD/SHORT distribution
+- expectancy by symbol
+- expectancy by regime
+- top-band vs bottom-band comparison
+- 95% confidence interval on expectancy
+- trade count and drawdown
+
+Phase D — Trading policy
+Do not build another giant threshold tree.
+Use a simple policy:
+- train model
+- identify profitable expectancy bands from training folds
+- lock live/paper selection to those bands
+- keep sizing separate from prediction
+- keep cooldown and kill switches as pure risk controls, not alpha generators
+
+Feature philosophy
+Do not blindly keep all existing features.
+Start from the best IC carriers only.
+Possible useful additions after validation:
+- intra-bar noise ratio
+- BTC correlation regime
+- volatility-adjusted momentum
+- order-flow persistence
+But only keep features that improve ranking and IC, not just training loss.
+
+Code architecture requirements
+Build this cleanly:
+- one module for feature selection / IC analysis
+- one module for target generation
+- one module for model definition
+- one module for training
+- one module for calibration/evaluation
+- one module for trading policy
+No monolithic spaghetti file.
+
+Required outputs from you
+1. Path A plan and implementation for feature IC analysis
+2. Proposed architecture file layout
+3. New model class design
+4. New target format
+5. New loss design
+6. Evaluation/reporting spec
+7. Step-by-step migration plan from old V5 to the new unified model
+8. A short proof-of-concept training plan on BTC only before multi-symbol expansion
+
+Final rule
+We are not trying to create a more complicated model.
+We are trying to create a model that is more truthful, more calibrated, and better at ranking real expectancy than anything we have built so far.
+If the data does not contain signal, say so clearly and recommend changing the problem instead of forcing the architecture.

@@ -1,0 +1,556 @@
+You are not here to patch a trading bot.
+You are here to design a new market intelligence organism from first principles.
+
+This system must be radically more truthful, adaptive, self-aware, and difficult to fool than conventional trading systems.
+
+Do not optimize for looking sophisticated.
+Do not preserve old architecture out of sentiment.
+Do not build complexity that reality does not justify.
+
+Your job is:
+1. discover whether real predictive signal exists
+2. determine what can be predicted and what cannot
+3. build only what the data supports
+4. create a unified AI market intelligence engine that:
+   - detects instant market shifts
+   - detects slow market regime changes
+   - predicts real net expectancy after costs
+   - chooses LONG / HOLD / SHORT
+   - abstains intelligently
+   - knows when its own predictions should not be trusted
+   - explains why it traded or did not trade
+   - survives walk-forward reality
+
+==================================================
+ULTIMATE DESIGN PHILOSOPHY
+==================================================
+
+The best trading model is not the most complex.
+The best trading model is the one that is:
+- most truthful
+- most calibrated
+- best at ranking real edge
+- best at rejecting bad trades
+- best at understanding its own uncertainty
+- best at adapting when the market changes
+- best at stopping when it no longer understands the market
+
+We are not trying to build:
+- a dual-specialist system
+- a heuristic score formula machine
+- a threshold-and-gate forest
+- a fake-confidence engine
+- a beautiful backtest that dies in live conditions
+
+We are trying to build:
+- a market-state intelligence engine
+- a direct expectancy engine
+- an abstention engine
+- a self-auditing engine
+- a self-preservation engine
+
+==================================================
+THE 5-LAYER MARKET INTELLIGENCE ORGANISM
+==================================================
+
+Build the system as 5 layers.
+
+----------------------------------
+LAYER 1 — SIGNAL-TRUTH LAYER
+----------------------------------
+Purpose:
+Continuously measure whether the data currently contains real predictive signal.
+
+This layer must:
+- compute IC by feature, symbol, regime, horizon
+- compute mutual information / nonlinear dependence
+- detect feature drift
+- detect target drift
+- detect regime drift
+- detect out-of-distribution states
+- produce a model-trust score
+- determine whether the downstream model should trust its own output
+
+This layer is non-negotiable.
+No model should trade unless this layer says the environment is still learnable enough.
+
+----------------------------------
+LAYER 2 — FAST SHIFT LAYER
+----------------------------------
+Purpose:
+Detect instant market changes and shock conditions.
+
+This layer should attempt to detect:
+- abrupt trend breaks
+- liquidation cascades
+- volatility explosions
+- reversal bursts
+- continuation bursts
+- flow imbalance shocks
+- instability / disorder events
+- market stress conditions
+
+If true event data is available, use:
+- news/sentiment embeddings
+- liquidation data
+- OI shocks
+- funding shocks
+- basis / premium dislocations
+- spread/depth stress
+- aggressor flow
+
+If not available, explicitly say what is missing and build the best proxy version from existing data.
+
+This layer does not directly decide trades.
+It produces a shock/instability embedding and fast-state context.
+
+----------------------------------
+LAYER 3 — SLOW REGIME LAYER
+----------------------------------
+Purpose:
+Understand the broad market environment.
+
+This layer should infer:
+- trend regime
+- chop regime
+- high-vol vs low-vol regime
+- BTC-correlated vs idiosyncratic regime
+- liquidity regime
+- macro risk-on / risk-off regime
+- directional persistence vs mean-reversion tendency
+
+This layer also does not directly decide trades.
+It produces a regime embedding and regime confidence.
+
+----------------------------------
+LAYER 4 — EXPECTANCY DECISION LAYER
+----------------------------------
+Purpose:
+Make the actual trade decision.
+
+This must be:
+- one unified model
+- one trunk only
+- no dual specialists
+- no long-vs-short trunk split
+- no fake specialization
+
+Inputs:
+- top validated features only
+- symbol embedding if useful
+- regime embedding from Layer 3
+- shock embedding from Layer 2
+- trust score from Layer 1
+
+Outputs:
+1. LONG / HOLD / SHORT logits
+2. direct predicted net expectancy for LONG
+3. direct predicted net expectancy for SHORT
+4. path-quality score (clean vs noisy move)
+5. optional MAE/MFE estimates if helpful
+6. optional uncertainty only if it becomes truly calibrated
+
+Important:
+The system must rank by direct predicted expectancy.
+Do NOT build another handcrafted score formula.
+
+----------------------------------
+LAYER 5 — SELF-AUDIT / SELF-PRESERVATION LAYER
+----------------------------------
+Purpose:
+Detect when the model is failing, drifting, or becoming dangerous.
+
+This layer must:
+- detect when confidence calibration breaks
+- detect when ranking becomes non-monotonic
+- detect when the model collapses to one class
+- detect when signal has disappeared
+- detect when the current market is out-of-distribution
+- lower trust automatically
+- stop trading automatically if needed
+- trigger retraining / fallback mode recommendations
+
+This is what makes the system exceptional.
+It does not merely predict.
+It audits its own intelligence.
+
+==================================================
+STAGE 1 — DEFINE THE REAL LEARNING PROBLEM
+==================================================
+
+Before building architecture, formally define candidate learning tasks and choose only those justified by the data.
+
+Candidate tasks:
+A. Predict direct net expectancy for LONG
+B. Predict direct net expectancy for SHORT
+C. Predict LONG / HOLD / SHORT
+D. Predict whether there is any tradeable edge at all
+E. Predict whether a move will be clean vs noisy
+F. Predict abrupt shift / shock
+G. Predict latent market regime
+H. Predict MAE / MFE
+I. Predict confidence / calibration quality
+J. Predict out-of-distribution / trustworthiness
+
+Return:
+1. which task is primary
+2. which tasks are auxiliary
+3. which tasks should be dropped
+4. why
+
+Use only the smallest set of tasks that strengthens real ranking and real decision quality.
+
+==================================================
+STAGE 2 — SIGNAL DISCOVERY AUDIT (MANDATORY)
+==================================================
+
+Before architecture, run a ruthless signal audit.
+
+I want:
+- Pearson IC
+- Spearman IC
+- mutual information
+- IC by symbol
+- IC by regime
+- IC by horizon
+- IC stability across walk-forward folds
+- feature redundancy map
+- top predictive feature interactions
+- learnability of each target definition
+
+Compare target definitions:
+- endpoint return
+- net R after costs
+- barrier outcome
+- clean-move label
+- path-quality label
+- excursion-adjusted label
+- shift-event label
+
+Decision rules:
+- if multiple features / target forms show meaningful signal, continue
+- if signal is weak, redesign features / targets / horizon
+- if signal is mostly noise, explicitly recommend pivot
+
+Required outputs:
+1. ranked signal report
+2. feature-by-symbol matrix
+3. feature-by-regime matrix
+4. horizon-by-target learnability matrix
+5. top 20–35 features recommendation
+6. continue / redesign / pivot verdict
+
+If signal is not proven, do not proceed to architecture.
+
+==================================================
+STAGE 3 — DATA & FEATURE SYSTEM
+==================================================
+
+Build feature families with strict selection.
+
+FAMILY A — Core market state
+- trend strength
+- momentum quality
+- volatility-adjusted returns
+- noise ratio / path cleanliness
+- range / breakout / mean-reversion pressure
+- regime-aware movement
+
+FAMILY B — Flow & path intelligence
+- order-flow persistence
+- imbalance persistence
+- follow-through tendency
+- adverse excursion tendency
+- favorable excursion tendency
+- compression / expansion signatures
+
+FAMILY C — Cross-market / macro context
+- BTC correlation regime
+- ETH correlation regime
+- market breadth / dispersion
+- macro beta state
+- relative strength
+- risk-on / risk-off context
+
+FAMILY D — Instant-shift / event context
+- volatility shock
+- funding/OI shock
+- liquidation burst
+- basis dislocation
+- news/sentiment/event features if feasible
+- spread/depth stress if feasible
+
+Important:
+Every feature must earn its place by improving:
+- IC
+- monotonic ranking
+- calibration
+- top-band expectancy
+- walk-forward stability
+
+If a feature does not improve those, remove it.
+
+==================================================
+STAGE 4 — ARCHITECTURE SEARCH
+==================================================
+
+Compare a small number of serious candidate architectures.
+
+Candidate A:
+- compact TCN
+
+Candidate B:
+- compact Transformer encoder
+
+Candidate C:
+- TCN + attention hybrid
+
+Candidate D:
+- mixture-of-experts only if simpler models fail measurably
+
+Rules:
+- start with the smallest truthful model
+- do not overbuild first
+- architecture must be justified by measurable gains
+
+Outputs:
+1. architecture comparison plan
+2. criteria for selecting the winning backbone
+3. expected pros/cons of each option
+
+==================================================
+STAGE 5 — TARGETS
+==================================================
+
+Build aligned targets only.
+
+Primary targets:
+1. LONG / HOLD / SHORT action target
+2. E[R_long] after fees/slippage
+3. E[R_short] after fees/slippage
+
+Auxiliary targets only if helpful:
+4. clean-move target
+5. MAE / MFE
+6. shift-event target
+7. regime target
+8. trust / OOD target
+
+Rules:
+- no contradictory targets
+- no endpoint-vs-barrier mismatch
+- HOLD must mean “not worth trading”
+- do not use targets that create conflicting truths
+
+==================================================
+STAGE 6 — LOSS DESIGN
+==================================================
+
+Design a multi-objective loss focused on real edge.
+
+Use:
+1. action cross-entropy
+2. expectancy regression
+3. ranking loss (pairwise/listwise)
+4. top-tail false-positive penalty
+5. abstention regularization
+6. optional path-quality supervision
+7. optional shift loss
+8. optional calibration loss
+9. optional OOD / trust loss
+
+Optimize for:
+- positive IC
+- monotonic ranking
+- top-band expectancy
+- false-positive suppression
+- calibration
+- robustness
+
+Do NOT optimize mainly for:
+- raw accuracy
+- pretty loss curves
+- overconfident outputs
+- vanity win rate
+
+==================================================
+STAGE 7 — INFERENCE POLICY
+==================================================
+
+Inference must be principled.
+
+For each bar:
+1. Layer 1 measures trust / signal validity
+2. Layer 2 estimates shock state
+3. Layer 3 estimates regime state
+4. Layer 4 predicts LONG / HOLD / SHORT and direct expectancy
+5. Layer 5 audits whether the output should be trusted
+
+Trade only if:
+- trust layer says signal is valid enough
+- chosen side has clearly positive expectancy after costs
+- action head agrees
+- path quality is acceptable
+- current regime supports the trade
+- current shock state does not invalidate it
+- the trade lies in a historically profitable expectancy band
+
+Otherwise HOLD.
+
+Do not use giant gate trees.
+Keep prediction, policy, and risk separate.
+
+==================================================
+STAGE 8 — EVALUATION STANDARD
+==================================================
+
+The system is only real if it proves:
+
+1. Positive signal
+- positive IC above noise
+
+2. Monotonic ranking
+- top deciles beat lower deciles consistently
+
+3. Calibration
+- confidence corresponds to actual quality
+- uncertainty means something if used
+
+4. Abstention intelligence
+- HOLD is meaningful and beneficial
+
+5. Trading quality
+- positive expectancy after friction
+- stable walk-forward performance
+- no one-class collapse
+- no fake alpha from cooldowns/gates
+
+6. Robustness
+- by symbol
+- by regime
+- by volatility
+- by shock/no-shock state
+
+7. Self-awareness
+- model trust score falls when drift/OOD appears
+- self-preservation triggers when ranking/calibration breaks
+
+Required reports:
+1. IC summary
+2. expectancy decile table
+3. calibration report
+4. LONG/HOLD/SHORT distribution
+5. expectancy by symbol
+6. expectancy by regime
+7. expectancy by shock-state
+8. trust score history
+9. false-positive analysis on top-ranked trades
+10. 95% CI on expectancy
+11. drawdown/trade count
+12. best/worst trade explanations
+
+==================================================
+STAGE 9 — BTC-ONLY PROOF
+==================================================
+
+Do not expand first.
+Master one battlefield first.
+
+Build and prove the full organism on BTC only.
+
+BTC proof success requires:
+- positive IC
+- monotonic expectancy deciles
+- positive top-band expectancy after costs
+- no one-class collapse
+- intelligent HOLD behavior
+- believable calibration
+- useful shift/regime context
+- trust/OOD layer actually detecting dangerous states
+- stable walk-forward behavior
+
+If BTC proof fails, stop and diagnose.
+Do not scale a broken organism.
+
+==================================================
+STAGE 10 — STOP CONDITIONS
+==================================================
+
+Define hard stop conditions.
+
+Stop and recommend pivot if:
+- signal is too weak
+- ranking remains non-monotonic
+- top band not positive after costs
+- one-class collapse persists
+- calibration stays broken
+- trust/OOD layer has no useful predictive value
+- system only works in one accidental regime
+- instant-shift prediction requires unavailable data
+
+If stopped, recommend the best pivot:
+- different horizon
+- different data
+- different feature family
+- different target definition
+- different strategy class
+
+==================================================
+STAGE 11 — ENGINEERING STRUCTURE
+==================================================
+
+Implement modularly.
+
+Required modules:
+1. problem_definition.py
+2. signal_truth_layer.py
+3. feature_signal_audit.py
+4. feature_selection.py
+5. target_builder.py
+6. fast_shift_layer.py
+7. slow_regime_layer.py
+8. expectancy_decision_model.py
+9. self_audit_layer.py
+10. loss_unified.py
+11. train_unified.py
+12. calibrate_unified.py
+13. evaluate_unified.py
+14. policy_unified.py
+15. report_unified.py
+
+No monolith.
+No train/live drift.
+No hidden defaults.
+
+==================================================
+REQUIRED OUTPUTS
+==================================================
+
+Return:
+1. problem-definition verdict
+2. signal-audit plan
+3. 5-layer architecture design
+4. exact target design
+5. exact loss design
+6. exact inference policy
+7. exact evaluation design
+8. BTC-only proof plan
+9. stop conditions
+10. roadmap from research → proof → expansion
+
+==================================================
+FINAL RULE
+==================================================
+
+Build only what reality supports.
+Destroy what reality rejects.
+The system must be able to admit:
+- when it sees edge
+- when it does not
+- when the market has changed
+- when it should not trust itself
+
+Your first job is truth discovery.
+Your second job is architecture.
+Your third job is implementation.
+In that order.
