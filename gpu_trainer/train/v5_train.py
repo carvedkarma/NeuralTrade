@@ -13,6 +13,7 @@ Changes from v5.0:
 """
 
 import math
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7818,6 +7819,31 @@ def train_v5_model(
                  f"seq_len={v6_seq_len} | conv={v6_conv_channels} | "
                  f"attn={v6_attn_layers}x{v6_attn_heads}h | mask={v6_feature_mask_ratio}")
     else:
+        # Optional fix for SHORT specialist mae/mfe head collapse to 0.
+        # Trunk features under SHORT KL pressure can push pre-activations negative
+        # for clamp(0, 20) regression heads, killing gradients and pinning mae_pred
+        # to 0 across all bars (observed empirically across SHORT folds 5-10).
+        # Setting V5_MAE_HEAD_INIT_BIAS=1.5 (and/or V5_MFE_HEAD_INIT_BIAS=1.5)
+        # initialises the final-layer bias of those heads to a positive value,
+        # placing initial activations safely above the clamp floor so gradients
+        # flow.  Defaults to 0.0 to preserve existing LONG-specialist behavior.
+        def _parse_head_bias_env(name: str) -> float:
+            try:
+                v = float(os.environ.get(name, '0.0'))
+            except (TypeError, ValueError):
+                return 0.0
+            if not math.isfinite(v):
+                log.warning(f"[{vtag}_HEAD_INIT] {name}={v!r} is not finite, falling back to 0.0")
+                return 0.0
+            # Clamp to a sane R-unit range; mae_R targets are typically 1-5.
+            if v < 0.0 or v > 5.0:
+                log.warning(f"[{vtag}_HEAD_INIT] {name}={v} outside [0, 5], clamping")
+                v = max(0.0, min(5.0, v))
+            return v
+
+        _mae_init_bias = _parse_head_bias_env('V5_MAE_HEAD_INIT_BIAS')
+        _mfe_init_bias = _parse_head_bias_env('V5_MFE_HEAD_INIT_BIAS')
+
         model_config = V5ForecasterConfig(
             input_dim=input_dim,
             hidden_dims=[512, 256, 128, 64],
@@ -7828,9 +7854,14 @@ def train_v5_model(
             enable_regime_head=use_regime_head,
             n_symbols=n_syms,
             symbol_embed_dim=symbol_embed_dim,
+            mae_head_init_bias=_mae_init_bias,
+            mfe_head_init_bias=_mfe_init_bias,
         )
         model = V5Forecaster(model_config).to(device)
         log.info(f"[{vtag}] Model parameters: {model.parameters_count():,}")
+        if _mae_init_bias != 0.0 or _mfe_init_bias != 0.0:
+            log.info(f"[{vtag}_HEAD_INIT] mae_head_bias_init={_mae_init_bias} mfe_head_bias_init={_mfe_init_bias} "
+                     f"(escapes clamp(0,20) dead-gradient trap for SHORT specialist regression heads)")
 
     if warm_start_state_dict is not None:
         try:

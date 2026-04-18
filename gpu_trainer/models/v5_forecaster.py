@@ -87,6 +87,13 @@ class V5ForecasterConfig:
     symbol_embed_dim: int = 8
     n_features: int = None  # Alias for input_dim — accepted for back-compat with old configs
     use_temporal: bool = True  # Enable Conv1D temporal block for sequence input
+    # Bias initialization for MAE/MFE regression heads.  Default 0.0 preserves existing
+    # behavior.  Setting to a small positive value (e.g. 1.0–2.0) lifts the head off the
+    # dead-gradient region of clamp(0, 20) so trunk features that get pushed into a
+    # regime with negative pre-activations (e.g. SHORT specialist runs with strong KL
+    # pressure on bear bars) do not collapse mae_pred / mfe_pred to 0 across all bars.
+    mae_head_init_bias: float = 0.0
+    mfe_head_init_bias: float = 0.0
 
     def __post_init__(self):
         if self.hidden_dims is None:
@@ -240,6 +247,18 @@ class V5Forecaster(nn.Module):
             if isinstance(final, nn.Linear):
                 nn.init.normal_(final.weight, std=0.01)
                 nn.init.zeros_(final.bias)
+        # Apply configurable positive bias to MAE/MFE heads to escape the
+        # clamp(0, 20) dead-gradient trap when trunk features get pushed
+        # negative (observed in SHORT specialist runs where mae_pred = 0 across
+        # all folds).  Single-element bias is broadcast across the batch.
+        if self.config.mae_head_init_bias != 0.0:
+            mae_final = list(self.mae_head.children())[-1]
+            if isinstance(mae_final, nn.Linear):
+                nn.init.constant_(mae_final.bias, float(self.config.mae_head_init_bias))
+        if self.config.mfe_head_init_bias != 0.0:
+            mfe_final = list(self.mfe_head.children())[-1]
+            if isinstance(mfe_final, nn.Linear):
+                nn.init.constant_(mfe_final.bias, float(self.config.mfe_head_init_bias))
 
     def forward(self, x: torch.Tensor, symbol_ids: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         if x.dim() == 3:
