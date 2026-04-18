@@ -1708,3 +1708,48 @@ export const moneyConfigSchema = z.object({
   base_currency: z.string().default("USD"),
 });
 export type MoneyConfig = z.infer<typeof moneyConfigSchema>;
+
+// V7 data acquisition tables (Task #103)
+// Order-flow features aggregated from 1-min Binance klines into 15-min bars.
+// Replaces the much larger aggTrades archive ingestion at <1% bandwidth cost,
+// at the price of large_trade_count and liquidation_proxy being kline-derived
+// proxies rather than true tick-level computations. Documented in
+// .local/reports/v7_truth_discovery_augmented.md.
+export const flowFeatures15m = pgTable("flow_features_15m", {
+  id: serial("id").primaryKey(),
+  symbol: varchar("symbol", { length: 20 }).notNull(),
+  timestamp: bigint("timestamp", { mode: "number" }).notNull(),
+  cvdDelta: real("cvd_delta").notNull(),
+  aggressorRatio: real("aggressor_ratio").notNull(),
+  totalVolume: real("total_volume").notNull(),
+  takerBuyVolume: real("taker_buy_volume").notNull(),
+  tradeCount: integer("trade_count").notNull(),
+  tradeIntensity: real("trade_intensity").notNull(),
+  largeTradeCount: integer("large_trade_count").notNull(),
+  largeTradeImbalance: real("large_trade_imbalance").notNull(),
+  liquidationProxy: integer("liquidation_proxy").notNull(),
+}, (table) => ({
+  symbolIdx: index("flow_features_15m_symbol_idx").on(table.symbol),
+  timestampIdx: index("flow_features_15m_timestamp_idx").on(table.timestamp),
+  uniqueFlow: uniqueIndex("flow_features_15m_unique_idx").on(table.symbol, table.timestamp),
+}));
+
+export const insertFlowFeatures15mSchema = createInsertSchema(flowFeatures15m).omit({ id: true });
+export type InsertFlowFeatures15m = z.infer<typeof insertFlowFeatures15mSchema>;
+export type FlowFeatures15m = typeof flowFeatures15m.$inferSelect;
+
+// Native-cadence funding rate history (Binance fundingRate endpoint is unrestricted).
+export const fundingHistory = pgTable("funding_history", {
+  id: serial("id").primaryKey(),
+  symbol: varchar("symbol", { length: 20 }).notNull(),
+  timestamp: bigint("timestamp", { mode: "number" }).notNull(),
+  fundingRate: real("funding_rate").notNull(),
+}, (table) => ({
+  symbolIdx: index("funding_history_symbol_idx").on(table.symbol),
+  timestampIdx: index("funding_history_timestamp_idx").on(table.timestamp),
+  uniqueFunding: uniqueIndex("funding_history_unique_idx").on(table.symbol, table.timestamp),
+}));
+
+export const insertFundingHistorySchema = createInsertSchema(fundingHistory).omit({ id: true });
+export type InsertFundingHistory = z.infer<typeof insertFundingHistorySchema>;
+export type FundingHistory = typeof fundingHistory.$inferSelect;

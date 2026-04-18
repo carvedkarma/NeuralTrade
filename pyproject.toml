@@ -9,5 +9,7 @@ dependencies = [
     "psycopg2-binary>=2.9.11",
     "pyarrow>=23.0.1",
     "pytest>=9.0.2",
+    "requests>=2.33.1",
     "scikit-learn>=1.8.0",
+    "sqlalchemy>=2.0.49",
 ]
