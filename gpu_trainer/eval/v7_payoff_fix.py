@@ -236,6 +236,7 @@ def collect_symbol_trades(symbol: str) -> pd.DataFrame:
 
         weights = np.array([SIZING_WEIGHTS.get(int(q), 0.0) for q in ap_q])
         ts_kept = timestamps[gi]
+        risk_pct = sp  # = STOP_VOL_MULT * vol_16[gi]; planned R per trade
         for j in np.where(keep_mask)[0]:
             rows.append({
                 "symbol": symbol,
@@ -251,6 +252,7 @@ def collect_symbol_trades(symbol: str) -> pd.DataFrame:
                 "exit_reason": _REASON_NAMES[int(reason_code[j])],
                 "exit_bar": int(exit_bar[j]),
                 "weight": float(weights[j]),
+                "risk_pct": float(risk_pct[j]),
             })
     out = pd.DataFrame(rows)
     log.info("%s: %d trades collected", symbol, len(out))

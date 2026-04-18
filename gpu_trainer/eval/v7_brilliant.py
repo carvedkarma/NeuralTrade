@@ -70,6 +70,108 @@ def per_symbol_history_gate(trades: pd.DataFrame, gross_col: str,
     return pd.Series(keep, index=trades.index)
 
 
+def r_multiple_stats(trades_subset: pd.DataFrame, gross_col: str,
+                     cost_frac: float = 8e-4) -> dict:
+    """Compute R-multiple stats: gross/risk and net/risk.
+    R = realized_return / planned_risk_per_trade.
+    planned_risk = STOP_VOL_MULT * vol_16 at entry (stored as risk_pct).
+    """
+    df = trades_subset
+    if df.empty or "risk_pct" not in df.columns:
+        return {"avg_R_gross": 0.0, "avg_R_net": 0.0,
+                "median_R_gross": 0.0, "median_R_net": 0.0,
+                "win_R_avg": 0.0, "loss_R_avg": 0.0,
+                "expectancy_R": 0.0, "win_rate": 0.0,
+                "n_with_risk": 0}
+    risk = df["risk_pct"].to_numpy()
+    valid = np.isfinite(risk) & (risk > 1e-8)
+    if not valid.any():
+        return {"avg_R_gross": 0.0, "avg_R_net": 0.0,
+                "median_R_gross": 0.0, "median_R_net": 0.0,
+                "win_R_avg": 0.0, "loss_R_avg": 0.0,
+                "expectancy_R": 0.0, "win_rate": 0.0,
+                "n_with_risk": 0}
+    g = df[gross_col].to_numpy()[valid]
+    r = risk[valid]
+    w = df["weight"].to_numpy()[valid] if "weight" in df.columns \
+        else np.ones(valid.sum())
+    R_gross = g / r
+    R_net = (g - cost_frac) / r
+    # weighted means
+    wsum = w.sum()
+    avg_R_gross = float((R_gross * w).sum() / wsum) if wsum > 0 else 0.0
+    avg_R_net = float((R_net * w).sum() / wsum) if wsum > 0 else 0.0
+    wins = R_net > 0
+    losses = R_net <= 0
+    win_rate = float((R_net > 0).mean())
+    win_R_avg = float(R_net[wins].mean()) if wins.any() else 0.0
+    loss_R_avg = float(R_net[losses].mean()) if losses.any() else 0.0
+    expectancy_R = win_rate * win_R_avg + (1 - win_rate) * loss_R_avg
+    return {
+        "avg_R_gross": avg_R_gross,
+        "avg_R_net": avg_R_net,
+        "median_R_gross": float(np.median(R_gross)),
+        "median_R_net": float(np.median(R_net)),
+        "win_R_avg": win_R_avg,
+        "loss_R_avg": loss_R_avg,
+        "expectancy_R": float(expectancy_R),
+        "win_rate": float(win_rate * 100),
+        "n_with_risk": int(valid.sum()),
+    }
+
+
+def attach_r_stats(cfg: dict, trades_used: pd.DataFrame,
+                   gross_col: str) -> None:
+    """Attach R-multiple stats to a config dict (book + per symbol)."""
+    cfg["book"]["r_stats"] = r_multiple_stats(trades_used, gross_col)
+    for sym, m in cfg.get("by_symbol", {}).items():
+        sub = trades_used[trades_used["symbol"] == sym]
+        m["r_stats"] = r_multiple_stats(sub, gross_col)
+
+
+def render_r_table(L: list, configs: dict) -> None:
+    L.append("## R-multiple comparison (R = return / planned 1.5×vol₁₆ risk)")
+    L.append("")
+    keys = list(configs.keys())
+    L.append("| metric |" + "|".join(f" {k} " for k in keys) + "|")
+    L.append("|---|" + "|".join("---:" for _ in keys) + "|")
+    rows = [
+        ("Avg R (gross)",   "avg_R_gross",   "{:+.3f}"),
+        ("Avg R (net @8bps)", "avg_R_net",   "{:+.3f}"),
+        ("Median R (net)",  "median_R_net",  "{:+.3f}"),
+        ("Win R avg",       "win_R_avg",     "{:+.3f}"),
+        ("Loss R avg",      "loss_R_avg",    "{:+.3f}"),
+        ("Expectancy R",    "expectancy_R",  "{:+.3f}"),
+        ("Win rate %",      "win_rate",      "{:+.2f}"),
+    ]
+    for label, key, fmt in rows:
+        cells = "|".join(
+            f" {fmt.format(configs[k]['book']['r_stats'][key])} "
+            for k in keys)
+        L.append(f"| {label} |{cells}|")
+    L.append("")
+
+
+def render_per_symbol_r(L: list, label: str, cfg: dict) -> None:
+    if not cfg.get("by_symbol"):
+        return
+    L.append(f"### Per-symbol Avg R for {label}")
+    L.append("")
+    L.append("| symbol | n | Avg R gross | Avg R net | Win R | Loss R | "
+             "Expectancy R | Win % |")
+    L.append("|---|---:|---:|---:|---:|---:|---:|---:|")
+    for sym in sorted(cfg["by_symbol"].keys()):
+        rs = cfg["by_symbol"][sym].get("r_stats", {})
+        L.append(f"| {sym} | {rs.get('n_with_risk', 0):,} | "
+                 f"{rs.get('avg_R_gross', 0):+.3f} | "
+                 f"{rs.get('avg_R_net', 0):+.3f} | "
+                 f"{rs.get('win_R_avg', 0):+.3f} | "
+                 f"{rs.get('loss_R_avg', 0):+.3f} | "
+                 f"{rs.get('expectancy_R', 0):+.3f} | "
+                 f"{rs.get('win_rate', 0):.2f} |")
+    L.append("")
+
+
 def render_compare_all(L: list, configs: dict) -> None:
     L.append("## Side-by-side: legacy A-D vs Brilliant V7 (E1-E3)")
     L.append("")
@@ -139,6 +241,11 @@ def main():
                         threshold_p=None)
     D = evaluate_config(raw, "gross_adapt", use_filter=True,  weighted=True,
                         threshold_p=4)
+    # R-stats for legacy configs (use the same gross_col each used)
+    attach_r_stats(A, raw, "gross_fixed")
+    attach_r_stats(B, raw, "gross_fixed")
+    attach_r_stats(C, raw, "gross_adapt")
+    attach_r_stats(D, raw[raw["abs_pred_q"] >= 4], "gross_adapt")
 
     # Brilliant V7 universe = drop BTC/BNB
     raw_wl = raw[raw["symbol"].isin(WHITELIST)].copy()
@@ -148,6 +255,7 @@ def main():
     # E1: top 2% + cell filter + whitelist + FIXED 60m hold + sizing
     E1 = evaluate_config(raw_wl, "gross_fixed", use_filter=True, weighted=True,
                          threshold_p=4)
+    attach_r_stats(E1, raw_wl[raw_wl["abs_pred_q"] >= 4], "gross_fixed")
 
     # E2: E1 + per-symbol cumulative-history gate
     keep = per_symbol_history_gate(
@@ -156,11 +264,13 @@ def main():
     # Re-evaluate without re-applying threshold (already applied)
     E2 = evaluate_config(raw_wl_e2, "gross_fixed", use_filter=True,
                          weighted=True, threshold_p=None)
+    attach_r_stats(E2, raw_wl_e2, "gross_fixed")
 
     # E3: E1 + low-vol-quintile only (vol_q <= 2)
     raw_wl_lv = raw_wl[raw_wl["vol_q"] <= 2].copy()
     E3 = evaluate_config(raw_wl_lv, "gross_fixed", use_filter=True,
                          weighted=True, threshold_p=4)
+    attach_r_stats(E3, raw_wl_lv[raw_wl_lv["abs_pred_q"] >= 4], "gross_fixed")
 
     L = ["# V7 Brilliant — Postmortem-driven Redesign", "",
          f"_Generated: {pd.Timestamp.utcnow().isoformat(timespec='seconds')}_",
@@ -220,6 +330,12 @@ def main():
 
     render_compare_all(L, {"A": A, "B": B, "C": C, "D": D,
                             "E1": E1, "E2": E2, "E3": E3})
+
+    render_r_table(L, {"A": A, "B": B, "C": C, "D": D,
+                       "E1": E1, "E2": E2, "E3": E3})
+
+    render_per_symbol_r(L, "D (legacy best)", D)
+    render_per_symbol_r(L, "E2 (Brilliant + kill switch)", E2)
 
     L += ["## Verdicts", ""]
     L.append("- " + verdict_text("D (legacy best)", D, 7))
