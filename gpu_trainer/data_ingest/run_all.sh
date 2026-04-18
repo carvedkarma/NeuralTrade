@@ -23,4 +23,3 @@ wait $PID_O; echo "=== $(date -u) oi DONE rc=$? ===" | tee -a "$LOG"
 wait $PID_F; echo "=== $(date -u) flow DONE rc=$? ===" | tee -a "$LOG"
 
 echo "=== $(date -u) ALL DONE ===" | tee -a "$LOG"
-sleep 86400  # keep workflow alive so logs stay accessible

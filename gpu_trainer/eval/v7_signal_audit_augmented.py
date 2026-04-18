@@ -526,7 +526,7 @@ def apply_verdict(results: list[dict]) -> dict:
         verdict = "GO"
     elif best_td <= 0:
         verdict = "PIVOT"
-    elif best_ic >= 0.03:
+    elif 0.03 <= best_ic < 0.05:
         verdict = "REDESIGN"
     else:
         verdict = "PIVOT"
@@ -686,13 +686,26 @@ def write_report(symbol_results: list[dict], synth: dict, verdict: dict,
     L.append("")
     L.append("**What this verdict means:**")
     L.append("")
-    L.append("- **Signal IS present.** `sign_60m` and `ret_60m_quintile` both deliver "
-             "cross-fold mean IC in the +0.04 to +0.07 range across the majority "
-             "of the 7 audit symbols, with sign positive across **every** fold for "
-             "most (symbol × model) pairs. This is genuine, robust learnable signal — "
-             "not noise, not a single-symbol lucky strike.")
+    n_total = len(rows)
+    best_ic = verdict["best_mean_ic_any_combo"]
     best_td_bps = verdict["best_top_decile_net_any_combo"] * 1e4
     n_with_pos_td = sum(1 for r in rows if r["td_net"] > 0)
+    n_ic_05 = sum(1 for r in rows if r["mean_ic"] >= 0.05)
+    n_ic_03 = sum(1 for r in rows if r["mean_ic"] >= 0.03)
+    n_all_pos = sum(1 for r in rows if r["all_positive"])
+    top_combo = max(rows, key=lambda r: r["mean_ic"]) if rows else None
+    if top_combo is not None:
+        L.append(
+            f"- **Signal-strength snapshot (computed).** {n_ic_05}/{n_total} "
+            f"(symbol × target × model) cells achieve cross-fold mean IC ≥ 0.05; "
+            f"{n_ic_03}/{n_total} cells achieve ≥ 0.03; {n_all_pos}/{n_total} cells "
+            f"are sign-positive on every fold. Best single cell: "
+            f"`{top_combo['symbol']} / {top_combo['target']} / {top_combo['model']}` "
+            f"with mean IC `{best_ic:+.4f}`."
+        )
+    else:
+        L.append("- **Signal-strength snapshot.** No rows produced (audit failed to "
+                 "score any (symbol × target × model) cell).")
     L.append(f"- **Cost gate result.** {n_with_pos_td}/{len(rows)} (symbol × target × model) "
              f"cells produce a positive top-decile mean net per-trade return after "
              f"the {COST_BPS} bps round-trip cost assumption. Best is "
