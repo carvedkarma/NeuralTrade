@@ -53,6 +53,10 @@ export function updateGPUPrediction(prediction: GPUPrediction): void {
   const key = `${prediction.symbol}_${prediction.modelId}`;
   gpuPredictionCache.set(key, prediction);
   console.log(`[GPU] Updated prediction for ${key}: H1=${(prediction.returnH1*100).toFixed(2)}%, conf=${(prediction.confidence*100).toFixed(0)}%`);
+  // V7 Path A signal evaluation hook (no-op for non-V7 symbols)
+  import("./paper/v7_path_a").then(m => m.onV7Prediction(prediction)).catch(e => {
+    console.error("[V7] onV7Prediction failed:", e);
+  });
 }
 
 export function getLatestGPUPrediction(symbol: string = "BTCUSDT"): GPUPrediction | null {

@@ -2,6 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import paperRoutes from "./paper/routes";
+import v7Routes from "./paper/v7_routes";
 import { manualOpenPosition, neuralPositionManager, computePositionHealth, updateCachedSignal, type NeuralSignalData } from "./paper/engine";
 import { getConfig } from "./paper/config";
 import { getPositionsBySymbol } from "./paper/storage";
@@ -94,6 +95,7 @@ export async function registerRoutes(
   startLiveCandleSync();
   
   app.use("/api/paper", paperRoutes);
+  app.use("/api/v7", v7Routes);
   app.use("/api", ingestRouter);
 
   app.get("/api/ping", (_req, res) => {

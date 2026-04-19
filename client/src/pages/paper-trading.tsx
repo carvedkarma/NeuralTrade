@@ -46,6 +46,7 @@ import {
   Lock,
 } from "lucide-react";
 import { CloseButton, PartialCloseButton, EditSLTPDialog } from "@/components/position-actions";
+import V7PathAPanel from "@/components/V7PathAPanel";
 import { usePingMonitor } from "@/hooks/use-ping";
 import { PingBadge } from "@/components/ping-badge";
 import {
@@ -1516,6 +1517,9 @@ export default function PaperTrading() {
           </div>
         </div>
       </div>
+
+      {/* ── V7 Path A Panel ─────────────────────────────────────── */}
+      <V7PathAPanel />
 
       {/* ── Primary KPI Row ──────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">

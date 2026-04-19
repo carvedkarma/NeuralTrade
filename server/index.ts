@@ -5,6 +5,7 @@ import { createServer } from "http";
 import { checkIncompleteBackfillJobs, backfillHistoricalData } from "./historical-data";
 import { loadPaperState, loadAnalyticsClearedTs } from "./paper/config";
 import { startPositionMonitor } from "./paper/engine";
+import { startV7Engine } from "./paper/v7_path_a";
 import { gpuBridge } from "./gpu-bridge";
 import { loadCandleTimestamps } from "./unified-learning-controller";
 import { initializeSelfLearning } from "./pattern-memory";
@@ -107,6 +108,7 @@ app.use((req, res, next) => {
       loadPaperState().then(async () => {
         await loadAnalyticsClearedTs();
         startPositionMonitor(1000);
+        startV7Engine(30_000);
         return gpuBridge.hydrateLastActivityFromDb();
       }).then(() => {
         return hydrateBackfillStateFromDb();
