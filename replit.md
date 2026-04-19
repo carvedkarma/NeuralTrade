@@ -29,6 +29,24 @@ Hydrates the V7 augmented dataset from `data.binance.vision` (live `fapi.binance
 ### V7 Truth-Discovery Audit (`gpu_trainer/eval/v7_signal_audit_augmented.py`)
 Walk-forward signal-learnability audit on the augmented dataset. 7 target variants (ret_15m, ret_60m, ret_240m, sign_60m, ret_60m_volnorm, ret_60m_quintile, mfe_minus_mae_4) × 2 simple models (Ridge, HGBR) × 5 walk-forward folds (24m train / 6m test). **16-bar embargo** between train end and test start (>= longest forward target horizon, prevents label-overlap leakage at fold boundaries). Ridge uses median-impute + clip + standardize; HGBR is NaN-native (so symbols without OI history audit cleanly). Verdict logic is fail-closed on the cost gate: a positive top-decile mean net per-trade return after 8 bps round-trip cost is the minimum evidence that a discovered IC is *tradeable*. Outputs `.local/reports/v7_truth_discovery_augmented.{md,json}`.
 
+### V7 Path A — Payoff-Geometry Sweep (2026-04-18) — VERDICT: PARTIAL PASS at maker fees only
+Tested 33 exit geometries across 5 families on the same E2 universe (whitelist ADA/AVAX/ETH/SOL/XRP, top 2% |pred|, HGBR sign_60m, 5-fold WF, 16-bar embargo, 8,560 trades). Module: `gpu_trainer/eval/v7_payoff_geometry.py`. Cache: `.local/cache/v7_payoff_geometry/*.parquet` (per-trade entry + 16 forward bars OHLC + vol_16). Report: `.local/reports/v7_payoff_geometry.md`.
+- **Strict criterion FAILS**: no variant has both Expectancy R > 0 AND mean net bps > 0 at 8 bps. Best by Exp R = stop=3×vol, hold=60m at Exp R = -0.043, net = -1.66 bps.
+- **Dollar-P&L criterion PASSES at all cost levels for one geometry**: `4.time_exit | no stop, hold=120m` — book mean net per trade: **+6.36 bps @ 4bps, +4.36 @ 6bps, +2.36 @ 8bps**. Per-symbol @ 8 bps: ADA +7.11, AVAX +1.21, ETH -3.46, SOL +0.31, XRP +6.58 — **3/5 positive, 2/5 negative (ETH and SOL)**.
+- **Key lever found**: REMOVING the hard stop is the largest single improvement. The 1.5×vol stop was chopping winners more than it saved on losers (4.time_exit hold=60m beats 1.stop_sweep stop=1.5×vol hold=60m by ~+2 bps net @ 8bps).
+- **Worst family**: trailing stops (-10 to -21 bps net @ 8bps across all variants). Trailing in 15-min crypto noise locks in chop, not trend.
+- **Symmetric TP at 1.5×vol = -3.7 bps net@8** vs the same 1.5×vol stop alone = -1.47 bps. The TP is hurting, not helping (caps the upside path that pays for the losers).
+- **Asymmetric TP** (e.g. stop=1.25×vol, TP=3.0×vol, hold=240m) gets to net = -0.62 @ 8bps but never positive — the wide TP fires too rarely to dominate the cost line.
+- **Path-quality early-exit at bar 1** does NOT work as intended: early-exiting trades that already moved against you at bar 1's close just locks in the small loss without giving the held branch enough upside concentration to compensate. All 6 path-gate variants negative.
+- **Why R disagrees with bps**: R = return / planned_risk. Time-exit (no stop) trades use a reference 1.5×vol risk denominator, but actual losses can far exceed 1.5×vol → big-loss trades blow up the R denominator → Exp R looks worse than the dollar P&L. **For a $15k-notional, $1k/day target, dollar bps is the right metric, not R.**
+- **Path B (cost ladder for `time_exit hold=120m`):**
+  - 2 bps: +8.36 bps net/trade — clearly tradeable
+  - 4 bps: +6.36 bps net/trade — clearly tradeable (achievable on Bybit/Bitget with maker rebates + tier-1 fees on sub-$50k notional)
+  - 6 bps: +4.36 bps — tradeable (mixed maker/taker)
+  - 8 bps: +2.36 bps — marginal at retail taker fees
+  - 10 bps: +0.36 bps — break-even
+- **Production-readiness verdict**: V7 Path A unlocks a CONDITIONAL GO for paper-trading the `time_exit hold=120m no-stop` geometry on the 5-symbol whitelist, contingent on (1) achievable round-trip cost ≤ 6 bps, (2) ETH and SOL kept on a per-symbol kill switch (negative cumulative net at any point → halt), (3) max drawdown bound at -27,488 bps × position-size scales must fit risk budget.
+
 ### V7.1 "Brilliant" — Postmortem-driven Redesign (2026-04-18)
 Added `gpu_trainer/eval/v7_brilliant.py`: keeps what worked in V7.0 (tight threshold + cell filter + confidence sizing), drops what hurt (1.5×vol stops + time stop), adds three new levers (5-symbol whitelist excluding BTC/BNB; per-symbol kill switch on negative prior-fold net; low-vol guard).
 - **E1 Brilliant baseline** (top 2% + filter + whitelist + fixed 60m hold + sizing): 6,511 trades, mean gross +5.92 bps, mean net @8 bps **−2.08 bps** (vs D's −2.64), Sharpe-like −1.07 (vs D's −1.98). Pass 2/5 @8bps, 2/5 @6bps, 3/5 @4bps.
