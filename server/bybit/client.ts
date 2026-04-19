@@ -484,3 +484,15 @@ export async function getClosedPnl(symbol?: string, limit: number = 50): Promise
   if (symbol) params.symbol = symbol;
   return request("GET", "/v5/position/closed-pnl", params);
 }
+
+export async function getFeeRate(symbol?: string): Promise<BybitResponse<{ list: Array<{ symbol: string; takerFeeRate: string; makerFeeRate: string }> }>> {
+  const params: Record<string, any> = { category: "linear" };
+  if (symbol) params.symbol = symbol;
+  return request("GET", "/v5/account/fee-rate", params);
+}
+
+export async function getExecutions(symbol?: string, limit: number = 100): Promise<BybitResponse<{ list: any[] }>> {
+  const params: Record<string, any> = { category: "linear", limit };
+  if (symbol) params.symbol = symbol;
+  return request("GET", "/v5/execution/list", params);
+}
