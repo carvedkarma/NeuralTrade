@@ -4911,30 +4911,46 @@ export async function registerRoutes(
       const { updateGPUPrediction } = await import("./ml-predictor");
       
       let stored = 0;
+      let rejected = 0;
       for (const pred of predictions) {
-        // Validate prediction has required fields
-        if (pred.symbol && pred.returnH1 !== undefined && pred.directionalProb !== undefined) {
-          updateGPUPrediction({
-            symbol: pred.symbol,
-            timestamp: pred.timestamp || timestamp || Date.now(),
-            returnH1: pred.returnH1,
-            returnH2: pred.returnH2 || 0,
-            returnH3: pred.returnH3 || 0,
-            quantile10: pred.quantile10 || pred.returnH1 * 0.5,
-            quantile50: pred.quantile50 || pred.returnH1,
-            quantile90: pred.quantile90 || pred.returnH1 * 1.5,
-            directionalProb: pred.directionalProb,
-            modelId: modelId || "gpu_transformer",
-            confidence: pred.confidence || 0.5,
-          });
-          stored++;
+        // Strict payload validation: reject incomplete rows rather than filling
+        // with synthetic defaults that can distort V7/V5 decisioning.
+        const hasRequiredCore =
+          pred &&
+          pred.symbol &&
+          Number.isFinite(pred.returnH1) &&
+          Number.isFinite(pred.returnH2) &&
+          Number.isFinite(pred.returnH3) &&
+          Number.isFinite(pred.quantile10) &&
+          Number.isFinite(pred.quantile50) &&
+          Number.isFinite(pred.quantile90) &&
+          Number.isFinite(pred.directionalProb);
+        if (!hasRequiredCore) {
+          rejected++;
+          continue;
         }
+
+        updateGPUPrediction({
+          symbol: pred.symbol,
+          timestamp: Number.isFinite(pred.timestamp) ? pred.timestamp : (timestamp || Date.now()),
+          returnH1: pred.returnH1,
+          returnH2: pred.returnH2,
+          returnH3: pred.returnH3,
+          quantile10: pred.quantile10,
+          quantile50: pred.quantile50,
+          quantile90: pred.quantile90,
+          directionalProb: pred.directionalProb,
+          modelId: modelId || "gpu_transformer",
+          confidence: Number.isFinite(pred.confidence) ? pred.confidence : 0.5,
+        });
+        stored++;
       }
       
       res.json({ 
         success: true, 
         received: predictions.length,
         stored,
+        rejected,
         modelId,
         timestamp 
       });
