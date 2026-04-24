@@ -607,6 +607,8 @@ class PolicyResult:
     shock_p_boost: float
     shock_meta_boost: float
     topup_score_scale: float
+    min_router_conf: float
+    max_expert_disp: float
     long_only: bool
     risk_min_bps: float
     max_per_ts: int
@@ -778,7 +780,17 @@ def _apply_policy_with_adaptive_pacing(
     shock_p_boost: float = 0.0,
     shock_meta_boost: float = 0.0,
     topup_weight_scale: float = 1.0,
+    expert_disp_max: float = 1.0,
+    router_conf_min: float = 0.0,
 ) -> pd.DataFrame:
+    if router_conf_min > 0.0 or expert_disp_max < 0.999:
+        d = d.copy()
+        if "router_conf" in d.columns and router_conf_min > 0.0:
+            d = d[pd.to_numeric(d["router_conf"], errors="coerce") >= float(router_conf_min)]
+        if "expert_dispersion" in d.columns and expert_disp_max < 0.999:
+            d = d[pd.to_numeric(d["expert_dispersion"], errors="coerce") <= float(expert_disp_max)]
+        if d.empty:
+            return pd.DataFrame()
     if min_trades_per_month_hard <= 0:
         return _apply_policy_and_allocate(
             d=d,
@@ -928,7 +940,17 @@ def eval_policy(
     shock_p_boost: float = 0.0,
     shock_meta_boost: float = 0.0,
     topup_score_scale: float = 1.0,
+    router_conf_min: float = 0.0,
+    expert_disp_max: float = 1.0,
 ) -> PolicyResult | None:
+    if router_conf_min > 0.0 or expert_disp_max < 0.999:
+        d = d.copy()
+        if "router_conf" in d.columns and router_conf_min > 0.0:
+            d = d[pd.to_numeric(d["router_conf"], errors="coerce") >= float(router_conf_min)]
+        if "expert_dispersion" in d.columns and expert_disp_max < 0.999:
+            d = d[pd.to_numeric(d["expert_dispersion"], errors="coerce") <= float(expert_disp_max)]
+        if d.empty:
+            return None
     if min_trades_per_month_hard > 0:
         # Hard monthly floor is treated as a true constraint when enabled.
         x = _apply_policy_with_adaptive_pacing(
@@ -987,6 +1009,8 @@ def eval_policy(
         shock_p_boost=float(shock_p_boost),
         shock_meta_boost=float(shock_meta_boost),
         topup_score_scale=float(topup_score_scale),
+        min_router_conf=float(router_conf_min),
+        max_expert_disp=float(expert_disp_max),
         long_only=bool(long_only),
         risk_min_bps=float(risk_min_bps),
         max_per_ts=int(max_per_ts),
@@ -1043,6 +1067,10 @@ def parse_args() -> argparse.Namespace:
                    help="Additive boost to meta_min during shock bars")
     p.add_argument("--topup-score-scale", type=float, default=1.0,
                    help="Weight scale applied to adaptive top-up rows (0..1)")
+    p.add_argument("--router-conf-mins", nargs="+", type=float, default=[0.0],
+                   help="Minimum router confidence gating value(s)")
+    p.add_argument("--expert-disp-maxs", nargs="+", type=float, default=[1.0],
+                   help="Maximum expert dispersion gating value(s)")
     p.add_argument("--rebuild-cache", action="store_true",
                    help="Force rebuild OOS cache for selected symbols/context")
     return p.parse_args()
@@ -1072,26 +1100,30 @@ def search_policies_with_args(d: pd.DataFrame, args: argparse.Namespace) -> pd.D
                             for long_only in long_flags:
                                 for risk_min in args.risk_min_bps:
                                     for max_per_ts in args.max_per_ts:
-                                        r = eval_policy(
-                                            d=d,
-                                            top_pct=top_pct,
-                                            symbols=symbols,
-                                            session=session,
-                                            regime=regime,
-                                            p_min=p_min,
-                                            meta_min=meta_min,
-                                            long_only=long_only,
-                                            risk_min_bps=risk_min,
-                                            max_per_ts=max_per_ts,
-                                            min_trades_per_month_hard=int(args.min_monthly_trades_hard),
-                                            shock_z_cut=float(args.shock_z_cut),
-                                            shock_p_boost=float(args.shock_p_boost),
-                                            shock_meta_boost=float(args.shock_meta_boost),
-                                            topup_score_scale=float(args.topup_score_scale),
-                                        )
-                                        if r is None:
-                                            continue
-                                        results.append(asdict(r))
+                                        for router_conf_min in args.router_conf_mins:
+                                            for expert_disp_max in args.expert_disp_maxs:
+                                                r = eval_policy(
+                                                    d=d,
+                                                    top_pct=top_pct,
+                                                    symbols=symbols,
+                                                    session=session,
+                                                    regime=regime,
+                                                    p_min=p_min,
+                                                    meta_min=meta_min,
+                                                    long_only=long_only,
+                                                    risk_min_bps=risk_min,
+                                                    max_per_ts=max_per_ts,
+                                                    min_trades_per_month_hard=int(args.min_monthly_trades_hard),
+                                                    shock_z_cut=float(args.shock_z_cut),
+                                                    shock_p_boost=float(args.shock_p_boost),
+                                                    shock_meta_boost=float(args.shock_meta_boost),
+                                                    topup_score_scale=float(args.topup_score_scale),
+                                                    router_conf_min=float(router_conf_min),
+                                                    expert_disp_max=float(expert_disp_max),
+                                                )
+                                                if r is None:
+                                                    continue
+                                                results.append(asdict(r))
     if not results:
         return pd.DataFrame()
     return pd.DataFrame(results)
@@ -1105,6 +1137,8 @@ def _monthly_breakdown_for_policy(
     shock_p_boost: float = 0.0,
     shock_meta_boost: float = 0.0,
     topup_score_scale: float = 1.0,
+    expert_disp_max: float = 1.0,
+    router_conf_min: float = 0.0,
 ) -> pd.DataFrame:
     symbols = tuple(str(row["symbols"]).split(","))
     session = None if row["session"] == "ALL" else str(row["session"])
@@ -1126,6 +1160,8 @@ def _monthly_breakdown_for_policy(
             shock_p_boost=shock_p_boost,
             shock_meta_boost=shock_meta_boost,
             topup_weight_scale=topup_score_scale,
+            expert_disp_max=expert_disp_max,
+            router_conf_min=router_conf_min,
         )
     else:
         x = _apply_policy_and_allocate(
@@ -1208,6 +1244,8 @@ def main() -> None:
         shock_p_boost=float(args.shock_p_boost),
         shock_meta_boost=float(args.shock_meta_boost),
         topup_score_scale=float(args.topup_score_scale),
+        expert_disp_max=float(args.expert_disp_maxs[0]),
+        router_conf_min=float(args.router_conf_mins[0]),
     )
 
     if len(monthly) >= 10:
@@ -1235,6 +1273,8 @@ def main() -> None:
         "shock_p_boost": float(args.shock_p_boost),
         "shock_meta_boost": float(args.shock_meta_boost),
         "topup_score_scale": float(args.topup_score_scale),
+        "router_conf_mins": [float(v) for v in args.router_conf_mins],
+        "expert_disp_maxs": [float(v) for v in args.expert_disp_maxs],
         "best_overall": best_overall.to_dict("records"),
         "best_robust": best_robust.to_dict("records"),
         "selected_policy_for_monthly_view": chosen.to_dict(),
@@ -1256,6 +1296,8 @@ def main() -> None:
         f"- Min monthly trades constraint (robust): **{float(args.min_monthly_trades):.1f}**",
         f"- Adaptive hard pacing target (per month): **{int(args.min_monthly_trades_hard)}**",
         f"- Adaptive top-up weight scale: **{float(args.topup_score_scale):.2f}**",
+        f"- Router confidence min grid: **{', '.join(f'{float(v):.2f}' for v in args.router_conf_mins)}**",
+        f"- Expert dispersion max grid: **{', '.join(f'{float(v):.2f}' for v in args.expert_disp_maxs)}**",
         f"- Best monthly R (overall): **{ceiling:+.2f}**",
         f"- Best monthly R (robust): **{robust_ceiling:+.2f}**",
         "",
