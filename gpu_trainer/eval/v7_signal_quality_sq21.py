@@ -734,6 +734,10 @@ class PolicyResult:
     topup_score_scale: float
     min_router_conf: float
     max_expert_disp: float
+    month_loss_cap_r: float
+    reentry_drawdown_r: float
+    conf_weight_power: float
+    post_cap_scale: float
     long_only: bool
     risk_min_bps: float
     max_per_ts: int
@@ -753,6 +757,9 @@ class PolicyResult:
     fold_min_avg_r: float
     fold_pos: int
     folds: int
+    worst_month_r: float
+    last10_total_r: float
+    last10_win_month_pct: float
 
 
 def _effective_thresholds(
@@ -783,6 +790,54 @@ def _effective_thresholds(
     p_req[shock_mask] = np.clip(p_req[shock_mask] + float(shock_p_boost), 0.5, 0.999)
     meta_req[shock_mask] = np.clip(meta_req[shock_mask] + float(shock_meta_boost), 0.0, 0.999)
     return p_req, meta_req
+
+
+def _confidence_quality(frame: pd.DataFrame) -> np.ndarray:
+    n = len(frame)
+    quality = np.ones(n, dtype="float64")
+    if n == 0:
+        return quality
+
+    if "router_conf" in frame.columns:
+        rc = pd.to_numeric(frame["router_conf"], errors="coerce").to_numpy(dtype="float64")
+        rc = np.where(np.isfinite(rc), np.clip(rc, 0.0, 1.0), 0.5)
+    else:
+        rc = np.full(n, 0.5, dtype="float64")
+
+    if "expert_dispersion" in frame.columns:
+        ed = pd.to_numeric(frame["expert_dispersion"], errors="coerce").to_numpy(dtype="float64")
+        ed = np.where(np.isfinite(ed), np.clip(ed, 0.0, 0.5), 0.1)
+        # Lower quality when expert disagreement is elevated.
+        disp_pen = np.clip(1.0 - (ed / 0.35), 0.2, 1.0)
+    else:
+        disp_pen = np.ones(n, dtype="float64")
+
+    quality = np.clip((0.35 + 0.65 * rc) * disp_pen, 0.1, 1.0)
+    return quality.astype("float64", copy=False)
+
+
+def _apply_monthly_loss_cap(x: pd.DataFrame, month_loss_cap_r: float) -> pd.DataFrame:
+    cap = float(month_loss_cap_r)
+    if x.empty or cap <= 0:
+        return x
+
+    keep_rows: list[pd.DataFrame] = []
+    for _, g_month in x.sort_values(["month", "ts"]).groupby("month", sort=False):
+        running = 0.0
+        chunks: list[pd.DataFrame] = []
+        for _, g_ts in g_month.groupby("ts", sort=True):
+            chunks.append(g_ts)
+            batch_r = float(pd.to_numeric(g_ts["r_weighted"], errors="coerce").sum())
+            if np.isfinite(batch_r):
+                running += batch_r
+            if running <= -cap:
+                break
+        if chunks:
+            keep_rows.append(pd.concat(chunks, ignore_index=False))
+
+    if not keep_rows:
+        return pd.DataFrame(columns=x.columns)
+    return pd.concat(keep_rows, ignore_index=False).sort_values(["ts", "symbol"])
 
 
 def _apply_policy_and_allocate(
@@ -1049,6 +1104,52 @@ def _apply_policy_with_adaptive_pacing(
     return x
 
 
+def _apply_monthly_loss_governor(
+    x: pd.DataFrame,
+    monthly_loss_cap_r: float,
+    reentry_drawdown_r: float,
+    post_cap_scale: float = 0.25,
+) -> pd.DataFrame:
+    if x.empty or monthly_loss_cap_r <= 0:
+        return x
+    if reentry_drawdown_r < 0:
+        reentry_drawdown_r = 0.0
+    post_cap_scale = float(np.clip(post_cap_scale, 0.0, 1.0))
+
+    out_chunks: list[pd.DataFrame] = []
+    for _, g in x.sort_values(["month", "ts"]).groupby("month", sort=False):
+        if g.empty:
+            continue
+        cum = 0.0
+        derisk = False
+        month_rows: list[pd.DataFrame] = []
+        by_ts = g.groupby("ts", sort=True)
+        for _, tblock in by_ts:
+            block = tblock.copy()
+            scale = post_cap_scale if derisk else 1.0
+            if scale < 0.999:
+                block["r_weighted"] = pd.to_numeric(block["r_weighted"], errors="coerce") * scale
+                block["net_bps_weighted"] = pd.to_numeric(block["net_bps_weighted"], errors="coerce") * scale
+            block["governor_scale"] = float(scale)
+            t_r = float(pd.to_numeric(block["r_weighted"], errors="coerce").sum())
+
+            month_rows.append(block)
+            if np.isfinite(t_r):
+                cum += t_r
+            if (not derisk) and cum <= -float(monthly_loss_cap_r):
+                # Keep trading to preserve cadence, but at scaled exposure.
+                derisk = True
+            elif derisk and cum >= (-(monthly_loss_cap_r) + reentry_drawdown_r):
+                derisk = False
+
+        if month_rows:
+            out_chunks.append(pd.concat(month_rows, ignore_index=False))
+
+    if not out_chunks:
+        return pd.DataFrame(columns=x.columns)
+    return pd.concat(out_chunks, ignore_index=False)
+
+
 def eval_policy(
     d: pd.DataFrame,
     top_pct: float,
@@ -1067,6 +1168,10 @@ def eval_policy(
     topup_score_scale: float = 1.0,
     router_conf_min: float = 0.0,
     expert_disp_max: float = 1.0,
+    monthly_loss_cap_r: float = 0.0,
+    reentry_drawdown_r: float = 0.0,
+    conf_weight_power: float = 1.0,
+    post_cap_scale: float = 0.25,
 ) -> PolicyResult | None:
     if router_conf_min > 0.0 or expert_disp_max < 0.999:
         d = d.copy()
@@ -1112,6 +1217,23 @@ def eval_policy(
             shock_p_boost=shock_p_boost,
             shock_meta_boost=shock_meta_boost,
         )
+    if x.empty:
+        return None
+    if float(conf_weight_power) != 1.0:
+        conf = np.clip(pd.to_numeric(x["meta_p"], errors="coerce").to_numpy(dtype="float64"), 0.0, 1.0)
+        scale = np.power(conf, float(max(0.1, conf_weight_power)))
+        x["weight"] = pd.to_numeric(x["weight"], errors="coerce").to_numpy(dtype="float64") * scale
+        wsum = x.groupby("ts")["weight"].transform("sum")
+        x["weight"] = np.where(wsum > 1e-12, x["weight"] / wsum, x["weight"])
+        x["r_weighted"] = x["r_net"] * x["weight"]
+        x["net_bps_weighted"] = x["net"] * x["weight"] * 1e4
+
+    x = _apply_monthly_loss_governor(
+        x=x,
+        monthly_loss_cap_r=float(monthly_loss_cap_r),
+        reentry_drawdown_r=float(reentry_drawdown_r),
+        post_cap_scale=float(post_cap_scale),
+    )
     if len(x) < 120:
         return None
 
@@ -1136,6 +1258,10 @@ def eval_policy(
         topup_score_scale=float(topup_score_scale),
         min_router_conf=float(router_conf_min),
         max_expert_disp=float(expert_disp_max),
+        month_loss_cap_r=float(monthly_loss_cap_r),
+        reentry_drawdown_r=float(reentry_drawdown_r),
+        conf_weight_power=float(conf_weight_power),
+        post_cap_scale=float(post_cap_scale),
         long_only=bool(long_only),
         risk_min_bps=float(risk_min_bps),
         max_per_ts=int(max_per_ts),
@@ -1152,6 +1278,9 @@ def eval_policy(
         median_monthly_total_r=float(msum.median()),
         total_r=float(msum.sum()),
         win_month_pct=float((msum > 0).mean() * 100),
+        worst_month_r=float(msum.min()),
+        last10_total_r=float(msum.tail(10).sum()) if len(msum) >= 10 else float(msum.sum()),
+        last10_win_month_pct=float((msum.tail(10) > 0).mean() * 100) if len(msum) >= 10 else float((msum > 0).mean() * 100),
         fold_min_avg_r=float(fold_avg.min()),
         fold_pos=int((fold_avg > 0).sum()),
         folds=int(len(fold_avg)),
@@ -1202,6 +1331,14 @@ def parse_args() -> argparse.Namespace:
                    help="Minimum router confidence gating value(s)")
     p.add_argument("--expert-disp-maxs", nargs="+", type=float, default=[1.0],
                    help="Maximum expert dispersion gating value(s)")
+    p.add_argument("--monthly-loss-cap-rs", nargs="+", type=float, default=[0.0],
+                   help="Monthly loss-cap in weighted R; 0 disables")
+    p.add_argument("--reentry-drawdown-rs", nargs="+", type=float, default=[0.0],
+                   help="Re-enable trading after capped month when recovery >= this R from cap trough")
+    p.add_argument("--conf-weight-powers", nargs="+", type=float, default=[1.0],
+                   help="Power on meta confidence for position weight scaling (1=off)")
+    p.add_argument("--post-cap-scales", nargs="+", type=float, default=[0.15, 0.25, 0.35],
+                   help="After monthly loss cap is hit, keep trading with this exposure scale (0..1)")
     p.add_argument("--rebuild-cache", action="store_true",
                    help="Force rebuild OOS cache for selected symbols/context")
     return p.parse_args()
@@ -1233,28 +1370,36 @@ def search_policies_with_args(d: pd.DataFrame, args: argparse.Namespace) -> pd.D
                                     for max_per_ts in args.max_per_ts:
                                         for router_conf_min in args.router_conf_mins:
                                             for expert_disp_max in args.expert_disp_maxs:
-                                                r = eval_policy(
-                                                    d=d,
-                                                    top_pct=top_pct,
-                                                    symbols=symbols,
-                                                    session=session,
-                                                    regime=regime,
-                                                    p_min=p_min,
-                                                    meta_min=meta_min,
-                                                    long_only=long_only,
-                                                    risk_min_bps=risk_min,
-                                                    max_per_ts=max_per_ts,
-                                                    min_trades_per_month_hard=int(args.min_monthly_trades_hard),
-                                                    shock_z_cut=float(args.shock_z_cut),
-                                                    shock_p_boost=float(args.shock_p_boost),
-                                                    shock_meta_boost=float(args.shock_meta_boost),
-                                                    topup_score_scale=float(args.topup_score_scale),
-                                                    router_conf_min=float(router_conf_min),
-                                                    expert_disp_max=float(expert_disp_max),
-                                                )
-                                                if r is None:
-                                                    continue
-                                                results.append(asdict(r))
+                                                for month_loss_cap_r in args.monthly_loss_cap_rs:
+                                                    for reentry_dd_r in args.reentry_drawdown_rs:
+                                                        for conf_w_pow in args.conf_weight_powers:
+                                                            for post_cap_scale in args.post_cap_scales:
+                                                                r = eval_policy(
+                                                                    d=d,
+                                                                    top_pct=top_pct,
+                                                                    symbols=symbols,
+                                                                    session=session,
+                                                                    regime=regime,
+                                                                    p_min=p_min,
+                                                                    meta_min=meta_min,
+                                                                    long_only=long_only,
+                                                                    risk_min_bps=risk_min,
+                                                                    max_per_ts=max_per_ts,
+                                                                    min_trades_per_month_hard=int(args.min_monthly_trades_hard),
+                                                                    shock_z_cut=float(args.shock_z_cut),
+                                                                    shock_p_boost=float(args.shock_p_boost),
+                                                                    shock_meta_boost=float(args.shock_meta_boost),
+                                                                    topup_score_scale=float(args.topup_score_scale),
+                                                                    router_conf_min=float(router_conf_min),
+                                                                    expert_disp_max=float(expert_disp_max),
+                                                                    monthly_loss_cap_r=float(month_loss_cap_r),
+                                                                    reentry_drawdown_r=float(reentry_dd_r),
+                                                                    conf_weight_power=float(conf_w_pow),
+                                                                    post_cap_scale=float(post_cap_scale),
+                                                                )
+                                                                if r is None:
+                                                                    continue
+                                                                results.append(asdict(r))
     if not results:
         return pd.DataFrame()
     return pd.DataFrame(results)
@@ -1270,6 +1415,10 @@ def _monthly_breakdown_for_policy(
     topup_score_scale: float = 1.0,
     expert_disp_max: float = 1.0,
     router_conf_min: float = 0.0,
+    monthly_loss_cap_r: float = 0.0,
+    reentry_drawdown_r: float = 0.0,
+    conf_weight_power: float = 1.0,
+    post_cap_scale: float = 0.25,
 ) -> pd.DataFrame:
     symbols = tuple(str(row["symbols"]).split(","))
     session = None if row["session"] == "ALL" else str(row["session"])
@@ -1311,6 +1460,22 @@ def _monthly_breakdown_for_policy(
             shock_p_boost=shock_p_boost,
             shock_meta_boost=shock_meta_boost,
         )
+    if x.empty:
+        return pd.DataFrame()
+    if float(conf_weight_power) != 1.0:
+        conf = np.clip(pd.to_numeric(x["meta_p"], errors="coerce").to_numpy(dtype="float64"), 0.0, 1.0)
+        scale = np.power(conf, float(max(0.1, conf_weight_power)))
+        x["weight"] = pd.to_numeric(x["weight"], errors="coerce").to_numpy(dtype="float64") * scale
+        wsum = x.groupby("ts")["weight"].transform("sum")
+        x["weight"] = np.where(wsum > 1e-12, x["weight"] / wsum, x["weight"])
+        x["r_weighted"] = x["r_net"] * x["weight"]
+        x["net_bps_weighted"] = x["net"] * x["weight"] * 1e4
+    x = _apply_monthly_loss_governor(
+        x=x,
+        monthly_loss_cap_r=float(monthly_loss_cap_r),
+        reentry_drawdown_r=float(reentry_drawdown_r),
+        post_cap_scale=float(post_cap_scale),
+    )
     if x.empty:
         return pd.DataFrame()
     out = x.groupby("month").agg(
@@ -1368,8 +1533,14 @@ def main() -> None:
     )
 
     best_overall = policies.sort_values("mean_monthly_total_r", ascending=False).head(25)
+    best_tail = policies.sort_values(
+        ["last10_total_r", "worst_month_r", "mean_monthly_total_r"],
+        ascending=False,
+    ).head(25)
     best_robust = robust.head(25)
-    chosen = best_robust.iloc[0] if not best_robust.empty else best_overall.iloc[0]
+    # If robust set is empty, prefer strongest tail profile over pure headline monthly R.
+    chosen_from = "robust" if not best_robust.empty else "tail"
+    chosen = best_robust.iloc[0] if not best_robust.empty else best_tail.iloc[0]
     monthly = _monthly_breakdown_for_policy(
         oos,
         chosen,
@@ -1380,6 +1551,10 @@ def main() -> None:
         topup_score_scale=float(args.topup_score_scale),
         expert_disp_max=float(args.expert_disp_maxs[0]),
         router_conf_min=float(args.router_conf_mins[0]),
+        monthly_loss_cap_r=float(chosen.get("month_loss_cap_r", 0.0)),
+        reentry_drawdown_r=float(chosen.get("reentry_drawdown_r", 0.0)),
+        conf_weight_power=float(chosen.get("conf_weight_power", 1.0)),
+        post_cap_scale=float(chosen.get("post_cap_scale", 0.25)),
     )
 
     if len(monthly) >= 10:
@@ -1413,8 +1588,14 @@ def main() -> None:
         "topup_score_scale": float(args.topup_score_scale),
         "router_conf_mins": [float(v) for v in args.router_conf_mins],
         "expert_disp_maxs": [float(v) for v in args.expert_disp_maxs],
+        "monthly_loss_cap_rs": [float(v) for v in args.monthly_loss_cap_rs],
+        "reentry_drawdown_rs": [float(v) for v in args.reentry_drawdown_rs],
+        "conf_weight_powers": [float(v) for v in args.conf_weight_powers],
+        "post_cap_scales": [float(v) for v in args.post_cap_scales],
         "best_overall": best_overall.to_dict("records"),
+        "best_tail": best_tail.to_dict("records"),
         "best_robust": best_robust.to_dict("records"),
+        "selected_policy_source": chosen_from,
         "selected_policy_for_monthly_view": chosen.to_dict(),
         "monthly_breakdown_selected_policy": monthly.to_dict("records"),
         "last10_months_total_r": last10_total_r,
@@ -1444,25 +1625,44 @@ def main() -> None:
         "",
         "## Top robust policies",
         "",
-        "| top% | symbols | long_only | p_min | meta_min | risk>=bps | max/ts | n | months | mean mth trades | min mth trades | trade win% | weighted win% | avg_R | mean monthly R | total R | win-month% | fold min R |",
-        "|---:|---|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| top% | symbols | long_only | p_min | meta_min | risk>=bps | max/ts | capR | reentryR | postCap | n | months | mean mth trades | min mth trades | trade win% | weighted win% | avg_R | mean monthly R | last10 R | worst month R |",
+        "|---:|---|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for _, r in best_robust.iterrows():
         lines.append(
             f"| {r['top_pct']:.1f} | {r['symbols']} | "
             f"{'Y' if bool(r['long_only']) else 'N'} | {r['p_min']:.2f} | {r['meta_min']:.2f} | "
             f"{r['risk_min_bps']:.0f} | {int(r['max_per_ts'])} | "
+            f"{float(r.get('month_loss_cap_r', 0.0)):.1f} | {float(r.get('reentry_drawdown_r', 0.0)):.1f} | {float(r.get('post_cap_scale', 0.0)):.2f} | "
             f"{int(r['n']):,} | {int(r['months'])} | "
             f"{r['mean_monthly_trades']:.1f} | {int(r['min_monthly_trades'])} | "
             f"{r['trade_win_rate_pct']:.1f} | {r['weighted_win_rate_pct']:.1f} | "
-            f"{r['avg_r_net']:+.3f} | {r['mean_monthly_total_r']:+.2f} | {r['total_r']:+.2f} | "
-            f"{r['win_month_pct']:.1f} | {r['fold_min_avg_r']:+.3f} |"
+            f"{r['avg_r_net']:+.3f} | {r['mean_monthly_total_r']:+.2f} | {r['last10_total_r']:+.2f} | {r['worst_month_r']:+.2f} |"
         )
 
     lines.extend(
         [
             "",
-            "## Monthly breakdown (selected best robust policy)",
+            "## Top tail-resilient policies (last-10-month objective)",
+            "",
+            "| top% | symbols | long_only | p_min | meta_min | risk>=bps | max/ts | capR | reentryR | postCap | mean monthly R | last10 R | worst month R | mean mth trades |",
+            "|---:|---|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for _, r in best_tail.iterrows():
+        lines.append(
+            f"| {r['top_pct']:.1f} | {r['symbols']} | "
+            f"{'Y' if bool(r['long_only']) else 'N'} | {r['p_min']:.2f} | {r['meta_min']:.2f} | "
+            f"{r['risk_min_bps']:.0f} | {int(r['max_per_ts'])} | "
+            f"{float(r.get('month_loss_cap_r', 0.0)):.1f} | {float(r.get('reentry_drawdown_r', 0.0)):.1f} | {float(r.get('post_cap_scale', 0.0)):.2f} | "
+            f"{r['mean_monthly_total_r']:+.2f} | {r['last10_total_r']:+.2f} | {r['worst_month_r']:+.2f} | "
+            f"{r['mean_monthly_trades']:.1f} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            f"## Monthly breakdown (selected {chosen_from} policy)",
             "",
             "| month | trades | month R | month trade win% | mean weighted R |",
             "|---|---:|---:|---:|---:|",
