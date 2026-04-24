@@ -97,7 +97,7 @@ def _cache_path(symbols: list[str], context_symbols: list[str]) -> Path:
             ",".join(sorted(set(symbols))),
             ",".join(sorted(set(context_symbols))),
             f"cost={COST_BPS:.2f}",
-            "sq21",
+            "sq21-intel-moe-v1",
         ]
     )
     key = hashlib.sha1(token.encode("utf-8")).hexdigest()[:16]
@@ -279,8 +279,91 @@ def _meta_features(
     mkt_disp: np.ndarray,
     risk_on: np.ndarray,
     dom_ret1: np.ndarray,
+    expert_dispersion: np.ndarray,
+    router_conf: np.ndarray,
 ) -> np.ndarray:
-    return np.column_stack([p_up, pred_mag, edge, np.abs(edge), risk_bps, mkt_disp, risk_on, dom_ret1])
+    return np.column_stack(
+        [
+            p_up,
+            pred_mag,
+            edge,
+            np.abs(edge),
+            risk_bps,
+            mkt_disp,
+            risk_on,
+            dom_ret1,
+            expert_dispersion,
+            router_conf,
+        ]
+    )
+
+
+def _regime_labels_from_context(risk_on: np.ndarray, shock_z: np.ndarray) -> np.ndarray:
+    labels = np.full(len(risk_on), -1, dtype=np.int8)
+    valid = np.isfinite(risk_on) & np.isfinite(shock_z)
+    if not valid.any():
+        return labels
+
+    risk_abs = np.abs(risk_on)
+    risk_cut = np.nanquantile(risk_abs[valid], 0.65)
+    shock_abs = np.abs(shock_z)
+
+    labels[valid & (shock_abs >= 1.8)] = 2  # shock regime
+    labels[valid & (shock_abs < 1.8) & (risk_abs >= risk_cut)] = 1  # directional/trending
+    labels[valid & (shock_abs < 1.8) & (risk_abs < risk_cut)] = 0  # calm/chop
+    return labels
+
+
+def _predict_regime_moe(
+    X_in: np.ndarray,
+    base_clf: HistGradientBoostingClassifier,
+    base_reg: HistGradientBoostingRegressor,
+    experts: dict[int, tuple[HistGradientBoostingClassifier, HistGradientBoostingRegressor]],
+    router: HistGradientBoostingClassifier | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    p_out = base_clf.predict_proba(X_in)[:, 1]
+    mag_out = np.clip(base_reg.predict(X_in), 0.0, None)
+    router_conf = np.full(len(X_in), 0.5, dtype="float64")
+
+    if not experts:
+        return p_out, mag_out, np.zeros(len(X_in), dtype="float64"), router_conf
+
+    p_stack: list[np.ndarray] = []
+    if router is not None:
+        router_proba = router.predict_proba(X_in)
+        cls_to_idx = {int(c): i for i, c in enumerate(router.classes_)}
+        router_conf = np.max(router_proba, axis=1)
+
+        p_blend = np.zeros(len(X_in), dtype="float64")
+        m_blend = np.zeros(len(X_in), dtype="float64")
+        wsum = np.zeros(len(X_in), dtype="float64")
+
+        for reg_id, (eclf, ereg) in experts.items():
+            p_e = eclf.predict_proba(X_in)[:, 1]
+            m_e = np.clip(ereg.predict(X_in), 0.0, None)
+            p_stack.append(p_e)
+            idx = cls_to_idx.get(int(reg_id))
+            if idx is None:
+                continue
+            w = router_proba[:, idx]
+            p_blend += w * p_e
+            m_blend += w * m_e
+            wsum += w
+
+        use = wsum > 1e-6
+        p_out[use] = p_blend[use] / wsum[use]
+        mag_out[use] = m_blend[use] / wsum[use]
+    else:
+        for _, (eclf, _) in experts.items():
+            p_stack.append(eclf.predict_proba(X_in)[:, 1])
+
+    if len(p_stack) >= 2:
+        p_mat = np.column_stack(p_stack)
+        expert_disp = np.std(p_mat, axis=1)
+    else:
+        expert_disp = np.zeros(len(X_in), dtype="float64")
+
+    return p_out, mag_out, expert_disp, router_conf
 
 
 def collect_oos_predictions(symbol: str, df: pd.DataFrame, context: pd.DataFrame) -> pd.DataFrame:
@@ -305,7 +388,9 @@ def collect_oos_predictions(symbol: str, df: pd.DataFrame, context: pd.DataFrame
     ctx_slice = context.reindex(ts)
     mkt_disp = ctx_slice["mkt_ret1_std"].to_numpy()
     risk_on = ctx_slice["risk_on_score"].to_numpy()
+    shock_z = ctx_slice["mkt_shock_z"].to_numpy()
     dom_ret1 = ctx_slice["btc_dominance_ret1"].to_numpy()
+    regime_lbl = _regime_labels_from_context(risk_on=risk_on, shock_z=shock_z)
 
     folds = walk_forward_indices(ts)
     rows: list[dict] = []
@@ -318,15 +403,49 @@ def collect_oos_predictions(symbol: str, df: pd.DataFrame, context: pd.DataFrame
         if good.sum() < 1200:
             continue
 
-        clf = _clf(0)
+        clf = _clf(11)
         clf.fit(X_tr[good], ysgn_tr[good])
-        reg = _reg(0)
+        reg = _reg(11)
         reg.fit(X_tr[good], np.abs(yret_tr[good]))
 
-        p_up_tr = clf.predict_proba(X_tr)[:, 1]
-        p_up_te = clf.predict_proba(X_te)[:, 1]
-        mag_tr = np.clip(reg.predict(X_tr), 0.0, None)
-        mag_te = np.clip(reg.predict(X_te), 0.0, None)
+        reg_tr = regime_lbl[tlo:thi]
+        experts: dict[int, tuple[HistGradientBoostingClassifier, HistGradientBoostingRegressor]] = {}
+        for reg_id in (0, 1, 2):
+            rmask = good & (reg_tr == reg_id)
+            if int(rmask.sum()) < 700:
+                continue
+            eclf = _clf(101 + reg_id)
+            eclf.fit(X_tr[rmask], ysgn_tr[rmask])
+            ereg = _reg(101 + reg_id)
+            ereg.fit(X_tr[rmask], np.abs(yret_tr[rmask]))
+            experts[reg_id] = (eclf, ereg)
+
+        router: HistGradientBoostingClassifier | None = None
+        router_mask = good & np.isin(reg_tr, np.array([0, 1, 2], dtype=np.int8))
+        if int(router_mask.sum()) > 1800 and np.unique(reg_tr[router_mask]).size >= 2:
+            router = HistGradientBoostingClassifier(
+                max_iter=180,
+                max_depth=4,
+                learning_rate=0.04,
+                min_samples_leaf=240,
+                random_state=73,
+            )
+            router.fit(X_tr[router_mask], reg_tr[router_mask])
+
+        p_up_tr, mag_tr, p_disp_tr, router_conf_tr = _predict_regime_moe(
+            X_in=X_tr,
+            base_clf=clf,
+            base_reg=reg,
+            experts=experts,
+            router=router,
+        )
+        p_up_te, mag_te, p_disp_te, router_conf_te = _predict_regime_moe(
+            X_in=X_te,
+            base_clf=clf,
+            base_reg=reg,
+            experts=experts,
+            router=router,
+        )
         edge_tr = (2.0 * p_up_tr - 1.0) * mag_tr
         edge_te = (2.0 * p_up_te - 1.0) * mag_te
 
@@ -351,6 +470,8 @@ def collect_oos_predictions(symbol: str, df: pd.DataFrame, context: pd.DataFrame
             & np.isfinite(disp_tr)
             & np.isfinite(risk_on_tr)
             & np.isfinite(dom_tr)
+            & np.isfinite(p_disp_tr)
+            & np.isfinite(router_conf_tr)
         )
         meta_te = np.full(len(X_te), 0.5, dtype=float)
         if meta_good.sum() > 1500:
@@ -362,6 +483,8 @@ def collect_oos_predictions(symbol: str, df: pd.DataFrame, context: pd.DataFrame
                 mkt_disp=disp_tr[meta_good],
                 risk_on=risk_on_tr[meta_good],
                 dom_ret1=dom_tr[meta_good],
+                expert_dispersion=p_disp_tr[meta_good],
+                router_conf=router_conf_tr[meta_good],
             )
             mclf = _clf(41)
             mclf.fit(X_meta_tr, y_meta_tr[meta_good])
@@ -373,6 +496,8 @@ def collect_oos_predictions(symbol: str, df: pd.DataFrame, context: pd.DataFrame
                 & np.isfinite(disp_te)
                 & np.isfinite(risk_on_te)
                 & np.isfinite(dom_te)
+                & np.isfinite(p_disp_te)
+                & np.isfinite(router_conf_te)
             )
             X_meta_te = _meta_features(
                 p_up=p_up_te[te_good_for_meta],
@@ -382,6 +507,8 @@ def collect_oos_predictions(symbol: str, df: pd.DataFrame, context: pd.DataFrame
                 mkt_disp=disp_te[te_good_for_meta],
                 risk_on=risk_on_te[te_good_for_meta],
                 dom_ret1=dom_te[te_good_for_meta],
+                expert_dispersion=p_disp_te[te_good_for_meta],
+                router_conf=router_conf_te[te_good_for_meta],
             )
             meta_te[te_good_for_meta] = mclf.predict_proba(X_meta_te)[:, 1]
 
@@ -401,6 +528,8 @@ def collect_oos_predictions(symbol: str, df: pd.DataFrame, context: pd.DataFrame
             & np.isfinite(disp_te)
             & np.isfinite(risk_on_te)
             & np.isfinite(dom_te)
+            & np.isfinite(p_disp_te)
+            & np.isfinite(router_conf_te)
         )
         idx = np.where(good_te)[0]
         for i in idx:
@@ -417,6 +546,8 @@ def collect_oos_predictions(symbol: str, df: pd.DataFrame, context: pd.DataFrame
                     "edge": float(edge_te[i]),
                     "abs_edge": float(abs(edge_te[i])),
                     "meta_p": float(meta_te[i]),
+                    "expert_dispersion": float(p_disp_te[i]),
+                    "router_conf": float(router_conf_te[i]),
                     "mkt_dispersion": float(disp_te[i]),
                     "risk_on_score": float(risk_on_te[i]),
                     "btc_dom_ret1": float(dom_te[i]),
