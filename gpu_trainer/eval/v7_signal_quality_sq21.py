@@ -472,6 +472,10 @@ class PolicyResult:
     regime: str
     p_min: float
     meta_min: float
+    shock_z_cut: float
+    shock_p_boost: float
+    shock_meta_boost: float
+    topup_score_scale: float
     long_only: bool
     risk_min_bps: float
     max_per_ts: int
@@ -493,6 +497,36 @@ class PolicyResult:
     folds: int
 
 
+def _effective_thresholds(
+    frame: pd.DataFrame,
+    p_min: float,
+    meta_min: float,
+    shock_z_cut: float,
+    shock_p_boost: float,
+    shock_meta_boost: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    n = len(frame)
+    p_req = np.full(n, float(p_min), dtype="float64")
+    meta_req = np.full(n, float(meta_min), dtype="float64")
+    if shock_z_cut <= 0:
+        return p_req, meta_req
+    shock_col: str | None = None
+    if "mkt_shock_z" in frame.columns:
+        shock_col = "mkt_shock_z"
+    elif "mkt_shock_z_l1" in frame.columns:
+        shock_col = "mkt_shock_z_l1"
+    if shock_col is None:
+        return p_req, meta_req
+
+    shock_abs = pd.to_numeric(frame[shock_col], errors="coerce").abs().to_numpy(dtype="float64")
+    shock_mask = np.isfinite(shock_abs) & (shock_abs >= float(shock_z_cut))
+    if not shock_mask.any():
+        return p_req, meta_req
+    p_req[shock_mask] = np.clip(p_req[shock_mask] + float(shock_p_boost), 0.5, 0.999)
+    meta_req[shock_mask] = np.clip(meta_req[shock_mask] + float(shock_meta_boost), 0.0, 0.999)
+    return p_req, meta_req
+
+
 def _apply_policy_and_allocate(
     d: pd.DataFrame,
     top_pct: float,
@@ -504,41 +538,240 @@ def _apply_policy_and_allocate(
     long_only: bool,
     risk_min_bps: float,
     max_per_ts: int,
+    min_trades_per_month_hard: int = 0,
+    shock_z_cut: float = 0.0,
+    shock_p_boost: float = 0.0,
+    shock_meta_boost: float = 0.0,
 ) -> pd.DataFrame:
     x = d[d["symbol"].isin(symbols)]
     if x.empty:
         return pd.DataFrame()
 
     q_cut = 1.0 - (top_pct / 100.0)
-    x = x[x["rank_pct"] >= q_cut]
     if session is not None:
         x = x[x["session"] == session]
     if regime is not None:
         x = x[x["regime"] == regime]
-    x = x[(x["risk_bps"] >= risk_min_bps) & (x["meta_p"] >= meta_min)].copy()
-    if x.empty:
-        return pd.DataFrame()
+    # Shock-aware threshold modulation: in elevated shock bars,
+    # require stronger probability/meta quality.
+    p_req, meta_req = _effective_thresholds(
+        frame=x,
+        p_min=p_min,
+        meta_min=meta_min,
+        shock_z_cut=shock_z_cut,
+        shock_p_boost=shock_p_boost,
+        shock_meta_boost=shock_meta_boost,
+    )
+
+    edge_arr = pd.to_numeric(x["edge"], errors="coerce").to_numpy(dtype="float64")
+    p_up_arr = pd.to_numeric(x["p_up"], errors="coerce").to_numpy(dtype="float64")
+    meta_arr = pd.to_numeric(x["meta_p"], errors="coerce").to_numpy(dtype="float64")
+    risk_arr = pd.to_numeric(x["risk_bps"], errors="coerce").to_numpy(dtype="float64")
+
+    base_mask = np.isfinite(edge_arr) & np.isfinite(p_up_arr) & np.isfinite(meta_arr) & np.isfinite(risk_arr)
+    base_mask &= (risk_arr >= float(risk_min_bps)) & (meta_arr >= meta_req)
 
     if long_only:
-        x = x[(x["edge"] > 0) & (x["p_up"] >= p_min)].copy()
+        dir_mask = (edge_arr > 0) & (p_up_arr >= p_req)
+        keep_mask = base_mask & dir_mask
+        x = x[keep_mask].copy()
         x["side"] = 1.0
     else:
-        long_mask = (x["edge"] > 0) & (x["p_up"] >= p_min)
-        short_mask = (x["edge"] < 0) & (x["p_up"] <= (1.0 - p_min))
-        x = x[long_mask | short_mask].copy()
-        x["side"] = np.where(x["edge"].to_numpy() > 0, 1.0, -1.0)
+        long_mask = (edge_arr > 0) & (p_up_arr >= p_req)
+        short_mask = (edge_arr < 0) & (p_up_arr <= (1.0 - p_req))
+        keep_mask = base_mask & (long_mask | short_mask)
+        x = x[keep_mask].copy()
+        x["side"] = np.where(x["edge"].to_numpy(dtype="float64", copy=False) > 0, 1.0, -1.0)
     if x.empty:
         return pd.DataFrame()
 
+    # Start with quality-selective subset; optionally top-up month cadence.
+    # The hard cadence mode is cap-aware (max_per_ts) to avoid adding trades
+    # that will later be dropped by timestamp capacity constraints.
     x["allocator_score"] = (x["abs_edge"] * np.clip(x["meta_p"], 0.0, 1.0)).astype("float64")
+    selected = x[x["rank_pct"] >= q_cut].copy()
+    if min_trades_per_month_hard > 0:
+        frames: list[pd.DataFrame] = []
+        for _, g in x.groupby("month", sort=False):
+            g_cap = g.sort_values("allocator_score", ascending=False).copy()
+            if max_per_ts > 0:
+                g_cap["_ts_rank_cap"] = g_cap.groupby("ts").cumcount()
+                g_cap = g_cap[g_cap["_ts_rank_cap"] < max_per_ts].drop(columns=["_ts_rank_cap"])
+
+            g_sel = g_cap[g_cap["rank_pct"] >= q_cut].copy()
+            need = int(min_trades_per_month_hard - len(g_sel))
+            if need > 0:
+                extra = g_cap[g_cap["rank_pct"] < q_cut].head(need)
+                if not extra.empty:
+                    g_sel = pd.concat([g_sel, extra], ignore_index=False)
+            if not g_sel.empty:
+                frames.append(g_sel)
+        if frames:
+            selected = pd.concat(frames, ignore_index=False).drop_duplicates(subset=["ts", "symbol"])
+    x = selected.copy()
+    if x.empty:
+        return pd.DataFrame()
+
     x = x.sort_values(["ts", "allocator_score"], ascending=[True, False])
     if max_per_ts > 0:
         x = x.groupby("ts", as_index=False).head(max_per_ts).copy()
 
-    score_sum = x.groupby("ts")["allocator_score"].transform("sum")
+    x["allocator_score"] = pd.to_numeric(x["allocator_score"], errors="coerce").astype("float64")
+    score_sum = x.groupby("ts")["allocator_score"].transform("sum").astype("float64")
     x["weight"] = np.where(score_sum > 1e-12, x["allocator_score"] / score_sum, 1.0)
+    x["weight"] = pd.to_numeric(x["weight"], errors="coerce").astype("float64")
     ts_count = x.groupby("ts")["symbol"].transform("count").replace(0, np.nan)
     x["weight"] = np.where(np.isfinite(x["weight"]), x["weight"], 1.0 / ts_count)
+
+    x["gross"] = x["ret_60m"] * x["side"]
+    x["net"] = x["gross"] - COST_FRAC
+    x["r_net"] = x["net"] / x["vol_16"]
+    x["r_weighted"] = x["r_net"] * x["weight"]
+    x["net_bps_weighted"] = x["net"] * x["weight"] * 1e4
+    return x
+
+
+def _apply_policy_with_adaptive_pacing(
+    d: pd.DataFrame,
+    top_pct: float,
+    symbols: tuple[str, ...],
+    session: str | None,
+    regime: str | None,
+    p_min: float,
+    meta_min: float,
+    long_only: bool,
+    risk_min_bps: float,
+    max_per_ts: int,
+    min_trades_per_month_hard: int,
+    shock_z_cut: float = 0.0,
+    shock_p_boost: float = 0.0,
+    shock_meta_boost: float = 0.0,
+    topup_weight_scale: float = 1.0,
+) -> pd.DataFrame:
+    if min_trades_per_month_hard <= 0:
+        return _apply_policy_and_allocate(
+            d=d,
+            top_pct=top_pct,
+            symbols=symbols,
+            session=session,
+            regime=regime,
+            p_min=p_min,
+            meta_min=meta_min,
+            long_only=long_only,
+            risk_min_bps=risk_min_bps,
+            max_per_ts=max_per_ts,
+            min_trades_per_month_hard=0,
+            shock_z_cut=shock_z_cut,
+            shock_p_boost=shock_p_boost,
+            shock_meta_boost=shock_meta_boost,
+        )
+
+    # Build base candidate universe without any rank cutoff.
+    base = d[d["symbol"].isin(symbols)]
+    if base.empty:
+        return pd.DataFrame()
+    if session is not None:
+        base = base[base["session"] == session]
+    if regime is not None:
+        base = base[base["regime"] == regime]
+    p_req, meta_req = _effective_thresholds(
+        frame=base,
+        p_min=p_min,
+        meta_min=meta_min,
+        shock_z_cut=shock_z_cut,
+        shock_p_boost=shock_p_boost,
+        shock_meta_boost=shock_meta_boost,
+    )
+    edge_arr = pd.to_numeric(base["edge"], errors="coerce").to_numpy(dtype="float64")
+    p_up_arr = pd.to_numeric(base["p_up"], errors="coerce").to_numpy(dtype="float64")
+    meta_arr = pd.to_numeric(base["meta_p"], errors="coerce").to_numpy(dtype="float64")
+    risk_arr = pd.to_numeric(base["risk_bps"], errors="coerce").to_numpy(dtype="float64")
+
+    valid = np.isfinite(edge_arr) & np.isfinite(p_up_arr) & np.isfinite(meta_arr) & np.isfinite(risk_arr)
+    valid &= (risk_arr >= float(risk_min_bps)) & (meta_arr >= meta_req)
+
+    if long_only:
+        dir_mask = (edge_arr > 0) & (p_up_arr >= p_req)
+        keep_mask = valid & dir_mask
+        base = base[keep_mask].copy()
+        base["side"] = 1.0
+    else:
+        long_mask = (edge_arr > 0) & (p_up_arr >= p_req)
+        short_mask = (edge_arr < 0) & (p_up_arr <= (1.0 - p_req))
+        keep_mask = valid & (long_mask | short_mask)
+        base = base[keep_mask].copy()
+        base["side"] = np.where(base["edge"].to_numpy(dtype="float64", copy=False) > 0, 1.0, -1.0)
+    if base.empty:
+        return pd.DataFrame()
+
+    q_cut = 1.0 - (top_pct / 100.0)
+    base["allocator_score"] = (base["abs_edge"] * np.clip(base["meta_p"], 0.0, 1.0)).astype("float64")
+
+    selected_chunks: list[pd.DataFrame] = []
+    for _, g in base.groupby("month", sort=False):
+        if g.empty:
+            continue
+        g = g.sort_values(["ts", "allocator_score"], ascending=[True, False]).copy()
+        per_ts_cap = int(max(1, max_per_ts))
+
+        # Base selective set by quality.
+        g_sel = g[g["rank_pct"] >= q_cut].copy()
+        if not g_sel.empty:
+            g_sel = g_sel.groupby("ts", as_index=False).head(per_ts_cap).copy()
+
+        current_n = int(len(g_sel))
+        target_n = int(min_trades_per_month_hard)
+        if current_n < target_n:
+            need = target_n - current_n
+            chosen_pairs = set(zip(g_sel["ts"], g_sel["symbol"])) if not g_sel.empty else set()
+            ts_selected_counts = (
+                g_sel.groupby("ts")["symbol"].size().to_dict() if not g_sel.empty else {}
+            )
+            # Top-up from non-selected candidates, respecting per-ts cap.
+            for _, row in g[g["rank_pct"] < q_cut].sort_values("allocator_score", ascending=False).iterrows():
+                key = (row["ts"], row["symbol"])
+                if key in chosen_pairs:
+                    continue
+                ts = row["ts"]
+                if int(ts_selected_counts.get(ts, 0)) >= per_ts_cap:
+                    continue
+                chosen_pairs.add(key)
+                ts_selected_counts[ts] = int(ts_selected_counts.get(ts, 0)) + 1
+                g_sel = pd.concat([g_sel, row.to_frame().T], ignore_index=False)
+                need -= 1
+                if need <= 0:
+                    break
+
+        if not g_sel.empty:
+            g_sel["is_topup"] = False
+            if target_n > current_n:
+                # rows added beyond initial quality-selective set are adaptive top-up rows
+                # and can be down-weighted to preserve portfolio quality.
+                g_sel = g_sel.copy()
+                g_sel.iloc[current_n:, g_sel.columns.get_loc("is_topup")] = True
+            selected_chunks.append(g_sel.drop_duplicates(subset=["ts", "symbol"]))
+
+    if not selected_chunks:
+        return pd.DataFrame()
+
+    x = pd.concat(selected_chunks, ignore_index=False)
+    x = x.sort_values(["ts", "allocator_score"], ascending=[True, False])
+    if max_per_ts > 0:
+        x = x.groupby("ts", as_index=False).head(max_per_ts).copy()
+
+    score_sum = pd.to_numeric(x.groupby("ts")["allocator_score"].transform("sum"), errors="coerce")
+    raw_weight = np.where(score_sum > 1e-12, x["allocator_score"] / score_sum, 1.0)
+    x["weight"] = pd.to_numeric(raw_weight, errors="coerce")
+    if "is_topup" in x.columns and float(topup_weight_scale) < 1.0:
+        scale = np.where(x["is_topup"].astype(bool).to_numpy(), float(topup_weight_scale), 1.0)
+        x["weight"] = x["weight"] * scale
+        # Renormalize by timestamp after top-up scaling.
+        wsum = x.groupby("ts")["weight"].transform("sum")
+        x["weight"] = np.where(wsum > 1e-12, x["weight"] / wsum, x["weight"])
+    ts_count = pd.to_numeric(x.groupby("ts")["symbol"].transform("count"), errors="coerce").replace(0, np.nan)
+    fallback = 1.0 / ts_count
+    weight_arr = x["weight"].to_numpy(dtype="float64", copy=False)
+    x["weight"] = np.where(np.isfinite(weight_arr), weight_arr, fallback)
 
     x["gross"] = x["ret_60m"] * x["side"]
     x["net"] = x["gross"] - COST_FRAC
@@ -559,25 +792,56 @@ def eval_policy(
     long_only: bool,
     risk_min_bps: float,
     max_per_ts: int,
+    min_trades_per_month_hard: int = 0,
+    shock_z_cut: float = 0.0,
+    shock_p_boost: float = 0.0,
+    shock_meta_boost: float = 0.0,
+    topup_score_scale: float = 1.0,
 ) -> PolicyResult | None:
-    x = _apply_policy_and_allocate(
-        d=d,
-        top_pct=top_pct,
-        symbols=symbols,
-        session=session,
-        regime=regime,
-        p_min=p_min,
-        meta_min=meta_min,
-        long_only=long_only,
-        risk_min_bps=risk_min_bps,
-        max_per_ts=max_per_ts,
-    )
+    if min_trades_per_month_hard > 0:
+        # Hard monthly floor is treated as a true constraint when enabled.
+        x = _apply_policy_with_adaptive_pacing(
+            d=d,
+            top_pct=top_pct,
+            symbols=symbols,
+            session=session,
+            regime=regime,
+            p_min=p_min,
+            meta_min=meta_min,
+            long_only=long_only,
+            risk_min_bps=risk_min_bps,
+            max_per_ts=max_per_ts,
+            min_trades_per_month_hard=min_trades_per_month_hard,
+            shock_z_cut=shock_z_cut,
+            shock_p_boost=shock_p_boost,
+            shock_meta_boost=shock_meta_boost,
+            topup_weight_scale=topup_score_scale,
+        )
+    else:
+        x = _apply_policy_and_allocate(
+            d=d,
+            top_pct=top_pct,
+            symbols=symbols,
+            session=session,
+            regime=regime,
+            p_min=p_min,
+            meta_min=meta_min,
+            long_only=long_only,
+            risk_min_bps=risk_min_bps,
+            max_per_ts=max_per_ts,
+            min_trades_per_month_hard=0,
+            shock_z_cut=shock_z_cut,
+            shock_p_boost=shock_p_boost,
+            shock_meta_boost=shock_meta_boost,
+        )
     if len(x) < 120:
         return None
 
     msum = x.groupby("month")["r_weighted"].sum()
     mtrades = x.groupby("month")["symbol"].size()
     if len(msum) < 10:
+        return None
+    if min_trades_per_month_hard > 0 and int(mtrades.min()) < int(min_trades_per_month_hard):
         return None
     fold_avg = x.groupby("fold")["r_weighted"].mean()
     weighted_win = x.loc[x["net"] > 0, "weight"].sum() / max(1e-12, x["weight"].sum())
@@ -588,6 +852,10 @@ def eval_policy(
         regime=regime or "ALL",
         p_min=float(p_min),
         meta_min=float(meta_min),
+        shock_z_cut=float(shock_z_cut),
+        shock_p_boost=float(shock_p_boost),
+        shock_meta_boost=float(shock_meta_boost),
+        topup_score_scale=float(topup_score_scale),
         long_only=bool(long_only),
         risk_min_bps=float(risk_min_bps),
         max_per_ts=int(max_per_ts),
@@ -634,6 +902,16 @@ def parse_args() -> argparse.Namespace:
                    help="Only evaluate the full active symbol set as one basket")
     p.add_argument("--min-monthly-trades", type=float, default=0.0,
                    help="Require mean monthly trades >= this value for robust policies")
+    p.add_argument("--min-monthly-trades-hard", type=int, default=0,
+                   help="Adaptive pacing: attempt >= this many trades per month via quality top-up")
+    p.add_argument("--shock-z-cut", type=float, default=0.0,
+                   help="Apply shock-aware threshold boosts when |mkt_shock_z| >= this cutoff (0 disables)")
+    p.add_argument("--shock-p-boost", type=float, default=0.0,
+                   help="Additive boost to p_min during shock bars")
+    p.add_argument("--shock-meta-boost", type=float, default=0.0,
+                   help="Additive boost to meta_min during shock bars")
+    p.add_argument("--topup-score-scale", type=float, default=1.0,
+                   help="Weight scale applied to adaptive top-up rows (0..1)")
     p.add_argument("--rebuild-cache", action="store_true",
                    help="Force rebuild OOS cache for selected symbols/context")
     return p.parse_args()
@@ -674,6 +952,11 @@ def search_policies_with_args(d: pd.DataFrame, args: argparse.Namespace) -> pd.D
                                             long_only=long_only,
                                             risk_min_bps=risk_min,
                                             max_per_ts=max_per_ts,
+                                            min_trades_per_month_hard=int(args.min_monthly_trades_hard),
+                                            shock_z_cut=float(args.shock_z_cut),
+                                            shock_p_boost=float(args.shock_p_boost),
+                                            shock_meta_boost=float(args.shock_meta_boost),
+                                            topup_score_scale=float(args.topup_score_scale),
                                         )
                                         if r is None:
                                             continue
@@ -683,22 +966,53 @@ def search_policies_with_args(d: pd.DataFrame, args: argparse.Namespace) -> pd.D
     return pd.DataFrame(results)
 
 
-def _monthly_breakdown_for_policy(d: pd.DataFrame, row: pd.Series) -> pd.DataFrame:
+def _monthly_breakdown_for_policy(
+    d: pd.DataFrame,
+    row: pd.Series,
+    min_trades_per_month_hard: int = 0,
+    shock_z_cut: float = 0.0,
+    shock_p_boost: float = 0.0,
+    shock_meta_boost: float = 0.0,
+    topup_score_scale: float = 1.0,
+) -> pd.DataFrame:
     symbols = tuple(str(row["symbols"]).split(","))
     session = None if row["session"] == "ALL" else str(row["session"])
     regime = None if row["regime"] == "ALL" else str(row["regime"])
-    x = _apply_policy_and_allocate(
-        d=d,
-        top_pct=float(row["top_pct"]),
-        symbols=symbols,
-        session=session,
-        regime=regime,
-        p_min=float(row["p_min"]),
-        meta_min=float(row["meta_min"]),
-        long_only=bool(row["long_only"]),
-        risk_min_bps=float(row["risk_min_bps"]),
-        max_per_ts=int(row["max_per_ts"]),
-    )
+    if min_trades_per_month_hard > 0:
+        x = _apply_policy_with_adaptive_pacing(
+            d=d,
+            top_pct=float(row["top_pct"]),
+            symbols=symbols,
+            session=session,
+            regime=regime,
+            p_min=float(row["p_min"]),
+            meta_min=float(row["meta_min"]),
+            long_only=bool(row["long_only"]),
+            risk_min_bps=float(row["risk_min_bps"]),
+            max_per_ts=int(row["max_per_ts"]),
+            min_trades_per_month_hard=min_trades_per_month_hard,
+            shock_z_cut=shock_z_cut,
+            shock_p_boost=shock_p_boost,
+            shock_meta_boost=shock_meta_boost,
+            topup_weight_scale=topup_score_scale,
+        )
+    else:
+        x = _apply_policy_and_allocate(
+            d=d,
+            top_pct=float(row["top_pct"]),
+            symbols=symbols,
+            session=session,
+            regime=regime,
+            p_min=float(row["p_min"]),
+            meta_min=float(row["meta_min"]),
+            long_only=bool(row["long_only"]),
+            risk_min_bps=float(row["risk_min_bps"]),
+            max_per_ts=int(row["max_per_ts"]),
+            min_trades_per_month_hard=0,
+            shock_z_cut=shock_z_cut,
+            shock_p_boost=shock_p_boost,
+            shock_meta_boost=shock_meta_boost,
+        )
     if x.empty:
         return pd.DataFrame()
     out = x.groupby("month").agg(
@@ -755,7 +1069,15 @@ def main() -> None:
     best_overall = policies.sort_values("mean_monthly_total_r", ascending=False).head(25)
     best_robust = robust.head(25)
     chosen = best_robust.iloc[0] if not best_robust.empty else best_overall.iloc[0]
-    monthly = _monthly_breakdown_for_policy(oos, chosen)
+    monthly = _monthly_breakdown_for_policy(
+        oos,
+        chosen,
+        min_trades_per_month_hard=int(args.min_monthly_trades_hard),
+        shock_z_cut=float(args.shock_z_cut),
+        shock_p_boost=float(args.shock_p_boost),
+        shock_meta_boost=float(args.shock_meta_boost),
+        topup_score_scale=float(args.topup_score_scale),
+    )
 
     if len(monthly) >= 10:
         last10 = monthly.tail(10)
@@ -777,6 +1099,11 @@ def main() -> None:
         "best_overall_monthly_r": ceiling,
         "best_robust_monthly_r": robust_ceiling,
         "min_monthly_trades_constraint": float(args.min_monthly_trades),
+        "min_monthly_trades_hard": int(args.min_monthly_trades_hard),
+        "shock_z_cut": float(args.shock_z_cut),
+        "shock_p_boost": float(args.shock_p_boost),
+        "shock_meta_boost": float(args.shock_meta_boost),
+        "topup_score_scale": float(args.topup_score_scale),
         "best_overall": best_overall.to_dict("records"),
         "best_robust": best_robust.to_dict("records"),
         "selected_policy_for_monthly_view": chosen.to_dict(),
@@ -796,6 +1123,8 @@ def main() -> None:
         f"- Context symbols: **{', '.join(usable_context)}**",
         f"- Policies tested: **{len(policies):,}**",
         f"- Min monthly trades constraint (robust): **{float(args.min_monthly_trades):.1f}**",
+        f"- Adaptive hard pacing target (per month): **{int(args.min_monthly_trades_hard)}**",
+        f"- Adaptive top-up weight scale: **{float(args.topup_score_scale):.2f}**",
         f"- Best monthly R (overall): **{ceiling:+.2f}**",
         f"- Best monthly R (robust): **{robust_ceiling:+.2f}**",
         "",
