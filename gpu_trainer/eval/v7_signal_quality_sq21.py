@@ -26,6 +26,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
+from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.preprocessing import StandardScaler
 
 from gpu_trainer.eval.v7_signal_audit_augmented import (
     DATA_CACHE_DIR,
@@ -91,13 +93,22 @@ def _discover_cached_symbols() -> list[str]:
     return sorted(set(out))
 
 
-def _cache_path(symbols: list[str], context_symbols: list[str]) -> Path:
+def _cache_path(
+    symbols: list[str],
+    context_symbols: list[str],
+    model_family: str,
+    sq3_seq_weight: float,
+    sq3_seq_window: int,
+) -> Path:
     token = "|".join(
         [
             ",".join(sorted(set(symbols))),
             ",".join(sorted(set(context_symbols))),
             f"cost={COST_BPS:.2f}",
-            "sq21-intel-moe-v1",
+            f"model={model_family}",
+            f"sq3w={float(sq3_seq_weight):.3f}",
+            f"sq3win={int(sq3_seq_window)}",
+            "sq21-intel-moe-v2",
         ]
     )
     key = hashlib.sha1(token.encode("utf-8")).hexdigest()[:16]
@@ -366,7 +377,32 @@ def _predict_regime_moe(
     return p_out, mag_out, expert_disp, router_conf
 
 
-def collect_oos_predictions(symbol: str, df: pd.DataFrame, context: pd.DataFrame) -> pd.DataFrame:
+def _seq_expand(X: np.ndarray, seq_window: int) -> np.ndarray:
+    w = max(1, int(seq_window))
+    if w <= 1:
+        return np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+    base = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    lags = sorted({1, 2, 4, 8, w})
+    parts = [base]
+    for lag in lags:
+        if lag <= 0:
+            continue
+        shifted = np.vstack([np.zeros((lag, base.shape[1])), base[:-lag]])
+        parts.append(shifted)
+        parts.append(base - shifted)
+    out = np.column_stack(parts)
+    return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def collect_oos_predictions(
+    symbol: str,
+    df: pd.DataFrame,
+    context: pd.DataFrame,
+    use_sq3: bool = False,
+    seq_weight: float = 0.55,
+    seq_window: int = 12,
+) -> pd.DataFrame:
     feats = build_sq21_features(symbol, df, context)
     targs = build_targets(df)
     y_ret = targs["ret_60m"].to_numpy()
@@ -375,10 +411,12 @@ def collect_oos_predictions(symbol: str, df: pd.DataFrame, context: pd.DataFrame
     feat_warmup = feats.notna().sum(axis=1)
     valid_from = max(int((feat_warmup > 14).idxmax()), 320)
 
-    X = feats.iloc[valid_from:].to_numpy(dtype="float64")
+    X_base = feats.iloc[valid_from:].to_numpy(dtype="float64")
     y_ret = y_ret[valid_from:]
     y_sign = y_sign[valid_from:]
     ts = df["timestamp"].to_numpy()[valid_from:]
+    X_seq = _seq_expand(X_base, seq_window=seq_window) if use_sq3 else np.empty((len(X_base), 0))
+    X = X_base
 
     close = df["close"].astype("float64").to_numpy()[valid_from:]
     logret = np.log(pd.Series(close)).diff()
@@ -396,6 +434,8 @@ def collect_oos_predictions(symbol: str, df: pd.DataFrame, context: pd.DataFrame
     rows: list[dict] = []
     for fold, (tlo, thi, slo, shi) in enumerate(folds):
         X_tr, X_te = X[tlo:thi], X[slo:shi]
+        Xs_tr = X_seq[tlo:thi] if use_sq3 else np.empty((thi - tlo, 0))
+        Xs_te = X_seq[slo:shi] if use_sq3 else np.empty((shi - slo, 0))
         yret_tr, yret_te = y_ret[tlo:thi], y_ret[slo:shi]
         ysgn_tr = y_sign[tlo:thi]
 
@@ -446,6 +486,55 @@ def collect_oos_predictions(symbol: str, df: pd.DataFrame, context: pd.DataFrame
             experts=experts,
             router=router,
         )
+        if use_sq3 and Xs_tr.shape[1] > 0:
+            seq_good = good.copy()
+            p_seq_tr = p_up_tr.copy()
+            p_seq_te = p_up_te.copy()
+            m_seq_tr = mag_tr.copy()
+            m_seq_te = mag_te.copy()
+            if (
+                int(seq_good.sum()) > 1800
+                and np.unique(ysgn_tr[seq_good]).size >= 2
+            ):
+                try:
+                    scaler = StandardScaler()
+                    Xn_tr = scaler.fit_transform(Xs_tr[seq_good])
+                    Xn_te = scaler.transform(Xs_te)
+
+                    s_clf = LogisticRegression(
+                        C=0.7,
+                        max_iter=500,
+                        solver="lbfgs",
+                    )
+                    s_clf.fit(Xn_tr, ysgn_tr[seq_good])
+                    p_seq_tr[seq_good] = s_clf.predict_proba(Xn_tr)[:, 1]
+                    p_seq_te = s_clf.predict_proba(Xn_te)[:, 1]
+
+                    s_reg = Ridge(alpha=2.0)
+                    s_reg.fit(Xn_tr, np.abs(yret_tr[seq_good]))
+                    m_seq_tr[seq_good] = np.clip(s_reg.predict(Xn_tr), 0.0, None)
+                    m_seq_te = np.clip(s_reg.predict(Xn_te), 0.0, None)
+                except Exception:
+                    p_seq_tr = p_up_tr.copy()
+                    p_seq_te = p_up_te.copy()
+                    m_seq_tr = mag_tr.copy()
+                    m_seq_te = mag_te.copy()
+
+            w = float(np.clip(seq_weight, 0.0, 0.90))
+            base_ptr = p_up_tr.copy()
+            base_pte = p_up_te.copy()
+            p_up_tr = ((1.0 - w) * p_up_tr) + (w * p_seq_tr)
+            p_up_te = ((1.0 - w) * p_up_te) + (w * p_seq_te)
+            mag_tr = np.clip(((1.0 - w) * mag_tr) + (w * m_seq_tr), 0.0, None)
+            mag_te = np.clip(((1.0 - w) * mag_te) + (w * m_seq_te), 0.0, None)
+
+            seq_conf_tr = np.clip(np.abs(p_seq_tr - 0.5) * 2.0, 0.0, 1.0)
+            seq_conf_te = np.clip(np.abs(p_seq_te - 0.5) * 2.0, 0.0, 1.0)
+            router_conf_tr = np.clip(0.70 * router_conf_tr + 0.30 * seq_conf_tr, 0.0, 1.0)
+            router_conf_te = np.clip(0.70 * router_conf_te + 0.30 * seq_conf_te, 0.0, 1.0)
+            p_disp_tr = np.sqrt(np.clip((p_disp_tr ** 2) + ((base_ptr - p_seq_tr) ** 2), 0.0, None))
+            p_disp_te = np.sqrt(np.clip((p_disp_te ** 2) + ((base_pte - p_seq_te) ** 2), 0.0, None))
+
         edge_tr = (2.0 * p_up_tr - 1.0) * mag_tr
         edge_te = (2.0 * p_up_te - 1.0) * mag_te
 
@@ -558,14 +647,40 @@ def collect_oos_predictions(symbol: str, df: pd.DataFrame, context: pd.DataFrame
     return pd.DataFrame(rows)
 
 
+def collect_oos_predictions_sq3(
+    symbol: str,
+    df: pd.DataFrame,
+    context: pd.DataFrame,
+    seq_weight: float = 0.55,
+    seq_window: int = 12,
+) -> pd.DataFrame:
+    return collect_oos_predictions(
+        symbol=symbol,
+        df=df,
+        context=context,
+        use_sq3=True,
+        seq_weight=seq_weight,
+        seq_window=seq_window,
+    )
+
+
 def ensure_oos_cache(
     symbols: list[str],
     context_symbols: list[str],
     rebuild_cache: bool = False,
     min_bars: int = 20000,
+    model_family: str = "sq21",
+    sq3_seq_weight: float = 0.55,
+    sq3_seq_window: int = 12,
 ) -> tuple[pd.DataFrame, list[str]]:
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    cache_path = _cache_path(symbols, context_symbols)
+    cache_path = _cache_path(
+        symbols=symbols,
+        context_symbols=context_symbols,
+        model_family=model_family,
+        sq3_seq_weight=sq3_seq_weight,
+        sq3_seq_window=sq3_seq_window,
+    )
     if cache_path.exists() and not rebuild_cache:
         return pd.read_parquet(cache_path), sorted(set(context_symbols))
 
@@ -580,9 +695,19 @@ def ensure_oos_cache(
     if context.empty:
         return pd.DataFrame(), []
 
+    use_sq3 = str(model_family).lower().startswith("sq3")
     frames = []
     for sym in usable_symbols:
-        s = collect_oos_predictions(sym, raw_by_symbol[sym], context)
+        if use_sq3:
+            s = collect_oos_predictions_sq3(
+                sym,
+                raw_by_symbol[sym],
+                context,
+                seq_weight=sq3_seq_weight,
+                seq_window=sq3_seq_window,
+            )
+        else:
+            s = collect_oos_predictions(sym, raw_by_symbol[sym], context)
         if not s.empty:
             frames.append(s)
     if not frames:
@@ -1035,6 +1160,12 @@ def eval_policy(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="V7 SQ2.1 macro + allocator WF search")
+    p.add_argument("--model-family", type=str, default="sq21", choices=["sq21", "sq3"],
+                   help="Model family for OOS generation: sq21 baseline or sq3 sequence blend")
+    p.add_argument("--sq3-seq-weight", type=float, default=0.55,
+                   help="SQ3 only: blend weight for sequence model predictions (0..0.9)")
+    p.add_argument("--sq3-seq-window", type=int, default=12,
+                   help="SQ3 only: lag window used for sequence feature expansion")
     p.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS, help="Symbol list to evaluate")
     p.add_argument("--context-symbols", nargs="+", default=[],
                    help="Symbols used to build market context (default: same as --symbols)")
@@ -1207,6 +1338,9 @@ def main() -> None:
         context_symbols=context_symbols,
         rebuild_cache=args.rebuild_cache,
         min_bars=args.min_bars,
+        model_family=str(args.model_family),
+        sq3_seq_weight=float(args.sq3_seq_weight),
+        sq3_seq_window=int(args.sq3_seq_window),
     )
     if oos.empty:
         raise RuntimeError("no OOS predictions")
@@ -1259,7 +1393,11 @@ def main() -> None:
     ceiling = float(best_overall["mean_monthly_total_r"].max())
     robust_ceiling = float(best_robust["mean_monthly_total_r"].max()) if not best_robust.empty else 0.0
     payload = {
-        "feature_pack": "sq21-macro-context-meta-allocator",
+        "feature_pack": "sq3-seq-moe-macro-allocator" if str(args.model_family).lower().startswith("sq3")
+        else "sq21-macro-context-meta-allocator",
+        "model_family": str(args.model_family),
+        "sq3_seq_weight": float(args.sq3_seq_weight),
+        "sq3_seq_window": int(args.sq3_seq_window),
         "cost_bps": COST_BPS,
         "oos_rows": int(len(oos)),
         "symbols": sorted(oos["symbol"].unique().tolist()),
@@ -1288,7 +1426,10 @@ def main() -> None:
     lines = [
         "# V7 SQ2.1 Signal Quality Upgrade",
         "",
-        "- Feature pack: **macro context + meta tradeability gate + top-K allocator**",
+        f"- Model family: **{str(args.model_family)}**",
+        f"- Feature pack: **{'SQ3 sequence blend + macro context + meta gate + top-K allocator' if str(args.model_family).lower().startswith('sq3') else 'macro context + meta tradeability gate + top-K allocator'}**",
+        f"- SQ3 sequence weight: **{float(args.sq3_seq_weight):.2f}**",
+        f"- SQ3 sequence window: **{int(args.sq3_seq_window)}**",
         f"- OOS rows: **{len(oos):,}**",
         f"- Active symbols: **{', '.join(sorted(oos['symbol'].unique()))}**",
         f"- Context symbols: **{', '.join(usable_context)}**",
