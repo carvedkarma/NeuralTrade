@@ -477,6 +477,9 @@ class PolicyResult:
     max_per_ts: int
     n: int
     months: int
+    mean_monthly_trades: float
+    median_monthly_trades: float
+    min_monthly_trades: int
     trade_win_rate_pct: float
     weighted_win_rate_pct: float
     mean_net_bps: float
@@ -573,6 +576,7 @@ def eval_policy(
         return None
 
     msum = x.groupby("month")["r_weighted"].sum()
+    mtrades = x.groupby("month")["symbol"].size()
     if len(msum) < 10:
         return None
     fold_avg = x.groupby("fold")["r_weighted"].mean()
@@ -589,6 +593,9 @@ def eval_policy(
         max_per_ts=int(max_per_ts),
         n=int(len(x)),
         months=int(len(msum)),
+        mean_monthly_trades=float(mtrades.mean()),
+        median_monthly_trades=float(mtrades.median()),
+        min_monthly_trades=int(mtrades.min()),
         trade_win_rate_pct=float((x["net"] > 0).mean() * 100),
         weighted_win_rate_pct=float(weighted_win * 100),
         mean_net_bps=float(x["net_bps_weighted"].mean()),
@@ -623,6 +630,10 @@ def parse_args() -> argparse.Namespace:
                    help="Only evaluate long-only policies")
     p.add_argument("--max-symbol-set-size", type=int, default=5,
                    help="Max symbols in subset")
+    p.add_argument("--full-symbol-set-only", action="store_true",
+                   help="Only evaluate the full active symbol set as one basket")
+    p.add_argument("--min-monthly-trades", type=float, default=0.0,
+                   help="Require mean monthly trades >= this value for robust policies")
     p.add_argument("--rebuild-cache", action="store_true",
                    help="Force rebuild OOS cache for selected symbols/context")
     return p.parse_args()
@@ -630,10 +641,13 @@ def parse_args() -> argparse.Namespace:
 
 def search_policies_with_args(d: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
     syms = sorted(d["symbol"].unique())
-    symbol_sets = []
-    max_size = args.max_symbol_set_size if args.max_symbol_set_size > 0 else len(syms)
-    for r in range(1, min(len(syms), max_size) + 1):
-        symbol_sets.extend(itertools.combinations(syms, r))
+    if args.full_symbol_set_only:
+        symbol_sets = [tuple(syms)]
+    else:
+        symbol_sets = []
+        max_size = args.max_symbol_set_size if args.max_symbol_set_size > 0 else len(syms)
+        for r in range(1, min(len(syms), max_size) + 1):
+            symbol_sets.extend(itertools.combinations(syms, r))
 
     sessions: list[str | None] = [None if s == "ALL" else s for s in args.sessions]
     regimes: list[str | None] = [None if r == "ALL" else r for r in args.regimes]
@@ -724,12 +738,14 @@ def main() -> None:
         (policies["months"] >= 10)
         & (policies["n"] >= 300)
         & (policies["fold_min_avg_r"] > 0)
+        & (policies["mean_monthly_trades"] >= float(args.min_monthly_trades))
     ].copy()
     robust["robust_score"] = (
         robust["mean_monthly_total_r"]
         + 1.7 * robust["avg_r_net"]
         + 0.025 * robust["win_month_pct"]
         + 0.01 * robust["weighted_win_rate_pct"]
+        + 0.004 * robust["mean_monthly_trades"]
     )
     robust = robust.sort_values(
         ["robust_score", "mean_monthly_total_r", "avg_r_net"],
@@ -760,6 +776,7 @@ def main() -> None:
         "total_policies": int(len(policies)),
         "best_overall_monthly_r": ceiling,
         "best_robust_monthly_r": robust_ceiling,
+        "min_monthly_trades_constraint": float(args.min_monthly_trades),
         "best_overall": best_overall.to_dict("records"),
         "best_robust": best_robust.to_dict("records"),
         "selected_policy_for_monthly_view": chosen.to_dict(),
@@ -778,13 +795,14 @@ def main() -> None:
         f"- Active symbols: **{', '.join(sorted(oos['symbol'].unique()))}**",
         f"- Context symbols: **{', '.join(usable_context)}**",
         f"- Policies tested: **{len(policies):,}**",
+        f"- Min monthly trades constraint (robust): **{float(args.min_monthly_trades):.1f}**",
         f"- Best monthly R (overall): **{ceiling:+.2f}**",
         f"- Best monthly R (robust): **{robust_ceiling:+.2f}**",
         "",
         "## Top robust policies",
         "",
-        "| top% | symbols | long_only | p_min | meta_min | risk>=bps | max/ts | n | months | trade win% | weighted win% | avg_R | mean monthly R | total R | win-month% | fold min R |",
-        "|---:|---|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| top% | symbols | long_only | p_min | meta_min | risk>=bps | max/ts | n | months | mean mth trades | min mth trades | trade win% | weighted win% | avg_R | mean monthly R | total R | win-month% | fold min R |",
+        "|---:|---|:---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for _, r in best_robust.iterrows():
         lines.append(
@@ -792,6 +810,7 @@ def main() -> None:
             f"{'Y' if bool(r['long_only']) else 'N'} | {r['p_min']:.2f} | {r['meta_min']:.2f} | "
             f"{r['risk_min_bps']:.0f} | {int(r['max_per_ts'])} | "
             f"{int(r['n']):,} | {int(r['months'])} | "
+            f"{r['mean_monthly_trades']:.1f} | {int(r['min_monthly_trades'])} | "
             f"{r['trade_win_rate_pct']:.1f} | {r['weighted_win_rate_pct']:.1f} | "
             f"{r['avg_r_net']:+.3f} | {r['mean_monthly_total_r']:+.2f} | {r['total_r']:+.2f} | "
             f"{r['win_month_pct']:.1f} | {r['fold_min_avg_r']:+.3f} |"
