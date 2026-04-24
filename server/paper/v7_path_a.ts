@@ -1,13 +1,14 @@
 /**
  * V7 Path A Paper-Trading Engine
  *
- * Current runtime policy (V7 "Precision" adaptation):
- *   - Tradeable book: ADA, XRP
- *   - AVAX/SOL/ETH/BTC/BNB excluded from live V7 universe
+ * Current runtime policy (V7 "Precision P2" adaptation):
+ *   - Tradeable book: ADA, ETH, SOL, XRP
+ *   - AVAX/BTC/BNB excluded from live V7 universe
  *   - Selectivity: top 2.0% of |pred| via rolling 30-day quantile per symbol
  *     (warmup: 50 prior samples min before first trade)
  *   - Geometry: fixed 60-minute market exit; NO stop, NO take-profit, NO trail
- *   - Volatility floor: only enter when realized vol_16 >= 100 bps
+ *   - LONG-only deployment (ignore SHORT predictions)
+ *   - Volatility floor: only enter when realized vol_16 >= 80 bps
  *   - One live position per symbol (no stacking)
  *   - Per-symbol performance gate:
  *       recent net mean/cumulative <= 0 at assumed costs -> block new entries
@@ -38,14 +39,15 @@ import type { GPUPrediction } from "../ml-predictor";
 import type { PaperPosition } from "@shared/schema";
 
 // ---- Config (locked) ----
-export const V7_TRADEABLE = ["ADAUSDT", "XRPUSDT"] as const;
+export const V7_TRADEABLE = ["ADAUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"] as const;
 export const V7_PROBATIONARY = [] as const;
-export const V7_DISABLED = ["AVAXUSDT", "SOLUSDT", "ETHUSDT", "BTCUSDT", "BNBUSDT"] as const;
+export const V7_DISABLED = ["AVAXUSDT", "BTCUSDT", "BNBUSDT"] as const;
 export const V7_UNIVERSE = [...V7_TRADEABLE, ...V7_PROBATIONARY] as const;
 export const V7_HOLD_BARS = 4;                       // 60 minutes / 15 min
 export const V7_HOLD_MS = V7_HOLD_BARS * 15 * 60 * 1000;
 export const V7_TOP_FRACTION = 0.02;                 // top 2.0%
-export const V7_MIN_VOL16_BPS = 100;                 // precision gate
+export const V7_MIN_VOL16_BPS = 80;                  // precision gate
+export const V7_LONG_ONLY = true;
 export const V7_ROLLING_WINDOW_DAYS = 30;
 export const V7_ROLLING_WINDOW_MS = V7_ROLLING_WINDOW_DAYS * 86400 * 1000;
 export const V7_MIN_BUFFER_SAMPLES = 50;             // warm-up gate
@@ -410,6 +412,7 @@ export async function onV7Prediction(pred: GPUPrediction): Promise<void> {
   if (!state.enabled) return;
   if (state.killed[sym]) return;
   if (state.perfGate[sym]?.blocked) return;
+  if (V7_LONG_ONLY && pred.returnH2 <= 0) return;
 
   const threshold = rollingThreshold(sym, V7_TOP_FRACTION);
   if (threshold === null) return;          // warm-up
@@ -433,8 +436,8 @@ export async function onV7Prediction(pred: GPUPrediction): Promise<void> {
     (p.source === V7_SOURCE_TRADEABLE || p.source === V7_SOURCE_PROBATIONARY));
   if (hasOpen) return;
 
-  const side: "LONG" | "SHORT" = pred.returnH2 > 0 ? "LONG" : "SHORT";
-  await openV7Position(sym, side, c.close, c.ts, predAbs);
+  if (pred.returnH2 <= 0) return; // Precision P2 is long-only
+  await openV7Position(sym, "LONG", c.close, c.ts, predAbs);
 }
 
 /** Background tick: check for 60-min exits. Called every ~30s. */
@@ -571,11 +574,11 @@ export async function getV7Performance(lookback: number = 200) {
     };
   }
 
-  // Back-test reference (V7 precision P1 offline run):
-  // tradeable book mean gross +66.46 bps, net@6 +60.46 bps, net@8 +58.46 bps
+  // Back-test reference (V7 precision P2 offline run):
+  // tradeable book mean gross +48.33 bps, net@6 +42.33 bps, net@8 +40.33 bps
   const tradeableLive = bookFor(V7_TRADEABLE);
   const probationaryLive = bookFor(V7_PROBATIONARY);
-  const refTradeable = { gross_mean_bps: 66.46, net_mean_bps_6: 60.46 };
+  const refTradeable = { gross_mean_bps: 48.33, net_mean_bps_6: 42.33 };
   const refProbationary = { gross_mean_bps: 0.0, net_mean_bps_6: 0.0 };
 
   function divergence(live: any, ref: any) {

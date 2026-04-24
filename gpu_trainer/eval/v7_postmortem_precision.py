@@ -177,6 +177,15 @@ def main() -> None:
     ].copy()
     p1_stats = _slice_stats(p1)
 
+    # Precision P2: strongest robust slice from broad search
+    # (LONG-only, 4-symbol subset, vol floor 80 bps).
+    p2 = current[
+        current["symbol"].isin(["ADAUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"])
+        & (current["risk_bps"] >= 80)
+        & (current["direction"] > 0)
+    ].copy()
+    p2_stats = _slice_stats(p2)
+
     drag_by_symbol = (
         current.groupby("symbol")
         .agg(
@@ -198,10 +207,16 @@ def main() -> None:
         "cost_bps": COST_BPS,
         "current_e2_stats": asdict(current_stats),
         "precision_p1_stats": asdict(p1_stats),
+        "precision_p2_stats": asdict(p2_stats),
         "delta_p1_minus_current": {
             "mean_net_bps": p1_stats.mean_net_bps - current_stats.mean_net_bps,
             "avg_R_net": p1_stats.avg_r_net - current_stats.avg_r_net,
             "win_month_pct": p1_stats.win_month_pct - current_stats.win_month_pct,
+        },
+        "delta_p2_minus_current": {
+            "mean_net_bps": p2_stats.mean_net_bps - current_stats.mean_net_bps,
+            "avg_R_net": p2_stats.avg_r_net - current_stats.avg_r_net,
+            "win_month_pct": p2_stats.win_month_pct - current_stats.win_month_pct,
         },
         "r_drag_by_symbol": drag_by_symbol.to_dict("records"),
         "top_robust_positive_slices": top_robust,
@@ -215,6 +230,17 @@ def main() -> None:
             "session_filter": "ALL",
             "regime_filter": "ALL",
         },
+        "precision_p2_policy_definition": {
+            "symbols": ["ADAUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"],
+            "top_pct": 2.0,
+            "hold_minutes": 60,
+            "direction": "LONG_ONLY",
+            "risk_floor_bps": 80,
+            "history_gate": True,
+            "cell_filter": True,
+            "session_filter": "ALL",
+            "regime_filter": "ALL",
+        }
     }
 
     OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
@@ -235,6 +261,9 @@ def main() -> None:
         f"- Precision P1 avg net bps: {p1_stats.mean_net_bps:+.2f}",
         f"- Precision P1 avg net R: {p1_stats.avg_r_net:+.3f}",
         f"- Delta avg net R: {p1_stats.avg_r_net - current_stats.avg_r_net:+.3f}",
+        f"- Precision P2 avg net bps: {p2_stats.mean_net_bps:+.2f}",
+        f"- Precision P2 avg net R: {p2_stats.avg_r_net:+.3f}",
+        f"- Precision P2 mean monthly total R: {p2_stats.mean_monthly_total_r:+.2f}",
         "",
         "## Precision P1 definition",
         "",
@@ -242,6 +271,15 @@ def main() -> None:
         "- selectivity: top 2% |pred|",
         "- hold: 60 minutes",
         "- risk floor: vol_16 >= 100 bps",
+        "- keep history gate + cell filter",
+        "",
+        "## Precision P2 definition (runtime best robust)",
+        "",
+        "- symbols: ADAUSDT + ETHUSDT + SOLUSDT + XRPUSDT",
+        "- selectivity: top 2% |pred|",
+        "- hold: 60 minutes",
+        "- direction: LONG-only",
+        "- risk floor: vol_16 >= 80 bps",
         "- keep history gate + cell filter",
         "",
         "## Worst R-drag symbols in current E2",
