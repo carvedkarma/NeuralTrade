@@ -1,14 +1,16 @@
 /**
  * V7 Path A Paper-Trading Engine
  *
- * Locked spec (per user 2026-04-19):
- *   - Tradeable book: ADA, XRP, AVAX (equal notional)
- *   - Probationary bucket: SOL (separate roll-up, no kill-switch participation in book metric)
- *   - ETH disabled (not subscribed)
- *   - Selectivity: top 0.5% of |pred| via rolling 30-day quantile per symbol
+ * Current runtime policy (V7 "Brilliant" adaptation):
+ *   - Tradeable book: ADA, XRP, AVAX, SOL, ETH
+ *   - BTC/BNB excluded from V7 universe (offline diagnostics showed weak edge)
+ *   - Selectivity: top 2.0% of |pred| via rolling 30-day quantile per symbol
  *     (warmup: 50 prior samples min before first trade)
- *   - Geometry: 120-minute fixed market exit; NO stop, NO take-profit, NO trail
- *   - Per-symbol kill switch at cumulative net < -1,500 bps; MANUAL RESUME ONLY
+ *   - Geometry: fixed 60-minute market exit; NO stop, NO take-profit, NO trail
+ *   - One live position per symbol (no stacking)
+ *   - Per-symbol performance gate:
+ *       recent net mean/cumulative <= 0 at assumed costs -> block new entries
+ *   - Deep loss kill-switch remains as a hard backstop (manual resume required)
  *   - Default DISABLED on boot. Operator must POST /api/v7/enable to start.
  *
  * Signal source: hooks into updateGPUPrediction() in ml-predictor.ts.
@@ -35,23 +37,35 @@ import type { GPUPrediction } from "../ml-predictor";
 import type { PaperPosition } from "@shared/schema";
 
 // ---- Config (locked) ----
-export const V7_TRADEABLE = ["ADAUSDT", "XRPUSDT", "AVAXUSDT"] as const;
-export const V7_PROBATIONARY = ["SOLUSDT"] as const;
-export const V7_DISABLED = ["ETHUSDT"] as const;
+export const V7_TRADEABLE = ["ADAUSDT", "XRPUSDT", "AVAXUSDT", "SOLUSDT", "ETHUSDT"] as const;
+export const V7_PROBATIONARY = [] as const;
+export const V7_DISABLED = ["BTCUSDT", "BNBUSDT"] as const;
 export const V7_UNIVERSE = [...V7_TRADEABLE, ...V7_PROBATIONARY] as const;
-export const V7_HOLD_BARS = 8;                       // 120 minutes / 15 min
+export const V7_HOLD_BARS = 4;                       // 60 minutes / 15 min
 export const V7_HOLD_MS = V7_HOLD_BARS * 15 * 60 * 1000;
-export const V7_TOP_FRACTION = 0.005;                // top 0.5%
+export const V7_TOP_FRACTION = 0.02;                 // top 2.0%
 export const V7_ROLLING_WINDOW_DAYS = 30;
 export const V7_ROLLING_WINDOW_MS = V7_ROLLING_WINDOW_DAYS * 86400 * 1000;
 export const V7_MIN_BUFFER_SAMPLES = 50;             // warm-up gate
 export const V7_KILL_THRESHOLD_BPS = -1500;          // per-symbol cum net @6bps
 export const V7_KILL_COST_BPS = 6;                   // assumed cost for kill-switch evaluation
+export const V7_PERF_GATE_COST_BPS = 8;              // mirrors strict offline gate
+export const V7_PERF_GATE_MIN_TRADES = 20;           // wait for enough samples
+export const V7_PERF_GATE_LOOKBACK_TRADES = 120;
 export const V7_SOURCE_TRADEABLE = "v7_path_a";
 export const V7_SOURCE_PROBATIONARY = "v7_path_a_prob";
 const STATE_PATH = path.resolve(".local/v7_path_a_state.json");
 
 // ---- State (persisted) ----
+interface V7PerfGateState {
+  recentNetBps: number[];
+  rollingMeanNetBps: number;
+  rollingCumNetBps: number;
+  blocked: boolean;
+  updatedTs: number;
+  reason?: string;
+}
+
 interface V7State {
   enabled: boolean;
   notionalUsd: number;
@@ -63,6 +77,7 @@ interface V7State {
   // kill-switch net calculation only counts trades since the active baseline.
   closedAtBaseline: Record<string, number>;
   killed: Record<string, { ts: number; cumGrossBps: number; cumNetBps: number; reason: string } | null>;
+  perfGate: Record<string, V7PerfGateState>;
   thresholdSnapshots: Array<{ symbol: string; ts: number; threshold: number; n: number }>;
 }
 
@@ -73,6 +88,7 @@ let state: V7State = {
   cumGrossBps: {},
   closedAtBaseline: {},
   killed: {},
+  perfGate: {},
   thresholdSnapshots: [],
 };
 
@@ -102,8 +118,20 @@ async function hydrate(): Promise<void> {
       cumGrossBps: loaded.cumGrossBps ?? {},
       closedAtBaseline: loaded.closedAtBaseline ?? {},
       killed: loaded.killed ?? {},
+      perfGate: loaded.perfGate ?? {},
       thresholdSnapshots: loaded.thresholdSnapshots ?? [],
     };
+    for (const sym of V7_UNIVERSE) {
+      if (!state.perfGate[sym]) {
+        state.perfGate[sym] = {
+          recentNetBps: [],
+          rollingMeanNetBps: 0,
+          rollingCumNetBps: 0,
+          blocked: false,
+          updatedTs: 0,
+        };
+      }
+    }
     // Trim buffers to current 30d window
     const cutoff = Date.now() - V7_ROLLING_WINDOW_MS;
     for (const sym of Object.keys(state.predBuffer)) {
@@ -116,6 +144,39 @@ async function hydrate(): Promise<void> {
   } catch (e: any) {
     if (e.code !== "ENOENT") console.error("[V7] hydrate failed:", e);
     console.log("[V7] starting with fresh state");
+  }
+}
+
+function updatePerfGate(symbol: string): void {
+  const perf = state.perfGate[symbol] ?? {
+    recentNetBps: [],
+    rollingMeanNetBps: 0,
+    rollingCumNetBps: 0,
+    blocked: false,
+    updatedTs: 0,
+  };
+  if (perf.recentNetBps.length > V7_PERF_GATE_LOOKBACK_TRADES) {
+    perf.recentNetBps = perf.recentNetBps.slice(-V7_PERF_GATE_LOOKBACK_TRADES);
+  }
+  const n = perf.recentNetBps.length;
+  const sum = perf.recentNetBps.reduce((a, b) => a + b, 0);
+  const mean = n > 0 ? sum / n : 0;
+  const shouldBlock = n >= V7_PERF_GATE_MIN_TRADES && (mean <= 0 || sum <= 0);
+  const changed = perf.blocked !== shouldBlock;
+  perf.rollingMeanNetBps = mean;
+  perf.rollingCumNetBps = sum;
+  perf.blocked = shouldBlock;
+  perf.updatedTs = Date.now();
+  perf.reason = shouldBlock
+    ? `Perf gate: n=${n}, mean=${mean.toFixed(2)}bps, cum=${sum.toFixed(1)}bps <= 0`
+    : undefined;
+  state.perfGate[symbol] = perf;
+  if (changed) {
+    if (shouldBlock) {
+      console.warn(`[V7] ⚠️ PERF GATE BLOCKED ${symbol}: n=${n} mean=${mean.toFixed(2)}bps cum=${sum.toFixed(1)}bps`);
+    } else {
+      console.log(`[V7] ✅ PERF GATE UNBLOCKED ${symbol}: n=${n} mean=${mean.toFixed(2)}bps cum=${sum.toFixed(1)}bps`);
+    }
   }
 }
 
@@ -268,6 +329,17 @@ async function closeV7Position(pos: PaperPosition, exitPrice: number, exitTs: nu
   });
 
   state.cumGrossBps[pos.symbol] = (state.cumGrossBps[pos.symbol] || 0) + grossBps;
+  const netForGate = grossBps - V7_PERF_GATE_COST_BPS;
+  const perf = state.perfGate[pos.symbol] ?? {
+    recentNetBps: [],
+    rollingMeanNetBps: 0,
+    rollingCumNetBps: 0,
+    blocked: false,
+    updatedTs: 0,
+  };
+  perf.recentNetBps.push(netForGate);
+  state.perfGate[pos.symbol] = perf;
+  updatePerfGate(pos.symbol);
   // Kill-switch evaluated on cumulative NET at the assumed cost level. We
   // count only trades closed since the active baseline (boot or last manual
   // resume) so a resumed symbol gets a fresh probationary window rather than
@@ -308,6 +380,7 @@ export async function onV7Prediction(pred: GPUPrediction): Promise<void> {
 
   if (!state.enabled) return;
   if (state.killed[sym]) return;
+  if (state.perfGate[sym]?.blocked) return;
 
   const threshold = rollingThreshold(sym, V7_TOP_FRACTION);
   if (threshold === null) return;          // warm-up
@@ -322,19 +395,17 @@ export async function onV7Prediction(pred: GPUPrediction): Promise<void> {
     console.warn(`[V7] no candle for ${sym} at/before ${pred.timestamp}, skipping signal`);
     return;
   }
-  // De-dupe: don't open if we already have an OPEN V7 position for this symbol
-  // at this candle ts
+  // No stacking: at most one OPEN V7 position per symbol.
   const existing = await storage.getPositionsBySymbol(sym, "OPEN", 10);
-  const dupe = existing.find(p =>
-    (p.source === V7_SOURCE_TRADEABLE || p.source === V7_SOURCE_PROBATIONARY) &&
-    p.entryTs === c.ts);
-  if (dupe) return;
+  const hasOpen = existing.some(p =>
+    (p.source === V7_SOURCE_TRADEABLE || p.source === V7_SOURCE_PROBATIONARY));
+  if (hasOpen) return;
 
   const side: "LONG" | "SHORT" = pred.returnH2 > 0 ? "LONG" : "SHORT";
   await openV7Position(sym, side, c.close, c.ts, predAbs);
 }
 
-/** Background tick: check for 120-min exits. Called every ~30s. */
+/** Background tick: check for 60-min exits. Called every ~30s. */
 export async function tickV7(): Promise<void> {
   const open = await storage.getPositions("OPEN", 1000);
   const v7Open = open.filter(p => p.source === V7_SOURCE_TRADEABLE || p.source === V7_SOURCE_PROBATIONARY);
@@ -345,7 +416,7 @@ export async function tickV7(): Promise<void> {
     // Find the candle closest to (entryTs + V7_HOLD_MS)
     const c = (await candleAt(pos.symbol, exitDueTs)) ?? (await latestCandle(pos.symbol));
     if (!c) continue;
-    await closeV7Position(pos, c.close, c.ts, "TIME_EXIT_120M");
+    await closeV7Position(pos, c.close, c.ts, "TIME_EXIT_60M");
   }
 }
 
@@ -381,6 +452,9 @@ export function getV7State() {
       minBufferSamples: V7_MIN_BUFFER_SAMPLES,
       killThresholdBps: V7_KILL_THRESHOLD_BPS,
       killCostBps: V7_KILL_COST_BPS,
+      perfGateCostBps: V7_PERF_GATE_COST_BPS,
+      perfGateMinTrades: V7_PERF_GATE_MIN_TRADES,
+      perfGateLookbackTrades: V7_PERF_GATE_LOOKBACK_TRADES,
     },
     bufferSizes: Object.fromEntries(
       [...V7_UNIVERSE].map(s => [s, (state.predBuffer[s] || []).length])
@@ -390,6 +464,9 @@ export function getV7State() {
     ),
     cumGrossBps: { ...state.cumGrossBps },
     killed: { ...state.killed },
+    perfGate: Object.fromEntries(
+      [...V7_UNIVERSE].map(s => [s, state.perfGate[s] ?? null])
+    ),
     recentSnapshots: state.thresholdSnapshots.slice(-20),
   };
 }
@@ -410,8 +487,9 @@ export async function manualResume(symbol: string): Promise<{ resumed: boolean; 
   if (!(V7_UNIVERSE as readonly string[]).includes(symbol)) {
     return { resumed: false, reason: "symbol not in V7 universe" };
   }
-  if (!state.killed[symbol]) {
-    return { resumed: false, reason: "symbol is not killed" };
+  const perfBlocked = state.perfGate[symbol]?.blocked === true;
+  if (!state.killed[symbol] && !perfBlocked) {
+    return { resumed: false, reason: "symbol is not blocked" };
   }
   // Reset the kill-switch counters so the symbol gets a fresh probationary
   // window: zero out cumGrossBps and rebase the closed-trade count to "now"
@@ -420,8 +498,15 @@ export async function manualResume(symbol: string): Promise<{ resumed: boolean; 
   state.cumGrossBps[symbol] = 0;
   state.closedAtBaseline[symbol] = closedNow;
   state.killed[symbol] = null;
+  state.perfGate[symbol] = {
+    recentNetBps: [],
+    rollingMeanNetBps: 0,
+    rollingCumNetBps: 0,
+    blocked: false,
+    updatedTs: Date.now(),
+  };
   await persist();
-  console.log(`[V7] ✅ MANUAL RESUME for ${symbol} (baseline reset @ ${closedNow} closed trades)`);
+  console.log(`[V7] ✅ MANUAL RESUME for ${symbol} (baseline reset @ ${closedNow} closed trades, perf gate reset)`);
   return { resumed: true };
 }
 
@@ -453,13 +538,12 @@ export async function getV7Performance(lookback: number = 200) {
     };
   }
 
-  // Back-test reference (rolling-OOS):
-  // tradeable book mean gross +30.01 bps, net@6 +24.01 bps
-  // probationary (SOL alone) mean gross +27.37 bps, net@6 +21.37 bps
+  // Back-test reference (V7 brilliant E2 offline run):
+  // tradeable book mean gross +9.10 bps, net@6 +3.10 bps, net@8 +1.10 bps
   const tradeableLive = bookFor(V7_TRADEABLE);
   const probationaryLive = bookFor(V7_PROBATIONARY);
-  const refTradeable = { gross_mean_bps: 30.01, net_mean_bps_6: 24.01 };
-  const refProbationary = { gross_mean_bps: 27.37, net_mean_bps_6: 21.37 };
+  const refTradeable = { gross_mean_bps: 9.10, net_mean_bps_6: 3.10 };
+  const refProbationary = { gross_mean_bps: 0.0, net_mean_bps_6: 0.0 };
 
   function divergence(live: any, ref: any) {
     if (!live.n) return null;
