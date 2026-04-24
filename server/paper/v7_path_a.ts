@@ -1,12 +1,13 @@
 /**
  * V7 Path A Paper-Trading Engine
  *
- * Current runtime policy (V7 "Brilliant" adaptation):
- *   - Tradeable book: ADA, XRP, AVAX, SOL, ETH
- *   - BTC/BNB excluded from V7 universe (offline diagnostics showed weak edge)
+ * Current runtime policy (V7 "Precision" adaptation):
+ *   - Tradeable book: ADA, XRP
+ *   - AVAX/SOL/ETH/BTC/BNB excluded from live V7 universe
  *   - Selectivity: top 2.0% of |pred| via rolling 30-day quantile per symbol
  *     (warmup: 50 prior samples min before first trade)
  *   - Geometry: fixed 60-minute market exit; NO stop, NO take-profit, NO trail
+ *   - Volatility floor: only enter when realized vol_16 >= 100 bps
  *   - One live position per symbol (no stacking)
  *   - Per-symbol performance gate:
  *       recent net mean/cumulative <= 0 at assumed costs -> block new entries
@@ -37,13 +38,14 @@ import type { GPUPrediction } from "../ml-predictor";
 import type { PaperPosition } from "@shared/schema";
 
 // ---- Config (locked) ----
-export const V7_TRADEABLE = ["ADAUSDT", "XRPUSDT", "AVAXUSDT", "SOLUSDT", "ETHUSDT"] as const;
+export const V7_TRADEABLE = ["ADAUSDT", "XRPUSDT"] as const;
 export const V7_PROBATIONARY = [] as const;
-export const V7_DISABLED = ["BTCUSDT", "BNBUSDT"] as const;
+export const V7_DISABLED = ["AVAXUSDT", "SOLUSDT", "ETHUSDT", "BTCUSDT", "BNBUSDT"] as const;
 export const V7_UNIVERSE = [...V7_TRADEABLE, ...V7_PROBATIONARY] as const;
 export const V7_HOLD_BARS = 4;                       // 60 minutes / 15 min
 export const V7_HOLD_MS = V7_HOLD_BARS * 15 * 60 * 1000;
 export const V7_TOP_FRACTION = 0.02;                 // top 2.0%
+export const V7_MIN_VOL16_BPS = 100;                 // precision gate
 export const V7_ROLLING_WINDOW_DAYS = 30;
 export const V7_ROLLING_WINDOW_MS = V7_ROLLING_WINDOW_DAYS * 86400 * 1000;
 export const V7_MIN_BUFFER_SAMPLES = 50;             // warm-up gate
@@ -237,6 +239,33 @@ async function candleAt(symbol: string, ts: number): Promise<{ ts: number; close
   return { ts: rows[0].ts, close: Number(rows[0].close) };
 }
 
+async function recentVol16Bps(symbol: string, atOrBeforeTs: number): Promise<number | null> {
+  const rows = await db.select({ ts: candles.timestamp, close: candles.close })
+    .from(candles)
+    .where(and(
+      eq(candles.symbol, symbol),
+      eq(candles.timeframe, "15m"),
+      lte(candles.timestamp, atOrBeforeTs),
+    ))
+    .orderBy(desc(candles.timestamp))
+    .limit(17);
+  if (rows.length < 17) return null;
+  const closes = [...rows]
+    .reverse()
+    .map(r => Number(r.close))
+    .filter(v => isFinite(v) && v > 0);
+  if (closes.length < 17) return null;
+  const rets: number[] = [];
+  for (let i = 1; i < closes.length; i++) {
+    rets.push(Math.log(closes[i] / closes[i - 1]));
+  }
+  if (rets.length < 16) return null;
+  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const varPop = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / rets.length;
+  if (!isFinite(varPop) || varPop <= 0) return 0;
+  return Math.sqrt(varPop) * 1e4;
+}
+
 // ---- Open / close ----
 async function openV7Position(
   symbol: string,
@@ -395,6 +424,9 @@ export async function onV7Prediction(pred: GPUPrediction): Promise<void> {
     console.warn(`[V7] no candle for ${sym} at/before ${pred.timestamp}, skipping signal`);
     return;
   }
+  const vol16Bps = await recentVol16Bps(sym, c.ts);
+  if (vol16Bps == null) return;
+  if (vol16Bps < V7_MIN_VOL16_BPS) return;
   // No stacking: at most one OPEN V7 position per symbol.
   const existing = await storage.getPositionsBySymbol(sym, "OPEN", 10);
   const hasOpen = existing.some(p =>
@@ -450,6 +482,7 @@ export function getV7State() {
       holdMinutes: V7_HOLD_BARS * 15,
       rollingDays: V7_ROLLING_WINDOW_DAYS,
       minBufferSamples: V7_MIN_BUFFER_SAMPLES,
+      minVol16Bps: V7_MIN_VOL16_BPS,
       killThresholdBps: V7_KILL_THRESHOLD_BPS,
       killCostBps: V7_KILL_COST_BPS,
       perfGateCostBps: V7_PERF_GATE_COST_BPS,
@@ -538,11 +571,11 @@ export async function getV7Performance(lookback: number = 200) {
     };
   }
 
-  // Back-test reference (V7 brilliant E2 offline run):
-  // tradeable book mean gross +9.10 bps, net@6 +3.10 bps, net@8 +1.10 bps
+  // Back-test reference (V7 precision P1 offline run):
+  // tradeable book mean gross +66.46 bps, net@6 +60.46 bps, net@8 +58.46 bps
   const tradeableLive = bookFor(V7_TRADEABLE);
   const probationaryLive = bookFor(V7_PROBATIONARY);
-  const refTradeable = { gross_mean_bps: 9.10, net_mean_bps_6: 3.10 };
+  const refTradeable = { gross_mean_bps: 66.46, net_mean_bps_6: 60.46 };
   const refProbationary = { gross_mean_bps: 0.0, net_mean_bps_6: 0.0 };
 
   function divergence(live: any, ref: any) {
