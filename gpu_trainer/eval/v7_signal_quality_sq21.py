@@ -116,6 +116,18 @@ def _tail_sample_weights(
     return w + tw * (0.65 * downside + 0.35 * tail_state)
 
 
+def _utility_asymmetric_weights(y: np.ndarray, downside_mult: float = 1.0) -> np.ndarray:
+    arr = pd.to_numeric(pd.Series(y), errors="coerce").to_numpy(dtype="float64")
+    w = np.ones(len(arr), dtype="float64")
+    dm = float(max(1.0, downside_mult))
+    if dm <= 1.000001:
+        return w
+    neg = np.isfinite(arr) & (arr < 0.0)
+    # Emphasize downside utility outcomes to reduce false-positive profitability.
+    w[neg] = dm
+    return w
+
+
 def _clf(seed: int = 0) -> HistGradientBoostingClassifier:
     return HistGradientBoostingClassifier(
         max_iter=260,
@@ -177,6 +189,8 @@ def _cache_path(
     secondary_horizon: str,
     secondary_horizon_weight: float,
     tail_objective_weight: float,
+    utility_label_mode: str = "net_r",
+    utility_downside_mult: float = 1.0,
 ) -> Path:
     token = "|".join(
         [
@@ -194,6 +208,8 @@ def _cache_path(
             f"h2={str(secondary_horizon).lower()}",
             f"h2w={float(secondary_horizon_weight):.3f}",
             f"tail={float(tail_objective_weight):.3f}",
+            f"util={str(utility_label_mode).lower()}",
+            f"udm={float(max(1.0, utility_downside_mult)):.2f}",
             "sq21-intel-moe-v2",
         ]
     )
@@ -532,6 +548,8 @@ def collect_oos_predictions(
     secondary_horizon: str = "30m",
     secondary_horizon_weight: float = 0.35,
     tail_objective_weight: float = 0.0,
+    utility_label_mode: str = "net_r",
+    utility_downside_mult: float = 1.0,
 ) -> pd.DataFrame:
     feats = build_sq21_features(symbol, df, context)
     h1_bars = _horizon_to_bars(primary_horizon)
@@ -749,7 +767,12 @@ def collect_oos_predictions(
         side_tr = np.where(edge_tr >= 0, 1.0, -1.0)
         net_pred_tr = side_tr * yret_tr - COST_FRAC
         y_meta_tr = (net_pred_tr > 0).astype(int)
-        y_utility_tr = net_pred_tr
+        util_mode = str(utility_label_mode).strip().lower()
+        if util_mode == "downside_penalized":
+            dm = float(max(1.0, utility_downside_mult))
+            y_utility_tr = np.where(net_pred_tr < 0.0, net_pred_tr * dm, net_pred_tr)
+        else:
+            y_utility_tr = net_pred_tr
 
         meta_good = (
             np.isfinite(yret_tr)
@@ -803,18 +826,56 @@ def collect_oos_predictions(
             )
             meta_te[te_good_for_meta] = mclf.predict_proba(X_meta_te)[:, 1]
 
-            # Utility head: directly estimate expected net R and P(net>0)
-            # to prioritize selections with better payoff geometry.
-            ureg = _reg(57)
-            ureg_sw = _tail_sample_weights(y_utility_tr[meta_good], tail_objective_weight)
-            ureg.fit(X_meta_tr, y_utility_tr[meta_good], sample_weight=ureg_sw)
-            util_te[te_good_for_meta] = ureg.predict(X_meta_te)
+            # Two-layer utility router:
+            #  1) stage-1 mclf estimates tradeability (meta_te),
+            #  2) stage-2 utility heads estimate payoff on tradeability-aware features.
+            meta_tr_hat = np.clip(mclf.predict_proba(X_meta_tr)[:, 1], 0.0, 1.0)
+            X_util_tr = _utility_features(
+                p_up=p_up_tr[meta_good],
+                pred_mag=mag_tr[meta_good],
+                edge=edge_tr[meta_good],
+                meta_p=meta_tr_hat,
+                risk_bps=vol_tr[meta_good] * 1e4,
+                mkt_disp=disp_tr[meta_good],
+                risk_on=risk_on_tr[meta_good],
+                dom_ret1=dom_tr[meta_good],
+                expert_dispersion=p_disp_tr[meta_good],
+                router_conf=router_conf_tr[meta_good],
+            )
+            X_util_te = _utility_features(
+                p_up=p_up_te[te_good_for_meta],
+                pred_mag=mag_te[te_good_for_meta],
+                edge=edge_te[te_good_for_meta],
+                meta_p=meta_te[te_good_for_meta],
+                risk_bps=vol_te[te_good_for_meta] * 1e4,
+                mkt_disp=disp_te[te_good_for_meta],
+                risk_on=risk_on_te[te_good_for_meta],
+                dom_ret1=dom_te[te_good_for_meta],
+                expert_dispersion=p_disp_te[te_good_for_meta],
+                router_conf=router_conf_te[te_good_for_meta],
+            )
+            tradeable_mask = meta_tr_hat >= float(np.nanquantile(meta_tr_hat, 0.35))
+            if int(tradeable_mask.sum()) < 900:
+                tradeable_mask = np.ones_like(meta_tr_hat, dtype=bool)
+            utility_sw = _tail_sample_weights(y_utility_tr[meta_good], tail_objective_weight)
+            utility_sw = utility_sw * _utility_asymmetric_weights(
+                y_utility_tr[meta_good],
+                downside_mult=float(max(1.0, utility_downside_mult)),
+            )
 
-            y_ucls = (y_utility_tr[meta_good] > 0).astype(int)
+            ureg = _reg(57)
+            ureg.fit(
+                X_util_tr[tradeable_mask],
+                y_utility_tr[meta_good][tradeable_mask],
+                sample_weight=utility_sw[tradeable_mask],
+            )
+            util_te[te_good_for_meta] = ureg.predict(X_util_te)
+
+            y_ucls = (net_pred_tr[meta_good] > 0).astype(int)
             if np.unique(y_ucls).size >= 2:
                 uclf = _clf(59)
-                uclf.fit(X_meta_tr, y_ucls, sample_weight=ureg_sw)
-                util_win_te[te_good_for_meta] = uclf.predict_proba(X_meta_te)[:, 1]
+                uclf.fit(X_util_tr, y_ucls, sample_weight=utility_sw)
+                util_win_te[te_good_for_meta] = uclf.predict_proba(X_util_te)[:, 1]
 
         sess = _session_from_ts(ts[slo:shi])
         side = np.sign(edge_te)
@@ -880,6 +941,8 @@ def collect_oos_predictions_sq3(
     secondary_horizon: str = "30m",
     secondary_horizon_weight: float = 0.35,
     tail_objective_weight: float = 0.0,
+    utility_label_mode: str = "net_r",
+    utility_downside_mult: float = 1.0,
 ) -> pd.DataFrame:
     return collect_oos_predictions(
         symbol=symbol,
@@ -896,6 +959,8 @@ def collect_oos_predictions_sq3(
         secondary_horizon=secondary_horizon,
         secondary_horizon_weight=secondary_horizon_weight,
         tail_objective_weight=tail_objective_weight,
+        utility_label_mode=utility_label_mode,
+        utility_downside_mult=utility_downside_mult,
     )
 
 
@@ -915,6 +980,8 @@ def ensure_oos_cache(
     secondary_horizon: str = "60m",
     secondary_horizon_weight: float = 0.25,
     tail_objective_weight: float = 0.5,
+    utility_label_mode: str = "net_r",
+    utility_downside_mult: float = 1.0,
 ) -> tuple[pd.DataFrame, list[str]]:
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     cache_path = _cache_path(
@@ -931,6 +998,8 @@ def ensure_oos_cache(
         secondary_horizon=str(secondary_horizon),
         secondary_horizon_weight=float(secondary_horizon_weight),
         tail_objective_weight=float(tail_objective_weight),
+        utility_label_mode=str(utility_label_mode),
+        utility_downside_mult=float(max(1.0, utility_downside_mult)),
     )
     if cache_path.exists() and not rebuild_cache:
         return pd.read_parquet(cache_path), sorted(set(context_symbols))
@@ -964,6 +1033,8 @@ def ensure_oos_cache(
                 secondary_horizon=str(secondary_horizon),
                 secondary_horizon_weight=float(secondary_horizon_weight),
                 tail_objective_weight=float(tail_objective_weight),
+                utility_label_mode=str(utility_label_mode),
+                utility_downside_mult=float(max(1.0, utility_downside_mult)),
             )
         else:
             s = collect_oos_predictions(
@@ -978,6 +1049,8 @@ def ensure_oos_cache(
                 secondary_horizon=str(secondary_horizon),
                 secondary_horizon_weight=float(secondary_horizon_weight),
                 tail_objective_weight=float(tail_objective_weight),
+                utility_label_mode=str(utility_label_mode),
+                utility_downside_mult=float(max(1.0, utility_downside_mult)),
             )
         if not s.empty:
             frames.append(s)
@@ -1267,6 +1340,88 @@ def _ensure_utility_columns(frame: pd.DataFrame) -> pd.DataFrame:
     out["utility_r_hat"] = ur
     out["utility_score"] = util_score
     return out
+
+
+def _derive_symbol_regime_abstentions(
+    frame: pd.DataFrame,
+    min_samples: int = 120,
+    min_mean_r: float = -0.03,
+    min_win_rate: float = 0.38,
+    min_mean_resid: float = -0.01,
+    max_overconf_rate: float = 0.58,
+    target_col: str = "ret_h1",
+    top_k: int = 8,
+) -> tuple[tuple[str, str], ...]:
+    """Learn hard symbol-regime blocks from utility/payoff residual underperformance."""
+    if frame.empty:
+        return ()
+    cols = {"symbol", "regime", "utility_r_hat", "utility_win_p"}
+    if not cols.issubset(frame.columns):
+        return ()
+
+    x = frame.copy()
+    x["symbol"] = x["symbol"].astype(str).str.upper()
+    x["regime"] = x["regime"].astype(str).str.upper()
+    x["utility_r_hat"] = pd.to_numeric(x["utility_r_hat"], errors="coerce")
+    x["utility_win_p"] = pd.to_numeric(x["utility_win_p"], errors="coerce")
+    ret_col = str(target_col) if str(target_col) in x.columns else ("ret_h1" if "ret_h1" in x.columns else "ret_60m")
+    if ret_col not in x.columns:
+        return ()
+    ret = pd.to_numeric(x[ret_col], errors="coerce").to_numpy(dtype="float64")
+    side = np.where(pd.to_numeric(x.get("edge", 0.0), errors="coerce").to_numpy(dtype="float64") >= 0.0, 1.0, -1.0)
+    realized_net = side * ret - COST_FRAC
+    x["realized_net"] = realized_net
+    x["utility_resid"] = x["realized_net"] - x["utility_r_hat"]
+    x["realized_win"] = (x["realized_net"] > 0.0).astype("float64")
+    x["overconf"] = (x["utility_resid"] <= float(min_mean_resid)).astype("float64")
+    x = x.dropna(
+        subset=["symbol", "regime", "utility_r_hat", "utility_win_p", "realized_net", "utility_resid"]
+    )
+    if x.empty:
+        return ()
+
+    grp = x.groupby(["symbol", "regime"], dropna=False).agg(
+        n=("utility_r_hat", "size"),
+        mean_ur=("utility_r_hat", "mean"),
+        mean_up=("utility_win_p", "mean"),
+        mean_realized=("realized_net", "mean"),
+        realized_win=("realized_win", "mean"),
+        mean_resid=("utility_resid", "mean"),
+        overconf_rate=("overconf", "mean"),
+    )
+    bad = grp[
+        (grp["n"] >= int(max(1, min_samples)))
+        & (
+            (grp["mean_realized"] <= float(min_mean_r))
+            | (grp["realized_win"] <= float(min_win_rate))
+            | (grp["mean_resid"] <= float(min_mean_resid))
+            | (grp["overconf_rate"] >= float(np.clip(max_overconf_rate, 0.0, 1.0)))
+        )
+    ].copy()
+    if bad.empty:
+        return ()
+    # Lower residuals / lower realized edge and higher overconfidence are worse.
+    bad["severity"] = (
+        np.minimum(0.0, bad["mean_realized"])
+        + np.minimum(0.0, bad["mean_resid"])
+        + 0.75 * (bad["realized_win"] - float(min_win_rate))
+        + 0.50 * (float(np.clip(max_overconf_rate, 0.0, 1.0)) - bad["overconf_rate"])
+    )
+    bad = bad.sort_values(["severity", "n"], ascending=[True, False]).head(int(max(1, top_k)))
+    out = tuple((str(sym), str(reg)) for sym, reg in bad.index.to_list())
+    return tuple(sorted(set(out)))
+
+
+def _merge_symbol_regime_abstentions(
+    base: tuple[tuple[str, str], ...],
+    learned: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str], ...]:
+    if not base and not learned:
+        return ()
+    out: set[tuple[str, str]] = set()
+    for sym, reg in list(base) + list(learned):
+        out.add((str(sym).upper(), str(reg).upper()))
+    return tuple(sorted(out))
 
 
 def _apply_dynamic_leverage(
@@ -1995,6 +2150,11 @@ def parse_args() -> argparse.Namespace:
                    help="Blend weight for secondary horizon return in target construction")
     p.add_argument("--tail-objective-weight", type=float, default=0.5,
                    help="Downside-sensitive sample weighting during model/meta fitting")
+    p.add_argument("--utility-label-mode", type=str, default="downside_penalized",
+                   choices=["net_r", "downside_penalized"],
+                   help="Utility regression label mode: raw net-R or downside-penalized net-R")
+    p.add_argument("--utility-downside-mult", type=float, default=1.8,
+                   help="Multiplier for negative utility labels/weights (>=1) to penalize false positives")
     p.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS, help="Symbol list to evaluate")
     p.add_argument("--context-symbols", nargs="+", default=[],
                    help="Symbols used to build market context (default: same as --symbols)")
@@ -2025,6 +2185,16 @@ def parse_args() -> argparse.Namespace:
                    help="Require mean monthly trades >= this value for robust policies")
     p.add_argument("--min-monthly-trades-hard", type=int, default=0,
                    help="Adaptive pacing: attempt >= this many trades per month via quality top-up")
+    p.add_argument("--auto-abstain-symbol-regimes", action="store_true",
+                   help="Learn hard symbol:regime abstentions from utility underperformance")
+    p.add_argument("--abstain-min-samples", type=int, default=120,
+                   help="Min samples needed for learned symbol:regime abstention")
+    p.add_argument("--abstain-min-mean-r", type=float, default=-0.03,
+                   help="Learn abstention when mean utility R is below this threshold")
+    p.add_argument("--abstain-min-win-p", type=float, default=0.38,
+                   help="Learn abstention when utility win-prob is below this threshold")
+    p.add_argument("--abstain-top-k", type=int, default=8,
+                   help="Max learned symbol:regime abstention pairs to apply")
     p.add_argument("--cadence-quality-floor", type=float, default=0.0,
                    help="For adaptive pacing, top-up rows must satisfy confidence quality floor (0..1)")
     p.add_argument("--quality-floors", nargs="+", type=float, default=[0.0],
@@ -2075,16 +2245,24 @@ def parse_args() -> argparse.Namespace:
 
 
 def search_policies_with_args(d: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    d = _ensure_utility_columns(d)
     syms = sorted(d["symbol"].unique())
     abstain_symbols = tuple(str(v).upper() for v in getattr(args, "abstain_symbols", []))
     abstain_regimes = tuple(str(v).upper() for v in args.abstain_regimes)
     abstain_symbol_regimes = _parse_symbol_regime_pairs(list(args.abstain_symbol_regimes))
+    if bool(getattr(args, "auto_abstain_symbol_regimes", False)):
+        learned_pairs = _derive_symbol_regime_abstentions(
+            d,
+            min_samples=int(getattr(args, "abstain_min_samples", 120)),
+            min_mean_r=float(getattr(args, "abstain_min_mean_r", -0.03)),
+            min_win_rate=float(getattr(args, "abstain_min_win_p", 0.38)),
+            top_k=int(getattr(args, "abstain_top_k", 8)),
+        )
+        abstain_symbol_regimes = tuple(sorted(set(abstain_symbol_regimes) | set(learned_pairs)))
     target_col = _resolve_target_col(str(args.primary_horizon))
     quality_floors = [float(np.clip(v, 0.0, 0.99)) for v in getattr(args, "quality_floors", [0.0])]
     allocator_quality_blends = [float(np.clip(v, 0.0, 1.0)) for v in getattr(args, "allocator_quality_blends", [0.25])]
     allocator_quality_powers = [float(max(0.1, v)) for v in getattr(args, "allocator_quality_powers", [1.2])]
-    allocator_utility_weights = [float(np.clip(v, 0.0, 1.0)) for v in getattr(args, "allocator_utility_weights", [0.35])]
-    allocator_utility_powers = [float(max(0.1, v)) for v in getattr(args, "allocator_utility_powers", [1.2])]
     allocator_utility_weights = [float(np.clip(v, 0.0, 1.0)) for v in getattr(args, "allocator_utility_weights", [0.35])]
     allocator_utility_powers = [float(max(0.1, v)) for v in getattr(args, "allocator_utility_powers", [1.2])]
     leverage_maxs = [float(max(1.0, v)) for v in getattr(args, "leverage_maxs", [1.0])]
@@ -2318,6 +2496,23 @@ def _monthly_breakdown_for_policy(
     return out
 
 
+def _safe_float(v: object, default: float = 0.0) -> float:
+    try:
+        f = float(v)
+        if np.isfinite(f):
+            return f
+    except Exception:
+        pass
+    return float(default)
+
+
+def _safe_int(v: object, default: int = 0) -> int:
+    try:
+        return int(v)
+    except Exception:
+        return int(default)
+
+
 def main() -> None:
     args = parse_args()
 
@@ -2348,9 +2543,22 @@ def main() -> None:
         secondary_horizon=str(args.secondary_horizon),
         secondary_horizon_weight=float(args.secondary_horizon_weight),
         tail_objective_weight=float(args.tail_objective_weight),
+        utility_label_mode=str(args.utility_label_mode),
+        utility_downside_mult=float(max(1.0, args.utility_downside_mult)),
     )
     if oos.empty:
         raise RuntimeError("no OOS predictions")
+
+    if bool(getattr(args, "auto_abstain_symbol_regimes", False)):
+        learned_pairs = _derive_symbol_regime_abstentions(
+            _ensure_utility_columns(oos),
+            min_samples=int(getattr(args, "abstain_min_samples", 120)),
+            min_mean_r=float(getattr(args, "abstain_min_mean_r", -0.03)),
+            min_win_rate=float(getattr(args, "abstain_min_win_p", 0.38)),
+            top_k=int(getattr(args, "abstain_top_k", 8)),
+        )
+        if learned_pairs:
+            abstain_symbol_regimes = tuple(sorted(set(abstain_symbol_regimes) | set(learned_pairs)))
 
     policies = search_policies_with_args(oos, args)
     if policies.empty:
@@ -2430,6 +2638,8 @@ def main() -> None:
         "secondary_horizon": str(args.secondary_horizon),
         "secondary_horizon_weight": float(args.secondary_horizon_weight),
         "tail_objective_weight": float(args.tail_objective_weight),
+        "utility_label_mode": str(args.utility_label_mode),
+        "utility_downside_mult": float(max(1.0, args.utility_downside_mult)),
         "target_col": str(target_col),
         "wf_train_months": int(args.wf_train_months),
         "wf_test_months": int(args.wf_test_months),
@@ -2462,6 +2672,11 @@ def main() -> None:
         "allocator_quality_powers": [float(v) for v in args.allocator_quality_powers],
         "allocator_utility_weights": [float(v) for v in args.allocator_utility_weights],
         "allocator_utility_powers": [float(v) for v in args.allocator_utility_powers],
+        "auto_abstain_symbol_regimes": bool(args.auto_abstain_symbol_regimes),
+        "abstain_min_samples": int(args.abstain_min_samples),
+        "abstain_min_mean_r": float(args.abstain_min_mean_r),
+        "abstain_min_win_p": float(args.abstain_min_win_p),
+        "abstain_top_k": int(args.abstain_top_k),
         "leverage_maxs": [float(v) for v in args.leverage_maxs],
         "leverage_quality_floors": [float(v) for v in args.leverage_quality_floors],
         "leverage_quality_powers": [float(v) for v in args.leverage_quality_powers],
