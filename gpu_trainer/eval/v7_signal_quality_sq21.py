@@ -1618,9 +1618,19 @@ def _apply_monthly_loss_governor(
 def _full_months_from_ts(ts: pd.Series, min_unique_days: int = 20) -> pd.Index:
     if ts.empty:
         return pd.Index([], dtype="object")
-    dt = pd.to_datetime(ts, unit="ms", utc=True, errors="coerce").dt.tz_localize(None)
-    month = dt.dt.to_period("M").astype(str)
-    day = dt.dt.floor("D")
+    # ts can be an object-typed series; normalize through numeric coercion first.
+    ts_num = pd.to_numeric(ts, errors="coerce")
+    dt = pd.to_datetime(ts_num, unit="ms", utc=True, errors="coerce")
+    if isinstance(dt, pd.DatetimeIndex):
+        if dt.tz is not None:
+            dt = dt.tz_localize(None)
+        month = dt.to_period("M").astype(str)
+        day = dt.floor("D")
+    else:
+        if getattr(dt.dt, "tz", None) is not None:
+            dt = dt.dt.tz_localize(None)
+        month = dt.dt.to_period("M").astype(str)
+        day = dt.dt.floor("D")
     by_month_days = pd.DataFrame({"month": month, "day": day}).dropna()
     if by_month_days.empty:
         return pd.Index([], dtype="object")
