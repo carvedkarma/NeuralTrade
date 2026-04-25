@@ -522,7 +522,10 @@ def collect_oos_predictions(
     y_sign = y_sign[valid_from:]
     ts = df["timestamp"].to_numpy()[valid_from:]
     if fast_oos_mode and int(fast_max_bars) > 0 and len(ts) > int(fast_max_bars):
-        keep = int(fast_max_bars)
+        # Keep fast mode from truncating below the configured WF horizon.
+        wf_min_bars = int((int(wf_train_months) + int(wf_test_months)) * 30 * 24 * 4 + 512)
+        keep = max(int(fast_max_bars), wf_min_bars)
+        keep = min(len(ts), keep)
         X_base = X_base[-keep:]
         y_ret = y_ret[-keep:]
         y_sign = y_sign[-keep:]
@@ -952,12 +955,18 @@ class PolicyResult:
     shock_z_cut: float
     shock_p_boost: float
     shock_meta_boost: float
+    quality_floor: float
+    allocator_quality_blend: float
+    allocator_quality_power: float
     topup_score_scale: float
     min_router_conf: float
     max_expert_disp: float
     month_loss_cap_r: float
     reentry_drawdown_r: float
     conf_weight_power: float
+    leverage_max: float
+    leverage_quality_floor: float
+    leverage_quality_power: float
     post_cap_scale: float
     long_only: bool
     risk_min_bps: float
@@ -1027,49 +1036,126 @@ def _confidence_quality(frame: pd.DataFrame) -> np.ndarray:
 
     if "expert_dispersion" in frame.columns:
         ed = pd.to_numeric(frame["expert_dispersion"], errors="coerce").to_numpy(dtype="float64")
-        ed = np.where(np.isfinite(ed), np.clip(ed, 0.0, 0.5), 0.1)
-        # Lower quality when expert disagreement is elevated.
-        disp_pen = np.clip(1.0 - (ed / 0.35), 0.2, 1.0)
+        ed = np.where(np.isfinite(ed), np.clip(ed, 0.0, 0.6), 0.15)
+        # Strongly penalize elevated expert disagreement.
+        disp_pen = np.clip(1.0 - (ed / 0.35), 0.1, 1.0)
     else:
         disp_pen = np.ones(n, dtype="float64")
 
-    quality = np.clip((0.35 + 0.65 * rc) * disp_pen, 0.1, 1.0)
+    if "p_up" in frame.columns:
+        p_up = pd.to_numeric(frame["p_up"], errors="coerce").to_numpy(dtype="float64")
+        p_up = np.where(np.isfinite(p_up), np.clip(p_up, 0.0, 1.0), 0.5)
+    else:
+        p_up = np.full(n, 0.5, dtype="float64")
+    p_margin = np.clip(np.abs(p_up - 0.5) * 2.0, 0.0, 1.0)
+
+    if "meta_p" in frame.columns:
+        meta = pd.to_numeric(frame["meta_p"], errors="coerce").to_numpy(dtype="float64")
+        meta = np.where(np.isfinite(meta), np.clip(meta, 0.0, 1.0), 0.5)
+    else:
+        meta = np.full(n, 0.5, dtype="float64")
+
+    if "abs_edge" in frame.columns:
+        abs_edge = pd.to_numeric(frame["abs_edge"], errors="coerce").to_numpy(dtype="float64")
+    elif "edge" in frame.columns:
+        abs_edge = np.abs(pd.to_numeric(frame["edge"], errors="coerce").to_numpy(dtype="float64"))
+    else:
+        abs_edge = np.full(n, 0.0, dtype="float64")
+    abs_edge = np.where(np.isfinite(abs_edge), np.clip(abs_edge, 0.0, None), 0.0)
+
+    if "risk_bps" in frame.columns:
+        risk_bps = pd.to_numeric(frame["risk_bps"], errors="coerce").to_numpy(dtype="float64")
+    else:
+        risk_bps = np.full(n, np.nan, dtype="float64")
+    risk_frac = np.where(np.isfinite(risk_bps), np.clip(risk_bps, 1.0, None) / 1e4, np.nan)
+    edge_eff = np.where(np.isfinite(risk_frac), abs_edge / (abs_edge + risk_frac), 0.5)
+    edge_eff = np.where(np.isfinite(edge_eff), np.clip(edge_eff, 0.0, 1.0), 0.5)
+
+    if "regime" in frame.columns:
+        reg = frame["regime"].astype(str).str.upper().to_numpy()
+        regime_align = np.where(reg == "WITH", 1.0, np.where(reg == "FLAT", 0.75, 0.55))
+    else:
+        regime_align = np.full(n, 0.75, dtype="float64")
+
+    shock_col: str | None = None
+    if "mkt_shock_z" in frame.columns:
+        shock_col = "mkt_shock_z"
+    elif "mkt_shock_z_l1" in frame.columns:
+        shock_col = "mkt_shock_z_l1"
+    if shock_col is not None:
+        shock = pd.to_numeric(frame[shock_col], errors="coerce").abs().to_numpy(dtype="float64")
+        shock = np.where(np.isfinite(shock), shock, 0.0)
+        shock_pen = np.clip(1.0 - np.maximum(shock - 1.2, 0.0) / 2.5, 0.45, 1.0)
+    else:
+        shock_pen = np.ones(n, dtype="float64")
+
+    quality = (
+        0.34 * rc
+        + 0.20 * disp_pen
+        + 0.16 * p_margin
+        + 0.14 * meta
+        + 0.10 * edge_eff
+        + 0.06 * regime_align
+    )
+    quality = np.clip(quality * shock_pen, 0.05, 1.0)
     return quality.astype("float64", copy=False)
 
 
-def _tail_sample_weights(
-    y: np.ndarray,
-    tail_weight: float,
-    shock: np.ndarray | None = None,
-    dispersion: np.ndarray | None = None,
+def _allocator_score(
+    frame: pd.DataFrame,
+    quality_blend: float = 0.0,
+    quality_power: float = 1.0,
 ) -> np.ndarray:
-    w = np.ones(len(y), dtype="float64")
-    tw = float(max(0.0, tail_weight))
-    if tw <= 1e-9 or len(y) == 0:
-        return w
-    y = pd.to_numeric(pd.Series(y), errors="coerce").to_numpy(dtype="float64")
-    finite = np.isfinite(y)
-    if not finite.any():
-        return w
-    scale = float(np.nanpercentile(np.abs(y[finite]), 75))
-    if not np.isfinite(scale) or scale < 1e-8:
-        scale = 1.0
-    downside = np.clip((-y) / scale, 0.0, 3.0)
-    downside = np.where(np.isfinite(downside), downside, 0.0)
+    n = len(frame)
+    if n == 0:
+        return np.zeros(0, dtype="float64")
+    edge = np.abs(pd.to_numeric(frame["edge"], errors="coerce").to_numpy(dtype="float64"))
+    edge = np.where(np.isfinite(edge), edge, 0.0)
+    meta = np.clip(pd.to_numeric(frame["meta_p"], errors="coerce").to_numpy(dtype="float64"), 0.0, 1.0)
+    meta = np.where(np.isfinite(meta), meta, 0.0)
+    p_up = np.clip(pd.to_numeric(frame["p_up"], errors="coerce").to_numpy(dtype="float64"), 0.0, 1.0)
+    p_up = np.where(np.isfinite(p_up), p_up, 0.5)
 
-    tail_state = np.zeros(len(y), dtype="float64")
-    if shock is not None:
-        sh = pd.to_numeric(pd.Series(shock), errors="coerce").abs().to_numpy(dtype="float64")
-        if np.isfinite(sh).any():
-            sh_cut = float(np.nanpercentile(sh[np.isfinite(sh)], 70))
-            tail_state += np.where(np.isfinite(sh) & (sh >= sh_cut), 1.0, 0.0)
-    if dispersion is not None:
-        dsp = pd.to_numeric(pd.Series(dispersion), errors="coerce").to_numpy(dtype="float64")
-        if np.isfinite(dsp).any():
-            dsp_cut = float(np.nanpercentile(dsp[np.isfinite(dsp)], 70))
-            tail_state += np.where(np.isfinite(dsp) & (dsp >= dsp_cut), 1.0, 0.0)
-    tail_state = np.clip(tail_state, 0.0, 2.0)
-    return w + tw * (0.65 * downside + 0.35 * tail_state)
+    base = edge * meta
+    p_margin = np.abs(p_up - 0.5) * 2.0
+    base = base * (0.85 + 0.15 * np.clip(p_margin, 0.0, 1.0))
+    blend = float(np.clip(quality_blend, 0.0, 1.0))
+    if blend <= 1e-12:
+        return np.where(np.isfinite(base), base, 0.0)
+
+    q = _confidence_quality(frame)
+    qpow = np.power(np.clip(q, 0.0, 1.0), float(max(0.1, quality_power)))
+    score = base * ((1.0 - blend) + blend * qpow)
+    return np.where(np.isfinite(score), score, 0.0)
+
+
+def _apply_dynamic_leverage(
+    x: pd.DataFrame,
+    leverage_max: float = 1.0,
+    leverage_quality_floor: float = 1.0,
+    leverage_quality_power: float = 1.0,
+) -> pd.DataFrame:
+    if x.empty:
+        return x
+    lev_max = float(max(1.0, leverage_max))
+    if lev_max <= 1.000001:
+        x = x.copy()
+        x["leverage"] = 1.0
+        return x
+
+    floor = float(np.clip(leverage_quality_floor, 0.0, 0.999))
+    q = _confidence_quality(x)
+    qn = np.clip((q - floor) / max(1e-6, 1.0 - floor), 0.0, 1.0)
+    curve = np.power(qn, float(max(0.1, leverage_quality_power)))
+    lev = 1.0 + (lev_max - 1.0) * curve
+
+    out = x.copy()
+    out["leverage"] = lev.astype("float64")
+    lev_arr = out["leverage"].to_numpy(dtype="float64", copy=False)
+    for col in ("gross", "net", "r_net", "r_weighted", "net_bps_weighted"):
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").to_numpy(dtype="float64") * lev_arr
+    return out
 
 
 def _apply_hard_abstentions(
@@ -1140,6 +1226,12 @@ def _apply_policy_and_allocate(
     hard_abstain_symbols: tuple[str, ...] = (),
     hard_abstain_regimes: tuple[str, ...] = (),
     hard_abstain_symbol_regimes: tuple[tuple[str, str], ...] = (),
+    quality_floor: float = 0.0,
+    allocator_quality_blend: float = 0.25,
+    allocator_quality_power: float = 1.2,
+    leverage_max: float = 1.0,
+    leverage_quality_floor: float = 0.8,
+    leverage_quality_power: float = 1.5,
     target_col: str = "ret_60m",
 ) -> pd.DataFrame:
     x = d[d["symbol"].isin(symbols)]
@@ -1192,10 +1284,20 @@ def _apply_policy_and_allocate(
     if x.empty:
         return pd.DataFrame()
 
+    qv = _confidence_quality(x)
+    if float(quality_floor) > 0.0:
+        x = x[qv >= float(quality_floor)].copy()
+        if x.empty:
+            return pd.DataFrame()
+
     # Start with quality-selective subset; optionally top-up month cadence.
     # The hard cadence mode is cap-aware (max_per_ts) to avoid adding trades
     # that will later be dropped by timestamp capacity constraints.
-    x["allocator_score"] = (x["abs_edge"] * np.clip(x["meta_p"], 0.0, 1.0)).astype("float64")
+    x["allocator_score"] = _allocator_score(
+        x,
+        quality_blend=float(allocator_quality_blend),
+        quality_power=float(allocator_quality_power),
+    ).astype("float64")
     selected = x[x["rank_pct"] >= q_cut].copy()
     if min_trades_per_month_hard > 0:
         frames: list[pd.DataFrame] = []
@@ -1242,6 +1344,12 @@ def _apply_policy_and_allocate(
     x["r_net"] = np.where(np.isfinite(vol_arr) & (vol_arr > 1e-12), x["net"] / vol_arr, np.nan)
     x["r_weighted"] = x["r_net"] * weight_arr
     x["net_bps_weighted"] = x["net"] * weight_arr * 1e4
+    x = _apply_dynamic_leverage(
+        x,
+        leverage_max=float(leverage_max),
+        leverage_quality_floor=float(leverage_quality_floor),
+        leverage_quality_power=float(leverage_quality_power),
+    )
     return x
 
 
@@ -1267,6 +1375,12 @@ def _apply_policy_with_adaptive_pacing(
     hard_abstain_regimes: tuple[str, ...] = (),
     hard_abstain_symbol_regimes: tuple[tuple[str, str], ...] = (),
     cadence_quality_floor: float = 0.0,
+    quality_floor: float = 0.0,
+    allocator_quality_blend: float = 0.25,
+    allocator_quality_power: float = 1.2,
+    leverage_max: float = 1.0,
+    leverage_quality_floor: float = 0.8,
+    leverage_quality_power: float = 1.5,
     target_col: str = "ret_60m",
 ) -> pd.DataFrame:
     if router_conf_min > 0.0 or expert_disp_max < 0.999:
@@ -1296,6 +1410,12 @@ def _apply_policy_with_adaptive_pacing(
             hard_abstain_symbols=hard_abstain_symbols,
             hard_abstain_regimes=hard_abstain_regimes,
             hard_abstain_symbol_regimes=hard_abstain_symbol_regimes,
+            quality_floor=quality_floor,
+            allocator_quality_blend=allocator_quality_blend,
+            allocator_quality_power=allocator_quality_power,
+            leverage_max=leverage_max,
+            leverage_quality_floor=leverage_quality_floor,
+            leverage_quality_power=leverage_quality_power,
             target_col=target_col,
         )
 
@@ -1345,8 +1465,18 @@ def _apply_policy_with_adaptive_pacing(
     if base.empty:
         return pd.DataFrame()
 
+    qv_base = _confidence_quality(base)
+    if float(quality_floor) > 0.0:
+        base = base[qv_base >= float(quality_floor)].copy()
+        if base.empty:
+            return pd.DataFrame()
+
     q_cut = 1.0 - (top_pct / 100.0)
-    base["allocator_score"] = (base["abs_edge"] * np.clip(base["meta_p"], 0.0, 1.0)).astype("float64")
+    base["allocator_score"] = _allocator_score(
+        base,
+        quality_blend=float(allocator_quality_blend),
+        quality_power=float(allocator_quality_power),
+    ).astype("float64")
 
     selected_chunks: list[pd.DataFrame] = []
     for _, g in base.groupby("month", sort=False):
@@ -1430,6 +1560,12 @@ def _apply_policy_with_adaptive_pacing(
     x["r_net"] = np.where(np.isfinite(vol_arr) & (vol_arr > 1e-12), x["net"] / vol_arr, np.nan)
     x["r_weighted"] = x["r_net"] * weight_arr
     x["net_bps_weighted"] = x["net"] * weight_arr * 1e4
+    x = _apply_dynamic_leverage(
+        x,
+        leverage_max=float(leverage_max),
+        leverage_quality_floor=float(leverage_quality_floor),
+        leverage_quality_power=float(leverage_quality_power),
+    )
     return x
 
 
@@ -1479,6 +1615,19 @@ def _apply_monthly_loss_governor(
     return pd.concat(out_chunks, ignore_index=False)
 
 
+def _full_months_from_ts(ts: pd.Series, min_unique_days: int = 20) -> pd.Index:
+    if ts.empty:
+        return pd.Index([], dtype="object")
+    dt = pd.to_datetime(ts, unit="ms", utc=True, errors="coerce").dt.tz_localize(None)
+    month = dt.dt.to_period("M").astype(str)
+    day = dt.dt.floor("D")
+    by_month_days = pd.DataFrame({"month": month, "day": day}).dropna()
+    if by_month_days.empty:
+        return pd.Index([], dtype="object")
+    day_counts = by_month_days.groupby("month")["day"].nunique()
+    return day_counts[day_counts >= int(max(1, min_unique_days))].index
+
+
 def eval_policy(
     d: pd.DataFrame,
     top_pct: float,
@@ -1505,6 +1654,12 @@ def eval_policy(
     hard_abstain_regimes: tuple[str, ...] = (),
     hard_abstain_symbol_regimes: tuple[tuple[str, str], ...] = (),
     adaptive_floor_quality: float = 0.0,
+    quality_floor: float = 0.0,
+    allocator_quality_blend: float = 0.25,
+    allocator_quality_power: float = 1.2,
+    leverage_max: float = 1.0,
+    leverage_quality_floor: float = 0.8,
+    leverage_quality_power: float = 1.5,
     target_col: str = "ret_60m",
 ) -> PolicyResult | None:
     if router_conf_min > 0.0 or expert_disp_max < 0.999:
@@ -1537,6 +1692,12 @@ def eval_policy(
             hard_abstain_regimes=hard_abstain_regimes,
             hard_abstain_symbol_regimes=hard_abstain_symbol_regimes,
             cadence_quality_floor=adaptive_floor_quality,
+            quality_floor=quality_floor,
+            allocator_quality_blend=allocator_quality_blend,
+            allocator_quality_power=allocator_quality_power,
+            leverage_max=leverage_max,
+            leverage_quality_floor=leverage_quality_floor,
+            leverage_quality_power=leverage_quality_power,
             target_col=target_col,
         )
     else:
@@ -1558,6 +1719,12 @@ def eval_policy(
             hard_abstain_symbols=hard_abstain_symbols,
             hard_abstain_regimes=hard_abstain_regimes,
             hard_abstain_symbol_regimes=hard_abstain_symbol_regimes,
+            quality_floor=quality_floor,
+            allocator_quality_blend=allocator_quality_blend,
+            allocator_quality_power=allocator_quality_power,
+            leverage_max=leverage_max,
+            leverage_quality_floor=leverage_quality_floor,
+            leverage_quality_power=leverage_quality_power,
             target_col=target_col,
         )
     if x.empty:
@@ -1584,8 +1751,14 @@ def eval_policy(
     mtrades = x.groupby("month")["symbol"].size()
     if len(msum) < 10:
         return None
-    if min_trades_per_month_hard > 0 and int(mtrades.min()) < int(min_trades_per_month_hard):
-        return None
+    if min_trades_per_month_hard > 0:
+        # Do not enforce hard trade floor on partial boundary months.
+        full_months = _full_months_from_ts(x["ts"], min_unique_days=20)
+        mcheck = mtrades.loc[mtrades.index.intersection(full_months)]
+        if mcheck.empty:
+            return None
+        if int(mcheck.min()) < int(min_trades_per_month_hard):
+            return None
     fold_avg = x.groupby("fold")["r_weighted"].mean()
     weighted_win = x.loc[x["net"] > 0, "weight"].sum() / max(1e-12, x["weight"].sum())
     return PolicyResult(
@@ -1598,12 +1771,18 @@ def eval_policy(
         shock_z_cut=float(shock_z_cut),
         shock_p_boost=float(shock_p_boost),
         shock_meta_boost=float(shock_meta_boost),
+        quality_floor=float(quality_floor),
+        allocator_quality_blend=float(allocator_quality_blend),
+        allocator_quality_power=float(allocator_quality_power),
         topup_score_scale=float(topup_score_scale),
         min_router_conf=float(router_conf_min),
         max_expert_disp=float(expert_disp_max),
         month_loss_cap_r=float(monthly_loss_cap_r),
         reentry_drawdown_r=float(reentry_drawdown_r),
         conf_weight_power=float(conf_weight_power),
+        leverage_max=float(leverage_max),
+        leverage_quality_floor=float(leverage_quality_floor),
+        leverage_quality_power=float(leverage_quality_power),
         post_cap_scale=float(post_cap_scale),
         long_only=bool(long_only),
         risk_min_bps=float(risk_min_bps),
@@ -1680,6 +1859,12 @@ def parse_args() -> argparse.Namespace:
                    help="Adaptive pacing: attempt >= this many trades per month via quality top-up")
     p.add_argument("--cadence-quality-floor", type=float, default=0.0,
                    help="For adaptive pacing, top-up rows must satisfy confidence quality floor (0..1)")
+    p.add_argument("--quality-floors", nargs="+", type=float, default=[0.0],
+                   help="Hard quality floor for all selected trades (0..1)")
+    p.add_argument("--allocator-quality-blends", nargs="+", type=float, default=[0.25, 0.40],
+                   help="Blend quality into allocator score (0=edge/meta only, 1=quality-dominated)")
+    p.add_argument("--allocator-quality-powers", nargs="+", type=float, default=[1.0, 1.2],
+                   help="Exponent on quality term used in allocator score")
     p.add_argument("--shock-z-cut", type=float, default=0.0,
                    help="Apply shock-aware threshold boosts when |mkt_shock_z| >= this cutoff (0 disables)")
     p.add_argument("--shock-p-boost", type=float, default=0.0,
@@ -1700,6 +1885,12 @@ def parse_args() -> argparse.Namespace:
                    help="Power on meta confidence for position weight scaling (1=off)")
     p.add_argument("--post-cap-scales", nargs="+", type=float, default=[0.15, 0.25, 0.35],
                    help="After monthly loss cap is hit, keep trading with this exposure scale (0..1)")
+    p.add_argument("--leverage-maxs", nargs="+", type=float, default=[1.0, 1.2],
+                   help="Max leverage multiplier for top-quality trades (>=1)")
+    p.add_argument("--leverage-quality-floors", nargs="+", type=float, default=[0.80],
+                   help="Quality floor above which dynamic leverage starts scaling up")
+    p.add_argument("--leverage-quality-powers", nargs="+", type=float, default=[1.5],
+                   help="Shape of quality->leverage curve (higher=more selective leverage)")
     p.add_argument("--wf-train-months", type=int, default=24,
                    help="Walk-forward train window in months for OOS generation")
     p.add_argument("--wf-test-months", type=int, default=6,
@@ -1717,6 +1908,12 @@ def search_policies_with_args(d: pd.DataFrame, args: argparse.Namespace) -> pd.D
     abstain_regimes = tuple(str(v).upper() for v in args.abstain_regimes)
     abstain_symbol_regimes = _parse_symbol_regime_pairs(list(args.abstain_symbol_regimes))
     target_col = _resolve_target_col(str(args.primary_horizon))
+    quality_floors = [float(np.clip(v, 0.0, 0.99)) for v in getattr(args, "quality_floors", [0.0])]
+    allocator_quality_blends = [float(np.clip(v, 0.0, 1.0)) for v in getattr(args, "allocator_quality_blends", [0.25])]
+    allocator_quality_powers = [float(max(0.1, v)) for v in getattr(args, "allocator_quality_powers", [1.2])]
+    leverage_maxs = [float(max(1.0, v)) for v in getattr(args, "leverage_maxs", [1.0])]
+    leverage_quality_floors = [float(np.clip(v, 0.0, 0.99)) for v in getattr(args, "leverage_quality_floors", [0.8])]
+    leverage_quality_powers = [float(max(0.1, v)) for v in getattr(args, "leverage_quality_powers", [1.5])]
     if args.full_symbol_set_only:
         symbol_sets = [tuple(syms)]
     else:
@@ -1730,52 +1927,89 @@ def search_policies_with_args(d: pd.DataFrame, args: argparse.Namespace) -> pd.D
     long_flags = [True] if args.long_only_only else [True, False]
 
     results: list[dict] = []
-    for top_pct in args.top_pcts:
-        for symbols in symbol_sets:
-            for session in sessions:
-                for regime in regimes:
-                    for p_min in args.p_mins:
-                        for meta_min in args.meta_mins:
-                            for long_only in long_flags:
-                                for risk_min in args.risk_min_bps:
-                                    for max_per_ts in args.max_per_ts:
-                                        for router_conf_min in args.router_conf_mins:
-                                            for expert_disp_max in args.expert_disp_maxs:
-                                                for month_loss_cap_r in args.monthly_loss_cap_rs:
-                                                    for reentry_dd_r in args.reentry_drawdown_rs:
-                                                        for conf_w_pow in args.conf_weight_powers:
-                                                            for post_cap_scale in args.post_cap_scales:
-                                                                r = eval_policy(
-                                                                    d=d,
-                                                                    top_pct=top_pct,
-                                                                    symbols=symbols,
-                                                                    session=session,
-                                                                    regime=regime,
-                                                                    p_min=p_min,
-                                                                    meta_min=meta_min,
-                                                                    long_only=long_only,
-                                                                    risk_min_bps=risk_min,
-                                                                    max_per_ts=max_per_ts,
-                                                                    min_trades_per_month_hard=int(args.min_monthly_trades_hard),
-                                                                    shock_z_cut=float(args.shock_z_cut),
-                                                                    shock_p_boost=float(args.shock_p_boost),
-                                                                    shock_meta_boost=float(args.shock_meta_boost),
-                                                                    topup_score_scale=float(args.topup_score_scale),
-                                                                    router_conf_min=float(router_conf_min),
-                                                                    expert_disp_max=float(expert_disp_max),
-                                                                    monthly_loss_cap_r=float(month_loss_cap_r),
-                                                                    reentry_drawdown_r=float(reentry_dd_r),
-                                                                    conf_weight_power=float(conf_w_pow),
-                                                                    post_cap_scale=float(post_cap_scale),
-                                                                    hard_abstain_symbols=abstain_symbols,
-                                                                    hard_abstain_regimes=abstain_regimes,
-                                                                    hard_abstain_symbol_regimes=abstain_symbol_regimes,
-                                                                    adaptive_floor_quality=float(args.cadence_quality_floor),
-                                                                    target_col=target_col,
-                                                                )
-                                                                if r is None:
-                                                                    continue
-                                                                results.append(asdict(r))
+    grid_iter = itertools.product(
+        args.top_pcts,
+        symbol_sets,
+        sessions,
+        regimes,
+        args.p_mins,
+        args.meta_mins,
+        long_flags,
+        args.risk_min_bps,
+        args.max_per_ts,
+        args.router_conf_mins,
+        args.expert_disp_maxs,
+        args.monthly_loss_cap_rs,
+        args.reentry_drawdown_rs,
+        args.conf_weight_powers,
+        args.post_cap_scales,
+        quality_floors,
+        allocator_quality_blends,
+        allocator_quality_powers,
+        leverage_maxs,
+        leverage_quality_floors,
+        leverage_quality_powers,
+    )
+    for (
+        top_pct,
+        symbols,
+        session,
+        regime,
+        p_min,
+        meta_min,
+        long_only,
+        risk_min,
+        max_per_ts,
+        router_conf_min,
+        expert_disp_max,
+        month_loss_cap_r,
+        reentry_dd_r,
+        conf_w_pow,
+        post_cap_scale,
+        quality_floor,
+        allocator_quality_blend,
+        allocator_quality_power,
+        leverage_max,
+        leverage_quality_floor,
+        leverage_quality_power,
+    ) in grid_iter:
+        r = eval_policy(
+            d=d,
+            top_pct=top_pct,
+            symbols=symbols,
+            session=session,
+            regime=regime,
+            p_min=p_min,
+            meta_min=meta_min,
+            long_only=long_only,
+            risk_min_bps=risk_min,
+            max_per_ts=max_per_ts,
+            min_trades_per_month_hard=int(args.min_monthly_trades_hard),
+            shock_z_cut=float(args.shock_z_cut),
+            shock_p_boost=float(args.shock_p_boost),
+            shock_meta_boost=float(args.shock_meta_boost),
+            topup_score_scale=float(args.topup_score_scale),
+            router_conf_min=float(router_conf_min),
+            expert_disp_max=float(expert_disp_max),
+            monthly_loss_cap_r=float(month_loss_cap_r),
+            reentry_drawdown_r=float(reentry_dd_r),
+            conf_weight_power=float(conf_w_pow),
+            post_cap_scale=float(post_cap_scale),
+            hard_abstain_symbols=abstain_symbols,
+            hard_abstain_regimes=abstain_regimes,
+            hard_abstain_symbol_regimes=abstain_symbol_regimes,
+            adaptive_floor_quality=float(args.cadence_quality_floor),
+            quality_floor=float(quality_floor),
+            allocator_quality_blend=float(allocator_quality_blend),
+            allocator_quality_power=float(allocator_quality_power),
+            leverage_max=float(leverage_max),
+            leverage_quality_floor=float(leverage_quality_floor),
+            leverage_quality_power=float(leverage_quality_power),
+            target_col=target_col,
+        )
+        if r is None:
+            continue
+        results.append(asdict(r))
     if not results:
         return pd.DataFrame()
     return pd.DataFrame(results)
@@ -1799,6 +2033,12 @@ def _monthly_breakdown_for_policy(
     hard_abstain_regimes: tuple[str, ...] = (),
     hard_abstain_symbol_regimes: tuple[tuple[str, str], ...] = (),
     cadence_quality_floor: float = 0.0,
+    quality_floor: float = 0.0,
+    allocator_quality_blend: float = 0.25,
+    allocator_quality_power: float = 1.2,
+    leverage_max: float = 1.0,
+    leverage_quality_floor: float = 0.8,
+    leverage_quality_power: float = 1.5,
     target_col: str = "ret_60m",
 ) -> pd.DataFrame:
     symbols = tuple(str(row["symbols"]).split(","))
@@ -1827,6 +2067,12 @@ def _monthly_breakdown_for_policy(
             hard_abstain_regimes=hard_abstain_regimes,
             hard_abstain_symbol_regimes=hard_abstain_symbol_regimes,
             cadence_quality_floor=cadence_quality_floor,
+            quality_floor=quality_floor,
+            allocator_quality_blend=allocator_quality_blend,
+            allocator_quality_power=allocator_quality_power,
+            leverage_max=leverage_max,
+            leverage_quality_floor=leverage_quality_floor,
+            leverage_quality_power=leverage_quality_power,
             target_col=target_col,
         )
     else:
@@ -1848,6 +2094,12 @@ def _monthly_breakdown_for_policy(
             hard_abstain_symbols=hard_abstain_symbols,
             hard_abstain_regimes=hard_abstain_regimes,
             hard_abstain_symbol_regimes=hard_abstain_symbol_regimes,
+            quality_floor=quality_floor,
+            allocator_quality_blend=allocator_quality_blend,
+            allocator_quality_power=allocator_quality_power,
+            leverage_max=leverage_max,
+            leverage_quality_floor=leverage_quality_floor,
+            leverage_quality_power=leverage_quality_power,
             target_col=target_col,
         )
     if x.empty:
@@ -1961,6 +2213,12 @@ def main() -> None:
         hard_abstain_regimes=abstain_regimes,
         hard_abstain_symbol_regimes=abstain_symbol_regimes,
         cadence_quality_floor=float(args.cadence_quality_floor),
+        quality_floor=float(chosen.get("quality_floor", 0.0)),
+        allocator_quality_blend=float(chosen.get("allocator_quality_blend", 0.25)),
+        allocator_quality_power=float(chosen.get("allocator_quality_power", 1.2)),
+        leverage_max=float(chosen.get("leverage_max", 1.0)),
+        leverage_quality_floor=float(chosen.get("leverage_quality_floor", 0.8)),
+        leverage_quality_power=float(chosen.get("leverage_quality_power", 1.5)),
         target_col=target_col,
     )
 
@@ -2011,6 +2269,12 @@ def main() -> None:
         "reentry_drawdown_rs": [float(v) for v in args.reentry_drawdown_rs],
         "conf_weight_powers": [float(v) for v in args.conf_weight_powers],
         "post_cap_scales": [float(v) for v in args.post_cap_scales],
+        "quality_floor": float(args.quality_floors[0]) if args.quality_floors else 0.0,
+        "allocator_quality_blends": [float(v) for v in args.allocator_quality_blends],
+        "allocator_quality_powers": [float(v) for v in args.allocator_quality_powers],
+        "leverage_maxs": [float(v) for v in args.leverage_maxs],
+        "leverage_quality_floors": [float(v) for v in args.leverage_quality_floors],
+        "leverage_quality_powers": [float(v) for v in args.leverage_quality_powers],
         "best_overall": best_overall.to_dict("records"),
         "best_tail": best_tail.to_dict("records"),
         "best_robust": best_robust.to_dict("records"),
@@ -2041,7 +2305,13 @@ def main() -> None:
         f"- Min monthly trades constraint (robust): **{float(args.min_monthly_trades):.1f}**",
         f"- Adaptive hard pacing target (per month): **{int(args.min_monthly_trades_hard)}**",
         f"- Adaptive cadence quality floor: **{float(args.cadence_quality_floor):.2f}**",
+        f"- Global quality floor grid: **{', '.join(f'{float(v):.2f}' for v in args.quality_floors)}**",
+        f"- Allocator quality blend grid: **{', '.join(f'{float(v):.2f}' for v in args.allocator_quality_blends)}**",
+        f"- Allocator quality power grid: **{', '.join(f'{float(v):.2f}' for v in args.allocator_quality_powers)}**",
         f"- Adaptive top-up weight scale: **{float(args.topup_score_scale):.2f}**",
+        f"- Leverage max grid: **{', '.join(f'{float(v):.2f}' for v in args.leverage_maxs)}**",
+        f"- Leverage quality floor grid: **{', '.join(f'{float(v):.2f}' for v in args.leverage_quality_floors)}**",
+        f"- Leverage quality power grid: **{', '.join(f'{float(v):.2f}' for v in args.leverage_quality_powers)}**",
         f"- Hard-abstain symbols: **{', '.join(abstain_symbols) if abstain_symbols else 'None'}**",
         f"- Hard-abstain regimes: **{', '.join(abstain_regimes) if abstain_regimes else 'None'}**",
         f"- Hard-abstain symbol:regime pairs: **{', '.join(f'{s}:{r}' for s, r in abstain_symbol_regimes) if abstain_symbol_regimes else 'None'}**",
