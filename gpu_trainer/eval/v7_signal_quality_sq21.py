@@ -414,6 +414,7 @@ def collect_oos_predictions(
     wf_test_months: int = 6,
     wf_folds: int = 5,
     fast_oos_mode: bool = False,
+    fast_max_bars: int = 20000,
 ) -> pd.DataFrame:
     feats = build_sq21_features(symbol, df, context)
     targs = build_targets(df)
@@ -427,6 +428,12 @@ def collect_oos_predictions(
     y_ret = y_ret[valid_from:]
     y_sign = y_sign[valid_from:]
     ts = df["timestamp"].to_numpy()[valid_from:]
+    if fast_oos_mode and int(fast_max_bars) > 0 and len(ts) > int(fast_max_bars):
+        keep = int(fast_max_bars)
+        X_base = X_base[-keep:]
+        y_ret = y_ret[-keep:]
+        y_sign = y_sign[-keep:]
+        ts = ts[-keep:]
     X_seq = _seq_expand(X_base, seq_window=seq_window) if use_sq3 else np.empty((len(X_base), 0))
     X = X_base
 
@@ -462,9 +469,14 @@ def collect_oos_predictions(
 
         if fast_oos_mode:
             # Fast all-symbol path: linear learners drastically reduce OOS build time.
-            X_fit = X_tr[good]
-            y_fit_cls = ysgn_tr[good]
-            y_fit_reg = np.abs(yret_tr[good])
+            good_idx = np.where(good)[0]
+            if good_idx.size > 7000:
+                take = np.random.default_rng(41 + fold).choice(good_idx, size=7000, replace=False)
+            else:
+                take = good_idx
+            X_fit = X_tr[take]
+            y_fit_cls = ysgn_tr[take]
+            y_fit_reg = np.abs(yret_tr[take])
             med = np.nanmedian(X_fit, axis=0)
             med = np.where(np.isfinite(med), med, 0.0)
             X_fit_i = np.where(np.isfinite(X_fit), X_fit, med)
