@@ -44,6 +44,8 @@ BAR_MS = 15 * 60 * 1000
 COST_BPS = 8.0  # round-trip cost assumption applied to top-decile expectancy
 COST_FRAC = COST_BPS / 1e4
 DATA_CACHE_DIR = Path(__file__).resolve().parents[1] / "data_cache"
+DB_CONNECT_TIMEOUT_SEC = int(os.environ.get("V7_DB_CONNECT_TIMEOUT_SEC", "3"))
+_DB_UNAVAILABLE = False
 
 DEFAULT_SYMBOLS_FULL = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT",
                         "ADAUSDT", "AVAXUSDT", "XRPUSDT"]
@@ -59,7 +61,10 @@ TARGET_NAMES = [
 # ---------- data loading ----------
 
 def _conn():
-    return psycopg2.connect(os.environ["DATABASE_URL"], connect_timeout=10)
+    return psycopg2.connect(
+        os.environ["DATABASE_URL"],
+        connect_timeout=max(1, DB_CONNECT_TIMEOUT_SEC),
+    )
 
 
 def _load_symbol_from_parquet(symbol: str) -> pd.DataFrame:
@@ -91,7 +96,8 @@ def _load_symbol_from_parquet(symbol: str) -> pd.DataFrame:
 
 def load_symbol(symbol: str) -> pd.DataFrame:
     """Load 15m candles + flow + funding + OI for a symbol; merge on bar timestamp."""
-    use_db = bool(os.environ.get("DATABASE_URL"))
+    global _DB_UNAVAILABLE
+    use_db = bool(os.environ.get("DATABASE_URL")) and not _DB_UNAVAILABLE
     if use_db:
         try:
             with _conn() as cn:
@@ -115,6 +121,9 @@ def load_symbol(symbol: str) -> pd.DataFrame:
         except Exception as e:
             log.warning("%s: DB load failed (%s), falling back to parquet cache",
                         symbol, str(e)[:160])
+            # Fail-fast for the current process: avoid re-trying a known
+            # unavailable DB for every symbol during large universe runs.
+            _DB_UNAVAILABLE = True
             use_db = False
     if not use_db:
         candles = _load_symbol_from_parquet(symbol)

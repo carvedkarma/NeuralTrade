@@ -99,6 +99,10 @@ def _cache_path(
     model_family: str,
     sq3_seq_weight: float,
     sq3_seq_window: int,
+    wf_train_months: int,
+    wf_test_months: int,
+    wf_folds: int,
+    fast_oos_mode: bool,
 ) -> Path:
     token = "|".join(
         [
@@ -108,6 +112,10 @@ def _cache_path(
             f"model={model_family}",
             f"sq3w={float(sq3_seq_weight):.3f}",
             f"sq3win={int(sq3_seq_window)}",
+            f"wftr={int(wf_train_months)}",
+            f"wfte={int(wf_test_months)}",
+            f"wff={int(wf_folds)}",
+            f"fast={int(bool(fast_oos_mode))}",
             "sq21-intel-moe-v2",
         ]
     )
@@ -402,6 +410,10 @@ def collect_oos_predictions(
     use_sq3: bool = False,
     seq_weight: float = 0.55,
     seq_window: int = 12,
+    wf_train_months: int = 24,
+    wf_test_months: int = 6,
+    wf_folds: int = 5,
+    fast_oos_mode: bool = False,
 ) -> pd.DataFrame:
     feats = build_sq21_features(symbol, df, context)
     targs = build_targets(df)
@@ -430,7 +442,12 @@ def collect_oos_predictions(
     dom_ret1 = ctx_slice["btc_dominance_ret1"].to_numpy()
     regime_lbl = _regime_labels_from_context(risk_on=risk_on, shock_z=shock_z)
 
-    folds = walk_forward_indices(ts)
+    folds = walk_forward_indices(
+        ts,
+        train_months=int(wf_train_months),
+        test_months=int(wf_test_months),
+        n_folds=int(wf_folds),
+    )
     rows: list[dict] = []
     for fold, (tlo, thi, slo, shi) in enumerate(folds):
         X_tr, X_te = X[tlo:thi], X[slo:shi]
@@ -443,49 +460,89 @@ def collect_oos_predictions(
         if good.sum() < 1200:
             continue
 
-        clf = _clf(11)
-        clf.fit(X_tr[good], ysgn_tr[good])
-        reg = _reg(11)
-        reg.fit(X_tr[good], np.abs(yret_tr[good]))
+        if fast_oos_mode:
+            # Fast all-symbol path: linear learners drastically reduce OOS build time.
+            X_fit = X_tr[good]
+            y_fit_cls = ysgn_tr[good]
+            y_fit_reg = np.abs(yret_tr[good])
+            med = np.nanmedian(X_fit, axis=0)
+            med = np.where(np.isfinite(med), med, 0.0)
+            X_fit_i = np.where(np.isfinite(X_fit), X_fit, med)
+            X_tr_i = np.where(np.isfinite(X_tr), X_tr, med)
+            X_te_i = np.where(np.isfinite(X_te), X_te, med)
+            sd = np.nanstd(X_fit_i, axis=0)
+            sd = np.where(sd > 1e-9, sd, 1.0)
+            lo = med - 8.0 * sd
+            hi = med + 8.0 * sd
+            X_fit_i = np.clip(X_fit_i, lo, hi)
+            X_tr_i = np.clip(X_tr_i, lo, hi)
+            X_te_i = np.clip(X_te_i, lo, hi)
+            scaler = StandardScaler()
+            X_fit_s = scaler.fit_transform(X_fit_i)
+            X_tr_s = scaler.transform(X_tr_i)
+            X_te_s = scaler.transform(X_te_i)
 
-        reg_tr = regime_lbl[tlo:thi]
-        experts: dict[int, tuple[HistGradientBoostingClassifier, HistGradientBoostingRegressor]] = {}
-        for reg_id in (0, 1, 2):
-            rmask = good & (reg_tr == reg_id)
-            if int(rmask.sum()) < 700:
-                continue
-            eclf = _clf(101 + reg_id)
-            eclf.fit(X_tr[rmask], ysgn_tr[rmask])
-            ereg = _reg(101 + reg_id)
-            ereg.fit(X_tr[rmask], np.abs(yret_tr[rmask]))
-            experts[reg_id] = (eclf, ereg)
+            p_base = float(np.clip(y_fit_cls.mean(), 0.01, 0.99))
+            p_up_tr = np.full(len(X_tr), p_base, dtype="float64")
+            p_up_te = np.full(len(X_te), p_base, dtype="float64")
+            if np.unique(y_fit_cls).size >= 2:
+                clf_fast = LogisticRegression(C=0.8, max_iter=350, solver="lbfgs")
+                clf_fast.fit(X_fit_s, y_fit_cls)
+                p_up_tr = clf_fast.predict_proba(X_tr_s)[:, 1]
+                p_up_te = clf_fast.predict_proba(X_te_s)[:, 1]
 
-        router: HistGradientBoostingClassifier | None = None
-        router_mask = good & np.isin(reg_tr, np.array([0, 1, 2], dtype=np.int8))
-        if int(router_mask.sum()) > 1800 and np.unique(reg_tr[router_mask]).size >= 2:
-            router = HistGradientBoostingClassifier(
-                max_iter=180,
-                max_depth=4,
-                learning_rate=0.04,
-                min_samples_leaf=240,
-                random_state=73,
+            reg_fast = Ridge(alpha=2.0)
+            reg_fast.fit(X_fit_s, y_fit_reg)
+            mag_tr = np.clip(reg_fast.predict(X_tr_s), 0.0, None)
+            mag_te = np.clip(reg_fast.predict(X_te_s), 0.0, None)
+            p_disp_tr = np.zeros(len(X_tr), dtype="float64")
+            p_disp_te = np.zeros(len(X_te), dtype="float64")
+            router_conf_tr = np.clip(np.abs(p_up_tr - 0.5) * 2.0, 0.0, 1.0)
+            router_conf_te = np.clip(np.abs(p_up_te - 0.5) * 2.0, 0.0, 1.0)
+        else:
+            clf = _clf(11)
+            clf.fit(X_tr[good], ysgn_tr[good])
+            reg = _reg(11)
+            reg.fit(X_tr[good], np.abs(yret_tr[good]))
+
+            reg_tr = regime_lbl[tlo:thi]
+            experts: dict[int, tuple[HistGradientBoostingClassifier, HistGradientBoostingRegressor]] = {}
+            for reg_id in (0, 1, 2):
+                rmask = good & (reg_tr == reg_id)
+                if int(rmask.sum()) < 700:
+                    continue
+                eclf = _clf(101 + reg_id)
+                eclf.fit(X_tr[rmask], ysgn_tr[rmask])
+                ereg = _reg(101 + reg_id)
+                ereg.fit(X_tr[rmask], np.abs(yret_tr[rmask]))
+                experts[reg_id] = (eclf, ereg)
+
+            router: HistGradientBoostingClassifier | None = None
+            router_mask = good & np.isin(reg_tr, np.array([0, 1, 2], dtype=np.int8))
+            if int(router_mask.sum()) > 1800 and np.unique(reg_tr[router_mask]).size >= 2:
+                router = HistGradientBoostingClassifier(
+                    max_iter=180,
+                    max_depth=4,
+                    learning_rate=0.04,
+                    min_samples_leaf=240,
+                    random_state=73,
+                )
+                router.fit(X_tr[router_mask], reg_tr[router_mask])
+
+            p_up_tr, mag_tr, p_disp_tr, router_conf_tr = _predict_regime_moe(
+                X_in=X_tr,
+                base_clf=clf,
+                base_reg=reg,
+                experts=experts,
+                router=router,
             )
-            router.fit(X_tr[router_mask], reg_tr[router_mask])
-
-        p_up_tr, mag_tr, p_disp_tr, router_conf_tr = _predict_regime_moe(
-            X_in=X_tr,
-            base_clf=clf,
-            base_reg=reg,
-            experts=experts,
-            router=router,
-        )
-        p_up_te, mag_te, p_disp_te, router_conf_te = _predict_regime_moe(
-            X_in=X_te,
-            base_clf=clf,
-            base_reg=reg,
-            experts=experts,
-            router=router,
-        )
+            p_up_te, mag_te, p_disp_te, router_conf_te = _predict_regime_moe(
+                X_in=X_te,
+                base_clf=clf,
+                base_reg=reg,
+                experts=experts,
+                router=router,
+            )
         if use_sq3 and Xs_tr.shape[1] > 0:
             seq_good = good.copy()
             p_seq_tr = p_up_tr.copy()
@@ -653,6 +710,9 @@ def collect_oos_predictions_sq3(
     context: pd.DataFrame,
     seq_weight: float = 0.55,
     seq_window: int = 12,
+    wf_train_months: int = 24,
+    wf_test_months: int = 6,
+    wf_folds: int = 5,
 ) -> pd.DataFrame:
     return collect_oos_predictions(
         symbol=symbol,
@@ -661,6 +721,9 @@ def collect_oos_predictions_sq3(
         use_sq3=True,
         seq_weight=seq_weight,
         seq_window=seq_window,
+        wf_train_months=wf_train_months,
+        wf_test_months=wf_test_months,
+        wf_folds=wf_folds,
     )
 
 
@@ -672,6 +735,10 @@ def ensure_oos_cache(
     model_family: str = "sq21",
     sq3_seq_weight: float = 0.55,
     sq3_seq_window: int = 12,
+    wf_train_months: int = 24,
+    wf_test_months: int = 6,
+    wf_folds: int = 5,
+    fast_oos_mode: bool = False,
 ) -> tuple[pd.DataFrame, list[str]]:
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     cache_path = _cache_path(
@@ -680,6 +747,10 @@ def ensure_oos_cache(
         model_family=model_family,
         sq3_seq_weight=sq3_seq_weight,
         sq3_seq_window=sq3_seq_window,
+        wf_train_months=wf_train_months,
+        wf_test_months=wf_test_months,
+        wf_folds=wf_folds,
+        fast_oos_mode=bool(fast_oos_mode),
     )
     if cache_path.exists() and not rebuild_cache:
         return pd.read_parquet(cache_path), sorted(set(context_symbols))
@@ -705,9 +776,19 @@ def ensure_oos_cache(
                 context,
                 seq_weight=sq3_seq_weight,
                 seq_window=sq3_seq_window,
+                wf_train_months=wf_train_months,
+                wf_test_months=wf_test_months,
+                wf_folds=wf_folds,
             )
         else:
-            s = collect_oos_predictions(sym, raw_by_symbol[sym], context)
+            s = collect_oos_predictions(
+                sym,
+                raw_by_symbol[sym],
+                context,
+                wf_train_months=wf_train_months,
+                wf_test_months=wf_test_months,
+                wf_folds=wf_folds,
+            )
         if not s.empty:
             frames.append(s)
     if not frames:
@@ -1291,6 +1372,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="V7 SQ2.1 macro + allocator WF search")
     p.add_argument("--model-family", type=str, default="sq21", choices=["sq21", "sq3"],
                    help="Model family for OOS generation: sq21 baseline or sq3 sequence blend")
+    p.add_argument("--fast-all-symbol-mode", action="store_true",
+                   help="Use faster learners/router path to complete very large all-symbol sweeps")
     p.add_argument("--sq3-seq-weight", type=float, default=0.55,
                    help="SQ3 only: blend weight for sequence model predictions (0..0.9)")
     p.add_argument("--sq3-seq-window", type=int, default=12,
@@ -1339,6 +1422,12 @@ def parse_args() -> argparse.Namespace:
                    help="Power on meta confidence for position weight scaling (1=off)")
     p.add_argument("--post-cap-scales", nargs="+", type=float, default=[0.15, 0.25, 0.35],
                    help="After monthly loss cap is hit, keep trading with this exposure scale (0..1)")
+    p.add_argument("--wf-train-months", type=int, default=24,
+                   help="Walk-forward train window in months for OOS generation")
+    p.add_argument("--wf-test-months", type=int, default=6,
+                   help="Walk-forward test window in months for OOS generation")
+    p.add_argument("--wf-folds", type=int, default=5,
+                   help="Number of walk-forward folds for OOS generation")
     p.add_argument("--rebuild-cache", action="store_true",
                    help="Force rebuild OOS cache for selected symbols/context")
     return p.parse_args()
@@ -1506,6 +1595,9 @@ def main() -> None:
         model_family=str(args.model_family),
         sq3_seq_weight=float(args.sq3_seq_weight),
         sq3_seq_window=int(args.sq3_seq_window),
+        wf_train_months=int(args.wf_train_months),
+        wf_test_months=int(args.wf_test_months),
+        wf_folds=int(args.wf_folds),
     )
     if oos.empty:
         raise RuntimeError("no OOS predictions")
@@ -1573,6 +1665,9 @@ def main() -> None:
         "model_family": str(args.model_family),
         "sq3_seq_weight": float(args.sq3_seq_weight),
         "sq3_seq_window": int(args.sq3_seq_window),
+        "wf_train_months": int(args.wf_train_months),
+        "wf_test_months": int(args.wf_test_months),
+        "wf_folds": int(args.wf_folds),
         "cost_bps": COST_BPS,
         "oos_rows": int(len(oos)),
         "symbols": sorted(oos["symbol"].unique().tolist()),
@@ -1611,6 +1706,7 @@ def main() -> None:
         f"- Feature pack: **{'SQ3 sequence blend + macro context + meta gate + top-K allocator' if str(args.model_family).lower().startswith('sq3') else 'macro context + meta tradeability gate + top-K allocator'}**",
         f"- SQ3 sequence weight: **{float(args.sq3_seq_weight):.2f}**",
         f"- SQ3 sequence window: **{int(args.sq3_seq_window)}**",
+        f"- Walk-forward train/test/folds: **{int(args.wf_train_months)}/{int(args.wf_test_months)}/{int(args.wf_folds)}**",
         f"- OOS rows: **{len(oos):,}**",
         f"- Active symbols: **{', '.join(sorted(oos['symbol'].unique()))}**",
         f"- Context symbols: **{', '.join(usable_context)}**",
