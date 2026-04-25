@@ -401,6 +401,35 @@ def _meta_features(
     )
 
 
+def _utility_features(
+    p_up: np.ndarray,
+    pred_mag: np.ndarray,
+    edge: np.ndarray,
+    meta_p: np.ndarray,
+    risk_bps: np.ndarray,
+    mkt_disp: np.ndarray,
+    risk_on: np.ndarray,
+    dom_ret1: np.ndarray,
+    expert_dispersion: np.ndarray,
+    router_conf: np.ndarray,
+) -> np.ndarray:
+    return np.column_stack(
+        [
+            p_up,
+            pred_mag,
+            edge,
+            np.abs(edge),
+            np.clip(meta_p, 0.0, 1.0),
+            risk_bps,
+            mkt_disp,
+            risk_on,
+            dom_ret1,
+            expert_dispersion,
+            router_conf,
+        ]
+    )
+
+
 def _regime_labels_from_context(risk_on: np.ndarray, shock_z: np.ndarray) -> np.ndarray:
     labels = np.full(len(risk_on), -1, dtype=np.int8)
     valid = np.isfinite(risk_on) & np.isfinite(shock_z)
@@ -720,6 +749,7 @@ def collect_oos_predictions(
         side_tr = np.where(edge_tr >= 0, 1.0, -1.0)
         net_pred_tr = side_tr * yret_tr - COST_FRAC
         y_meta_tr = (net_pred_tr > 0).astype(int)
+        y_utility_tr = net_pred_tr
 
         meta_good = (
             np.isfinite(yret_tr)
@@ -733,6 +763,8 @@ def collect_oos_predictions(
             & np.isfinite(router_conf_tr)
         )
         meta_te = np.full(len(X_te), 0.5, dtype=float)
+        util_te = np.zeros(len(X_te), dtype=float)
+        util_win_te = np.full(len(X_te), 0.5, dtype=float)
         if meta_good.sum() > 1500:
             X_meta_tr = _meta_features(
                 p_up=p_up_tr[meta_good],
@@ -771,6 +803,19 @@ def collect_oos_predictions(
             )
             meta_te[te_good_for_meta] = mclf.predict_proba(X_meta_te)[:, 1]
 
+            # Utility head: directly estimate expected net R and P(net>0)
+            # to prioritize selections with better payoff geometry.
+            ureg = _reg(57)
+            ureg_sw = _tail_sample_weights(y_utility_tr[meta_good], tail_objective_weight)
+            ureg.fit(X_meta_tr, y_utility_tr[meta_good], sample_weight=ureg_sw)
+            util_te[te_good_for_meta] = ureg.predict(X_meta_te)
+
+            y_ucls = (y_utility_tr[meta_good] > 0).astype(int)
+            if np.unique(y_ucls).size >= 2:
+                uclf = _clf(59)
+                uclf.fit(X_meta_tr, y_ucls, sample_weight=ureg_sw)
+                util_win_te[te_good_for_meta] = uclf.predict_proba(X_meta_te)[:, 1]
+
         sess = _session_from_ts(ts[slo:shi])
         side = np.sign(edge_te)
         sign_trend = np.sign(trend_16[slo:shi])
@@ -807,6 +852,8 @@ def collect_oos_predictions(
                     "edge": float(edge_te[i]),
                     "abs_edge": float(abs(edge_te[i])),
                     "meta_p": float(meta_te[i]),
+                    "utility_r_hat": float(util_te[i]),
+                    "utility_win_p": float(util_win_te[i]),
                     "expert_dispersion": float(p_disp_te[i]),
                     "router_conf": float(router_conf_te[i]),
                     "mkt_dispersion": float(disp_te[i]),
@@ -958,6 +1005,8 @@ class PolicyResult:
     quality_floor: float
     allocator_quality_blend: float
     allocator_quality_power: float
+    allocator_utility_weight: float
+    allocator_utility_power: float
     topup_score_scale: float
     min_router_conf: float
     max_expert_disp: float
@@ -1054,6 +1103,24 @@ def _confidence_quality(frame: pd.DataFrame) -> np.ndarray:
         meta = np.where(np.isfinite(meta), np.clip(meta, 0.0, 1.0), 0.5)
     else:
         meta = np.full(n, 0.5, dtype="float64")
+    util_p_col = "utility_win_p" if "utility_win_p" in frame.columns else "utility_p"
+    if util_p_col in frame.columns:
+        util_p = pd.to_numeric(frame[util_p_col], errors="coerce").to_numpy(dtype="float64")
+        util_p = np.where(np.isfinite(util_p), np.clip(util_p, 0.0, 1.0), 0.5)
+    else:
+        util_p = meta.copy()
+    if "utility_r_hat" in frame.columns:
+        util_r = pd.to_numeric(frame["utility_r_hat"], errors="coerce").to_numpy(dtype="float64")
+        if np.isfinite(util_r).any():
+            u_scale = float(np.nanpercentile(np.abs(util_r[np.isfinite(util_r)]), 80))
+            if not np.isfinite(u_scale) or u_scale < 1e-8:
+                u_scale = 1.0
+            util_r_sig = np.clip((util_r / u_scale + 1.0) * 0.5, 0.0, 1.0)
+            util_r_sig = np.where(np.isfinite(util_r_sig), util_r_sig, 0.5)
+        else:
+            util_r_sig = np.full(n, 0.5, dtype="float64")
+    else:
+        util_r_sig = np.full(n, 0.5, dtype="float64")
 
     if "abs_edge" in frame.columns:
         abs_edge = pd.to_numeric(frame["abs_edge"], errors="coerce").to_numpy(dtype="float64")
@@ -1091,20 +1158,52 @@ def _confidence_quality(frame: pd.DataFrame) -> np.ndarray:
 
     quality = (
         0.34 * rc
-        + 0.20 * disp_pen
-        + 0.16 * p_margin
-        + 0.14 * meta
-        + 0.10 * edge_eff
-        + 0.06 * regime_align
+        + 0.17 * disp_pen
+        + 0.13 * p_margin
+        + 0.10 * meta
+        + 0.14 * util_p
+        + 0.14 * util_r_sig
+        + 0.08 * edge_eff
+        + 0.04 * regime_align
     )
     quality = np.clip(quality * shock_pen, 0.05, 1.0)
     return quality.astype("float64", copy=False)
+
+
+def _utility_score(frame: pd.DataFrame) -> np.ndarray:
+    n = len(frame)
+    if n == 0:
+        return np.zeros(0, dtype="float64")
+    win_col = "utility_win_p" if "utility_win_p" in frame.columns else "utility_p"
+    if win_col in frame.columns:
+        up = pd.to_numeric(frame[win_col], errors="coerce").to_numpy(dtype="float64")
+        up = np.where(np.isfinite(up), np.clip(up, 0.0, 1.0), 0.5)
+    else:
+        up = np.full(n, 0.5, dtype="float64")
+
+    if "utility_r_hat" in frame.columns:
+        ur = pd.to_numeric(frame["utility_r_hat"], errors="coerce").to_numpy(dtype="float64")
+        if np.isfinite(ur).any():
+            sc = float(np.nanpercentile(np.abs(ur[np.isfinite(ur)]), 80))
+            if not np.isfinite(sc) or sc < 1e-8:
+                sc = 1.0
+            ur_sig = np.clip((ur / sc + 1.0) * 0.5, 0.0, 1.0)
+            ur_sig = np.where(np.isfinite(ur_sig), ur_sig, 0.5)
+        else:
+            ur_sig = np.full(n, 0.5, dtype="float64")
+    else:
+        ur_sig = np.full(n, 0.5, dtype="float64")
+
+    score = 0.58 * up + 0.42 * ur_sig
+    return np.where(np.isfinite(score), np.clip(score, 0.0, 1.0), 0.5)
 
 
 def _allocator_score(
     frame: pd.DataFrame,
     quality_blend: float = 0.0,
     quality_power: float = 1.0,
+    utility_weight: float = 0.0,
+    utility_power: float = 1.0,
 ) -> np.ndarray:
     n = len(frame)
     if n == 0:
@@ -1119,6 +1218,13 @@ def _allocator_score(
     base = edge * meta
     p_margin = np.abs(p_up - 0.5) * 2.0
     base = base * (0.85 + 0.15 * np.clip(p_margin, 0.0, 1.0))
+    if "utility_score" in frame.columns:
+        util = pd.to_numeric(frame["utility_score"], errors="coerce").to_numpy(dtype="float64")
+        util = np.where(np.isfinite(util), np.clip(util, 0.0, 1.0), 0.0)
+        uw = float(np.clip(utility_weight, 0.0, 1.0))
+        if uw > 1e-12:
+            up = np.power(util, float(max(0.1, utility_power)))
+            base = base * ((1.0 - uw) + uw * up)
     blend = float(np.clip(quality_blend, 0.0, 1.0))
     if blend <= 1e-12:
         return np.where(np.isfinite(base), base, 0.0)
@@ -1127,6 +1233,40 @@ def _allocator_score(
     qpow = np.power(np.clip(q, 0.0, 1.0), float(max(0.1, quality_power)))
     score = base * ((1.0 - blend) + blend * qpow)
     return np.where(np.isfinite(score), score, 0.0)
+
+
+def _normalize_utility_grid(values: list[float], default: list[float]) -> list[float]:
+    src = values if values else default
+    out = [float(np.clip(v, 0.0, 1.0)) for v in src]
+    # Preserve order while removing duplicates.
+    return list(dict.fromkeys(out))
+
+
+def _ensure_utility_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    out = frame.copy()
+    if "utility_win_p" not in out.columns:
+        out["utility_win_p"] = pd.to_numeric(out.get("meta_p", 0.5), errors="coerce").fillna(0.5)
+    if "utility_r_hat" not in out.columns:
+        out["utility_r_hat"] = pd.to_numeric(out.get("edge", 0.0), errors="coerce").fillna(0.0)
+    up = pd.to_numeric(out["utility_win_p"], errors="coerce").to_numpy(dtype="float64")
+    up = np.where(np.isfinite(up), np.clip(up, 0.0, 1.0), 0.5)
+    ur = pd.to_numeric(out["utility_r_hat"], errors="coerce").to_numpy(dtype="float64")
+    ur = np.where(np.isfinite(ur), ur, 0.0)
+    ur_pos = np.clip(ur, 0.0, None)
+    if np.isfinite(ur_pos).any():
+        sc = float(np.nanpercentile(ur_pos[np.isfinite(ur_pos)], 85))
+        if not np.isfinite(sc) or sc < 1e-8:
+            sc = 1.0
+    else:
+        sc = 1.0
+    ur_sig = np.clip(ur_pos / sc, 0.0, 1.5)
+    util_score = np.clip(0.65 * up + 0.35 * ur_sig, 0.0, 1.0)
+    out["utility_win_p"] = up
+    out["utility_r_hat"] = ur
+    out["utility_score"] = util_score
+    return out
 
 
 def _apply_dynamic_leverage(
@@ -1229,11 +1369,14 @@ def _apply_policy_and_allocate(
     quality_floor: float = 0.0,
     allocator_quality_blend: float = 0.25,
     allocator_quality_power: float = 1.2,
+    allocator_utility_weight: float = 0.35,
+    allocator_utility_power: float = 1.2,
     leverage_max: float = 1.0,
     leverage_quality_floor: float = 0.8,
     leverage_quality_power: float = 1.5,
     target_col: str = "ret_60m",
 ) -> pd.DataFrame:
+    d = _ensure_utility_columns(d)
     x = d[d["symbol"].isin(symbols)]
     if x.empty:
         return pd.DataFrame()
@@ -1297,6 +1440,8 @@ def _apply_policy_and_allocate(
         x,
         quality_blend=float(allocator_quality_blend),
         quality_power=float(allocator_quality_power),
+        utility_weight=float(allocator_utility_weight),
+        utility_power=float(allocator_utility_power),
     ).astype("float64")
     selected = x[x["rank_pct"] >= q_cut].copy()
     if min_trades_per_month_hard > 0:
@@ -1378,11 +1523,14 @@ def _apply_policy_with_adaptive_pacing(
     quality_floor: float = 0.0,
     allocator_quality_blend: float = 0.25,
     allocator_quality_power: float = 1.2,
+    allocator_utility_weight: float = 0.35,
+    allocator_utility_power: float = 1.2,
     leverage_max: float = 1.0,
     leverage_quality_floor: float = 0.8,
     leverage_quality_power: float = 1.5,
     target_col: str = "ret_60m",
 ) -> pd.DataFrame:
+    d = _ensure_utility_columns(d)
     if router_conf_min > 0.0 or expert_disp_max < 0.999:
         d = d.copy()
         if "router_conf" in d.columns and router_conf_min > 0.0:
@@ -1476,6 +1624,8 @@ def _apply_policy_with_adaptive_pacing(
         base,
         quality_blend=float(allocator_quality_blend),
         quality_power=float(allocator_quality_power),
+        utility_weight=float(allocator_utility_weight),
+        utility_power=float(allocator_utility_power),
     ).astype("float64")
 
     selected_chunks: list[pd.DataFrame] = []
@@ -1667,6 +1817,8 @@ def eval_policy(
     quality_floor: float = 0.0,
     allocator_quality_blend: float = 0.25,
     allocator_quality_power: float = 1.2,
+    allocator_utility_weight: float = 0.35,
+    allocator_utility_power: float = 1.2,
     leverage_max: float = 1.0,
     leverage_quality_floor: float = 0.8,
     leverage_quality_power: float = 1.5,
@@ -1705,6 +1857,8 @@ def eval_policy(
             quality_floor=quality_floor,
             allocator_quality_blend=allocator_quality_blend,
             allocator_quality_power=allocator_quality_power,
+            allocator_utility_weight=allocator_utility_weight,
+            allocator_utility_power=allocator_utility_power,
             leverage_max=leverage_max,
             leverage_quality_floor=leverage_quality_floor,
             leverage_quality_power=leverage_quality_power,
@@ -1732,6 +1886,8 @@ def eval_policy(
             quality_floor=quality_floor,
             allocator_quality_blend=allocator_quality_blend,
             allocator_quality_power=allocator_quality_power,
+            allocator_utility_weight=allocator_utility_weight,
+            allocator_utility_power=allocator_utility_power,
             leverage_max=leverage_max,
             leverage_quality_floor=leverage_quality_floor,
             leverage_quality_power=leverage_quality_power,
@@ -1784,6 +1940,8 @@ def eval_policy(
         quality_floor=float(quality_floor),
         allocator_quality_blend=float(allocator_quality_blend),
         allocator_quality_power=float(allocator_quality_power),
+        allocator_utility_weight=float(allocator_utility_weight),
+        allocator_utility_power=float(allocator_utility_power),
         topup_score_scale=float(topup_score_scale),
         min_router_conf=float(router_conf_min),
         max_expert_disp=float(expert_disp_max),
@@ -1875,6 +2033,10 @@ def parse_args() -> argparse.Namespace:
                    help="Blend quality into allocator score (0=edge/meta only, 1=quality-dominated)")
     p.add_argument("--allocator-quality-powers", nargs="+", type=float, default=[1.0, 1.2],
                    help="Exponent on quality term used in allocator score")
+    p.add_argument("--allocator-utility-weights", nargs="+", type=float, default=[0.35, 0.55],
+                   help="Blend utility score into allocator score (0=edge/meta only, 1=utility-dominated)")
+    p.add_argument("--allocator-utility-powers", nargs="+", type=float, default=[1.0, 1.2],
+                   help="Exponent on utility score in allocator")
     p.add_argument("--shock-z-cut", type=float, default=0.0,
                    help="Apply shock-aware threshold boosts when |mkt_shock_z| >= this cutoff (0 disables)")
     p.add_argument("--shock-p-boost", type=float, default=0.0,
@@ -1921,6 +2083,10 @@ def search_policies_with_args(d: pd.DataFrame, args: argparse.Namespace) -> pd.D
     quality_floors = [float(np.clip(v, 0.0, 0.99)) for v in getattr(args, "quality_floors", [0.0])]
     allocator_quality_blends = [float(np.clip(v, 0.0, 1.0)) for v in getattr(args, "allocator_quality_blends", [0.25])]
     allocator_quality_powers = [float(max(0.1, v)) for v in getattr(args, "allocator_quality_powers", [1.2])]
+    allocator_utility_weights = [float(np.clip(v, 0.0, 1.0)) for v in getattr(args, "allocator_utility_weights", [0.35])]
+    allocator_utility_powers = [float(max(0.1, v)) for v in getattr(args, "allocator_utility_powers", [1.2])]
+    allocator_utility_weights = [float(np.clip(v, 0.0, 1.0)) for v in getattr(args, "allocator_utility_weights", [0.35])]
+    allocator_utility_powers = [float(max(0.1, v)) for v in getattr(args, "allocator_utility_powers", [1.2])]
     leverage_maxs = [float(max(1.0, v)) for v in getattr(args, "leverage_maxs", [1.0])]
     leverage_quality_floors = [float(np.clip(v, 0.0, 0.99)) for v in getattr(args, "leverage_quality_floors", [0.8])]
     leverage_quality_powers = [float(max(0.1, v)) for v in getattr(args, "leverage_quality_powers", [1.5])]
@@ -1956,6 +2122,8 @@ def search_policies_with_args(d: pd.DataFrame, args: argparse.Namespace) -> pd.D
         quality_floors,
         allocator_quality_blends,
         allocator_quality_powers,
+        allocator_utility_weights,
+        allocator_utility_powers,
         leverage_maxs,
         leverage_quality_floors,
         leverage_quality_powers,
@@ -1979,6 +2147,8 @@ def search_policies_with_args(d: pd.DataFrame, args: argparse.Namespace) -> pd.D
         quality_floor,
         allocator_quality_blend,
         allocator_quality_power,
+        allocator_utility_weight,
+        allocator_utility_power,
         leverage_max,
         leverage_quality_floor,
         leverage_quality_power,
@@ -2012,6 +2182,8 @@ def search_policies_with_args(d: pd.DataFrame, args: argparse.Namespace) -> pd.D
             quality_floor=float(quality_floor),
             allocator_quality_blend=float(allocator_quality_blend),
             allocator_quality_power=float(allocator_quality_power),
+            allocator_utility_weight=float(allocator_utility_weight),
+            allocator_utility_power=float(allocator_utility_power),
             leverage_max=float(leverage_max),
             leverage_quality_floor=float(leverage_quality_floor),
             leverage_quality_power=float(leverage_quality_power),
@@ -2046,6 +2218,8 @@ def _monthly_breakdown_for_policy(
     quality_floor: float = 0.0,
     allocator_quality_blend: float = 0.25,
     allocator_quality_power: float = 1.2,
+    allocator_utility_weight: float = 0.35,
+    allocator_utility_power: float = 1.2,
     leverage_max: float = 1.0,
     leverage_quality_floor: float = 0.8,
     leverage_quality_power: float = 1.5,
@@ -2080,6 +2254,8 @@ def _monthly_breakdown_for_policy(
             quality_floor=quality_floor,
             allocator_quality_blend=allocator_quality_blend,
             allocator_quality_power=allocator_quality_power,
+            allocator_utility_weight=allocator_utility_weight,
+            allocator_utility_power=allocator_utility_power,
             leverage_max=leverage_max,
             leverage_quality_floor=leverage_quality_floor,
             leverage_quality_power=leverage_quality_power,
@@ -2107,6 +2283,8 @@ def _monthly_breakdown_for_policy(
             quality_floor=quality_floor,
             allocator_quality_blend=allocator_quality_blend,
             allocator_quality_power=allocator_quality_power,
+            allocator_utility_weight=allocator_utility_weight,
+            allocator_utility_power=allocator_utility_power,
             leverage_max=leverage_max,
             leverage_quality_floor=leverage_quality_floor,
             leverage_quality_power=leverage_quality_power,
@@ -2282,6 +2460,8 @@ def main() -> None:
         "quality_floor": float(args.quality_floors[0]) if args.quality_floors else 0.0,
         "allocator_quality_blends": [float(v) for v in args.allocator_quality_blends],
         "allocator_quality_powers": [float(v) for v in args.allocator_quality_powers],
+        "allocator_utility_weights": [float(v) for v in args.allocator_utility_weights],
+        "allocator_utility_powers": [float(v) for v in args.allocator_utility_powers],
         "leverage_maxs": [float(v) for v in args.leverage_maxs],
         "leverage_quality_floors": [float(v) for v in args.leverage_quality_floors],
         "leverage_quality_powers": [float(v) for v in args.leverage_quality_powers],
@@ -2318,6 +2498,8 @@ def main() -> None:
         f"- Global quality floor grid: **{', '.join(f'{float(v):.2f}' for v in args.quality_floors)}**",
         f"- Allocator quality blend grid: **{', '.join(f'{float(v):.2f}' for v in args.allocator_quality_blends)}**",
         f"- Allocator quality power grid: **{', '.join(f'{float(v):.2f}' for v in args.allocator_quality_powers)}**",
+        f"- Allocator utility weight grid: **{', '.join(f'{float(v):.2f}' for v in args.allocator_utility_weights)}**",
+        f"- Allocator utility power grid: **{', '.join(f'{float(v):.2f}' for v in args.allocator_utility_powers)}**",
         f"- Adaptive top-up weight scale: **{float(args.topup_score_scale):.2f}**",
         f"- Leverage max grid: **{', '.join(f'{float(v):.2f}' for v in args.leverage_maxs)}**",
         f"- Leverage quality floor grid: **{', '.join(f'{float(v):.2f}' for v in args.leverage_quality_floors)}**",
