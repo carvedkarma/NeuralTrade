@@ -46,6 +46,76 @@ OUT_JSON = Path(".local/reports/v7_signal_quality_sq21.json")
 OUT_MD = Path(".local/reports/v7_signal_quality_sq21.md")
 
 
+def _horizon_to_bars(h: str) -> int:
+    key = str(h).strip().lower()
+    if key == "15m":
+        return 1
+    if key == "30m":
+        return 2
+    return 4
+
+
+def _forward_return_from_close(close: pd.Series, bars: int) -> pd.Series:
+    logc = np.log(pd.to_numeric(close, errors="coerce").replace(0, np.nan))
+    return logc.shift(-int(max(1, bars))) - logc
+
+
+def _parse_symbol_regime_pairs(values: list[str]) -> tuple[tuple[str, str], ...]:
+    out: list[tuple[str, str]] = []
+    for raw in values:
+        txt = str(raw).strip()
+        if ":" not in txt:
+            continue
+        sym, reg = txt.split(":", 1)
+        sym_u = sym.strip().upper()
+        reg_u = reg.strip().upper()
+        if sym_u and reg_u:
+            out.append((sym_u, reg_u))
+    return tuple(sorted(set(out)))
+
+
+def _normalize_horizon(h: str) -> str:
+    key = str(h).strip().lower()
+    if key in {"15m", "30m", "60m"}:
+        return key
+    return "60m"
+
+
+def _tail_sample_weights(
+    y: np.ndarray,
+    tail_weight: float,
+    shock: np.ndarray | None = None,
+    dispersion: np.ndarray | None = None,
+) -> np.ndarray:
+    w = np.ones(len(y), dtype="float64")
+    tw = float(max(0.0, tail_weight))
+    if tw <= 1e-9 or len(y) == 0:
+        return w
+    y = pd.to_numeric(pd.Series(y), errors="coerce").to_numpy(dtype="float64")
+    finite = np.isfinite(y)
+    if not finite.any():
+        return w
+    scale = float(np.nanpercentile(np.abs(y[finite]), 75))
+    if not np.isfinite(scale) or scale < 1e-8:
+        scale = 1.0
+    downside = np.clip((-y) / scale, 0.0, 3.0)
+    downside = np.where(np.isfinite(downside), downside, 0.0)
+
+    tail_state = np.zeros(len(y), dtype="float64")
+    if shock is not None:
+        sh = pd.to_numeric(pd.Series(shock), errors="coerce").abs().to_numpy(dtype="float64")
+        if np.isfinite(sh).any():
+            sh_cut = float(np.nanpercentile(sh[np.isfinite(sh)], 70))
+            tail_state += np.where(np.isfinite(sh) & (sh >= sh_cut), 1.0, 0.0)
+    if dispersion is not None:
+        dsp = pd.to_numeric(pd.Series(dispersion), errors="coerce").to_numpy(dtype="float64")
+        if np.isfinite(dsp).any():
+            dsp_cut = float(np.nanpercentile(dsp[np.isfinite(dsp)], 70))
+            tail_state += np.where(np.isfinite(dsp) & (dsp >= dsp_cut), 1.0, 0.0)
+    tail_state = np.clip(tail_state, 0.0, 2.0)
+    return w + tw * (0.65 * downside + 0.35 * tail_state)
+
+
 def _clf(seed: int = 0) -> HistGradientBoostingClassifier:
     return HistGradientBoostingClassifier(
         max_iter=260,
@@ -103,6 +173,10 @@ def _cache_path(
     wf_test_months: int,
     wf_folds: int,
     fast_oos_mode: bool,
+    primary_horizon: str,
+    secondary_horizon: str,
+    secondary_horizon_weight: float,
+    tail_objective_weight: float,
 ) -> Path:
     token = "|".join(
         [
@@ -116,11 +190,21 @@ def _cache_path(
             f"wfte={int(wf_test_months)}",
             f"wff={int(wf_folds)}",
             f"fast={int(bool(fast_oos_mode))}",
+            f"h1={str(primary_horizon).lower()}",
+            f"h2={str(secondary_horizon).lower()}",
+            f"h2w={float(secondary_horizon_weight):.3f}",
+            f"tail={float(tail_objective_weight):.3f}",
             "sq21-intel-moe-v2",
         ]
     )
     key = hashlib.sha1(token.encode("utf-8")).hexdigest()[:16]
     return CACHE_ROOT / f"oos_{key}.parquet"
+
+
+def _resolve_target_col(primary_horizon: str) -> str:
+    _ = _normalize_horizon(primary_horizon)
+    # ret_h1 is always generated from the configured primary horizon.
+    return "ret_h1"
 
 
 def load_symbol_universe(symbols: list[str], min_bars: int) -> dict[str, pd.DataFrame]:
@@ -415,10 +499,19 @@ def collect_oos_predictions(
     wf_folds: int = 5,
     fast_oos_mode: bool = False,
     fast_max_bars: int = 20000,
+    primary_horizon: str = "15m",
+    secondary_horizon: str = "30m",
+    secondary_horizon_weight: float = 0.35,
+    tail_objective_weight: float = 0.0,
 ) -> pd.DataFrame:
     feats = build_sq21_features(symbol, df, context)
-    targs = build_targets(df)
-    y_ret = targs["ret_60m"].to_numpy()
+    h1_bars = _horizon_to_bars(primary_horizon)
+    h2_bars = _horizon_to_bars(secondary_horizon)
+    close_s = df["close"].astype("float64")
+    y_ret_1 = _forward_return_from_close(close_s, h1_bars)
+    y_ret_2 = _forward_return_from_close(close_s, h2_bars)
+    sec_w = float(np.clip(secondary_horizon_weight, 0.0, 1.0))
+    y_ret = ((1.0 - sec_w) * y_ret_1 + sec_w * y_ret_2).to_numpy(dtype="float64")
     y_sign = (y_ret > 0).astype(int)
 
     feat_warmup = feats.notna().sum(axis=1)
@@ -499,12 +592,14 @@ def collect_oos_predictions(
             p_up_te = np.full(len(X_te), p_base, dtype="float64")
             if np.unique(y_fit_cls).size >= 2:
                 clf_fast = LogisticRegression(C=0.8, max_iter=350, solver="lbfgs")
-                clf_fast.fit(X_fit_s, y_fit_cls)
+                fit_sw = _tail_sample_weights(yret_tr[take], tail_objective_weight)
+                clf_fast.fit(X_fit_s, y_fit_cls, sample_weight=fit_sw)
                 p_up_tr = clf_fast.predict_proba(X_tr_s)[:, 1]
                 p_up_te = clf_fast.predict_proba(X_te_s)[:, 1]
 
             reg_fast = Ridge(alpha=2.0)
-            reg_fast.fit(X_fit_s, y_fit_reg)
+            fit_sw = _tail_sample_weights(yret_tr[take], tail_objective_weight)
+            reg_fast.fit(X_fit_s, y_fit_reg, sample_weight=fit_sw)
             mag_tr = np.clip(reg_fast.predict(X_tr_s), 0.0, None)
             mag_te = np.clip(reg_fast.predict(X_te_s), 0.0, None)
             p_disp_tr = np.zeros(len(X_tr), dtype="float64")
@@ -513,9 +608,10 @@ def collect_oos_predictions(
             router_conf_te = np.clip(np.abs(p_up_te - 0.5) * 2.0, 0.0, 1.0)
         else:
             clf = _clf(11)
-            clf.fit(X_tr[good], ysgn_tr[good])
+            tr_sw = _tail_sample_weights(yret_tr[good], tail_objective_weight)
+            clf.fit(X_tr[good], ysgn_tr[good], sample_weight=tr_sw)
             reg = _reg(11)
-            reg.fit(X_tr[good], np.abs(yret_tr[good]))
+            reg.fit(X_tr[good], np.abs(yret_tr[good]), sample_weight=tr_sw)
 
             reg_tr = regime_lbl[tlo:thi]
             experts: dict[int, tuple[HistGradientBoostingClassifier, HistGradientBoostingRegressor]] = {}
@@ -524,9 +620,10 @@ def collect_oos_predictions(
                 if int(rmask.sum()) < 700:
                     continue
                 eclf = _clf(101 + reg_id)
-                eclf.fit(X_tr[rmask], ysgn_tr[rmask])
+                reg_sw = _tail_sample_weights(yret_tr[rmask], tail_objective_weight)
+                eclf.fit(X_tr[rmask], ysgn_tr[rmask], sample_weight=reg_sw)
                 ereg = _reg(101 + reg_id)
-                ereg.fit(X_tr[rmask], np.abs(yret_tr[rmask]))
+                ereg.fit(X_tr[rmask], np.abs(yret_tr[rmask]), sample_weight=reg_sw)
                 experts[reg_id] = (eclf, ereg)
 
             router: HistGradientBoostingClassifier | None = None
@@ -575,12 +672,13 @@ def collect_oos_predictions(
                         max_iter=500,
                         solver="lbfgs",
                     )
-                    s_clf.fit(Xn_tr, ysgn_tr[seq_good])
+                    seq_sw = _tail_sample_weights(yret_tr[seq_good], tail_objective_weight)
+                    s_clf.fit(Xn_tr, ysgn_tr[seq_good], sample_weight=seq_sw)
                     p_seq_tr[seq_good] = s_clf.predict_proba(Xn_tr)[:, 1]
                     p_seq_te = s_clf.predict_proba(Xn_te)[:, 1]
 
                     s_reg = Ridge(alpha=2.0)
-                    s_reg.fit(Xn_tr, np.abs(yret_tr[seq_good]))
+                    s_reg.fit(Xn_tr, np.abs(yret_tr[seq_good]), sample_weight=seq_sw)
                     m_seq_tr[seq_good] = np.clip(s_reg.predict(Xn_tr), 0.0, None)
                     m_seq_te = np.clip(s_reg.predict(Xn_te), 0.0, None)
                 except Exception:
@@ -697,6 +795,8 @@ def collect_oos_predictions(
                     "fold": int(fold),
                     "ts": int(ts[slo + i]),
                     "ret_60m": float(yret_te[i]),
+                    "ret_h1": float((y_ret_1.to_numpy(dtype="float64")[valid_from:])[slo + i]),
+                    "ret_h2": float((y_ret_2.to_numpy(dtype="float64")[valid_from:])[slo + i]),
                     "vol_16": float(vol_te[i]),
                     "risk_bps": float(vol_te[i] * 1e4),
                     "p_up": float(p_up_te[i]),
@@ -725,6 +825,11 @@ def collect_oos_predictions_sq3(
     wf_train_months: int = 24,
     wf_test_months: int = 6,
     wf_folds: int = 5,
+    fast_oos_mode: bool = False,
+    primary_horizon: str = "15m",
+    secondary_horizon: str = "30m",
+    secondary_horizon_weight: float = 0.35,
+    tail_objective_weight: float = 0.0,
 ) -> pd.DataFrame:
     return collect_oos_predictions(
         symbol=symbol,
@@ -736,6 +841,11 @@ def collect_oos_predictions_sq3(
         wf_train_months=wf_train_months,
         wf_test_months=wf_test_months,
         wf_folds=wf_folds,
+        fast_oos_mode=fast_oos_mode,
+        primary_horizon=primary_horizon,
+        secondary_horizon=secondary_horizon,
+        secondary_horizon_weight=secondary_horizon_weight,
+        tail_objective_weight=tail_objective_weight,
     )
 
 
@@ -751,6 +861,10 @@ def ensure_oos_cache(
     wf_test_months: int = 6,
     wf_folds: int = 5,
     fast_oos_mode: bool = False,
+    primary_horizon: str = "15m",
+    secondary_horizon: str = "60m",
+    secondary_horizon_weight: float = 0.25,
+    tail_objective_weight: float = 0.5,
 ) -> tuple[pd.DataFrame, list[str]]:
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     cache_path = _cache_path(
@@ -763,6 +877,10 @@ def ensure_oos_cache(
         wf_test_months=wf_test_months,
         wf_folds=wf_folds,
         fast_oos_mode=bool(fast_oos_mode),
+        primary_horizon=str(primary_horizon),
+        secondary_horizon=str(secondary_horizon),
+        secondary_horizon_weight=float(secondary_horizon_weight),
+        tail_objective_weight=float(tail_objective_weight),
     )
     if cache_path.exists() and not rebuild_cache:
         return pd.read_parquet(cache_path), sorted(set(context_symbols))
@@ -791,6 +909,11 @@ def ensure_oos_cache(
                 wf_train_months=wf_train_months,
                 wf_test_months=wf_test_months,
                 wf_folds=wf_folds,
+                fast_oos_mode=bool(fast_oos_mode),
+                primary_horizon=str(primary_horizon),
+                secondary_horizon=str(secondary_horizon),
+                secondary_horizon_weight=float(secondary_horizon_weight),
+                tail_objective_weight=float(tail_objective_weight),
             )
         else:
             s = collect_oos_predictions(
@@ -800,6 +923,11 @@ def ensure_oos_cache(
                 wf_train_months=wf_train_months,
                 wf_test_months=wf_test_months,
                 wf_folds=wf_folds,
+                fast_oos_mode=bool(fast_oos_mode),
+                primary_horizon=str(primary_horizon),
+                secondary_horizon=str(secondary_horizon),
+                secondary_horizon_weight=float(secondary_horizon_weight),
+                tail_objective_weight=float(tail_objective_weight),
             )
         if not s.empty:
             frames.append(s)
@@ -909,6 +1037,67 @@ def _confidence_quality(frame: pd.DataFrame) -> np.ndarray:
     return quality.astype("float64", copy=False)
 
 
+def _tail_sample_weights(
+    y: np.ndarray,
+    tail_weight: float,
+    shock: np.ndarray | None = None,
+    dispersion: np.ndarray | None = None,
+) -> np.ndarray:
+    w = np.ones(len(y), dtype="float64")
+    tw = float(max(0.0, tail_weight))
+    if tw <= 1e-9 or len(y) == 0:
+        return w
+    y = pd.to_numeric(pd.Series(y), errors="coerce").to_numpy(dtype="float64")
+    finite = np.isfinite(y)
+    if not finite.any():
+        return w
+    scale = float(np.nanpercentile(np.abs(y[finite]), 75))
+    if not np.isfinite(scale) or scale < 1e-8:
+        scale = 1.0
+    downside = np.clip((-y) / scale, 0.0, 3.0)
+    downside = np.where(np.isfinite(downside), downside, 0.0)
+
+    tail_state = np.zeros(len(y), dtype="float64")
+    if shock is not None:
+        sh = pd.to_numeric(pd.Series(shock), errors="coerce").abs().to_numpy(dtype="float64")
+        if np.isfinite(sh).any():
+            sh_cut = float(np.nanpercentile(sh[np.isfinite(sh)], 70))
+            tail_state += np.where(np.isfinite(sh) & (sh >= sh_cut), 1.0, 0.0)
+    if dispersion is not None:
+        dsp = pd.to_numeric(pd.Series(dispersion), errors="coerce").to_numpy(dtype="float64")
+        if np.isfinite(dsp).any():
+            dsp_cut = float(np.nanpercentile(dsp[np.isfinite(dsp)], 70))
+            tail_state += np.where(np.isfinite(dsp) & (dsp >= dsp_cut), 1.0, 0.0)
+    tail_state = np.clip(tail_state, 0.0, 2.0)
+    return w + tw * (0.65 * downside + 0.35 * tail_state)
+
+
+def _apply_hard_abstentions(
+    frame: pd.DataFrame,
+    abstain_symbols: tuple[str, ...] = (),
+    abstain_regimes: tuple[str, ...] = (),
+    abstain_symbol_regimes: tuple[tuple[str, str], ...] = (),
+) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    out = frame
+    if abstain_symbols:
+        sym_set = {str(s).upper() for s in abstain_symbols}
+        sym_arr = out["symbol"].astype(str).str.upper().to_numpy()
+        out = out[~np.isin(sym_arr, list(sym_set))]
+    if abstain_regimes:
+        reg_set = {str(r).upper() for r in abstain_regimes}
+        reg_arr = out["regime"].astype(str).str.upper().to_numpy()
+        out = out[~np.isin(reg_arr, list(reg_set))]
+    if out.empty or not abstain_symbol_regimes:
+        return out
+    pair_set = {(str(s).upper(), str(r).upper()) for s, r in abstain_symbol_regimes}
+    sym_arr = out["symbol"].astype(str).str.upper().to_numpy()
+    reg_arr = out["regime"].astype(str).str.upper().to_numpy()
+    block = np.fromiter(((s, r) in pair_set for s, r in zip(sym_arr, reg_arr)), dtype=bool, count=len(out))
+    return out[~block]
+
+
 def _apply_monthly_loss_cap(x: pd.DataFrame, month_loss_cap_r: float) -> pd.DataFrame:
     cap = float(month_loss_cap_r)
     if x.empty or cap <= 0:
@@ -948,6 +1137,10 @@ def _apply_policy_and_allocate(
     shock_z_cut: float = 0.0,
     shock_p_boost: float = 0.0,
     shock_meta_boost: float = 0.0,
+    hard_abstain_symbols: tuple[str, ...] = (),
+    hard_abstain_regimes: tuple[str, ...] = (),
+    hard_abstain_symbol_regimes: tuple[tuple[str, str], ...] = (),
+    target_col: str = "ret_60m",
 ) -> pd.DataFrame:
     x = d[d["symbol"].isin(symbols)]
     if x.empty:
@@ -958,6 +1151,14 @@ def _apply_policy_and_allocate(
         x = x[x["session"] == session]
     if regime is not None:
         x = x[x["regime"] == regime]
+    x = _apply_hard_abstentions(
+        x,
+        abstain_symbols=hard_abstain_symbols,
+        abstain_regimes=hard_abstain_regimes,
+        abstain_symbol_regimes=hard_abstain_symbol_regimes,
+    )
+    if x.empty:
+        return pd.DataFrame()
     # Shock-aware threshold modulation: in elevated shock bars,
     # require stronger probability/meta quality.
     p_req, meta_req = _effective_thresholds(
@@ -1029,11 +1230,18 @@ def _apply_policy_and_allocate(
     ts_count = x.groupby("ts")["symbol"].transform("count").replace(0, np.nan)
     x["weight"] = np.where(np.isfinite(x["weight"]), x["weight"], 1.0 / ts_count)
 
-    x["gross"] = x["ret_60m"] * x["side"]
+    ret_col = str(target_col)
+    if ret_col not in x.columns:
+        ret_col = "ret_60m"
+    ret_arr = pd.to_numeric(x[ret_col], errors="coerce").to_numpy(dtype="float64")
+    side_arr = pd.to_numeric(x["side"], errors="coerce").to_numpy(dtype="float64")
+    vol_arr = pd.to_numeric(x["vol_16"], errors="coerce").to_numpy(dtype="float64")
+    weight_arr = pd.to_numeric(x["weight"], errors="coerce").to_numpy(dtype="float64")
+    x["gross"] = ret_arr * side_arr
     x["net"] = x["gross"] - COST_FRAC
-    x["r_net"] = x["net"] / x["vol_16"]
-    x["r_weighted"] = x["r_net"] * x["weight"]
-    x["net_bps_weighted"] = x["net"] * x["weight"] * 1e4
+    x["r_net"] = np.where(np.isfinite(vol_arr) & (vol_arr > 1e-12), x["net"] / vol_arr, np.nan)
+    x["r_weighted"] = x["r_net"] * weight_arr
+    x["net_bps_weighted"] = x["net"] * weight_arr * 1e4
     return x
 
 
@@ -1055,6 +1263,11 @@ def _apply_policy_with_adaptive_pacing(
     topup_weight_scale: float = 1.0,
     expert_disp_max: float = 1.0,
     router_conf_min: float = 0.0,
+    hard_abstain_symbols: tuple[str, ...] = (),
+    hard_abstain_regimes: tuple[str, ...] = (),
+    hard_abstain_symbol_regimes: tuple[tuple[str, str], ...] = (),
+    cadence_quality_floor: float = 0.0,
+    target_col: str = "ret_60m",
 ) -> pd.DataFrame:
     if router_conf_min > 0.0 or expert_disp_max < 0.999:
         d = d.copy()
@@ -1080,6 +1293,10 @@ def _apply_policy_with_adaptive_pacing(
             shock_z_cut=shock_z_cut,
             shock_p_boost=shock_p_boost,
             shock_meta_boost=shock_meta_boost,
+            hard_abstain_symbols=hard_abstain_symbols,
+            hard_abstain_regimes=hard_abstain_regimes,
+            hard_abstain_symbol_regimes=hard_abstain_symbol_regimes,
+            target_col=target_col,
         )
 
     # Build base candidate universe without any rank cutoff.
@@ -1090,6 +1307,14 @@ def _apply_policy_with_adaptive_pacing(
         base = base[base["session"] == session]
     if regime is not None:
         base = base[base["regime"] == regime]
+    base = _apply_hard_abstentions(
+        base,
+        abstain_symbols=hard_abstain_symbols,
+        abstain_regimes=hard_abstain_regimes,
+        abstain_symbol_regimes=hard_abstain_symbol_regimes,
+    )
+    if base.empty:
+        return pd.DataFrame()
     p_req, meta_req = _effective_thresholds(
         frame=base,
         p_min=p_min,
@@ -1143,8 +1368,12 @@ def _apply_policy_with_adaptive_pacing(
             ts_selected_counts = (
                 g_sel.groupby("ts")["symbol"].size().to_dict() if not g_sel.empty else {}
             )
+            extra_pool = g[g["rank_pct"] < q_cut].copy()
+            if float(cadence_quality_floor) > 0.0:
+                qv = _confidence_quality(extra_pool)
+                extra_pool = extra_pool[qv >= float(cadence_quality_floor)]
             # Top-up from non-selected candidates, respecting per-ts cap.
-            for _, row in g[g["rank_pct"] < q_cut].sort_values("allocator_score", ascending=False).iterrows():
+            for _, row in extra_pool.sort_values("allocator_score", ascending=False).iterrows():
                 key = (row["ts"], row["symbol"])
                 if key in chosen_pairs:
                     continue
@@ -1189,11 +1418,18 @@ def _apply_policy_with_adaptive_pacing(
     weight_arr = x["weight"].to_numpy(dtype="float64", copy=False)
     x["weight"] = np.where(np.isfinite(weight_arr), weight_arr, fallback)
 
-    x["gross"] = x["ret_60m"] * x["side"]
+    ret_col = str(target_col)
+    if ret_col not in x.columns:
+        ret_col = "ret_60m"
+    ret_arr = pd.to_numeric(x[ret_col], errors="coerce").to_numpy(dtype="float64")
+    side_arr = pd.to_numeric(x["side"], errors="coerce").to_numpy(dtype="float64")
+    vol_arr = pd.to_numeric(x["vol_16"], errors="coerce").to_numpy(dtype="float64")
+    weight_arr = pd.to_numeric(x["weight"], errors="coerce").to_numpy(dtype="float64")
+    x["gross"] = ret_arr * side_arr
     x["net"] = x["gross"] - COST_FRAC
-    x["r_net"] = x["net"] / x["vol_16"]
-    x["r_weighted"] = x["r_net"] * x["weight"]
-    x["net_bps_weighted"] = x["net"] * x["weight"] * 1e4
+    x["r_net"] = np.where(np.isfinite(vol_arr) & (vol_arr > 1e-12), x["net"] / vol_arr, np.nan)
+    x["r_weighted"] = x["r_net"] * weight_arr
+    x["net_bps_weighted"] = x["net"] * weight_arr * 1e4
     return x
 
 
@@ -1265,6 +1501,11 @@ def eval_policy(
     reentry_drawdown_r: float = 0.0,
     conf_weight_power: float = 1.0,
     post_cap_scale: float = 0.25,
+    hard_abstain_symbols: tuple[str, ...] = (),
+    hard_abstain_regimes: tuple[str, ...] = (),
+    hard_abstain_symbol_regimes: tuple[tuple[str, str], ...] = (),
+    adaptive_floor_quality: float = 0.0,
+    target_col: str = "ret_60m",
 ) -> PolicyResult | None:
     if router_conf_min > 0.0 or expert_disp_max < 0.999:
         d = d.copy()
@@ -1292,6 +1533,11 @@ def eval_policy(
             shock_p_boost=shock_p_boost,
             shock_meta_boost=shock_meta_boost,
             topup_weight_scale=topup_score_scale,
+            hard_abstain_symbols=hard_abstain_symbols,
+            hard_abstain_regimes=hard_abstain_regimes,
+            hard_abstain_symbol_regimes=hard_abstain_symbol_regimes,
+            cadence_quality_floor=adaptive_floor_quality,
+            target_col=target_col,
         )
     else:
         x = _apply_policy_and_allocate(
@@ -1309,6 +1555,10 @@ def eval_policy(
             shock_z_cut=shock_z_cut,
             shock_p_boost=shock_p_boost,
             shock_meta_boost=shock_meta_boost,
+            hard_abstain_symbols=hard_abstain_symbols,
+            hard_abstain_regimes=hard_abstain_regimes,
+            hard_abstain_symbol_regimes=hard_abstain_symbol_regimes,
+            target_col=target_col,
         )
     if x.empty:
         return None
@@ -1390,6 +1640,14 @@ def parse_args() -> argparse.Namespace:
                    help="SQ3 only: blend weight for sequence model predictions (0..0.9)")
     p.add_argument("--sq3-seq-window", type=int, default=12,
                    help="SQ3 only: lag window used for sequence feature expansion")
+    p.add_argument("--primary-horizon", type=str, default="15m", choices=["15m", "30m", "60m"],
+                   help="Primary execution horizon used for target return labeling")
+    p.add_argument("--secondary-horizon", type=str, default="60m", choices=["15m", "30m", "60m"],
+                   help="Secondary horizon blended into execution labels")
+    p.add_argument("--secondary-horizon-weight", type=float, default=0.25,
+                   help="Blend weight for secondary horizon return in target construction")
+    p.add_argument("--tail-objective-weight", type=float, default=0.5,
+                   help="Downside-sensitive sample weighting during model/meta fitting")
     p.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS, help="Symbol list to evaluate")
     p.add_argument("--context-symbols", nargs="+", default=[],
                    help="Symbols used to build market context (default: same as --symbols)")
@@ -1404,6 +1662,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-per-ts", nargs="+", type=int, default=[1, 2, 3])
     p.add_argument("--sessions", nargs="+", default=["ALL", "EU", "US"])
     p.add_argument("--regimes", nargs="+", default=["ALL", "WITH", "COUNTER"])
+    p.add_argument("--abstain-symbols", nargs="+", default=[],
+                   help="Hard abstain symbols globally (e.g. DOGEUSDT)")
+    p.add_argument("--abstain-regimes", nargs="+", default=[],
+                   help="Hard abstain these regimes globally (e.g. COUNTER FLAT)")
+    p.add_argument("--abstain-symbol-regimes", nargs="+", default=[],
+                   help="Hard abstain symbol:regime pairs (e.g. SOLUSDT:COUNTER)")
     p.add_argument("--long-only-only", action="store_true",
                    help="Only evaluate long-only policies")
     p.add_argument("--max-symbol-set-size", type=int, default=5,
@@ -1414,6 +1678,8 @@ def parse_args() -> argparse.Namespace:
                    help="Require mean monthly trades >= this value for robust policies")
     p.add_argument("--min-monthly-trades-hard", type=int, default=0,
                    help="Adaptive pacing: attempt >= this many trades per month via quality top-up")
+    p.add_argument("--cadence-quality-floor", type=float, default=0.0,
+                   help="For adaptive pacing, top-up rows must satisfy confidence quality floor (0..1)")
     p.add_argument("--shock-z-cut", type=float, default=0.0,
                    help="Apply shock-aware threshold boosts when |mkt_shock_z| >= this cutoff (0 disables)")
     p.add_argument("--shock-p-boost", type=float, default=0.0,
@@ -1447,6 +1713,10 @@ def parse_args() -> argparse.Namespace:
 
 def search_policies_with_args(d: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
     syms = sorted(d["symbol"].unique())
+    abstain_symbols = tuple(str(v).upper() for v in getattr(args, "abstain_symbols", []))
+    abstain_regimes = tuple(str(v).upper() for v in args.abstain_regimes)
+    abstain_symbol_regimes = _parse_symbol_regime_pairs(list(args.abstain_symbol_regimes))
+    target_col = _resolve_target_col(str(args.primary_horizon))
     if args.full_symbol_set_only:
         symbol_sets = [tuple(syms)]
     else:
@@ -1497,6 +1767,11 @@ def search_policies_with_args(d: pd.DataFrame, args: argparse.Namespace) -> pd.D
                                                                     reentry_drawdown_r=float(reentry_dd_r),
                                                                     conf_weight_power=float(conf_w_pow),
                                                                     post_cap_scale=float(post_cap_scale),
+                                                                    hard_abstain_symbols=abstain_symbols,
+                                                                    hard_abstain_regimes=abstain_regimes,
+                                                                    hard_abstain_symbol_regimes=abstain_symbol_regimes,
+                                                                    adaptive_floor_quality=float(args.cadence_quality_floor),
+                                                                    target_col=target_col,
                                                                 )
                                                                 if r is None:
                                                                     continue
@@ -1520,6 +1795,11 @@ def _monthly_breakdown_for_policy(
     reentry_drawdown_r: float = 0.0,
     conf_weight_power: float = 1.0,
     post_cap_scale: float = 0.25,
+    hard_abstain_symbols: tuple[str, ...] = (),
+    hard_abstain_regimes: tuple[str, ...] = (),
+    hard_abstain_symbol_regimes: tuple[tuple[str, str], ...] = (),
+    cadence_quality_floor: float = 0.0,
+    target_col: str = "ret_60m",
 ) -> pd.DataFrame:
     symbols = tuple(str(row["symbols"]).split(","))
     session = None if row["session"] == "ALL" else str(row["session"])
@@ -1543,6 +1823,11 @@ def _monthly_breakdown_for_policy(
             topup_weight_scale=topup_score_scale,
             expert_disp_max=expert_disp_max,
             router_conf_min=router_conf_min,
+            hard_abstain_symbols=hard_abstain_symbols,
+            hard_abstain_regimes=hard_abstain_regimes,
+            hard_abstain_symbol_regimes=hard_abstain_symbol_regimes,
+            cadence_quality_floor=cadence_quality_floor,
+            target_col=target_col,
         )
     else:
         x = _apply_policy_and_allocate(
@@ -1560,6 +1845,10 @@ def _monthly_breakdown_for_policy(
             shock_z_cut=shock_z_cut,
             shock_p_boost=shock_p_boost,
             shock_meta_boost=shock_meta_boost,
+            hard_abstain_symbols=hard_abstain_symbols,
+            hard_abstain_regimes=hard_abstain_regimes,
+            hard_abstain_symbol_regimes=hard_abstain_symbol_regimes,
+            target_col=target_col,
         )
     if x.empty:
         return pd.DataFrame()
@@ -1594,6 +1883,10 @@ def main() -> None:
 
     symbols = list(dict.fromkeys(args.symbols))
     context_symbols = list(dict.fromkeys(args.context_symbols)) or symbols.copy()
+    abstain_symbols = tuple(str(v).upper() for v in getattr(args, "abstain_symbols", []))
+    abstain_regimes = tuple(str(v).upper() for v in args.abstain_regimes)
+    abstain_symbol_regimes = _parse_symbol_regime_pairs(list(args.abstain_symbol_regimes))
+    target_col = _resolve_target_col(str(args.primary_horizon))
     if args.auto_symbols_from_cache:
         cached_symbols = _discover_cached_symbols()
         symbols = sorted(set(symbols) | set(cached_symbols))
@@ -1610,6 +1903,11 @@ def main() -> None:
         wf_train_months=int(args.wf_train_months),
         wf_test_months=int(args.wf_test_months),
         wf_folds=int(args.wf_folds),
+        fast_oos_mode=bool(args.fast_all_symbol_mode),
+        primary_horizon=str(args.primary_horizon),
+        secondary_horizon=str(args.secondary_horizon),
+        secondary_horizon_weight=float(args.secondary_horizon_weight),
+        tail_objective_weight=float(args.tail_objective_weight),
     )
     if oos.empty:
         raise RuntimeError("no OOS predictions")
@@ -1659,6 +1957,11 @@ def main() -> None:
         reentry_drawdown_r=float(chosen.get("reentry_drawdown_r", 0.0)),
         conf_weight_power=float(chosen.get("conf_weight_power", 1.0)),
         post_cap_scale=float(chosen.get("post_cap_scale", 0.25)),
+        hard_abstain_symbols=abstain_symbols,
+        hard_abstain_regimes=abstain_regimes,
+        hard_abstain_symbol_regimes=abstain_symbol_regimes,
+        cadence_quality_floor=float(args.cadence_quality_floor),
+        target_col=target_col,
     )
 
     if len(monthly) >= 10:
@@ -1677,6 +1980,11 @@ def main() -> None:
         "model_family": str(args.model_family),
         "sq3_seq_weight": float(args.sq3_seq_weight),
         "sq3_seq_window": int(args.sq3_seq_window),
+        "primary_horizon": str(args.primary_horizon),
+        "secondary_horizon": str(args.secondary_horizon),
+        "secondary_horizon_weight": float(args.secondary_horizon_weight),
+        "tail_objective_weight": float(args.tail_objective_weight),
+        "target_col": str(target_col),
         "wf_train_months": int(args.wf_train_months),
         "wf_test_months": int(args.wf_test_months),
         "wf_folds": int(args.wf_folds),
@@ -1693,6 +2001,10 @@ def main() -> None:
         "shock_p_boost": float(args.shock_p_boost),
         "shock_meta_boost": float(args.shock_meta_boost),
         "topup_score_scale": float(args.topup_score_scale),
+        "cadence_quality_floor": float(args.cadence_quality_floor),
+        "abstain_symbols": list(abstain_symbols),
+        "abstain_regimes": list(abstain_regimes),
+        "abstain_symbol_regimes": [f"{s}:{r}" for s, r in abstain_symbol_regimes],
         "router_conf_mins": [float(v) for v in args.router_conf_mins],
         "expert_disp_maxs": [float(v) for v in args.expert_disp_maxs],
         "monthly_loss_cap_rs": [float(v) for v in args.monthly_loss_cap_rs],
@@ -1718,6 +2030,9 @@ def main() -> None:
         f"- Feature pack: **{'SQ3 sequence blend + macro context + meta gate + top-K allocator' if str(args.model_family).lower().startswith('sq3') else 'macro context + meta tradeability gate + top-K allocator'}**",
         f"- SQ3 sequence weight: **{float(args.sq3_seq_weight):.2f}**",
         f"- SQ3 sequence window: **{int(args.sq3_seq_window)}**",
+        f"- Primary/secondary horizon: **{str(args.primary_horizon)}/{str(args.secondary_horizon)}** (secondary weight **{float(args.secondary_horizon_weight):.2f}**)",
+        f"- Tail objective weight: **{float(args.tail_objective_weight):.2f}**",
+        f"- Target return column: **{target_col}**",
         f"- Walk-forward train/test/folds: **{int(args.wf_train_months)}/{int(args.wf_test_months)}/{int(args.wf_folds)}**",
         f"- OOS rows: **{len(oos):,}**",
         f"- Active symbols: **{', '.join(sorted(oos['symbol'].unique()))}**",
@@ -1725,7 +2040,11 @@ def main() -> None:
         f"- Policies tested: **{len(policies):,}**",
         f"- Min monthly trades constraint (robust): **{float(args.min_monthly_trades):.1f}**",
         f"- Adaptive hard pacing target (per month): **{int(args.min_monthly_trades_hard)}**",
+        f"- Adaptive cadence quality floor: **{float(args.cadence_quality_floor):.2f}**",
         f"- Adaptive top-up weight scale: **{float(args.topup_score_scale):.2f}**",
+        f"- Hard-abstain symbols: **{', '.join(abstain_symbols) if abstain_symbols else 'None'}**",
+        f"- Hard-abstain regimes: **{', '.join(abstain_regimes) if abstain_regimes else 'None'}**",
+        f"- Hard-abstain symbol:regime pairs: **{', '.join(f'{s}:{r}' for s, r in abstain_symbol_regimes) if abstain_symbol_regimes else 'None'}**",
         f"- Router confidence min grid: **{', '.join(f'{float(v):.2f}' for v in args.router_conf_mins)}**",
         f"- Expert dispersion max grid: **{', '.join(f'{float(v):.2f}' for v in args.expert_disp_maxs)}**",
         f"- Best monthly R (overall): **{ceiling:+.2f}**",
