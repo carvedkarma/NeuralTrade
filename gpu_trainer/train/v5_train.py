@@ -7027,6 +7027,7 @@ def train_v5_model(
     ret_mag_ce_weight=False,  # Task #56 B2: upweight CE by return magnitude; opt-in
     ret_mag_scale=1.0,  # Task #56 B2: multiplier for return-magnitude CE upweighting (optimal: 2.0)
     specialist_mode='none',  # Task #67: "none" | "short" | "long" — dual-specialist training
+    dual_specialist=False,   # compatibility shim: quick_start may pass this in single-run mode
     # Task #69: signal quality — LONG specialist head-agreement improvements
     min_mu_r_long=-1e9,         # hard gate: LONG specialist trades blocked when mu_R < this (0.0 = agree-only)
     long_disagree_mult=1.0,     # soft penalty on LONG disagree trades; 0.3 = 70% score reduction
