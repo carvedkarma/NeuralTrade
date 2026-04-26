@@ -3301,21 +3301,19 @@ def run_v5_forward_test(
     if test_cand_mask is not None:
         scores_work[~test_cand_mask.astype(bool)] = -np.inf
     quality_blend_cutoff_final = quality_blend_cutoff
+    quality_blend_allowed_regimes = None
+    if getattr(config, "quality_blend_regimes", None):
+        quality_blend_allowed_regimes = {str(r) for r in getattr(config, "quality_blend_regimes", [])}
     quality_blend_pass_rate = None
     if quality_blend_mask is not None:
-        _qb_mask = quality_blend_mask.copy()
-        if bar_regimes is not None and getattr(config, "quality_blend_regimes", None):
-            _allowed_regimes = {str(r) for r in getattr(config, "quality_blend_regimes", [])}
-            _regime_mask = np.array([str(r) in _allowed_regimes for r in bar_regimes], dtype=bool)
-            _qb_mask &= _regime_mask
-            if getattr(config, "quality_blend_block_outside_regimes", False):
-                scores_work[~_regime_mask] = -np.inf
-        scores_work[~_qb_mask] = -np.inf
-        quality_blend_pass_rate = float(100.0 * np.mean(_qb_mask))
+        quality_blend_pass_rate = float(100.0 * np.mean(quality_blend_mask))
         log.info(
-            "[V5_QUALITY_BLEND] Applied pre-gate: pass_rate=%.1f%% cutoff=%.4f",
+            "[V5_QUALITY_BLEND] Prepared gate: base_pass_rate=%.1f%% cutoff=%.4f "
+            "allowed_regimes=%s block_outside=%s",
             quality_blend_pass_rate,
             float(quality_blend_cutoff_final) if quality_blend_cutoff_final is not None else float("nan"),
+            sorted(list(quality_blend_allowed_regimes)) if quality_blend_allowed_regimes else "ALL",
+            bool(getattr(config, "quality_blend_block_outside_regimes", False)),
         )
 
     finite_work = scores_work[np.isfinite(scores_work)]
@@ -3980,6 +3978,23 @@ def run_v5_forward_test(
                 bar_regime = "trending_down"
             else:
                 bar_regime = "choppy"
+
+        if quality_blend_mask is not None:
+            _regime_in_scope = True
+            if quality_blend_allowed_regimes:
+                _regime_in_scope = bar_regime in quality_blend_allowed_regimes
+                if (not _regime_in_scope) and bool(getattr(config, "quality_blend_block_outside_regimes", False)):
+                    quality_blend_blocked += 1
+                    gate_blocks["quality_blend_regime"] += 1
+                    gate_blocked_r["quality_blend_regime"].append(_oracle_r(idx))
+                    _cand_reason[idx] = "quality_blend_regime"
+                    continue
+            if _regime_in_scope and (not bool(quality_blend_mask[idx])):
+                quality_blend_blocked += 1
+                gate_blocks["quality_blend"] += 1
+                gate_blocked_r["quality_blend"].append(_oracle_r(idx))
+                _cand_reason[idx] = "quality_blend"
+                continue
 
         if config.regime_side_map is not None:
             allowed = config.regime_side_map.get(bar_regime, "BOTH")
