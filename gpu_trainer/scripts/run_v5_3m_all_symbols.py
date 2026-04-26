@@ -39,6 +39,24 @@ def main() -> None:
                         help="Use EMA200 soft multiplier (0.5) instead of hard EMA200 gate.")
     parser.add_argument("--relax-risk-caps", action="store_true", default=False,
                         help="Disable daily/weekly caps and per-symbol kill for cadence probe.")
+    parser.add_argument("--choppy-side-mode", type=str, default="BOTH", choices=["BOTH", "LONG", "SHORT", "NONE"],
+                        help="Override choppy regime side in regime-side-map.")
+    parser.add_argument("--long-min-mu-r", type=float, default=0.0,
+                        help="Dual specialist LONG hard gate: block LONG when mu_R below this.")
+    parser.add_argument("--long-disagree-mult", type=float, default=0.3,
+                        help="Dual specialist LONG disagree multiplier (lower = stricter).")
+    parser.add_argument("--specialist-align-weight", type=float, default=0.5,
+                        help="LONG specialist alignment loss weight.")
+    parser.add_argument("--min-p-side", type=float, default=0.45,
+                        help="Minimum side confidence for entry gate.")
+    parser.add_argument("--min-p-short", type=float, default=0.0,
+                        help="Minimum SHORT confidence for short entries.")
+    parser.add_argument("--short-min-fraction", type=float, default=0.45,
+                        help="SHORT oversample target fraction.")
+    parser.add_argument("--edge-topn-per-day", type=int, default=25,
+                        help="Per-symbol daily top-N cap for edge-first mode.")
+    parser.add_argument("--cooldown", type=int, default=0,
+                        help="Cooldown bars between entries.")
     args = parser.parse_args()
 
     symbols = [
@@ -60,7 +78,11 @@ def main() -> None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         quality_cfg = V5QualityGateConfig()
         tpd_cfg = V5TPDControllerConfig(min_threshold_floor=0.001)
-        regime_side_map = {"trending_up": "LONG", "trending_down": "SHORT", "choppy": "BOTH"}
+        regime_side_map = {
+            "trending_up": "LONG",
+            "trending_down": "SHORT",
+            "choppy": str(args.choppy_side_mode).upper(),
+        }
 
         run_v5_walk_forward(
             data_dir=Path("/workspace/gpu_trainer/data_cache"),
@@ -101,7 +123,7 @@ def main() -> None:
             edge_first=True,
             edge_min=0.025,
             edge_pct_floor=65,
-            edge_topn_per_day=25,
+            edge_topn_per_day=int(max(1, args.edge_topn_per_day)),
             regime_side_map=regime_side_map,
             size_floor=0.5,
             adaptive_sizing=True,
@@ -118,10 +140,19 @@ def main() -> None:
             temp_scale=False,
             promote_metric="expectancy",
             stage_a_epochs=0,
-            cooldown=0,
+            cooldown=int(max(0, args.cooldown)),
             replit_url="https://99f68291-4a03-450a-9815-ebee9435cee2-00-2os5ge21n6uho.spock.replit.dev",
             max_folds=1,
             candidate_logger=candidate_logger,
+            dual_specialist=True,
+            min_mu_r_long=float(args.long_min_mu_r),
+            long_disagree_mult=float(max(0.05, args.long_disagree_mult)),
+            specialist_align_weight=float(max(0.0, args.specialist_align_weight)),
+            short_oversample=True,
+            short_min_fraction=float(np.clip(args.short_min_fraction, 0.20, 0.80)),
+            per_side_threshold=True,
+            min_p_side=float(np.clip(args.min_p_side, 0.0, 0.99)),
+            min_p_short=float(np.clip(args.min_p_short, 0.0, 0.99)),
         )
     finally:
         candidate_log_file.close()
