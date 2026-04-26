@@ -121,6 +121,41 @@ def _compute_adx(high, low, close, period=14):
     return adx
 
 
+def _rank01(values: np.ndarray) -> np.ndarray:
+    """Return percentile ranks in [0, 1] with NaN-safe fallback."""
+    s = pd.Series(values, dtype=float)
+    r = s.rank(pct=True, method="average")
+    return r.fillna(0.5).to_numpy(dtype=np.float64)
+
+
+def _compute_quality_blend_signal(
+    features: np.ndarray,
+    feature_names: Optional[List[str]],
+    blend_weights: Optional[dict],
+) -> Tuple[Optional[np.ndarray], List[str]]:
+    """Compute weighted rank-blend score from named features."""
+    if features is None or feature_names is None or blend_weights is None:
+        return None, []
+    if len(feature_names) == 0 or len(blend_weights) == 0:
+        return None, []
+
+    name_to_idx = {str(name): i for i, name in enumerate(feature_names)}
+    signal = np.zeros(features.shape[0], dtype=np.float64)
+    used = 0
+    missing: List[str] = []
+    for fname, weight in blend_weights.items():
+        idx = name_to_idx.get(str(fname))
+        if idx is None:
+            missing.append(str(fname))
+            continue
+        vals = pd.to_numeric(pd.Series(features[:, idx]), errors="coerce").to_numpy(dtype=np.float64)
+        signal += float(weight) * _rank01(vals)
+        used += 1
+    if used == 0:
+        return None, missing
+    return signal, missing
+
+
 @dataclass
 class V5ForwardTestConfig:
     """Config for frozen decision layer in forward test.
@@ -274,6 +309,13 @@ class V5ForwardTestConfig:
     per_side_threshold: bool = False
     gate_mode: str = "ref_magnitude"   # choices: ref_magnitude | percentile_top15
     specialist_mode: str = "none"      # "none" | "short" | "long" — dual-specialist training
+    # --- Deep signal discovery blend gate (optional hard pre-gate) ---
+    quality_blend_enabled: bool = False
+    quality_blend_weights: Optional[dict] = None  # feature_name -> signed weight
+    quality_blend_min_quantile: float = 0.80      # keep top (1-q) by blend score
+    quality_blend_regimes: Optional[list] = None  # e.g. ["trending_up", "trending_down"]
+    quality_blend_block_outside_regimes: bool = False
+    quality_blend_min_bars: int = 300
     # --- Signal quality: LONG specialist head-agreement gates (Task #69) ---
     min_mu_r_long: float = -1e9        # hard gate: block LONG specialist trades where mu_R < this (0.0 = agree-only)
     long_disagree_mult: float = 1.0    # soft multiplier on LONG disagree trades (mu_R<0); 0.3 = 70% score penalty
@@ -2851,6 +2893,7 @@ def run_v5_forward_test(
     train_ref_arrays=None,
     use_v6=False, v6_seq_len=16,
     symbols=None,
+    test_feature_names=None,
     candidate_logger=None,
     fold_idx=None,
 ):
@@ -3106,6 +3149,43 @@ def run_v5_forward_test(
                                                ref_arrays=_gate_ref)
     _qual_gate_pass_rate = 100.0 * qual_diag.get('final', 0) / max(qual_diag.get('total', 1), 1)
 
+    quality_blend_signal = None
+    quality_blend_mask = None
+    quality_blend_cutoff = None
+    quality_blend_missing: List[str] = []
+    quality_blend_used_weights = 0
+    if getattr(config, "quality_blend_enabled", False):
+        quality_blend_signal, quality_blend_missing = _compute_quality_blend_signal(
+            features=test_features,
+            feature_names=test_feature_names,
+            blend_weights=getattr(config, "quality_blend_weights", None),
+        )
+        if quality_blend_signal is not None:
+            _q_finite = quality_blend_signal[np.isfinite(quality_blend_signal)]
+            _q_min_bars = int(max(10, getattr(config, "quality_blend_min_bars", 300)))
+            if len(_q_finite) >= _q_min_bars:
+                _q = float(np.clip(getattr(config, "quality_blend_min_quantile", 0.80), 0.0, 0.99))
+                quality_blend_cutoff = float(np.percentile(_q_finite, _q * 100.0))
+                quality_blend_mask = np.isfinite(quality_blend_signal) & (quality_blend_signal >= quality_blend_cutoff)
+                _blend_pass_rate = float(100.0 * np.mean(quality_blend_mask))
+                _blend_w = getattr(config, "quality_blend_weights", None) or {}
+                quality_blend_used_weights = max(0, len(_blend_w) - len(quality_blend_missing))
+                log.info(
+                    "[V5_QUALITY_BLEND] ENABLED: used_features=%d missing=%d "
+                    "min_q=%.2f cutoff=%.4f pass_rate=%.1f%%",
+                    quality_blend_used_weights, len(quality_blend_missing),
+                    _q, quality_blend_cutoff, _blend_pass_rate,
+                )
+                if quality_blend_missing:
+                    log.info("[V5_QUALITY_BLEND] Missing features ignored: %s", quality_blend_missing)
+            else:
+                log.warning(
+                    "[V5_QUALITY_BLEND] disabled this fold: only %d finite blend bars (< min_bars=%d)",
+                    len(_q_finite), _q_min_bars,
+                )
+        else:
+            log.warning("[V5_QUALITY_BLEND] disabled: unable to compute blend signal (missing features/weights)")
+
     scores, sides, score_diag = compute_v5_scores(
         None, horizon_bars=config.horizon,
         score_lambda=config.score_lambda,
@@ -3220,6 +3300,23 @@ def run_v5_forward_test(
     scores_work[~valid_bool] = -np.inf
     if test_cand_mask is not None:
         scores_work[~test_cand_mask.astype(bool)] = -np.inf
+    quality_blend_cutoff_final = quality_blend_cutoff
+    quality_blend_pass_rate = None
+    if quality_blend_mask is not None:
+        _qb_mask = quality_blend_mask.copy()
+        if bar_regimes is not None and getattr(config, "quality_blend_regimes", None):
+            _allowed_regimes = {str(r) for r in getattr(config, "quality_blend_regimes", [])}
+            _regime_mask = np.array([str(r) in _allowed_regimes for r in bar_regimes], dtype=bool)
+            _qb_mask &= _regime_mask
+            if getattr(config, "quality_blend_block_outside_regimes", False):
+                scores_work[~_regime_mask] = -np.inf
+        scores_work[~_qb_mask] = -np.inf
+        quality_blend_pass_rate = float(100.0 * np.mean(_qb_mask))
+        log.info(
+            "[V5_QUALITY_BLEND] Applied pre-gate: pass_rate=%.1f%% cutoff=%.4f",
+            quality_blend_pass_rate,
+            float(quality_blend_cutoff_final) if quality_blend_cutoff_final is not None else float("nan"),
+        )
 
     finite_work = scores_work[np.isfinite(scores_work)]
     if len(finite_work) > 0:
@@ -3750,7 +3847,14 @@ def run_v5_forward_test(
             return v if not np.isnan(v) else 0.0
         return 0.0
 
+    quality_blend_blocked = 0
     for idx in chronological_idx:
+        if quality_blend_mask is not None and not quality_blend_mask[idx]:
+            quality_blend_blocked += 1
+            gate_blocks["quality_blend"] += 1
+            gate_blocked_r["quality_blend"].append(_oracle_r(idx))
+            _cand_reason[idx] = "quality_blend"
+            continue
         if config.warmup_skip_bars > 0 and idx < config.warmup_skip_bars:
             warmup_blocked += 1
             gate_blocks["warmup"] += 1
@@ -4339,6 +4443,13 @@ def run_v5_forward_test(
         log.info(f"[V5_GATE] Max trades/day cap blocked {tpd_blocked} trades")
     if adx_blocked > 0:
         log.info(f"[V5_GATE] ADX regime gate blocked {adx_blocked} trades (min={config.adx_min:.1f})")
+    if quality_blend_blocked > 0:
+        log.info(
+            "[V5_GATE] Quality-blend gate blocked %d trades (cutoff=%.4f pass_rate=%.1f%%)",
+            quality_blend_blocked,
+            float(quality_blend_cutoff_final) if quality_blend_cutoff_final is not None else float("nan"),
+            float(quality_blend_pass_rate) if quality_blend_pass_rate is not None else 0.0,
+        )
     if edge_first_blocked > 0:
         log.info(f"[V5_GATE] Edge-first blocked {edge_first_blocked} candidates (pre-loop)")
     if regime_side_blocked > 0:
@@ -4588,6 +4699,19 @@ def run_v5_forward_test(
     )
     # gate_pass_rate: quality-mask pass rate (preserved for backward compatibility)
     report['gate_pass_rate'] = _qual_gate_pass_rate
+    if quality_blend_pass_rate is not None:
+        report['quality_blend_pass_rate'] = round(float(quality_blend_pass_rate), 2)
+    if quality_blend_cutoff_final is not None:
+        report['quality_blend_cutoff'] = float(quality_blend_cutoff_final)
+    report['quality_blend_blocked'] = int(quality_blend_blocked)
+    report['quality_blend_used_features'] = int(quality_blend_used_weights)
+    if quality_blend_missing:
+        report['quality_blend_missing_features'] = list(quality_blend_missing)
+    if quality_blend_allowed_regimes:
+        report['quality_blend_allowed_regimes'] = sorted(list(quality_blend_allowed_regimes))
+    report['quality_blend_block_outside_regimes'] = bool(
+        getattr(config, "quality_blend_block_outside_regimes", False)
+    )
 
     side_quality = {}
     if len(taken_valid) > 0 and arrays is not None:
@@ -5521,6 +5645,12 @@ def run_v5_walk_forward(
     rolling_er_window=20,
     rolling_er_min=-0.05,
     gate_mode='ref_magnitude',
+    quality_blend_enabled=False,
+    quality_blend_weights=None,
+    quality_blend_min_quantile=0.80,
+    quality_blend_regimes=None,
+    quality_blend_block_outside_regimes=False,
+    quality_blend_min_bars=300,
     max_folds=None,
     candidate_logger=None,
     side_bal_weight=0.05,  # T5: was 0.15
@@ -5868,6 +5998,12 @@ def run_v5_walk_forward(
                 rolling_er_window=rolling_er_window,
                 rolling_er_min=rolling_er_min,
                 gate_mode=gate_mode,
+                quality_blend_enabled=quality_blend_enabled,
+                quality_blend_weights=quality_blend_weights,
+                quality_blend_min_quantile=quality_blend_min_quantile,
+                quality_blend_regimes=quality_blend_regimes,
+                quality_blend_block_outside_regimes=quality_blend_block_outside_regimes,
+                quality_blend_min_bars=quality_blend_min_bars,
                 model_version=model_version,
                 v6_seq_len=v6_seq_len,
                 v6_conv_channels=v6_conv_channels,
@@ -6068,6 +6204,12 @@ def run_v5_walk_forward(
                     rolling_er_window=rolling_er_window,
                     rolling_er_min=rolling_er_min,
                     gate_mode=gate_mode,
+                    quality_blend_enabled=quality_blend_enabled,
+                    quality_blend_weights=quality_blend_weights,
+                    quality_blend_min_quantile=quality_blend_min_quantile,
+                    quality_blend_regimes=quality_blend_regimes,
+                    quality_blend_block_outside_regimes=quality_blend_block_outside_regimes,
+                    quality_blend_min_bars=quality_blend_min_bars,
                     model_version=model_version,
                     v6_seq_len=v6_seq_len,
                     v6_conv_channels=v6_conv_channels,
@@ -7008,6 +7150,12 @@ def train_v5_model(
     rolling_er_window=20,
     rolling_er_min=-0.05,
     gate_mode='ref_magnitude',
+    quality_blend_enabled=False,
+    quality_blend_weights=None,
+    quality_blend_min_quantile=0.80,
+    quality_blend_regimes=None,
+    quality_blend_block_outside_regimes=False,
+    quality_blend_min_bars=300,
     model_version='v5',
     v6_seq_len=16,
     v6_conv_channels=128,
@@ -9134,6 +9282,12 @@ def train_v5_model(
                 per_side_threshold=per_side_threshold,
                 gate_mode=gate_mode,
                 specialist_mode=specialist_mode,
+                quality_blend_enabled=quality_blend_enabled,
+                quality_blend_weights=quality_blend_weights,
+                quality_blend_min_quantile=quality_blend_min_quantile,
+                quality_blend_regimes=quality_blend_regimes,
+                quality_blend_block_outside_regimes=quality_blend_block_outside_regimes,
+                quality_blend_min_bars=quality_blend_min_bars,
             )
 
             train_ref_arrays = _build_train_ref_arrays(
@@ -9168,6 +9322,7 @@ def train_v5_model(
                     train_ref_arrays=train_ref_arrays,
                     use_v6=use_v6, v6_seq_len=v6_seq_len,
                     symbols=symbols,
+                    test_feature_names=features_df_columns,
                     candidate_logger=candidate_logger,
                     fold_idx=fold_id,
                 )

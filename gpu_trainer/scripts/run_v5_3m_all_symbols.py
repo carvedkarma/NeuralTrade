@@ -29,6 +29,18 @@ def _json_default(value: object) -> object:
     return str(value)
 
 
+DISCOVERY_BLEND_48 = {
+    "h4_rsi14": -0.104,
+    "h1_ema200_pos": -0.103,
+    "ema200_pos_15m": -0.070,
+    "h4_trend_sign": -0.063,
+    "return_100": -0.060,
+    "h1_atr_ratio": 0.059,
+    "regime_session_sin": -0.059,
+    "h1_trend_sign": -0.059,
+}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run 3-month V5 walk-forward all-symbol diagnostic.")
     parser.add_argument("--epochs", type=int, default=4)
@@ -57,6 +69,24 @@ def main() -> None:
                         help="Per-symbol daily top-N cap for edge-first mode.")
     parser.add_argument("--cooldown", type=int, default=0,
                         help="Cooldown bars between entries.")
+    parser.add_argument(
+        "--use-quality-blend-gate",
+        action="store_true",
+        default=False,
+        help="Enable discovery-derived quality blend hard gate before trade gates.",
+    )
+    parser.add_argument(
+        "--quality-blend-min-quantile",
+        type=float,
+        default=0.80,
+        help="Keep bars with blend score >= this quantile (0.80 = top 20%).",
+    )
+    parser.add_argument(
+        "--quality-blend-only-trending",
+        action="store_true",
+        default=False,
+        help="Apply blend gate only in trending regimes and block outside regimes.",
+    )
     args = parser.parse_args()
 
     symbols = [
@@ -153,6 +183,12 @@ def main() -> None:
             per_side_threshold=True,
             min_p_side=float(np.clip(args.min_p_side, 0.0, 0.99)),
             min_p_short=float(np.clip(args.min_p_short, 0.0, 0.99)),
+            quality_blend_enabled=bool(args.use_quality_blend_gate),
+            quality_blend_weights=DISCOVERY_BLEND_48 if bool(args.use_quality_blend_gate) else None,
+            quality_blend_min_quantile=float(np.clip(args.quality_blend_min_quantile, 0.50, 0.99)),
+            quality_blend_regimes=["trending_up", "trending_down"] if bool(args.quality_blend_only_trending) else None,
+            quality_blend_block_outside_regimes=bool(args.quality_blend_only_trending),
+            quality_blend_min_bars=300,
         )
     finally:
         candidate_log_file.close()
