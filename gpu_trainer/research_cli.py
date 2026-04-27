@@ -523,7 +523,6 @@ def run_training(profile: ResearchProfile, *, device: str) -> Dict[str, Any]:
             symbols=profile.symbols,
             quality_gate_cfg=qual_cfg,
             tpd_ctrl_cfg=tpd_cfg,
-            phase1_epochs=profile.phase1_epochs,
             **profile.train_v5_kwargs(),
         )
     metrics = latest_v5_metrics()
@@ -568,7 +567,6 @@ def run_walk_forward(profile: ResearchProfile, *, device: str) -> Dict[str, Any]
             lr=profile.lr,
             quality_gate_cfg=qual_cfg,
             tpd_ctrl_cfg=tpd_cfg,
-            phase1_epochs=profile.phase1_epochs,
             **profile.walk_forward_kwargs(),
         )
     if report is None:
