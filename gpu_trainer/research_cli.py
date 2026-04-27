@@ -557,6 +557,29 @@ def run_walk_forward(profile: ResearchProfile, *, device: str) -> Dict[str, Any]
         profile.walk_forward_folds,
         len(profile.symbols),
     )
+    latest_ts_ms = 0
+    for symbol in profile.symbols:
+        path = data_dir_path / f"{symbol}_{profile.interval}.parquet"
+        if not path.exists():
+            continue
+        try:
+            import pandas as pd
+            df = pd.read_parquet(path, columns=["timestamp"])
+            if not df.empty:
+                latest_ts_ms = max(latest_ts_ms, int(df["timestamp"].max()))
+        except Exception:
+            continue
+    test_end_date = None
+    if latest_ts_ms > 0:
+        from datetime import datetime, timedelta, timezone
+        latest_dt = datetime.fromtimestamp(latest_ts_ms / 1000, tz=timezone.utc)
+        latest_midnight = latest_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        capped_test_end = latest_midnight - timedelta(days=7)
+        test_end_date = capped_test_end.strftime("%Y-%m-%d")
+        log.info(
+            "[EVAL] Capping walk-forward test_end_date at %s to avoid tiny terminal folds",
+            test_end_date,
+        )
     with trainer_cwd():
         report = run_v5_walk_forward(
             data_dir=data_dir_path,
@@ -567,6 +590,7 @@ def run_walk_forward(profile: ResearchProfile, *, device: str) -> Dict[str, Any]
             lr=profile.lr,
             quality_gate_cfg=qual_cfg,
             tpd_ctrl_cfg=tpd_cfg,
+            test_end_date=test_end_date,
             **profile.walk_forward_kwargs(),
         )
     if report is None:

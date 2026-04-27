@@ -54,7 +54,7 @@ class ResearchProfile:
     target_tpd_tol: float = 1.0
     threshold_warmup_epochs: int = 2
     threshold_step_mult: float = 0.05
-    min_threshold_floor: float = 0.004
+    min_threshold_floor: float = 0.0001
     phase1_epochs: int = 0
     promotion_gates: PromotionGateConfig = field(default_factory=PromotionGateConfig)
 
@@ -80,13 +80,18 @@ class ResearchProfile:
             "per_symbol_scaler": False,
             "short_oversample": True,
             "short_min_fraction": 0.40,
-            "per_symbol_threshold": True,
-            "per_side_threshold": True,
+            # Global thresholding is more stable for the research path.
+            # The per-symbol/per-side sweep can drive some symbols to very low
+            # thresholds and explode their local trades/day even when the
+            # aggregate global sweep looks healthy.
+            "per_symbol_threshold": False,
+            "per_side_threshold": False,
             "ema200_soft_mult": 0.50,
             "adx_gate": True,
             "adx_min": 18.0,
-            # Empirically healthy runs in this stack tend to cluster around ~0.003-0.007.
-            # 0.04 was an order-of-magnitude too high for this score scale.
+            # Observed score distributions in real walk-forward runs are
+            # typically around 0.0001-0.0003 on the validation window.
+            # A higher hard floor forces dead folds by blocking every score.
             "min_threshold": self.min_threshold_floor,
             "trailing_sl": True,
             "trail_activation": 1.5,
