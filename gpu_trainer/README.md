@@ -2,6 +2,103 @@
 
 A comprehensive deep learning system for cryptocurrency trading signals, designed to run on your local GPU.
 
+## Important reality check
+
+No trading model can honestly be guaranteed to be "better than any available platform".
+Markets are non-stationary, execution quality matters, and most apparent edge disappears
+under realistic costs, slippage, and out-of-sample testing. This repository now includes
+a local-first research CLI aimed at making the process more robust:
+
+- fixed 10-symbol liquid crypto universe by default,
+- GPU-oriented multi-symbol V5 training,
+- walk-forward validation before promotion,
+- local self-training loop with guarded promotion,
+- CLI workflows that do not require a hosted dashboard.
+
+Use it as a research and experimentation framework, not as a promise of profit.
+
+## Local GPU research CLI
+
+The recommended path for local multi-symbol crypto research is the new `crypto-research`
+CLI (or `python -m gpu_trainer.research_cli`).
+
+### Default 10-symbol universe
+
+```text
+BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT,
+ADAUSDT, DOGEUSDT, LINKUSDT, AVAXUSDT, LTCUSDT
+```
+
+### Install
+
+From the repo root:
+
+```bash
+pip install -e .
+pip install -r gpu_trainer/requirements.txt
+```
+
+If you prefer not to install the package, you can still run:
+
+```bash
+python -m gpu_trainer.research_cli --help
+```
+
+### Prepare local data
+
+Binance-only:
+
+```bash
+crypto-research --dashboard-url "" prepare-data
+```
+
+Custom symbols:
+
+```bash
+crypto-research --symbols BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,LTCUSDT prepare-data
+```
+
+### Train on your GPU
+
+```bash
+crypto-research train
+```
+
+### Run walk-forward evaluation and export a best policy
+
+```bash
+crypto-research evaluate
+```
+
+This writes:
+
+- `checkpoints/v5_walkforward_report.json`
+- `checkpoints/v5_run_metrics.json`
+- `checkpoints/best_policy.json`
+
+### Full research pipeline
+
+```bash
+crypto-research run --dashboard-url "" --refresh --set-baseline-on-first-success
+```
+
+This will:
+
+1. refresh/download local data,
+2. train the multi-symbol model,
+3. run walk-forward evaluation,
+4. export the best policy,
+5. promote checkpoints only if configured gates pass.
+
+### Self-training loop
+
+```bash
+crypto-research self-train --cycles 3 --sleep-seconds 600
+```
+
+This loop refreshes cached parquet data and fine-tunes symbol models locally using the
+existing V5 learning stack. Promotion remains gated.
+
 ## Features
 
 ### Neural Network Models

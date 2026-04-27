@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bulk download 15m candle data for all 20 symbols.
+"""Bulk download 15m candle data for GPU research.
 
 Strategy:
 1. For symbols already in DB (BTC/ETH/SOL/BNB) - export directly from dashboard API (fast)
@@ -10,14 +10,14 @@ Usage:
     python3 gpu_trainer/bulk_download.py --force
 """
 
+import argparse
 import json
 import sys
 import time
-import os
 import urllib.request
-import urllib.error
 from pathlib import Path
 from datetime import datetime
+from typing import Iterable, Optional
 
 import pandas as pd
 
@@ -39,8 +39,10 @@ BINANCE_ENDPOINTS = [
 ]
 
 
-def fetch_from_dashboard(symbol: str) -> pd.DataFrame:
-    url = f"{DASHBOARD_URL}/api/data/export-csv?symbol={symbol}&timeframe=15m"
+def fetch_from_dashboard(symbol: str, dashboard_url: Optional[str] = DASHBOARD_URL) -> pd.DataFrame:
+    if not dashboard_url:
+        return pd.DataFrame()
+    url = f"{dashboard_url.rstrip('/')}/api/data/export-csv?symbol={symbol}&timeframe=15m"
     print(f"  [{symbol}] Fetching from dashboard API...")
     try:
         req = urllib.request.Request(url)
@@ -176,12 +178,20 @@ def refresh_existing_data(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def process_symbol(symbol: str, force: bool = False, refresh: bool = False) -> dict:
-    parquet_path = DATA_DIR / f"{symbol}_15m.parquet"
+def process_symbol(
+    symbol: str,
+    force: bool = False,
+    refresh: bool = False,
+    *,
+    data_dir: Path = DATA_DIR,
+    min_candles: int = MIN_CANDLES,
+    dashboard_url: Optional[str] = DASHBOARD_URL,
+) -> dict:
+    parquet_path = data_dir / f"{symbol}_15m.parquet"
 
     if parquet_path.exists() and not force:
         df = pd.read_parquet(parquet_path)
-        if len(df) >= MIN_CANDLES:
+        if len(df) >= min_candles:
             if refresh:
                 df = refresh_existing_data(symbol, df)
                 df.to_parquet(parquet_path, index=False)
@@ -202,10 +212,13 @@ def process_symbol(symbol: str, force: bool = False, refresh: bool = False) -> d
                 print(f"  [{symbol}] Already cached: {len(df):,} candles")
                 return {"symbol": symbol, "candles": len(df), "status": "cached"}
 
-    df = fetch_from_dashboard(symbol)
+    df = fetch_from_dashboard(symbol, dashboard_url=dashboard_url)
 
-    if len(df) < MIN_CANDLES:
-        print(f"  [{symbol}] Dashboard only has {len(df)} candles, fetching from Binance...")
+    if len(df) < min_candles:
+        if dashboard_url:
+            print(f"  [{symbol}] Dashboard only has {len(df)} candles, fetching from Binance...")
+        else:
+            print(f"  [{symbol}] Fetching directly from Binance...")
         df_binance = download_from_binance(symbol)
         if len(df_binance) > len(df):
             df = df_binance
@@ -220,46 +233,44 @@ def process_symbol(symbol: str, force: bool = False, refresh: bool = False) -> d
 
     df.to_parquet(parquet_path, index=False)
 
-    status = "ok" if len(df) >= MIN_CANDLES else f"low"
+    status = "ok" if len(df) >= min_candles else "low"
     print(f"  [{symbol}] SAVED: {len(df):,} candles [{date_min} to {date_max}]")
     return {"symbol": symbol, "candles": len(df), "status": status, "date_range": f"{date_min} to {date_max}"}
 
 
-def main():
-    force = "--force" in sys.argv
-    refresh = "--refresh" in sys.argv
-    only = None
-    for arg in sys.argv[1:]:
-        if arg.endswith("USDT"):
-            only = [arg]
-    
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    symbols = only or SYMBOLS
-    
-    print("=" * 60)
-    print("  BULK DOWNLOAD: 15m Candle Data for GPU Training")
-    print("=" * 60)
-    print(f"  Symbols: {', '.join(symbols)}")
-    print(f"  Output:  {DATA_DIR}")
-    if refresh:
-        print(f"  Mode:    REFRESH (force update stale data)")
-    print()
-    
+def download_symbols(
+    symbols: Iterable[str],
+    *,
+    force: bool = False,
+    refresh: bool = False,
+    data_dir: Path = DATA_DIR,
+    min_candles: int = MIN_CANDLES,
+    dashboard_url: Optional[str] = DASHBOARD_URL,
+) -> list[dict]:
+    data_dir.mkdir(parents=True, exist_ok=True)
     results = []
     for sym in symbols:
-        result = process_symbol(sym, force=force, refresh=refresh)
+        result = process_symbol(
+            sym,
+            force=force,
+            refresh=refresh,
+            data_dir=data_dir,
+            min_candles=min_candles,
+            dashboard_url=dashboard_url,
+        )
         results.append(result)
         sys.stdout.flush()
-    
-    print()
+    return results
+
+
+def print_summary(results: list[dict], *, min_candles: int = MIN_CANDLES) -> bool:
     print("=" * 60)
     print("  SUMMARY")
     print("=" * 60)
-    
     total = 0
     all_ok = True
     for r in results:
-        ok = r["candles"] >= MIN_CANDLES
+        ok = r["candles"] >= min_candles
         icon = "OK" if ok else "LOW" if r["candles"] > 0 else "FAIL"
         print(f"  [{icon:4s}] {r['symbol']}: {r['candles']:>9,} candles  {r.get('date_range', '')}")
         total += r["candles"]
@@ -269,7 +280,63 @@ def main():
     print(f"\n  Total: {total:,} candles")
     if all_ok:
         print("  All symbols ready for GPU training!")
-    
+    return all_ok
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Bulk download 15m candles for GPU research")
+    parser.add_argument(
+        "--symbols",
+        type=str,
+        default=",".join(SYMBOLS),
+        help="Comma-separated symbol list (default: 20-symbol universe)",
+    )
+    parser.add_argument("--force", action="store_true", help="Force a full re-download")
+    parser.add_argument("--refresh", action="store_true", help="Refresh stale cached files")
+    parser.add_argument(
+        "--dashboard-url",
+        type=str,
+        default=DASHBOARD_URL,
+        help="Optional dashboard URL; pass '' to skip dashboard and use Binance only",
+    )
+    parser.add_argument(
+        "--min-candles",
+        type=int,
+        default=MIN_CANDLES,
+        help=f"Minimum rows per symbol required for success (default: {MIN_CANDLES})",
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None):
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    if not symbols:
+        parser.error("No symbols specified")
+
+    print("=" * 60)
+    print("  BULK DOWNLOAD: 15m Candle Data for GPU Training")
+    print("=" * 60)
+    print(f"  Symbols: {', '.join(symbols)}")
+    print(f"  Output:  {DATA_DIR}")
+    if args.refresh:
+        print("  Mode:    REFRESH (force update stale data)")
+    if not args.dashboard_url:
+        print("  Source:  Binance only")
+    print()
+
+    results = download_symbols(
+        symbols,
+        force=args.force,
+        refresh=args.refresh,
+        data_dir=DATA_DIR,
+        min_candles=args.min_candles,
+        dashboard_url=args.dashboard_url or None,
+    )
+    print()
+    all_ok = print_summary(results, min_candles=args.min_candles)
     return 0 if all_ok else 1
 
 

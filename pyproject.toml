@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.4.2",
     "pandas>=3.0.0",
+    "python-dateutil>=2.9.0.post0",
     "psycopg2-binary>=2.9.11",
     "pyarrow>=23.0.1",
     "pytest>=9.0.2",
@@ -13,3 +14,7 @@ dependencies = [
     "scikit-learn>=1.8.0",
     "sqlalchemy>=2.0.49",
 ]
+
+[project.scripts]
+crypto-research = "gpu_trainer.research_cli:main"
+gpu-crypto-research = "gpu_trainer.research_cli:main"
