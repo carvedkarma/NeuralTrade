@@ -1,3 +1,6 @@
+import sys
+
+import gpu_trainer
 from gpu_trainer.research_cli import evaluate_promotion, parse_symbols, summarize_doctor_report
 from gpu_trainer.research_config import DEFAULT_RESEARCH_SYMBOLS, build_research_profile
 
@@ -92,3 +95,10 @@ def test_summarize_doctor_report_detects_failures() -> None:
 
     assert summary["ok"] is False
     assert "ETHUSDT" in summary["failing_symbols"]
+
+
+def test_gpu_trainer_bootstrap_registers_legacy_aliases() -> None:
+    assert sys.modules.get("config") is gpu_trainer.config
+    assert sys.modules.get("data") is gpu_trainer.data
+    assert sys.modules.get("train") is gpu_trainer.train
+    assert sys.modules.get("models") is gpu_trainer.models
