@@ -45,7 +45,7 @@ class ResearchProfile:
     horizon: int = 16
     tp_mult: float = 2.0
     sl_mult: float = 1.2
-    train_months: int = 9
+    train_months: int = 24
     test_months: int = 1
     walk_forward_folds: int = 3
     cooldown: int = 4
@@ -55,7 +55,7 @@ class ResearchProfile:
     threshold_warmup_epochs: int = 2
     threshold_step_mult: float = 0.05
     min_threshold_floor: float = 0.004
-    phase1_epochs: int = 1
+    phase1_epochs: int = 0
     promotion_gates: PromotionGateConfig = field(default_factory=PromotionGateConfig)
 
     def regime_side_map(self) -> Dict[str, str]:
@@ -70,7 +70,7 @@ class ResearchProfile:
             "tp_mult": self.tp_mult,
             "sl_mult": self.sl_mult,
             "horizon": self.horizon,
-            "score_lambda": 0.50,
+            "score_lambda": self.score_lambda,
             "risk_proxy": "mae",
             "hold_target": 0.30,
             "mfe_min": 0.05,
