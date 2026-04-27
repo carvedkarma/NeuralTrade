@@ -1,4 +1,4 @@
-from gpu_trainer.research_cli import evaluate_promotion, parse_symbols
+from gpu_trainer.research_cli import evaluate_promotion, parse_symbols, summarize_doctor_report
 from gpu_trainer.research_config import DEFAULT_RESEARCH_SYMBOLS, build_research_profile
 
 
@@ -75,3 +75,20 @@ def test_evaluate_promotion_rejects_missing_baseline_when_required() -> None:
 
     assert promoted is False
     assert "baseline metrics missing" in reasons
+
+
+def test_summarize_doctor_report_detects_failures() -> None:
+    report = {
+        "device": "cpu",
+        "python": {"version": "3.11.0", "ok": True},
+        "torch": {"installed": False, "cuda_available": False},
+        "symbols": [
+            {"symbol": "BTCUSDT", "exists": True, "ok": True, "row_count": 25000},
+            {"symbol": "ETHUSDT", "exists": False, "ok": False, "row_count": 0},
+        ],
+    }
+
+    summary = summarize_doctor_report(report)
+
+    assert summary["ok"] is False
+    assert "ETHUSDT" in summary["failing_symbols"]

@@ -8,6 +8,7 @@ import sys
 import time
 from dataclasses import asdict
 from importlib import import_module
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -26,6 +27,8 @@ log = logging.getLogger("research_cli")
 CHECKPOINT_DIR = Path("checkpoints")
 DEPLOYED_DIR = CHECKPOINT_DIR / "deployed"
 RESEARCH_RUNS_DIR = CHECKPOINT_DIR / "research_runs"
+REQUIRED_COLUMNS = {"timestamp", "open", "high", "low", "close", "volume"}
+EXPECTED_15M_MS = 15 * 60 * 1000
 
 
 def _import_bulk_download():
@@ -98,6 +101,203 @@ def profile_from_args(args: argparse.Namespace) -> ResearchProfile:
         test_months=args.test_months,
         walk_forward_folds=args.walk_forward_folds,
     )
+
+
+def dependency_status() -> Dict[str, bool]:
+    return {
+        "pandas": find_spec("pandas") is not None,
+        "pyarrow": find_spec("pyarrow") is not None,
+        "sklearn": find_spec("sklearn") is not None,
+        "dateutil": find_spec("dateutil") is not None,
+        "torch": torch is not None,
+    }
+
+
+def validate_local_data(profile: ResearchProfile) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "ok": True,
+        "issues": [],
+        "warnings": [],
+        "symbols": [],
+    }
+    deps = dependency_status()
+    data_dir_path = data_dir()
+
+    if not deps["pandas"]:
+        result["ok"] = False
+        result["issues"].append("Missing dependency: pandas")
+        return result
+
+    try:
+        import pandas as pd
+    except ImportError:
+        result["ok"] = False
+        result["issues"].append("Missing dependency: pandas")
+        return result
+
+    for symbol in profile.symbols:
+        sym_result: Dict[str, Any] = {
+            "symbol": symbol,
+            "path": str(data_dir_path / f"{symbol}_{profile.interval}.parquet"),
+            "ok": True,
+            "issues": [],
+            "warnings": [],
+        }
+        path = Path(sym_result["path"])
+        if not path.exists():
+            sym_result["ok"] = False
+            sym_result["issues"].append("missing parquet file")
+            result["ok"] = False
+            result["symbols"].append(sym_result)
+            continue
+
+        try:
+            df = pd.read_parquet(path)
+        except Exception as exc:
+            sym_result["ok"] = False
+            sym_result["issues"].append(f"failed to read parquet: {exc}")
+            result["ok"] = False
+            result["symbols"].append(sym_result)
+            continue
+
+        missing_cols = sorted(REQUIRED_COLUMNS - set(df.columns))
+        if missing_cols:
+            sym_result["ok"] = False
+            sym_result["issues"].append(f"missing columns: {', '.join(missing_cols)}")
+            result["ok"] = False
+
+        row_count = int(len(df))
+        sym_result["rows"] = row_count
+        if row_count < profile.min_candles:
+            sym_result["ok"] = False
+            sym_result["issues"].append(f"only {row_count} rows (min={profile.min_candles})")
+            result["ok"] = False
+
+        if "timestamp" in df.columns and row_count > 1:
+            ts = df["timestamp"].astype("int64")
+            sym_result["start_ts"] = int(ts.iloc[0])
+            sym_result["end_ts"] = int(ts.iloc[-1])
+            if not ts.is_monotonic_increasing:
+                sym_result["ok"] = False
+                sym_result["issues"].append("timestamps are not sorted ascending")
+                result["ok"] = False
+            duplicate_count = int(ts.duplicated().sum())
+            if duplicate_count:
+                sym_result["ok"] = False
+                sym_result["issues"].append(f"duplicate timestamps: {duplicate_count}")
+                result["ok"] = False
+            diffs = ts.diff().dropna()
+            if not diffs.empty:
+                median_step = int(diffs.median())
+                sym_result["median_step_ms"] = median_step
+                if abs(median_step - EXPECTED_15M_MS) > 60_000:
+                    sym_result["warnings"].append(
+                        f"median timestamp step is {median_step}ms, expected about {EXPECTED_15M_MS}ms"
+                    )
+
+        null_columns = [col for col in REQUIRED_COLUMNS if col in df.columns and int(df[col].isna().sum()) > 0]
+        if null_columns:
+            sym_result["warnings"].append(f"nulls present in: {', '.join(sorted(null_columns))}")
+
+        result["symbols"].append(sym_result)
+
+    return result
+
+
+def print_doctor_report(profile: ResearchProfile, device: str) -> bool:
+    deps = dependency_status()
+    data_report = validate_local_data(profile)
+    python_ok = sys.version_info >= (3, 11)
+
+    print("=" * 72)
+    print("RESEARCH CLI DOCTOR")
+    print("=" * 72)
+    print(f"Python:     {sys.version.split()[0]}  ({'OK' if python_ok else 'NEEDS 3.11+'})")
+    print(f"Device:     {device}")
+    if torch is not None and torch.cuda.is_available():
+        print(f"GPU:        {torch.cuda.get_device_name(0)}")
+    else:
+        print("GPU:        not detected by torch")
+    print("")
+    print("Dependencies:")
+    for name, present in deps.items():
+        print(f"  - {name:<8} {'OK' if present else 'MISSING'}")
+    print("")
+    print(f"Data dir:   {data_dir()}")
+    print(f"Symbols:    {', '.join(profile.symbols)}")
+    print("")
+    print("Per-symbol data checks:")
+    for sym in data_report["symbols"]:
+        icon = "OK" if sym["ok"] else "FAIL"
+        rows = sym.get("rows", 0)
+        median_step = sym.get("median_step_ms", "n/a")
+        print(f"  [{icon}] {sym['symbol']:<10} rows={rows:<8} median_step={median_step}")
+        for issue in sym.get("issues", []):
+            print(f"         issue: {issue}")
+        for warning in sym.get("warnings", []):
+            print(f"         warn : {warning}")
+    print("")
+
+    ready = python_ok and all(deps.values()) and data_report["ok"]
+    print(f"READY FOR WALK-FORWARD: {'YES' if ready else 'NO'}")
+    if ready:
+        print("Recommended next command:")
+        print("  crypto-research walk-forward")
+    else:
+        print("Fix the failing items above before running walk-forward.")
+    return ready
+
+
+def summarize_walk_forward_report(report: Dict[str, Any]) -> Dict[str, Any]:
+    folds = report.get("folds", [])
+    aggregate = report.get("aggregate", {})
+    best_fold = None
+    if folds:
+        best_fold = max(
+            folds,
+            key=lambda fold: (
+                float(fold.get("total_r", 0.0)),
+                float(fold.get("expectancy_r", 0.0)),
+                int(fold.get("total_trades", 0)),
+            ),
+        )
+    return {
+        "n_folds": len(folds),
+        "aggregate_total_r": aggregate.get("total_r"),
+        "aggregate_expectancy_r": aggregate.get("avg_expectancy_r"),
+        "aggregate_total_trades": aggregate.get("total_trades"),
+        "best_fold": best_fold,
+    }
+
+
+def print_walk_forward_results(report: Dict[str, Any], metrics: Optional[Dict[str, Any]] = None) -> None:
+    summary = summarize_walk_forward_report(report)
+    print("=" * 72)
+    print("WALK-FORWARD RESULTS")
+    print("=" * 72)
+    print(f"Folds:            {summary['n_folds']}")
+    print(f"Total R:          {summary['aggregate_total_r']}")
+    print(f"Avg expectancy:   {summary['aggregate_expectancy_r']}")
+    print(f"Total trades:     {summary['aggregate_total_trades']}")
+    if metrics:
+        print(f"Action accuracy:  {metrics.get('mean_action_accuracy')}")
+        print(f"mu_R correlation: {metrics.get('mean_mu_r_correlation')}")
+        print(f"Long %:           {metrics.get('long_pct')}")
+        print(f"Score disc p90/p50: {metrics.get('mean_score_disc_p90p50')}")
+    best_fold = summary["best_fold"]
+    if best_fold:
+        print("")
+        print("Best fold:")
+        print(f"  fold:           {best_fold.get('fold')}")
+        print(f"  total_r:        {best_fold.get('total_r')}")
+        print(f"  expectancy_r:   {best_fold.get('expectancy_r')}")
+        print(f"  total_trades:   {best_fold.get('total_trades')}")
+        print(f"  threshold:      {best_fold.get('threshold_ema', best_fold.get('score_threshold'))}")
+    print("")
+    print(f"Artifacts:")
+    print(f"  - {CHECKPOINT_DIR / 'v5_walkforward_report.json'}")
+    print(f"  - {CHECKPOINT_DIR / 'v5_run_metrics.json'}")
+    print(f"  - {CHECKPOINT_DIR / 'best_policy.json'}")
 
 
 def ensure_data(
@@ -500,8 +700,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("prepare-data", help="Download or refresh local data for the research universe")
+    sub.add_parser("doctor", help="Validate local data files and environment before training")
     sub.add_parser("train", help="Train the multi-symbol V5 model")
     sub.add_parser("evaluate", help="Run walk-forward evaluation and export best policy")
+    sub.add_parser("walk-forward", help="Alias for evaluate: run walk-forward evaluation and export best policy")
+    sub.add_parser("inspect-results", help="Print the latest walk-forward and metrics summary")
 
     pipeline = sub.add_parser("run", help="Run full prepare -> train -> evaluate -> promote pipeline")
     pipeline.add_argument("--skip-data", action="store_true", help="Skip data refresh before running the pipeline")
@@ -532,17 +735,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         ensure_data(profile, force=args.force_download, refresh=args.refresh, dashboard_url=dashboard_url)
         return 0
 
+    if args.command == "doctor":
+        ok = print_doctor_report(profile, device=device)
+        return 0 if ok else 1
+
     if args.command == "train":
         run_training(profile, device=device)
         return 0
 
-    if args.command == "evaluate":
+    if args.command in {"evaluate", "walk-forward"}:
         report = run_walk_forward(profile, device=device)
         metrics = latest_v5_metrics()
         promoted, reasons = evaluate_promotion(metrics, profile, current_baseline())
         bundle = save_run_bundle(profile, metrics, report, promoted, reasons)
         log.info("[EVAL] Run bundle saved to %s", bundle)
         return 0 if promoted else 1
+
+    if args.command == "inspect-results":
+        print_results_summary()
+        return 0
 
     if args.command == "run":
         result = run_pipeline(

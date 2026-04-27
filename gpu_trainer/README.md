@@ -70,11 +70,49 @@ crypto-research train
 crypto-research evaluate
 ```
 
+There is also an explicit alias if you want the command name to match the task:
+
+```bash
+crypto-research walk-forward
+```
+
 This writes:
 
 - `checkpoints/v5_walkforward_report.json`
 - `checkpoints/v5_run_metrics.json`
 - `checkpoints/best_policy.json`
+
+### Recommended walk-forward workflow for existing local data
+
+If you already have 5 years of parquet data across your symbols, use this order:
+
+1. Validate local files and environment:
+
+```bash
+crypto-research doctor
+```
+
+2. Run walk-forward only:
+
+```bash
+crypto-research --symbols BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,LTCUSDT walk-forward
+```
+
+3. Print the saved fold-by-fold results:
+
+```bash
+crypto-research inspect-results
+```
+
+The `doctor` command checks:
+
+- whether PyTorch is installed,
+- whether CUDA is visible,
+- whether each parquet file exists,
+- whether required columns are present,
+- whether timestamps are sorted and unique,
+- whether row counts meet the minimum threshold,
+- whether the date range is long enough for walk-forward training.
 
 ### Full research pipeline
 
