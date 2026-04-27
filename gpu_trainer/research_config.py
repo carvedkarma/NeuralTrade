@@ -49,6 +49,13 @@ class ResearchProfile:
     test_months: int = 1
     walk_forward_folds: int = 3
     cooldown: int = 4
+    score_lambda: float = 0.50
+    target_tpd: float = 4.5
+    target_tpd_tol: float = 1.0
+    threshold_warmup_epochs: int = 2
+    threshold_step_mult: float = 0.05
+    min_threshold_floor: float = 0.004
+    phase1_epochs: int = 1
     promotion_gates: PromotionGateConfig = field(default_factory=PromotionGateConfig)
 
     def regime_side_map(self) -> Dict[str, str]:
@@ -78,7 +85,9 @@ class ResearchProfile:
             "ema200_soft_mult": 0.50,
             "adx_gate": True,
             "adx_min": 18.0,
-            "min_threshold": 0.04,
+            # Empirically healthy runs in this stack tend to cluster around ~0.003-0.007.
+            # 0.04 was an order-of-magnitude too high for this score scale.
+            "min_threshold": self.min_threshold_floor,
             "trailing_sl": True,
             "trail_activation": 1.5,
             "trail_distance": 1.0,
@@ -99,8 +108,9 @@ class ResearchProfile:
         kwargs = self.shared_v5_kwargs()
         kwargs.update(
             {
-                "target_tpd": 4.0,
-                "target_tpd_tol": 2.0,
+                "target_tpd": self.target_tpd,
+                "target_tpd_tol": self.target_tpd_tol,
+                "phase1_epochs": self.phase1_epochs,
                 "run_forward_test": True,
                 "run_diagnostics": True,
                 "promote_metric": "expectancy",
@@ -115,6 +125,7 @@ class ResearchProfile:
                 "train_months": self.train_months,
                 "test_months": self.test_months,
                 "max_folds": self.walk_forward_folds,
+                "phase1_epochs": self.phase1_epochs,
                 "warm_start": True,
                 "wf_threshold_ema": True,
                 "wf_threshold_ema_alpha": 0.50,

@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import asdict
 from importlib import import_module
 from importlib.util import find_spec
@@ -24,11 +26,28 @@ except ImportError:  # pragma: no cover - direct script fallback
 
 log = logging.getLogger("research_cli")
 
-CHECKPOINT_DIR = Path("checkpoints")
+PACKAGE_DIR = Path(__file__).resolve().parent
+CHECKPOINT_DIR = PACKAGE_DIR / "checkpoints"
 DEPLOYED_DIR = CHECKPOINT_DIR / "deployed"
 RESEARCH_RUNS_DIR = CHECKPOINT_DIR / "research_runs"
 REQUIRED_COLUMNS = {"timestamp", "open", "high", "low", "close", "volume"}
 EXPECTED_15M_MS = 15 * 60 * 1000
+
+
+@contextmanager
+def trainer_cwd():
+    """Run legacy trainer code from the package directory.
+
+    The older training stack uses many relative paths like ``Path("data_cache")`` and
+    ``Path("checkpoints")``.  Switching into gpu_trainer/ keeps those paths consistent
+    whether the CLI is launched from the repo root or as an installed console script.
+    """
+    previous = Path.cwd()
+    os.chdir(PACKAGE_DIR)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
 
 
 def _import_bulk_download():
@@ -59,7 +78,7 @@ def _bulk_download_helpers():
 
 def _v5_training_helpers():
     mod = _import_v5_train()
-    return mod.run_v5_walk_forward, mod.train_v5_model
+    return mod.run_v5_walk_forward, mod.train_v5_model, mod.V5QualityGateConfig, mod.V5TPDControllerConfig
 
 
 def _learning_modules():
@@ -466,7 +485,26 @@ def set_baseline(metrics: Dict[str, Any]) -> None:
 
 def run_training(profile: ResearchProfile, *, device: str) -> Dict[str, Any]:
     data_dir_path, _, _ = _bulk_download_helpers()
-    _, train_v5_model = _v5_training_helpers()
+    _, train_v5_model, V5QualityGateConfig, V5TPDControllerConfig = _v5_training_helpers()
+    qual_cfg = V5QualityGateConfig(
+        sigma_max=1.0,
+        mae_max=1.0,
+        mu_R_min=0.05,
+        p_trade_min=0.40,
+        enable_calib=False,
+    )
+    tpd_cfg = V5TPDControllerConfig(
+        target_tpd=profile.target_tpd,
+        tpd_tol=profile.target_tpd_tol,
+        thr_warmup_epochs=profile.threshold_warmup_epochs,
+        thr_step_mult=profile.threshold_step_mult,
+        score_threshold=None,
+        score_lambda=profile.score_lambda,
+        mae_cap=2.0,
+        side_mode="action_head",
+        rr_weight=0.0,
+        min_threshold_floor=profile.min_threshold_floor,
+    )
     log.info(
         "[TRAIN] Training V5 on %d symbols with epochs=%d batch=%d lr=%g",
         len(profile.symbols),
@@ -475,15 +513,19 @@ def run_training(profile: ResearchProfile, *, device: str) -> Dict[str, Any]:
         profile.lr,
     )
     data_path = data_dir_path / f"{profile.symbols[0]}_{profile.interval}.parquet"
-    train_v5_model(
-        data_path,
-        device,
-        profile.epochs,
-        profile.batch_size,
-        profile.lr,
-        symbols=profile.symbols,
-        **profile.train_v5_kwargs(),
-    )
+    with trainer_cwd():
+        train_v5_model(
+            data_path,
+            device,
+            profile.epochs,
+            profile.batch_size,
+            profile.lr,
+            symbols=profile.symbols,
+            quality_gate_cfg=qual_cfg,
+            tpd_ctrl_cfg=tpd_cfg,
+        phase1_epochs=profile.phase1_epochs,
+            **profile.train_v5_kwargs(),
+        )
     metrics = latest_v5_metrics()
     write_json(RESEARCH_RUNS_DIR / "latest_train_metrics.json", metrics)
     return metrics
@@ -491,21 +533,44 @@ def run_training(profile: ResearchProfile, *, device: str) -> Dict[str, Any]:
 
 def run_walk_forward(profile: ResearchProfile, *, device: str) -> Dict[str, Any]:
     data_dir_path, _, _ = _bulk_download_helpers()
-    run_v5_walk_forward, _ = _v5_training_helpers()
+    run_v5_walk_forward, _, V5QualityGateConfig, V5TPDControllerConfig = _v5_training_helpers()
+    qual_cfg = V5QualityGateConfig(
+        sigma_max=1.0,
+        mae_max=1.0,
+        mu_R_min=0.05,
+        p_trade_min=0.40,
+        enable_calib=False,
+    )
+    tpd_cfg = V5TPDControllerConfig(
+        target_tpd=profile.target_tpd,
+        tpd_tol=profile.target_tpd_tol,
+        thr_warmup_epochs=profile.threshold_warmup_epochs,
+        thr_step_mult=profile.threshold_step_mult,
+        score_threshold=None,
+        score_lambda=profile.score_lambda,
+        mae_cap=2.0,
+        side_mode="action_head",
+        rr_weight=0.0,
+        min_threshold_floor=profile.min_threshold_floor,
+    )
     log.info(
         "[EVAL] Running walk-forward with %d folds over %d symbols",
         profile.walk_forward_folds,
         len(profile.symbols),
     )
-    report = run_v5_walk_forward(
-        data_dir=data_dir_path,
-        device=device,
-        symbols=profile.symbols,
-        epochs=profile.epochs,
-        batch_size=profile.batch_size,
-        lr=profile.lr,
-        **profile.walk_forward_kwargs(),
-    )
+    with trainer_cwd():
+        report = run_v5_walk_forward(
+            data_dir=data_dir_path,
+            device=device,
+            symbols=profile.symbols,
+            epochs=profile.epochs,
+            batch_size=profile.batch_size,
+            lr=profile.lr,
+            quality_gate_cfg=qual_cfg,
+            tpd_ctrl_cfg=tpd_cfg,
+        phase1_epochs=profile.phase1_epochs,
+            **profile.walk_forward_kwargs(),
+        )
     if report is None:
         raise RuntimeError("Walk-forward did not return a report")
     write_json(RESEARCH_RUNS_DIR / "latest_walk_forward_report.json", report)
