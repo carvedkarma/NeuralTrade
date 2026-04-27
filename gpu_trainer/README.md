@@ -2,6 +2,90 @@
 
 A comprehensive deep learning system for cryptocurrency trading signals, designed to run on your local GPU.
 
+> Important: this repository can train research models and generate signals, but no model can guarantee profit or be "better than every platform" in live markets. Use paper trading, exchange-side stops, small sizing, and independent monitoring before risking capital.
+
+## New: 10-symbol self-training CLI
+
+`crypto_ai_system.py` is a self-contained Python CLI for training a GPU-capable multi-symbol crypto model across 10 default symbols:
+
+`BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, ADAUSDT, DOGEUSDT, LINKUSDT, LTCUSDT, AVAXUSDT`
+
+It includes the practical controls that matter for financial ML:
+
+- Binance spot/futures candle download with local parquet cache
+- rolling technical features only from current/past candles
+- future-return labels that include configurable fees and slippage
+- chronological train/validation split with a purge gap to reduce lookahead leakage
+- robust scaler fitted on training rows only
+- Transformer encoder with symbol embeddings and GPU mixed precision
+- classification plus return-distribution heads
+- validation metrics with costs, max drawdown, trade rate, profit factor, and Sharpe
+- signal JSON export for all configured symbols
+- `auto` mode that downloads fresh data, retrains, exports signals, sleeps, and repeats
+
+### Install on your GPU machine
+
+```bash
+cd gpu_trainer
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Install the CUDA build of PyTorch that matches your driver if the default wheel is CPU-only. Verify:
+
+```bash
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+```
+
+### Download data
+
+```bash
+python crypto_ai_system.py download --market futures --bars 80000
+```
+
+### Train
+
+```bash
+python crypto_ai_system.py train \
+  --device cuda \
+  --epochs 40 \
+  --batch-size 256 \
+  --sequence-length 96 \
+  --horizon 16 \
+  --fee-bps 6 \
+  --slippage-bps 4 \
+  --purge-bars 160
+```
+
+Outputs:
+
+- `gpu_trainer/checkpoints/crypto_ai_best.pt`
+- `gpu_trainer/checkpoints/crypto_ai_report.json`
+
+### Generate signals
+
+```bash
+python crypto_ai_system.py signal \
+  --device cuda \
+  --checkpoint gpu_trainer/checkpoints/crypto_ai_best.pt \
+  --min-confidence 0.50 \
+  --output gpu_trainer/signals/crypto_ai_signals.json
+```
+
+### Self-training loop
+
+```bash
+python crypto_ai_system.py auto \
+  --device cuda \
+  --market futures \
+  --bars 80000 \
+  --epochs 30 \
+  --retrain-hours 12
+```
+
+This is intended for research/paper trading. For live execution, keep a separate risk engine with position limits, kill switches, max daily drawdown, exchange-side stops, and alerting.
+
 ## Features
 
 ### Neural Network Models
