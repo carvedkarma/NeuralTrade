@@ -98,6 +98,15 @@ crypto-research doctor
 crypto-research --symbols BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,LTCUSDT walk-forward
 ```
 
+For a first baseline-seeding run, prefer:
+
+```bash
+crypto-research --symbols BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,LTCUSDT run --skip-data --set-baseline-on-first-success
+```
+
+This path now skips the standalone pre-train stage and performs walk-forward first,
+which avoids noisy single-train sweep logs when your main goal is walk-forward validation.
+
 3. Print the saved fold-by-fold results:
 
 ```bash

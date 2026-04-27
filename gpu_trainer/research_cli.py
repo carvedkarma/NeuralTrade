@@ -242,7 +242,7 @@ def print_doctor_report(profile: ResearchProfile, device: str) -> bool:
     print(f"READY FOR WALK-FORWARD: {'YES' if ready else 'NO'}")
     if ready:
         print("Recommended next command:")
-        print("  crypto-research walk-forward")
+        print("  crypto-research walk-forward --set-baseline-on-first-success")
     else:
         print("Fix the failing items above before running walk-forward.")
     return ready
@@ -536,6 +536,38 @@ def save_run_bundle(profile: ResearchProfile, metrics: Dict[str, Any], report: D
     return out
 
 
+def finalize_walk_forward_run(
+    profile: ResearchProfile,
+    report: Dict[str, Any],
+    *,
+    set_baseline_on_first_success: bool,
+) -> Dict[str, Any]:
+    metrics = latest_v5_metrics()
+    baseline = current_baseline()
+    baseline_for_eval = baseline
+    if baseline is None and set_baseline_on_first_success:
+        baseline_for_eval = dict(metrics)
+        log.info("[PROMOTION] No baseline found; evaluating first successful run against absolute gates only")
+
+    promoted, reasons = evaluate_promotion(metrics, profile, baseline_for_eval)
+    if promoted:
+        copy_promoted_artifacts(profile.symbols)
+        if baseline is not None or set_baseline_on_first_success:
+            set_baseline(metrics)
+        log.info("[PROMOTION] Candidate promoted")
+    else:
+        log.warning("[PROMOTION] Candidate rejected: %s", "; ".join(reasons))
+
+    run_bundle = save_run_bundle(profile, metrics, report, promoted, reasons)
+    return {
+        "metrics": metrics,
+        "walk_forward_report": report,
+        "promoted": promoted,
+        "reasons": reasons,
+        "run_bundle": str(run_bundle),
+    }
+
+
 def run_pipeline(
     profile: ResearchProfile,
     *,
@@ -549,33 +581,14 @@ def run_pipeline(
     if ensure_data_first:
         ensure_data(profile, force=force_download, refresh=refresh, dashboard_url=dashboard_url)
 
-    train_metrics = run_training(profile, device=device)
     wf_report = run_walk_forward(profile, device=device)
-    metrics = latest_v5_metrics()
-    baseline = current_baseline()
-    baseline_for_eval = baseline
-    if baseline is None and set_baseline_on_first_success:
-        baseline_for_eval = dict(metrics)
-        log.info("[PROMOTION] No baseline found; evaluating first successful run against absolute gates only")
-    promoted, reasons = evaluate_promotion(metrics, profile, baseline_for_eval)
-
-    if promoted:
-        copy_promoted_artifacts(profile.symbols)
-        if baseline is not None or set_baseline_on_first_success:
-            set_baseline(metrics)
-        log.info("[PROMOTION] Candidate promoted")
-    else:
-        log.warning("[PROMOTION] Candidate rejected: %s", "; ".join(reasons))
-
-    run_bundle = save_run_bundle(profile, metrics, wf_report, promoted, reasons)
-    return {
-        "train_metrics": train_metrics,
-        "metrics": metrics,
-        "walk_forward_report": wf_report,
-        "promoted": promoted,
-        "reasons": reasons,
-        "run_bundle": str(run_bundle),
-    }
+    result = finalize_walk_forward_run(
+        profile,
+        wf_report,
+        set_baseline_on_first_success=set_baseline_on_first_success,
+    )
+    result["train_metrics"] = None
+    return result
 
 
 def make_local_learning_manager():
@@ -702,11 +715,16 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("prepare-data", help="Download or refresh local data for the research universe")
     sub.add_parser("doctor", help="Validate local data files and environment before training")
     sub.add_parser("train", help="Train the multi-symbol V5 model")
-    sub.add_parser("evaluate", help="Run walk-forward evaluation and export best policy")
-    sub.add_parser("walk-forward", help="Alias for evaluate: run walk-forward evaluation and export best policy")
+    evaluate = sub.add_parser("evaluate", help="Run walk-forward evaluation and export best policy")
+    evaluate.add_argument("--set-baseline-on-first-success", action="store_true",
+                          help="Seed the baseline when none exists and the walk-forward run passes")
+
+    walk_forward = sub.add_parser("walk-forward", help="Alias for evaluate: run walk-forward evaluation and export best policy")
+    walk_forward.add_argument("--set-baseline-on-first-success", action="store_true",
+                              help="Seed the baseline when none exists and the walk-forward run passes")
     sub.add_parser("inspect-results", help="Print the latest walk-forward and metrics summary")
 
-    pipeline = sub.add_parser("run", help="Run full prepare -> train -> evaluate -> promote pipeline")
+    pipeline = sub.add_parser("run", help="Run full prepare -> walk-forward -> promote pipeline")
     pipeline.add_argument("--skip-data", action="store_true", help="Skip data refresh before running the pipeline")
     pipeline.add_argument("--set-baseline-on-first-success", action="store_true", help="Seed the baseline when none exists and the run passes")
 
@@ -745,11 +763,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.command in {"evaluate", "walk-forward"}:
         report = run_walk_forward(profile, device=device)
-        metrics = latest_v5_metrics()
-        promoted, reasons = evaluate_promotion(metrics, profile, current_baseline())
-        bundle = save_run_bundle(profile, metrics, report, promoted, reasons)
-        log.info("[EVAL] Run bundle saved to %s", bundle)
-        return 0 if promoted else 1
+        result = finalize_walk_forward_run(
+            profile,
+            report,
+            set_baseline_on_first_success=getattr(args, "set_baseline_on_first_success", False),
+        )
+        log.info("[EVAL] Run bundle saved to %s", result["run_bundle"])
+        return 0 if result["promoted"] else 1
 
     if args.command == "inspect-results":
         print_results_summary()
