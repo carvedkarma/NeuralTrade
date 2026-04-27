@@ -1,5 +1,9 @@
 import numpy as np
 import pandas as pd
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from crypto_ai_system import (
     FeatureConfig,
@@ -53,7 +57,8 @@ def test_targets_use_round_trip_cost_threshold():
     df["close"] = [100.0, 100.1, 100.2, 100.3, 100.45, 100.2, 99.0, 98.0]
     targeted = add_targets(df, horizon=2, threshold=0.001, round_trip_cost=0.002)
     assert targeted.loc[0, "label"] == 1
-    assert targeted.loc[2, "label"] == 0
+    assert targeted.loc[2, "label"] == 1
+    assert targeted.loc[4, "label"] == 0
     assert "future_return" in targeted.columns
 
 
