@@ -6,11 +6,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .backtest import backtest_model
 from .config import DEFAULT_SYMBOLS, SystemConfig
-from .data import build_data_bundle
-from .paper import paper_trade_replay
-from .training import train_model
 
 
 def _run_name(prefix: str) -> str:
@@ -47,6 +43,8 @@ def cmd_init_config(args: argparse.Namespace) -> int:
 
 
 def cmd_fetch(args: argparse.Namespace) -> int:
+    from .data import build_data_bundle
+
     config = _load_config(args.config)
     bundle = build_data_bundle(config, horizon=args.horizon, refresh=args.refresh)
     print(
@@ -68,6 +66,9 @@ def _resolve_checkpoint(explicit: str | None, run_name: str | None, config: Syst
 
 
 def cmd_train(args: argparse.Namespace) -> int:
+    from .data import build_data_bundle
+    from .training import train_model
+
     config = _load_config(args.config)
     if args.epochs is not None:
         config.epochs = args.epochs
@@ -93,6 +94,9 @@ def cmd_train(args: argparse.Namespace) -> int:
 
 
 def cmd_backtest(args: argparse.Namespace) -> int:
+    from .data import build_data_bundle
+    from .backtest import backtest_model
+
     config = _load_config(args.config)
     if args.device is not None:
         config.device = args.device
@@ -118,6 +122,9 @@ def cmd_backtest(args: argparse.Namespace) -> int:
 
 
 def cmd_paper(args: argparse.Namespace) -> int:
+    from .data import build_data_bundle
+    from .paper import paper_trade_replay
+
     config = _load_config(args.config)
     if args.device is not None:
         config.device = args.device
@@ -142,6 +149,10 @@ def cmd_paper(args: argparse.Namespace) -> int:
 
 
 def cmd_self_train(args: argparse.Namespace) -> int:
+    from .data import build_data_bundle
+    from .backtest import backtest_model
+    from .training import train_model
+
     config = _load_config(args.config)
     if args.device is not None:
         config.device = args.device
