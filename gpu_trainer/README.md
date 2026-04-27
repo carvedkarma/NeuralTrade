@@ -98,6 +98,48 @@ python main.py train-rl --episodes 1000
 python main.py serve --port 8000
 ```
 
+## Autonomous 10-Symbol Crypto AI (new CLI)
+
+This repository now includes a dedicated multi-symbol trading AI pipeline designed for GPU training and repeated self-training loops from the command line.
+
+### What it does
+- Uses **exactly 10 symbols** (default majors) and enforces this constraint.
+- Downloads Binance OHLCV history and builds leakage-aware engineered features.
+- Trains a **multi-symbol transformer** with:
+  - time attention per symbol
+  - cross-symbol attention
+  - dual heads (classification + return regression)
+- Runs out-of-sample backtests with fees/slippage and risk caps.
+- Supports paper-trading replay and autonomous retraining cycles.
+
+### Quick run
+
+```bash
+cd gpu_trainer
+python crypto_ai_cli.py init-config --output crypto_ai_config.json
+
+# Train (GPU auto-detected if available)
+python crypto_ai_cli.py --config crypto_ai_config.json train --horizon 6 --epochs 35 --refresh-data
+
+# Backtest the run
+python crypto_ai_cli.py --config crypto_ai_config.json backtest --run-name <train_run_name>
+
+# Replay recent paper-trading window
+python crypto_ai_cli.py --config crypto_ai_config.json paper --run-name <train_run_name> --steps 240
+
+# Autonomous self-train loop (retrain + backtest repeatedly)
+python crypto_ai_cli.py --config crypto_ai_config.json self-train --cycles 5 --sleep-seconds 120
+```
+
+### Output paths
+- Raw/cache data: `gpu_trainer/crypto_ai_data/`
+- Checkpoints + training metrics: `gpu_trainer/crypto_ai_runs/<run_name>/`
+- Backtest/paper reports: `gpu_trainer/crypto_ai_reports/`
+
+### Important reality check
+
+No system can honestly guarantee "better than any available platform" across all market regimes. This implementation is designed to be robust and extensible, with realistic evaluation and risk controls, so you can iterate toward stronger performance on your own infrastructure.
+
 ## Docker Setup (Recommended)
 
 ### Start All Services
