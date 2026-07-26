@@ -8,10 +8,6 @@ on:
       - 'rithal_tail_guard_v6_5_1/**'
       - '.github/workflows/rithal-tail-guard-v6-5-1.yml'
 
-permissions:
-  contents: read
-  pull-requests: write
-
 jobs:
   canonical-premium-contract:
     runs-on: ubuntu-latest
@@ -24,22 +20,7 @@ jobs:
       - name: Compile V6.5.2 patcher
         run: python -m py_compile rithal_tail_guard_v6_5_1/rithal_tail_guard_premium_fix_v652.py
       - name: Run bounded/full exact-parity regression
-        id: regression
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          python rithal_tail_guard_v6_5_1/rithal_tail_guard_premium_fix_v652.py --self-test 2>&1 | tee /tmp/v652-self-test.log
-      - name: Publish regression diagnostic
-        if: steps.regression.outcome == 'failure'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tail -100 /tmp/v652-self-test.log > /tmp/v652-tail.log
-          printf 'V6.5.2 regression diagnostic for `%s`:\n\n```text\n' "$GITHUB_SHA" > /tmp/comment.md
-          cat /tmp/v652-tail.log >> /tmp/comment.md
-          printf '\n```\n' >> /tmp/comment.md
-          gh pr comment 7 --body-file /tmp/comment.md
-          exit 1
+        run: python rithal_tail_guard_v6_5_1/rithal_tail_guard_premium_fix_v652.py --self-test
       - name: Assert frozen-contract correction
         run: |
           python - <<'PY'
