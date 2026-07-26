@@ -1,15 +1,19 @@
-# Rithal Behavior Fix V1.0.5 R3.1
+# Rithal Behavior Fix V1.0.5 R3.2
 
 Canonical incremental PAPER behavior repair for the locked Rithal instance.
 
-**R1, R2 and the direct R3 installer were withdrawn during cross-verification. Do not install them.** R3.1 is the only supported entry point. It includes every R3 correction and additionally passes the complete expanded feature family as the actual forced-neutralization argument.
+**R1, R2, R3 and R3.1 are superseded. Use R3.2 only.**
+
+R3.2 corrects the six-symbol startup quarantine introduced by R3.1. R3.1 reimplemented rank prewarm directly from a raw `regime_logits` key. The active Rithal source already had a canonical shared `_score_model_output()` and rank-prewarm path that handled the deployed regime contract. Because the raw key was not exposed in that exact form, all six rank buffers were marked `QUARANTINED_REGIME` with `regime_head_not_valid_four_class`.
+
+R3.2 preserves the active shared scorer and active rank-prewarm implementation. Risk-adjusted side selection is now applied as a narrow post-scoring overlay, so regime truth, double-softmax rank parity and the valid breakout posterior remain owned by the active scorer.
 
 ## Protected contract
 
 - Instance: `rithal-1-0-contract-locked`
 - Checkpoints: `checkpoints\rithal_clean`
 - Starting paper equity: `$18,000`
-- Current realized paper equity: preserved; never reset by this installer
+- Current realized paper equity and ledger: preserved
 - Fixed margin: `10%`
 - Fixed leverage: `10x`
 - Allocation cap: `60%`
@@ -21,77 +25,58 @@ Canonical incremental PAPER behavior repair for the locked Rithal instance.
 - Original TP/SL geometry: unchanged
 - LIVE exchange authority: disabled
 
-## Cross-verified PAPER behavior changes
+## R3.2 behavior
 
-- Direction uses risk-adjusted long/short edge instead of raw expected-R alone.
-- True regime posterior and backtest/rank posterior are published separately.
-- The real breakout posterior is preserved; invalid four-class output becomes `REGIME_UNKNOWN` and blocks a new entry.
-- Live inference and rank prewarm use the same canonical scorer and rank-regime contract.
-- Open-interest, liquidation and aggregate-trade repairs operate as coherent families.
-- The expanded family is passed as the actual forced repair list, not only exposed through a temporary eligibility tuple.
-- Feature repair is protected by a process-wide lock so one symbol cannot leak a temporary repair contract into another symbol's inference.
-- The active five-argument engine/manager context signatures are preserved exactly.
-- A full immutable 15-minute thesis is handed to the single 5-minute Trade Manager.
-- Restored positions reconstruct entry context where possible; missing context remains explicitly unavailable.
-- Controller proposed, effective and applied multipliers are separated; quantity follows the effective entry-authority multiplier already used by the active engine.
-- The PAPER monthly trade-count cap is bypassed; daily/monthly R-loss guards remain active.
-- Early-loss authority requires persistent closed-5-minute evidence and thesis deterioration or failed recovery.
-- The 70-minute/55% mature-profit exit additionally requires stagnation, giveback and available deterioration evidence.
-- P80 partial harvesting requires persistent erosion; the first 80% touch alone cannot execute.
-- Existing parity-locked PAPER full-close and partial-close authority is reused only after the exact local classifier passes hold, mature-profit, P80-partial and loss test vectors.
+- Uses the active shared `_score_model_output()` for live inference and rank prewarm.
+- Does not require a raw `regime_logits` dictionary key in the overlay.
+- Preserves true regime probabilities, rank probabilities, breakout probability and active double-softmax parity.
+- Applies risk-adjusted long/short side selection after canonical scoring.
+- Retains R3.1 coherent feature-family expansion and process-wide repair isolation.
+- Retains immutable 15-minute thesis handoff and restored-position context handling.
+- Retains persistent closed-5-minute evidence for loss, mature-profit and P80 actions.
+- Reuses the exact local PAPER authority classifier.
+- Keeps `SHADOW_ONLY` and `PAPER_CONTROL` mode semantics consistent.
 
-## Mandatory controlled restart
+## Installation
 
-Stop the running Rithal engine before installation. R3.1 refuses to continue while it detects the active Python engine. This prevents the old in-memory manager from loading new authority settings.
+Stop the running Rithal engine before installing. Then run from:
 
-## Install in PAPER_CONTROL
-
-Run from `C:\Users\muham\Downloads\mythos_v24_full` after stopping the engine:
-
-```powershell
-$u='https://raw.githubusercontent.com/carvedkarma/NeuralTrade/rithal-behavior-fix-v1.0.5/rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R3_1.ps1'; Invoke-WebRequest -UseBasicParsing $u -OutFile .\Install-RithalBehaviorFixV1_0_5_R3_1.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-RithalBehaviorFixV1_0_5_R3_1.ps1 -ProjectRoot . -ManagerMode PAPER_CONTROL
+```text
+C:\Users\muham\Downloads\mythos_v24_full
 ```
 
-For observation-only manager behavior, replace `PAPER_CONTROL` with `SHADOW_ONLY`. R3.1 then writes `SHADOW_ONLY` and `execution_enabled=false` consistently.
+```powershell
+$u='https://raw.githubusercontent.com/carvedkarma/NeuralTrade/rithal-behavior-fix-v1.0.5/rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R3_2.ps1'
+Invoke-WebRequest -UseBasicParsing $u -OutFile .\Install-RithalBehaviorFixV1_0_5_R3_2.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-RithalBehaviorFixV1_0_5_R3_2.ps1 -ProjectRoot . -ManagerMode PAPER_CONTROL
+```
 
-The installer:
-
-1. proves the old engine is stopped;
-2. requires a non-empty `checkpoints\rithal_clean` directory;
-3. backs up every changed/generated file;
-4. checks exact callable assignments known to exist in the supplied active `live.py` and `trade_manager_v6.py`;
-5. installs exactly one R3.1 engine hook and one R3.1 manager hook;
-6. compiles the active engine, manager, settings and authority modules;
-7. runs deterministic behavior, family-propagation and active-signature tests;
-8. sends synthetic hold, mature-profit, P80 partial and loss instructions through the exact local authority classifier;
-9. applies settings only after all code/authority checks pass;
-10. confirms mode consistency and checkpoint immutability;
-11. restores the backup automatically on any failure.
+The installer rebuilds the verified R3.1 dependency chain while the engine is stopped, promotes the active hooks to R3.2, compiles the complete chain, runs the exact rank-prewarm regression test, retests the local authority classifier, confirms checkpoint immutability and rolls back automatically on failure.
 
 ## Verify
 
 ```powershell
-.\Verify-RithalBehaviorFixV1_0_5_R3_1.ps1
+.\Verify-RithalBehaviorFixV1_0_5_R3_2.ps1 -ProjectRoot .
 ```
 
 Expected final line:
 
 ```text
-[RITHAL_BEHAVIOR_FIX_V1_0_5_R3_1] VERIFICATION PASS
+[RITHAL_BEHAVIOR_FIX_V1_0_5_R3_2] VERIFICATION PASS
 ```
 
-## Activate
-
-Start the engine once after verification. Dashboard restart is not required by this package.
+## Start
 
 ```powershell
 .\Start-Rithal18KContractV2.ps1 -ProjectRoot .
 ```
 
-## Roll back
+After startup, the rank buffer should no longer report `QUARANTINED_REGIME` solely because a raw `regime_logits` key is absent. A genuine invalid regime output still fails closed.
+
+## Rollback
 
 ```powershell
-.\Rollback-RithalBehaviorFixV1_0_5_R3_1.ps1
+.\Rollback-RithalBehaviorFixV1_0_5_R3_2.ps1
 ```
 
 Restart the engine after rollback.
