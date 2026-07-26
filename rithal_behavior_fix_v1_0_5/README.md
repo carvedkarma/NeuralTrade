@@ -1,4 +1,4 @@
-# Rithal Behavior Fix V1.0.5 R1
+# Rithal Behavior Fix V1.0.5 R2
 
 Canonical incremental behavior repair for the locked Rithal PAPER instance.
 
@@ -26,7 +26,7 @@ Canonical incremental behavior repair for the locked Rithal PAPER instance.
 - Family members are neutralized only during an explicitly forced repair call.
 - Invalid or missing four-class regime output is `REGIME_UNKNOWN` and blocks a new entry.
 - The real breakout posterior is published; no synthetic panic class is invented.
-- The rank prewarm and live decision path use the same canonical scorer.
+- Rank prewarm and live decisions use the same canonical scorer.
 - A full immutable 15m entry thesis is handed to the single 5m Trade Manager.
 - Controller proposed, effective and applied multipliers are separated; quantity follows applied/effective authority.
 - The PAPER monthly trade-count cap is bypassed; daily/monthly R-loss guards remain active.
@@ -35,15 +35,19 @@ Canonical incremental behavior repair for the locked Rithal PAPER instance.
 - P80 partial harvesting requires persistent erosion; the first 80% touch alone does not execute.
 - Existing parity-locked PAPER full-close and partial-close authority is reused.
 
+## Mandatory controlled restart
+
+Stop the currently running trading engine before installation. R2 refuses to continue when it detects the active Rithal Python process. This prevents the already-loaded old manager from hot-reloading `PAPER_CONTROL` before the repaired code is loaded.
+
 ## Install in PAPER_CONTROL
 
-Run from `C:\Users\muham\Downloads\mythos_v24_full`:
+Run from `C:\Users\muham\Downloads\mythos_v24_full` after the engine is stopped:
 
 ```powershell
-$u='https://raw.githubusercontent.com/carvedkarma/NeuralTrade/rithal-behavior-fix-v1.0.5/rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R1.ps1'; Invoke-WebRequest -UseBasicParsing $u -OutFile .\Install-RithalBehaviorFixV1_0_5_R1.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-RithalBehaviorFixV1_0_5_R1.ps1 -ProjectRoot . -ManagerMode PAPER_CONTROL
+$u='https://raw.githubusercontent.com/carvedkarma/NeuralTrade/rithal-behavior-fix-v1.0.5/rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R2.ps1'; Invoke-WebRequest -UseBasicParsing $u -OutFile .\Install-RithalBehaviorFixV1_0_5_R2.ps1; powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-RithalBehaviorFixV1_0_5_R2.ps1 -ProjectRoot . -ManagerMode PAPER_CONTROL
 ```
 
-The installer compiles the active engine and manager, runs deterministic behavior tests, checks unique hook placement, records hashes, verifies that `checkpoints\rithal_clean` did not change, and restores its timestamped backup on any failure.
+The inner transactional installer compiles the active engine and manager, runs deterministic behavior tests, checks unique hook placement, records hashes, verifies that `checkpoints\rithal_clean` did not change, and restores its timestamped backup on any failure.
 
 ## Verify
 
@@ -59,7 +63,7 @@ Expected final line:
 
 ## Activate
 
-A single controlled restart of the trading engine is required because `live.py` and the single Trade Manager are loaded at process start. Dashboard restart is not required by this package.
+Start the engine once after verification. Dashboard restart is not required by this package.
 
 ```powershell
 .\Start-Rithal18KContractV2.ps1 -ProjectRoot .
