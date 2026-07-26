@@ -21,11 +21,14 @@ jobs:
           python-version: '3.11'
       - name: Compile runtime
         run: python -m py_compile rithal_layer_truth_v1_0_4_7_r3/rithal_layer_truth_v1047_r3.py
-      - name: Parse PowerShell installer
+      - name: Parse PowerShell installers
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          [void][scriptblock]::Create((Get-Content rithal_layer_truth_v1_0_4_7_r3/Install-RithalLayerTruthV1_0_4_7_R3.ps1 -Raw))
+          Get-ChildItem rithal_layer_truth_v1_0_4_7_r3 -Filter '*.ps1' | ForEach-Object {
+            [void][scriptblock]::Create((Get-Content $_.FullName -Raw))
+            Write-Host "Parsed $($_.Name)"
+          }
       - name: Build canonical instance state
         shell: bash
         run: |
@@ -52,23 +55,25 @@ jobs:
           JSON
           echo '{"model_instance_id":"rithal-1-0-contract-locked"}' > "$INST/live_prices.json"
           cat > "$TEST_ROOT/mythos_5m_execution_control.json" <<'JSON'
-          {"mode":"SHADOW_ONLY","execution_enabled":false,"scope":"PAPER_ONLY","authority_bridge":{"ready":true}}
+          {"schema_version":9,"module":"EXISTING_CONTROL_CONTRACT","mode":"SHADOW_ONLY","execution_enabled":false,"scope":"PAPER_ONLY","authority_bridge":{"ready":true}}
           JSON
           cat > "$TEST_ROOT/settings_override_v1.json" <<'JSON'
           {"rithal_layer_contract_v1047":{"instance_id":"rithal-1-0-contract-locked","starting_equity_usd":18000,"fixed_margin_pct":0.10,"leverage":10,"allocation_cap_pct":0.60,"heat_cap_pct":0.03,"max_open_positions":6,"manager_mode":"SHADOW_ONLY"}}
           JSON
       - name: Run verifier
         run: python rithal_layer_truth_v1_0_4_7_r3/rithal_layer_truth_v1047_r3.py --project-root "$TEST_ROOT" --verify
-      - name: Cross-verify all contracts
+      - name: Cross-verify runtime contracts
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-          import importlib.util, json, os, pathlib
+          import importlib.util, json, os, pathlib, sys
           root = pathlib.Path(os.environ['TEST_ROOT'])
           module_path = pathlib.Path('rithal_layer_truth_v1_0_4_7_r3/rithal_layer_truth_v1047_r3.py')
           spec = importlib.util.spec_from_file_location('r3', module_path)
-          mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+          mod = importlib.util.module_from_spec(spec)
+          sys.modules['r3'] = mod
+          spec.loader.exec_module(mod)
           runtime = mod.LayerTruthRuntime(root)
           first = runtime.publish()
           payload = json.loads((root/'mythos_rithal_intelligence_truth.json').read_text())
@@ -98,5 +103,5 @@ jobs:
           assert counter2['review_advanced'] is False and counter2['persistent_giveback_reviews'] == 1, counter2
           assert len(after_lines) == len(before_lines), (len(before_lines), len(after_lines))
           assert first['status'] == 'WARN', first
-          print('All R3 cross-verification assertions passed')
+          print('All R3 runtime assertions passed')
           PY
