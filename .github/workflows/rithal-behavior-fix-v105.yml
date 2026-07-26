@@ -1,4 +1,4 @@
-name: Rithal Behavior Fix V1.0.5
+name: Rithal Behavior Fix V1.0.5 R1
 
 on:
   push:
@@ -16,34 +16,99 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Compile overlay
-        run: python -m py_compile rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105.py
+      - name: Compile behavior modules
+        run: |
+          python -m py_compile rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105.py
+          python -m py_compile rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r1.py
       - name: Run deterministic behavior tests
-        run: python rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105.py --self-test
-      - name: Parse installer
+        run: python rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r1.py
+      - name: Parse canonical installer
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          [void][scriptblock]::Create((Get-Content rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5.ps1 -Raw))
+          [void][scriptblock]::Create((Get-Content rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R1.ps1 -Raw))
       - name: Static safety assertions
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
-          text = Path('rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105.py').read_text()
-          assert 'RISK_ADJUSTED_EDGE_V105' in text
-          assert 'REGIME_UNKNOWN' in text
-          assert 'coherent_family_repair_healthy_direction_change_allowed' in text
-          assert 'HOLD_PERSISTENCE_REQUIRED' in text
-          assert 'P80_PARTIAL_70_PROTECTED_30' in text
-          assert 'M70_P55_FULL_EXIT' in text
-          assert 'PAPER_CONTROL' in text
-          assert 'live_exchange_control": False' in text or '"live_exchange_control": False' in text
-          assert 'checkpoints\\mythos_models' not in text
+          base = Path('rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105.py').read_text()
+          r1 = Path('rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r1.py').read_text()
+          installer = Path('rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R1.ps1').read_text()
+          for token in ('RISK_ADJUSTED_EDGE_V105','REGIME_UNKNOWN','HOLD_PERSISTENCE_REQUIRED','P80_PARTIAL_70_PROTECTED_30','M70_P55_FULL_EXIT','PAPER_CONTROL'):
+              assert token in base, token
+          assert 'family expansion=forced-call-only' in r1
+          assert 'immutable_entry_snapshot' in r1
+          assert 'checkpoints\\mythos_models' not in base + r1 + installer
+          assert 'live_exchange_control": False' in base
+          assert '# RITHAL_BEHAVIOR_FIX_V1_0_5_R1_LIVE_HOOK' in installer
+          assert '# RITHAL_BEHAVIOR_FIX_V1_0_5_R1_MANAGER_HOOK' in installer
           print('Static safety assertions passed')
           PY
-      - name: Test settings configuration against a synthetic project
+      - name: Test R1 runtime wrappers with synthetic classes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import importlib.util, pathlib, sys, threading
+          root = pathlib.Path('rithal_behavior_fix_v1_0_5').resolve()
+          sys.path.insert(0, str(root))
+          import rithal_behavior_fix_v105_r1 as r1
+
+          seen = []
+          ns = {
+              'RITHAL_ABSOLUTE_OOD_NEUTRALIZE_FEATURES': ('open_interest','liq_total_usd_15m','agg_trade_notional_15m'),
+              'RANK_WINDOW': 100,
+              'RANK_MIN_HISTORY': 10,
+              'np': object(),
+          }
+          class Model:
+              feature_names = ('open_interest','oi_delta','oi_z','ret_1')
+              def _prepare_model_inputs(self, df, *, context, force_neutralize_nonstationary=None):
+                  seen.append((context, tuple(ns['RITHAL_ABSOLUTE_OOD_NEUTRALIZE_FEATURES'])))
+                  return None, [], {'top_ood_features':[], 'blocks':[], 'blocked':False}
+              def _score_model_output(self, out): return {}
+              def infer(self, df): return {}
+              def prewarm_rank_history(self, df, max_bars=None): return True
+          class Engine:
+              def _get_regime_probs(self, sym, pred): return {}
+              def _trade_manager_entry_context(self, sym, pos, pred, last_bar): return {}
+              def _arm_trade_manager_position(self, sym, pos, pred, last_bar): return None
+              def _process(self, sym, *args, **kwargs): return None
+          ns.update({'NeuralV2Model':Model,'LiveEngine':Engine})
+          r1.apply_live_patch(ns)
+          assert ns['RITHAL_ABSOLUTE_OOD_NEUTRALIZE_FEATURES'] == ('open_interest','liq_total_usd_15m','agg_trade_notional_15m')
+          m = Model()
+          m._prepare_model_inputs(None, context='normal')
+          m._prepare_model_inputs(None, context='forced', force_neutralize_nonstationary=['open_interest','oi_delta','oi_z'])
+          assert seen[0][1] == ('open_interest','liq_total_usd_15m','agg_trade_notional_15m')
+          assert 'oi_delta' in seen[1][1] and 'oi_z' in seen[1][1]
+          assert ns['RITHAL_ABSOLUTE_OOD_NEUTRALIZE_FEATURES'] == ('open_interest','liq_total_usd_15m','agg_trade_notional_15m')
+
+          class TM:
+              def __init__(self):
+                  self._lock=threading.RLock(); self._trades={'t1':{'entry_context':None}}; self.persisted=0
+              def _trade_id(self,pos): return pos['trade_id']
+              def _persist(self): self.persisted += 1
+              def _entry_context(self,pos): return {}
+              def review_15m_context(self,sym,pos,pred,last_bar): return {'base':True}
+              def _decision(self,state,review,*,bar_open_ms,hard_flip=None,source='CLOSED_5M'): return {}
+              def observe_mark(self,sym,pos,current_price): return {}
+              def public_trade_state(self,trade_id): return {}
+              def status(self): return {}
+          class Mod: pass
+          mod=Mod(); mod.TradeManager=TM
+          r1.apply_trade_manager_patch(mod)
+          tm=TM()
+          result=tm.review_15m_context('BTCUSDT',{'trade_id':'t1'},{'side':1,'decision_score':.9,'threshold':.8,'edge_margin':.2,'router_confidence':.9,'p_no_trade':.1,'regime_valid':True,'feature_health':{'blocked':False}},{'timestamp':123})
+          assert isinstance(tm._trades['t1']['entry_context'],dict)
+          assert 'immutable_entry_snapshot' in tm._trades['t1']['entry_context']
+          assert result['thesis_v105']['status']=='INTACT'
+          assert tm.persisted==1
+          print('R1 runtime wrapper assertions passed')
+          PY
+      - name: Test locked settings configuration
         shell: bash
         run: |
           set -euo pipefail
@@ -57,7 +122,11 @@ jobs:
           def preflight_settings(before,candidate,instance_id=None): return {"candidate":copy.deepcopy(candidate),"ok":True}
           def save_settings(root,iid,candidate,actor=None,remote_addr=None,expected_revision=None):
               assert expected_revision==4
+              assert candidate["capital"]["starting_equity"]==18000.0
+              assert candidate["capital"]["per_trade_margin_pct"]==0.10
               assert candidate["capital"]["leverage"]==10
+              assert candidate["capital"]["max_portfolio_margin_pct"]==0.60
+              assert candidate["capital"]["max_portfolio_heat_pct"]==0.03
               assert candidate["trade_manager"]["mode"]=="PAPER_CONTROL"
               assert candidate["safety"]["live_exchange_control"] is False
               return candidate,{"ok":True,"actor":actor}
@@ -67,11 +136,10 @@ jobs:
           import json, os, pathlib
           root=pathlib.Path(os.environ['RUNNER_TEMP'])/'rithal-v105'
           report=json.loads((root/'configure.json').read_text())
-          assert report['restart_required'] is True
-          assert report['live_exchange_control'] is False
+          assert report['restart_required'] is True and report['live_exchange_control'] is False
           control=json.loads((root/'mythos_5m_execution_control.json').read_text())
-          assert control['mode']=='PAPER_AUTOMANAGE' and control['execution_enabled'] is True
+          assert control['mode']=='PAPER_AUTOMANAGE' and control['execution_enabled'] is True and control['scope']=='PAPER_ONLY'
           policy=json.loads((root/'mythos/neural/mythos_paper_policy.json').read_text())
           assert policy=={"leverage":10,"leverage_mode":"fixed","max_portfolio_margin_pct":0.6,"per_trade_margin_pct":0.1,"starting_equity":18000.0}
-          print('Synthetic settings configuration passed')
+          print('Locked settings configuration passed')
           PY
