@@ -18,10 +18,12 @@ Write-Host '[RITHAL_TAIL_GUARD_V6_5_1_R2] preparing corrected transactional inst
 Invoke-WebRequest -UseBasicParsing -Uri $Raw -OutFile $Downloaded
 $text = [IO.File]::ReadAllText($Downloaded)
 
-$oldInstall = "(`$engineText.Split('RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_ALIGNMENT').Count - 1)"
-$newInstall = "([regex]::Matches(`$engineText,[regex]::Escape('RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_ALIGNMENT'))).Count"
-$oldVerify = "(`$et.Split('RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_ALIGNMENT').Count-1)"
-$newVerify = "([regex]::Matches(`$et,[regex]::Escape('RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_ALIGNMENT'))).Count"
+# Single-quoted literals preserve the backtick that must remain inside the base
+# installer's generated-verifier here-string.
+$oldInstall = '($engineText.Split(''RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_ALIGNMENT'').Count - 1)'
+$newInstall = '([regex]::Matches($engineText,[regex]::Escape(''RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_ALIGNMENT''))).Count'
+$oldVerify = '(`$et.Split(''RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_ALIGNMENT'').Count-1)'
+$newVerify = '([regex]::Matches(`$et,[regex]::Escape(''RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_ALIGNMENT''))).Count'
 
 if (-not $text.Contains($oldInstall)) { throw 'Base installer marker-count expression was not found.' }
 if (-not $text.Contains($oldVerify)) { throw 'Generated verifier marker-count expression was not found.' }
@@ -29,8 +31,8 @@ $text = $text.Replace($oldInstall, $newInstall).Replace($oldVerify, $newVerify)
 $text = $text.Replace("`$Version = 'RITHAL_TAIL_GUARD_V6_5_1'", "`$Version = 'RITHAL_TAIL_GUARD_V6_5_1_R2'")
 
 foreach ($token in @(
-    "[regex]::Matches(`$engineText",
-    "[regex]::Matches(`$et",
+    '[regex]::Matches($engineText',
+    '[regex]::Matches(`$et',
     'premium_source_covered',
     'pct_change(periods=4, fill_method=None)'
 )) {
