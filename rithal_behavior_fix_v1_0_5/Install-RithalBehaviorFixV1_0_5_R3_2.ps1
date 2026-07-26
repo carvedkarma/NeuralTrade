@@ -31,46 +31,24 @@ function Checkpoint-Digest([string]$Dir){
     $bytes=[Text.Encoding]::UTF8.GetBytes([string]::Join("`n",$rows));$sha=[Security.Cryptography.SHA256]::Create()
     try{return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
 }
-function Replace-Hook([string]$Path,[string]$Kind){
+function Promote-Hook([string]$Path,[string]$Kind){
     $text=[IO.File]::ReadAllText($Path)
-    if($Kind -eq 'LIVE'){
-        $pattern='(?ms)\r?\n# RITHAL_BEHAVIOR_FIX_V1_0_5_R3_1_LIVE_HOOK\r?\n.*?_rithal_v105_r3_1_apply_live_patch\(globals\(\)\)\r?\n'
-        $hook=@'
-
-# RITHAL_BEHAVIOR_FIX_V1_0_5_R3_2_LIVE_HOOK
-try:
-    from .rithal_behavior_fix_v105_r3_2 import apply_live_patch as _rithal_v105_r3_2_apply_live_patch
-except ImportError:
-    from rithal_behavior_fix_v105_r3_2 import apply_live_patch as _rithal_v105_r3_2_apply_live_patch
-_rithal_v105_r3_2_apply_live_patch(globals())
-'@
-    }else{
-        $pattern='(?ms)\r?\n# RITHAL_BEHAVIOR_FIX_V1_0_5_R3_1_MANAGER_HOOK\r?\n.*?_rithal_v105_r3_1_apply_trade_manager_patch\(_rithal_v105_r3_1_sys\.modules\[__name__\]\)\r?\n'
-        $hook=@'
-
-# RITHAL_BEHAVIOR_FIX_V1_0_5_R3_2_MANAGER_HOOK
-try:
-    from .rithal_behavior_fix_v105_r3_2 import apply_trade_manager_patch as _rithal_v105_r3_2_apply_trade_manager_patch
-except ImportError:
-    from rithal_behavior_fix_v105_r3_2 import apply_trade_manager_patch as _rithal_v105_r3_2_apply_trade_manager_patch
-import sys as _rithal_v105_r3_2_sys
-_rithal_v105_r3_2_apply_trade_manager_patch(_rithal_v105_r3_2_sys.modules[__name__])
-'@
-    }
-    $updated=[regex]::Replace($text,$pattern,$hook)
-    if($updated -eq $text){throw "Expected R3.1 $Kind hook was not found in $Path"}
-    $marker="# RITHAL_BEHAVIOR_FIX_V1_0_5_R3_2_${Kind}_HOOK"
-    if(([regex]::Matches($updated,[regex]::Escape($marker))).Count -ne 1){throw "R3.2 $Kind hook count is not exactly one"}
-    if($updated.Contains("# RITHAL_BEHAVIOR_FIX_V1_0_5_R3_1_${Kind}_HOOK")){throw "Superseded R3.1 $Kind hook remains"}
+    $oldMarker="# RITHAL_BEHAVIOR_FIX_V1_0_5_R3_1_${Kind}_HOOK"
+    $newMarker="# RITHAL_BEHAVIOR_FIX_V1_0_5_R3_2_${Kind}_HOOK"
+    if(-not $text.Contains($oldMarker)){throw "Expected R3.1 $Kind hook was not found in $Path"}
+    $updated=$text.Replace($oldMarker,$newMarker)
+    $updated=$updated.Replace('rithal_behavior_fix_v105_r3_1','rithal_behavior_fix_v105_r3_2')
+    $updated=$updated.Replace('_rithal_v105_r3_1','_rithal_v105_r3_2')
+    if(([regex]::Matches($updated,[regex]::Escape($newMarker))).Count -ne 1){throw "R3.2 $Kind hook count is not exactly one"}
+    if($updated.Contains($oldMarker)){throw "Superseded R3.1 $Kind hook remains"}
+    if(-not $updated.Contains('rithal_behavior_fix_v105_r3_2')){throw "R3.2 $Kind module import is missing"}
     [IO.File]::WriteAllText($Path,$updated,[Text.UTF8Encoding]::new($false))
 }
 function Rollback-R32{
     if(Test-Path -LiteralPath $R31Rollback -PathType Leaf){
         try{& powershell -NoProfile -ExecutionPolicy Bypass -File $R31Rollback|Out-Host}catch{Write-Warning "R3.1 rollback failed: $($_.Exception.Message)"}
     }
-    foreach($path in @($R32Module,$VerifyFile,$RollbackFile,$ReportFile)){
-        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
-    }
+    foreach($path in @($R32Module,$VerifyFile,$RollbackFile,$ReportFile)){Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue}
 }
 
 if(-not(Test-Path -LiteralPath $Neural -PathType Container)){throw "Invalid project root: $Root"}
@@ -85,8 +63,8 @@ try{
 
     Stage 'Installing R3.2 active-shared-scorer module'
     Invoke-WebRequest -UseBasicParsing -Uri "$RawBase/rithal_behavior_fix_v105_r3_2.py" -OutFile $R32Module
-    Replace-Hook $Live 'LIVE'
-    Replace-Hook $Manager 'MANAGER'
+    Promote-Hook $Live 'LIVE'
+    Promote-Hook $Manager 'MANAGER'
 
     Stage 'Compiling complete behavior chain and active source'
     $compile=@(
@@ -104,14 +82,12 @@ try{
     Stage 'Running the exact rank-prewarm regression test'
     $self=& python $R32Module --self-test 2>&1
     if($LASTEXITCODE -ne 0){throw "R3.2 self-test failed: $([string]::Join(' ',@($self)))"}
-    $selfText=[string]::Join("`n",@($self))
-    if(-not $selfText.Contains('"status": "PASS"')){throw "R3.2 self-test did not report PASS: $selfText"}
+    $selfText=[string]::Join("`n",@($self));if(-not $selfText.Contains('"status": "PASS"')){throw "R3.2 self-test did not report PASS: $selfText"}
 
     Stage 'Rechecking exact local manager authority classification'
     $authority=& python $R32Module --authority-self-test --project-root $Root 2>&1
     if($LASTEXITCODE -ne 0){throw "Authority test failed: $([string]::Join(' ',@($authority)))"}
-    $authorityText=[string]::Join("`n",@($authority))
-    if(-not $authorityText.Contains('"status": "PASS"')){throw "Authority test did not report PASS: $authorityText"}
+    $authorityText=[string]::Join("`n",@($authority));if(-not $authorityText.Contains('"status": "PASS"')){throw "Authority test did not report PASS: $authorityText"}
 
     $CheckpointAfter=Checkpoint-Digest $CheckpointDir
     if($CheckpointAfter -ne $CheckpointBefore){throw "Checkpoint digest changed: $CheckpointBefore -> $CheckpointAfter"}
@@ -135,8 +111,7 @@ Write-Host '[RITHAL_BEHAVIOR_FIX_V1_0_5_R3_2] VERIFICATION PASS' -ForegroundColo
         version=$Version;installed_at=(Get-Date).ToUniversalTime().ToString('o');manager_mode=$ManagerMode
         root_cause='R3.1 raw regime_logits requirement bypassed active shared scorer during rank prewarm'
         correction='active _score_model_output and prewarm_rank_history preserved; risk-adjusted side applied as overlay only'
-        self_test='PASS';authority_test='PASS';checkpoint_digest_before=$CheckpointBefore;checkpoint_digest_after=$CheckpointAfter;checkpoint_unchanged=$true
-        restart_required=$true
+        self_test='PASS';authority_test='PASS';checkpoint_digest_before=$CheckpointBefore;checkpoint_digest_after=$CheckpointAfter;checkpoint_unchanged=$true;restart_required=$true
     })
     Write-Host "[$Version] INSTALLATION PASS" -ForegroundColor Green
     Write-Host 'Verify: .\Verify-RithalBehaviorFixV1_0_5_R3_2.ps1' -ForegroundColor Green
