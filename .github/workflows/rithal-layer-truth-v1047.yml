@@ -1,0 +1,74 @@
+name: Rithal Layer Truth V1.0.4.7
+
+on:
+  push:
+    branches:
+      - rithal-layer-truth-v1.0.4.7
+  pull_request:
+    paths:
+      - 'rithal_layer_truth_v1_0_4_7/**'
+      - '.github/workflows/rithal-layer-truth-v1047.yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      TEST_ROOT: ${{ runner.temp }}/rithal-test
+      INSTALLED_RUNTIME: ${{ runner.temp }}/rithal_layer_truth_v1047.py
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build installed R2 runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp rithal_layer_truth_v1_0_4_7/rithal_layer_truth_v1047.py "$INSTALLED_RUNTIME"
+          python rithal_layer_truth_v1_0_4_7/apply_rithal_layer_truth_v1047_r2.py "$INSTALLED_RUNTIME"
+          python -m py_compile "$INSTALLED_RUNTIME"
+      - name: Parse PowerShell installers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem rithal_layer_truth_v1_0_4_7 -Filter '*.ps1' | ForEach-Object {
+            [void][scriptblock]::Create((Get-Content $_.FullName -Raw))
+            Write-Host "Parsed $($_.Name)"
+          }
+      - name: Build synthetic Rithal state
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TEST_ROOT/mythos/neural"
+          cat > "$TEST_ROOT/settings_override_v1.json" <<'JSON'
+          {"rithal_layer_contract_v1047":{"instance_id":"rithal-1-0-contract-locked","paper_equity_usd":18000,"fixed_margin_pct":0.10,"leverage":10,"allocation_cap_pct":0.60,"heat_cap_pct":0.03,"max_open_positions":2,"manager_mode":"SHADOW_ONLY"}}
+          JSON
+          cat > "$TEST_ROOT/mythos_5m_execution_control.json" <<'JSON'
+          {"mode":"SHADOW_ONLY","execution_enabled":false,"scope":"PAPER_ONLY"}
+          JSON
+          cat > "$TEST_ROOT/mythos_open_positions.json" <<'JSON'
+          {"positions":[{"symbol":"ADAUSDT","trade_id":"trade-1","ticket_id":"5m-trade-1","gross_r":-0.2,"mfe":0.6,"mae":-0.3,"giveback":0.8,"age_minutes":40,"base_margin_usd":1800,"requested_margin_usd":900,"controller_decision":{"proposed_size_multiplier":0.5,"effective_size_multiplier":0.5}}]}
+          JSON
+          cat > "$TEST_ROOT/mythos_trade_manager_state.json" <<'JSON'
+          {"active":{"trade-1":{"trade_id":"trade-1","ticket_id":"5m-trade-1","module":"RITHAL_TM_V3_3","state":"SHADOW_EXIT_CONFIRMED","rec":"V3_2_SHADOW_EXIT_CONFIRMED","execution":"UNCHANGED_SHADOW_ONLY","reviewed_at":"2099-01-01T00:00:00+00:00"}}}
+          JSON
+          cat > "$TEST_ROOT/mythos_model_interactions.json" <<'JSON'
+          {"trades":{"trade-1":{"trade_id":"trade-1","decision_score":0.95,"side":"SHORT","long_edge":-1.2,"short_edge":2.5,"true_regime_probs":[0.1,0.7,0.1,0.1],"rank_regime_probs":[0.2,0.4,0.2,0.2]}}}
+          JSON
+          echo '{}' > "$TEST_ROOT/mythos_runtime_state.json"
+          echo '{}' > "$TEST_ROOT/mythos_account_state.json"
+          echo '{}' > "$TEST_ROOT/mythos_live_prices.json"
+      - name: Runtime verify command
+        run: python "$INSTALLED_RUNTIME" --project-root "$TEST_ROOT" --verify
+      - name: Contract - exact manager binding
+        run: python -c "import json,os;p=json.load(open(os.environ['TEST_ROOT']+'/mythos_rithal_intelligence_truth.json'));assert p['positions'][0]['binding']=='LINKED',p['positions'][0]"
+      - name: Contract - recommendation authority execution separation
+        run: python -c "import json,os;p=json.load(open(os.environ['TEST_ROOT']+'/mythos_rithal_intelligence_truth.json'));m=p['positions'][0]['manager'];assert m['recommended_action']=='CLOSE_FULL' and m['effective_authority']=='SHADOW_ONLY' and m['actual_execution']=='UNCHANGED_SHADOW_ONLY',m"
+      - name: Contract - exact thesis binding
+        run: python -c "import json,os;p=json.load(open(os.environ['TEST_ROOT']+'/mythos_rithal_intelligence_truth.json'));assert p['positions'][0]['entry_thesis']['binding']=='LINKED',p['positions'][0]['entry_thesis']"
+      - name: Contract - true breakout posterior
+        run: python -c "import json,os;p=json.load(open(os.environ['TEST_ROOT']+'/mythos_rithal_intelligence_truth.json'));assert p['positions'][0]['entry_thesis']['snapshot']['regime']['p_breakout']==0.1,p['positions'][0]['entry_thesis']"
+      - name: Contract - risk adjusted side shadow
+        run: python -c "import json,os;p=json.load(open(os.environ['TEST_ROOT']+'/mythos_rithal_intelligence_truth.json'));assert p['positions'][0]['side_comparison']['risk_adjusted_shadow_side']=='SHORT',p['positions'][0]['side_comparison']"
+      - name: Contract - applied sizing truth
+        run: python -c "import json,os;p=json.load(open(os.environ['TEST_ROOT']+'/mythos_rithal_intelligence_truth.json'));assert p['positions'][0]['sizing']['applied_multiplier']==0.5,p['positions'][0]['sizing']"
