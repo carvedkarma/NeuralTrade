@@ -84,7 +84,7 @@ jobs:
           def raw_premium_path(root, symbol):
               return Path(root) / 'raw_premium' / f'{symbol}.parquet'
           def fetch_binance_premium(client, symbol, start_ms, end_open_ms) -> pd.DataFrame:
-              cursor=int(start_ms)
+              cursor = int(start_ms)
               rows=[]
               out=pd.DataFrame(rows)
               out["premium_index_change_1h"]=(
@@ -165,7 +165,7 @@ jobs:
           BAR_15M_MS=900000
           def raw_premium_path(root,symbol): return Path(root)/'raw_premium'/f'{symbol}.parquet'
           def fetch_binance_premium(client,symbol,start_ms,end_open_ms)->pd.DataFrame:
-              cursor=int(start_ms);rows=[];out=pd.DataFrame(rows)
+              cursor = int(start_ms);rows=[];out=pd.DataFrame(rows)
               out["premium_index_change_1h"]=(out["premium_index_close"].pct_change(periods=4,fill_method=None).replace([np.inf,-np.inf],0).fillna(0))
               return out
           def main(): pass
