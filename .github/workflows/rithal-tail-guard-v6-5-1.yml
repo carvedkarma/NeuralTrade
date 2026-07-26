@@ -1,4 +1,4 @@
-name: Rithal Tail Guard V6.5.1 R2
+name: Rithal Tail Guard V6.5.2
 
 on:
   push:
@@ -8,12 +8,8 @@ on:
       - 'rithal_tail_guard_v6_5_1/**'
       - '.github/workflows/rithal-tail-guard-v6-5-1.yml'
 
-permissions:
-  contents: read
-  pull-requests: write
-
 jobs:
-  python-contract:
+  canonical-premium-contract:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,34 +17,33 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install --disable-pip-version-check numpy pandas
-      - name: Compile patcher
-        run: python -m py_compile rithal_tail_guard_v6_5_1/rithal_tail_guard_premium_fix_v651.py
-      - name: Run premium parity regression suite
-        run: python rithal_tail_guard_v6_5_1/rithal_tail_guard_premium_fix_v651.py --self-test
-      - name: Assert fail-closed and coverage contracts
+      - name: Compile V6.5.2 patcher
+        run: python -m py_compile rithal_tail_guard_v6_5_1/rithal_tail_guard_premium_fix_v652.py
+      - name: Run bounded/full exact-parity regression
+        run: python rithal_tail_guard_v6_5_1/rithal_tail_guard_premium_fix_v652.py --self-test
+      - name: Assert frozen-contract correction
         run: |
           python - <<'PY'
           from pathlib import Path
-          text=Path('rithal_tail_guard_v6_5_1/rithal_tail_guard_premium_fix_v651.py').read_text()
-          for token in (
-              'premium_source_covered',
-              'pct_change(periods=4, fill_method=None)',
-              'zero_premium_remains_available',
-              'refusing an ungrounded source edit',
-              'ENGINE_MARKER',
-              'GUARD_MARKER',
-          ):
+          text=Path('rithal_tail_guard_v6_5_1/rithal_tail_guard_premium_fix_v652.py').read_text()
+          required=(
+              'canonical_v22_engine_semantics_restored',
+              'four_bar_hidden_warmup',
+              'bounded_equals_full_exactly',
+              '_requested_start_ms - 4 * BAR_15M_MS',
+              'trim_after_raw_derivative',
+              'RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_ALIGNMENT',
+          )
+          for token in required:
               assert token in text, token
-          print('source contract PASS')
+          print('V6.5.2 source contract PASS')
           PY
-      - name: Parse installers
+      - name: Parse V6.5.2 installer
         shell: pwsh
         run: |
-          foreach($file in @('Install-RithalTailGuardV6_5_1.ps1','Install-RithalTailGuardV6_5_1_R2.ps1')){
-            [void][scriptblock]::Create((Get-Content (Join-Path 'rithal_tail_guard_v6_5_1' $file) -Raw))
-          }
+          [void][scriptblock]::Create((Get-Content rithal_tail_guard_v6_5_1/Install-RithalTailGuardV6_5_2.ps1 -Raw))
 
-  windows-transaction:
+  windows-committed-bootstrap:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,76 +51,158 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install --disable-pip-version-check numpy pandas
-      - name: Build synthetic V6.5 project
+      - name: Build synthetic active V6.5.1 project
         shell: pwsh
         run: |
-          $root=Join-Path $env:RUNNER_TEMP 'rithal-tail-v651'
+          $root=Join-Path $env:RUNNER_TEMP 'rithal-tail-v652-pass'
           New-Item -ItemType Directory -Force -Path (Join-Path $root 'mythos'),(Join-Path $root 'data_lake\manifests')|Out-Null
           @'
           import numpy as np
           import pandas as pd
           def _numeric(df, col, default=0.0):
               return pd.to_numeric(df[col], errors='coerce').fillna(default) if col in df.columns else pd.Series(default, index=df.index)
-          def _z(s, n):
-              return s * 0.0
+          def _z(s, n): return s * 0.0
           class V22DataEngine:
               def build_symbol_enriched(self, symbol):
-                  df = pd.DataFrame({
-                      'premium_index_close':[0.001,0.0011,0.0012,0.0013,0.0,0.0014,0.0015,0.0016,0.0017],
-                      'premium_index_change_1h':[99.0]*9,
-                      'premium_source_covered':[1.0]*9,
-                  })
-                  for col in ["premium_index_close", "premium_index_change_1h"]:
-                      df[col] = _numeric(df, col, 0.0)
-                  df["premium_index_available"] = (df["premium_index_close"].abs() > 0).astype(float)
-                  df["premium_index_z_7d"] = _z(df["premium_index_close"].replace(0.0, np.nan).ffill().fillna(0.0), 7 * 96)
+                  df=pd.DataFrame({'premium_index_close':[.001,.0011,.0012,.0013,.0014,.0015],'premium_index_change_1h':[0]*6})
+                  # RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_ALIGNMENT
+                  # Derive every premium field from the final engine-aligned 15m close.
+                  # A zero premium is a valid covered observation, not a missing feed.
+                  _premium_close_raw = (
+                      pd.to_numeric(df["premium_index_close"], errors="coerce")
+                      if "premium_index_close" in df.columns
+                      else pd.Series(np.nan, index=df.index, dtype=float)
+                  ).replace([np.inf, -np.inf], np.nan)
+                  _premium_covered_raw = (
+                      pd.to_numeric(df["premium_source_covered"], errors="coerce")
+                      if "premium_source_covered" in df.columns
+                      else pd.Series(np.nan, index=df.index, dtype=float)
+                  )
+                  df["premium_index_close"] = _premium_close_raw.fillna(0.0)
+                  df["premium_index_change_1h"] = (
+                      _premium_close_raw.pct_change(periods=4, fill_method=None)
+                      .replace([np.inf, -np.inf], 0.0)
+                      .fillna(0.0)
+                  )
+                  if bool(_premium_covered_raw.notna().any()):
+                      df["premium_index_available"] = (
+                          _premium_covered_raw.fillna(0.0) >= 0.5
+                      ).astype(float)
+                  else:
+                      df["premium_index_available"] = _premium_close_raw.notna().astype(float)
+                  df["premium_index_z_7d"] = _z(
+                      _premium_close_raw.ffill().fillna(0.0), 7 * 96
+                  )
                   return df
           '@ | Set-Content -LiteralPath (Join-Path $root 'mythos\data_engine_v22.py') -Encoding utf8
           @'
           from __future__ import annotations
           import numpy as np
           import pandas as pd
-          def fetch_premium():
-              out=pd.DataFrame({'premium_index_close':[0.001,0.0011,0.0012,0.0013,0.0]})
-              out["premium_index_change_1h"] = out["premium_index_close"].pct_change(4).replace([np.inf, -np.inf], 0.0).fillna(0.0)
+          BAR_15M_MS=15*60*1000
+          def fetch_binance_premium(client, symbol, start_ms, end_open_ms) -> pd.DataFrame:
+              end_time = int(end_open_ms + BAR_15M_MS - 1)
+              cursor = int(start_ms)
+              rows = []
+              if not rows:
+                  return pd.DataFrame()
+              out = pd.DataFrame(rows).drop_duplicates("timestamp", keep="last").sort_values("timestamp").reset_index(drop=True)
+              # RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_FETCH
+              out["premium_index_change_1h"] = (
+                  out["premium_index_close"].pct_change(periods=4, fill_method=None)
+                  .replace([np.inf, -np.inf], 0.0)
+                  .fillna(0.0)
+              )
               return out
-          '@ | Set-Content -LiteralPath (Join-Path $root 'mythos_live_tail_guard_v6_5.py') -Encoding utf8
+          def next_function(): pass
+          '@ | Set-Content -LiteralPath (Join-Path $root 'mythos_live_tail_guard_v6_6.py') -Encoding utf8
           @'
           param([string]$ProjectRoot=$PSScriptRoot,[switch]$Background,[switch]$NoRunNow,[switch]$Once,[switch]$Bootstrap)
           if($Background){Write-Host 'background';exit 0}
-          if($Once){Write-Host 'synthetic bootstrap pass';exit 0}
-          '@ | Set-Content -LiteralPath (Join-Path $root 'Start-RithalTailWatch.ps1') -Encoding utf8
-      - name: Run transactional R2 installer
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $root=Join-Path $env:RUNNER_TEMP 'rithal-tail-v651'
-          $output=& powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_tail_guard_v6_5_1\Install-RithalTailGuardV6_5_1_R2.ps1 -ProjectRoot $root 2>&1
-          $code=$LASTEXITCODE
-          $output|ForEach-Object{Write-Host $_}
-          if($code -ne 0){
-            $tail=(@($output)|Select-Object -Last 80) -join "`n"
-            $body="V6.5.1 R2 Windows installer diagnostic for commit $env:GITHUB_SHA:`n``````text`n$tail`n``````"
-            gh api repos/carvedkarma/NeuralTrade/issues/comments/5084187305 -X PATCH -f body="$body" | Out-Null
-            throw "installer failed with exit code $code"
+          if($Once){
+            $dir=Join-Path $ProjectRoot 'data_lake\manifests';New-Item -ItemType Directory -Force -Path $dir|Out-Null
+            @{publication='COMMITTED';tail_feature_contract_ok=$true}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $dir 'live_tail_guard_v6_5_report.json') -Encoding utf8
+            Write-Host 'Publication: COMMITTED | 96-row contract: PASS';exit 0
           }
-      - name: Run generated verifier
+          '@ | Set-Content -LiteralPath (Join-Path $root 'Start-RithalTailWatch.ps1') -Encoding utf8
+      - name: Install and require committed bootstrap
         shell: pwsh
         run: |
-          $root=Join-Path $env:RUNNER_TEMP 'rithal-tail-v651'
-          & (Join-Path $root 'Verify-RithalTailGuardV6_5_1.ps1') -ProjectRoot $root
+          $root=Join-Path $env:RUNNER_TEMP 'rithal-tail-v652-pass'
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_tail_guard_v6_5_1\Install-RithalTailGuardV6_5_2.ps1 -ProjectRoot $root
+      - name: Run generated verifier and inspect exact source
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP 'rithal-tail-v652-pass'
+          & (Join-Path $root 'Verify-RithalTailGuardV6_5_2.ps1') -ProjectRoot $root
           $engine=Get-Content (Join-Path $root 'mythos\data_engine_v22.py') -Raw
-          if(-not $engine.Contains('premium_source_covered')){throw 'coverage patch missing'}
-          if(-not $engine.Contains('pct_change(periods=4, fill_method=None)')){throw 'aligned derivative patch missing'}
-      - name: Execute patched synthetic engine
+          $guard=Get-Content (Join-Path $root 'mythos_live_tail_guard_v6_6.py') -Raw
+          if($engine.Contains('RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_ALIGNMENT')){throw 'V6.5.1 semantics remain'}
+          if(-not $engine.Contains('RITHAL_TAIL_GUARD_V6_5_2_CANONICAL_PREMIUM')){throw 'canonical engine marker missing'}
+          if(-not $guard.Contains('_requested_start_ms - 4 * BAR_15M_MS')){throw 'warmup missing'}
+          if(-not $guard.Contains('out = out.loc[out["timestamp"] >= _requested_start_ms]')){throw 'trim missing'}
+
+  windows-failed-bootstrap-rolls-back:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --disable-pip-version-check numpy pandas
+      - name: Build failure project
         shell: pwsh
         run: |
-          $root=Join-Path $env:RUNNER_TEMP 'rithal-tail-v651'
-          $env:PYTHONPATH=Join-Path $root 'mythos'
-          python -c "from data_engine_v22 import V22DataEngine; d=V22DataEngine().build_symbol_enriched('AVAXUSDT'); assert d.premium_index_available.mean()==1.0; assert d.premium_index_available.iloc[4]==1.0; assert d.premium_index_change_1h.iloc[4] != 99.0; print('runtime premium contract PASS')"
-      - name: Verify rollback command exists
+          $root=Join-Path $env:RUNNER_TEMP 'rithal-tail-v652-fail'
+          New-Item -ItemType Directory -Force -Path (Join-Path $root 'mythos'),(Join-Path $root 'data_lake\manifests')|Out-Null
+          Copy-Item .\rithal_tail_guard_v6_5_1\fixtures\v651_engine_fixture.py (Join-Path $root 'mythos\data_engine_v22.py') -ErrorAction SilentlyContinue
+          if(-not(Test-Path (Join-Path $root 'mythos\data_engine_v22.py'))){
+            @'
+            import numpy as np
+            import pandas as pd
+            def _numeric(df,col,default=0.0): return pd.to_numeric(df[col],errors='coerce').fillna(default)
+            def _z(s,n): return s*0
+            class V22DataEngine:
+                def build(self,df):
+                    # RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_ALIGNMENT
+                    _premium_close_raw=(pd.to_numeric(df["premium_index_close"],errors="coerce") if "premium_index_close" in df.columns else pd.Series(np.nan,index=df.index,dtype=float)).replace([np.inf,-np.inf],np.nan)
+                    _premium_covered_raw=(pd.to_numeric(df["premium_source_covered"],errors="coerce") if "premium_source_covered" in df.columns else pd.Series(np.nan,index=df.index,dtype=float))
+                    df["premium_index_close"]=_premium_close_raw.fillna(0.0)
+                    df["premium_index_change_1h"] = (_premium_close_raw.pct_change(periods=4,fill_method=None).replace([np.inf,-np.inf],0.0).fillna(0.0))
+                    if bool(_premium_covered_raw.notna().any()):
+                        df["premium_index_available"]=(_premium_covered_raw.fillna(0.0)>=0.5).astype(float)
+                    else:
+                        df["premium_index_available"]=_premium_close_raw.notna().astype(float)
+                    df["premium_index_z_7d"]=_z(_premium_close_raw.ffill().fillna(0.0),7*96)
+                    return df
+            '@|Set-Content (Join-Path $root 'mythos\data_engine_v22.py') -Encoding utf8
+          }
+          @'
+          import numpy as np
+          import pandas as pd
+          BAR_15M_MS=900000
+          def fetch_binance_premium(client, symbol, start_ms, end_open_ms) -> pd.DataFrame:
+              end_time=int(end_open_ms+BAR_15M_MS-1)
+              cursor=int(start_ms)
+              rows=[]
+              if not rows: return pd.DataFrame()
+              out=pd.DataFrame(rows)
+              out["premium_index_change_1h"]=(out["premium_index_close"].pct_change(periods=4,fill_method=None).replace([np.inf,-np.inf],0.0).fillna(0.0))
+              return out
+          def next_function(): pass
+          '@|Set-Content (Join-Path $root 'mythos_live_tail_guard_v6_6.py') -Encoding utf8
+          @'
+          param([string]$ProjectRoot=$PSScriptRoot,[switch]$Background,[switch]$NoRunNow,[switch]$Once,[switch]$Bootstrap)
+          if($Once){exit 2}
+          '@|Set-Content (Join-Path $root 'Start-RithalTailWatch.ps1') -Encoding utf8
+          (Get-FileHash (Join-Path $root 'mythos\data_engine_v22.py') -Algorithm SHA256).Hash|Set-Content (Join-Path $root 'before.sha')
+      - name: Installer must fail and restore source
         shell: pwsh
         run: |
-          $root=Join-Path $env:RUNNER_TEMP 'rithal-tail-v651'
-          if(-not(Test-Path (Join-Path $root 'Rollback-RithalTailGuardV6_5_1.ps1'))){throw 'rollback missing'}
+          $root=Join-Path $env:RUNNER_TEMP 'rithal-tail-v652-fail'
+          $p=Start-Process powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Resolve-Path '.\rithal_tail_guard_v6_5_1\Install-RithalTailGuardV6_5_2.ps1'),'-ProjectRoot',$root) -Wait -PassThru -NoNewWindow
+          if($p.ExitCode -eq 0){throw 'installer incorrectly reported success'}
+          $before=Get-Content (Join-Path $root 'before.sha')
+          $after=(Get-FileHash (Join-Path $root 'mythos\data_engine_v22.py') -Algorithm SHA256).Hash
+          if($before-ne $after){throw 'engine was not restored after failed bootstrap'}
+          if(Test-Path (Join-Path $root 'Verify-RithalTailGuardV6_5_2.ps1')){throw 'verifier should not survive failed install'}
