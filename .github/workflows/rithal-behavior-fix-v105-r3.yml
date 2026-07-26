@@ -1,0 +1,149 @@
+name: Rithal Behavior Fix V1.0.5 R3
+
+on:
+  push:
+    branches:
+      - rithal-behavior-fix-v1.0.5
+  pull_request:
+    paths:
+      - 'rithal_behavior_fix_v1_0_5/**'
+      - '.github/workflows/rithal-behavior-fix-v105-r3.yml'
+
+jobs:
+  unit-and-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install test dependency
+        run: python -m pip install --disable-pip-version-check numpy
+      - name: Compile canonical modules
+        run: |
+          python -m py_compile \
+            rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105.py \
+            rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3.py
+      - name: Run R3 deterministic tests
+        run: python rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3.py --self-test
+      - name: Cross-check source contracts
+        run: |
+          python - <<'PY'
+          import ast, pathlib
+          module = pathlib.Path('rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3.py').read_text()
+          tree = ast.parse(module)
+          functions = {node.name: node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+          assert 'apply_live_patch' in functions
+          assert 'apply_trade_manager_patch' in functions
+          assert 'authority_contract_self_test' in functions
+          assert 'configure_project' in functions
+          required = [
+              'RITHAL_BEHAVIOR_V105_R3_REPAIR_LOCK',
+              'current_15m_regime_missing_or_invalid',
+              'restored_position_entry_thesis_could_not_be_reconstructed',
+              'TRUE_POSTERIOR_PLUS_BACKTEST_RANK_POSTERIOR',
+              'P80_PARTIAL_70_PROTECTED_30',
+              'M70_P55_FULL_EXIT',
+              'SHADOW_ONLY',
+          ]
+          for token in required:
+              assert token in module, token
+          print('R3 source contract assertions passed')
+          PY
+      - name: Parse installer with PowerShell
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          [void][scriptblock]::Create((Get-Content rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R3.ps1 -Raw))
+          $text=Get-Content rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R3.ps1 -Raw
+          foreach($token in @('RITHAL_ENGINE_RUNNING','Checkpoint directory missing','--authority-self-test','PAPER_AUTOMANAGE','SHADOW_ONLY','checkpoint digest changed')){
+            if(-not $text.Contains($token)){throw "missing installer token: $token"}
+          }
+
+  windows-synthetic-install:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        manager_mode: [PAPER_CONTROL, SHADOW_ONLY]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install test dependency
+        run: python -m pip install --disable-pip-version-check numpy
+      - name: Build synthetic active project
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP "rithal-r3-${{ matrix.manager_mode }}"
+          $n=Join-Path $root 'mythos\neural'
+          New-Item -ItemType Directory -Path $n -Force|Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $root 'checkpoints\rithal_clean') -Force|Out-Null
+          Set-Content -LiteralPath (Join-Path $root 'checkpoints\rithal_clean\model.pt') -Value 'immutable-checkpoint' -Encoding ascii
+          @'
+          RITHAL_ABSOLUTE_OOD_NEUTRALIZE_FEATURES = ('open_interest',)
+          RANK_WINDOW = 100
+          RANK_MIN_HISTORY = 10
+          import numpy as np
+          class NeuralV2Model:
+              def _prepare_model_inputs(self, df, *, context, force_neutralize_nonstationary=None): return None, [], {'blocked': False, 'top_ood_features': []}
+              def _run_scored_sequence(self, sequence): return {}
+          class LiveEngine:
+              def _get_regime_probs(self, sym, pred): return {}
+              def _trade_manager_entry_context(self, sym, pos, pred, threshold_used, bar_timestamp_ms): return {'threshold_used': threshold_used, 'entry_bar_timestamp': bar_timestamp_ms}
+              def _arm_trade_manager_position(self, sym, pos, pred, threshold_used, bar_timestamp_ms): return None
+              def _process(self, sym, *args, **kwargs): return None
+          # RITHAL_CONSOLIDATED_INTELLIGENCE_SAFETY
+          '@ | Set-Content -LiteralPath (Join-Path $n 'live.py') -Encoding utf8
+          @'
+          class TradeManager:
+              pass
+          # RITHAL_TRADE_MANAGER_V3_3_2
+          # RITHAL_CONSOLIDATED_TRADE_MANAGER_PERSISTENCE
+          '@ | Set-Content -LiteralPath (Join-Path $n 'trade_manager_v6.py') -Encoding utf8
+          "# synthetic" | Set-Content -LiteralPath (Join-Path $n 'rithal_consolidated_v104.py') -Encoding utf8
+          @'
+          import json
+          from pathlib import Path
+          def load_settings(root, instance_id):
+              return {'revision': 0, 'capital': {}, 'runtime': {}, 'trade_manager': {}, 'safety': {}}
+          def preflight_settings(before, candidate, instance_id=None): return {'candidate': candidate}
+          def save_settings(root, instance_id, candidate, actor=None, remote_addr=None, expected_revision=None):
+              path=Path(root)/'settings_override_v1.json'; path.write_text(json.dumps(candidate), encoding='utf-8'); return candidate, {'status':'PASS'}
+          '@ | Set-Content -LiteralPath (Join-Path $n 'rithal_runtime_settings.py') -Encoding utf8
+          @'
+          CONTRACT_VERSION='SYNTHETIC_R3_AUTHORITY'
+          def classify_exact_instruction(instruction, pos, settings, current_price=None, source=None):
+              v33=instruction.get('trade_manager_v3_3') or {}
+              state=str(v33.get('final_manager_state') or '')
+              rec=str(v33.get('final_shadow_recommendation') or '')
+              layer=v33.get('loss_recovery_layer') or {}
+              v31=instruction.get('trade_manager_v3_1') or {}
+              if state == 'MATURE_PROFIT_EXIT_LATCHED' and rec == 'M70_P55_FULL_EXIT': kind='MATURE_PROFIT_EXIT'; fraction=1.0; branch='NONE'
+              elif state == 'PROFIT_EROSION_CONFIRMED' and rec == 'P80_PARTIAL_70_PROTECTED_30': kind='PROFIT_HARVEST_PARTIAL_70'; fraction=.7; branch='NONE'
+              elif state.startswith('SHADOW_EXIT_CONFIRMED') or str(layer.get('manager_state') or '').startswith('SHADOW_EXIT_CONFIRMED'): kind='LOSS_EXIT'; fraction=1.0; branch=str(layer.get('branch') or v31.get('branch') or 'NONE')
+              else: kind='NONE'; fraction=0.0; branch='NONE'
+              return {'candidate_type':kind,'candidate_state':state,'close_fraction':fraction,'loss_branch':branch,'policy_eligible':kind!='NONE','execution_kind':'PARTIAL' if fraction==.7 else 'FULL' if fraction==1 else 'NONE','instruction_fingerprint':'same','candidate_fingerprint':kind}
+          def route_candidate(*args, **kwargs): return {'effect':'SHADOW_RECORDED','reason':'synthetic'}
+          def parity_self_test(): return {'ok': True}
+          '@ | Set-Content -LiteralPath (Join-Path $n 'rithal_manager_authority_contract.py') -Encoding utf8
+          $env:TEST_RITHAL_ROOT=$root
+      - name: Run transactional installer
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP "rithal-r3-${{ matrix.manager_mode }}"
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_behavior_fix_v1_0_5\Install-RithalBehaviorFixV1_0_5_R3.ps1 -ProjectRoot $root -ManagerMode '${{ matrix.manager_mode }}'
+      - name: Run generated verifier and inspect mode
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP "rithal-r3-${{ matrix.manager_mode }}"
+          & (Join-Path $root 'Verify-RithalBehaviorFixV1_0_5_R3.ps1') -ProjectRoot $root
+          $control=Get-Content (Join-Path $root 'mythos_5m_execution_control.json') -Raw|ConvertFrom-Json
+          if('${{ matrix.manager_mode }}' -eq 'PAPER_CONTROL'){
+            if($control.mode -ne 'PAPER_AUTOMANAGE' -or -not $control.execution_enabled){throw 'PAPER_CONTROL mismatch'}
+          }else{
+            if($control.mode -ne 'SHADOW_ONLY' -or $control.execution_enabled){throw 'SHADOW_ONLY mismatch'}
+          }
+          $report=Get-Content (Join-Path $root 'rithal_behavior_fix_v105_r3_install_report.json') -Raw|ConvertFrom-Json
+          if(-not $report.checkpoint_unchanged -or $report.authority_contract_test -ne 'PASS'){throw 'install report failed'}
