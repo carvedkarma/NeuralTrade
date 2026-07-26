@@ -33,9 +33,39 @@ $text=$text.Replace(
 # A rerun must remove both an older R3 hook and the current R3.1 hook.
 $text=$text.Replace('R3_1_(?:LIVE|MANAGER)_HOOK','R3(?:_1)?_(?:LIVE|MANAGER)_HOOK')
 
+# R3.1 is a narrow final wrapper over the cross-verified R3 implementation. Add
+# the R3 dependency to the same backup/download/compile transaction rather than
+# leaving an undeclared import dependency in the project.
+$text=$text.Replace(
+    "`$R3Module=Join-Path `$Neural 'rithal_behavior_fix_v105_r3_1.py'",
+    "`$R3Module=Join-Path `$Neural 'rithal_behavior_fix_v105_r3_1.py'`r`n`$R3Dependency=Join-Path `$Neural 'rithal_behavior_fix_v105_r3.py'"
+)
+$text=$text.Replace(
+    '`$targets=@(`$Live,`$Manager,`$BaseModule,`$R3Module,',
+    '`$targets=@(`$Live,`$Manager,`$BaseModule,`$R3Dependency,`$R3Module,'
+)
+$text=$text.Replace(
+    'Invoke-WebRequest -UseBasicParsing -Uri "`$RawBase/rithal_behavior_fix_v105_r3_1.py" -OutFile `$R3Module',
+    'Invoke-WebRequest -UseBasicParsing -Uri "`$RawBase/rithal_behavior_fix_v105_r3.py" -OutFile `$R3Dependency`r`n    Invoke-WebRequest -UseBasicParsing -Uri "`$RawBase/rithal_behavior_fix_v105_r3_1.py" -OutFile `$R3Module'
+)
+$text=$text.Replace(
+    '& python -m py_compile `$BaseModule `$R3Module `$Live',
+    '& python -m py_compile `$BaseModule `$R3Dependency `$R3Module `$Live'
+)
+$text=$text.Replace(
+    "`$r=Join-Path `$n 'rithal_behavior_fix_v105_r3_1.py';`$l=",
+    "`$d=Join-Path `$n 'rithal_behavior_fix_v105_r3.py';`$r=Join-Path `$n 'rithal_behavior_fix_v105_r3_1.py';`$l="
+)
+$text=$text.Replace(
+    'python -m py_compile `$b `$r `$l',
+    'python -m py_compile `$b `$d `$r `$l'
+)
+
 $required=@(
     'RITHAL_BEHAVIOR_FIX_V1_0_5_R3_1',
+    'rithal_behavior_fix_v105_r3.py',
     'rithal_behavior_fix_v105_r3_1.py',
+    '$R3Dependency',
     '_rithal_v104_apply_live_patch(globals())',
     'TradeManager.observe_mark = _tmv33_observe_mark',
     'TradeManager._decision = _tmv33_decision',
