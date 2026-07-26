@@ -23,6 +23,7 @@ $BackupRoot = Join-Path $Root ('rithal_tail_guard_backups\v6_5_3_r2_' + (Get-Dat
 $Manifest = Join-Path $BackupRoot 'backup_manifest.json'
 $TempBase = Join-Path ([IO.Path]::GetTempPath()) ("rithal_tail_guard_premium_fix_v653_$PID.py")
 $TempPatcher = Join-Path ([IO.Path]::GetTempPath()) ("rithal_tail_guard_premium_fix_v653_r2_$PID.py")
+$ExpectedBase = $null
 $Symbols = 'BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,ADAUSDT,AVAXUSDT'
 
 function Stage([string]$Message,[ConsoleColor]$Color=[ConsoleColor]::Cyan){
@@ -72,7 +73,6 @@ try{
     Invoke-WebRequest -UseBasicParsing -Uri "$RawBase/rithal_tail_guard_premium_fix_v653.py" -OutFile $TempBase
     Invoke-WebRequest -UseBasicParsing -Uri "$RawBase/rithal_tail_guard_premium_fix_v653_r2.py" -OutFile $TempPatcher
 
-    # The wrapper loads its base from the same directory, so stage both together.
     $TempDir=Split-Path -Parent $TempPatcher
     $ExpectedBase=Join-Path $TempDir 'rithal_tail_guard_premium_fix_v653.py'
     Copy-Item -LiteralPath $TempBase -Destination $ExpectedBase -Force
