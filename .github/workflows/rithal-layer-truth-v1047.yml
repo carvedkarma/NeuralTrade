@@ -14,13 +14,19 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TEST_ROOT: ${{ runner.temp }}/rithal-test
+      INSTALLED_RUNTIME: ${{ runner.temp }}/rithal_layer_truth_v1047.py
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Compile Python runtime
-        run: python -m py_compile rithal_layer_truth_v1_0_4_7/rithal_layer_truth_v1047.py
+      - name: Build installed R2 runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp rithal_layer_truth_v1_0_4_7/rithal_layer_truth_v1047.py "$INSTALLED_RUNTIME"
+          python rithal_layer_truth_v1_0_4_7/apply_rithal_layer_truth_v1047_r2.py "$INSTALLED_RUNTIME"
+          python -m py_compile "$INSTALLED_RUNTIME"
       - name: Parse PowerShell installers
         shell: pwsh
         run: |
@@ -53,7 +59,7 @@ jobs:
           echo '{}' > "$TEST_ROOT/mythos_account_state.json"
           echo '{}' > "$TEST_ROOT/mythos_live_prices.json"
       - name: Runtime verify command
-        run: python rithal_layer_truth_v1_0_4_7/rithal_layer_truth_v1047.py --project-root "$TEST_ROOT" --verify
+        run: python "$INSTALLED_RUNTIME" --project-root "$TEST_ROOT" --verify
       - name: Contract - exact manager binding
         run: python -c "import json,os;p=json.load(open(os.environ['TEST_ROOT']+'/mythos_rithal_intelligence_truth.json'));assert p['positions'][0]['binding']=='LINKED',p['positions'][0]"
       - name: Contract - recommendation authority execution separation
