@@ -1,0 +1,151 @@
+name: Rithal Behavior Fix V1.0.5 R3.2
+
+on:
+  push:
+    branches: [rithal-behavior-fix-v1.0.5]
+  pull_request:
+    paths:
+      - 'rithal_behavior_fix_v1_0_5/**'
+      - '.github/workflows/rithal-behavior-fix-v105-r3-2.yml'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  rank-prewarm-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --disable-pip-version-check numpy
+      - name: Compile R3.2 chain
+        run: |
+          python -m py_compile \
+            rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105.py \
+            rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3.py \
+            rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3_1.py \
+            rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3_2.py
+      - name: Reproduce and prevent six-symbol quarantine cause
+        run: python rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3_2.py --self-test
+      - name: Assert raw regime head is not required by R3.2
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text=Path('rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3_2.py').read_text()
+          assert 'active_score = Model._score_model_output' in text
+          assert 'active_prewarm = Model.prewarm_rank_history' in text
+          assert 'return active_prewarm(self, df, max_bars=max_bars)' in text
+          assert 'regime_logits' not in text.split('def score_r32',1)[1].split('def prewarm_r32',1)[0]
+          print('active shared scorer/prewarm preservation PASS')
+          PY
+      - name: Parse R3.2 installer
+        shell: pwsh
+        run: |
+          [void][scriptblock]::Create((Get-Content rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R3_2.ps1 -Raw))
+
+  windows-install:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        manager_mode: [PAPER_CONTROL, SHADOW_ONLY]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --disable-pip-version-check numpy
+      - name: Build active-scorer synthetic project
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP "rithal-r32-${{ matrix.manager_mode }}"
+          $n=Join-Path $root 'mythos\neural'
+          New-Item -ItemType Directory -Path $n -Force|Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $root 'checkpoints\rithal_clean') -Force|Out-Null
+          Set-Content (Join-Path $root 'checkpoints\rithal_clean\model.pt') 'immutable-checkpoint'
+          @'
+          RITHAL_ABSOLUTE_OOD_NEUTRALIZE_FEATURES=('open_interest',)
+          RANK_WINDOW=100
+          RANK_MIN_HISTORY=10
+          import numpy as np
+          class NeuralV2Model:
+              seq_len=2
+              feature_names=('open_interest','open_interest_delta')
+              def _prepare_model_inputs(self, df, *, context, force_neutralize_nonstationary=None): return None, [], {'blocked':False,'top_ood_features':[]}
+              def _run_scored_sequence(self, sequence): return {}
+              def _score_model_output(self, out):
+                  return {'p_long_win':.55,'p_short_win':.72,'expected_r_long':1.4,'expected_r_short':1.1,'mae_long':2.0,'mae_short':.8,'calibration_score':.9,'router_confidence':.9,'p_no_trade':.1,'direction_confidence':.5,'quantile_spread':.5,'specialist_conf':.9,'regime_valid':True,'regime_state':'BREAKOUT','true_regime_probs':[.1,.1,.2,.6],'rank_regime_probs':[.2,.2,.2,.4],'p_breakout':.6,'raw_composite':.5}
+              def prewarm_rank_history(self, df, max_bars=None):
+                  s=self._score_model_output({'regime_output_under_different_key':[1,2,3,4]}); self._rank_prewarm_status={'ok':s['regime_valid'],'mode':'ACTIVE_SHARED_SCORER','count':100}; return s['regime_valid']
+          class LiveEngine:
+              def _get_regime_probs(self,sym,pred): return {}
+              def _trade_manager_entry_context(self,sym,pos,pred,threshold_used,bar_timestamp_ms): return {}
+              def _arm_trade_manager_position(self,sym,pos,pred,threshold_used,bar_timestamp_ms): return None
+              def _process(self,sym,*args,**kwargs): return None
+          def _rithal_v104_apply_live_patch(ns): pass
+          _rithal_v104_apply_live_patch(globals())
+          '@ | Set-Content (Join-Path $n 'live.py')
+          @'
+          class TradeManager: pass
+          def _tmv33_observe_mark(self,*args,**kwargs): return {}
+          def _tmv33_decision(self,*args,**kwargs): return {}
+          TradeManager.observe_mark=_tmv33_observe_mark
+          TradeManager._decision=_tmv33_decision
+          '@ | Set-Content (Join-Path $n 'trade_manager_v6.py')
+          Set-Content (Join-Path $n 'rithal_consolidated_v104.py') '# synthetic'
+          @'
+          import json
+          from pathlib import Path
+          def load_settings(root,instance_id): return {'revision':0,'capital':{},'runtime':{},'trade_manager':{},'safety':{}}
+          def preflight_settings(before,candidate,instance_id=None): return {'candidate':candidate}
+          def save_settings(root,instance_id,candidate,actor=None,remote_addr=None,expected_revision=None):
+              Path(root,'settings_override_v1.json').write_text(json.dumps(candidate)); return candidate,{'status':'PASS'}
+          '@ | Set-Content (Join-Path $n 'rithal_runtime_settings.py')
+          @'
+          CONTRACT_VERSION='SYNTHETIC_R32'
+          def classify_exact_instruction(instruction,pos,settings,current_price=None,source=None):
+              v=instruction.get('trade_manager_v3_3') or {}; state=str(v.get('final_manager_state') or ''); rec=str(v.get('final_shadow_recommendation') or ''); layer=v.get('loss_recovery_layer') or {}; v31=instruction.get('trade_manager_v3_1') or {}
+              if state=='MATURE_PROFIT_EXIT_LATCHED' and rec=='M70_P55_FULL_EXIT': kind='MATURE_PROFIT_EXIT'; fraction=1.; branch='NONE'
+              elif state=='PROFIT_EROSION_CONFIRMED' and rec=='P80_PARTIAL_70_PROTECTED_30': kind='PROFIT_HARVEST_PARTIAL_70'; fraction=.7; branch='NONE'
+              elif state.startswith('SHADOW_EXIT_CONFIRMED') or str(layer.get('manager_state') or '').startswith('SHADOW_EXIT_CONFIRMED'): kind='LOSS_EXIT'; fraction=1.; branch=str(layer.get('branch') or v31.get('branch') or 'NONE')
+              else: kind='NONE'; fraction=0.; branch='NONE'
+              return {'candidate_type':kind,'candidate_state':state,'close_fraction':fraction,'loss_branch':branch,'policy_eligible':kind!='NONE','execution_kind':'PARTIAL' if fraction==.7 else 'FULL' if fraction==1 else 'NONE','instruction_fingerprint':'same','candidate_fingerprint':kind}
+          def route_candidate(*args,**kwargs): return {'effect':'SHADOW_RECORDED'}
+          def parity_self_test(): return {'ok':True}
+          '@ | Set-Content (Join-Path $n 'rithal_manager_authority_contract.py')
+      - name: Install R3.2
+        id: install
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP "rithal-r32-${{ matrix.manager_mode }}"
+          $log=Join-Path $env:RUNNER_TEMP "r32-install-${{ matrix.manager_mode }}.log"
+          $output=& powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_behavior_fix_v1_0_5\Install-RithalBehaviorFixV1_0_5_R3_2.ps1 -ProjectRoot $root -ManagerMode '${{ matrix.manager_mode }}' 2>&1
+          $code=$LASTEXITCODE
+          $output|Tee-Object -FilePath $log|Out-Host
+          if($code -ne 0){"failed=true"|Out-File -FilePath $env:GITHUB_OUTPUT -Append;"log=$log"|Out-File -FilePath $env:GITHUB_OUTPUT -Append}else{"failed=false"|Out-File -FilePath $env:GITHUB_OUTPUT -Append}
+      - name: Publish concise installer failure
+        if: steps.install.outputs.failed == 'true' && matrix.manager_mode == 'PAPER_CONTROL'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tail=(Get-Content '${{ steps.install.outputs.log }}'|Select-Object -Last 60) -join "`n"
+          $body="R3.2 installer debug tail for commit $env:GITHUB_SHA:`n``````text`n$tail`n``````"
+          gh pr comment 6 --body $body
+          throw 'R3.2 installer failed; diagnostic posted to PR #6'
+      - name: Fail shadow installer clearly
+        if: steps.install.outputs.failed == 'true' && matrix.manager_mode == 'SHADOW_ONLY'
+        shell: pwsh
+        run: throw 'R3.2 SHADOW_ONLY installer failed'
+      - name: Verify active scorer survives installation
+        if: steps.install.outputs.failed != 'true'
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP "rithal-r32-${{ matrix.manager_mode }}"
+          & (Join-Path $root 'Verify-RithalBehaviorFixV1_0_5_R3_2.ps1') -ProjectRoot $root
+          $env:PYTHONPATH=Join-Path $root 'mythos\neural'
+          python -c "import live; m=live.NeuralV2Model(); assert m.prewarm_rank_history(None); assert m._rank_prewarm_status['mode']=='ACTIVE_SHARED_SCORER'; print('rank prewarm PASS')"
