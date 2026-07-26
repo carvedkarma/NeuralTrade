@@ -1,4 +1,4 @@
-name: Rithal Tail Guard V6.5.1
+name: Rithal Tail Guard V6.5.1 R2
 
 on:
   push:
@@ -41,10 +41,12 @@ jobs:
               assert token in text, token
           print('source contract PASS')
           PY
-      - name: Parse installer
+      - name: Parse installers
         shell: pwsh
         run: |
-          [void][scriptblock]::Create((Get-Content rithal_tail_guard_v6_5_1/Install-RithalTailGuardV6_5_1.ps1 -Raw))
+          foreach($file in @('Install-RithalTailGuardV6_5_1.ps1','Install-RithalTailGuardV6_5_1_R2.ps1')){
+            [void][scriptblock]::Create((Get-Content (Join-Path 'rithal_tail_guard_v6_5_1' $file) -Raw))
+          }
 
   windows-transaction:
     runs-on: windows-latest
@@ -93,18 +95,18 @@ jobs:
           if($Background){Write-Host 'background';exit 0}
           if($Once){Write-Host 'synthetic bootstrap pass';exit 0}
           '@ | Set-Content -LiteralPath (Join-Path $root 'Start-RithalTailWatch.ps1') -Encoding utf8
-      - name: Run transactional installer
+      - name: Run transactional R2 installer
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $root=Join-Path $env:RUNNER_TEMP 'rithal-tail-v651'
-          $output=& powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_tail_guard_v6_5_1\Install-RithalTailGuardV6_5_1.ps1 -ProjectRoot $root 2>&1
+          $output=& powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_tail_guard_v6_5_1\Install-RithalTailGuardV6_5_1_R2.ps1 -ProjectRoot $root 2>&1
           $code=$LASTEXITCODE
           $output|ForEach-Object{Write-Host $_}
           if($code -ne 0){
             $tail=(@($output)|Select-Object -Last 80) -join "`n"
-            $body="V6.5.1 Windows installer diagnostic for commit $env:GITHUB_SHA:`n``````text`n$tail`n``````"
+            $body="V6.5.1 R2 Windows installer diagnostic for commit $env:GITHUB_SHA:`n``````text`n$tail`n``````"
             gh pr comment 7 --body $body
             throw "installer failed with exit code $code"
           }
