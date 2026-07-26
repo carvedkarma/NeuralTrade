@@ -8,6 +8,10 @@ on:
       - 'rithal_behavior_fix_v1_0_5/**'
       - '.github/workflows/rithal-behavior-fix-v105-r3-2.yml'
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   rank-prewarm-regression:
     runs-on: ubuntu-latest
@@ -113,11 +117,32 @@ jobs:
           def parity_self_test(): return {'ok':True}
           '@ | Set-Content (Join-Path $n 'rithal_manager_authority_contract.py')
       - name: Install R3.2
+        id: install
+        continue-on-error: true
         shell: pwsh
         run: |
           $root=Join-Path $env:RUNNER_TEMP "rithal-r32-${{ matrix.manager_mode }}"
-          powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_behavior_fix_v1_0_5\Install-RithalBehaviorFixV1_0_5_R3_2.ps1 -ProjectRoot $root -ManagerMode '${{ matrix.manager_mode }}'
+          $log=Join-Path $env:RUNNER_TEMP "r32-install-${{ matrix.manager_mode }}.log"
+          $output=& powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_behavior_fix_v1_0_5\Install-RithalBehaviorFixV1_0_5_R3_2.ps1 -ProjectRoot $root -ManagerMode '${{ matrix.manager_mode }}' 2>&1
+          $code=$LASTEXITCODE
+          $output|Tee-Object -FilePath $log|Out-Host
+          if($code -ne 0){"failed=true"|Out-File -FilePath $env:GITHUB_OUTPUT -Append;"log=$log"|Out-File -FilePath $env:GITHUB_OUTPUT -Append}else{"failed=false"|Out-File -FilePath $env:GITHUB_OUTPUT -Append}
+      - name: Publish concise installer failure
+        if: steps.install.outputs.failed == 'true' && matrix.manager_mode == 'PAPER_CONTROL'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tail=(Get-Content '${{ steps.install.outputs.log }}'|Select-Object -Last 60) -join "`n"
+          $body="R3.2 installer debug tail for commit $env:GITHUB_SHA:`n``````text`n$tail`n``````"
+          gh pr comment 6 --body $body
+          throw 'R3.2 installer failed; diagnostic posted to PR #6'
+      - name: Fail shadow installer clearly
+        if: steps.install.outputs.failed == 'true' && matrix.manager_mode == 'SHADOW_ONLY'
+        shell: pwsh
+        run: throw 'R3.2 SHADOW_ONLY installer failed'
       - name: Verify active scorer survives installation
+        if: steps.install.outputs.failed != 'true'
         shell: pwsh
         run: |
           $root=Join-Path $env:RUNNER_TEMP "rithal-r32-${{ matrix.manager_mode }}"
