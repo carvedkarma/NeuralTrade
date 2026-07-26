@@ -3,9 +3,9 @@ from __future__ import annotations
 """Rithal Tail Guard V6.5.1 premium-alignment repair.
 
 The existing guard correctly rolled publication back when the engine-facing
-96-row output disagreed with the transaction candidate.  The disagreement came
+96-row output disagreed with the transaction candidate. The disagreement came
 from carrying a precomputed premium_index_change_1h through an asof merge while
-premium_index_close was aligned separately.  Availability was also inferred
+premium_index_close was aligned separately. Availability was also inferred
 from value != 0, which incorrectly treats a genuine zero premium as missing.
 
 V6.5.1 makes the final aligned premium close the single source of truth:
@@ -100,8 +100,6 @@ def patch_guard_text(text: str) -> tuple[str, bool]:
         return text, False
     match = GUARD_PATTERN.search(text)
     if not match:
-        # Some later guard builds already use fill_method=None.  That is safe and
-        # does not need a textual rewrite.
         if "premium_index_change_1h" in text and "pct_change(periods=4, fill_method=None)" in text:
             return text, False
         raise RuntimeError(
@@ -148,7 +146,6 @@ def self_test() -> dict:
     import numpy as np
     import pandas as pd
 
-    # A real premium series can contain exact zeros while the source is covered.
     close = pd.Series([0.0010, 0.0012, 0.0011, 0.0013, 0.0, 0.0014, 0.0015, 0.0016, 0.0017])
     covered = pd.Series([1.0] * len(close))
     derived = close.pct_change(periods=4, fill_method=None).replace([np.inf, -np.inf], 0.0).fillna(0.0)
@@ -157,7 +154,10 @@ def self_test() -> dict:
     assert availability.iloc[4] == 1.0
     assert np.isfinite(derived.to_numpy()).all()
 
-    old_block = '''        for col in ["premium_index_close", "premium_index_change_1h"]:\n            df[col] = _numeric(df, col, 0.0)\n        df["premium_index_available"] = (df["premium_index_close"].abs() > 0).astype(float)\n        df["premium_index_z_7d"] = _z(df["premium_index_close"].replace(0.0, np.nan).ffill().fillna(0.0), 7 * 96)'''
+    old_block = '''        for col in ["premium_index_close", "premium_index_change_1h"]:
+            df[col] = _numeric(df, col, 0.0)
+        df["premium_index_available"] = (df["premium_index_close"].abs() > 0).astype(float)
+        df["premium_index_z_7d"] = _z(df["premium_index_close"].replace(0.0, np.nan).ffill().fillna(0.0), 7 * 96)'''
     patched, changed = patch_engine_text(old_block)
     assert changed and ENGINE_MARKER in patched
     assert "pct_change(periods=4, fill_method=None)" in patched
@@ -170,8 +170,18 @@ def self_test() -> dict:
     assert guard_changed and GUARD_MARKER in guard_new
     assert "fill_method=None" in guard_new
 
-    # Compile a minimal synthetic V22 method containing the transformed block.
-    synthetic = "import numpy as np\nimport pandas as pd\n\ndef _numeric(df, col, default=0.0):\n    return pd.to_numeric(df[col], errors='coerce').fillna(default) if col in df else pd.Series(default, index=df.index)\n\ndef _z(s, n):\n    return s * 0.0\n\ndef build(df):\n" + "\n".join("    " + line if line else line for line in patched.splitlines()) + "\n    return df\n"
+    synthetic = (
+        "import numpy as np\n"
+        "import pandas as pd\n\n"
+        "def _numeric(df, col, default=0.0):\n"
+        "    return pd.to_numeric(df[col], errors='coerce').fillna(default) if col in df else pd.Series(default, index=df.index)\n\n"
+        "def _z(s, n):\n"
+        "    return s * 0.0\n\n"
+        "class SyntheticV22:\n"
+        "    def build(self, df):\n"
+        + patched
+        + "\n        return df\n"
+    )
     with tempfile.TemporaryDirectory() as td:
         source = Path(td) / "synthetic_v22.py"
         source.write_text(synthetic, encoding="utf-8")
