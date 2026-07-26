@@ -1,0 +1,80 @@
+name: Rithal Layer Truth V1.0.4.7
+
+on:
+  push:
+    branches:
+      - rithal-layer-truth-v1.0.4.7
+  pull_request:
+    paths:
+      - 'rithal_layer_truth_v1_0_4_7/**'
+      - '.github/workflows/rithal-layer-truth-v1047.yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile Python runtime
+        run: python -m py_compile rithal_layer_truth_v1_0_4_7/rithal_layer_truth_v1047.py
+      - name: Parse PowerShell installers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem rithal_layer_truth_v1_0_4_7 -Filter '*.ps1' | ForEach-Object {
+            [void][scriptblock]::Create((Get-Content $_.FullName -Raw))
+            Write-Host "Parsed $($_.Name)"
+          }
+      - name: Run synthetic state verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/rithal-test"
+          mkdir -p "$ROOT/mythos/neural"
+          cat > "$ROOT/settings_override_v1.json" <<'JSON'
+          {
+            "rithal_layer_contract_v1047": {
+              "instance_id": "rithal-1-0-contract-locked",
+              "paper_equity_usd": 18000,
+              "fixed_margin_pct": 0.10,
+              "leverage": 10,
+              "allocation_cap_pct": 0.60,
+              "heat_cap_pct": 0.03,
+              "max_open_positions": 2,
+              "manager_mode": "SHADOW_ONLY"
+            }
+          }
+          JSON
+          cat > "$ROOT/mythos_5m_execution_control.json" <<'JSON'
+          {"mode":"SHADOW_ONLY","execution_enabled":false,"scope":"PAPER_ONLY"}
+          JSON
+          cat > "$ROOT/mythos_open_positions.json" <<'JSON'
+          {"positions":[{"symbol":"ADAUSDT","trade_id":"trade-1","ticket_id":"5m-trade-1","gross_r":-0.2,"mfe":0.6,"mae":-0.3,"giveback":0.8,"age_minutes":40,"base_margin_usd":1800,"requested_margin_usd":900,"controller_decision":{"proposed_size_multiplier":0.5,"effective_size_multiplier":0.5}}]}
+          JSON
+          cat > "$ROOT/mythos_trade_manager_state.json" <<'JSON'
+          {"active":{"trade-1":{"trade_id":"trade-1","ticket_id":"5m-trade-1","module":"RITHAL_TM_V3_3","state":"SHADOW_EXIT_CONFIRMED","rec":"V3_2_SHADOW_EXIT_CONFIRMED","execution":"UNCHANGED_SHADOW_ONLY","reviewed_at":"2099-01-01T00:00:00+00:00"}}}
+          JSON
+          cat > "$ROOT/mythos_model_interactions.json" <<'JSON'
+          {"trades":{"trade-1":{"trade_id":"trade-1","decision_score":0.95,"side":"SHORT","long_edge":-1.2,"short_edge":2.5,"true_regime_probs":[0.1,0.7,0.1,0.1],"rank_regime_probs":[0.2,0.4,0.2,0.2]}}}
+          JSON
+          echo '{}' > "$ROOT/mythos_runtime_state.json"
+          echo '{}' > "$ROOT/mythos_account_state.json"
+          echo '{}' > "$ROOT/mythos_live_prices.json"
+          python rithal_layer_truth_v1_0_4_7/rithal_layer_truth_v1047.py --project-root "$ROOT" --verify
+          python - <<'PY'
+          import json, os
+          root = os.environ['RUNNER_TEMP'] + '/rithal-test'
+          payload = json.load(open(root + '/mythos_rithal_intelligence_truth.json', encoding='utf-8'))
+          pos = payload['positions'][0]
+          assert pos['binding'] == 'LINKED', pos
+          assert pos['manager']['recommended_action'] == 'CLOSE_FULL', pos
+          assert pos['manager']['effective_authority'] == 'SHADOW_ONLY', pos
+          assert pos['manager']['actual_execution'] == 'UNCHANGED_SHADOW_ONLY', pos
+          assert pos['entry_thesis']['binding'] == 'LINKED', pos
+          assert pos['entry_thesis']['snapshot']['regime']['p_breakout'] == 0.1, pos
+          assert pos['side_comparison']['risk_adjusted_shadow_side'] == 'SHORT', pos
+          assert pos['sizing']['applied_multiplier'] == 0.5, pos
+          print('Synthetic contract assertions passed')
+          PY
