@@ -56,7 +56,7 @@ jobs:
           $ErrorActionPreference='Stop'
           [void][scriptblock]::Create((Get-Content rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R3.ps1 -Raw))
           $text=Get-Content rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R3.ps1 -Raw
-          foreach($token in @('RITHAL_ENGINE_RUNNING','Checkpoint directory missing','--authority-self-test','PAPER_AUTOMANAGE','SHADOW_ONLY','checkpoint digest changed')){
+          foreach($token in @('RITHAL_ENGINE_RUNNING','Checkpoint directory missing','--authority-self-test','PAPER_AUTOMANAGE','SHADOW_ONLY','Checkpoint digest changed')){
             if(-not $text.Contains($token)){throw "missing installer token: $token"}
           }
 
