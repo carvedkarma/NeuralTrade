@@ -1,0 +1,26 @@
+name: Rithal Behavior Installer R2
+
+on:
+  push:
+    branches: [rithal-behavior-fix-v1.0.5]
+  pull_request:
+    paths:
+      - 'rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R2.ps1'
+      - '.github/workflows/rithal-behavior-installer-r2.yml'
+
+jobs:
+  verify-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse installer and assert stop-before-authority contract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $path='rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R2.ps1'
+          $text=Get-Content $path -Raw
+          [void][scriptblock]::Create($text)
+          foreach($token in @('Get-CimInstance Win32_Process','RITHAL_ENGINE_RUNNING','live-neural-v2','rithal-1-0-contract-locked','Install-RithalBehaviorFixV1_0_5_R1.ps1','PAPER_CONTROL')){
+            if(-not $text.Contains($token)){throw "Missing controlled-restart token: $token"}
+          }
+          Write-Host 'R2 controlled-restart installer assertions passed'
