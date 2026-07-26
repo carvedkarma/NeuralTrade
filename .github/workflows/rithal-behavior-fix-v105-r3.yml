@@ -1,4 +1,4 @@
-name: Rithal Behavior Fix V1.0.5 R3
+name: Rithal Behavior Fix V1.0.5 R3.1
 
 on:
   push:
@@ -23,20 +23,20 @@ jobs:
         run: |
           python -m py_compile \
             rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105.py \
-            rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3.py
-      - name: Run R3 deterministic tests
-        run: python rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3.py --self-test
+            rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3.py \
+            rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3_1.py
+      - name: Run R3.1 deterministic tests
+        run: python rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3_1.py --self-test
       - name: Cross-check source contracts
         run: |
           python - <<'PY'
           import ast, pathlib
-          module = pathlib.Path('rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3.py').read_text()
-          tree = ast.parse(module)
-          functions = {node.name: node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-          assert 'apply_live_patch' in functions
-          assert 'apply_trade_manager_patch' in functions
-          assert 'authority_contract_self_test' in functions
-          assert 'configure_project' in functions
+          r3 = pathlib.Path('rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3.py').read_text()
+          r31 = pathlib.Path('rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105_r3_1.py').read_text()
+          tree = ast.parse(r3 + '\n' + r31)
+          functions = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+          for name in ('apply_live_patch','apply_trade_manager_patch','authority_contract_self_test','configure_project'):
+              assert name in functions, name
           required = [
               'RITHAL_BEHAVIOR_V105_R3_REPAIR_LOCK',
               'current_15m_regime_missing_or_invalid',
@@ -44,20 +44,23 @@ jobs:
               'TRUE_POSTERIOR_PLUS_BACKTEST_RANK_POSTERIOR',
               'P80_PARTIAL_70_PROTECTED_30',
               'M70_P55_FULL_EXIT',
-              'SHADOW_ONLY',
+              'expanded_family_passed_as_actual_force_argument',
           ]
+          combined = r3 + r31
           for token in required:
-              assert token in module, token
-          print('R3 source contract assertions passed')
+              assert token in combined, token
+          print('R3.1 source contract assertions passed')
           PY
-      - name: Parse installer with PowerShell
+      - name: Parse canonical installer wrapper and transactional source
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          [void][scriptblock]::Create((Get-Content rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R3.ps1 -Raw))
-          $text=Get-Content rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R3.ps1 -Raw
-          foreach($token in @('RITHAL_ENGINE_RUNNING','Checkpoint directory missing','--authority-self-test','PAPER_AUTOMANAGE','SHADOW_ONLY','Checkpoint digest changed')){
-            if(-not $text.Contains($token)){throw "missing installer token: $token"}
+          foreach($file in @('Install-RithalBehaviorFixV1_0_5_R3.ps1','Install-RithalBehaviorFixV1_0_5_R3_1.ps1')){
+            [void][scriptblock]::Create((Get-Content (Join-Path 'rithal_behavior_fix_v1_0_5' $file) -Raw))
+          }
+          $text=Get-Content rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5_R3_1.ps1 -Raw
+          foreach($token in @('RITHAL_BEHAVIOR_FIX_V1_0_5_R3_1','_rithal_v104_apply_live_patch(globals())','TradeManager.observe_mark = _tmv33_observe_mark','TradeManager._decision = _tmv33_decision','--authority-self-test')){
+            if(-not $text.Contains($token)){throw "missing canonical installer token: $token"}
           }
 
   windows-synthetic-install:
@@ -76,7 +79,7 @@ jobs:
       - name: Build synthetic active project
         shell: pwsh
         run: |
-          $root=Join-Path $env:RUNNER_TEMP "rithal-r3-${{ matrix.manager_mode }}"
+          $root=Join-Path $env:RUNNER_TEMP "rithal-r31-${{ matrix.manager_mode }}"
           $n=Join-Path $root 'mythos\neural'
           New-Item -ItemType Directory -Path $n -Force|Out-Null
           New-Item -ItemType Directory -Path (Join-Path $root 'checkpoints\rithal_clean') -Force|Out-Null
@@ -94,13 +97,16 @@ jobs:
               def _trade_manager_entry_context(self, sym, pos, pred, threshold_used, bar_timestamp_ms): return {'threshold_used': threshold_used, 'entry_bar_timestamp': bar_timestamp_ms}
               def _arm_trade_manager_position(self, sym, pos, pred, threshold_used, bar_timestamp_ms): return None
               def _process(self, sym, *args, **kwargs): return None
-          # RITHAL_CONSOLIDATED_INTELLIGENCE_SAFETY
+          def _rithal_v104_apply_live_patch(ns): pass
+          _rithal_v104_apply_live_patch(globals())
           '@ | Set-Content -LiteralPath (Join-Path $n 'live.py') -Encoding utf8
           @'
           class TradeManager:
               pass
-          # RITHAL_TRADE_MANAGER_V3_3_2
-          # RITHAL_CONSOLIDATED_TRADE_MANAGER_PERSISTENCE
+          def _tmv33_observe_mark(self, *args, **kwargs): return {}
+          def _tmv33_decision(self, *args, **kwargs): return {}
+          TradeManager.observe_mark = _tmv33_observe_mark
+          TradeManager._decision = _tmv33_decision
           '@ | Set-Content -LiteralPath (Join-Path $n 'trade_manager_v6.py') -Encoding utf8
           "# synthetic" | Set-Content -LiteralPath (Join-Path $n 'rithal_consolidated_v104.py') -Encoding utf8
           @'
@@ -113,7 +119,7 @@ jobs:
               path=Path(root)/'settings_override_v1.json'; path.write_text(json.dumps(candidate), encoding='utf-8'); return candidate, {'status':'PASS'}
           '@ | Set-Content -LiteralPath (Join-Path $n 'rithal_runtime_settings.py') -Encoding utf8
           @'
-          CONTRACT_VERSION='SYNTHETIC_R3_AUTHORITY'
+          CONTRACT_VERSION='SYNTHETIC_R31_AUTHORITY'
           def classify_exact_instruction(instruction, pos, settings, current_price=None, source=None):
               v33=instruction.get('trade_manager_v3_3') or {}
               state=str(v33.get('final_manager_state') or '')
@@ -128,22 +134,21 @@ jobs:
           def route_candidate(*args, **kwargs): return {'effect':'SHADOW_RECORDED','reason':'synthetic'}
           def parity_self_test(): return {'ok': True}
           '@ | Set-Content -LiteralPath (Join-Path $n 'rithal_manager_authority_contract.py') -Encoding utf8
-          $env:TEST_RITHAL_ROOT=$root
-      - name: Run transactional installer
+      - name: Run canonical R3.1 transactional installer
         shell: pwsh
         run: |
-          $root=Join-Path $env:RUNNER_TEMP "rithal-r3-${{ matrix.manager_mode }}"
-          powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_behavior_fix_v1_0_5\Install-RithalBehaviorFixV1_0_5_R3.ps1 -ProjectRoot $root -ManagerMode '${{ matrix.manager_mode }}'
+          $root=Join-Path $env:RUNNER_TEMP "rithal-r31-${{ matrix.manager_mode }}"
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_behavior_fix_v1_0_5\Install-RithalBehaviorFixV1_0_5_R3_1.ps1 -ProjectRoot $root -ManagerMode '${{ matrix.manager_mode }}'
       - name: Run generated verifier and inspect mode
         shell: pwsh
         run: |
-          $root=Join-Path $env:RUNNER_TEMP "rithal-r3-${{ matrix.manager_mode }}"
-          & (Join-Path $root 'Verify-RithalBehaviorFixV1_0_5_R3.ps1') -ProjectRoot $root
+          $root=Join-Path $env:RUNNER_TEMP "rithal-r31-${{ matrix.manager_mode }}"
+          & (Join-Path $root 'Verify-RithalBehaviorFixV1_0_5_R3_1.ps1') -ProjectRoot $root
           $control=Get-Content (Join-Path $root 'mythos_5m_execution_control.json') -Raw|ConvertFrom-Json
           if('${{ matrix.manager_mode }}' -eq 'PAPER_CONTROL'){
             if($control.mode -ne 'PAPER_AUTOMANAGE' -or -not $control.execution_enabled){throw 'PAPER_CONTROL mismatch'}
           }else{
             if($control.mode -ne 'SHADOW_ONLY' -or $control.execution_enabled){throw 'SHADOW_ONLY mismatch'}
           }
-          $report=Get-Content (Join-Path $root 'rithal_behavior_fix_v105_r3_install_report.json') -Raw|ConvertFrom-Json
+          $report=Get-Content (Join-Path $root 'rithal_behavior_fix_v105_r3_1_install_report.json') -Raw|ConvertFrom-Json
           if(-not $report.checkpoint_unchanged -or $report.authority_contract_test -ne 'PASS'){throw 'install report failed'}
