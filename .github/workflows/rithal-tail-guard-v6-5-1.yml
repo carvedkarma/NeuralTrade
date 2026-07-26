@@ -8,6 +8,10 @@ on:
       - 'rithal_tail_guard_v6_5_1/**'
       - '.github/workflows/rithal-tail-guard-v6-5-1.yml'
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   canonical-premium-contract:
     runs-on: ubuntu-latest
@@ -20,7 +24,22 @@ jobs:
       - name: Compile V6.5.2 patcher
         run: python -m py_compile rithal_tail_guard_v6_5_1/rithal_tail_guard_premium_fix_v652.py
       - name: Run bounded/full exact-parity regression
-        run: python rithal_tail_guard_v6_5_1/rithal_tail_guard_premium_fix_v652.py --self-test
+        id: regression
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python rithal_tail_guard_v6_5_1/rithal_tail_guard_premium_fix_v652.py --self-test 2>&1 | tee /tmp/v652-self-test.log
+      - name: Publish regression diagnostic
+        if: steps.regression.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tail -100 /tmp/v652-self-test.log > /tmp/v652-tail.log
+          printf 'V6.5.2 regression diagnostic for `%s`:\n\n```text\n' "$GITHUB_SHA" > /tmp/comment.md
+          cat /tmp/v652-tail.log >> /tmp/comment.md
+          printf '\n```\n' >> /tmp/comment.md
+          gh pr comment 7 --body-file /tmp/comment.md
+          exit 1
       - name: Assert frozen-contract correction
         run: |
           python - <<'PY'
@@ -66,33 +85,15 @@ jobs:
               def build_symbol_enriched(self, symbol):
                   df=pd.DataFrame({'premium_index_close':[.001,.0011,.0012,.0013,.0014,.0015],'premium_index_change_1h':[0]*6})
                   # RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_ALIGNMENT
-                  # Derive every premium field from the final engine-aligned 15m close.
-                  # A zero premium is a valid covered observation, not a missing feed.
-                  _premium_close_raw = (
-                      pd.to_numeric(df["premium_index_close"], errors="coerce")
-                      if "premium_index_close" in df.columns
-                      else pd.Series(np.nan, index=df.index, dtype=float)
-                  ).replace([np.inf, -np.inf], np.nan)
-                  _premium_covered_raw = (
-                      pd.to_numeric(df["premium_source_covered"], errors="coerce")
-                      if "premium_source_covered" in df.columns
-                      else pd.Series(np.nan, index=df.index, dtype=float)
-                  )
+                  _premium_close_raw = (pd.to_numeric(df["premium_index_close"], errors="coerce") if "premium_index_close" in df.columns else pd.Series(np.nan, index=df.index, dtype=float)).replace([np.inf, -np.inf], np.nan)
+                  _premium_covered_raw = (pd.to_numeric(df["premium_source_covered"], errors="coerce") if "premium_source_covered" in df.columns else pd.Series(np.nan, index=df.index, dtype=float))
                   df["premium_index_close"] = _premium_close_raw.fillna(0.0)
-                  df["premium_index_change_1h"] = (
-                      _premium_close_raw.pct_change(periods=4, fill_method=None)
-                      .replace([np.inf, -np.inf], 0.0)
-                      .fillna(0.0)
-                  )
+                  df["premium_index_change_1h"] = (_premium_close_raw.pct_change(periods=4, fill_method=None).replace([np.inf, -np.inf], 0.0).fillna(0.0))
                   if bool(_premium_covered_raw.notna().any()):
-                      df["premium_index_available"] = (
-                          _premium_covered_raw.fillna(0.0) >= 0.5
-                      ).astype(float)
+                      df["premium_index_available"] = (_premium_covered_raw.fillna(0.0) >= 0.5).astype(float)
                   else:
                       df["premium_index_available"] = _premium_close_raw.notna().astype(float)
-                  df["premium_index_z_7d"] = _z(
-                      _premium_close_raw.ffill().fillna(0.0), 7 * 96
-                  )
+                  df["premium_index_z_7d"] = _z(_premium_close_raw.ffill().fillna(0.0), 7 * 96)
                   return df
           '@ | Set-Content -LiteralPath (Join-Path $root 'mythos\data_engine_v22.py') -Encoding utf8
           @'
@@ -107,7 +108,6 @@ jobs:
               if not rows:
                   return pd.DataFrame()
               out = pd.DataFrame(rows).drop_duplicates("timestamp", keep="last").sort_values("timestamp").reset_index(drop=True)
-              # RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_FETCH
               out["premium_index_change_1h"] = (
                   out["premium_index_close"].pct_change(periods=4, fill_method=None)
                   .replace([np.inf, -np.inf], 0.0)
@@ -155,28 +155,25 @@ jobs:
         run: |
           $root=Join-Path $env:RUNNER_TEMP 'rithal-tail-v652-fail'
           New-Item -ItemType Directory -Force -Path (Join-Path $root 'mythos'),(Join-Path $root 'data_lake\manifests')|Out-Null
-          Copy-Item .\rithal_tail_guard_v6_5_1\fixtures\v651_engine_fixture.py (Join-Path $root 'mythos\data_engine_v22.py') -ErrorAction SilentlyContinue
-          if(-not(Test-Path (Join-Path $root 'mythos\data_engine_v22.py'))){
-            @'
-            import numpy as np
-            import pandas as pd
-            def _numeric(df,col,default=0.0): return pd.to_numeric(df[col],errors='coerce').fillna(default)
-            def _z(s,n): return s*0
-            class V22DataEngine:
-                def build(self,df):
-                    # RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_ALIGNMENT
-                    _premium_close_raw=(pd.to_numeric(df["premium_index_close"],errors="coerce") if "premium_index_close" in df.columns else pd.Series(np.nan,index=df.index,dtype=float)).replace([np.inf,-np.inf],np.nan)
-                    _premium_covered_raw=(pd.to_numeric(df["premium_source_covered"],errors="coerce") if "premium_source_covered" in df.columns else pd.Series(np.nan,index=df.index,dtype=float))
-                    df["premium_index_close"]=_premium_close_raw.fillna(0.0)
-                    df["premium_index_change_1h"] = (_premium_close_raw.pct_change(periods=4,fill_method=None).replace([np.inf,-np.inf],0.0).fillna(0.0))
-                    if bool(_premium_covered_raw.notna().any()):
-                        df["premium_index_available"]=(_premium_covered_raw.fillna(0.0)>=0.5).astype(float)
-                    else:
-                        df["premium_index_available"]=_premium_close_raw.notna().astype(float)
-                    df["premium_index_z_7d"]=_z(_premium_close_raw.ffill().fillna(0.0),7*96)
-                    return df
-            '@|Set-Content (Join-Path $root 'mythos\data_engine_v22.py') -Encoding utf8
-          }
+          @'
+          import numpy as np
+          import pandas as pd
+          def _numeric(df,col,default=0.0): return pd.to_numeric(df[col],errors='coerce').fillna(default)
+          def _z(s,n): return s*0
+          class V22DataEngine:
+              def build(self,df):
+                  # RITHAL_TAIL_GUARD_V6_5_1_PREMIUM_ALIGNMENT
+                  _premium_close_raw=(pd.to_numeric(df["premium_index_close"],errors="coerce") if "premium_index_close" in df.columns else pd.Series(np.nan,index=df.index,dtype=float)).replace([np.inf,-np.inf],np.nan)
+                  _premium_covered_raw=(pd.to_numeric(df["premium_source_covered"],errors="coerce") if "premium_source_covered" in df.columns else pd.Series(np.nan,index=df.index,dtype=float))
+                  df["premium_index_close"]=_premium_close_raw.fillna(0.0)
+                  df["premium_index_change_1h"] = (_premium_close_raw.pct_change(periods=4,fill_method=None).replace([np.inf,-np.inf],0.0).fillna(0.0))
+                  if bool(_premium_covered_raw.notna().any()):
+                      df["premium_index_available"]=(_premium_covered_raw.fillna(0.0)>=0.5).astype(float)
+                  else:
+                      df["premium_index_available"]=_premium_close_raw.notna().astype(float)
+                  df["premium_index_z_7d"]=_z(_premium_close_raw.ffill().fillna(0.0),7*96)
+                  return df
+          '@|Set-Content (Join-Path $root 'mythos\data_engine_v22.py') -Encoding utf8
           @'
           import numpy as np
           import pandas as pd
