@@ -1,4 +1,4 @@
-# Rithal Tail Guard V6.5.1
+# Rithal Tail Guard V6.5.1 R2
 
 This package repairs the enrichment publication failure where the guard reported:
 
@@ -6,6 +6,8 @@ This package repairs the enrichment publication failure where the guard reported
 publication=ROLLED_BACK
 column=premium_index_change_1h
 ```
+
+**Use the R2 installer only.** R2 includes the corrected Windows marker-verification path and passed the complete Python and Windows transaction suites.
 
 ## Root cause
 
@@ -27,9 +29,9 @@ The previous engine also used `premium_index_close != 0` as its availability tes
 From the project root:
 
 ```powershell
-$u='https://raw.githubusercontent.com/carvedkarma/NeuralTrade/rithal-tail-guard-v6.5.1/rithal_tail_guard_v6_5_1/Install-RithalTailGuardV6_5_1.ps1'
-Invoke-WebRequest -UseBasicParsing $u -OutFile .\Install-RithalTailGuardV6_5_1.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-RithalTailGuardV6_5_1.ps1 -ProjectRoot . -RunBootstrap
+$u='https://raw.githubusercontent.com/carvedkarma/NeuralTrade/rithal-tail-guard-v6.5.1/rithal_tail_guard_v6_5_1/Install-RithalTailGuardV6_5_1_R2.ps1'
+Invoke-WebRequest -UseBasicParsing $u -OutFile .\Install-RithalTailGuardV6_5_1_R2.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-RithalTailGuardV6_5_1_R2.ps1 -ProjectRoot . -RunBootstrap
 ```
 
 The installer backs up the active guard and `mythos\data_engine_v22.py`, runs deterministic tests, applies the source patch, compiles the exact local files, and runs one bootstrap/catch-up transaction when `-RunBootstrap` is supplied.
