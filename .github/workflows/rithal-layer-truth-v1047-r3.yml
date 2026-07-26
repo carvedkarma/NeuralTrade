@@ -1,0 +1,107 @@
+name: Rithal Layer Truth V1.0.4.7 R3
+
+on:
+  push:
+    branches:
+      - rithal-layer-truth-v1.0.4.7-r3
+  pull_request:
+    paths:
+      - 'rithal_layer_truth_v1_0_4_7_r3/**'
+      - '.github/workflows/rithal-layer-truth-v1047-r3.yml'
+
+jobs:
+  cross-verify:
+    runs-on: ubuntu-latest
+    env:
+      TEST_ROOT: ${{ runner.temp }}/rithal-r3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile runtime
+        run: python -m py_compile rithal_layer_truth_v1_0_4_7_r3/rithal_layer_truth_v1047_r3.py
+      - name: Parse PowerShell installers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Get-ChildItem rithal_layer_truth_v1_0_4_7_r3 -Filter '*.ps1' | ForEach-Object {
+            [void][scriptblock]::Create((Get-Content $_.FullName -Raw))
+            Write-Host "Parsed $($_.Name)"
+          }
+      - name: Build canonical instance state
+        shell: bash
+        run: |
+          set -euo pipefail
+          INST="$TEST_ROOT/mythos_model_instances/rithal-1-0-contract-locked"
+          mkdir -p "$TEST_ROOT/mythos/neural" "$INST"
+          cat > "$INST/manifest.json" <<'JSON'
+          {"model_instance_id":"rithal-1-0-contract-locked","positions_file":"mythos_model_instances/rithal-1-0-contract-locked/open_positions.json","trade_manager_state_file":"mythos_model_instances/rithal-1-0-contract-locked/trade_manager_state.json","runtime_file":"mythos_model_instances/rithal-1-0-contract-locked/runtime_state.json","account_file":"mythos_model_instances/rithal-1-0-contract-locked/account_state.json","interaction_file":"mythos_model_instances/rithal-1-0-contract-locked/interactions.json","prices_file":"mythos_model_instances/rithal-1-0-contract-locked/live_prices.json"}
+          JSON
+          cat > "$INST/open_positions.json" <<'JSON'
+          {"model_instance_id":"rithal-1-0-contract-locked","positions":[{"symbol":"ADAUSDT","trade_id":"trade-1","ticket_id":"5m-trade-1","gross_r":-0.2,"mfe":0.6,"mae":-0.3,"giveback":0.8,"age_minutes":80,"current_progress_pct":60,"mfe_progress_pct":85,"base_margin_usd":1800,"requested_margin_usd":900,"controller_decision":{"proposed_size_multiplier":0.5,"effective_size_multiplier":1.0}}]}
+          JSON
+          cat > "$INST/trade_manager_state.json" <<'JSON'
+          {"model_instance_id":"rithal-1-0-contract-locked","active":{"trade-1":{"v3_3":{"trade_id":"trade-1","ticket_id":"5m-trade-1","module":"RITHAL_TM_V3_3","state":"PROFIT_SENTINEL_ARMED","rec":"HOLD_FULL_UNTIL_80_PERCENT_TOUCH","triggered":false,"execution":"UNCHANGED_SHADOW_ONLY","reviewed_at":"2099-01-01T00:00:00+00:00"},"v3_2":{"trade_id":"trade-1","ticket_id":"5m-trade-1","module":"RITHAL_TM_V3_2","state":"SHADOW_EXIT_CONFIRMED_ACTIVE","branch":"MID_MFE_REVERSAL","execution":"UNCHANGED_SHADOW_ONLY","reviewed_at":"2099-01-01T00:00:00+00:00","gross_r":-0.2,"mfe":0.6,"giveback":0.8}}}}
+          JSON
+          cat > "$INST/runtime_state.json" <<'JSON'
+          {"model_instance_id":"rithal-1-0-contract-locked","starting_equity_usd":18000,"fixed_margin_pct":0.15,"effective_leverage":30,"allocation_cap_pct":0.60,"heat_cap_pct":0.03,"max_open_positions":6}
+          JSON
+          cat > "$INST/account_state.json" <<'JSON'
+          {"model_instance_id":"rithal-1-0-contract-locked","current_equity_usd":15100}
+          JSON
+          cat > "$INST/interactions.json" <<'JSON'
+          {"model_instance_id":"rithal-1-0-contract-locked","trades":{"trade-1":{"trade_id":"trade-1","ticket_id":"5m-trade-1","side":"SHORT","decision_score":0.99,"long_edge":-1.1,"short_edge":2.4,"true_regime_probs":[0.1,0.7,0.1,0.1],"rank_regime_probs":[0.2,0.4,0.2,0.2]}}}
+          JSON
+          echo '{"model_instance_id":"rithal-1-0-contract-locked"}' > "$INST/live_prices.json"
+          cat > "$TEST_ROOT/mythos_5m_execution_control.json" <<'JSON'
+          {"schema_version":9,"module":"EXISTING_CONTROL_CONTRACT","mode":"SHADOW_ONLY","execution_enabled":false,"scope":"PAPER_ONLY","authority_bridge":{"ready":true}}
+          JSON
+          cat > "$TEST_ROOT/settings_override_v1.json" <<'JSON'
+          {"rithal_layer_contract_v1047":{"instance_id":"rithal-1-0-contract-locked","starting_equity_usd":18000,"fixed_margin_pct":0.10,"leverage":10,"allocation_cap_pct":0.60,"heat_cap_pct":0.03,"max_open_positions":6,"manager_mode":"SHADOW_ONLY"}}
+          JSON
+      - name: Run verifier
+        run: python rithal_layer_truth_v1_0_4_7_r3/rithal_layer_truth_v1047_r3.py --project-root "$TEST_ROOT" --verify
+      - name: Cross-verify runtime contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import importlib.util, json, os, pathlib, sys
+          root = pathlib.Path(os.environ['TEST_ROOT'])
+          module_path = pathlib.Path('rithal_layer_truth_v1_0_4_7_r3/rithal_layer_truth_v1047_r3.py')
+          spec = importlib.util.spec_from_file_location('r3', module_path)
+          mod = importlib.util.module_from_spec(spec)
+          sys.modules['r3'] = mod
+          spec.loader.exec_module(mod)
+          runtime = mod.LayerTruthRuntime(root)
+          first = runtime.publish()
+          payload = json.loads((root/'mythos_rithal_intelligence_truth.json').read_text())
+          row = payload['positions'][0]
+          assert row['binding'] == 'LINKED', row
+          assert row['manager']['source'] == 'RITHAL_TM_V3_2', row['manager']
+          assert row['manager']['recommended_action'] == 'CLOSE_FULL', row['manager']
+          assert row['manager']['actionable'] is True, row['manager']
+          assert row['manager']['effective_authority'] == 'SHADOW_ONLY', row['manager']
+          assert row['manager']['actual_execution'] == 'UNCHANGED_SHADOW_ONLY', row['manager']
+          assert row['entry_thesis']['binding'] == 'LINKED', row['entry_thesis']
+          assert row['regime']['p_breakout'] == 0.1, row['regime']
+          assert row['side_comparison']['risk_adjusted_shadow_side'] == 'SHORT', row['side_comparison']
+          assert row['sizing']['applied_multiplier'] == 0.5, row['sizing']
+          assert 'effective_multiplier_differs_from_applied_multiplier' in row['sizing']['contradictions'], row['sizing']
+          assert payload['profile']['runtime_actual']['leverage'] == 30, payload['profile']
+          assert any(item.startswith('leverage:30') for item in payload['profile']['mismatches']), payload['profile']
+          assert any(item.startswith('fixed_margin_pct:0.15') for item in payload['profile']['mismatches']), payload['profile']
+          assert payload['source_health']['positions']['path'].endswith('mythos_model_instances/rithal-1-0-contract-locked/open_positions.json'), payload['source_health']
+          counter = row['shadow_manager_v1047_r3']
+          assert counter['review_advanced'] is True and counter['persistent_giveback_reviews'] == 1, counter
+          before_lines = (root/'mythos_rithal_counterfactual.jsonl').read_text().strip().splitlines()
+          runtime.publish()
+          payload2 = json.loads((root/'mythos_rithal_intelligence_truth.json').read_text())
+          counter2 = payload2['positions'][0]['shadow_manager_v1047_r3']
+          after_lines = (root/'mythos_rithal_counterfactual.jsonl').read_text().strip().splitlines()
+          assert counter2['review_advanced'] is False and counter2['persistent_giveback_reviews'] == 1, counter2
+          assert len(after_lines) == len(before_lines), (len(before_lines), len(after_lines))
+          assert first['status'] == 'WARN', first
+          print('All R3 runtime assertions passed')
+          PY
