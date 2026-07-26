@@ -1,0 +1,77 @@
+name: Rithal Behavior Fix V1.0.5
+
+on:
+  push:
+    branches: [rithal-behavior-fix-v1.0.5]
+  pull_request:
+    paths:
+      - 'rithal_behavior_fix_v1_0_5/**'
+      - '.github/workflows/rithal-behavior-fix-v105.yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile overlay
+        run: python -m py_compile rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105.py
+      - name: Run deterministic behavior tests
+        run: python rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105.py --self-test
+      - name: Parse installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          [void][scriptblock]::Create((Get-Content rithal_behavior_fix_v1_0_5/Install-RithalBehaviorFixV1_0_5.ps1 -Raw))
+      - name: Static safety assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105.py').read_text()
+          assert 'RISK_ADJUSTED_EDGE_V105' in text
+          assert 'REGIME_UNKNOWN' in text
+          assert 'coherent_family_repair_healthy_direction_change_allowed' in text
+          assert 'HOLD_PERSISTENCE_REQUIRED' in text
+          assert 'P80_PARTIAL_70_PROTECTED_30' in text
+          assert 'M70_P55_FULL_EXIT' in text
+          assert 'PAPER_CONTROL' in text
+          assert 'live_exchange_control": False' in text or '"live_exchange_control": False' in text
+          assert 'checkpoints\\mythos_models' not in text
+          print('Static safety assertions passed')
+          PY
+      - name: Test settings configuration against a synthetic project
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/rithal-v105"
+          mkdir -p "$ROOT/mythos/neural" "$ROOT/mythos_model_instances/rithal-1-0-contract-locked"
+          cp rithal_behavior_fix_v1_0_5/rithal_behavior_fix_v105.py "$ROOT/mythos/neural/"
+          cat > "$ROOT/mythos/neural/rithal_runtime_settings.py" <<'PY'
+          import copy
+          _S={"revision":4,"capital":{},"runtime":{},"trade_manager":{},"safety":{}}
+          def load_settings(root,iid): return copy.deepcopy(_S)
+          def preflight_settings(before,candidate,instance_id=None): return {"candidate":copy.deepcopy(candidate),"ok":True}
+          def save_settings(root,iid,candidate,actor=None,remote_addr=None,expected_revision=None):
+              assert expected_revision==4
+              assert candidate["capital"]["leverage"]==10
+              assert candidate["trade_manager"]["mode"]=="PAPER_CONTROL"
+              assert candidate["safety"]["live_exchange_control"] is False
+              return candidate,{"ok":True,"actor":actor}
+          PY
+          python "$ROOT/mythos/neural/rithal_behavior_fix_v105.py" --configure --project-root "$ROOT" --manager-mode PAPER_CONTROL > "$ROOT/configure.json"
+          python - <<'PY'
+          import json, os, pathlib
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'rithal-v105'
+          report=json.loads((root/'configure.json').read_text())
+          assert report['restart_required'] is True
+          assert report['live_exchange_control'] is False
+          control=json.loads((root/'mythos_5m_execution_control.json').read_text())
+          assert control['mode']=='PAPER_AUTOMANAGE' and control['execution_enabled'] is True
+          policy=json.loads((root/'mythos/neural/mythos_paper_policy.json').read_text())
+          assert policy=={"leverage":10,"leverage_mode":"fixed","max_portfolio_margin_pct":0.6,"per_trade_margin_pct":0.1,"starting_equity":18000.0}
+          print('Synthetic settings configuration passed')
+          PY
