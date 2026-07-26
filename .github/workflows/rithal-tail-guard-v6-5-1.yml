@@ -107,7 +107,7 @@ jobs:
           if($code -ne 0){
             $tail=(@($output)|Select-Object -Last 80) -join "`n"
             $body="V6.5.1 R2 Windows installer diagnostic for commit $env:GITHUB_SHA:`n``````text`n$tail`n``````"
-            gh pr comment 7 --body $body
+            gh api repos/carvedkarma/NeuralTrade/issues/comments/5084187305 -X PATCH -f body="$body" | Out-Null
             throw "installer failed with exit code $code"
           }
       - name: Run generated verifier
