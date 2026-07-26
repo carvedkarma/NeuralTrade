@@ -41,24 +41,15 @@ $text=$text.Replace(
     "`$R3Module=Join-Path `$Neural 'rithal_behavior_fix_v105_r3_1.py'`r`n`$R3Dependency=Join-Path `$Neural 'rithal_behavior_fix_v105_r3.py'"
 )
 $text=$text.Replace(
-    '`$targets=@(`$Live,`$Manager,`$BaseModule,`$R3Module,',
-    '`$targets=@(`$Live,`$Manager,`$BaseModule,`$R3Dependency,`$R3Module,'
+    '$targets=@($Live,$Manager,$BaseModule,$R3Module,',
+    '$targets=@($Live,$Manager,$BaseModule,$R3Dependency,$R3Module,'
 )
+$oldDownload='Invoke-WebRequest -UseBasicParsing -Uri "$RawBase/rithal_behavior_fix_v105_r3_1.py" -OutFile $R3Module'
+$newDownload='Invoke-WebRequest -UseBasicParsing -Uri "$RawBase/rithal_behavior_fix_v105_r3.py" -OutFile $R3Dependency' + "`r`n    " + $oldDownload
+$text=$text.Replace($oldDownload,$newDownload)
 $text=$text.Replace(
-    'Invoke-WebRequest -UseBasicParsing -Uri "`$RawBase/rithal_behavior_fix_v105_r3_1.py" -OutFile `$R3Module',
-    'Invoke-WebRequest -UseBasicParsing -Uri "`$RawBase/rithal_behavior_fix_v105_r3.py" -OutFile `$R3Dependency`r`n    Invoke-WebRequest -UseBasicParsing -Uri "`$RawBase/rithal_behavior_fix_v105_r3_1.py" -OutFile `$R3Module'
-)
-$text=$text.Replace(
-    '& python -m py_compile `$BaseModule `$R3Module `$Live',
-    '& python -m py_compile `$BaseModule `$R3Dependency `$R3Module `$Live'
-)
-$text=$text.Replace(
-    "`$r=Join-Path `$n 'rithal_behavior_fix_v105_r3_1.py';`$l=",
-    "`$d=Join-Path `$n 'rithal_behavior_fix_v105_r3.py';`$r=Join-Path `$n 'rithal_behavior_fix_v105_r3_1.py';`$l="
-)
-$text=$text.Replace(
-    'python -m py_compile `$b `$r `$l',
-    'python -m py_compile `$b `$d `$r `$l'
+    '& python -m py_compile $BaseModule $R3Module $Live',
+    '& python -m py_compile $BaseModule $R3Dependency $R3Module $Live'
 )
 
 $required=@(
