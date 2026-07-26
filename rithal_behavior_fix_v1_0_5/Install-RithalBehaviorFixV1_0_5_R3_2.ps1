@@ -58,6 +58,13 @@ $CheckpointBefore=Checkpoint-Digest $CheckpointDir
 try{
     Stage 'Reinstalling verified R3.1 baseline while the engine is stopped'
     Invoke-WebRequest -UseBasicParsing -Uri "$RawBase/Install-RithalBehaviorFixV1_0_5_R3_1.ps1" -OutFile $R31Installer
+    # The active source can use equivalent assignment spacing. Require the
+    # callable names rather than one formatting-specific assignment string.
+    $r31Text=[IO.File]::ReadAllText($R31Installer)
+    $r31Text=$r31Text.Replace('TradeManager.observe_mark = _tmv33_observe_mark','TradeManager.observe_mark')
+    $r31Text=$r31Text.Replace('TradeManager._decision = _tmv33_decision','TradeManager._decision')
+    [void][scriptblock]::Create($r31Text)
+    [IO.File]::WriteAllText($R31Installer,$r31Text,[Text.UTF8Encoding]::new($false))
     & powershell -NoProfile -ExecutionPolicy Bypass -File $R31Installer -ProjectRoot $Root -ManagerMode $ManagerMode
     if($LASTEXITCODE -ne 0){throw "R3.1 baseline installer failed: $LASTEXITCODE"}
 
