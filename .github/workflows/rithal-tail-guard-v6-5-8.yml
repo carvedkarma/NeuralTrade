@@ -97,7 +97,7 @@ jobs:
           def _as_float(value,default=0.0): return default
           def tail_ratios(*a,**k): return {}
           def placeholder():
-              report={"guard_version":"6.5.3"}; staged_report={}; symbols=[]; live_enriched_dir=Path('.'); anchor_now_ms=0
+              report={"guard_version": "6.5.3"}; staged_report={}; symbols=[]; live_enriched_dir=Path('.'); anchor_now_ms=0
               class Args: max_latest_age_minutes=35.0
               args=Args(); status={}
               report["rebuild_mode"] = "INCREMENTAL_BOUNDED_LIVE_OVERLAY"
