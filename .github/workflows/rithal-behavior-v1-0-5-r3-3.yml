@@ -16,10 +16,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Compile compatibility bridge
-        run: python -m py_compile rithal_behavior_fix_v1_0_5_r3_3/rithal_behavior_fix_v105_r3_3.py
-      - name: Run scorer/infer and real-head side simulation
-        run: python rithal_behavior_fix_v1_0_5_r3_3/rithal_behavior_fix_v105_r3_3.py --self-test
+      - name: Compile compatibility bridge and installer patcher
+        run: |
+          python -m py_compile rithal_behavior_fix_v1_0_5_r3_3/rithal_behavior_fix_v105_r3_3.py
+          python -m py_compile rithal_behavior_fix_v1_0_5_r3_3/rithal_behavior_fix_v105_r3_3_install_patch.py
+      - name: Run scorer/infer and line-ending simulations
+        run: |
+          python rithal_behavior_fix_v1_0_5_r3_3/rithal_behavior_fix_v105_r3_3.py --self-test
+          python rithal_behavior_fix_v1_0_5_r3_3/rithal_behavior_fix_v105_r3_3_install_patch.py --self-test
       - name: Assert protected calculation ownership
         run: |
           python - <<'PY'
@@ -41,10 +45,10 @@ jobs:
           assert 'result["rank_regime_probs"] =' not in text
           print('calculation ownership contract PASS')
           PY
-      - name: Parse PowerShell installer
+      - name: Parse robust PowerShell installer
         shell: pwsh
         run: |
-          [void][scriptblock]::Create((Get-Content rithal_behavior_fix_v1_0_5_r3_3/Install-RithalBehaviorFixV1_0_5_R3_3.ps1 -Raw))
+          [void][scriptblock]::Create((Get-Content rithal_behavior_fix_v1_0_5_r3_3/Install-RithalBehaviorFixV1_0_5_R3_3_R2.ps1 -Raw))
 
   windows-transactional-install:
     runs-on: windows-latest
@@ -80,17 +84,17 @@ jobs:
                       pass
           # RITHAL_CONSOLIDATED_INTELLIGENCE_SAFETY_V1_0_4_1_END
           '@|Set-Content (Join-Path $n 'live.py') -Encoding utf8
-      - name: Install R3.3
+      - name: Install R3.3 R2
         shell: pwsh
         run: |
           $root=Join-Path $env:RUNNER_TEMP 'rithal-r33'
-          powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_behavior_fix_v1_0_5_r3_3\Install-RithalBehaviorFixV1_0_5_R3_3.ps1 -ProjectRoot $root
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_behavior_fix_v1_0_5_r3_3\Install-RithalBehaviorFixV1_0_5_R3_3_R2.ps1 -ProjectRoot $root
       - name: Verify and prove idempotent reinstall
         shell: pwsh
         run: |
           $root=Join-Path $env:RUNNER_TEMP 'rithal-r33'
           & (Join-Path $root 'Verify-RithalBehaviorFixV1_0_5_R3_3.ps1') -ProjectRoot $root
-          powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_behavior_fix_v1_0_5_r3_3\Install-RithalBehaviorFixV1_0_5_R3_3.ps1 -ProjectRoot $root
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_behavior_fix_v1_0_5_r3_3\Install-RithalBehaviorFixV1_0_5_R3_3_R2.ps1 -ProjectRoot $root
           & (Join-Path $root 'Verify-RithalBehaviorFixV1_0_5_R3_3.ps1') -ProjectRoot $root
           $live=Get-Content (Join-Path $root 'mythos\neural\live.py') -Raw
           if(([regex]::Matches($live,[regex]::Escape('RITHAL_BEHAVIOR_FIX_V1_0_5_R3_3_ACTIVATION_START'))).Count-ne 1){throw 'duplicate activation'}
@@ -116,7 +120,8 @@ jobs:
         run: |
           mkdir -p package/RithalBehaviorFixV1_0_5_R3_3
           cp rithal_behavior_fix_v1_0_5_r3_3/rithal_behavior_fix_v105_r3_3.py package/RithalBehaviorFixV1_0_5_R3_3/
-          cp rithal_behavior_fix_v1_0_5_r3_3/Install-RithalBehaviorFixV1_0_5_R3_3.ps1 package/RithalBehaviorFixV1_0_5_R3_3/
+          cp rithal_behavior_fix_v1_0_5_r3_3/rithal_behavior_fix_v105_r3_3_install_patch.py package/RithalBehaviorFixV1_0_5_R3_3/
+          cp rithal_behavior_fix_v1_0_5_r3_3/Install-RithalBehaviorFixV1_0_5_R3_3_R2.ps1 package/RithalBehaviorFixV1_0_5_R3_3/Install-RithalBehaviorFixV1_0_5_R3_3.ps1
           cp rithal_behavior_fix_v1_0_5_r3_3/README.md package/RithalBehaviorFixV1_0_5_R3_3/
       - uses: actions/upload-artifact@v4
         with:
