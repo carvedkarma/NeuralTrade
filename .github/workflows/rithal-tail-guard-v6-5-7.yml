@@ -1,0 +1,176 @@
+name: Rithal Tail Guard V6.5.7
+
+on:
+  push:
+    branches: [rithal-tail-guard-v6.5.7]
+  pull_request:
+    paths:
+      - 'rithal_tail_guard_v6_5_7/**'
+      - '.github/workflows/rithal-tail-guard-v6-5-7.yml'
+
+jobs:
+  exact-state-regressions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --disable-pip-version-check numpy pandas
+      - name: Compile delta
+        run: python -m py_compile rithal_tail_guard_v6_5_7/rithal_tail_guard_v657_delta.py
+      - name: Run V6.5.7 self tests
+        run: python rithal_tail_guard_v6_5_7/rithal_tail_guard_v657_delta.py --self-test
+      - name: Parse installer
+        shell: pwsh
+        run: |
+          [void][scriptblock]::Create((Get-Content rithal_tail_guard_v6_5_7/Install-RithalTailGuardV6_5_7.ps1 -Raw))
+      - name: Reproduce the invalid seam invariant
+        run: |
+          python - <<'PY'
+          import numpy as np
+          n=96
+          canonical=np.zeros(n)
+          corrected=canonical.copy(); corrected[40]=270031.3211488724
+          diff=np.abs(corrected-canonical)
+          assert diff.max()==270031.3211488724
+          assert abs(diff.mean()-2812.8262619674206)<1e-9
+          # One corrected source row naturally propagates through a rolling feature.
+          raw=np.ones(800); raw[700]=2.0
+          old=np.ones(800)
+          def rolling_z(x,w=672):
+              out=np.zeros(len(x))
+              for i in range(w-1,len(x)):
+                  v=x[i-w+1:i+1]; s=v.std(ddof=1)
+                  out[i]=0.0 if s==0 else (x[i]-v.mean())/s
+              return out
+          assert np.count_nonzero(np.abs(rolling_z(raw)-rolling_z(old))>1e-12)>1
+          print('one-row source correction and rolling propagation reproduced')
+          PY
+      - name: Assert protected architecture
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text=Path('rithal_tail_guard_v6_5_7/rithal_tail_guard_v657_delta.py').read_text()
+          for token in (
+              'RITHAL_TAIL_GUARD_V6_5_7_FULL_CONTEXT_LIVE_REBASE',
+              'INCREMENTAL_LIVE_OVERLAY_WITH_FULL_CONTEXT_REBASE',
+              'bounded/full-context reference parity failed',
+              'canonical archive is an immutable historical output snapshot',
+              '_v657_reference_tail',
+              'PARITY_EXCLUDE',
+          ):
+              assert token in text, token
+          stage=text.split('STAGE_REPLACEMENT',1)[1]
+          assert 'canonical/reference seam parity failed' not in stage
+          assert 'premium_index_z_7d' not in text.split('PARITY_EXCLUDE',1)[0]
+          print('V6.5.7 architecture contract PASS')
+          PY
+
+  windows-install-and-bootstrap:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --disable-pip-version-check numpy pandas
+      - name: Build synthetic active project
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP 'rithal-v657'
+          New-Item -ItemType Directory -Force -Path (Join-Path $root 'data_lake\manifests')|Out-Null
+          @'
+          from pathlib import Path
+          from types import MethodType
+          from typing import Any,Dict,List,Sequence
+          import hashlib,importlib.util,json,os,sqlite3,sys
+          import numpy as np
+          import pandas as pd
+          BAR_MS=900000
+          DAY_BARS=96
+          MAX_ROLLING_BARS=2880
+          DEFAULT_WARMUP_BARS=3200
+          DEFAULT_REPLACE_BARS=96
+          DEFAULT_LIVE_ROWS=16384
+          PARITY_EXCLUDE={"btc_regime","eth_regime"}
+          ONE_FEATURE_COLS=[]
+          AGG_FEATURE_COLS=[]
+          class ContextState: pass
+          def normalize_timestamp_ms(d): return d
+          def load_engine_module(p): pass
+          def read_frame(p): pass
+          def make_plan(*a,**k): pass
+          def compare_parity(*a,**k): pass
+          def patch_microstructure_contract(*a,**k): pass
+          def atomic_write_parquet(*a,**k): pass
+          def _validate_grid(*a,**k): pass
+          def _schema_hash(*a,**k): pass
+          def sha256_file(*a,**k): pass
+          def stage_incremental_live_outputs(*,engine_path,data_root,canonical_enriched_dir,live_enriched_dir,live_cache_dir,symbols,stage_dir,expected_latest_ms,raw_refresh_start_ms,requested_replace_start_ms,warmup_bars=3200,replace_rows_minimum=96,max_live_rows=16384,parity_rows=96): return {}
+          def initialize_live_overlay_from_canonical(): pass
+          '@|Set-Content (Join-Path $root 'mythos_incremental_enricher_v6_5.py') -Encoding utf8
+          @'
+          from pathlib import Path
+          from typing import Any,Dict,List,Mapping,Optional,Sequence,Tuple
+          import argparse,json,os,shutil,sys,time
+          import numpy as np
+          import pandas as pd
+          BAR_15M_MS=900000
+          BINANCE_FAPI='x'
+          class JsonClient: pass
+          def fetch_binance_premium(client,symbol,start_ms,end_open_ms): return pd.DataFrame()
+          def _as_float(value,default=0.0): return default
+          def placeholder():
+              report={"guard_version":"6.5.3"}; staged_report={}
+              report["rebuild_mode"] = "INCREMENTAL_BOUNDED_LIVE_OVERLAY"
+          '@|Set-Content (Join-Path $root 'mythos_live_tail_guard_v6_6.py') -Encoding utf8
+          @'
+          $ErrorActionPreference="Stop"
+          $root=$PSScriptRoot
+          $bridge=Join-Path $root "mythos_agg_archive_bridge_v6_5_4.py"
+          $normalizer=Join-Path $root "mythos_normalize_agg_schema_v6_5_5.py"
+          $core=Join-Path $root "Start-RithalTailWatchV6_5_3_Core.ps1"
+          & $core @args
+          exit $LASTEXITCODE
+          '@|Set-Content (Join-Path $root 'Start-RithalTailWatch.ps1') -Encoding utf8
+          "raise SystemExit(0)"|Set-Content (Join-Path $root 'mythos_agg_archive_bridge_v6_5_4.py') -Encoding utf8
+          "raise SystemExit(0)"|Set-Content (Join-Path $root 'mythos_normalize_agg_schema_v6_5_5.py') -Encoding utf8
+          @'
+          param([string]$ProjectRoot=$PSScriptRoot,[switch]$Once,[switch]$Bootstrap,[switch]$Background,[switch]$NoRunNow)
+          $dir=Join-Path $PSScriptRoot 'data_lake\manifests';New-Item -ItemType Directory -Force -Path $dir|Out-Null
+          $now=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();$step=[int64]900000;$latest=$now-($now%$step)-$step
+          @{publication_transaction='COMMITTED';tail_feature_contract_ok=$true;latest_closed_15m_open_ms=$latest}|ConvertTo-Json|Set-Content (Join-Path $dir 'live_tail_guard_v6_5_report.json') -Encoding utf8
+          exit 0
+          '@|Set-Content (Join-Path $root 'Start-RithalTailWatchV6_5_3_Core.ps1') -Encoding utf8
+      - name: Install and require committed bootstrap
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP 'rithal-v657'
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_tail_guard_v6_5_7\Install-RithalTailGuardV6_5_7.ps1 -ProjectRoot $root -RunBootstrap
+      - name: Verify exact source contract
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP 'rithal-v657'
+          & (Join-Path $root 'Verify-RithalTailGuardV6_5_7.ps1') -ProjectRoot $root
+          $text=Get-Content (Join-Path $root 'mythos_incremental_enricher_v6_5.py') -Raw
+          if($text.Contains('canonical/reference seam parity failed')){throw 'invalid seam gate remains'}
+          if(-not $text.Contains('INCREMENTAL_LIVE_OVERLAY_WITH_FULL_CONTEXT_REBASE')){throw 'full-context rebase missing'}
+
+  package:
+    needs: [exact-state-regressions, windows-install-and-bootstrap]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build package directory
+        run: |
+          mkdir -p package/RithalTailGuardV6_5_7
+          cp rithal_tail_guard_v6_5_7/Install-RithalTailGuardV6_5_7.ps1 package/RithalTailGuardV6_5_7/
+          cp rithal_tail_guard_v6_5_7/rithal_tail_guard_v657_delta.py package/RithalTailGuardV6_5_7/
+          cp rithal_tail_guard_v6_5_7/README.md package/RithalTailGuardV6_5_7/
+          cp rithal_tail_guard_v6_5_6/rithal_tail_guard_v656_patch.py package/RithalTailGuardV6_5_7/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RithalTailGuardV6_5_7
+          path: package/RithalTailGuardV6_5_7
+          if-no-files-found: error
