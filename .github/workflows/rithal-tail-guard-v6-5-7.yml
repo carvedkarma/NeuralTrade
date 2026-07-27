@@ -121,7 +121,7 @@ jobs:
           def fetch_binance_premium(client,symbol,start_ms,end_open_ms): return pd.DataFrame()
           def _as_float(value,default=0.0): return default
           def placeholder():
-              report={"guard_version":"6.5.3"}; staged_report={}
+              report = {"guard_version": "6.5.3"}; staged_report={}
               report["rebuild_mode"] = "INCREMENTAL_BOUNDED_LIVE_OVERLAY"
           '@|Set-Content (Join-Path $root 'mythos_live_tail_guard_v6_6.py') -Encoding utf8
           @'
