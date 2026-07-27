@@ -1,0 +1,159 @@
+name: Rithal Tail Guard V6.5.6
+
+on:
+  push:
+    branches: [rithal-tail-guard-v6.5.6]
+  pull_request:
+    paths:
+      - 'rithal_tail_guard_v6_5_6/**'
+      - '.github/workflows/rithal-tail-guard-v6-5-6.yml'
+
+jobs:
+  exact-state-regressions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --disable-pip-version-check numpy pandas
+      - name: Compile patcher
+        run: python -m py_compile rithal_tail_guard_v6_5_6/rithal_tail_guard_v656_patch.py
+      - name: Run stale baseline and reference proof tests
+        run: python rithal_tail_guard_v6_5_6/rithal_tail_guard_v656_patch.py --self-test
+      - name: Parse installer
+        shell: pwsh
+        run: |
+          [void][scriptblock]::Create((Get-Content rithal_tail_guard_v6_5_6/Install-RithalTailGuardV6_5_6.ps1 -Raw))
+      - name: Assert protected contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text=Path('rithal_tail_guard_v6_5_6/rithal_tail_guard_v656_patch.py').read_text()
+          for token in (
+              'INCREMENTAL_LIVE_OVERLAY_WITH_CANONICAL_REBASE',
+              'bounded/extended-reference parity failed',
+              'canonical/reference seam parity failed',
+              'MAX_ROLLING_BARS',
+              'requested_start_ms - 4 * BAR_15M_MS',
+              'Get-OneBarRolloverState',
+              'PARITY_EXCLUDE',
+          ):
+              assert token in text, token
+          assert 'premium_index_z_7d' not in text.split('PARITY_EXCLUDE',1)[1].split('\n',1)[0]
+          print('strict exact-state contract PASS')
+          PY
+
+  windows-install-and-handshake:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --disable-pip-version-check numpy pandas
+      - name: Build synthetic active project
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP 'rithal-v656'
+          New-Item -ItemType Directory -Force -Path (Join-Path $root 'data_lake\manifests')|Out-Null
+          @'
+          from pathlib import Path
+          from types import MethodType
+          from typing import Any,Dict,List,Sequence
+          import numpy as np
+          import pandas as pd
+          BAR_MS=900000
+          DAY_BARS=96
+          MAX_ROLLING_BARS=2880
+          DEFAULT_WARMUP_BARS=3200
+          DEFAULT_REPLACE_BARS=96
+          DEFAULT_LIVE_ROWS=16384
+          PARITY_EXCLUDE={"btc_regime","eth_regime"}
+          ONE_FEATURE_COLS=[]
+          AGG_FEATURE_COLS=[]
+          class ContextState: pass
+          def normalize_timestamp_ms(d): return d
+          def load_engine_module(p): pass
+          def read_frame(p): pass
+          def make_plan(*a,**k): pass
+          def compare_parity(*a,**k): pass
+          def patch_microstructure_contract(*a,**k): pass
+          def atomic_write_parquet(*a,**k): pass
+          def _validate_grid(*a,**k): pass
+          def _schema_hash(*a,**k): pass
+          def sha256_file(*a,**k): pass
+          def stage_incremental_live_outputs(*,engine_path,data_root,canonical_enriched_dir,live_enriched_dir,live_cache_dir,symbols,stage_dir,expected_latest_ms,raw_refresh_start_ms,requested_replace_start_ms,warmup_bars=3200,replace_rows_minimum=96,max_live_rows=16384,parity_rows=96): return {}
+          def initialize_live_overlay_from_canonical(): pass
+          '@|Set-Content (Join-Path $root 'mythos_incremental_enricher_v6_5.py') -Encoding utf8
+          @'
+          from pathlib import Path
+          from typing import Any,Dict,List,Mapping,Optional,Sequence,Tuple
+          import argparse,json,os,shutil,sys,time
+          import numpy as np
+          import pandas as pd
+          BAR_15M_MS=900000
+          BINANCE_FAPI='x'
+          class JsonClient: pass
+          def fetch_binance_premium(client,symbol,start_ms,end_open_ms): return pd.DataFrame()
+          def _as_float(value,default=0.0): return default
+          def placeholder():
+              report={}
+              staged_report={}
+              report["rebuild_mode"] = "INCREMENTAL_BOUNDED_LIVE_OVERLAY"
+              report["guard_version"] = "6.5.3"
+          '@|Set-Content (Join-Path $root 'mythos_live_tail_guard_v6_6.py') -Encoding utf8
+          @'
+          $ErrorActionPreference="Stop"
+          $root=$PSScriptRoot
+          $bridge=Join-Path $root "mythos_agg_archive_bridge_v6_5_4.py"
+          $normalizer=Join-Path $root "mythos_normalize_agg_schema_v6_5_5.py"
+          $core=Join-Path $root "Start-RithalTailWatchV6_5_3_Core.ps1"
+          & $core @args
+          exit $LASTEXITCODE
+          '@|Set-Content (Join-Path $root 'Start-RithalTailWatch.ps1') -Encoding utf8
+          "raise SystemExit(0)"|Set-Content (Join-Path $root 'mythos_agg_archive_bridge_v6_5_4.py') -Encoding utf8
+          "raise SystemExit(0)"|Set-Content (Join-Path $root 'mythos_normalize_agg_schema_v6_5_5.py') -Encoding utf8
+          @'
+          param([string]$ProjectRoot=$PSScriptRoot,[switch]$Once,[switch]$Bootstrap,[switch]$Background,[switch]$NoRunNow)
+          $dir=Join-Path $PSScriptRoot 'data_lake\manifests';New-Item -ItemType Directory -Force -Path $dir|Out-Null
+          $now=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();$step=[int64]900000;$latest=$now-($now%$step)-$step
+          @{publication_transaction='COMMITTED';tail_feature_contract_ok=$true;latest_closed_15m_open_ms=$latest}|ConvertTo-Json|Set-Content (Join-Path $dir 'live_tail_guard_v6_5_report.json') -Encoding utf8
+          exit 0
+          '@|Set-Content (Join-Path $root 'Start-RithalTailWatchV6_5_3_Core.ps1') -Encoding utf8
+      - name: Install and bootstrap
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP 'rithal-v656'
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\rithal_tail_guard_v6_5_6\Install-RithalTailGuardV6_5_6.ps1 -ProjectRoot $root -RunBootstrap
+      - name: Verify installed source
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP 'rithal-v656'
+          & (Join-Path $root 'Verify-RithalTailGuardV6_5_6.ps1') -ProjectRoot $root
+      - name: One-bar rollover is retried then accepted without rollback
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP 'rithal-v656'
+          @'
+          param([string]$ProjectRoot=$PSScriptRoot,[switch]$Once,[switch]$Bootstrap,[switch]$Background,[switch]$NoRunNow)
+          $dir=Join-Path $PSScriptRoot 'data_lake\manifests';New-Item -ItemType Directory -Force -Path $dir|Out-Null
+          $now=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();$step=[int64]900000;$latest=$now-($now%$step)-2*$step
+          @{publication_transaction='COMMITTED';tail_feature_contract_ok=$true;latest_closed_15m_open_ms=$latest}|ConvertTo-Json|Set-Content (Join-Path $dir 'live_tail_guard_v6_5_report.json') -Encoding utf8
+          exit 2
+          '@|Set-Content (Join-Path $root 'Start-RithalTailWatchV6_5_3_Core.ps1') -Encoding utf8
+          $env:RITHAL_FRESHNESS_RETRY_SECONDS='1'
+          & (Join-Path $root 'Start-RithalTailWatch.ps1') -ProjectRoot $root -Once -Bootstrap
+          if($LASTEXITCODE-ne 0){throw "rollover handshake failed: $LASTEXITCODE"}
+      - name: Genuine rollback remains a failure
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP 'rithal-v656'
+          @'
+          param([string]$ProjectRoot=$PSScriptRoot,[switch]$Once,[switch]$Bootstrap,[switch]$Background,[switch]$NoRunNow)
+          $dir=Join-Path $PSScriptRoot 'data_lake\manifests';New-Item -ItemType Directory -Force -Path $dir|Out-Null
+          @{publication_transaction='ROLLED_BACK';tail_feature_contract_ok=$false;latest_closed_15m_open_ms=0}|ConvertTo-Json|Set-Content (Join-Path $dir 'live_tail_guard_v6_5_report.json') -Encoding utf8
+          exit 2
+          '@|Set-Content (Join-Path $root 'Start-RithalTailWatchV6_5_3_Core.ps1') -Encoding utf8
+          $p=Start-Process powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $root 'Start-RithalTailWatch.ps1'),'-ProjectRoot',$root,'-Once','-Bootstrap') -Wait -PassThru -NoNewWindow
+          if($p.ExitCode-ne 2){throw "genuine failure was masked: $($p.ExitCode)"}
