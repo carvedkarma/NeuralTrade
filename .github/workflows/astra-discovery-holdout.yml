@@ -1,0 +1,29 @@
+name: ASTRA discovery holdout 17-19 Sep
+on:
+  push:
+    branches: [main]
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch official Binance public-data archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p astra_discovery/raw
+          BASE=https://data.binance.vision/data/futures/um/daily
+          for d in 2026-09-17 2026-09-18 2026-09-19; do
+            for s in BTCUSDT ETHUSDT; do
+              curl -fL --retry 3 "$BASE/klines/$s/5m/$s-5m-$d.zip" -o "astra_discovery/raw/$s-klines5m-$d.zip"
+              curl -fL --retry 3 "$BASE/metrics/$s/$s-metrics-$d.zip" -o "astra_discovery/raw/$s-metrics-$d.zip"
+            done
+          done
+          sha256sum astra_discovery/raw/* > astra_discovery/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astra-discovery-holdout-20260917-19
+          path: astra_discovery
+          if-no-files-found: error
+          retention-days: 7
