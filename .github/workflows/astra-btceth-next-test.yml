@@ -1,0 +1,31 @@
+name: ASTRA BTC ETH untouched 20-21 Sep
+on:
+  push:
+    branches: [main]
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch official Binance public-data archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p astra_untouched/raw
+          BASE=https://data.binance.vision/data/futures/um/daily
+          for d in 2026-09-20 2026-09-21; do
+            for s in BTCUSDT ETHUSDT; do
+              curl -fL --retry 3 "$BASE/klines/$s/5m/$s-5m-$d.zip" -o "astra_untouched/raw/$s-klines5m-$d.zip"
+              curl -fL --retry 3 "$BASE/aggTrades/$s/$s-aggTrades-$d.zip" -o "astra_untouched/raw/$s-aggTrades-$d.zip"
+              curl -fL --retry 3 "$BASE/metrics/$s/$s-metrics-$d.zip" -o "astra_untouched/raw/$s-metrics-$d.zip"
+              curl -fL --retry 3 "$BASE/premiumIndexKlines/$s/5m/$s-5m-$d.zip" -o "astra_untouched/raw/$s-premium5m-$d.zip"
+            done
+          done
+          sha256sum astra_untouched/raw/* > astra_untouched/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astra-btceth-untouched-20260920-21
+          path: astra_untouched
+          if-no-files-found: error
+          retention-days: 7
