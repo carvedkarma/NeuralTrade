@@ -1,0 +1,61 @@
+name: ASTRA BTC ETH fresh 48h
+on:
+  push:
+    branches: [main]
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch Binance USDT-M perpetual panel
+        shell: bash
+        run: |
+          cat > /tmp/fetch.py <<'PY'
+          import json,urllib.request,urllib.parse,time,datetime,csv,os,hashlib
+          base="https://fapi.binance.com"
+          out="astra_btceth_fresh48h"; os.makedirs(out,exist_ok=True)
+          end=(int(time.time()*1000)//300000)*300000
+          start=end-48*60*60*1000
+          def get(path,params):
+              u=base+path+"?"+urllib.parse.urlencode(params)
+              req=urllib.request.Request(u,headers={"User-Agent":"ASTRA-research/1.0"})
+              with urllib.request.urlopen(req,timeout=30) as r:return json.load(r)
+          manifest={"retrieved_utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),"start_ms":start,"end_ms":end,"symbols":{}}
+          for sym in ["BTCUSDT","ETHUSDT"]:
+              kl=[]
+              cur=start
+              while cur<end:
+                  a=get("/fapi/v1/klines",{"symbol":sym,"interval":"5m","startTime":cur,"endTime":end-1,"limit":1500})
+                  if not a: break
+                  kl += a; cur=int(a[-1][0])+300000
+              kl=[x for x in kl if start<=int(x[0])<end]
+              oi=get("/futures/data/openInterestHist",{"symbol":sym,"period":"5m","startTime":start,"endTime":end-1,"limit":500})
+              tak=get("/futures/data/takerlongshortRatio",{"symbol":sym,"period":"5m","startTime":start,"endTime":end-1,"limit":500})
+              gl=get("/futures/data/globalLongShortAccountRatio",{"symbol":sym,"period":"5m","startTime":start,"endTime":end-1,"limit":500})
+              top=get("/futures/data/topLongShortPositionRatio",{"symbol":sym,"period":"5m","startTime":start,"endTime":end-1,"limit":500})
+              fund=get("/fapi/v1/fundingRate",{"symbol":sym,"startTime":start,"endTime":end-1,"limit":1000})
+              prem=[]
+              cur=start
+              while cur<end:
+                  a=get("/fapi/v1/premiumIndexKlines",{"symbol":sym,"interval":"5m","startTime":cur,"endTime":end-1,"limit":1500})
+                  if not a: break
+                  prem+=a; cur=int(a[-1][0])+300000
+              def dump(name,obj):
+                  p=f"{out}/{sym}_{name}.json"; open(p,"w").write(json.dumps(obj,separators=(",",":")))
+                  return hashlib.sha256(open(p,"rb").read()).hexdigest()
+              hs={n:dump(n,o) for n,o in [("klines5m",kl),("oi5m",oi),("taker5m",tak),("globalLS5m",gl),("topPos5m",top),("funding",fund),("premium5m",prem)]}
+              manifest["symbols"][sym]={"klines":len(kl),"oi":len(oi),"taker":len(tak),"globalLS":len(gl),"topPos":len(top),"funding":len(fund),"premium":len(prem),"sha256":hs}
+          open(f"{out}/MANIFEST.json","w").write(json.dumps(manifest,indent=2))
+          print(json.dumps(manifest,indent=2))
+          PY
+          python /tmp/fetch.py | tee astra_btceth_fresh48h/FETCH_LOG.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astra-btceth-fresh48h
+          path: astra_btceth_fresh48h
+          if-no-files-found: error
+          retention-days: 7
