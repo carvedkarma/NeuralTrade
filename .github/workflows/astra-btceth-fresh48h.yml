@@ -16,18 +16,17 @@ jobs:
           BASE=https://data.binance.vision/data/futures/um/daily
           for d in 2026-09-22 2026-09-23; do
             for s in BTCUSDT ETHUSDT; do
-              for spec in "klines/$s/5m/$s-5m-$d.zip" "aggTrades/$s/$s-aggTrades-$d.zip" "metrics/$s/$s-metrics-$d.zip" "premiumIndexKlines/$s/5m/$s-5m-$d.zip"; do
-                u="$BASE/$spec"; o="astra_btceth_fresh2d/raw/$(basename "$u")"
-                echo "$u"
-                curl -fL --retry 3 "$u" -o "$o"
-              done
+              curl -fL --retry 3 "$BASE/klines/$s/5m/$s-5m-$d.zip" -o "astra_btceth_fresh2d/raw/$s-klines5m-$d.zip"
+              curl -fL --retry 3 "$BASE/aggTrades/$s/$s-aggTrades-$d.zip" -o "astra_btceth_fresh2d/raw/$s-aggTrades-$d.zip"
+              curl -fL --retry 3 "$BASE/metrics/$s/$s-metrics-$d.zip" -o "astra_btceth_fresh2d/raw/$s-metrics-$d.zip"
+              curl -fL --retry 3 "$BASE/premiumIndexKlines/$s/5m/$s-5m-$d.zip" -o "astra_btceth_fresh2d/raw/$s-premium5m-$d.zip"
             done
           done
           sha256sum astra_btceth_fresh2d/raw/* > astra_btceth_fresh2d/SHA256SUMS.txt
           ls -lh astra_btceth_fresh2d/raw
       - uses: actions/upload-artifact@v4
         with:
-          name: astra-btceth-official-binance-20260922-23
+          name: astra-btceth-official-binance-20260922-23-v2
           path: astra_btceth_fresh2d
           if-no-files-found: error
           retention-days: 7
