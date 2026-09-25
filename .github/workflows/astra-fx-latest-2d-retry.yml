@@ -1,0 +1,30 @@
+name: ASTRA FX latest retry
+on:
+  push:
+    branches: [astra-tournament-20260925]
+    paths: ['.github/workflows/astra-fx-latest-2d-retry.yml']
+permissions:
+  contents: read
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - run: |
+          npm install --prefix /tmp/fx --ignore-scripts dukascopy-node@1.50.0
+          mkdir -p bundle/fx bundle/evidence
+          cat > /tmp/fx/get.cjs <<'JS'
+          const {getHistoricalRates}=require('dukascopy-node');const fs=require('fs'),path=require('path');
+          const sleep=m=>new Promise(r=>setTimeout(r,m));
+          (async()=>{let a=[];for(const s of ['eurusd','gbpusd','gbpjpy','audusd','xauusd','xagusd']){await sleep(12000);try{
+          const d=await getHistoricalRates({instrument:s,dates:{from:'2026-09-24',to:'2026-09-26'},timeframe:'m1',priceType:'bid',format:'csv',utcOffset:0,volumes:true,ignoreFlats:true,batchSize:1,pauseBetweenBatchesMs:5000,retryCount:5,failAfterRetryCount:true,useCache:true,cacheFolderPath:'/tmp/cache'});
+          if(typeof d!=='string'||d.length<100)throw Error('NO_DATA');const f=s+'_bid_m1_2026-09-24_25.csv';fs.writeFileSync(path.join(process.env.GITHUB_WORKSPACE,'bundle/fx',f),d);a.push({s,status:'OK',rows:d.split('\n').length-1});
+          }catch(e){a.push({s,status:'FAILED',error:String(e)})}}fs.writeFileSync(path.join(process.env.GITHUB_WORKSPACE,'bundle/evidence/acquisition.json'),JSON.stringify(a,null,2));console.log(a)})()
+          JS
+          node /tmp/fx/get.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: astra-fx-20260924-25-retry
+          path: bundle
+          retention-days: 7
