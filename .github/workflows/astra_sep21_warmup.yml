@@ -9,75 +9,63 @@ on:
 jobs:
   acquire:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
-      - name: Download native Dukascopy BID M1 warmup and parity data
+      - name: Fetch Dukascopy chart-widget BID M1
         shell: bash
         run: |
           python - <<'PY'
-          import csv, hashlib, json, lzma, struct, time, urllib.request, urllib.error
-          from datetime import datetime, timezone
+          import csv,json,time,urllib.request,urllib.parse,hashlib
+          from datetime import datetime,timezone
           from pathlib import Path
 
           OUT=Path("astra_sep21_warmup"); OUT.mkdir(exist_ok=True)
           SYMBOLS=["EURUSD","GBPUSD","USDJPY","GBPJPY","AUDUSD","USDCAD","XAUUSD","XAGUSD"]
-          SCALE={"EURUSD":100000.0,"GBPUSD":100000.0,"AUDUSD":100000.0,"USDCAD":100000.0,
-                 "USDJPY":1000.0,"GBPJPY":1000.0,"XAUUSD":1000.0,"XAGUSD":1000.0}
-          REC=struct.Struct(">iiiiif")
-          HOSTS=["https://datafeed.dukascopy.com/datafeed","https://www.dukascopy.com/datafeed"]
-          HEADERS={"User-Agent":"Mozilla/5.0 ASTRA-research/1.2","Accept":"application/octet-stream,*/*;q=0.8"}
+          HEADERS={"User-Agent":"Mozilla/5.0","Referer":"https://www.dukascopy.com/"}
+          end_ms=int(datetime(2026,9,23,tzinfo=timezone.utc).timestamp()*1000)
 
-          def fetch_native_m1(sym, datestr):
-              day=datetime.fromisoformat(datestr).replace(tzinfo=timezone.utc)
-              urls=[f"{h}/{sym}/{day.year}/{day.month-1:02d}/{day.day:02d}/BID_candles_min_1.bi5" for h in HOSTS]
-              errs=[]
-              for attempt in range(10):
-                  for url in urls:
-                      try:
-                          req=urllib.request.Request(url,headers=HEADERS)
-                          with urllib.request.urlopen(req,timeout=30) as r:
-                              blob=r.read()
-                          if len(blob)>=REC.size:
-                              return blob,url
-                      except Exception as e:
-                          errs.append(f"{url}: {type(e).__name__} {e}")
-                  time.sleep(min(12,1.5*(2**min(attempt,3))))
-              raise RuntimeError("native M1 download failure: "+" | ".join(errs[-6:]))
+          def fetch(sym):
+              inst=urllib.parse.quote(sym[:3]+"/"+sym[3:])
+              url=(f"https://freeserv.dukascopy.com/2.0/index.php?path=chart/json3"
+                   f"&instrument={inst}&offer_side=B&interval=1MIN&splits=true&stocks=true"
+                   f"&limit=5000&time_direction=P&timestamp={end_ms}&jsonp=_cb")
+              last=None
+              for attempt in range(8):
+                  try:
+                      req=urllib.request.Request(url,headers=HEADERS)
+                      with urllib.request.urlopen(req,timeout=40) as r:
+                          txt=r.read().decode("utf-8","replace")
+                      payload=json.loads(txt[txt.index("(")+1:txt.rindex(")")])
+                      if payload: return payload,url,txt
+                  except Exception as e: last=e
+                  time.sleep(2*(attempt+1))
+              raise RuntimeError(f"widget failed {sym}: {last}")
 
-          def decode(sym, datestr, blob):
-              day=datetime.fromisoformat(datestr).replace(tzinfo=timezone.utc)
-              raw=lzma.decompress(blob)
-              if len(raw)%REC.size:
-                  raise RuntimeError(f"bad candle record bytes {sym} {datestr}: {len(raw)}")
-              scale=SCALE[sym]; rows=[]
-              for off in range(0,len(raw),REC.size):
-                  seconds,o,c,l,h,vol=REC.unpack_from(raw,off)
-                  if o<=0: continue
-                  ts=int((day.timestamp()+seconds)*1000)
-                  rows.append((ts,o/scale,h/scale,l/scale,c/scale))
-              rows.sort()
-              return rows
-
-          manifest={"provider":"Dukascopy native BID M1 candle .bi5","side":"BID","symbols":{}}
+          manifest={"provider":"Dukascopy chart widget json3","side":"BID","interval":"1MIN","symbols":{}}
           for sym in SYMBOLS:
-              manifest["symbols"][sym]={}
+              payload,url,rawtxt=fetch(sym)
+              rows=[]
+              for a in payload:
+                  if len(a)<5: continue
+                  ts=int(a[0]); o,h,l,c=map(float,a[1:5])
+                  dt=datetime.fromtimestamp(ts/1000,tz=timezone.utc)
+                  if datetime(2026,9,21,tzinfo=timezone.utc) <= dt < datetime(2026,9,23,tzinfo=timezone.utc):
+                      rows.append((ts,o,h,l,c))
+              rows.sort()
+              byday={}
               for datestr in ["2026-09-21","2026-09-22"]:
-                  blob,url=fetch_native_m1(sym,datestr)
-                  rows=decode(sym,datestr,blob)
-                  path=OUT/f"{sym}_{datestr}_M1.csv"
-                  with path.open("w",newline="") as f:
-                      w=csv.writer(f); w.writerow(["timestamp","open","high","low","close"]); w.writerows(rows)
-                  ts=[r[0] for r in rows]
+                  dayrows=[r for r in rows if datetime.fromtimestamp(r[0]/1000,tz=timezone.utc).strftime("%Y-%m-%d")==datestr]
+                  p=OUT/f"{sym}_{datestr}_M1.csv"
+                  with p.open("w",newline="") as f:
+                      w=csv.writer(f); w.writerow(["timestamp","open","high","low","close"]); w.writerows(dayrows)
+                  ts=[r[0] for r in dayrows]
                   gaps=[{"after":a,"before":b,"gap_minutes":(b-a)//60000-1} for a,b in zip(ts,ts[1:]) if b-a!=60000]
-                  manifest["symbols"][sym][datestr]={
-                    "rows":len(rows),"start_ms":ts[0] if ts else None,"end_ms":ts[-1] if ts else None,
-                    "minute_gaps":gaps,"csv_sha256":hashlib.sha256(path.read_bytes()).hexdigest(),
-                    "source_url":url,"source_bytes":len(blob),"source_sha256":hashlib.sha256(blob).hexdigest()
-                  }
-                  if len(rows)<1300:
-                      raise RuntimeError(f"insufficient native M1 rows {sym} {datestr}: {len(rows)}")
-              print(sym,manifest["symbols"][sym]["2026-09-21"]["rows"],manifest["symbols"][sym]["2026-09-22"]["rows"],flush=True)
+                  byday[datestr]={"rows":len(dayrows),"start_ms":ts[0] if ts else None,"end_ms":ts[-1] if ts else None,
+                    "minute_gaps":gaps,"csv_sha256":hashlib.sha256(p.read_bytes()).hexdigest()}
+                  if len(dayrows)<1300: raise RuntimeError(f"insufficient {sym} {datestr}: {len(dayrows)}")
+              manifest["symbols"][sym]={"source_url":url,"raw_response_sha256":hashlib.sha256(rawtxt.encode()).hexdigest(),**byday}
+              print(sym,byday["2026-09-21"]["rows"],byday["2026-09-22"]["rows"],flush=True)
           (OUT/"manifest.json").write_text(json.dumps(manifest,indent=2))
           PY
       - uses: actions/upload-artifact@v4
