@@ -1,0 +1,73 @@
+name: ASTRA B12 blind BIDASK M1
+on:
+  push:
+    branches: [astra-b12-blind-20260926]
+
+jobs:
+  acquire:
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [eurusd, gbpusd, usdjpy, gbpjpy, audusd, usdcad, xauusd, xagusd]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Download BID and ASK native M1
+        shell: bash
+        run: |
+          set -euo pipefail
+          s="${{ matrix.symbol }}"
+          out="astra_b12_blind/${s}"
+          mkdir -p "${out}"
+          for side in bid ask; do
+            npx --yes dukascopy-node \
+              -i "${s}" \
+              -from 2025-01-01 \
+              -to 2026-06-01 \
+              -t m1 \
+              -p "${side}" \
+              -v \
+              -fl \
+              -f csv \
+              -dir "${out}" \
+              -fn "${s}_${side}_m1" \
+              --batch-size 8 \
+              --batch-pause 600
+          done
+      - name: Audit without filling gaps
+        shell: bash
+        env:
+          SYMBOL: ${{ matrix.symbol }}
+        run: |
+          set -euo pipefail
+          s="${{ matrix.symbol }}"
+          out="astra_b12_blind/${s}"
+          test "$(find "${out}" -maxdepth 1 -type f -name '*.csv' | wc -l)" -eq 2
+          python - <<'PY' > "${out}/ALIGNMENT_AUDIT.json"
+          import csv,json,os
+          from pathlib import Path
+          s=os.environ["SYMBOL"];out=Path("astra_b12_blind")/s
+          def load(side):
+              p=out/f"{s}_{side}_m1.csv";ts=[]
+              with p.open(newline="") as fh:
+                  for r in csv.DictReader(fh):ts.append(int(float(r["timestamp"])))
+              assert ts==sorted(ts);assert len(ts)==len(set(ts));return ts
+          b=load("bid");a=load("ask");bs=set(b);aa=set(a);common=bs&aa
+          print(json.dumps({"symbol":s,"bid_rows":len(b),"ask_rows":len(a),"common_rows":len(common),
+            "bid_only":len(bs-aa),"ask_only":len(aa-bs),"overlap_vs_smaller":len(common)/min(len(b),len(a)),
+            "overlap_vs_larger":len(common)/max(len(b),len(a)),"bid_start":b[0],"bid_end":b[-1],
+            "ask_start":a[0],"ask_end":a[-1],"gap_policy":"NO_FILL_INNER_ALIGNMENT_AT_EXECUTION"},indent=2))
+          PY
+          cat "${out}/ALIGNMENT_AUDIT.json"
+          wc -l "${out}"/*.csv > "${out}/ROW_COUNTS.txt"
+          sha256sum "${out}"/*.csv > "${out}/SHA256SUMS.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astra-b12-${{ matrix.symbol }}-blind-bidask-m1-20250101-20260531
+          path: astra_b12_blind/${{ matrix.symbol }}
+          if-no-files-found: error
+          retention-days: 7
