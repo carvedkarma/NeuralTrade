@@ -32,6 +32,7 @@ jobs:
               -t m1 \
               -p "${side}" \
               -v \
+              -fl \
               -f csv \
               -dir "${out}" \
               -fn "${s}_${side}_m1" \
@@ -50,11 +51,26 @@ jobs:
             echo "${f}: ${rows} lines"
             test "${rows}" -gt 50000
           done
+          python - <<'PY'
+import pandas as pd
+from pathlib import Path
+import os
+s=os.environ["SYMBOL"]
+out=Path("astra_b11_history")/s
+b=pd.read_csv(out/f"{s}_bid_m1.csv")
+a=pd.read_csv(out/f"{s}_ask_m1.csv")
+assert list(b["timestamp"]) == list(a["timestamp"]), f"BID/ASK timestamp mismatch for {s}"
+assert len(b)==len(a)
+assert ((a[["open","high","low","close"]].to_numpy() - b[["open","high","low","close"]].to_numpy()) >= -1e-12).all(), f"negative spread detected for {s}"
+print(f"{s}: aligned rows={len(b)}")
+PY
           wc -l "${out}"/*.csv > "${out}/ROW_COUNTS.txt"
           sha256sum "${out}"/*.csv > "${out}/SHA256SUMS.txt"
+        env:
+          SYMBOL: ${{ matrix.symbol }}
       - uses: actions/upload-artifact@v4
         with:
-          name: astra-b11-${{ matrix.symbol }}-bidask-m1-20260601-20260925
+          name: astra-b11-${{ matrix.symbol }}-bidask-m1-flats-20260601-20260925
           path: astra_b11_history/${{ matrix.symbol }}
           if-no-files-found: error
           retention-days: 7
