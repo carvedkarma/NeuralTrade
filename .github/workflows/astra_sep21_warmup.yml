@@ -9,10 +9,10 @@ on:
 jobs:
   acquire:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
-      - name: Download Dukascopy Sep21-22 bid M1
+      - name: Download Dukascopy warmup + parity slice
         shell: bash
         run: |
           python - <<'PY'
@@ -21,77 +21,63 @@ jobs:
           from datetime import datetime, timedelta, timezone
           from pathlib import Path
 
-          OUT = Path("astra_sep21_warmup"); OUT.mkdir(exist_ok=True)
-          SYMBOLS = ["EURUSD","GBPUSD","USDJPY","GBPJPY","AUDUSD","USDCAD","XAUUSD","XAGUSD"]
-          SCALE = {"EURUSD":100000.0,"GBPUSD":100000.0,"AUDUSD":100000.0,"USDCAD":100000.0,
-                   "USDJPY":1000.0,"GBPJPY":1000.0,"XAUUSD":1000.0,"XAGUSD":1000.0}
-          REC = struct.Struct(">IIIff")
-          HOSTS = ["https://datafeed.dukascopy.com/datafeed","https://www.dukascopy.com/datafeed"]
-          HEADERS = {"User-Agent":"Mozilla/5.0 ASTRA-research/1.0","Accept":"application/octet-stream,*/*;q=0.8"}
+          OUT=Path("astra_sep21_warmup"); OUT.mkdir(exist_ok=True)
+          SYMBOLS=["EURUSD","GBPUSD","USDJPY","GBPJPY","AUDUSD","USDCAD","XAUUSD","XAGUSD"]
+          SCALE={"EURUSD":100000.0,"GBPUSD":100000.0,"AUDUSD":100000.0,"USDCAD":100000.0,
+                 "USDJPY":1000.0,"GBPJPY":1000.0,"XAUUSD":1000.0,"XAGUSD":1000.0}
+          REC=struct.Struct(">IIIff")
+          HOSTS=["https://datafeed.dukascopy.com/datafeed","https://www.dukascopy.com/datafeed"]
+          HEADERS={"User-Agent":"Mozilla/5.0 ASTRA-research/1.1","Accept":"application/octet-stream,*/*;q=0.8"}
 
-          def fetch(urls, attempts=8):
-              errs=[]
-              for attempt in range(attempts):
-                  for url in urls:
+          def fetch_hour(sym, dt):
+              paths=[f"{h}/{sym}/{dt.year}/{dt.month-1:02d}/{dt.day:02d}/{dt.hour:02d}h_ticks.bi5" for h in HOSTS]
+              errors=[]
+              for attempt in range(12):
+                  for url in paths:
                       try:
                           req=urllib.request.Request(url,headers=HEADERS)
-                          with urllib.request.urlopen(req,timeout=30) as r:
-                              data=r.read()
-                          if len(data)>=10:
-                              return data,url
-                      except Exception as e:
-                          errs.append(f"{url}: {type(e).__name__} {e}")
-                  time.sleep(min(8,0.8*(attempt+1)))
-              raise RuntimeError("all download routes failed: "+" | ".join(errs[-6:]))
+                          with urllib.request.urlopen(req,timeout=20) as r: blob=r.read()
+                          if len(blob)>=10: return blob,url
+                      except Exception as e: errors.append(f"{url}: {e}")
+                  time.sleep(min(5,0.4*(attempt+1)))
+              raise RuntimeError("download failure: "+" | ".join(errors[-5:]))
 
-          def unpack_blob(blob, base_dt, scale, bars):
-              raw=lzma.decompress(blob)
-              if len(raw)%REC.size:
-                  raise RuntimeError(f"bad record bytes {len(raw)}")
-              for off in range(0,len(raw),REC.size):
-                  ms, ask_i, bid_i, avol, bvol = REC.unpack_from(raw,off)
-                  ts=base_dt+timedelta(milliseconds=ms)
-                  minute=ts.replace(second=0,microsecond=0)
-                  bid=bid_i/scale
-                  k=int(minute.timestamp()*1000)
-                  if k not in bars:
-                      bars[k]=[bid,bid,bid,bid]
-                  else:
-                      b=bars[k]; b[1]=max(b[1],bid); b[2]=min(b[2],bid); b[3]=bid
-
-          def download_day(sym, day):
-              scale=SCALE[sym]; bars=OrderedDict(); sources=[]
-              # Current Dukascopy daily bucket first.
-              daily_paths=[f"{h}/{sym}/{day.year}/{day.month-1:02d}/{day.day:02d}_ticks.bi5" for h in HOSTS]
-              try:
-                  blob,url=fetch(daily_paths,attempts=5)
-                  unpack_blob(blob,datetime(day.year,day.month,day.day,tzinfo=timezone.utc),scale,bars)
-                  sources.append({"url":url,"bytes":len(blob),"sha256":hashlib.sha256(blob).hexdigest(),"bucket":"daily"})
-              except Exception as daily_error:
-                  # Legacy/current hourly fallback.
-                  for hour in range(24):
-                      hour_paths=[f"{h}/{sym}/{day.year}/{day.month-1:02d}/{day.day:02d}/{hour:02d}h_ticks.bi5" for h in HOSTS]
-                      blob,url=fetch(hour_paths,attempts=10)
-                      unpack_blob(blob,datetime(day.year,day.month,day.day,hour,tzinfo=timezone.utc),scale,bars)
-                      sources.append({"url":url,"bytes":len(blob),"sha256":hashlib.sha256(blob).hexdigest(),"bucket":"hourly"})
+          def aggregate(sym, hours):
+              bars=OrderedDict(); sources=[]; scale=SCALE[sym]
+              for dt in hours:
+                  blob,url=fetch_hour(sym,dt)
+                  raw=lzma.decompress(blob)
+                  if len(raw)%REC.size: raise RuntimeError(f"bad record length {url}")
+                  sources.append({"url":url,"bytes":len(blob),"sha256":hashlib.sha256(blob).hexdigest()})
+                  for off in range(0,len(raw),REC.size):
+                      ms,ask_i,bid_i,av,bv=REC.unpack_from(raw,off)
+                      ts=dt+timedelta(milliseconds=ms)
+                      minute=ts.replace(second=0,microsecond=0)
+                      bid=bid_i/scale; k=int(minute.timestamp()*1000)
+                      if k not in bars: bars[k]=[bid,bid,bid,bid]
+                      else:
+                          b=bars[k]; b[1]=max(b[1],bid); b[2]=min(b[2],bid); b[3]=bid
               return [(k,*v) for k,v in sorted(bars.items())],sources
 
-          manifest={"provider":"Dukascopy tick .bi5","side":"BID","generated_utc":datetime.now(timezone.utc).isoformat(),"symbols":{}}
+          sep21_hours=[datetime(2026,9,21,h,tzinfo=timezone.utc) for h in range(18,24)]
+          sep22_parity=[datetime(2026,9,22,h,tzinfo=timezone.utc) for h in range(0,2)]
+          manifest={"provider":"Dukascopy hourly tick .bi5","side":"BID","scope":"Sep21 18-24 warmup + Sep22 00-02 parity","symbols":{}}
           for sym in SYMBOLS:
               manifest["symbols"][sym]={}
-              for datestr in ["2026-09-21","2026-09-22"]:
-                  day=datetime.fromisoformat(datestr).replace(tzinfo=timezone.utc)
-                  rows,sources=download_day(sym,day)
-                  path=OUT/f"{sym}_{datestr}_M1.csv"
+              for label,hours in [("2026-09-21-warmup",sep21_hours),("2026-09-22-parity",sep22_parity)]:
+                  rows,sources=aggregate(sym,hours)
+                  path=OUT/f"{sym}_{label}_M1.csv"
                   with path.open("w",newline="") as f:
                       w=csv.writer(f); w.writerow(["timestamp","open","high","low","close"]); w.writerows(rows)
                   ts=[r[0] for r in rows]
                   gaps=[{"after":a,"before":b,"gap_minutes":(b-a)//60000-1} for a,b in zip(ts,ts[1:]) if b-a!=60000]
-                  manifest["symbols"][sym][datestr]={
-                      "rows":len(rows),"start_ms":ts[0] if ts else None,"end_ms":ts[-1] if ts else None,
+                  manifest["symbols"][sym][label]={"rows":len(rows),"start_ms":ts[0],"end_ms":ts[-1],
                       "minute_gaps":gaps,"csv_sha256":hashlib.sha256(path.read_bytes()).hexdigest(),"sources":sources}
-                  if len(rows)<1300: raise RuntimeError(f"too few rows {sym} {datestr}: {len(rows)}")
-              print(sym,manifest["symbols"][sym]["2026-09-21"]["rows"],manifest["symbols"][sym]["2026-09-22"]["rows"],flush=True)
+              if manifest["symbols"][sym]["2026-09-21-warmup"]["rows"] < 330:
+                  raise RuntimeError(f"insufficient warmup rows {sym}")
+              if manifest["symbols"][sym]["2026-09-22-parity"]["rows"] < 100:
+                  raise RuntimeError(f"insufficient parity rows {sym}")
+              print(sym,manifest["symbols"][sym]["2026-09-21-warmup"]["rows"],manifest["symbols"][sym]["2026-09-22-parity"]["rows"],flush=True)
           (OUT/"manifest.json").write_text(json.dumps(manifest,indent=2))
           PY
       - uses: actions/upload-artifact@v4
