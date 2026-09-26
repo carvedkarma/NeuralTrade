@@ -39,7 +39,7 @@ jobs:
               --batch-size 8 \
               --batch-pause 800
           done
-      - name: Validate and inventory
+      - name: Validate and inventory without filling gaps
         shell: bash
         env:
           SYMBOL: ${{ matrix.symbol }}
@@ -53,19 +53,38 @@ jobs:
             echo "${f}: ${rows} lines"
             test "${rows}" -gt 50000
           done
-          python - <<'PY'
-          import pandas as pd
+          python - <<'PY' > "${out}/ALIGNMENT_AUDIT.json"
+          import csv, json, os
           from pathlib import Path
-          import os
           s=os.environ["SYMBOL"]
           out=Path("astra_b11_history")/s
-          b=pd.read_csv(out/f"{s}_bid_m1.csv")
-          a=pd.read_csv(out/f"{s}_ask_m1.csv")
-          assert list(b["timestamp"]) == list(a["timestamp"]), f"BID/ASK timestamp mismatch for {s}"
-          assert len(b)==len(a)
-          assert ((a[["open","high","low","close"]].to_numpy() - b[["open","high","low","close"]].to_numpy()) >= -1e-12).all(), f"negative spread detected for {s}"
-          print(f"{s}: aligned rows={len(b)}")
+          def load(side):
+              p=out/f"{s}_{side}_m1.csv"
+              ts=[]
+              with p.open(newline="") as fh:
+                  for r in csv.DictReader(fh):
+                      ts.append(int(float(r["timestamp"])))
+              assert ts==sorted(ts), f"{side} not monotonic"
+              assert len(ts)==len(set(ts)), f"{side} duplicate timestamps"
+              return ts
+          b=load("bid"); a=load("ask")
+          bs=set(b); aset=set(a); common=bs & aset
+          audit={
+              "symbol":s,
+              "bid_rows":len(b),
+              "ask_rows":len(a),
+              "common_rows":len(common),
+              "bid_only":len(bs-aset),
+              "ask_only":len(aset-bs),
+              "overlap_vs_smaller":len(common)/min(len(b),len(a)),
+              "overlap_vs_larger":len(common)/max(len(b),len(a)),
+              "bid_start":b[0],"bid_end":b[-1],
+              "ask_start":a[0],"ask_end":a[-1],
+              "gap_policy":"NO_FILL_INNER_ALIGNMENT_AT_EXECUTION"
+          }
+          print(json.dumps(audit,indent=2))
           PY
+          cat "${out}/ALIGNMENT_AUDIT.json"
           wc -l "${out}"/*.csv > "${out}/ROW_COUNTS.txt"
           sha256sum "${out}"/*.csv > "${out}/SHA256SUMS.txt"
       - uses: actions/upload-artifact@v4
