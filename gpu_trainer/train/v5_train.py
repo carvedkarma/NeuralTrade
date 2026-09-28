@@ -6388,9 +6388,13 @@ def run_v5_walk_forward(
                 active_folds += 1
                 total_long += n_long
                 total_short += n_short
+                sharpe = float(r.get('sharpe', 0.0) or 0.0)
+                max_dd = float(
+                    r.get('max_drawdown_r', r.get('max_dd', r.get('max_drawdown', 0.0))) or 0.0
+                )
                 log.info(f"{r['fold']:>6} {window:>25} {n_trades:>8} {ls_str:>10} "
                          f"{r['win_rate']:>6.1%} {r['expectancy_r']:>+10.4f} {r['profit_factor']:>7.2f} "
-                         f"{r['sharpe']:>8.2f} {r['max_drawdown_r']:>10.4f} "
+                         f"{sharpe:>8.2f} {max_dd:>10.4f} "
                          f"{r['total_r']:>+10.4f} {thr_str:>10} {status:>10}")
 
             total_trades += n_trades

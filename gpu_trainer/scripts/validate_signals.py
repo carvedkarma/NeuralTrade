@@ -143,7 +143,16 @@ def _print_per_symbol_thresholds(folds):
         log.info("=" * 80)
         for sym in sorted(sym_thresholds):
             thr = sym_thresholds[sym]
-            log.info("  %-14s  threshold=%.6f", sym, thr)
+            if isinstance(thr, dict):
+                long_thr = thr.get("long")
+                short_thr = thr.get("short")
+                long_str = f"{float(long_thr):.6f}" if isinstance(long_thr, (int, float)) else "None"
+                short_str = f"{float(short_thr):.6f}" if isinstance(short_thr, (int, float)) else "None"
+                log.info("  %-14s  threshold_long=%s  threshold_short=%s", sym, long_str, short_str)
+            elif isinstance(thr, (int, float)):
+                log.info("  %-14s  threshold=%.6f", sym, float(thr))
+            else:
+                log.info("  %-14s  threshold=%s", sym, str(thr))
         log.info("")
 
 

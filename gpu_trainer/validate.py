@@ -347,7 +347,6 @@ def _run_wf(
         slippage_base_bps=6.0,
         score_lambda=0.5,
         balanced_sampling=True,
-        calibration_monitor=True,
     )
     return records, wf_report
 

@@ -2280,6 +2280,29 @@ class LiveRunner:
                 log.warning(f"Failed to push {no_exec_reason} cycle log for {symbol}: {e}")
             return
 
+        # In live mode we require a wired execution adapter. Otherwise we would
+        # create local portfolio positions with no real exchange order.
+        if self.execution_mode == "live" and self.execution is None:
+            log.warning(
+                f"  [LIVE_BLOCKED] no_adapter_wired {symbol} {side} "
+                f"v5_score={v5_info.get('v5_score','?')} p={p_enter:.4f} "
+                f"[execution_mode=live requires a real exchange adapter]"
+            )
+            try:
+                self._push_cycle_log(
+                    symbol=symbol, price=current_price, p_enter=p_enter,
+                    htf=htf, direction=side, decision="LIVE_BLOCKED_NO_ADAPTER",
+                    reasons=[
+                        "would_enter=true",
+                        f"side={side} entry={current_price:.2f}",
+                        "execution_mode=live but no execution adapter wired",
+                    ],
+                    lane_info=v5_info,
+                )
+            except Exception as e:
+                log.warning(f"Failed to push LIVE_BLOCKED cycle log for {symbol}: {e}")
+            return
+
         entry_price = current_price
         exec_result = None
 
@@ -2367,13 +2390,8 @@ class LiveRunner:
             log.info(f"  [PAPER_OPEN] V5 {symbol} {side} @ {entry_price:.2f} "
                      f"| v5_score={v5_info.get('v5_score','?')}")
         elif self.execution_mode == "live":
-            if self.execution is not None:
-                log.info(f"  [LIVE_OPEN] real_order_sent V5 {symbol} {side} @ {entry_price:.2f} "
-                         f"| v5_score={v5_info.get('v5_score','?')}")
-            else:
-                log.info(f"  [LIVE_SIGNAL_ONLY] no_adapter_wired V5 {symbol} {side} @ {entry_price:.2f} "
-                         f"| v5_score={v5_info.get('v5_score','?')} "
-                         f"[WARNING: execution_mode=live but no real exchange adapter — no order placed]")
+            log.info(f"  [LIVE_OPEN] real_order_sent V5 {symbol} {side} @ {entry_price:.2f} "
+                     f"| v5_score={v5_info.get('v5_score','?')}")
         self._push_prediction(prediction)
 
     def _print_summary(self):
