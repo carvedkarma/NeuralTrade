@@ -1,0 +1,27 @@
+name: Rithal Tail Guard V6.5.6 Package
+
+on:
+  push:
+    branches: [rithal-tail-guard-v6.5.6]
+  pull_request:
+    paths:
+      - 'rithal_tail_guard_v6_5_6/**'
+      - '.github/workflows/rithal-tail-guard-v6-5-6-package.yml'
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build package directory
+        run: |
+          mkdir -p package/RithalTailGuardV6_5_6
+          cp rithal_tail_guard_v6_5_6/Install-RithalTailGuardV6_5_6.ps1 package/RithalTailGuardV6_5_6/
+          cp rithal_tail_guard_v6_5_6/rithal_tail_guard_v656_patch.py package/RithalTailGuardV6_5_6/
+          cp rithal_tail_guard_v6_5_6/README.md package/RithalTailGuardV6_5_6/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RithalTailGuardV6_5_6
+          path: package/RithalTailGuardV6_5_6
+          if-no-files-found: error
+          retention-days: 30
