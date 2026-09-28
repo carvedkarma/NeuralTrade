@@ -25,6 +25,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, asdict
+from pathlib import Path
 from typing import Iterable
 
 import numpy as np
@@ -42,6 +43,7 @@ log = logging.getLogger("v7-audit")
 BAR_MS = 15 * 60 * 1000
 COST_BPS = 8.0  # round-trip cost assumption applied to top-decile expectancy
 COST_FRAC = COST_BPS / 1e4
+DATA_CACHE_DIR = Path(__file__).resolve().parents[1] / "data_cache"
 
 DEFAULT_SYMBOLS_FULL = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT",
                         "ADAUSDT", "AVAXUSDT", "XRPUSDT"]
@@ -60,26 +62,68 @@ def _conn():
     return psycopg2.connect(os.environ["DATABASE_URL"], connect_timeout=10)
 
 
+def _load_symbol_from_parquet(symbol: str) -> pd.DataFrame:
+    p = DATA_CACHE_DIR / f"{symbol}_15m.parquet"
+    if not p.exists():
+        return pd.DataFrame()
+    df = pd.read_parquet(p)
+    if df.empty:
+        return df
+    rename_map = {
+        "ts": "timestamp",
+        "o": "open",
+        "h": "high",
+        "l": "low",
+        "c": "close",
+        "v": "volume",
+    }
+    present = {k: v for k, v in rename_map.items() if k in df.columns and v not in df.columns}
+    if present:
+        df = df.rename(columns=present)
+    required = ("timestamp", "open", "high", "low", "close", "volume")
+    if any(col not in df.columns for col in required):
+        return pd.DataFrame()
+    out = df.loc[:, list(required)].copy()
+    out["timestamp"] = out["timestamp"].astype("int64")
+    out = out.sort_values("timestamp").reset_index(drop=True)
+    return out
+
+
 def load_symbol(symbol: str) -> pd.DataFrame:
     """Load 15m candles + flow + funding + OI for a symbol; merge on bar timestamp."""
-    with _conn() as cn:
-        candles = pd.read_sql(
-            "SELECT timestamp, open, high, low, close, volume "
-            "FROM candles WHERE symbol=%s AND timeframe='15m' ORDER BY timestamp",
-            cn, params=(symbol,))
-        flow = pd.read_sql(
-            "SELECT timestamp, cvd_delta, aggressor_ratio, total_volume, "
-            "taker_buy_volume, trade_count, trade_intensity, large_trade_count, "
-            "large_trade_imbalance, liquidation_proxy "
-            "FROM flow_features_15m WHERE symbol=%s ORDER BY timestamp",
-            cn, params=(symbol,))
-        funding = pd.read_sql(
-            "SELECT timestamp, funding_rate FROM funding_history "
-            "WHERE symbol=%s ORDER BY timestamp", cn, params=(symbol,))
-        oi = pd.read_sql(
-            "SELECT timestamp, sum_open_interest FROM open_interest_history "
-            "WHERE symbol=%s AND period='5m' ORDER BY timestamp",
-            cn, params=(symbol,))
+    use_db = bool(os.environ.get("DATABASE_URL"))
+    if use_db:
+        try:
+            with _conn() as cn:
+                candles = pd.read_sql(
+                    "SELECT timestamp, open, high, low, close, volume "
+                    "FROM candles WHERE symbol=%s AND timeframe='15m' ORDER BY timestamp",
+                    cn, params=(symbol,))
+                flow = pd.read_sql(
+                    "SELECT timestamp, cvd_delta, aggressor_ratio, total_volume, "
+                    "taker_buy_volume, trade_count, trade_intensity, large_trade_count, "
+                    "large_trade_imbalance, liquidation_proxy "
+                    "FROM flow_features_15m WHERE symbol=%s ORDER BY timestamp",
+                    cn, params=(symbol,))
+                funding = pd.read_sql(
+                    "SELECT timestamp, funding_rate FROM funding_history "
+                    "WHERE symbol=%s ORDER BY timestamp", cn, params=(symbol,))
+                oi = pd.read_sql(
+                    "SELECT timestamp, sum_open_interest FROM open_interest_history "
+                    "WHERE symbol=%s AND period='5m' ORDER BY timestamp",
+                    cn, params=(symbol,))
+        except Exception as e:
+            log.warning("%s: DB load failed (%s), falling back to parquet cache",
+                        symbol, str(e)[:160])
+            use_db = False
+    if not use_db:
+        candles = _load_symbol_from_parquet(symbol)
+        flow = pd.DataFrame()
+        funding = pd.DataFrame()
+        oi = pd.DataFrame()
+        if candles.empty:
+            log.warning("%s: missing parquet cache at %s", symbol, DATA_CACHE_DIR)
+            return pd.DataFrame()
 
     if candles.empty:
         return pd.DataFrame()
