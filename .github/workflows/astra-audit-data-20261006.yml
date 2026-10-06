@@ -1,0 +1,62 @@
+name: ASTRA audit data-only 20261006
+on:
+  push:
+    branches: [astra-audit-data-20261006]
+    paths: ['.github/workflows/astra-audit-data-20261006.yml']
+permissions:
+  contents: read
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        symbol: [eurusd, gbpusd, usdjpy, gbpjpy, audusd, usdcad, xauusd, xagusd]
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Acquire quotes only
+        shell: bash
+        env:
+          SYMBOL: ${{ matrix.symbol }}
+        run: |
+          set -euo pipefail
+          out="source/${SYMBOL}"
+          mkdir -p "$out"
+          printf '%s\n' 'dukascopy-node@1.50.0' > "$out/DOWNLOADER_VERSION.txt"
+          for side in bid ask; do
+            npx --yes dukascopy-node@1.50.0 -i "$SYMBOL" -from 2026-09-29 -to 2026-10-06 -t m1 -p "$side" -v -fl -f csv -dir "$out" -fn "${SYMBOL}_${side}_m1" --batch-size 2 --batch-pause 800
+          done
+          python - <<'PY'
+          import csv, hashlib, json, os, math
+          from pathlib import Path
+          from datetime import datetime, timezone
+          s=os.environ['SYMBOL']; out=Path('source')/s; records=[]
+          for side in ('bid','ask'):
+              p=out/f'{s}_{side}_m1.csv'
+              with p.open() as f: rows=list(csv.DictReader(f))
+              assert rows, f'empty {side}'
+              ts=[int(r['timestamp']) for r in rows]
+              assert ts==sorted(ts) and len(ts)==len(set(ts))
+              assert min(ts)>=int(datetime(2026,9,29,tzinfo=timezone.utc).timestamp()*1000)
+              assert max(ts)<int(datetime(2026,10,6,tzinfo=timezone.utc).timestamp()*1000)
+              counts={}
+              for t,r in zip(ts,rows):
+                  d=datetime.fromtimestamp(t/1000,timezone.utc).date().isoformat(); counts[d]=counts.get(d,0)+1
+                  o,h,l,c=(float(r[k]) for k in ('open','high','low','close'))
+                  assert all(math.isfinite(v) for v in (o,h,l,c)) and 0<l<=min(o,c)<=max(o,c)<=h
+              records.append({'symbol':s,'side':side,'rows':len(rows),'per_utc_day':counts,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+          manifest={'source':'Dukascopy public datafeed','acquired_at_utc':datetime.now(timezone.utc).isoformat(),'from':'2026-09-29','to_exclusive':'2026-10-06','strategy_executed':False,'local_gap_filling':False,'files':records}
+          (out/'MANIFEST.json').write_text(json.dumps(manifest,indent=2))
+          print(json.dumps(manifest,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: astra-audit-20261006-${{ matrix.symbol }}-bidask-m1
+          path: source/${{ matrix.symbol }}
+          if-no-files-found: error
+          retention-days: 7
