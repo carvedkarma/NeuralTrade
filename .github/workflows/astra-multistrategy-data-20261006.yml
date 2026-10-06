@@ -1,0 +1,61 @@
+name: ASTRA multistrategy historical data only
+on:
+  push:
+    branches: [astra-multistrategy-data-20261006]
+    paths: ['.github/workflows/astra-multistrategy-data-20261006.yml']
+permissions:
+  contents: read
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        symbol: [eurusd, gbpusd, usdjpy, gbpjpy, audusd, usdcad, xauusd, xagusd]
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Historical quotes only; no strategy or broker
+        shell: bash
+        env:
+          SYMBOL: ${{ matrix.symbol }}
+        run: |
+          set -euo pipefail
+          out="source/${SYMBOL}"
+          mkdir -p "$out"
+          printf '%s\n' 'dukascopy-node@1.50.0' > "$out/DOWNLOADER_VERSION.txt"
+          for side in bid ask; do
+            npx --yes dukascopy-node@1.50.0 -i "$SYMBOL" -from 2026-08-10 -to 2026-09-19 -t m1 -p "$side" -v -fl -f csv -dir "$out" -fn "${SYMBOL}_${side}_m1" --batch-size 2 --batch-pause 800
+          done
+          python - <<'PY'
+          import csv,hashlib,json,os,math
+          from pathlib import Path
+          from datetime import datetime,timezone
+          s=os.environ['SYMBOL']; out=Path('source')/s; records=[]
+          for side in ('bid','ask'):
+              p=out/f'{s}_{side}_m1.csv'
+              with p.open() as f: rows=list(csv.DictReader(f))
+              assert rows
+              ts=[int(r['timestamp']) for r in rows]
+              assert ts==sorted(ts) and len(ts)==len(set(ts))
+              assert min(ts)>=int(datetime(2026,8,10,tzinfo=timezone.utc).timestamp()*1000)
+              assert max(ts)<int(datetime(2026,9,19,tzinfo=timezone.utc).timestamp()*1000)
+              counts={}
+              for t,r in zip(ts,rows):
+                  d=datetime.fromtimestamp(t/1000,timezone.utc).date().isoformat();counts[d]=counts.get(d,0)+1
+                  o,h,l,c=(float(r[k]) for k in ('open','high','low','close'))
+                  assert all(math.isfinite(v) for v in (o,h,l,c)) and 0<l<=min(o,c)<=max(o,c)<=h
+              records.append({'symbol':s,'side':side,'rows':len(rows),'per_utc_day':counts,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+          result={'acquired_at_utc':datetime.now(timezone.utc).isoformat(),'source':'Dukascopy public quote history','from':'2026-08-10','to_exclusive':'2026-09-19','strategy_executed':False,'local_gap_filling':False,'files':records,'research_split':{'warmup':'Aug10-14','development':'Aug17-Sep4','validation':'Sep7-11','locked_historical_test':'Sep14-18'},'qualification':'retrospective historical study, not live/forward execution'}
+          (out/'MANIFEST.json').write_text(json.dumps(result,indent=2));print(json.dumps(result,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: astra-multi-history-${{ matrix.symbol }}-bidask-m1
+          path: source/${{ matrix.symbol }}
+          if-no-files-found: error
+          retention-days: 14
