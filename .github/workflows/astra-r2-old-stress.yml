@@ -1,0 +1,60 @@
+name: ASTRA R2 backward robustness quotes Jul6-Aug7
+on:
+  push:
+    branches: [astra-r2-backward-stress-20261010]
+    paths: ['.github/workflows/astra-r2-old-stress.yml']
+permissions:
+  contents: read
+jobs:
+  quote-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 16
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        symbol: [eurusd, gbpusd, usdjpy, gbpjpy, audusd, usdcad, xauusd, xagusd]
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Acquire quote history (no strategy or broker)
+        shell: bash
+        env:
+          SYMBOL: ${{ matrix.symbol }}
+        run: |
+          set -euo pipefail
+          mkdir -p "source/${SYMBOL}"
+          echo 'dukascopy-node@1.50.0' > "source/${SYMBOL}/DOWNLOADER_VERSION.txt"
+          for side in bid ask; do
+            npx --yes dukascopy-node@1.50.0 -i "${SYMBOL}" -from 2026-07-06 -to 2026-08-08 -t m1 -p "${side}" -v -fl -f csv -dir "source/${SYMBOL}" -fn "${SYMBOL}_${side}_m1" --batch-size 2 --batch-pause 800
+          done
+          python - <<'PY'
+          import csv,hashlib,json,os,math
+          from pathlib import Path
+          from datetime import datetime,timezone
+          s=os.environ['SYMBOL'];out=Path('source')/s;files=[]
+          for side in ('bid','ask'):
+              p=out/f'{s}_{side}_m1.csv'
+              with p.open() as f: rows=list(csv.DictReader(f))
+              assert rows,f'{s} {side} has no prices'
+              ts=[int(r['timestamp']) for r in rows]
+              assert ts==sorted(ts) and len(ts)==len(set(ts))
+              assert ts[0]>=int(datetime(2026,7,6,tzinfo=timezone.utc).timestamp()*1000)
+              assert ts[-1]<int(datetime(2026,8,8,tzinfo=timezone.utc).timestamp()*1000)
+              days={}
+              for r,t in zip(rows,ts):
+                  d=datetime.fromtimestamp(t/1000,timezone.utc).date().isoformat();days[d]=days.get(d,0)+1
+                  o,h,l,c=(float(r[k]) for k in ('open','high','low','close'))
+                  assert all(map(math.isfinite,[o,h,l,c])) and 0<l<=min(o,c)<=max(o,c)<=h
+              files.append({'side':side,'rows':len(rows),'days':days,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+          out.joinpath('MANIFEST.json').write_text(json.dumps({'source':'Dukascopy historical bid/ask M1','symbol':s,'window':'2026-07-06 inclusive through 2026-08-08 exclusive','downloaded_at_utc':datetime.now(timezone.utc).isoformat(),'no_strategy_run':True,'source_files':files},indent=2))
+          print(json.dumps(files))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: astra-r2-backwards-${{ matrix.symbol }}-bidask
+          path: source/${{ matrix.symbol }}
+          retention-days: 14
+          if-no-files-found: error
