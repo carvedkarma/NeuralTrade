@@ -1,0 +1,50 @@
+name: ASTRA Oct5-9 Yahoo indicative one-minute snapshot audit
+on:
+  push:
+    branches: [astra-oct5-micro-probe-20261010]
+    paths: ['.github/workflows/astra-yahoo-snapshots.yml']
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Acquire and audit indicative Yahoo FX and futures minute snapshots (no orders)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,urllib.request,urllib.parse,datetime,hashlib
+          from pathlib import Path
+          out=Path('indicative');out.mkdir(exist_ok=True)
+          symbols=['EURUSD=X','GBPUSD=X','JPY=X','GBPJPY=X','AUDUSD=X','CAD=X','XAUUSD=X','XAGUSD=X','GC=F','SI=F']
+          rows=[]
+          for ticker in symbols:
+              url='https://query1.finance.yahoo.com/v8/finance/chart/'+urllib.parse.quote(ticker,safe='')+'?period1=1791158400&period2=1791590400&interval=1m'
+              r={'ticker':ticker,'provider':'Yahoo Finance chart API, indicative/snapshot, NOT executable bid/ask'}
+              try:
+                  req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 (compatible; ASTRA research)'})
+                  with urllib.request.urlopen(req,timeout=18) as resp:
+                      data=resp.read(7000000)
+                  raw=json.loads(data); chart=raw.get('chart',{});res=chart.get('result') or []
+                  r['error']=chart.get('error')
+                  if not res:raise ValueError('no chart result: '+str(chart.get('error')))
+                  rr=res[0];ts=rr.get('timestamp') or [];qq=(rr.get('indicators',{}).get('quote') or [{}])[0]
+                  r['rows']=len(ts);r['valid_close']=sum(p is not None for p in qq.get('close',[]))
+                  r['nonflat_candles']=sum(h is not None and l is not None and h>l for h,l in zip(qq.get('high',[]),qq.get('low',[])))
+                  r['nonzero_volume']=sum(v is not None and v>0 for v in qq.get('volume',[]))
+                  r['first_ts']=ts[0] if ts else None;r['last_ts']=ts[-1] if ts else None
+                  r['sha256']=hashlib.sha256(data).hexdigest();r['instrumentType']=rr.get('meta',{}).get('instrumentType')
+                  if len(ts)>100 and r['valid_close']>100:
+                      (out/(ticker.replace('=','_')+'.json')).write_bytes(data)
+              except Exception as e:r['download_error']=str(e)
+              rows.append(r);print(json.dumps(r),flush=True)
+          (out/'MANIFEST.json').write_text(json.dumps({'run_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'no_strategy_or_trading_execution':True,'items':rows,'limitation':'Indicative one-minute snapshots; no measured bid/ask, so cannot claim executable intraday SL/TP or after-cost P/L'},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: astra-oct5-9-indicative-multiasset-snapshots
+          path: indicative/
+          retention-days: 10
+          if-no-files-found: error
