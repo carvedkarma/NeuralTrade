@@ -1,0 +1,65 @@
+name: ASTRA R2 virgin quotes Oct6-9
+on:
+  push:
+    branches: [astra-r2-virgin-20261010]
+    paths: ['.github/workflows/astra-r2-quotes.yml']
+permissions:
+  contents: read
+jobs:
+  quote-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        symbol: [eurusd, gbpusd, usdjpy, gbpjpy, audusd, usdcad, xauusd, xagusd]
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Acquire genuine quote-side minute bars (no trading)
+        shell: bash
+        env:
+          SYMBOL: ${{ matrix.symbol }}
+        run: |
+          set -euo pipefail
+          out="source/${SYMBOL}"
+          mkdir -p "${out}"
+          echo "dukascopy-node@1.50.0" > "${out}/DOWNLOADER_VERSION.txt"
+          for side in bid ask; do
+            npx --yes dukascopy-node@1.50.0 -i "${SYMBOL}" -from 2026-10-06 -to 2026-10-10 -t m1 -p "${side}" -v -fl -f csv -dir "${out}" -fn "${SYMBOL}_${side}_m1" --batch-size 2 --batch-pause 800
+          done
+          python - <<'PY'
+          import csv,hashlib,json,math,os
+          from pathlib import Path
+          from datetime import datetime,timezone
+          symbol=os.environ['SYMBOL']
+          out=Path('source')/symbol
+          rows_summary=[]
+          for side in ('bid','ask'):
+              f=out/f'{symbol}_{side}_m1.csv'
+              with f.open(newline='') as fp: rows=list(csv.DictReader(fp))
+              assert rows, f'{symbol} empty {side}'
+              ts=[int(r['timestamp']) for r in rows]
+              assert ts==sorted(ts) and len(ts)==len(set(ts))
+              assert ts[0]>=int(datetime(2026,10,6,tzinfo=timezone.utc).timestamp()*1000)
+              assert ts[-1]<int(datetime(2026,10,10,tzinfo=timezone.utc).timestamp()*1000)
+              days={}
+              for r,t in zip(rows,ts):
+                  d=datetime.fromtimestamp(t/1000,timezone.utc).date().isoformat()
+                  days[d]=days.get(d,0)+1
+                  o,h,l,c=(float(r[k]) for k in ('open','high','low','close'))
+                  assert all(math.isfinite(v) for v in (o,h,l,c)) and 0<l<=min(o,c)<=max(o,c)<=h
+              rows_summary.append(dict(symbol=symbol,side=side,rows=len(rows),days=days,sha256=hashlib.sha256(f.read_bytes()).hexdigest(),start=ts[0],end=ts[-1]))
+          report={'source':'Dukascopy public quote feed','snapshot_at_utc':datetime.now(timezone.utc).isoformat(),'window_start_utc':'2026-10-06','window_end_exclusive_utc':'2026-10-10','strategy_execution':False,'synthetic_fill':False,'rows':rows_summary}
+          (out/'MANIFEST.json').write_text(json.dumps(report,indent=2))
+          print(json.dumps(report,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: astra-r2-${{ matrix.symbol }}-bidask
+          path: source/${{ matrix.symbol }}
+          retention-days: 14
+          if-no-files-found: error
